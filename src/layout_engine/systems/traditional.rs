@@ -2661,8 +2661,9 @@ impl Layout {
             }
             // Some apps report transient or overly conservative min/max bounds while still
             // being user-resizable. In traditional tiling, honoring those bounds at split
-            // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split).
-            return (0.0, None, max, true);
+            // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split),
+            // so the minimum only counts when an app rule asks for it.
+            return (if c.respect_min_size { min } else { 0.0 }, None, max, true);
         }
         let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
         let can_grow = fixed.is_none();
@@ -4262,6 +4263,7 @@ mod tests {
                     min_height: 120.0,
                     max_width: 280.0,
                     max_height: 120.0,
+                    respect_min_size: false,
                 }
                 .normalized(),
             );
@@ -4321,6 +4323,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 320.0,
                 max_height: 200.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4382,6 +4385,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 320.0,
                 max_height: 200.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4461,6 +4465,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 360.0,
                 max_height: 200.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4515,6 +4520,7 @@ mod tests {
                 min_height: 300.0,
                 max_width: 200.0,
                 max_height: 300.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4569,6 +4575,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 360.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4623,6 +4630,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 320.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4730,6 +4738,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4792,6 +4801,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 320.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -4851,6 +4861,7 @@ mod tests {
                     min_height: 0.0,
                     max_width: 320.0,
                     max_height: 0.0,
+                    respect_min_size: false,
                 }
                 .normalized(),
             );
@@ -5111,6 +5122,7 @@ mod tests {
                     min_height: 0.0,
                     max_width: 0.0,
                     max_height: 0.0,
+                    respect_min_size: false,
                 }
                 .normalized(),
             );
@@ -5167,6 +5179,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5264,6 +5277,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5327,6 +5341,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 280.0,
                 max_height: 200.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5633,6 +5648,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5646,6 +5662,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5698,6 +5715,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5711,6 +5729,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5759,6 +5778,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 1000.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5772,6 +5792,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );
@@ -5821,6 +5842,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 600.0,
                 max_height: 0.0,
+                respect_min_size: false,
             }
             .normalized(),
         );

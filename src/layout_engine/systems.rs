@@ -1,5 +1,5 @@
 use enum_dispatch::enum_dispatch;
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -7,6 +7,13 @@ use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
 slotmap::new_key_type! { pub struct LayoutId; }
+
+/// The minimum a window reports, or `None` when it reports none (0x0) or garbage.
+pub(crate) fn reported_min_size(size: Option<CGSize>) -> Option<CGSize> {
+    use constraints::sanitize;
+    size.map(|s| CGSize::new(sanitize(s.width), sanitize(s.height)))
+        .filter(|s| *s != CGSize::ZERO)
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowLayoutConstraints {
@@ -17,6 +24,7 @@ pub struct WindowLayoutConstraints {
     pub min_height: f64,
     pub max_width: f64,
     pub max_height: f64,
+    pub respect_min_size: bool,
 }
 
 impl WindowLayoutConstraints {
@@ -40,6 +48,7 @@ impl WindowLayoutConstraints {
             min_height,
             max_width,
             max_height,
+            respect_min_size: self.respect_min_size,
         }
     }
 
@@ -499,6 +508,7 @@ mod tests {
             min_height: 470.0,
             max_width: 723.0,
             max_height: 0.0,
+            respect_min_size: false,
         }
         .normalized();
 
@@ -519,6 +529,7 @@ mod tests {
             min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
+            respect_min_size: false,
         }
         .normalized();
 
@@ -538,6 +549,7 @@ mod tests {
             min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
+            respect_min_size: false,
         }
         .normalized();
 
@@ -558,6 +570,7 @@ mod tests {
             min_height: 0.0,
             max_width: 600.0,
             max_height: 480.0,
+            respect_min_size: false,
         }
         .normalized();
 
