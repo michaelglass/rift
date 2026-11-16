@@ -176,6 +176,11 @@ impl DragActor {
 
     pub fn source(&self) -> Option<DragSource> { self.session().map(|session| session.source) }
 
+    /// Whether `window` is the one the user is dragging right now.
+    pub fn is_dragging(&self, window: WindowId) -> bool {
+        self.source().is_some_and(|source| source.window == window)
+    }
+
     pub fn target(&self) -> Option<DropTarget> { self.session()?.target.validated() }
 
     pub fn preview_target(&self) -> Option<DropTarget> {

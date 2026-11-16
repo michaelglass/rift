@@ -12306,3 +12306,53 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+#[test]
+fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let wid = WindowId::new(7, 2);
+    let wsid = reactor.test_window_server_id(wid);
+    let start = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+
+    // The user drags the tiled window towards the right edge of the first display...
+    let dragged = CGRect::new(
+        CGPoint::new(start.origin.x + 200., start.origin.y + 20.),
+        start.size,
+    );
+    let last_seen = Some(apps.windows[&wid].last_seen_txid);
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged,
+        last_seen,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert!(reactor.is_in_drag());
+    let _ = apps.requests();
+
+    // ...and with the button still down, the window server reports it on the other display, and
+    // the app's window inventory is refreshed.
+    reactor.handle_event(Event::WindowServerAppeared(wsid, space2, SpaceEventKind::User));
+    let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+    info.frame = dragged;
+    reactor.discover_test_windows(wid.pid, vec![(wid, info)], vec![WindowId::new(7, 1), wid]);
+    let requests = apps.requests();
+    let snapped = requests.iter().find(|request| {
+        matches!(request, Request::SetWindowFrames(frames, ..)
+            if frames.iter().any(|(w, _)| *w == wid))
+    });
+    assert!(
+        snapped.is_none(),
+        "rift moved the window while the user was dragging it: {snapped:?}"
+    );
+    assert!(reactor.is_in_drag());
+}

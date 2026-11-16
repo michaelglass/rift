@@ -302,7 +302,7 @@ pub fn handle_window_frame_changed(
     if matches!(
         drag.actor.kind(),
         Some(crate::actor::drag::DragKind::ModifierMove)
-    ) && drag.actor.source().is_some_and(|source| source.window == wid)
+    ) && drag.actor.is_dragging(wid)
     {
         return Ok(EventOutcome::no_change());
     }

@@ -4735,7 +4735,7 @@ impl Reactor {
 
     #[cfg(test)]
     fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
-        if self.drag_manager.actor.source().is_none_or(|source| source.window != wid) {
+        if !self.drag_manager.actor.is_dragging(wid) {
             let server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
             self.drag_manager.actor.begin_native(
@@ -5178,7 +5178,9 @@ impl Reactor {
                         .pending_transfer()
                         .is_some_and(|operation| operation.requested_space != target)
             });
-            if needs_transfer {
+            // A window the user is dragging is going where the drop puts it; pulling it back to
+            // its assignment mid-drag snaps it out from under the pointer.
+            if needs_transfer && !self.drag_manager.actor.is_dragging(window) {
                 let outcome = self.request_window_transfer(window, target, None);
                 self.apply_event_outcome(outcome);
             }
