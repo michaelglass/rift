@@ -1,6 +1,7 @@
 use rift_protocol::WindowClaimFlags;
 
 use crate::actor::app::WindowId;
+use crate::actor::drag::{DragPhase, PendingStart, Session};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
 use crate::model::reactor::WindowState;
@@ -34,6 +35,43 @@ pub struct PendingWindowTransfer {
     pub status: TransferStatus,
 }
 
+/// Who decides where a window physically goes next: nobody, a transfer Rift requested, or
+/// the user's drag.
+///
+/// The drag session lives here, on the window it holds, so a window cannot be both held and
+/// transferring: while it is held nothing can request a transfer, and re-observing it on a
+/// space other than its assignment cannot pull it back from under the pointer.
+#[derive(Debug, Default)]
+enum Placement {
+    #[default]
+    Settled,
+    Transferring(PendingWindowTransfer),
+    Held(Box<Session>),
+}
+
+impl Placement {
+    fn transfer(&self) -> Option<PendingWindowTransfer> {
+        match self {
+            Placement::Transferring(operation) => Some(*operation),
+            Placement::Settled | Placement::Held(_) => None,
+        }
+    }
+
+    fn transfer_mut(&mut self) -> Option<&mut PendingWindowTransfer> {
+        match self {
+            Placement::Transferring(operation) => Some(operation),
+            Placement::Settled | Placement::Held(_) => None,
+        }
+    }
+
+    /// Forgets a transfer; a drag's hold ends only with the drag.
+    fn clear_transfer(&mut self) {
+        if matches!(self, Placement::Transferring(_)) {
+            *self = Placement::Settled;
+        }
+    }
+}
+
 /// The complete reactor-owned state for one AX window identity.
 #[derive(Debug, Default)]
 pub struct WindowRecord {
@@ -43,7 +81,7 @@ pub struct WindowRecord {
     visibility: WindowVisibility,
     // AX invalidation retains ownership until fresh AX evidence or confirmed retirement.
     ax_invalidated: bool,
-    pending_transfer: Option<PendingWindowTransfer>,
+    placement: Placement,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
     claim: Option<WindowClaim>,
@@ -89,7 +127,7 @@ impl WindowRecord {
 
     pub fn visibility(&self) -> WindowVisibility { self.visibility }
 
-    pub fn pending_transfer(&self) -> Option<PendingWindowTransfer> { self.pending_transfer }
+    pub fn pending_transfer(&self) -> Option<PendingWindowTransfer> { self.placement.transfer() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +207,9 @@ pub struct WindowStore {
     native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
     claims: HashMap<ClaimOwner, Vec<WindowId>>,
+    /// `Dragging(w)` exactly when `w`'s placement is `Held`; kept here, beside the
+    /// placements, by the store's own methods.
+    drag: DragPhase,
 }
 
 /// Restored native lifecycle facts; placement and actor effects remain external.
@@ -492,7 +533,7 @@ impl WindowStore {
             && Some(old) != wsid
         {
             self.remove_window_server_state(old);
-            self.windows.get_mut(&wid).unwrap().pending_transfer = None;
+            self.windows.get_mut(&wid).unwrap().placement.clear_transfer();
         }
         let wsid = wsid?;
         let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
@@ -875,6 +916,7 @@ impl WindowStore {
         });
         if should_remove {
             self.windows.remove(&window_id);
+            self.forget_drag_on(window_id);
             if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
                 windows.remove(&window_id);
                 if windows.is_empty() {
@@ -1342,7 +1384,7 @@ impl WindowStore {
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
         // A claim keeps its saved workspace until release; only workspace removal clears it.
         let old = self.windows.get_mut(&window_id).and_then(|record| {
-            record.pending_transfer = None;
+            record.placement.clear_transfer();
             record.workspace.take()
         });
         if let Some(old_assignment) = old {
@@ -1361,18 +1403,24 @@ impl WindowStore {
             return;
         }
 
-        let (workspace, rule_floating, visibility, pending, geom) = match self.windows.get(&from) {
+        let (workspace, rule_floating, visibility, (), geom) = match self.windows.get(&from) {
             Some(record) => (
                 record.workspace,
                 record.rule_floating,
                 record.visibility,
-                record.pending_transfer,
+                (),
                 record.floating_display_geometry,
             ),
             None => return,
         };
 
         let ax_invalidated = self.windows[&from].ax_invalidated;
+        // The placement, a drag's hold included, moves with the identity.
+        let mut pending = std::mem::take(&mut self.windows.get_mut(&from).unwrap().placement);
+        if let Placement::Held(session) = &mut pending {
+            session.source.window = to;
+            self.drag = DragPhase::Dragging(to);
+        }
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -1391,7 +1439,11 @@ impl WindowStore {
         target.ax_invalidated |= ax_invalidated;
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
-        target.pending_transfer = pending;
+        // A drag holding the replacement keeps it unless the drag held the old identity.
+        if matches!(pending, Placement::Held(_)) || !matches!(target.placement, Placement::Held(_))
+        {
+            target.placement = pending;
+        }
         target.floating_display_geometry = geom;
         self.app_windows.entry(to.pid).or_default().insert(to);
 
@@ -1399,7 +1451,7 @@ impl WindowStore {
             source.workspace = None;
             source.ax_invalidated = false;
             source.rule_floating = false;
-            source.pending_transfer = None;
+            source.placement.clear_transfer();
             source.floating_display_geometry = None;
         }
         if let Some(mut claim) = self.windows.get_mut(&from).and_then(|r| r.claim.take()) {
@@ -1469,6 +1521,7 @@ impl WindowStore {
         let Some(record) = self.windows.remove(&window_id) else {
             return None;
         };
+        self.forget_drag_on(window_id);
         if let Some(claim) = record.claim {
             self.unindex_claim(claim.owner, window_id);
         }
@@ -1561,7 +1614,7 @@ impl WindowStore {
         }
 
         for record in self.windows.values_mut() {
-            if let Some(operation) = record.pending_transfer.as_mut()
+            if let Some(operation) = record.placement.transfer_mut()
                 && operation.requested_space == old_space
             {
                 operation.requested_space = new_space;
@@ -1614,6 +1667,74 @@ impl WindowStore {
             })
     }
 
+    pub(crate) fn drag_phase(&self) -> DragPhase { self.drag }
+
+    /// A drag's session lives on its window's record, so it ends with the record.
+    fn forget_drag_on(&mut self, window: WindowId) {
+        if matches!(self.drag, DragPhase::Dragging(held) if held == window) {
+            self.drag = DragPhase::Idle;
+        }
+    }
+
+    pub(crate) fn drag(&self) -> Option<&Session> {
+        let DragPhase::Dragging(window) = self.drag else {
+            return None;
+        };
+        match &self.windows.get(&window)?.placement {
+            Placement::Held(session) => Some(session),
+            Placement::Settled | Placement::Transferring(_) => None,
+        }
+    }
+
+    pub(crate) fn drag_mut(&mut self) -> Option<&mut Session> {
+        let DragPhase::Dragging(window) = self.drag else {
+            return None;
+        };
+        match &mut self.windows.get_mut(&window)?.placement {
+            Placement::Held(session) => Some(session),
+            Placement::Settled | Placement::Transferring(_) => None,
+        }
+    }
+
+    /// A modifier press waits for its window; whatever drag there was is over.
+    pub(crate) fn await_drag(&mut self, pending: PendingStart) {
+        self.end_drag();
+        self.drag = DragPhase::AwaitingSource(pending);
+    }
+
+    /// The modifier press found no window to drag.
+    pub(crate) fn abandon_drag_start(&mut self) {
+        if matches!(self.drag, DragPhase::AwaitingSource(_)) {
+            self.drag = DragPhase::Idle;
+        }
+    }
+
+    /// The user's drag takes over the window's placement, superseding any transfer in flight.
+    /// There is one drag: starting one ends the last.
+    pub(crate) fn start_drag(&mut self, session: Session) {
+        self.end_drag();
+        let window = session.source.window;
+        self.windows.entry(window).or_default().placement = Placement::Held(Box::new(session));
+        self.app_windows.entry(window.pid).or_default().insert(window);
+        self.drag = DragPhase::Dragging(window);
+    }
+
+    /// The drop (or a cancel) decides where the window goes from here.
+    pub(crate) fn end_drag(&mut self) -> Option<Session> {
+        let DragPhase::Dragging(window) = self.drag else {
+            return None;
+        };
+        self.drag = DragPhase::Idle;
+        let record = self.windows.get_mut(&window)?;
+        match std::mem::take(&mut record.placement) {
+            Placement::Held(session) => Some(*session),
+            other => {
+                record.placement = other;
+                None
+            }
+        }
+    }
+
     /// Coalesce repeated intent; only a new destination or newly available
     /// lifecycle context can start physical work. Exhaustion preserves intent.
     pub(crate) fn request_transfer(
@@ -1625,7 +1746,10 @@ impl WindowStore {
     ) -> bool {
         let available = available && self.can_place_window(window);
         let record = self.windows.entry(window).or_default();
-        if let Some(operation) = record.pending_transfer.as_mut()
+        if matches!(record.placement, Placement::Held(_)) {
+            return false;
+        }
+        if let Some(operation) = record.placement.transfer_mut()
             && operation.requested_space == target
         {
             use crate::sys::geometry::SameAs;
@@ -1651,7 +1775,7 @@ impl WindowStore {
         }
         self.operation_generation = self.operation_generation.wrapping_add(1);
         let write = available && frame.is_some();
-        record.pending_transfer = Some(PendingWindowTransfer {
+        record.placement = Placement::Transferring(PendingWindowTransfer {
             generation: self.operation_generation,
             requested_frame: frame,
             requested_space: target,
@@ -1679,7 +1803,7 @@ impl WindowStore {
         let available = available && self.can_place_window(window);
         let record = self.windows.get_mut(&window)?;
         let frame = record.frame();
-        let operation = record.pending_transfer.as_mut()?;
+        let operation = record.placement.transfer_mut()?;
         if !available {
             operation.status = TransferStatus::Unavailable;
             return None;
@@ -1708,7 +1832,7 @@ impl WindowStore {
 
     /// A new display set or Space identity is a new chance; unchanged topology never is.
     pub(crate) fn resume_deferred_transfers(&mut self) {
-        for operation in self.windows.values_mut().filter_map(|r| r.pending_transfer.as_mut()) {
+        for operation in self.windows.values_mut().filter_map(|r| r.placement.transfer_mut()) {
             if operation.status == TransferStatus::Deferred {
                 operation.status = TransferStatus::Pending;
                 operation.attempts = 0;
@@ -1727,14 +1851,14 @@ impl WindowStore {
         let Some(record) = self.windows.get_mut(&window_id) else {
             return false;
         };
-        if record.pending_transfer.is_some_and(|operation| {
+        if record.placement.transfer().is_some_and(|operation| {
             operation.generation == generation
                 && revision >= self.topology_revision
                 && revision >= operation.started_revision
                 && Some(operation.requested_space) == observed
                 && operation.last_revision.is_none_or(|last| revision >= last)
         }) {
-            record.pending_transfer = None;
+            record.placement = Placement::Settled;
             true
         } else {
             false

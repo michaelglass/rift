@@ -2202,16 +2202,24 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         };
         if modifier {
             reactor.drag_manager.actor.begin_modifier(
+                &mut reactor.state.windows,
                 source,
                 frame.mid(),
                 crate::common::config::MouseAction::Move,
                 crate::actor::drag::DragScene::default(),
             );
-            reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
-                point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
-            });
+            reactor.drag_manager.actor.motion(
+                &mut reactor.state.windows,
+                crate::actor::drag::DragMotion {
+                    point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
+                },
+            );
         } else {
-            reactor.drag_manager.actor.begin_native(source, Default::default());
+            reactor.drag_manager.actor.begin_native(
+                &mut reactor.state.windows,
+                source,
+                Default::default(),
+            );
         }
         assert!(reactor.is_in_drag());
         let added = WindowId::new(1, 2);
@@ -2277,6 +2285,7 @@ fn cross_display_drag_clears_source_floating_position() {
         initial_frame.size,
     );
     reactor.drag_manager.actor.begin_native(
+        &mut reactor.state.windows,
         crate::actor::drag::DragSource {
             window: wid,
             origin_frame: initial_frame,
@@ -2299,7 +2308,7 @@ fn cross_display_drag_clears_source_floating_position() {
     )
     .unwrap();
     assert!(outcome.arrange.passes > 0);
-    assert!(!reactor.drag_manager.actor.is_active());
+    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(
@@ -2349,8 +2358,8 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         Requested(false),
         Some(MouseState::Down),
     ));
-    assert!(reactor.drag_manager.actor.is_active());
-    assert!(reactor.drag_manager.actor.target().is_none());
+    assert!(reactor.drag_manager.actor.is_active(&reactor.state.windows));
+    assert!(reactor.drag_manager.actor.target(&reactor.state.windows).is_none());
 
     // Keep dragging with the swap still latched, then release.
     let released_frame = CGRect::new(
@@ -2364,11 +2373,11 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         Requested(false),
         Some(MouseState::Down),
     ));
-    assert!(reactor.drag_manager.actor.is_active());
-    assert!(reactor.drag_manager.actor.target().is_none());
+    assert!(reactor.drag_manager.actor.is_active(&reactor.state.windows));
+    assert!(reactor.drag_manager.actor.target(&reactor.state.windows).is_none());
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
 
-    assert!(!reactor.drag_manager.actor.is_active());
+    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating_wid));
     let stored = reactor
         .layout_manager
@@ -2396,14 +2405,18 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     };
 
     reactor.drag_manager.actor.begin_modifier(
+        &mut reactor.state.windows,
         source,
         frame.mid(),
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
     );
-    reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
-        point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
-    });
+    reactor
+        .drag_manager
+        .actor
+        .motion(&mut reactor.state.windows, crate::actor::drag::DragMotion {
+            point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
+        });
     assert!(reactor.is_in_drag());
     let before = reactor.layout_update_count;
     reactor.apply_event_outcome(EventOutcome::layout_changed(false));
@@ -2416,19 +2429,23 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     assert_eq!(reactor.drag_manager.externally_controlled_window, None);
 
     reactor.drag_manager.actor.begin_modifier(
+        &mut reactor.state.windows,
         source,
         frame.mid(),
         crate::common::config::MouseAction::Move,
         crate::actor::drag::DragScene::default(),
     );
-    reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
-        point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
-    });
+    reactor
+        .drag_manager
+        .actor
+        .motion(&mut reactor.state.windows, crate::actor::drag::DragMotion {
+            point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
+        });
     let mut config = reactor.config.clone();
     config.settings.drag_drop.enabled = false;
     let config_cancel = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
     assert_eq!(config_cancel.arrange.passes, 1);
-    assert!(!reactor.drag_manager.actor.is_active());
+    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
     let before = reactor.layout_update_count;
     reactor.apply_event_outcome(config_cancel);
     assert_eq!(reactor.layout_update_count - before, 1);
@@ -2440,6 +2457,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
         reactor_with_window_on_space1_two_displays();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     reactor.drag_manager.actor.begin_modifier(
+        &mut reactor.state.windows,
         crate::actor::drag::DragSource {
             window: wid,
             origin_frame: frame,
@@ -2460,10 +2478,10 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
         Requested(false),
         Some(MouseState::Up),
     ));
-    assert!(reactor.drag_manager.actor.is_active());
+    assert!(reactor.drag_manager.actor.is_active(&reactor.state.windows));
 
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    assert!(!reactor.drag_manager.actor.is_active());
+    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
 }
 
 #[test]
@@ -3176,8 +3194,8 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.insert_test_window_state(wid, frame, Some(WindowServerId::new(1)), true);
     reactor.ensure_active_drag(wid, &frame);
 
-    assert!(reactor.drag_manager.actor.is_active());
-    reactor.drag_manager.sync_motion_gate();
+    assert!(reactor.drag_manager.actor.is_active(&reactor.state.windows));
+    reactor.drag_manager.sync_motion_gate(&reactor.state.windows);
     assert!(
         reactor
             .drag_manager
@@ -3189,7 +3207,7 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.communication_manager.input_tx = Some(input_tx);
     reactor.handle_event(Event::MissionControlNativeEntered);
 
-    assert!(!reactor.drag_manager.actor.is_active());
+    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
     assert!(
         !reactor
             .drag_manager
@@ -6691,6 +6709,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         let outcome = window_workflow::apply_window_retirement(
             &reactor.transaction_manager,
             &mut reactor.drag_manager,
+            &mut reactor.state.windows,
             retired,
         );
         reactor.apply_event_outcome(outcome);
@@ -9805,7 +9824,7 @@ fn rejected_config_preserves_live_graph_and_mode_migration_preserves_dormant_mem
         command_workflow::handle_config_updated(
             &mut reactor.config,
             &mut reactor.layout_manager,
-            &reactor.state,
+            &mut reactor.state,
             &mut reactor.drag_manager,
             invalid,
         )
@@ -12305,4 +12324,69 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
     }
+}
+
+#[test]
+fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let wid = WindowId::new(7, 2);
+    let window = reactor.state.windows.window(wid).unwrap();
+    let (wsid, start) = (window.info.sys_id.unwrap(), window.frame_monotonic);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+
+    // The user drags the tiled window towards the right edge of the first display...
+    let dragged = CGRect::new(
+        CGPoint::new(start.origin.x + 200., start.origin.y + 20.),
+        start.size,
+    );
+    let last_seen = Some(apps.windows[&wid].last_seen_txid);
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged,
+        last_seen,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert!(reactor.is_in_drag());
+    let _ = apps.requests();
+
+    // ...and with the button still down, the window server reports it on the other display, and
+    // the app's window inventory is refreshed.
+    reactor.handle_event(Event::WindowServerAppeared(wsid, space2, SpaceEventKind::User));
+    let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+    info.frame = dragged;
+    reactor.request_window_inventory(wid.pid);
+    let mut requests = apps.requests();
+    let token = requests
+        .iter()
+        .find_map(|request| match request {
+            Request::RefreshWindowInventory(token) => Some(*token),
+            _ => None,
+        })
+        .expect("inventory refresh requested");
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: wid.pid,
+        token,
+        successful: true,
+        new: vec![(wid, info)],
+        known_visible: vec![WindowId::new(7, 1), wid],
+    });
+    requests.extend(apps.requests());
+    let snapped = requests.iter().find(|request| {
+        matches!(request, Request::SetWindowFrames(frames, ..)
+            if frames.iter().any(|(w, _)| *w == wid))
+    });
+    assert!(
+        snapped.is_none(),
+        "rift moved the window while the user was dragging it: {snapped:?}"
+    );
+    assert!(reactor.is_in_drag());
 }

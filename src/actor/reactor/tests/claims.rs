@@ -235,6 +235,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     reactor.drag_manager.actor.begin_modifier(
+        &mut reactor.state.windows,
         crate::actor::drag::DragSource {
             window: wid,
             origin_frame: frame,
@@ -254,7 +255,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
     reactor.animation_tx = Some(animation_tx);
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
-    assert!(!reactor.drag_manager.actor.is_active());
+    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
     assert_eq!(reactor.drag_manager.externally_controlled_window, None);
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
     assert!(

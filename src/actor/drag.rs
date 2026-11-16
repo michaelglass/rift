@@ -15,6 +15,7 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
+use crate::model::window_store::WindowStore;
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
@@ -133,45 +134,42 @@ pub struct PendingStart {
     pub action: MouseAction,
 }
 
-#[derive(Debug, Clone, Default)]
-pub enum State {
+/// Where the user's drag is. The window store owns it, next to the held window's placement,
+/// which carries the session: a window being dragged cannot also be transferring.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DragPhase {
     #[default]
     Idle,
     AwaitingSource(PendingStart),
-    Dragging(Session),
+    Dragging(WindowId),
 }
 
+/// Drag behaviour over the session the window store holds.
 #[derive(Debug, Clone)]
 pub struct DragActor {
-    state: State,
     next_session_id: u64,
     settings: DragDropSettings,
 }
 
 impl DragActor {
-    pub fn new(settings: DragDropSettings) -> Self {
-        Self {
-            state: State::Idle,
-            next_session_id: 1,
-            settings,
-        }
+    pub fn new(settings: DragDropSettings) -> Self { Self { next_session_id: 1, settings } }
+
+    pub fn is_active(&self, windows: &WindowStore) -> bool {
+        !matches!(windows.drag_phase(), DragPhase::Idle)
     }
 
-    pub fn is_active(&self) -> bool { !matches!(self.state, State::Idle) }
+    fn session<'a>(&self, windows: &'a WindowStore) -> Option<&'a Session> { windows.drag() }
 
-    fn session(&self) -> Option<&Session> {
-        match &self.state {
-            State::Dragging(session) => Some(session),
-            _ => None,
-        }
+    pub fn source(&self, windows: &WindowStore) -> Option<DragSource> {
+        self.session(windows).map(|session| session.source)
     }
 
-    pub fn source(&self) -> Option<DragSource> { self.session().map(|session| session.source) }
+    pub fn target(&self, windows: &WindowStore) -> Option<DropTarget> {
+        self.session(windows)?.target.validated()
+    }
 
-    pub fn target(&self) -> Option<DropTarget> { self.session()?.target.validated() }
-
-    pub fn preview_target(&self) -> Option<DropTarget> {
-        let session = self.session()?;
+    pub fn preview_target(&self, windows: &WindowStore) -> Option<DropTarget> {
+        let session = self.session(windows)?;
         if let Some(target) = session.target.validated() {
             return (session.source.tiled || target.intent.action == WindowDropAction::Stack)
                 .then_some(target);
@@ -194,13 +192,21 @@ impl DragActor {
         })
     }
 
-    pub fn intent(&self) -> Option<DropIntent> { self.session()?.target.intent() }
+    pub fn intent(&self, windows: &WindowStore) -> Option<DropIntent> {
+        self.session(windows)?.target.intent()
+    }
 
-    pub fn kind(&self) -> Option<DragKind> { self.session().map(|session| session.kind) }
+    pub fn kind(&self, windows: &WindowStore) -> Option<DragKind> {
+        self.session(windows).map(|session| session.kind)
+    }
 
     /// Update reactor-resolved space membership and invalidate destination state.
-    pub fn update_current_space(&mut self, current_space: Option<SpaceId>) -> bool {
-        let State::Dragging(session) = &mut self.state else {
+    pub fn update_current_space(
+        &mut self,
+        windows: &mut WindowStore,
+        current_space: Option<SpaceId>,
+    ) -> bool {
+        let Some(session) = windows.drag_mut() else {
             return false;
         };
         if session.source.current_space == current_space {
@@ -211,8 +217,8 @@ impl DragActor {
         true
     }
 
-    pub fn replace_scene(&mut self, scene: DragScene) {
-        let State::Dragging(session) = &mut self.state else {
+    pub fn replace_scene(&mut self, windows: &mut WindowStore, scene: DragScene) {
+        let Some(session) = windows.drag_mut() else {
             return;
         };
         let previous = session.target.intent();
@@ -236,8 +242,13 @@ impl DragActor {
         }
     }
 
-    pub fn set_preview(&mut self, intent: DropIntent, preview_area: Option<CGRect>) -> bool {
-        let State::Dragging(session) = &mut self.state else {
+    pub fn set_preview(
+        &mut self,
+        windows: &mut WindowStore,
+        intent: DropIntent,
+        preview_area: Option<CGRect>,
+    ) -> bool {
+        let Some(session) = windows.drag_mut() else {
             return false;
         };
         if !session
@@ -271,60 +282,72 @@ impl DragActor {
         !matches!(session.target, TargetState::None)
     }
 
-    pub fn update_config(&mut self, settings: DragDropSettings) {
+    pub fn update_config(&mut self, windows: &mut WindowStore, settings: DragDropSettings) {
         let semantics_changed = self.settings.drop_action != settings.drop_action
             || self.settings.drop_zone_fraction != settings.drop_zone_fraction;
         self.settings = settings;
         if !settings.enabled {
-            self.cancel();
-        } else if semantics_changed && let State::Dragging(session) = &mut self.state {
+            self.cancel(windows);
+        } else if semantics_changed && let Some(session) = windows.drag_mut() {
             session.invalidate_drop();
         }
     }
 
     pub fn await_modifier(
         &mut self,
+        windows: &mut WindowStore,
         button: MouseButton,
         point: CGPoint,
         action: MouseAction,
     ) -> u64 {
         let id = self.next_session_id;
         self.next_session_id = self.next_session_id.wrapping_add(1);
-        self.state = State::AwaitingSource(PendingStart { id, button, point, action });
+        windows.await_drag(PendingStart { id, button, point, action });
         id
     }
 
     /// Complete source resolution. Stale results are ignored by session id.
     pub fn resolve_start(
         &mut self,
+        windows: &mut WindowStore,
         session_id: u64,
         source: Option<DragSource>,
         scene: DragScene,
     ) -> bool {
-        let State::AwaitingSource(pending) = self.state else {
+        let DragPhase::AwaitingSource(pending) = windows.drag_phase() else {
             return false;
         };
         if pending.id != session_id {
             return false;
         }
         let Some(source) = source else {
-            self.state = State::Idle;
+            windows.abandon_drag_start();
             return true;
         };
         let PendingStart { button, point, action, .. } = pending;
-        self.start_modifier_session(source, button, point, action, scene);
+        self.start_modifier_session(windows, source, button, point, action, scene);
         true
     }
 
     #[cfg(test)]
-    pub fn begin_native(&mut self, source: DragSource, scene: DragScene) {
-        if self.update_native(source.window, source.last_frame, source.current_space) {
+    pub fn begin_native(
+        &mut self,
+        windows: &mut WindowStore,
+        source: DragSource,
+        scene: DragScene,
+    ) {
+        if self.update_native(windows, source.window, source.last_frame, source.current_space) {
             return;
         }
-        self.start_native(source, scene);
+        self.start_native(windows, source, scene);
     }
 
-    pub fn start_native(&mut self, source: DragSource, scene: DragScene) {
+    pub fn start_native(
+        &mut self,
+        windows: &mut WindowStore,
+        source: DragSource,
+        scene: DragScene,
+    ) {
         let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
             DragKind::NativeMove
         } else {
@@ -334,7 +357,7 @@ impl DragActor {
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        self.state = State::Dragging(Session::new(source, MouseButton::Left, pointer, scene, kind));
+        windows.start_drag(Session::new(source, MouseButton::Left, pointer, scene, kind));
     }
 
     /// Updates an existing native drag without rebuilding its immutable scene.
@@ -342,11 +365,12 @@ impl DragActor {
     /// Returns `true` when `window` owns the active native drag session.
     pub fn update_native(
         &mut self,
+        windows: &mut WindowStore,
         window: WindowId,
         frame: CGRect,
         current_space: Option<SpaceId>,
     ) -> bool {
-        let State::Dragging(session) = &mut self.state else {
+        let Some(session) = windows.drag_mut() else {
             return false;
         };
         if session.source.window != window
@@ -370,17 +394,19 @@ impl DragActor {
     #[cfg(test)]
     pub fn begin_modifier(
         &mut self,
+        windows: &mut WindowStore,
         source: DragSource,
         point: CGPoint,
         action: MouseAction,
         scene: DragScene,
     ) {
-        let id = self.await_modifier(MouseButton::Left, point, action);
-        let _ = self.resolve_start(id, Some(source), scene);
+        let id = self.await_modifier(windows, MouseButton::Left, point, action);
+        let _ = self.resolve_start(windows, id, Some(source), scene);
     }
 
     fn start_modifier_session(
         &mut self,
+        windows: &mut WindowStore,
         source: DragSource,
         button: MouseButton,
         point: CGPoint,
@@ -391,11 +417,11 @@ impl DragActor {
             MouseAction::Move => DragKind::ModifierMove,
             MouseAction::None => return,
         };
-        self.state = State::Dragging(Session::new(source, button, point, scene, kind));
+        windows.start_drag(Session::new(source, button, point, scene, kind));
     }
 
-    pub fn motion(&mut self, motion: DragMotion) -> bool {
-        let State::Dragging(session) = &mut self.state else {
+    pub fn motion(&mut self, windows: &mut WindowStore, motion: DragMotion) -> bool {
+        let Some(session) = windows.drag_mut() else {
             return false;
         };
         let home_preview_changed = contains(session.source.origin_frame, session.pointer, 0.0)
@@ -439,21 +465,19 @@ impl DragActor {
         changed || home_preview_changed
     }
 
-    pub fn interactive_update(&mut self) -> Option<(WindowId, CGRect)> {
-        let State::Dragging(session) = &mut self.state else {
+    pub fn interactive_update(&mut self, windows: &mut WindowStore) -> Option<(WindowId, CGRect)> {
+        let Some(session) = windows.drag_mut() else {
             return None;
         };
         (session.kind == DragKind::ModifierMove)
             .then_some((session.source.window, session.source.last_frame))
     }
 
-    pub fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
-        if !matches!(&self.state, State::Dragging(session) if session.button == button) {
+    pub fn finish(&mut self, windows: &mut WindowStore, button: MouseButton) -> Option<DragCommit> {
+        if !windows.drag().is_some_and(|session| session.button == button) {
             return None;
         }
-        let State::Dragging(session) = std::mem::take(&mut self.state) else {
-            return None;
-        };
+        let session = windows.end_drag()?;
         Some(DragCommit {
             source: session.source,
             target: session.target.validated(),
@@ -462,22 +486,20 @@ impl DragActor {
         })
     }
 
-    pub fn cancel(&mut self) -> Option<DragCancel> {
-        let State::Dragging(session) = std::mem::take(&mut self.state) else {
-            return None;
-        };
+    pub fn cancel(&mut self, windows: &mut WindowStore) -> Option<DragCancel> {
+        let session = windows.end_drag()?;
         Some(DragCancel {
             source: session.source,
             kind: session.kind,
         })
     }
 
-    pub fn window_removed(&mut self, window: WindowId) -> bool {
-        let State::Dragging(session) = &mut self.state else {
+    pub fn window_removed(&mut self, windows: &mut WindowStore, window: WindowId) -> bool {
+        let Some(session) = windows.drag_mut() else {
             return false;
         };
         if session.source.window == window {
-            self.cancel();
+            windows.end_drag();
             return true;
         }
         session.scene.targets.retain(|target| target.window != window);
@@ -743,6 +765,104 @@ mod tests {
 
     use super::*;
 
+    /// The drag actor with the window store that holds its session.
+    struct Drag {
+        actor: DragActor,
+        windows: WindowStore,
+    }
+
+    #[allow(dead_code)]
+    impl Drag {
+        fn new(settings: DragDropSettings) -> Self {
+            Self {
+                actor: DragActor::new(settings),
+                windows: WindowStore::default(),
+            }
+        }
+
+        fn is_active(&self) -> bool { self.actor.is_active(&self.windows) }
+
+        fn source(&self) -> Option<DragSource> { self.actor.source(&self.windows) }
+
+        fn target(&self) -> Option<DropTarget> { self.actor.target(&self.windows) }
+
+        fn preview_target(&self) -> Option<DropTarget> { self.actor.preview_target(&self.windows) }
+
+        fn intent(&self) -> Option<DropIntent> { self.actor.intent(&self.windows) }
+
+        fn kind(&self) -> Option<DragKind> { self.actor.kind(&self.windows) }
+
+        fn update_current_space(&mut self, space: Option<SpaceId>) -> bool {
+            self.actor.update_current_space(&mut self.windows, space)
+        }
+
+        fn replace_scene(&mut self, scene: DragScene) {
+            self.actor.replace_scene(&mut self.windows, scene)
+        }
+
+        fn set_preview(&mut self, intent: DropIntent, area: Option<CGRect>) -> bool {
+            self.actor.set_preview(&mut self.windows, intent, area)
+        }
+
+        fn update_config(&mut self, settings: DragDropSettings) {
+            self.actor.update_config(&mut self.windows, settings)
+        }
+
+        fn await_modifier(
+            &mut self,
+            button: MouseButton,
+            point: CGPoint,
+            action: MouseAction,
+        ) -> u64 {
+            self.actor.await_modifier(&mut self.windows, button, point, action)
+        }
+
+        fn resolve_start(&mut self, id: u64, source: Option<DragSource>, scene: DragScene) -> bool {
+            self.actor.resolve_start(&mut self.windows, id, source, scene)
+        }
+
+        fn begin_native(&mut self, source: DragSource, scene: DragScene) {
+            self.actor.begin_native(&mut self.windows, source, scene)
+        }
+
+        fn update_native(
+            &mut self,
+            window: WindowId,
+            frame: CGRect,
+            space: Option<SpaceId>,
+        ) -> bool {
+            self.actor.update_native(&mut self.windows, window, frame, space)
+        }
+
+        fn begin_modifier(
+            &mut self,
+            source: DragSource,
+            point: CGPoint,
+            action: MouseAction,
+            scene: DragScene,
+        ) {
+            self.actor.begin_modifier(&mut self.windows, source, point, action, scene)
+        }
+
+        fn motion(&mut self, motion: DragMotion) -> bool {
+            self.actor.motion(&mut self.windows, motion)
+        }
+
+        fn interactive_update(&mut self) -> Option<(WindowId, CGRect)> {
+            self.actor.interactive_update(&mut self.windows)
+        }
+
+        fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
+            self.actor.finish(&mut self.windows, button)
+        }
+
+        fn cancel(&mut self) -> Option<DragCancel> { self.actor.cancel(&mut self.windows) }
+
+        fn window_removed(&mut self, window: WindowId) -> bool {
+            self.actor.window_removed(&mut self.windows, window)
+        }
+    }
+
     fn frame(x: f64, y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
     }
@@ -781,18 +901,18 @@ mod tests {
             targets,
         }
     }
-    fn motion(actor: &mut DragActor, x: f64, y: f64) -> bool {
+    fn motion(actor: &mut Drag, x: f64, y: f64) -> bool {
         actor.motion(DragMotion { point: point(x, y) })
     }
-    fn native(tiled: bool, last_frame: CGRect, scene: DragScene) -> DragActor {
+    fn native(tiled: bool, last_frame: CGRect, scene: DragScene) -> Drag {
         let mut source = source(tiled);
         source.last_frame = last_frame;
-        let mut actor = DragActor::new(DragDropSettings::default());
+        let mut actor = Drag::new(DragDropSettings::default());
         actor.begin_native(source, scene);
         actor
     }
-    fn modifier(action: MouseAction, tiled: bool) -> DragActor {
-        let mut actor = DragActor::new(DragDropSettings::default());
+    fn modifier(action: MouseAction, tiled: bool) -> Drag {
+        let mut actor = Drag::new(DragDropSettings::default());
         actor.begin_modifier(source(tiled), point(100.0, 50.0), action, scene(rect()));
         actor
     }
@@ -923,7 +1043,7 @@ mod tests {
         motion(&mut native_drag, 100.0, 50.0);
         assert!(native_drag.preview_target().is_none());
 
-        let mut modifier_drag = DragActor::new(DragDropSettings::default());
+        let mut modifier_drag = Drag::new(DragDropSettings::default());
         modifier_drag.begin_modifier(
             source(false),
             point(100.0, 50.0),
@@ -1108,7 +1228,7 @@ mod tests {
 
     #[test]
     fn only_the_owning_button_finishes_a_modifier_drag() {
-        let mut actor = DragActor::new(DragDropSettings::default());
+        let mut actor = Drag::new(DragDropSettings::default());
         let id = actor.await_modifier(MouseButton::Left, point(10.0, 10.0), MouseAction::Move);
         assert!(actor.resolve_start(id, Some(source(true)), DragScene::default()));
 
@@ -1120,7 +1240,7 @@ mod tests {
 
     #[test]
     fn stale_source_resolution_is_ignored() {
-        let mut actor = DragActor::new(DragDropSettings::default());
+        let mut actor = Drag::new(DragDropSettings::default());
         let stale = actor.await_modifier(MouseButton::Left, point(1.0, 1.0), MouseAction::Move);
         let current = actor.await_modifier(MouseButton::Left, point(2.0, 2.0), MouseAction::Move);
         assert!(!actor.resolve_start(stale, None, DragScene::default()));

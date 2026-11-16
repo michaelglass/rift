@@ -83,18 +83,24 @@ pub fn handle_window_destroyed(
     let Some(record) = state.windows.remove_window(wid) else {
         return EventOutcome::no_change();
     };
-    apply_window_retirement(transactions, drag, (wid, record.window_server_id()))
+    apply_window_retirement(
+        transactions,
+        drag,
+        &mut state.windows,
+        (wid, record.window_server_id()),
+    )
 }
 
 pub(crate) fn apply_window_retirement(
     transactions: &TransactionManager,
     drag: &mut DragManager,
+    windows: &mut crate::model::window_store::WindowStore,
     (wid, wsid): (WindowId, Option<crate::sys::window_server::WindowServerId>),
 ) -> EventOutcome {
     if let Some(wsid) = wsid {
         transactions.remove_for_window(wsid);
     }
-    drag.forget_window(wid);
+    drag.forget_window(windows, wid);
     EventOutcome::window_membership_changed(true, false)
         .with_arrange_passes(0)
         .with_layout_event(LayoutEvent::WindowRemoved(wid))
@@ -189,14 +195,14 @@ pub fn classify_window_frame_change(
     mission_control_active: bool,
 ) -> FrameChangeDisposition {
     let Some(window) = state.windows.window(wid) else {
-        query_mouse_for_active_drag(drag, mouse_state);
+        query_mouse_for_active_drag(drag, &state.windows, mouse_state);
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
     let old_frame = window.frame_monotonic;
 
     if mission_control_active {
-        drag.reset();
+        drag.reset(&mut state.windows);
         return FrameChangeDisposition::Handled;
     }
 
@@ -205,7 +211,7 @@ pub fn classify_window_frame_change(
         && let Some(seen) = last_seen
     {
         if seen != transactions.get_last_sent_txid(server) {
-            query_mouse_for_active_drag(drag, mouse_state);
+            query_mouse_for_active_drag(drag, &state.windows, mouse_state);
             return FrameChangeDisposition::Handled;
         }
         if mouse_state.is_none() {
@@ -224,7 +230,7 @@ pub fn classify_window_frame_change(
         }
     }
     if requested {
-        query_mouse_for_active_drag(drag, mouse_state);
+        query_mouse_for_active_drag(drag, &state.windows, mouse_state);
         if let Some(window) = state.windows.window_mut(wid) {
             window.frame_monotonic = new_frame;
         }
@@ -235,7 +241,7 @@ pub fn classify_window_frame_change(
     }
 
     if old_frame.same_as(new_frame) {
-        query_mouse_for_active_drag(drag, mouse_state);
+        query_mouse_for_active_drag(drag, &state.windows, mouse_state);
         return FrameChangeDisposition::Handled;
     }
     if mouse_state.is_none() {
@@ -244,8 +250,12 @@ pub fn classify_window_frame_change(
     FrameChangeDisposition::NeedsGeometryAnalysis
 }
 
-fn query_mouse_for_active_drag(drag: &DragManager, mouse_state: &mut Option<MouseState>) {
-    if mouse_state.is_none() && drag.actor.is_active() {
+fn query_mouse_for_active_drag(
+    drag: &DragManager,
+    windows: &crate::model::window_store::WindowStore,
+    mouse_state: &mut Option<MouseState>,
+) {
+    if mouse_state.is_none() && drag.actor.is_active(windows) {
         *mouse_state = crate::sys::event::get_mouse_state();
     }
 }
@@ -300,9 +310,9 @@ pub fn handle_window_frame_changed(
     }
     // An adjusted acknowledgement of our own frame write is not a new native drag.
     if matches!(
-        drag.actor.kind(),
+        drag.actor.kind(&state.windows),
         Some(crate::actor::drag::DragKind::ModifierMove)
-    ) && drag.actor.source().is_some_and(|source| source.window == wid)
+    ) && drag.actor.source(&state.windows).is_some_and(|source| source.window == wid)
     {
         return Ok(EventOutcome::no_change());
     }
@@ -324,11 +334,11 @@ pub fn handle_window_frame_changed(
     }
 
     let dragging = state.windows.is_admitted(wid)
-        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active());
+        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active(&state.windows));
     if dragging {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
-        if !drag.actor.update_native(wid, new_frame, new_space) {
+        if !drag.actor.update_native(&mut state.windows, wid, new_frame, new_space) {
             // The start of a user drag is intent, even when no workspace changes.
             layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
             let scene = if tiled && !native_resize {
@@ -339,6 +349,7 @@ pub fn handle_window_frame_changed(
                 Default::default()
             };
             drag.actor.start_native(
+                &mut state.windows,
                 crate::actor::drag::DragSource {
                     window: wid,
                     origin_frame: old_frame,
@@ -350,7 +361,7 @@ pub fn handle_window_frame_changed(
                 scene,
             );
         }
-        drag.sync_preview();
+        drag.sync_preview(&state.windows);
         if tiled {
             drag.externally_controlled_window = Some(wid);
         }
@@ -399,7 +410,7 @@ pub fn handle_window_frame_changed(
         }
     }
 
-    if handle_mouse_up_if_needed(drag, false, mouse_state) {
+    if handle_mouse_up_if_needed(drag, &mut state.windows, false, mouse_state) {
         outcome.dispatch_mouse_up = true;
     }
     Ok(outcome)
@@ -475,15 +486,16 @@ pub fn handle_mouse_moved_over_window(
 }
 fn handle_mouse_up_if_needed(
     drag: &mut DragManager,
+    windows: &mut crate::model::window_store::WindowStore,
     mission_control_active: bool,
     mouse_state: Option<MouseState>,
 ) -> bool {
     if mission_control_active {
-        drag.reset();
+        drag.reset(windows);
         return false;
     }
 
-    if mouse_state == Some(MouseState::Up) && drag.actor.is_active() {
+    if mouse_state == Some(MouseState::Up) && drag.actor.is_active(windows) {
         return true;
     }
     false
