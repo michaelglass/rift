@@ -123,22 +123,14 @@ impl Session {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum StartKind {
-    Native {
-        window: WindowId,
-    },
-    Modifier {
-        button: MouseButton,
-        point: CGPoint,
-        action: MouseAction,
-    },
-}
-
+/// A modifier drag waiting for the window under the pointer to be resolved. A native drag
+/// names its window from the start, so it never waits.
 #[derive(Debug, Clone, Copy)]
 pub struct PendingStart {
     pub id: u64,
-    pub kind: StartKind,
+    pub button: MouseButton,
+    pub point: CGPoint,
+    pub action: MouseAction,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -290,24 +282,16 @@ impl DragActor {
         }
     }
 
-    fn await_start(&mut self, kind: StartKind) -> u64 {
-        let id = self.next_session_id;
-        self.next_session_id = self.next_session_id.wrapping_add(1);
-        self.state = State::AwaitingSource(PendingStart { id, kind });
-        id
-    }
-
-    pub fn await_native(&mut self, window: WindowId) -> u64 {
-        self.await_start(StartKind::Native { window })
-    }
-
     pub fn await_modifier(
         &mut self,
         button: MouseButton,
         point: CGPoint,
         action: MouseAction,
     ) -> u64 {
-        self.await_start(StartKind::Modifier { button, point, action })
+        let id = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1);
+        self.state = State::AwaitingSource(PendingStart { id, button, point, action });
+        id
     }
 
     /// Complete source resolution. Stale results are ignored by session id.
@@ -327,20 +311,9 @@ impl DragActor {
             self.state = State::Idle;
             return true;
         };
-        match pending.kind {
-            StartKind::Native { window } if window == source.window => {
-                self.start_native_session(source, scene);
-                true
-            }
-            StartKind::Modifier { button, point, action } => {
-                self.start_modifier_session(source, button, point, action, scene);
-                true
-            }
-            StartKind::Native { .. } => {
-                self.state = State::Idle;
-                false
-            }
-        }
+        let PendingStart { button, point, action, .. } = pending;
+        self.start_modifier_session(source, button, point, action, scene);
+        true
     }
 
     #[cfg(test)]
@@ -348,11 +321,10 @@ impl DragActor {
         if self.update_native(source.window, source.last_frame, source.current_space) {
             return;
         }
-        let id = self.await_native(source.window);
-        let _ = self.resolve_start(id, Some(source), scene);
+        self.start_native(source, scene);
     }
 
-    fn start_native_session(&mut self, source: DragSource, scene: DragScene) {
+    pub fn start_native(&mut self, source: DragSource, scene: DragScene) {
         let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
             DragKind::NativeMove
         } else {
@@ -501,16 +473,6 @@ impl DragActor {
     }
 
     pub fn window_removed(&mut self, window: WindowId) -> bool {
-        if matches!(
-            self.state,
-            State::AwaitingSource(PendingStart {
-                kind: StartKind::Native { window: pending },
-                ..
-            }) if pending == window
-        ) {
-            self.state = State::Idle;
-            return true;
-        }
         let State::Dragging(session) = &mut self.state else {
             return false;
         };
@@ -1159,8 +1121,8 @@ mod tests {
     #[test]
     fn stale_source_resolution_is_ignored() {
         let mut actor = DragActor::new(DragDropSettings::default());
-        let stale = actor.await_native(w(1));
-        let current = actor.await_native(w(2));
+        let stale = actor.await_modifier(MouseButton::Left, point(1.0, 1.0), MouseAction::Move);
+        let current = actor.await_modifier(MouseButton::Left, point(2.0, 2.0), MouseAction::Move);
         assert!(!actor.resolve_start(stale, None, DragScene::default()));
         assert!(actor.is_active());
         assert!(actor.resolve_start(current, None, DragScene::default()));

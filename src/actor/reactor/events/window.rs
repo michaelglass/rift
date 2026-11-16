@@ -331,7 +331,6 @@ pub fn handle_window_frame_changed(
         if !drag.actor.update_native(wid, new_frame, new_space) {
             // The start of a user drag is intent, even when no workspace changes.
             layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
-            let session_id = drag.actor.await_native(wid);
             let scene = if tiled && !native_resize {
                 new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                     crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
@@ -339,16 +338,15 @@ pub fn handle_window_frame_changed(
             } else {
                 Default::default()
             };
-            let _ = drag.actor.resolve_start(
-                session_id,
-                Some(crate::actor::drag::DragSource {
+            drag.actor.start_native(
+                crate::actor::drag::DragSource {
                     window: wid,
                     origin_frame: old_frame,
                     last_frame: new_frame,
                     origin_space: old_space,
                     current_space: new_space,
                     tiled,
-                }),
+                },
                 scene,
             );
         }
