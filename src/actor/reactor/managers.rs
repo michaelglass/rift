@@ -9,6 +9,7 @@ use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
+use crate::actor::drag::{DragKind, Session};
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -17,7 +18,6 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
-use crate::model::window_store::WindowStore;
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -40,11 +40,9 @@ impl AppManager {
     }
 }
 
-/// Manages drag operations and window swapping
+/// The drag preview and motion gate; the drag itself is the held window's placement.
 pub struct DragManager {
-    pub actor: crate::actor::drag::DragActor,
     pub native_motion_active: Arc<AtomicBool>,
-    pub externally_controlled_window: Option<WindowId>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) preview_suppressed: bool,
@@ -52,56 +50,27 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn sync_motion_gate(&self, windows: &WindowStore) {
-        let active = self.actor.is_active(windows)
-            && matches!(
-                self.actor.kind(windows),
-                Some(
-                    crate::actor::drag::DragKind::NativeMove
-                        | crate::actor::drag::DragKind::NativeResize
-                )
-            );
+    pub fn sync_motion_gate(&self, held: Option<&Session>) {
+        let active = held.is_some_and(|session| {
+            matches!(session.kind, DragKind::NativeMove | DragKind::NativeResize)
+        });
         self.native_motion_active.store(active, Ordering::Release);
     }
 
-    /// A window leaving Rift's control can no longer be dragged by it.
-    pub fn forget_window(&mut self, windows: &mut WindowStore, wid: WindowId) {
-        // The store may already have ended the drag with the window's record.
-        self.actor.window_removed(windows, wid);
-        if self.externally_controlled_window == Some(wid) {
-            self.externally_controlled_window = None;
-        }
-        self.sync_motion_gate(windows);
-        self.sync_preview(windows);
-    }
-
-    pub fn reset(&mut self, windows: &mut WindowStore) {
-        self.actor.cancel(windows);
-        self.sync_motion_gate(windows);
-        self.release_preview();
-        self.externally_controlled_window = None;
-    }
-
-    pub fn update_config(&mut self, windows: &mut WindowStore, config: DragDropSettings) {
+    pub fn update_config(&mut self, config: DragDropSettings) {
         self.haptics_enabled = config.haptics_enabled;
-        self.actor.update_config(windows, config);
         self.preview_enabled = config.enabled && config.preview;
         if !config.enabled || !config.preview {
             self.release_preview();
         }
-        if !config.enabled {
-            self.externally_controlled_window = None;
-        }
-        self.sync_preview(windows);
     }
 
-    pub fn sync_preview(&mut self, windows: &WindowStore) {
+    pub fn sync_preview(&mut self, held: Option<&Session>) {
         if cfg!(test) {
             return;
         }
-        let Some(target) = self
-            .actor
-            .preview_target(windows)
+        let Some(target) = held
+            .and_then(Session::preview_target)
             .filter(|_| self.preview_enabled && !self.preview_suppressed)
         else {
             self.hide_preview();
@@ -447,7 +416,12 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        let skip_wid = reactor.drag_manager.externally_controlled_window;
+        // A tiled window the user is dragging is theirs to place until the drop.
+        let skip_wid = reactor
+            .state
+            .windows
+            .held()
+            .and_then(|(window, session)| session.source.tiled.then_some(window));
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();

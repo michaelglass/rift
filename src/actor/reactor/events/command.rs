@@ -285,7 +285,7 @@ pub fn handle_config_updated(
             anyhow::anyhow!("configuration reload retained previous workspace graph: {error}")
         })?;
     let mut outcome = if config.settings.drag_drop != new_config.settings.drag_drop {
-        super::drag::handle_cancel(drag, &mut state.windows)
+        super::drag::handle_cancel(state, drag)
     } else {
         EventOutcome::no_change()
     };
@@ -298,7 +298,7 @@ pub fn handle_config_updated(
         migration,
     );
 
-    drag.update_config(&mut state.windows, config.settings.drag_drop);
+    drag.update_config(config.settings.drag_drop);
 
     outcome.absorb(EventOutcome {
         service_config_update: Some(config.clone()),

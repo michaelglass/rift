@@ -331,7 +331,8 @@ pub fn handle_mission_control_native_entered(
     windows: &mut crate::model::window_store::WindowStore,
 ) -> anyhow::Result<EventOutcome> {
     drag.suppress_preview(true);
-    drag.reset(windows);
+    windows.end_drag();
+    drag.release_preview();
     let changed = !matches!(
         mission_control.mission_control_state,
         MissionControlState::Active

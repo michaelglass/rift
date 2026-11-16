@@ -39,7 +39,8 @@ impl Reactor {
             if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
                 reactor.transaction_manager.clear_target_for_window(wsid);
             }
-            reactor.drag_manager.forget_window(&mut reactor.state.windows, wid);
+            reactor.state.windows.forget_drag_window(wid);
+            reactor.drag_manager.sync_preview(reactor.state.windows.drag());
             // Leave the projection (keeping floating state and the layout slot) before the
             // claim takes the assignment, but arrange only after: no write may target it.
             let space = reactor.assigned_space_for_window_id(wid);

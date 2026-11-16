@@ -37,14 +37,9 @@ pub struct MouseUpPayload {
     pub final_space: Option<SpaceId>,
 }
 
-pub fn handle_cancel(
-    drag: &mut DragManager,
-    windows: &mut crate::model::window_store::WindowStore,
-) -> EventOutcome {
-    let cancelled = drag.actor.cancel(windows);
+pub fn handle_cancel(state: &mut RiftState, drag: &mut DragManager) -> EventOutcome {
     drag.release_preview();
-    drag.externally_controlled_window = None;
-    let Some(cancelled) = cancelled else {
+    let Some(cancelled) = state.windows.end_drag() else {
         return EventOutcome::no_change();
     };
     let source = cancelled.source;
@@ -70,15 +65,14 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some(commit) = drag.actor.finish(&mut state.windows, payload.button) else {
+    let Some(commit) = state.windows.finish_drag(payload.button) else {
         return Ok(outcome);
     };
     drag.release_preview();
     let window = commit.source.window;
-    drag.externally_controlled_window = None;
     let mut needs_layout = commit.source.tiled;
 
-    if let Some(target) = commit.target
+    if let Some(target) = commit.target()
         && commit.source.current_space == Some(target.intent.space)
         && state.windows.contains_window(window)
         && state.windows.contains_window(target.intent.window)
