@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::CGRect;
 
 use crate::actor::app::WindowId;
 use crate::layout_engine::WindowDropAction;
@@ -59,18 +59,4 @@ pub struct DragSource {
     pub origin_space: Option<SpaceId>,
     pub current_space: Option<SpaceId>,
     pub tiled: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DragCommit {
-    pub source: DragSource,
-    pub target: Option<DropTarget>,
-    pub pointer: CGPoint,
-    pub kind: DragKind,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DragCancel {
-    pub source: DragSource,
-    pub kind: DragKind,
 }

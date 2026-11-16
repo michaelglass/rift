@@ -1,7 +1,7 @@
 use rift_protocol::WindowClaimFlags;
 
 use crate::actor::app::WindowId;
-use crate::actor::drag::{DragPhase, PendingStart, Session};
+use crate::actor::drag::{MouseButton, Session};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
 use crate::model::reactor::WindowState;
@@ -36,11 +36,11 @@ pub struct PendingWindowTransfer {
 }
 
 /// Who decides where a window physically goes next: nobody, a transfer Rift requested, or
-/// the user's drag.
+/// the user, whose drag session lives here.
 ///
-/// The drag session lives here, on the window it holds, so a window cannot be both held and
-/// transferring: while it is held nothing can request a transfer, and re-observing it on a
-/// space other than its assignment cannot pull it back from under the pointer.
+/// A held window cannot also be transferring, and nothing can request a transfer for it, so
+/// re-observing it on a space other than its assignment cannot pull it back from under the
+/// pointer. The drop decides where it goes.
 #[derive(Debug, Default)]
 enum Placement {
     #[default]
@@ -64,7 +64,7 @@ impl Placement {
         }
     }
 
-    /// Forgets a transfer; a drag's hold ends only with the drag.
+    /// Forgets a transfer; a hold ends only with its drag.
     fn clear_transfer(&mut self) {
         if matches!(self, Placement::Transferring(_)) {
             *self = Placement::Settled;
@@ -207,9 +207,6 @@ pub struct WindowStore {
     native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
     claims: HashMap<ClaimOwner, Vec<WindowId>>,
-    /// `Dragging(w)` exactly when `w`'s placement is `Held`; kept here, beside the
-    /// placements, by the store's own methods.
-    drag: DragPhase,
 }
 
 /// Restored native lifecycle facts; placement and actor effects remain external.
@@ -916,7 +913,6 @@ impl WindowStore {
         });
         if should_remove {
             self.windows.remove(&window_id);
-            self.forget_drag_on(window_id);
             if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
                 windows.remove(&window_id);
                 if windows.is_empty() {
@@ -1419,7 +1415,6 @@ impl WindowStore {
         let mut pending = std::mem::take(&mut self.windows.get_mut(&from).unwrap().placement);
         if let Placement::Held(session) = &mut pending {
             session.source.window = to;
-            self.drag = DragPhase::Dragging(to);
         }
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
@@ -1521,7 +1516,6 @@ impl WindowStore {
         let Some(record) = self.windows.remove(&window_id) else {
             return None;
         };
-        self.forget_drag_on(window_id);
         if let Some(claim) = record.claim {
             self.unindex_claim(claim.owner, window_id);
         }
@@ -1667,46 +1661,38 @@ impl WindowStore {
             })
     }
 
-    pub(crate) fn drag_phase(&self) -> DragPhase { self.drag }
-
-    /// A drag's session lives on its window's record, so it ends with the record.
-    fn forget_drag_on(&mut self, window: WindowId) {
-        if matches!(self.drag, DragPhase::Dragging(held) if held == window) {
-            self.drag = DragPhase::Idle;
-        }
-    }
-
-    pub(crate) fn drag(&self) -> Option<&Session> {
-        let DragPhase::Dragging(window) = self.drag else {
-            return None;
-        };
+    /// The drag holding `window`, if the user is dragging it.
+    pub(crate) fn drag_on(&self, window: WindowId) -> Option<&Session> {
         match &self.windows.get(&window)?.placement {
             Placement::Held(session) => Some(session),
             Placement::Settled | Placement::Transferring(_) => None,
         }
     }
 
-    pub(crate) fn drag_mut(&mut self) -> Option<&mut Session> {
-        let DragPhase::Dragging(window) = self.drag else {
-            return None;
-        };
+    pub(crate) fn drag_on_mut(&mut self, window: WindowId) -> Option<&mut Session> {
         match &mut self.windows.get_mut(&window)?.placement {
             Placement::Held(session) => Some(session),
             Placement::Settled | Placement::Transferring(_) => None,
         }
     }
 
-    /// A modifier press waits for its window; whatever drag there was is over.
-    pub(crate) fn await_drag(&mut self, pending: PendingStart) {
-        self.end_drag();
-        self.drag = DragPhase::AwaitingSource(pending);
+    pub(crate) fn drag(&self) -> Option<&Session> { self.held().map(|(_, session)| session) }
+
+    /// The user's drag, found on the window it holds.
+    pub(crate) fn held(&self) -> Option<(WindowId, &Session)> {
+        self.windows.iter().find_map(|(window, record)| match &record.placement {
+            Placement::Held(session) => Some((*window, &**session)),
+            Placement::Settled | Placement::Transferring(_) => None,
+        })
     }
 
-    /// The modifier press found no window to drag.
-    pub(crate) fn abandon_drag_start(&mut self) {
-        if matches!(self.drag, DragPhase::AwaitingSource(_)) {
-            self.drag = DragPhase::Idle;
-        }
+    pub(crate) fn held_mut(&mut self) -> Option<(WindowId, &mut Session)> {
+        self.windows
+            .iter_mut()
+            .find_map(|(window, record)| match &mut record.placement {
+                Placement::Held(session) => Some((*window, &mut **session)),
+                Placement::Settled | Placement::Transferring(_) => None,
+            })
     }
 
     /// The user's drag takes over the window's placement, superseding any transfer in flight.
@@ -1716,22 +1702,35 @@ impl WindowStore {
         let window = session.source.window;
         self.windows.entry(window).or_default().placement = Placement::Held(Box::new(session));
         self.app_windows.entry(window.pid).or_default().insert(window);
-        self.drag = DragPhase::Dragging(window);
     }
 
     /// The drop (or a cancel) decides where the window goes from here.
     pub(crate) fn end_drag(&mut self) -> Option<Session> {
-        let DragPhase::Dragging(window) = self.drag else {
+        self.windows
+            .values_mut()
+            .find_map(|record| match std::mem::take(&mut record.placement) {
+                Placement::Held(session) => Some(*session),
+                other => {
+                    record.placement = other;
+                    None
+                }
+            })
+    }
+
+    /// Only the button that started a drag ends it.
+    pub(crate) fn finish_drag(&mut self, button: MouseButton) -> Option<Session> {
+        if !self.held().is_some_and(|(_, session)| session.button() == button) {
             return None;
-        };
-        self.drag = DragPhase::Idle;
-        let record = self.windows.get_mut(&window)?;
-        match std::mem::take(&mut record.placement) {
-            Placement::Held(session) => Some(*session),
-            other => {
-                record.placement = other;
-                None
-            }
+        }
+        self.end_drag()
+    }
+
+    /// A window left Rift's control: a drag holding it ends, and it is no longer a drop target.
+    pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
+        match self.held_mut() {
+            Some((held, _)) if held == window => _ = self.end_drag(),
+            Some((_, session)) => session.forget_target(window),
+            None => {}
         }
     }
 

@@ -234,8 +234,8 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
 fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-    reactor.drag_manager.actor.begin_modifier(
-        &mut reactor.state.windows,
+    start_modifier_drag(
+        &mut reactor,
         crate::actor::drag::DragSource {
             window: wid,
             origin_frame: frame,
@@ -245,18 +245,14 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
             tiled: true,
         },
         frame.mid(),
-        crate::common::config::MouseAction::Move,
-        crate::actor::drag::DragScene::default(),
     );
-    reactor.drag_manager.externally_controlled_window = Some(wid);
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
     reactor.transaction_manager.store_txid(wsid, txid, frame);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
-    assert!(!reactor.drag_manager.actor.is_active(&reactor.state.windows));
-    assert_eq!(reactor.drag_manager.externally_controlled_window, None);
+    assert!(!reactor.is_in_drag());
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
     assert!(
         std::iter::from_fn(|| animation_rx.commands.try_recv().ok())
