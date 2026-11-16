@@ -17,6 +17,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::model::window_store::WindowStore;
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -51,10 +52,10 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn sync_motion_gate(&self) {
-        let active = self.actor.is_active()
+    pub fn sync_motion_gate(&self, windows: &WindowStore) {
+        let active = self.actor.is_active(windows)
             && matches!(
-                self.actor.kind(),
+                self.actor.kind(windows),
                 Some(
                     crate::actor::drag::DragKind::NativeMove
                         | crate::actor::drag::DragKind::NativeResize
@@ -64,24 +65,26 @@ impl DragManager {
     }
 
     /// A window leaving Rift's control can no longer be dragged by it.
-    pub fn forget_window(&mut self, wid: WindowId) {
-        if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
+    pub fn forget_window(&mut self, windows: &mut WindowStore, wid: WindowId) {
+        // The store may already have ended the drag with the window's record.
+        self.actor.window_removed(windows, wid);
+        if self.externally_controlled_window == Some(wid) {
             self.externally_controlled_window = None;
         }
-        self.sync_motion_gate();
-        self.sync_preview();
+        self.sync_motion_gate(windows);
+        self.sync_preview(windows);
     }
 
-    pub fn reset(&mut self) {
-        self.actor.cancel();
-        self.sync_motion_gate();
+    pub fn reset(&mut self, windows: &mut WindowStore) {
+        self.actor.cancel(windows);
+        self.sync_motion_gate(windows);
         self.release_preview();
         self.externally_controlled_window = None;
     }
 
-    pub fn update_config(&mut self, config: DragDropSettings) {
+    pub fn update_config(&mut self, windows: &mut WindowStore, config: DragDropSettings) {
         self.haptics_enabled = config.haptics_enabled;
-        self.actor.update_config(config);
+        self.actor.update_config(windows, config);
         self.preview_enabled = config.enabled && config.preview;
         if !config.enabled || !config.preview {
             self.release_preview();
@@ -89,16 +92,16 @@ impl DragManager {
         if !config.enabled {
             self.externally_controlled_window = None;
         }
-        self.sync_preview();
+        self.sync_preview(windows);
     }
 
-    pub fn sync_preview(&mut self) {
+    pub fn sync_preview(&mut self, windows: &WindowStore) {
         if cfg!(test) {
             return;
         }
         let Some(target) = self
             .actor
-            .preview_target()
+            .preview_target(windows)
             .filter(|_| self.preview_enabled && !self.preview_suppressed)
         else {
             self.hide_preview();

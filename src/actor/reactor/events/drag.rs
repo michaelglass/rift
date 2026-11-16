@@ -37,8 +37,11 @@ pub struct MouseUpPayload {
     pub final_space: Option<SpaceId>,
 }
 
-pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
-    let cancelled = drag.actor.cancel();
+pub fn handle_cancel(
+    drag: &mut DragManager,
+    windows: &mut crate::model::window_store::WindowStore,
+) -> EventOutcome {
+    let cancelled = drag.actor.cancel(windows);
     drag.release_preview();
     drag.externally_controlled_window = None;
     let Some(cancelled) = cancelled else {
@@ -67,7 +70,7 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some(commit) = drag.actor.finish(payload.button) else {
+    let Some(commit) = drag.actor.finish(&mut state.windows, payload.button) else {
         return Ok(outcome);
     };
     drag.release_preview();
