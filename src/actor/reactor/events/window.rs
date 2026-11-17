@@ -9,9 +9,7 @@ use crate::actor::reactor::{Quiet, TransactionId, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
 use crate::model::drag::Mover;
-use crate::model::window_store::WindowStore;
 use crate::sys::app::WindowInfo as Window;
-use crate::sys::event::MouseState;
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerInfo;
@@ -159,7 +157,6 @@ pub fn handle_window_visibility_changed(
 pub struct WindowFrameChangedPayload {
     pub window: WindowId,
     pub new_frame: CGRect,
-    pub mouse_state: Option<MouseState>,
     pub mover: Mover,
     pub old_space: Option<SpaceId>,
     pub new_space: Option<SpaceId>,
@@ -184,11 +181,10 @@ pub fn classify_window_frame_change(
     new_frame: CGRect,
     last_seen: Option<TransactionId>,
     requested: bool,
-    mouse_state: &mut Option<MouseState>,
+    mover: Mover,
     mission_control_active: bool,
 ) -> FrameChangeDisposition {
     let Some(window) = state.windows.window(wid) else {
-        query_mouse_for_active_drag(&state.windows, mouse_state);
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
@@ -204,13 +200,10 @@ pub fn classify_window_frame_change(
         && let Some(seen) = last_seen
     {
         if seen != transactions.get_last_sent_txid(server) {
-            query_mouse_for_active_drag(&state.windows, mouse_state);
             return FrameChangeDisposition::Handled;
         }
-        if mouse_state.is_none() {
-            *mouse_state = crate::sys::event::get_mouse_state();
-        }
-        if *mouse_state == Some(MouseState::Down) {
+        // The user grabbed the window while Rift's own write was still in flight.
+        if mover == Mover::User {
             transactions.clear_target_for_window(server);
         } else {
             if new_frame.same_as(target) {
@@ -223,7 +216,6 @@ pub fn classify_window_frame_change(
         }
     }
     if requested {
-        query_mouse_for_active_drag(&state.windows, mouse_state);
         if let Some(window) = state.windows.window_mut(wid) {
             window.frame_monotonic = new_frame;
         }
@@ -234,19 +226,9 @@ pub fn classify_window_frame_change(
     }
 
     if old_frame.same_as(new_frame) {
-        query_mouse_for_active_drag(&state.windows, mouse_state);
         return FrameChangeDisposition::Handled;
     }
-    if mouse_state.is_none() {
-        *mouse_state = crate::sys::event::get_mouse_state();
-    }
     FrameChangeDisposition::NeedsGeometryAnalysis
-}
-
-fn query_mouse_for_active_drag(windows: &WindowStore, mouse_state: &mut Option<MouseState>) {
-    if mouse_state.is_none() && windows.drag().is_some() {
-        *mouse_state = crate::sys::event::get_mouse_state();
-    }
 }
 
 pub fn handle_window_frame_changed(
@@ -257,7 +239,6 @@ pub fn handle_window_frame_changed(
     let WindowFrameChangedPayload {
         window: wid,
         new_frame,
-        mouse_state,
         mover,
         old_space,
         new_space,
@@ -398,9 +379,6 @@ pub fn handle_window_frame_changed(
         }
     }
 
-    if handle_mouse_up_if_needed(&mut state.windows, false, mouse_state) {
-        outcome.dispatch_mouse_up = true;
-    }
     Ok(outcome)
 }
 
@@ -471,15 +449,4 @@ pub fn handle_mouse_moved_over_window(
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
     }
     Ok(outcome)
-}
-fn handle_mouse_up_if_needed(
-    windows: &mut WindowStore,
-    mission_control_active: bool,
-    mouse_state: Option<MouseState>,
-) -> bool {
-    if mission_control_active {
-        windows.end_drag();
-        return false;
-    }
-    mouse_state == Some(MouseState::Up) && windows.drag().is_some()
 }

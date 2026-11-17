@@ -2289,7 +2289,7 @@ fn cross_display_drag_clears_source_floating_position() {
         &mut reactor.layout_manager,
         &mut reactor.drag_manager,
         crate::actor::reactor::events::drag::MouseUpPayload {
-            button: crate::actor::drag::MouseButton::Left,
+            released: crate::model::drag::PointerReleased(crate::actor::drag::MouseButton::Left),
             final_space: Some(space2),
         },
     )
@@ -10352,10 +10352,10 @@ fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership()
     reactor.state.windows.window_mut(window).unwrap().frame_monotonic = written;
     reactor.track_test_window_server_info(wsid, window.pid, stale);
     let store = &mut reactor.state.windows;
-    store.request_transfer(window, Some(written), target, true);
+    store.unheld(window).unwrap().request_transfer(Some(written), target, true);
     let generation = store.record(window).unwrap().pending_transfer().unwrap().generation;
     for revision in [11, 12, 13] {
-        store.advance_transfer(window, revision, true);
+        store.unheld(window).unwrap().advance_transfer(revision, true);
     }
     assert_eq!(store.record(window).unwrap().frame(), Some(written));
     assert_eq!(
@@ -12468,4 +12468,43 @@ fn a_window_moved_with_no_button_reported_is_not_dragged_or_reassigned() {
         "no evidence, yet a drag started"
     );
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(SpaceId::new(1)));
+}
+
+#[test]
+fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
+    // The tap reports every release; if one is missed, a fresh read finding the button up ends
+    // a native drag at the next frame report. A modifier drag's button is the tap's own, so
+    // only its real release ends that.
+    for modifier in [false, true] {
+        let (apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
+        let source = crate::actor::drag::DragSource {
+            origin_frame: frame,
+            last_frame: frame,
+            origin_space: Some(SpaceId::new(1)),
+            current_space: Some(SpaceId::new(1)),
+            tiled: true,
+        };
+        if modifier {
+            reactor.start_modifier_drag(wid, source, frame.mid());
+        } else {
+            reactor.state.windows.start_drag(
+                wid,
+                crate::actor::drag::Session::native(source, Default::default()),
+            );
+        }
+        reactor.read_button = || Some(MouseState::Up);
+        let other = WindowId::new(7, 1);
+        let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic;
+        reactor.handle_event(Event::WindowFrameChanged(
+            other,
+            CGRect::new(
+                CGPoint::new(other_frame.origin.x + 5., other_frame.origin.y),
+                other_frame.size,
+            ),
+            Some(apps.windows[&other].last_seen_txid),
+            Requested(false),
+            None,
+        ));
+        assert_eq!(reactor.user_is_dragging(), modifier, "modifier drag: {modifier}");
+    }
 }

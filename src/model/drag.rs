@@ -132,12 +132,16 @@ impl Button {
 pub enum Hold {
     /// The user is dragging this window.
     This,
-    /// The pointer is moving another window by modifier drag.
-    OtherByModifier,
-    /// Another window is in a native drag.
-    OtherNative,
+    /// The user is dragging another window.
+    Other,
     Nobody,
 }
+
+/// The pointer let go of `.0`. Only this ends a drag by release: it comes from the input tap,
+/// which reports every release, or from a fresh read of the button during a native drag (a
+/// release the tap missed). The button a window's frame report carries is never one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerReleased(pub MouseButton);
 
 /// Who moved a window whose frame changed without Rift asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,16 +155,14 @@ pub enum Mover {
 impl Mover {
     pub fn of(hold: Hold, button: Button) -> Self {
         match (hold, button) {
-            // Its own drag continues even if a stale read says the button is up.
+            // Its own drag continues whatever the button reads: only a release ends it.
             (Hold::This, _) => Mover::User,
-            // One pointer: while it moves another window by modifier, this one isn't the user's.
-            (Hold::OtherByModifier, _) => Mover::App,
-            // A native drag of another window can only have ended unseen if the pointer is now
-            // dragging this one.
-            (Hold::OtherNative | Hold::Nobody, Button::Down) => Mover::User,
+            // One pointer, one drag: while it holds another window, this one isn't the user's.
+            (Hold::Other, _) => Mover::App,
+            (Hold::Nobody, Button::Down) => Mover::User,
             // Without a button there's no telling a trackpad drag from an app moving itself;
             // treat it as the app's (conservative: nothing starts a drag on no evidence).
-            (Hold::OtherNative | Hold::Nobody, Button::Up | Button::Unknown) => Mover::App,
+            (Hold::Nobody, Button::Up | Button::Unknown) => Mover::App,
         }
     }
 }
@@ -175,12 +177,10 @@ mod tests {
         use Hold::*;
         for button in [Down, Up, Unknown] {
             assert_eq!(Mover::of(This, button), Mover::User, "{button:?}");
-            assert_eq!(Mover::of(OtherByModifier, button), Mover::App, "{button:?}");
+            assert_eq!(Mover::of(Other, button), Mover::App, "{button:?}");
         }
-        for hold in [OtherNative, Nobody] {
-            assert_eq!(Mover::of(hold, Down), Mover::User, "{hold:?}");
-            assert_eq!(Mover::of(hold, Up), Mover::App, "{hold:?}");
-            assert_eq!(Mover::of(hold, Unknown), Mover::App, "{hold:?}");
-        }
+        assert_eq!(Mover::of(Nobody, Down), Mover::User);
+        assert_eq!(Mover::of(Nobody, Up), Mover::App);
+        assert_eq!(Mover::of(Nobody, Unknown), Mover::App);
     }
 }

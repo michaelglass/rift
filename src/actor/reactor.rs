@@ -91,7 +91,7 @@ use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
-use crate::model::drag::{Button, Mover};
+use crate::model::drag::{Button, Mover, PointerReleased};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::window_store::NativeFullscreenTransition;
@@ -540,7 +540,7 @@ impl Reactor {
             mouse_inventory_hit: None,
             // Tests feed the button explicitly; they never read the real one.
             read_button: if cfg!(test) {
-                || Some(MouseState::Up)
+                || None
             } else {
                 crate::sys::event::get_mouse_state
             },
@@ -1946,13 +1946,17 @@ impl Reactor {
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 let mission_control_active = self.is_mission_control_active();
-                let mut effective_mouse_state = mouse_state;
+                // The button is read once, here, and only to say who moved this window. Nothing
+                // below sees it: frame handling gets the answer, and a drag ends only by a
+                // `PointerReleased`.
+                let button = Button::reported(mouse_state.or_else(self.read_button));
+                let mover = Mover::of(self.state.windows.hold_of(wid), button);
                 // A delayed move from an app can invalidate a parked frame even when
                 // WindowServer reports Rift's transaction id. Drop the stale hide
                 // target so the next layout can re-park the window.
                 if !mission_control_active
                     && !requested.0
-                    && mouse_state != Some(MouseState::Down)
+                    && mover == Mover::App
                     && let Some(window) = self.state.windows.window(wid)
                     && let Some(wsid) = window.info.sys_id
                     && self.hidden_assigned_space_for_window_id(wid).is_some()
@@ -1972,15 +1976,13 @@ impl Reactor {
                         new_frame,
                         last_seen,
                         requested.0,
-                        &mut effective_mouse_state,
+                        mover,
                         mission_control_active,
                     ),
                     window_workflow::FrameChangeDisposition::Handled
                 ) {
                     let mut outcome = EventOutcome::no_change();
-                    outcome.dispatch_mouse_up = effective_mouse_state
-                        == Some(crate::sys::event::MouseState::Up)
-                        && self.user_is_dragging();
+                    outcome.pointer_released = self.missed_release();
                     outcome.focused_window = raised_window;
                     return Ok(outcome);
                 }
@@ -2007,10 +2009,6 @@ impl Reactor {
                 let pending_target_space = server_id
                     .and_then(|server| self.pending_target_space_for_window_server_id(server));
                 let assigned_space = self.assigned_space_for_window_id(wid);
-                let mover = Mover::of(
-                    self.state.windows.hold_of(wid),
-                    Button::reported(effective_mouse_state),
-                );
                 // Only the user's drag vouches for a window seen off its space; any other move
                 // stays doubtful until a snapshot confirms it.
                 let (old_space, new_space) = if assigned_space.is_some()
@@ -2052,7 +2050,6 @@ impl Reactor {
                     window_workflow::WindowFrameChangedPayload {
                         window: wid,
                         new_frame,
-                        mouse_state: effective_mouse_state,
                         mover,
                         old_space,
                         new_space,
@@ -2065,14 +2062,7 @@ impl Reactor {
                         screens,
                     },
                 )?;
-                // Frame acknowledgements and no-op geometry changes can return
-                // early from the reducer. Mouse release still has to terminate
-                // an existing drag session in those cases.
-                if effective_mouse_state == Some(crate::sys::event::MouseState::Up)
-                    && self.user_is_dragging()
-                {
-                    outcome.dispatch_mouse_up = true;
-                }
+                outcome.pointer_released = self.missed_release();
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
@@ -2386,7 +2376,10 @@ impl Reactor {
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.drag_manager,
-                    interaction_workflow::MouseUpPayload { button, final_space },
+                    interaction_workflow::MouseUpPayload {
+                        released: PointerReleased(button),
+                        final_space,
+                    },
                 )?;
                 if let Some((space, window)) = focused {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
@@ -3146,16 +3139,8 @@ impl Reactor {
         for (response, workspace_switch_space) in outcome.layout_responses {
             self.handle_layout_response(response, workspace_switch_space);
         }
-        // The input tap captured a modifier drag's button and always reports its real release,
-        // so none is inferred from button state for it.
-        if outcome.dispatch_mouse_up
-            && !self
-                .state
-                .windows
-                .drag()
-                .is_some_and(|(_, session)| session.kind == DragKind::ModifierMove)
-        {
-            self.handle_event(Event::MouseUp(MouseButton::Left));
+        if let Some(PointerReleased(button)) = outcome.pointer_released {
+            self.handle_event(Event::MouseUp(button));
         }
 
         let mut layout_changed = false;
@@ -4313,7 +4298,9 @@ impl Reactor {
                 .collect();
             for (window, target, frame) in intents {
                 // Unknown membership preserves intent without issuing a speculative write.
-                self.state.windows.request_transfer(window, frame, target, false);
+                if let Some(unheld) = self.state.windows.unheld(window) {
+                    unheld.request_transfer(frame, target, false);
+                }
             }
         }
         outcome
@@ -4373,6 +4360,16 @@ impl Reactor {
         )
     }
 
+    /// The input tap reports every release. This covers one it missed: a fresh read finding
+    /// the button up while a native drag is held. A modifier drag's button is captured by the
+    /// tap, which always reports its real release.
+    fn missed_release(&self) -> Option<PointerReleased> {
+        let (_, session) = self.state.windows.drag()?;
+        (session.kind != DragKind::ModifierMove
+            && Button::reported((self.read_button)()) == Button::Up)
+            .then_some(PointerReleased(MouseButton::Left))
+    }
+
     /// With the button down the user may be dragging a window before Rift has seen the drag
     /// start.
     fn pointer_may_be_dragging(&self) -> bool {
@@ -4413,11 +4410,11 @@ impl Reactor {
                         self.space_state.revision,
                         observed,
                     );
-                } else if let Some(operation) = self.state.windows.advance_transfer(
-                    window,
-                    self.space_state.revision,
-                    available,
-                ) && let Some(frame) = operation.requested_frame
+                } else if let Some(operation) =
+                    self.state.windows.unheld(window).and_then(|unheld| {
+                        unheld.advance_transfer(self.space_state.revision, available)
+                    })
+                    && let Some(frame) = operation.requested_frame
                 {
                     if let Some(screen) = self.space_state.screen_by_space(target) {
                         // Intent recorded while unavailable may describe another display.
@@ -4427,7 +4424,9 @@ impl Reactor {
                         } else {
                             frame
                         };
-                        self.state.windows.request_transfer(window, Some(frame), target, true);
+                        if let Some(unheld) = self.state.windows.unheld(window) {
+                            unheld.request_transfer(Some(frame), target, true);
+                        }
                         self.layout_manager.layout_engine.prepare_window_placement(
                             &mut self.state.windows,
                             window,
