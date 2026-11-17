@@ -5,7 +5,7 @@ use crate::actor::app::WindowId;
 use crate::actor::drag::{DragKind, DragSource, Session};
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::transaction_manager::TransactionManager;
-use crate::actor::reactor::{Quiet, TransactionId, WindowState, utils};
+use crate::actor::reactor::{Quiet, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
 use crate::model::window_store::Hand;
@@ -166,67 +166,6 @@ pub struct WindowFrameChangedPayload {
     pub assigned_space: Option<SpaceId>,
     pub keep_assigned_for_scrolling: bool,
     pub screens: Vec<(SpaceId, CGRect, Option<String>)>,
-}
-
-pub enum FrameChangeDisposition {
-    Handled,
-    NeedsGeometryAnalysis,
-}
-
-pub fn classify_window_frame_change(
-    state: &mut crate::model::RiftState,
-    transactions: &TransactionManager,
-    wid: WindowId,
-    new_frame: CGRect,
-    last_seen: Option<TransactionId>,
-    requested: bool,
-    mission_control_active: bool,
-) -> FrameChangeDisposition {
-    let Some(window) = state.windows.window(wid) else {
-        return FrameChangeDisposition::Handled;
-    };
-    let server_id = window.info.sys_id;
-    let old_frame = window.frame_monotonic;
-
-    if mission_control_active {
-        state.windows.end_drag();
-        return FrameChangeDisposition::Handled;
-    }
-
-    if let Some(server) = server_id
-        && let Some(target) = transactions.get_target_frame(server)
-        && let Some(seen) = last_seen
-    {
-        if seen != transactions.get_last_sent_txid(server) {
-            return FrameChangeDisposition::Handled;
-        }
-        // The user's hand is on the window while Rift's own write was still in flight: theirs.
-        if state.windows.is_gripped(wid) {
-            transactions.clear_target_for_window(server);
-        } else {
-            if new_frame.same_as(target) {
-                transactions.clear_target_for_window(server);
-            }
-            if let Some(window) = state.windows.window_mut(wid) {
-                window.frame_monotonic = new_frame;
-            }
-            return FrameChangeDisposition::Handled;
-        }
-    }
-    if requested {
-        if let Some(window) = state.windows.window_mut(wid) {
-            window.frame_monotonic = new_frame;
-        }
-        if let Some(server) = server_id {
-            transactions.clear_target_for_window(server);
-        }
-        return FrameChangeDisposition::Handled;
-    }
-
-    if old_frame.same_as(new_frame) {
-        return FrameChangeDisposition::Handled;
-    }
-    FrameChangeDisposition::NeedsGeometryAnalysis
 }
 
 pub fn handle_window_frame_changed(

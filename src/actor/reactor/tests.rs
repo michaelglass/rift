@@ -1885,11 +1885,12 @@ fn matching_rift_frame_clears_pending_target() {
             .same_as(target_frame)
     );
 
-    // AX may adjust a requested frame; cache the accepted geometry but keep the target pending.
+    // AX may adjust a requested frame. An answer further off than the tolerance is a refusal:
+    // the accepted geometry is cached, the target stays pending, and nothing is arranged.
     let adjusted_target = CGRect::new(CGPoint::new(80.0, 40.0), frame.size);
-    let accepted = CGRect::new(CGPoint::new(81.0, 40.0), frame.size);
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, adjusted_target);
+    let accepted = CGRect::new(CGPoint::new(95.0, 40.0), frame.size);
+    reactor.place_window(wid, adjusted_target, true);
+    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
     let outcome = reactor
         .dispatch_workflow(Event::WindowFrameChanged(
             wid,
@@ -1904,18 +1905,26 @@ fn matching_rift_frame_clears_pending_target() {
         reactor.transaction_manager.get_target_frame(wsid),
         Some(adjusted_target)
     );
+    assert_eq!(reactor.reconciler.sync(wid), super::reconciler::Sync::Refused {
+        wanted: adjusted_target,
+        got: accepted
+    });
     assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
 
-    // A user drag beginning during the transaction clears it instead of accepting it blindly.
+    // A user drag beginning while a write is with the app clears it instead of waiting for
+    // the app's answer.
+    let dragged = CGRect::new(CGPoint::new(140.0, 90.0), frame.size);
+    reactor.place_window(wid, adjusted_target, true);
     reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
-        accepted,
+        dragged,
         Some(txid),
-        Requested(true),
+        Requested(false),
         Some(MouseState::Down),
     ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert!(reactor.state.windows.drag_on(wid).is_some());
 }
 
 #[test]
@@ -2162,8 +2171,8 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let moved = |wid, frame, txid, requested| {
         Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
     };
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, at(40.0));
+    reactor.place_window(wid, at(40.0), true);
+    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
     // Acknowledged, unchanged, and explicitly requested frames.
     for event in [
         moved(wid, at(40.0), Some(txid), true),
@@ -2174,10 +2183,10 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
         assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
     }
 
-    // A stale transaction while a newer target is pending, duplicate minimize
-    // edges, and events for unknown windows.
-    let current = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, current, at(40.0));
+    // A report of somewhere else while a write is with the app (a step on its way),
+    // duplicate minimize edges, and events for unknown windows.
+    reactor.place_window(wid, at(40.0), true);
+    let current = reactor.transaction_manager.get_last_sent_txid(wsid);
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
         (moved(wid, at(60.0), Some(current.next()), false), true),
@@ -3570,18 +3579,23 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         .map(|(_, frame)| frame)
         .expect("inactive-workspace window should still be laid out to a hidden position");
 
-    // Rift's write parking the window is still with the app.
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, hidden_target);
-    let known = reactor.state.windows.window(wid).unwrap().frame_monotonic;
-    let _ = reactor
-        .reconciler
-        .want(wid, hidden_target, known, super::reconciler::Want::Place);
+    // Rift parked the window and the app answered with somewhere else: a refusal, which
+    // Rift does not ask for again.
+    let parked_elsewhere = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    reactor.place_window(wid, hidden_target, true);
+    let _ = apps.requests();
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        parked_elsewhere,
+        Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
+        Requested(true),
+        None,
+    ));
 
     assert!(!reactor.update_layout_or_warn(false, true, None));
     assert!(
         apps.requests().is_empty(),
-        "a stale pending target suppresses the hide write before topology invalidation"
+        "a refused hide target suppresses the hide write before topology invalidation"
     );
 
     reactor.handle_event(space_state_event_with(
@@ -12623,6 +12637,37 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
         None,
     ));
     assert_eq!(reactor.state.windows.gripped(), None, "{wid:?} stayed pressed");
+}
+
+#[test]
+fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    // Rift has written a frame the app hasn't applied yet: its reports still carry the
+    // transaction id it last saw.
+    let last_seen_by_app = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let in_flight = CGRect::new(CGPoint::new(frame.origin.x + 10.0, frame.origin.y), frame.size);
+    reactor.place_window(wid, in_flight, true);
+    assert!(reactor.reconciler.in_flight(wid));
+
+    // The user grabs the window and moves it somewhere that is neither where it was nor
+    // where Rift's write would put it.
+    reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
+    let dragged = CGRect::new(
+        CGPoint::new(frame.origin.x + 60.0, frame.origin.y + 40.0),
+        frame.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged,
+        Some(last_seen_by_app),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+
+    assert!(
+        reactor.state.windows.drag_on(wid).is_some(),
+        "the user's move was discarded as a stale echo of Rift's in-flight write"
+    );
 }
 
 /// Delivers requests and their answers until none are left, and says how many rounds it took.
