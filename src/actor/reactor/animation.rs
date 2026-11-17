@@ -7,8 +7,8 @@ use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use super::TransactionId;
-use super::reconciler::Desired;
-use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
+use super::reconciler::{Desired, Verdict, Want};
+use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
@@ -745,7 +745,7 @@ impl Reactor {
     }
 }
 
-fn scrolling_bounds(
+pub(super) fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
 ) -> Option<super::managers::ScrollingDisplayBounds> {
@@ -1041,6 +1041,15 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
+        if !animate_camera {
+            // Nothing to animate: these are ordinary desires, reconciled like any other.
+            let frames: Vec<_> =
+                layout.iter().copied().filter(|(wid, _)| !presented.contains(wid)).collect();
+            return reactor.arrange_frames(space, &frames, false, Want::Arrange) || camera;
+        }
+        // From here on is the animated path. Its transition frames (`PresentedWindow::begin`,
+        // `FrameBatch::flush`, `skip_to_end`) are sent by the animation thread and are not
+        // reconciled; a window it takes over is forgotten by the reconciler.
         let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
         if let Some(dragged) = dragged {
@@ -1067,6 +1076,26 @@ impl AnimationManager {
                 continue;
             }
             any_frame_changed = true;
+            if reactor.state.windows.workspace_for_window(wid) != Some(active_ws) {
+                // A hidden window has nothing to animate: an ordinary desire.
+                anim.mark_handled(wid);
+                trace!(
+                    ?wid,
+                    ?current_frame,
+                    ?target_frame,
+                    "Direct positioning hidden window"
+                );
+                match reactor.reconciler.want(wid, target_frame, current_frame, Want::Place) {
+                    Verdict::Send(write) => reactor.send_arranged(write),
+                    Verdict::Queued => {
+                        if let Some(window) = reactor.state.windows.window_mut(wid) {
+                            window.frame_monotonic = target_frame;
+                        }
+                    }
+                    Verdict::Nothing => {}
+                }
+                continue;
+            }
             let txid = window_server_id
                 .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
                 .unwrap_or_default();
@@ -1076,33 +1105,15 @@ impl AnimationManager {
                 continue;
             };
 
-            let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
-
             if let Some(wsid) = window_server_id {
                 reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
             }
-            if is_active {
-                trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                let handle = app_state.handle.with_scrolling_bounds(
-                    bounds
-                        .filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
-                );
-                anim.add_window(&handle, wid, current_frame, target_frame, txid);
-            } else {
-                anim.mark_handled(wid);
-                trace!(
-                    ?wid,
-                    ?current_frame,
-                    ?target_frame,
-                    "Direct positioning hidden window"
-                );
-                if let Err(e) =
-                    app_state.handle.send(Request::set_window_frame(wid, target_frame, txid, true))
-                {
-                    debug!(?wid, ?e, "Failed to send frame request for hidden window");
-                    continue;
-                }
-            }
+            trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
+            let handle = app_state.handle.with_scrolling_bounds(
+                bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
+            );
+            anim.add_window(&handle, wid, current_frame, target_frame, txid);
+            reactor.reconciler.forget(wid);
 
             if let Some(window) = reactor.state.windows.window_mut(wid) {
                 window.frame_monotonic = target_frame;
@@ -1164,107 +1175,12 @@ impl AnimationManager {
         force_frames: bool,
     ) -> bool {
         reactor.cancel_window_presentations(desired.windows());
-        let bounds = scrolling_bounds(reactor, space);
-        let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
-        let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
-        let mut any_frame_changed = false;
-
-        for &(wid, target_frame) in desired.frames() {
-            let constrained = bounds.is_some()
-                && reactor.state.windows.workspace_for_window(wid) == active
-                && !reactor.layout_manager.layout_engine.is_window_floating(wid);
-            let window_store = &mut reactor.state.windows;
-            let Some(window) = window_store.window_mut(wid) else {
-                debug!(?wid, "Skipping layout - window no longer exists");
-                continue;
-            };
-            let current_frame = window.frame_monotonic;
-            if !force_frames && target_frame.same_as(current_frame) {
-                continue;
-            }
-            if !force_frames
-                && let Some(wsid) = window.info.sys_id
-                && reactor
-                    .transaction_manager
-                    .get_target_frame(wsid)
-                    .is_some_and(|pending| pending.same_as(target_frame))
-            {
-                trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
-                continue;
-            }
-            any_frame_changed = true;
-            trace!(
-                ?wid,
-                ?current_frame,
-                ?target_frame,
-                "Instant workspace positioning"
-            );
-
-            let size_unchanged = !force_frames && current_frame.size.same_as(target_frame.size);
-            window.frame_monotonic = target_frame;
-            let (frames, positions, first_wsid) = per_app
-                .entry((wid.pid, constrained))
-                .or_insert_with(|| (Vec::new(), Vec::new(), None));
-            *first_wsid = first_wsid.or(window.info.sys_id);
-            if position_only && size_unchanged {
-                positions.push((wid, target_frame));
-            } else {
-                frames.push((wid, target_frame));
-            }
-        }
-
-        for ((pid, constrained), (frames, positions, first_wsid)) in per_app {
-            let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
-                debug!(?pid, "Skipping layout update for app - app no longer exists");
-                continue;
-            };
-
-            let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
-
-            let txid = first_wsid
-                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                .unwrap_or_default();
-            for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
-            {
-                if let Some(window) = reactor.state.windows.window(*wid)
-                    && let Some(wsid) = window.info.sys_id
-                {
-                    reactor.transaction_manager.store_txid(wsid, txid, window.frame_monotonic);
-                }
-            }
-            let requests = [
-                (!positions.is_empty()).then(|| {
-                    Request::SetWindowFrames(
-                        positions,
-                        txid,
-                        FrameMode::Position,
-                        true,
-                        Default::default(),
-                    )
-                }),
-                (!frames.is_empty()).then(|| {
-                    Request::SetWindowFrames(
-                        frames,
-                        txid,
-                        FrameMode::Full,
-                        true,
-                        Default::default(),
-                    )
-                }),
-            ];
-            for request in requests.into_iter().flatten() {
-                if let Err(e) = handle.send(request) {
-                    debug!(
-                        ?pid,
-                        ?e,
-                        "Failed to send instant layout request - app may have quit"
-                    );
-                    break;
-                }
-            }
-        }
-
-        any_frame_changed
+        let want = if force_frames {
+            Want::Place
+        } else {
+            Want::Arrange
+        };
+        reactor.arrange_frames(space, desired.frames(), position_only, want)
     }
 }
 
@@ -1584,6 +1500,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
+    use crate::actor::app::FrameMode;
 
     fn rect(origin_x: f64, origin_y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))

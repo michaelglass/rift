@@ -458,6 +458,34 @@ pub struct TestWindowState {
     pub last_sent_txid: TransactionId,
     pub animating: bool,
     pub frame: CGRect,
+    pub sizing: TestSizing,
+}
+
+/// What a test app does with the size it is asked to take.
+#[derive(Default, PartialEq, Debug, Clone, Copy)]
+pub enum TestSizing {
+    /// Takes it.
+    #[default]
+    AsAsked,
+    /// Has a minimum size it does not report (WhatsApp).
+    AtLeast(CGSize),
+    /// Rounds down to whole cells (a terminal).
+    Cells(f64),
+}
+
+impl TestSizing {
+    fn apply(self, asked: CGSize) -> CGSize {
+        match self {
+            TestSizing::AsAsked => asked,
+            TestSizing::AtLeast(min) => {
+                CGSize::new(asked.width.max(min.width), asked.height.max(min.height))
+            }
+            TestSizing::Cells(cell) => CGSize::new(
+                (asked.width / cell).floor() * cell,
+                (asked.height / cell).floor() * cell,
+            ),
+        }
+    }
 }
 
 impl Apps {
@@ -617,9 +645,12 @@ impl Apps {
                         if mode == crate::actor::app::FrameMode::Position {
                             window.frame.origin = frame.origin;
                         } else {
-                            window.frame = frame;
+                            window.frame =
+                                CGRect::new(frame.origin, window.sizing.apply(frame.size));
                         }
-                        if !window.animating && !old_frame.same_as(window.frame) {
+                        // The app always answers a write with the frame it read back.
+                        let _ = old_frame;
+                        if !window.animating {
                             events.push(Event::WindowFrameChanged(
                                 wid,
                                 window.frame,
