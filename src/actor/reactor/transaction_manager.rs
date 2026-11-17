@@ -6,7 +6,7 @@ use crate::sys::window_server::WindowServerId;
 
 /// A per-window counter that tracks the last time the reactor sent a request to
 /// change the window frame.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
 impl TransactionId {

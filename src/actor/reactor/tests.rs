@@ -12914,6 +12914,45 @@ fn a_floating_window_dropped_stays_where_the_user_put_it() {
     );
 }
 
+#[test]
+fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
+    let (mut apps, mut reactor, left, right, _screen, _space) = two_tiled_windows();
+    // Rift places the right window on its own twice (its id counter moves ahead of the left
+    // window's), and the app is slow to answer.
+    for x in [600., 650.] {
+        let elsewhere = CGRect::new(CGPoint::new(x, 300.), CGSize::new(200., 200.));
+        reactor.place_window(right, elsewhere, true);
+        reactor.reconciler.clock.advance(std::time::Duration::from_secs(1));
+        reactor.expire_writes();
+    }
+    let slow = apps.requests();
+
+    // Another app's window arrives: both windows are written in one batch for their app.
+    reactor.handle_events(apps.make_app(3, make_windows(1)));
+    let batch = apps.requests();
+    let batched = frames_written(&batch);
+    let target = |wid| batched.iter().find(|(w, _)| *w == wid).map(|(_, frame)| *frame);
+    let (Some(_), Some(new_right)) = (target(left), target(right)) else {
+        panic!("expected one batch writing both windows: {batch:?}");
+    };
+
+    // The answer to the slow placement arrives: it says nothing about the batch's write.
+    for event in apps.simulate_events_for_requests(slow) {
+        reactor.handle_event(event);
+    }
+    assert_eq!(
+        reactor.reconciler.sync(right),
+        super::reconciler::Sync::InFlight {
+            target: new_right,
+            deadline: match reactor.reconciler.sync(right) {
+                super::reconciler::Sync::InFlight { deadline, .. } => deadline,
+                other => panic!("the old answer settled the batched write: {other:?}"),
+            },
+            queued: None,
+        }
+    );
+}
+
 /// A layout as the appliers take it.
 fn desired(layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
     super::reconciler::Desired::of(layout)
