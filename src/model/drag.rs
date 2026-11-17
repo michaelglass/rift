@@ -51,9 +51,10 @@ pub struct DropTarget {
     pub preview_area: CGRect,
 }
 
+/// Where a dragged window started and where it is now. The window itself is whichever one
+/// the drag holds, so it is not stored here.
 #[derive(Debug, Clone, Copy)]
 pub struct DragSource {
-    pub window: WindowId,
     pub origin_frame: CGRect,
     pub last_frame: CGRect,
     pub origin_space: Option<SpaceId>,
@@ -67,8 +68,8 @@ pub enum MouseButton {
     Right,
 }
 
-/// A user drag: the window it holds, where the pointer is and where a drop would land.
-/// It lives in the held window's placement in the window store.
+/// A user drag: where the pointer is and where a drop would land. It lives in the held
+/// window's placement in the window store, which is how it knows its window.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub source: DragSource,

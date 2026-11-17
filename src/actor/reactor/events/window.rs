@@ -340,17 +340,19 @@ pub fn handle_window_frame_changed(
             } else {
                 Default::default()
             };
-            state.windows.start_drag(Session::native(
-                DragSource {
-                    window: wid,
-                    origin_frame: old_frame,
-                    last_frame: new_frame,
-                    origin_space: old_space,
-                    current_space: new_space,
-                    tiled,
-                },
-                scene,
-            ));
+            state.windows.start_drag(
+                wid,
+                Session::native(
+                    DragSource {
+                        origin_frame: old_frame,
+                        last_frame: new_frame,
+                        origin_space: old_space,
+                        current_space: new_space,
+                        tiled,
+                    },
+                    scene,
+                ),
+            );
         }
         if native_resize && active_resize_space.is_some() {
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
