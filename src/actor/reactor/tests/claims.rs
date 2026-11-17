@@ -235,8 +235,8 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     reactor.start_modifier_drag(
+        wid,
         crate::actor::drag::DragSource {
-            window: wid,
             origin_frame: frame,
             last_frame: frame,
             origin_space: Some(space),

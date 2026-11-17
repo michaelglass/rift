@@ -50,8 +50,8 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn sync_motion_gate(&self, held: Option<&Session>) {
-        let active = held.is_some_and(|session| {
+    pub fn sync_motion_gate(&self, held: Option<(WindowId, &Session)>) {
+        let active = held.is_some_and(|(_, session)| {
             matches!(session.kind, DragKind::NativeMove | DragKind::NativeResize)
         });
         self.native_motion_active.store(active, Ordering::Release);
@@ -65,16 +65,16 @@ impl DragManager {
         }
     }
 
-    pub fn sync_preview(&mut self, held: Option<&Session>) {
+    pub fn sync_preview(&mut self, held: Option<(WindowId, &Session)>) {
         if cfg!(test) {
             return;
         }
-        let Some(session) = held else {
+        let Some((window, session)) = held else {
             self.release_preview();
             return;
         };
         let Some(target) = session
-            .preview_target()
+            .preview_target(window)
             .filter(|_| self.preview_enabled && !self.preview_suppressed)
         else {
             self.hide_preview();
@@ -425,7 +425,7 @@ impl LayoutManager {
             .state
             .windows
             .drag()
-            .and_then(|session| session.source.tiled.then_some(session.source.window));
+            .and_then(|(window, session)| session.source.tiled.then_some(window));
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();

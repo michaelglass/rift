@@ -939,7 +939,7 @@ impl WindowStore {
         });
         if should_remove {
             self.windows.remove(&window_id);
-            if let Some(session) = self.drag_mut() {
+            if let Some((_, session)) = self.drag_mut() {
                 session.forget_target(window_id);
             }
             if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
@@ -1440,10 +1440,7 @@ impl WindowStore {
 
         let ax_invalidated = self.windows[&from].ax_invalidated;
         // The placement, a drag's hold included, moves with the identity.
-        let mut pending = std::mem::take(&mut self.windows.get_mut(&from).unwrap().placement);
-        if let Placement::Held(session) = &mut pending {
-            session.source.window = to;
-        }
+        let pending = std::mem::take(&mut self.windows.get_mut(&from).unwrap().placement);
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -1545,7 +1542,7 @@ impl WindowStore {
             return None;
         };
         // A drag holding the window ends with it; one elsewhere can no longer drop onto it.
-        if let Some(session) = self.drag_mut() {
+        if let Some((_, session)) = self.drag_mut() {
             session.forget_target(window_id);
         }
         if let Some(claim) = record.claim {
@@ -1702,20 +1699,24 @@ impl WindowStore {
         self.windows.get_mut(&window)?.placement.held_mut()
     }
 
-    /// The user's drag, found on the window it holds (`session.source.window`).
-    pub(crate) fn drag(&self) -> Option<&Session> {
-        self.windows.values().find_map(|record| record.placement.held())
+    /// The user's drag and the window it holds: the record the session is found on.
+    pub(crate) fn drag(&self) -> Option<(WindowId, &Session)> {
+        self.windows
+            .iter()
+            .find_map(|(window, record)| Some((*window, record.placement.held()?)))
     }
 
-    pub(crate) fn drag_mut(&mut self) -> Option<&mut Session> {
-        self.windows.values_mut().find_map(|record| record.placement.held_mut())
+    pub(crate) fn drag_mut(&mut self) -> Option<(WindowId, &mut Session)> {
+        self.windows
+            .iter_mut()
+            .find_map(|(window, record)| Some((*window, record.placement.held_mut()?)))
     }
 
-    /// The user's drag takes over the window's placement, superseding any transfer in flight.
+    /// The user's drag takes over `window`'s placement, superseding any transfer in flight.
     /// There is one drag: starting one ends the last. The window is already tracked.
-    pub(crate) fn start_drag(&mut self, session: Session) {
+    pub(crate) fn start_drag(&mut self, window: WindowId, session: Session) {
         self.end_drag();
-        let record = self.windows.get_mut(&session.source.window);
+        let record = self.windows.get_mut(&window);
         debug_assert!(record.is_some(), "a drag holds a tracked window");
         if let Some(record) = record {
             record.placement = Placement::Held(Box::new(session));
@@ -1723,32 +1724,30 @@ impl WindowStore {
     }
 
     /// The drop (or a cancel) decides where the window goes from here.
-    pub(crate) fn end_drag(&mut self) -> Option<Session> {
-        let window = self.drag()?.source.window;
+    pub(crate) fn end_drag(&mut self) -> Option<(WindowId, Session)> {
+        let (window, _) = self.drag()?;
         self.take_drag(window)
     }
 
     /// Ends the drag on `window`, which holds it.
-    fn take_drag(&mut self, window: WindowId) -> Option<Session> {
+    fn take_drag(&mut self, window: WindowId) -> Option<(WindowId, Session)> {
         let session = self.windows.get_mut(&window)?.placement.take_held()?;
         self.prune_window_record(window);
-        Some(*session)
+        Some((window, *session))
     }
 
     /// Only the button that started a drag ends it.
-    pub(crate) fn finish_drag(&mut self, button: MouseButton) -> Option<Session> {
-        let session = self.drag().filter(|session| session.button == button)?;
-        let window = session.source.window;
+    pub(crate) fn finish_drag(&mut self, button: MouseButton) -> Option<(WindowId, Session)> {
+        let (window, _) = self.drag().filter(|(_, session)| session.button == button)?;
         self.take_drag(window)
     }
 
     /// A window left Rift's control: a drag holding it ends, and it is no longer a drop target.
     pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
-        let Some(session) = self.drag_mut() else { return };
-        if session.source.window == window {
-            self.take_drag(window);
-        } else {
-            session.forget_target(window);
+        match self.drag_mut() {
+            Some((held, _)) if held == window => _ = self.take_drag(window),
+            Some((_, session)) => session.forget_target(window),
+            None => {}
         }
     }
 
@@ -1899,13 +1898,8 @@ impl WindowStore {
                 debug_assert!(self.owner_claims(claim.owner).contains(&wid));
             }
         }
-        let held: Vec<_> = self
-            .windows
-            .iter()
-            .filter_map(|(wid, record)| record.placement.held().map(|session| (wid, session)))
-            .collect();
-        debug_assert!(held.len() <= 1, "one drag at a time");
-        debug_assert!(held.iter().all(|(wid, session)| **wid == session.source.window));
+        let held = self.windows.values().filter(|record| record.placement.held().is_some());
+        debug_assert!(held.count() <= 1, "one drag at a time");
         for (&owner, ids) in &self.claims {
             debug_assert!(!ids.is_empty());
             debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));

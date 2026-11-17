@@ -2192,7 +2192,6 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         let (mut reactor, wid, _, space, _, frame) = reactor_with_window_on_space1();
         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
         let source = crate::actor::drag::DragSource {
-            window: wid,
             origin_frame: frame,
             last_frame: frame,
             origin_space: Some(space),
@@ -2200,13 +2199,13 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
             tiled: true,
         };
         if modifier {
-            reactor.start_modifier_drag(source, frame.mid());
+            reactor.start_modifier_drag(wid, source, frame.mid());
             reactor.nudge_drag(30.0);
         } else {
-            reactor
-                .state
-                .windows
-                .start_drag(crate::actor::drag::Session::native(source, Default::default()));
+            reactor.state.windows.start_drag(
+                wid,
+                crate::actor::drag::Session::native(source, Default::default()),
+            );
         }
         assert!(reactor.is_in_drag());
         let added = WindowId::new(1, 2);
@@ -2271,17 +2270,19 @@ fn cross_display_drag_clears_source_floating_position() {
         CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
         initial_frame.size,
     );
-    reactor.state.windows.start_drag(crate::actor::drag::Session::native(
-        crate::actor::drag::DragSource {
-            window: wid,
-            origin_frame: initial_frame,
-            last_frame: moved_frame,
-            origin_space: None,
-            current_space: Some(space2),
-            tiled: false,
-        },
-        crate::actor::drag::DragScene::default(),
-    ));
+    reactor.state.windows.start_drag(
+        wid,
+        crate::actor::drag::Session::native(
+            crate::actor::drag::DragSource {
+                origin_frame: initial_frame,
+                last_frame: moved_frame,
+                origin_space: None,
+                current_space: Some(space2),
+                tiled: false,
+            },
+            crate::actor::drag::DragScene::default(),
+        ),
+    );
 
     let outcome = crate::actor::reactor::events::drag::handle_mouse_up(
         &mut reactor.state,
@@ -2382,7 +2383,6 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
         reactor_with_window_on_space1_two_displays();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     let source = crate::actor::drag::DragSource {
-        window: wid,
         origin_frame: frame,
         last_frame: frame,
         origin_space: Some(space),
@@ -2390,7 +2390,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
         tiled: true,
     };
 
-    reactor.start_modifier_drag(source, frame.mid());
+    reactor.start_modifier_drag(wid, source, frame.mid());
     reactor.nudge_drag(30.0);
     assert!(reactor.is_in_drag());
     let before = reactor.layout_update_count;
@@ -2401,7 +2401,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     let move_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
     assert!(move_cancel.arrange.passes > 0);
 
-    reactor.start_modifier_drag(source, frame.mid());
+    reactor.start_modifier_drag(wid, source, frame.mid());
     reactor.nudge_drag(30.0);
     let mut config = reactor.config.clone();
     config.settings.drag_drop.enabled = false;
@@ -2419,8 +2419,8 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
         reactor_with_window_on_space1_two_displays();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     reactor.start_modifier_drag(
+        wid,
         crate::actor::drag::DragSource {
-            window: wid,
             origin_frame: frame,
             last_frame: frame,
             origin_space: Some(space),
@@ -12277,7 +12277,7 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
 }
 
 fn drop_target(reactor: &Reactor) -> Option<crate::actor::drag::DropTarget> {
-    reactor.state.windows.drag().and_then(crate::actor::drag::Session::target)
+    reactor.state.windows.drag().and_then(|(_, session)| session.target())
 }
 
 #[test]
@@ -12347,8 +12347,8 @@ fn other_window_moves_during_a_modifier_drag() -> (Reactor, WindowId, WindowId, 
     let (held, other) = (WindowId::new(7, 1), WindowId::new(7, 2));
     let held_frame = reactor.state.windows.window(held).unwrap().frame_monotonic;
     reactor.start_modifier_drag(
+        held,
         crate::actor::drag::DragSource {
-            window: held,
             origin_frame: held_frame,
             last_frame: held_frame,
             origin_space: Some(space1),

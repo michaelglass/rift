@@ -39,7 +39,7 @@ pub struct MouseUpPayload {
 }
 
 pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
-    let Some(cancelled) = state.windows.end_drag() else {
+    let Some((window, cancelled)) = state.windows.end_drag() else {
         return EventOutcome::no_change();
     };
     let source = cancelled.source;
@@ -47,7 +47,7 @@ pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
         (DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
         (DragKind::ModifierMove, false) if source.last_frame != source.origin_frame => {
             EventOutcome::no_change().with_pre_layout_window_frame_write(
-                source.window,
+                window,
                 source.origin_frame,
                 true,
             )
@@ -63,10 +63,9 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some(commit) = state.windows.finish_drag(payload.button) else {
+    let Some((window, commit)) = state.windows.finish_drag(payload.button) else {
         return Ok(outcome);
     };
-    let window = commit.source.window;
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target()
