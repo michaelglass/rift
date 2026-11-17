@@ -11455,9 +11455,7 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
         assert!(
             animation_rx.commands.try_iter().all(|message| !matches!(
                 message,
-                super::animation::Message::Camera(_)
-                    | super::animation::Message::Replace(_)
-                    | super::animation::Message::SkipToEnd(_)
+                super::animation::Message::Camera(_) | super::animation::Message::Replace(_)
             )),
             "the overview must own the only visible transition"
         );

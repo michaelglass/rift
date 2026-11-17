@@ -80,7 +80,6 @@ pub struct AnimationReceiver {
 #[derive(Debug)]
 pub enum Message {
     Replace(Animation),
-    SkipToEnd(Animation),
     Stop(Vec<WindowId>),
     Camera(Box<CameraAnimation>),
     StopCamera(SpaceId),
@@ -803,7 +802,7 @@ impl AnimationManager {
                         }
                         mut message => {
                             let display = match &message {
-                                Message::Replace(a) | Message::SkipToEnd(a) => a.display,
+                                Message::Replace(a) => a.display,
                                 Message::Camera(c) => c.display,
                                 Message::Stop(..) | Message::StopCamera(..) | Message::Displays(..) => unreachable!(),
                             };
@@ -819,7 +818,7 @@ impl AnimationManager {
                             // A command queued before cancellation cannot resurrect its
                             // windows or replay an obsolete instant-layout target.
                             match &mut message {
-                                Message::Replace(a) | Message::SkipToEnd(a) => a.windows.retain(|w| !shared.cancelled.contains(&w.wid)),
+                                Message::Replace(a) => a.windows.retain(|w| !shared.cancelled.contains(&w.wid)),
                                 Message::Camera(c) => {
                                     c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
                                     c.active = !c.windows.is_empty();
@@ -972,17 +971,6 @@ impl AnimationManager {
                     self.motions.push(Motion::Transition(next));
                 }
             }
-            Message::SkipToEnd(animation) => {
-                self.motions.retain_mut(|m| {
-                    if let Motion::Transition(a) = m {
-                        a.animation.finish_all();
-                        false
-                    } else {
-                        true
-                    }
-                });
-                animation.skip_to_end();
-            }
             _ => unreachable!("runner handles display control"),
         }
     }
@@ -1024,9 +1012,13 @@ impl AnimationManager {
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
+            // Nothing to animate: these are ordinary desires, reconciled like any other.
             let windows =
                 desired.windows().into_iter().filter(|wid| !presented.contains(wid)).collect();
             reactor.cancel_window_presentations(windows);
+            let frames: Vec<_> =
+                layout.iter().copied().filter(|(wid, _)| !presented.contains(wid)).collect();
+            return reactor.arrange_frames(space, &frames, false, Want::Arrange) || camera;
         }
         let Some(active_ws) =
             reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
@@ -1041,12 +1033,6 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
-        if !animate_camera {
-            // Nothing to animate: these are ordinary desires, reconciled like any other.
-            let frames: Vec<_> =
-                layout.iter().copied().filter(|(wid, _)| !presented.contains(wid)).collect();
-            return reactor.arrange_frames(space, &frames, false, Want::Arrange) || camera;
-        }
         // From here on is the animated path. Its transition frames (`PresentedWindow::begin`,
         // `FrameBatch::flush`, `skip_to_end`) are sent by the animation thread and are not
         // reconciled; a window it takes over is forgotten by the reconciler.
@@ -1125,15 +1111,9 @@ impl AnimationManager {
 
         if !anim.is_empty() {
             if let Some(tx) = &reactor.animation_tx {
-                let message = if !animate_camera {
-                    Message::SkipToEnd(anim)
-                } else {
-                    Message::Replace(anim)
-                };
-                if let Err(err) = tx.send(message) {
+                if let Err(err) = tx.send(Message::Replace(anim)) {
                     match err.0 {
                         Message::Replace(animation) => animation.skip_to_end(),
-                        Message::SkipToEnd(animation) => animation.skip_to_end(),
                         Message::Stop(..)
                         | Message::Camera(_)
                         | Message::StopCamera(_)
@@ -1607,23 +1587,6 @@ mod tests {
                 assert!(*eui);
             }
             _ => panic!("expected SetWindowFrame, got {request:?}"),
-        }
-    }
-
-    fn assert_animation_frame(request: &Observed, wid: WindowId, frame: CGRect) {
-        match request {
-            Observed::Frame {
-                wid: req_wid,
-                frame: req_frame,
-                set_size,
-                txid,
-            } => {
-                assert_eq!(*req_wid, wid);
-                assert_eq!(*req_frame, frame);
-                assert!(*set_size, "expected a set_size frame");
-                assert_eq!(*txid, TransactionId::default());
-            }
-            _ => panic!("expected coalesced frame, got {request:?}"),
         }
     }
 
@@ -2599,36 +2562,21 @@ mod tests {
     }
 
     #[test]
-    fn skip_to_end_finishes_active_animation_and_applies_new_layout() {
+    fn skip_to_end_applies_every_target_at_once() {
+        // The fallback when an animation cannot be handed to the animation thread.
         let (tx, mut rx) = crate::actor::channel();
         let handle = AppThreadHandle::new_for_test(tx);
         let wid = WindowId::new(1, 1);
-        let first = animation(
-            &handle,
-            wid,
-            rect(0.0, 0.0, 10.0, 10.0),
-            rect(50.0, 60.0, 10.0, 10.0),
-        );
-        let second = animation(
+        animation(
             &handle,
             wid,
             rect(50.0, 60.0, 10.0, 10.0),
             rect(80.0, 90.0, 10.0, 10.0),
-        );
-
-        let mut manager = AnimationManager::new();
-        manager.handle_message(Message::Replace(first));
-        manager.handle_message(Message::SkipToEnd(second));
+        )
+        .skip_to_end();
 
         let requests = collect_requests(&mut rx);
-        assert_eq!(requests.len(), 4);
-        assert!(
-            matches!(requests[0], Observed::Request(Request::BeginWindowAnimation(req_wid, _)) if req_wid == wid)
-        );
-        assert_animation_frame(&requests[1], wid, rect(50.0, 60.0, 10.0, 10.0));
-        assert!(
-            matches!(requests[2], Observed::Request(Request::EndWindowAnimation(req_wid, _)) if req_wid == wid)
-        );
-        assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
+        assert_eq!(requests.len(), 1);
+        assert_set_window_frame(&requests[0], wid, rect(80.0, 90.0, 10.0, 10.0));
     }
 }
