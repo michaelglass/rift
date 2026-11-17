@@ -3423,7 +3423,7 @@ fn non_workspace_instant_layout_keeps_full_frame_batch() {
     let _ = apps.requests();
 
     let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
-    let layout = desired(&reactor, &[(wid, target)]);
+    let layout = desired(&[(wid, target)]);
     assert!(super::animation::AnimationManager::instant_layout(
         &mut reactor,
         space,
@@ -3459,7 +3459,7 @@ fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
     let _ = apps.requests();
 
     let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
-    let layout = desired(&reactor, &[(wid, target)]);
+    let layout = desired(&[(wid, target)]);
     assert!(super::animation::AnimationManager::workspace_switch_layout(
         &mut reactor,
         space,
@@ -5359,7 +5359,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     let right = WindowId::new(1, 2);
     let frame = |x| CGRect::new(CGPoint::new(x, 38.), CGSize::new(1284., 944.));
 
-    let layout = desired(&reactor, &[(left, frame(228.)), (right, frame(1284.))]);
+    let layout = desired(&[(left, frame(228.)), (right, frame(1284.))]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
@@ -5387,7 +5387,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
             .frame_monotonic
             .same_as(frame(228.))
     );
-    let layout = desired(&reactor, &[(left, frame(-1056.)), (right, frame(228.))]);
+    let layout = desired(&[(left, frame(-1056.)), (right, frame(228.))]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
@@ -5444,7 +5444,7 @@ fn animated_layout_handles_windows_without_server_ids() {
     apps.requests();
 
     let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let layout = desired(&reactor, &[(WindowId::new(1, 1), target)]);
+    let layout = desired(&[(WindowId::new(1, 1), target)]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
@@ -12728,7 +12728,193 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
     }
 }
 
-/// A layout as the appliers take it: without the dragged window.
-fn desired(reactor: &Reactor, layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
-    super::reconciler::Desired::of(layout, &reactor.state.windows)
+/// The frames a batch of requests writes (a modifier drag's interactive frames are not
+/// `SetWindowFrames`).
+fn frames_written(requests: &[Request]) -> Vec<(WindowId, CGRect)> {
+    requests
+        .iter()
+        .flat_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => frames.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Two tiled windows of one app on a 1000x800 display, settled. Returns the left one first.
+fn two_tiled_windows() -> (Apps, Reactor, WindowId, WindowId, CGRect, SpaceId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    apps.simulate_until_quiet(&mut reactor);
+    let (a, b) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    let x = |wid| reactor.state.windows.window(wid).unwrap().frame_monotonic.origin.x;
+    let (left, right) = if x(a) < x(b) { (a, b) } else { (b, a) };
+    (apps, reactor, left, right, screen, space)
+}
+
+fn slot(reactor: &Reactor, wid: WindowId) -> CGRect {
+    reactor.state.windows.window(wid).unwrap().frame_monotonic
+}
+
+/// The user presses on `wid` and moves it by (dx, dy): a native title-bar drag.
+fn drag_by(apps: &Apps, reactor: &mut Reactor, wid: WindowId, dx: f64, dy: f64) -> CGRect {
+    let start = apps.windows[&wid].frame;
+    let moved = CGRect::new(
+        CGPoint::new(start.origin.x + dx, start.origin.y + dy),
+        start.size,
+    );
+    if !reactor.state.windows.is_gripped(wid) {
+        reactor.handle_event(Event::PointerPressed {
+            point: CGPoint::new(start.origin.x + 20., start.origin.y + 10.),
+        });
+    }
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        moved,
+        Some(apps.windows[&wid].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    moved
+}
+
+#[test]
+fn a_layout_pass_during_a_drag_writes_no_window_until_the_release() {
+    let (mut apps, mut reactor, dragged, other, screen, space) = two_tiled_windows();
+    // Before the drag: another app's window arrives, and the writes that makes room for it
+    // are with the apps, unanswered.
+    reactor.handle_events(apps.make_app(3, make_windows(1)));
+    let unanswered = apps.requests();
+    assert!(!frames_written(&unanswered).is_empty());
+    let moved = drag_by(&apps, &mut reactor, dragged, 60., 40.);
+    apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    assert!(reactor.user_is_dragging());
+
+    // Mid-drag: another app opens a window, the first app's inventory is refreshed, the
+    // display set changes (which forces every frame), the earlier writes are answered (what
+    // waited behind them would go out now), and a window goes away (which rearranges the
+    // others even mid-drag).
+    let mut requests = apps.requests();
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    requests.extend(apps.requests());
+    let inventory = [dragged, other]
+        .map(|wid| {
+            let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+            info.frame = apps.windows[&wid].frame;
+            (wid, info)
+        })
+        .to_vec();
+    reactor.discover_test_windows(1, inventory, vec![dragged, other]);
+    requests.extend(apps.requests());
+    reactor.handle_event(space_state_event_with(
+        vec![screen],
+        vec![Some(space)],
+        |state| {
+            state.display_set_changed = true;
+        },
+    ));
+    requests.extend(apps.requests());
+    for event in apps.simulate_events_for_requests(unanswered) {
+        reactor.handle_event(event);
+    }
+    requests.extend(apps.requests());
+    apps.windows.remove(&WindowId::new(3, 1));
+    reactor.handle_event(Event::WindowDestroyed(WindowId::new(3, 1)));
+    requests.extend(apps.requests());
+    assert!(reactor.user_is_dragging());
+    assert_eq!(
+        frames_written(&requests),
+        [],
+        "a drag does not change the layout: nothing is written until the drop"
+    );
+
+    // The drop is the layout change: now the windows are arranged, the dragged one included.
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    let written = frames_written(&apps.requests());
+    assert!(
+        written.iter().any(|(wid, _)| *wid == dragged),
+        "the drop arranges the dragged window: {written:?}"
+    );
+}
+
+#[test]
+fn a_drop_on_no_target_puts_the_window_back_in_its_slot_with_one_write() {
+    let (mut apps, mut reactor, dragged, other, _screen, _space) = two_tiled_windows();
+    let home = slot(&reactor, dragged);
+    let moved = drag_by(&apps, &mut reactor, dragged, 0., 40.);
+    apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    assert!(reactor.user_is_dragging());
+    assert!(drop_target(&reactor).is_none());
+    assert!(slot(&reactor, other).same_as(apps.windows[&other].frame));
+
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    let written = frames_written(&apps.requests());
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0].0, dragged);
+    assert!(written[0].1.same_as(home), "{written:?}, slot {home:?}");
+}
+
+#[test]
+fn a_drop_on_a_swap_target_writes_exactly_the_swapped_windows() {
+    let (mut apps, mut reactor, dragged, other, _screen, _space) = two_tiled_windows();
+    let (home, theirs) = (slot(&reactor, dragged), slot(&reactor, other));
+    // Drag the left window over the right one, in two steps so the target latches.
+    for _ in 0..2 {
+        let dx = (theirs.mid().x - apps.windows[&dragged].frame.mid().x) / 2.;
+        let moved = drag_by(&apps, &mut reactor, dragged, dx, 0.);
+        apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    }
+    // The pointer is over the other window's tile.
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: theirs.mid(),
+    }));
+    assert!(reactor.user_is_dragging());
+    assert!(drop_target(&reactor).is_some(), "no swap target latched");
+    assert_eq!(frames_written(&apps.requests()), []);
+
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    let mut written = frames_written(&apps.requests());
+    written.sort_by_key(|(wid, _)| *wid);
+    let windows: Vec<_> = written.iter().map(|(wid, _)| *wid).collect();
+    let mut expected = vec![dragged, other];
+    expected.sort();
+    assert_eq!(windows, expected, "{written:?}");
+    let frame_of = |wid| written.iter().find(|(w, _)| *w == wid).unwrap().1;
+    assert!(frame_of(dragged).same_as(theirs), "{written:?}");
+    assert!(frame_of(other).same_as(home), "{written:?}");
+}
+
+#[test]
+fn a_floating_window_dropped_stays_where_the_user_put_it() {
+    let (mut apps, mut reactor, floating, _tiled, _screen, space) = two_tiled_windows();
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, floating));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(floating));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let mut moved = apps.windows[&floating].frame;
+    for _ in 0..2 {
+        moved = drag_by(&apps, &mut reactor, floating, 30., 50.);
+        apps.windows.get_mut(&floating).unwrap().frame = moved;
+    }
+    assert!(reactor.user_is_dragging());
+    assert_eq!(
+        frames_written(&apps.requests()),
+        [],
+        "nothing is written mid-drag"
+    );
+
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(
+        apps.windows[&floating].frame.same_as(moved),
+        "the floating window was moved from where the user dropped it: {:?} vs {moved:?}",
+        apps.windows[&floating].frame
+    );
+}
+
+/// A layout as the appliers take it.
+fn desired(layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
+    super::reconciler::Desired::of(layout)
 }

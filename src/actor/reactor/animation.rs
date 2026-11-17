@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use super::TransactionId;
-use super::reconciler::{Desired, Verdict, Want};
+use super::reconciler::{Desired, Owner, Verdict, Want};
 use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
@@ -1057,7 +1057,8 @@ impl AnimationManager {
         }
 
         for &(wid, target_frame) in layout {
-            if presented.contains(&wid) {
+            // The window the user holds keeps its slot, but its frame is theirs until the drop.
+            if presented.contains(&wid) || reactor.owner(wid) == Owner::User {
                 anim.mark_handled(wid);
                 continue;
             }
@@ -1085,7 +1086,9 @@ impl AnimationManager {
                     ?target_frame,
                     "Direct positioning hidden window"
                 );
-                match reactor.reconciler.want(wid, target_frame, current_frame, Want::Place) {
+                let owner = reactor.owner(wid);
+                match reactor.reconciler.want(wid, target_frame, current_frame, Want::Place, owner)
+                {
                     Verdict::Send(write) => reactor.send_arranged(write),
                     Verdict::Queued => {
                         if let Some(window) = reactor.state.windows.window_mut(wid) {

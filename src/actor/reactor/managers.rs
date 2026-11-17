@@ -425,7 +425,7 @@ impl LayoutManager {
 
         let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
-            let desired = Desired::of(&layout, &reactor.state.windows);
+            let desired = Desired::of(&layout);
             // Start native workspace moves before collecting stack tabs and building
             // IPC events. App actors can perform AX work while we publish the UI.
             let switch_dispatched = is_workspace_switch && !instant && !force_frames;

@@ -4295,7 +4295,8 @@ impl Reactor {
         let gripped = self.state.windows.is_gripped(wid);
         let report = match source {
             FrameSource::Reply => {
-                let (answer, queued) = self.reconciler.answer(wid, new_frame);
+                let owner = self.owner(wid);
+                let (answer, queued) = self.reconciler.answer(wid, new_frame, owner);
                 // The desire that waited behind the answered write goes out now.
                 if let Some(write) = queued {
                     self.send_arranged(write);

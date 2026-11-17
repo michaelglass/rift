@@ -15,7 +15,7 @@ use super::{Reactor, TransactionId};
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::actor::drag::Session;
 use crate::common::collections::HashMap;
-use crate::model::window_store::WindowStore;
+use crate::model::window_store::{Pointer, WindowStore};
 use crate::sys::geometry::{IsWithin, Round, SameAs};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -27,21 +27,15 @@ const ACK_TOLERANCE: f64 = 1.5;
 /// How long an app has to answer a write before Rift stops waiting for it.
 const WRITE_DEADLINE: Duration = Duration::from_millis(300);
 
-/// Where Rift wants the windows of one space: layout as data. The window the user is dragging
-/// is theirs to place until the drop, so it has no desired frame and is not in here.
+/// Where Rift wants the windows of one space: layout as data. A drag does not change the
+/// layout, so the window the user holds is in here too, at its slot; the reconciler is what
+/// leaves it alone until they let go ([`Owner::User`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Desired(Vec<(WindowId, CGRect)>);
 
 impl Desired {
-    pub(crate) fn of(layout: &[(WindowId, CGRect)], windows: &WindowStore) -> Self {
-        let dragged = windows.drag().map(|(window, _)| window);
-        Self(
-            layout
-                .iter()
-                .filter(|(wid, _)| Some(*wid) != dragged)
-                .map(|&(wid, frame)| (wid, frame.round()))
-                .collect(),
-        )
+    pub(crate) fn of(layout: &[(WindowId, CGRect)]) -> Self {
+        Self(layout.iter().map(|&(wid, frame)| (wid, frame.round())).collect())
     }
 
     pub(crate) fn frames(&self) -> &[(WindowId, CGRect)] { &self.0 }
@@ -122,6 +116,18 @@ pub(crate) enum Want {
     Place,
 }
 
+/// Whose a window's frame is right now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Owner {
+    /// Rift's: layout and placements decide where it goes.
+    Rift,
+    /// The user's: their hand is on it (pressed or dragging), or they are dragging another
+    /// window (a drag does not change the layout; only the drop does). Rift writes nothing to
+    /// it but a modifier drag's interactive frame. A desire for it is discarded, not queued:
+    /// the release re-derives its frame from what is true then.
+    User,
+}
+
 /// What the reconciler made of a desire.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Verdict {
@@ -199,10 +205,27 @@ impl Reconciler {
         desired: CGRect,
         known: CGRect,
         want: Want,
+        owner: Owner,
     ) -> Verdict {
         // A write nobody answered in time no longer holds newer desires back. Whatever was
         // queued behind it is older than `desired`.
-        _ = self.expire_one(window, known);
+        _ = self.expire_one(window, known, owner);
+        match owner {
+            Owner::Rift => {}
+            Owner::User => {
+                debug!(?window, frame = ?desired, "reconcile: discarded (user's)");
+                // A placement's caller has already moved the model to `desired`, so what the
+                // model believes is no longer what the app was told. An answer still due
+                // brings the truth; otherwise the next desire is sent regardless.
+                match (want, self.sync(window)) {
+                    (Want::Arrange, _) | (Want::Place, Sync::InFlight { .. }) => {}
+                    (Want::Place, Sync::Settled | Sync::Refused { .. } | Sync::Adrift) => {
+                        self.set(window, Sync::Adrift)
+                    }
+                }
+                return Verdict::Nothing;
+            }
+        }
         match (self.sync(window), want) {
             (Sync::InFlight { target, deadline, queued: _ }, Want::Arrange | Want::Place) => {
                 if desired.same_as(target) {
@@ -240,9 +263,29 @@ impl Reconciler {
         Some(Write { window, frame })
     }
 
+    /// What waited behind a write that has been answered or given up on: sent if the window is
+    /// Rift's. If it is the user's now, the desire is discarded; the model already takes the
+    /// window to be at that frame, so it is `Adrift` and the next desire is sent regardless.
+    fn release(&mut self, window: WindowId, queued: Option<CGRect>, owner: Owner) -> Option<Write> {
+        match (owner, queued) {
+            (Owner::Rift, Some(next)) => Some(self.send(window, next, None)),
+            (Owner::Rift | Owner::User, None) => None,
+            (Owner::User, Some(frame)) => {
+                debug!(?window, ?frame, "reconcile: discarded (user's)");
+                self.set(window, Sync::Adrift);
+                None
+            }
+        }
+    }
+
     /// The app answered its latest write to `window` with `frame`. Returns the queued write,
-    /// if one was waiting behind it.
-    pub(crate) fn answer(&mut self, window: WindowId, frame: CGRect) -> (Answer, Option<Write>) {
+    /// if one was waiting behind it and the window is still Rift's.
+    pub(crate) fn answer(
+        &mut self,
+        window: WindowId,
+        frame: CGRect,
+        owner: Owner,
+    ) -> (Answer, Option<Write>) {
         match self.sync(window) {
             Sync::Settled | Sync::Adrift => (Answer::Unasked, None),
             Sync::InFlight { target, deadline: _, queued } => {
@@ -255,7 +298,7 @@ impl Reconciler {
                     self.set(window, Sync::Refused { wanted: target, got: frame });
                     Answer::Refused { wanted: target, got: frame }
                 };
-                (answer, queued.map(|next| self.send(window, next, None)))
+                (answer, self.release(window, queued, owner))
             }
             Sync::Refused { wanted, got: _ } => {
                 // The answer Rift stopped waiting for, or a second look at a refusal.
@@ -294,7 +337,7 @@ impl Reconciler {
         }
     }
 
-    fn expire_one(&mut self, window: WindowId, known: CGRect) -> Option<Write> {
+    fn expire_one(&mut self, window: WindowId, known: CGRect, owner: Owner) -> Option<Write> {
         let Sync::InFlight { target, deadline, queued } = self.sync(window) else {
             return None;
         };
@@ -303,18 +346,21 @@ impl Reconciler {
         }
         debug!(?window, wanted = ?target, "reconcile: timeout");
         self.set(window, Sync::Refused { wanted: target, got: known });
-        queued.map(|next| self.send(window, next, None))
+        self.release(window, queued, owner)
     }
 
     /// Stops waiting for every write whose deadline has passed, and forgets windows that are
-    /// gone. `known` is where the model last saw a window. Returns the writes that were queued
-    /// behind the late ones.
-    pub(crate) fn expire(&mut self, known: impl Fn(WindowId) -> Option<CGRect>) -> Vec<Write> {
+    /// gone. `known` is where the model last saw a window, and whose it is. Returns the writes
+    /// that were queued behind the late ones.
+    pub(crate) fn expire(
+        &mut self,
+        known: impl Fn(WindowId) -> Option<(CGRect, Owner)>,
+    ) -> Vec<Write> {
         let unsettled: Vec<WindowId> = self.unsettled.keys().copied().collect();
         unsettled
             .into_iter()
             .filter_map(|window| match known(window) {
-                Some(known) => self.expire_one(window, known),
+                Some((known, owner)) => self.expire_one(window, known, owner),
                 None => {
                     self.forget(window);
                     None
@@ -348,8 +394,19 @@ fn frames_of(writes: Vec<Write>) -> Vec<(WindowId, CGRect)> {
     writes.into_iter().map(|write| (write.window, write.frame)).collect()
 }
 
+/// Whose `window`'s frame is: the user's while their hand is on it, and every window's while
+/// they drag one.
+fn owner(windows: &WindowStore, window: WindowId) -> Owner {
+    match (windows.pointer(), windows.is_gripped(window)) {
+        (Pointer::Dragging, _) | (Pointer::Pressing | Pointer::Idle, true) => Owner::User,
+        (Pointer::Pressing | Pointer::Idle, false) => Owner::Rift,
+    }
+}
+
 /// The senders. Each takes a [`Write`], so each sends only what the reconciler decided.
 impl Reactor {
+    pub(super) fn owner(&self, window: WindowId) -> Owner { owner(&self.state.windows, window) }
+
     /// Where the model last saw `window`.
     fn known_frame(&self, window: WindowId) -> Option<CGRect> {
         self.state.windows.window(window).map(|state| state.frame_monotonic)
@@ -388,7 +445,8 @@ impl Reactor {
             return;
         };
         let handle = app.handle.clone();
-        match self.reconciler.want(window, frame, known, Want::Place) {
+        let owner = self.owner(window);
+        match self.reconciler.want(window, frame, known, Want::Place, owner) {
             Verdict::Send(write) => self.send_one(write, handle, eui),
             Verdict::Queued | Verdict::Nothing => {}
         }
@@ -434,9 +492,9 @@ impl Reactor {
     /// behind them.
     pub(super) fn expire_writes(&mut self) {
         let windows = &self.state.windows;
-        let queued = self
-            .reconciler
-            .expire(|window| windows.window(window).map(|state| state.frame_monotonic));
+        let queued = self.reconciler.expire(|window| {
+            Some((windows.window(window)?.frame_monotonic, owner(windows, window)))
+        });
         for write in queued {
             self.send_arranged(write);
         }
@@ -457,6 +515,7 @@ impl Reactor {
         let mut any_desire_new = false;
 
         for &(wid, target) in frames {
+            let owner = self.owner(wid);
             let constrained = bounds.is_some()
                 && self.state.windows.workspace_for_window(wid) == active
                 && !self.layout_manager.layout_engine.is_window_floating(wid);
@@ -465,7 +524,7 @@ impl Reactor {
                 continue;
             };
             let current = window.frame_monotonic;
-            match self.reconciler.want(wid, target, current, want) {
+            match self.reconciler.want(wid, target, current, want, owner) {
                 Verdict::Nothing => {}
                 Verdict::Queued => {
                     any_desire_new = true;
@@ -549,12 +608,12 @@ mod tests {
     fn a_window_already_where_it_should_be_is_not_written() {
         let mut reconciler = Reconciler::default();
         assert_eq!(
-            reconciler.want(window(), at(10.), at(10.), Want::Arrange),
+            reconciler.want(window(), at(10.), at(10.), Want::Arrange, Owner::Rift),
             Verdict::Nothing
         );
         // A placement is sent whatever the model believes.
         assert_eq!(
-            sent(reconciler.want(window(), at(10.), at(10.), Want::Place)),
+            sent(reconciler.want(window(), at(10.), at(10.), Want::Place, Owner::Rift)),
             at(10.)
         );
     }
@@ -563,64 +622,73 @@ mod tests {
     fn one_write_is_in_flight_and_only_the_latest_desire_waits_behind_it() {
         let mut reconciler = Reconciler::default();
         assert_eq!(
-            sent(reconciler.want(window(), at(10.), at(0.), Want::Arrange)),
+            sent(reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift)),
             at(10.)
         );
         // The same desire again: nothing. Newer ones: queued, the latest replacing the last.
         assert_eq!(
-            reconciler.want(window(), at(10.), at(10.), Want::Arrange),
+            reconciler.want(window(), at(10.), at(10.), Want::Arrange, Owner::Rift),
             Verdict::Nothing
         );
         assert_eq!(
-            reconciler.want(window(), at(20.), at(10.), Want::Arrange),
+            reconciler.want(window(), at(20.), at(10.), Want::Arrange, Owner::Rift),
             Verdict::Queued
         );
         assert_eq!(
-            reconciler.want(window(), at(30.), at(20.), Want::Place),
+            reconciler.want(window(), at(30.), at(20.), Want::Place, Owner::Rift),
             Verdict::Queued
         );
 
-        let (answer, next) = reconciler.answer(window(), at(10.5));
+        let (answer, next) = reconciler.answer(window(), at(10.5), Owner::Rift);
         assert_eq!(answer, Answer::Acked);
         assert_eq!(next.map(|write| write.frame), Some(at(30.)));
         assert!(reconciler.in_flight(window()));
 
-        assert_eq!(reconciler.answer(window(), at(30.)), (Answer::Acked, None));
+        assert_eq!(
+            reconciler.answer(window(), at(30.), Owner::Rift),
+            (Answer::Acked, None)
+        );
         assert_eq!(reconciler.sync(window()), Sync::Settled);
     }
 
     #[test]
     fn a_desire_withdrawn_while_queued_is_not_sent() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
         assert_eq!(
-            reconciler.want(window(), at(20.), at(10.), Want::Arrange),
+            reconciler.want(window(), at(20.), at(10.), Want::Arrange, Owner::Rift),
             Verdict::Queued
         );
         // Layout changes its mind back to what is in flight.
         assert_eq!(
-            reconciler.want(window(), at(10.), at(20.), Want::Arrange),
+            reconciler.want(window(), at(10.), at(20.), Want::Arrange, Owner::Rift),
             Verdict::Nothing
         );
-        assert_eq!(reconciler.answer(window(), at(10.)), (Answer::Acked, None));
+        assert_eq!(
+            reconciler.answer(window(), at(10.), Owner::Rift),
+            (Answer::Acked, None)
+        );
     }
 
     #[test]
     fn an_adjusted_answer_is_a_refusal_that_is_not_asked_again() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
         let refused = Answer::Refused { wanted: at(10.), got: at(14.) };
-        assert_eq!(reconciler.answer(window(), at(14.)), (refused, None));
+        assert_eq!(
+            reconciler.answer(window(), at(14.), Owner::Rift),
+            (refused, None)
+        );
         // Layout keeps wanting the same frame; the window stays where the app put it.
         for _ in 0..3 {
             assert_eq!(
-                reconciler.want(window(), at(10.), at(14.), Want::Arrange),
+                reconciler.want(window(), at(10.), at(14.), Want::Arrange, Owner::Rift),
                 Verdict::Nothing
             );
         }
         // A different desire is a new question.
         assert_eq!(
-            sent(reconciler.want(window(), at(50.), at(14.), Want::Arrange)),
+            sent(reconciler.want(window(), at(50.), at(14.), Want::Arrange, Owner::Rift)),
             at(50.)
         );
     }
@@ -628,15 +696,15 @@ mod tests {
     #[test]
     fn a_refused_window_seen_somewhere_else_is_asked_again() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
-        _ = reconciler.answer(window(), at(14.));
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
+        _ = reconciler.answer(window(), at(14.), Owner::Rift);
         // Its app moved it: no longer the frame that was refused.
         assert_eq!(
             reconciler.observe(window(), at(90.), at(14.), false),
             Observation::Foreign { frame: at(90.) }
         );
         assert_eq!(
-            sent(reconciler.want(window(), at(10.), at(90.), Want::Arrange)),
+            sent(reconciler.want(window(), at(10.), at(90.), Want::Arrange, Owner::Rift)),
             at(10.)
         );
     }
@@ -644,15 +712,15 @@ mod tests {
     #[test]
     fn an_unanswered_write_times_out_into_a_refusal_and_releases_what_waited() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
-        _ = reconciler.want(window(), at(20.), at(10.), Want::Arrange);
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
+        _ = reconciler.want(window(), at(20.), at(10.), Want::Arrange, Owner::Rift);
         assert!(
-            reconciler.expire(|_| Some(at(0.))).is_empty(),
+            reconciler.expire(|_| Some((at(0.), Owner::Rift))).is_empty(),
             "the deadline has not passed"
         );
 
         reconciler.clock.advance(WRITE_DEADLINE);
-        let released = reconciler.expire(|_| Some(at(0.)));
+        let released = reconciler.expire(|_| Some((at(0.), Owner::Rift)));
         assert_eq!(released.iter().map(|write| write.frame).collect::<Vec<_>>(), [
             at(20.)
         ]);
@@ -660,19 +728,22 @@ mod tests {
         // Without anything queued, the late write is a refusal, and its answer, when it does
         // come, settles it.
         reconciler.clock.advance(WRITE_DEADLINE);
-        assert!(reconciler.expire(|_| Some(at(0.))).is_empty());
+        assert!(reconciler.expire(|_| Some((at(0.), Owner::Rift))).is_empty());
         assert_eq!(reconciler.sync(window()), Sync::Refused {
             wanted: at(20.),
             got: at(0.)
         });
-        assert_eq!(reconciler.answer(window(), at(20.)), (Answer::Unasked, None));
+        assert_eq!(
+            reconciler.answer(window(), at(20.), Owner::Rift),
+            (Answer::Unasked, None)
+        );
         assert_eq!(reconciler.sync(window()), Sync::Settled);
     }
 
     #[test]
     fn a_report_during_a_write_is_the_users_only_if_their_hand_is_on_the_window() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
         // Nobody holds it: a step on the way.
         assert_eq!(
             reconciler.observe(window(), at(5.), at(10.), false),
@@ -686,10 +757,13 @@ mod tests {
         );
         assert_eq!(reconciler.sync(window()), Sync::Adrift);
         // The answer to the abandoned write is nobody's.
-        assert_eq!(reconciler.answer(window(), at(10.)), (Answer::Unasked, None));
+        assert_eq!(
+            reconciler.answer(window(), at(10.), Owner::Rift),
+            (Answer::Unasked, None)
+        );
         // After the drop the window is written even where the model believes it already is.
         assert_eq!(
-            sent(reconciler.want(window(), at(70.), at(70.), Want::Arrange)),
+            sent(reconciler.want(window(), at(70.), at(70.), Want::Arrange, Owner::Rift)),
             at(70.)
         );
     }
@@ -697,7 +771,7 @@ mod tests {
     #[test]
     fn a_report_of_the_target_is_no_news_and_the_answer_still_decides() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
         // Even with the user's hand on it: by geometry this is the write landing.
         for held in [false, true] {
             assert_eq!(
@@ -708,13 +782,16 @@ mod tests {
         }
         // The app then answers with something else (it adjusted the size when it applied it).
         let refused = Answer::Refused { wanted: at(10.), got: at(13.) };
-        assert_eq!(reconciler.answer(window(), at(13.)), (refused, None));
+        assert_eq!(
+            reconciler.answer(window(), at(13.), Owner::Rift),
+            (refused, None)
+        );
     }
 
     #[test]
     fn forgetting_a_window_drops_what_was_outstanding() {
         let mut reconciler = Reconciler::default();
-        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
         // The window is gone from the model.
         assert!(reconciler.expire(|_| None).is_empty());
         assert_eq!(reconciler.sync(window()), Sync::Settled);
