@@ -1027,7 +1027,10 @@ impl Reactor {
         }
     }
 
-    fn is_in_drag(&self) -> bool { self.state.windows.drag().is_some() }
+    /// Policies that hold while the user drags any window: deferring arrangement and
+    /// retirement, ignoring display moves, not warping focus, ending on button release.
+    /// A question about one window asks `drag_on(window)` instead.
+    fn user_is_dragging(&self) -> bool { self.state.windows.drag().is_some() }
 
     fn is_mission_control_active(&self) -> bool {
         matches!(
@@ -1944,7 +1947,7 @@ impl Reactor {
                     let mut outcome = EventOutcome::no_change();
                     outcome.dispatch_mouse_up = effective_mouse_state
                         == Some(crate::sys::event::MouseState::Up)
-                        && self.is_in_drag();
+                        && self.user_is_dragging();
                     outcome.focused_window = raised_window;
                     return Ok(outcome);
                 }
@@ -2029,7 +2032,7 @@ impl Reactor {
                 // early from the reducer. Mouse release still has to terminate
                 // an existing drag session in those cases.
                 if effective_mouse_state == Some(crate::sys::event::MouseState::Up)
-                    && self.is_in_drag()
+                    && self.user_is_dragging()
                 {
                     outcome.dispatch_mouse_up = true;
                 }
@@ -2731,7 +2734,7 @@ impl Reactor {
                 selector,
                 window_id,
             })) => {
-                if self.is_in_drag() {
+                if self.user_is_dragging() {
                     warn!("Ignoring move-window-to-display while a drag is active");
                     return Ok(EventOutcome::no_change());
                 }
@@ -2814,7 +2817,7 @@ impl Reactor {
                 selector,
                 wrap_around,
             })) => {
-                if self.is_in_drag() {
+                if self.user_is_dragging() {
                     warn!("Ignoring move-workspace-to-display while a drag is active");
                     return Ok(EventOutcome::no_change());
                 }
@@ -3120,7 +3123,7 @@ impl Reactor {
 
         let mut layout_changed = false;
         if outcome.arrange.passes > 0
-            && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
+            && (!self.user_is_dragging() || outcome.arrange.window_was_destroyed)
         {
             // Reducers have finished mutating the model; arrange each affected space once.
             layout_changed = if outcome.arrange.instant || outcome.arrange.force_frames {
@@ -4514,7 +4517,7 @@ impl Reactor {
             self.refocus_manager.stale_cleanup_state,
             StaleCleanupState::Suppressed
         ) || self.is_mission_control_active()
-            || self.is_in_drag()
+            || self.user_is_dragging()
         {
             Vec::new()
         } else {
@@ -5203,7 +5206,7 @@ impl Reactor {
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, workspace_switch_space);
         if geometry_changed
-            && (!self.is_in_drag() || matches!(event_clone, LayoutEvent::WindowRemoved(_)))
+            && (!self.user_is_dragging() || matches!(event_clone, LayoutEvent::WindowRemoved(_)))
         {
             self.update_layout_or_warn(
                 false,
@@ -5667,7 +5670,7 @@ impl Reactor {
                 self.space_state.menu_bar_space = Some(space);
             }
         }
-        if self.is_in_drag() {
+        if self.user_is_dragging() {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
         }
@@ -5778,7 +5781,7 @@ impl Reactor {
                 {
                     focus_window = Some(wid);
                     false
-                } else if !self.is_in_drag() {
+                } else if !self.user_is_dragging() {
                     self.try_focus_or_warp_without_raise(Some(space), &mut focus_window)
                 } else {
                     false
@@ -5798,7 +5801,7 @@ impl Reactor {
             if self.state.windows.is_temporarily_unavailable(wid) {
                 focus_window = None;
                 if let Some(space) = workspace_switch_space
-                    && !self.is_in_drag()
+                    && !self.user_is_dragging()
                 {
                     let _ = self.try_focus_or_warp_without_raise(Some(space), &mut focus_window);
                 }
