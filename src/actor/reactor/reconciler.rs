@@ -299,6 +299,11 @@ fn frames_of(writes: Vec<Write>) -> Vec<(WindowId, CGRect)> {
 
 /// The senders. Each takes a [`Write`], so each sends only what the reconciler decided.
 impl Reactor {
+    /// Where the model last saw `window`.
+    fn known_frame(&self, window: WindowId) -> Option<CGRect> {
+        self.state.windows.window(window).map(|state| state.frame_monotonic)
+    }
+
     /// The transaction id the app protocol wants on a write, recorded with its target.
     fn stamp(&self, window: WindowId, frame: CGRect) -> TransactionId {
         let server_id = self.state.windows.window(window).and_then(|state| state.info.sys_id);
@@ -321,6 +326,20 @@ impl Reactor {
         )) {
             warn!(window = ?write.window, %error, "failed to write window frame");
             self.reconciler.forget(write.window);
+        }
+    }
+
+    /// Rift places `window` at `frame` (a transfer, a cancelled drag's way back, an app rule):
+    /// sent whatever the model believes, unless a write is with the app, which it then follows.
+    pub(super) fn place_window(&mut self, window: WindowId, frame: CGRect, eui: bool) {
+        let Some(known) = self.known_frame(window) else { return };
+        let Some(app) = self.app_manager.apps.get(&window.pid) else {
+            return;
+        };
+        let handle = app.handle.clone();
+        match self.reconciler.want(window, frame, known, Want::Place) {
+            Verdict::Send(write) => self.send_one(write, handle, eui),
+            Verdict::Queued | Verdict::Nothing => {}
         }
     }
 

@@ -3028,6 +3028,10 @@ impl Reactor {
             if !self.state.windows.can_place_window(write.window) {
                 continue;
             }
+            if !write.coalesced {
+                self.place_window(write.window, write.frame, write.requested);
+                continue;
+            }
             let window_server_id =
                 self.state.windows.window(write.window).and_then(|window| window.info.sys_id);
             let transaction = if let Some(window_server_id) = window_server_id {
@@ -3038,22 +3042,13 @@ impl Reactor {
                 TransactionId::default()
             };
             if let Some(app) = self.app_manager.apps.get(&write.window.pid) {
-                if write.coalesced {
-                    app.handle.send_interactive_frame(
-                        write.window,
-                        write.frame,
-                        write.set_size,
-                        transaction,
-                        crate::actor::app::FrameSource::Drag,
-                    );
-                } else if let Err(error) = app.handle.send(Request::set_window_frame(
+                app.handle.send_interactive_frame(
                     write.window,
                     write.frame,
+                    write.set_size,
                     transaction,
-                    write.requested,
-                )) {
-                    warn!(window = ?write.window, %error, "failed to write requested window frame");
-                }
+                    crate::actor::app::FrameSource::Drag,
+                );
             }
         }
 
@@ -5436,7 +5431,6 @@ impl Reactor {
                 placement.resolve_frame(window.frame_monotonic, CGRect::default())
             };
 
-            let window_server_id = window.info.sys_id;
             self.state.windows.clear_floating_display_geometry(placement.window);
             if let Some(workspace) = self
                 .layout_manager
@@ -5453,23 +5447,7 @@ impl Reactor {
                     frame,
                 );
             }
-            let transaction = if let Some(window_server_id) = window_server_id {
-                let transaction = self.transaction_manager.generate_next_txid(window_server_id);
-                self.transaction_manager.store_txid(window_server_id, transaction, frame);
-                transaction
-            } else {
-                TransactionId::default()
-            };
-            if let Some(app) = self.app_manager.apps.get(&placement.window.pid)
-                && let Err(error) = app.handle.send(Request::set_window_frame(
-                    placement.window,
-                    frame,
-                    transaction,
-                    true,
-                ))
-            {
-                warn!(window = ?placement.window, %error, "failed to apply app-rule placement");
-            }
+            self.place_window(placement.window, frame, true);
         }
     }
 
