@@ -631,7 +631,6 @@ impl Reactor {
         space: SpaceId,
         animate: bool,
         gesture: Option<(Context, Control, f64, Duration)>,
-        skip: Option<WindowId>,
     ) -> Option<HashSet<WindowId>> {
         if self.animation_tx.is_none() && gesture.is_none() && self.viewport_gesture.is_none() {
             return None;
@@ -668,7 +667,8 @@ impl Reactor {
         let windows = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
-                if Some(wid) == skip {
+                // A drag changes nothing until the drop: the viewport moves only Rift's windows.
+                if self.owner(wid) == Owner::User {
                     return None;
                 }
                 let window = self.state.windows.window(wid)?;
@@ -1011,8 +1011,8 @@ impl AnimationManager {
         allow_animation: bool,
     ) -> bool {
         let layout = desired.frames();
-        // The animated path's own bookkeeping still names the dragged window: the camera must
-        // not present it, and a replaced animation must not carry it over.
+        // The animated path's own bookkeeping still names the dragged window: a replaced
+        // animation must not carry it over.
         let dragged = reactor.state.windows.drag().map(|(window, _)| window);
         reactor.retire_presentations();
         let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
@@ -1020,7 +1020,7 @@ impl AnimationManager {
             && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
-        let presentation = reactor.present_camera(space, animate_camera, None, dragged);
+        let presentation = reactor.present_camera(space, animate_camera, None);
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
@@ -2265,7 +2265,7 @@ mod tests {
                 .frames
                 .insert(wid, (handle.clone(), retained));
             // Within a Space, a new camera must preserve the last publication.
-            reactor.present_camera(spaces[source], true, None, None).unwrap();
+            reactor.present_camera(spaces[source], true, None).unwrap();
             let Message::Camera(source_camera) = receiver.commands.try_recv().unwrap() else {
                 panic!("expected source camera");
             };
