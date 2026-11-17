@@ -398,7 +398,7 @@ impl Reconciler {
 struct Batch {
     positions: Vec<Write>,
     frames: Vec<Write>,
-    first: Option<WindowServerId>,
+    servers: Vec<WindowServerId>,
 }
 
 fn frames_of(writes: Vec<Write>) -> Vec<(WindowId, CGRect)> {
@@ -549,7 +549,7 @@ impl Reactor {
                         Want::Place => false,
                     };
                     let batch = per_app.entry((wid.pid, constrained)).or_default();
-                    batch.first = batch.first.or(window.info.sys_id);
+                    batch.servers.extend(window.info.sys_id);
                     if position_only && size_unchanged {
                         batch.positions.push(write);
                     } else {
@@ -559,7 +559,7 @@ impl Reactor {
             }
         }
 
-        for ((pid, constrained), Batch { positions, frames, first }) in per_app {
+        for ((pid, constrained), Batch { positions, frames, servers }) in per_app {
             let sent = positions.iter().chain(&frames).map(|write| write.window);
             let Some(app) = self.app_manager.apps.get(&pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
@@ -569,9 +569,14 @@ impl Reactor {
                 continue;
             };
             let handle = app.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
-            // One transaction id for the app's whole batch, as its protocol expects.
-            let transaction = first
-                .map(|server_id| self.transaction_manager.generate_next_txid(server_id))
+            // One transaction id for the app's whole batch, as its protocol expects. Ids are
+            // counted per window, so it is the newest of the batch's windows' next ids: one taken
+            // from a window written less often would repeat an id another window was already
+            // sent, and an answer to that older write would pass for this one.
+            let transaction = servers
+                .iter()
+                .map(|&server_id| self.transaction_manager.generate_next_txid(server_id))
+                .max()
                 .unwrap_or_default();
             for write in positions.iter().chain(&frames) {
                 if let Some(server_id) =
