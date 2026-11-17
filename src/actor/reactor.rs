@@ -67,7 +67,7 @@ use events::{
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect};
-use reconciler::{Answer, Observation};
+use reconciler::{Answer, Holder, Observation};
 pub use replay::{Record, replay};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
@@ -445,22 +445,14 @@ enum Initiative {
     WarpFocus,
 }
 
-/// A frame report, classified once against what Rift asked of the window.
+/// What a report of a window's frame is to Rift.
 #[derive(Debug, Clone, Copy)]
-enum FrameReport {
-    Answered(Answer),
-    Observed(Observation),
-}
-
-/// Where an observation of a window's frame came from.
-#[derive(Debug, Clone, Copy)]
-enum FrameSource {
+enum ReportKind {
     /// The app's answer to the latest write Rift sent the window: the frame it read back.
     Reply,
-    /// The app's unprompted change notification.
-    Notification,
-    /// An inventory refresh found the window at a frame Rift didn't know.
-    Inventory,
+    /// The app's change notification, or an inventory refresh that found the window at a frame
+    /// Rift didn't know.
+    Unprompted,
 }
 
 pub struct Reactor {
@@ -1823,7 +1815,7 @@ impl Reactor {
                     .then_some((*wid, info.frame))
                 });
                 if let Some((wid, frame)) = moved {
-                    let outcome = self.observe_frame(wid, frame, FrameSource::Inventory)?;
+                    let outcome = self.observe_frame(wid, frame, ReportKind::Unprompted)?;
                     self.apply_event_outcome(outcome);
                 }
                 let refocus = self
@@ -2033,16 +2025,16 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, _) => {
-                let source = if !requested.0 {
-                    FrameSource::Notification
+                let kind = if !requested.0 {
+                    ReportKind::Unprompted
                 } else if self.answers_latest_write(wid, last_seen) {
-                    FrameSource::Reply
+                    ReportKind::Reply
                 } else {
                     // The answer to a write Rift has since replaced: it says nothing about
                     // the one that is with the app now.
                     return Ok(EventOutcome::no_change());
                 };
-                let mut outcome = self.observe_frame(wid, new_frame, source)?;
+                let mut outcome = self.observe_frame(wid, new_frame, kind)?;
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
@@ -4290,6 +4282,42 @@ impl Reactor {
         !waiting || seen == self.transaction_manager.get_last_sent_txid(server_id)
     }
 
+    /// Mission Control moves windows itself; nothing it shows is a drag or a placement.
+    fn mission_control_moved_it(&mut self) -> bool {
+        let active = self.is_mission_control_active();
+        if active {
+            self.state.windows.end_drag();
+        }
+        active
+    }
+
+    /// What a report of `frame` settled: `seen`, if the model now takes the window to be
+    /// there, and whether the target the app actor and the space bookkeeping still read
+    /// (`TransactionManager`) has been reached, which `reached` decides given whether the
+    /// report is at that target. A refused target stays pending: it still says where Rift
+    /// means the window to be.
+    fn record_report(
+        &mut self,
+        wid: WindowId,
+        frame: CGRect,
+        seen: Option<CGRect>,
+        reached: impl FnOnce(bool) -> bool,
+    ) {
+        let Some(window) = self.state.windows.window_mut(wid) else {
+            return;
+        };
+        if let Some(seen) = seen {
+            window.frame_monotonic = seen;
+        }
+        let Some(server_id) = window.info.sys_id else { return };
+        let Some(target) = self.transaction_manager.get_target_frame(server_id) else {
+            return;
+        };
+        if reached(frame.same_as(target)) {
+            self.transaction_manager.clear_target_for_window(server_id);
+        }
+    }
+
     /// Every observation of a window's frame comes through here: its change notification, or
     /// an inventory refresh that found it somewhere new. Rift's own echoes are recognised
     /// first; what is left is someone else's move, the user's if their hand is on the window.
@@ -4297,7 +4325,7 @@ impl Reactor {
         &mut self,
         wid: WindowId,
         new_frame: CGRect,
-        source: FrameSource,
+        kind: ReportKind,
     ) -> anyhow::Result<EventOutcome> {
         let Some(window) = self.state.windows.window(wid) else {
             return Ok(EventOutcome::no_change());
@@ -4306,57 +4334,48 @@ impl Reactor {
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
-        let report = match source {
-            FrameSource::Reply => {
+        let observation = match kind {
+            ReportKind::Reply => {
                 let owner = self.owner(wid);
                 let (answer, queued) = self.reconciler.answer(wid, new_frame, owner);
                 // The desire that waited behind the answered write goes out now.
                 if let Some(write) = queued {
                     self.send_arranged(write);
                 }
-                FrameReport::Answered(answer)
-            }
-            FrameSource::Notification | FrameSource::Inventory => {
-                FrameReport::Observed(self.reconciler.observe(wid, new_frame, old_frame, gripped))
-            }
-        };
-        if self.is_mission_control_active() {
-            // Mission Control moves windows itself; nothing it shows is a drag or a placement.
-            self.state.windows.end_drag();
-            return Ok(EventOutcome::no_change());
-        }
-        let pending = server_id.and_then(|server_id| {
-            Some((server_id, self.transaction_manager.get_target_frame(server_id)?))
-        });
-        let reached_pending = pending.is_some_and(|(_, target)| new_frame.same_as(target));
-        // What the model now takes the frame to be, and whether the target the app actor and
-        // the space bookkeeping still read (`TransactionManager`) has been reached. A refused
-        // target stays pending: it still says where Rift means the window to be.
-        let (seen, target_reached) = match report {
-            // An answer is where the window is, whatever was asked of it.
-            FrameReport::Answered(Answer::Acked) => (Some(new_frame), true),
-            FrameReport::Answered(Answer::Refused { .. }) => (Some(new_frame), false),
-            FrameReport::Answered(Answer::Unasked) => (Some(new_frame), reached_pending),
-            FrameReport::Observed(Observation::Ack { .. }) => (None, reached_pending),
-            FrameReport::Observed(Observation::InTransit) => (Some(new_frame), false),
-            // The user's hand on the window ends whatever Rift had pending for it.
-            FrameReport::Observed(Observation::Foreign { .. }) => (None, gripped),
-        };
-        if let Some(frame) = seen
-            && let Some(window) = self.state.windows.window_mut(wid)
-        {
-            window.frame_monotonic = frame;
-        }
-        if target_reached && let Some((server_id, _)) = pending {
-            self.transaction_manager.clear_target_for_window(server_id);
-        }
-        match report {
-            FrameReport::Answered(Answer::Acked | Answer::Refused { .. } | Answer::Unasked)
-            | FrameReport::Observed(Observation::Ack { .. } | Observation::InTransit) => {
+                if !self.mission_control_moved_it() {
+                    // An answer is where the window is, whatever was asked of it.
+                    self.record_report(wid, new_frame, Some(new_frame), |at_target| match answer {
+                        Answer::Acked => true,
+                        Answer::Refused => false,
+                        Answer::Unasked => at_target,
+                    });
+                }
                 return Ok(EventOutcome::no_change());
             }
-            // Someone else's move: what follows works out whose, and what it means.
-            FrameReport::Observed(Observation::Foreign { frame: _ }) => {}
+            ReportKind::Unprompted => {
+                let holder = if gripped {
+                    Holder::User
+                } else {
+                    Holder::Nobody
+                };
+                self.reconciler.observe(wid, new_frame, old_frame, holder)
+            }
+        };
+        if self.mission_control_moved_it() {
+            return Ok(EventOutcome::no_change());
+        }
+        match observation {
+            Observation::Ack => {
+                self.record_report(wid, new_frame, None, |at_target| at_target);
+                return Ok(EventOutcome::no_change());
+            }
+            Observation::InTransit => {
+                self.record_report(wid, new_frame, Some(new_frame), |_| false);
+                return Ok(EventOutcome::no_change());
+            }
+            // Someone else's move: what follows works out whose, and what it means. The user's
+            // hand on the window ends whatever Rift had pending for it.
+            Observation::Foreign => self.record_report(wid, new_frame, None, |_| gripped),
         }
         let old_space = self.geometry_space_for_window(&old_frame, server_id);
         let new_space = self.geometry_space_for_window(&new_frame, server_id);
