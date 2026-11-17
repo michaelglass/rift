@@ -1924,6 +1924,7 @@ fn matching_rift_frame_clears_pending_target() {
         Some(MouseState::Down),
     ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.reconciler.sync(wid), super::reconciler::Sync::Adrift);
     assert!(reactor.state.windows.drag_on(wid).is_some());
 }
 

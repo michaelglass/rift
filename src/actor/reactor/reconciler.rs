@@ -107,6 +107,9 @@ pub(crate) enum Sync {
     /// the model last saw it). Rift does not ask for `wanted` again while the window stays at
     /// `got`.
     Refused { wanted: CGRect, got: CGRect },
+    /// The user's hand moved it. Where the model last saw it is not to be trusted (reports
+    /// lag a drag), so the next desire is sent whatever the model believes.
+    Adrift,
 }
 
 /// How strongly Rift wants a frame.
@@ -172,7 +175,9 @@ impl Reconciler {
     fn set(&mut self, window: WindowId, sync: Sync) {
         match sync {
             Sync::Settled => _ = self.unsettled.remove(&window),
-            Sync::InFlight { .. } | Sync::Refused { .. } => _ = self.unsettled.insert(window, sync),
+            Sync::InFlight { .. } | Sync::Refused { .. } | Sync::Adrift => {
+                _ = self.unsettled.insert(window, sync)
+            }
         }
     }
 
@@ -220,7 +225,7 @@ impl Reconciler {
                 self.set(window, Sync::Settled);
                 Verdict::Nothing
             }
-            (Sync::Settled | Sync::Refused { .. }, Want::Arrange | Want::Place) => {
+            (Sync::Settled | Sync::Refused { .. } | Sync::Adrift, Want::Arrange | Want::Place) => {
                 Verdict::Send(self.send(window, desired, None))
             }
         }
@@ -231,7 +236,7 @@ impl Reconciler {
     /// next one replaces it in the app's queue, and the drop arranges the window afresh.
     pub(crate) fn follow(&mut self, window: WindowId, session: &Session) -> Option<Write> {
         let frame = session.interactive_frame()?;
-        self.set(window, Sync::Settled);
+        self.set(window, Sync::Adrift);
         Some(Write { window, frame })
     }
 
@@ -239,7 +244,7 @@ impl Reconciler {
     /// if one was waiting behind it.
     pub(crate) fn answer(&mut self, window: WindowId, frame: CGRect) -> (Answer, Option<Write>) {
         match self.sync(window) {
-            Sync::Settled => (Answer::Unasked, None),
+            Sync::Settled | Sync::Adrift => (Answer::Unasked, None),
             Sync::InFlight { target, deadline: _, queued } => {
                 let answer = if answers(target, frame) {
                     debug!(?window, ?target, "reconcile: ack");
@@ -278,12 +283,12 @@ impl Reconciler {
         match self.sync(window) {
             Sync::InFlight { target, .. } if answers(target, frame) => Observation::Ack { target },
             Sync::InFlight { .. } if !held => Observation::InTransit,
-            Sync::InFlight { .. } | Sync::Settled | Sync::Refused { .. } => {
+            Sync::InFlight { .. } | Sync::Settled | Sync::Refused { .. } | Sync::Adrift => {
                 if frame.same_as(known) {
                     return Observation::Ack { target: known };
                 }
                 // Whatever Rift was waiting for, the window is someone else's now.
-                self.set(window, Sync::Settled);
+                self.set(window, if held { Sync::Adrift } else { Sync::Settled });
                 Observation::Foreign { frame }
             }
         }
@@ -322,7 +327,7 @@ impl Reconciler {
     pub(crate) fn in_flight(&self, window: WindowId) -> bool {
         match self.sync(window) {
             Sync::InFlight { .. } => true,
-            Sync::Settled | Sync::Refused { .. } => false,
+            Sync::Settled | Sync::Refused { .. } | Sync::Adrift => false,
         }
     }
 
@@ -662,6 +667,31 @@ mod tests {
         });
         assert_eq!(reconciler.answer(window(), at(20.)), (Answer::Unasked, None));
         assert_eq!(reconciler.sync(window()), Sync::Settled);
+    }
+
+    #[test]
+    fn a_report_during_a_write_is_the_users_only_if_their_hand_is_on_the_window() {
+        let mut reconciler = Reconciler::default();
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        // Nobody holds it: a step on the way.
+        assert_eq!(
+            reconciler.observe(window(), at(5.), at(10.), false),
+            Observation::InTransit
+        );
+        assert!(reconciler.in_flight(window()));
+        // The user holds it: theirs, and Rift stops waiting.
+        assert_eq!(
+            reconciler.observe(window(), at(70.), at(10.), true),
+            Observation::Foreign { frame: at(70.) }
+        );
+        assert_eq!(reconciler.sync(window()), Sync::Adrift);
+        // The answer to the abandoned write is nobody's.
+        assert_eq!(reconciler.answer(window(), at(10.)), (Answer::Unasked, None));
+        // After the drop the window is written even where the model believes it already is.
+        assert_eq!(
+            sent(reconciler.want(window(), at(70.), at(70.), Want::Arrange)),
+            at(70.)
+        );
     }
 
     #[test]
