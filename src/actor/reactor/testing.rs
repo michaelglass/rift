@@ -62,6 +62,12 @@ impl Reactor {
         )
     }
 
+    /// Time passes: every unanswered write is past its deadline, and Rift stops waiting for it.
+    pub fn test_expire_all_writes(&mut self) {
+        self.reconciler.clock.advance(std::time::Duration::from_secs(1));
+        self.expire_writes();
+    }
+
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
         self.state
             .windows
@@ -567,14 +573,19 @@ impl Apps {
         requests
     }
 
-    pub fn simulate_until_quiet(&mut self, reactor: &mut Reactor) {
-        let mut requests = self.requests();
-        while !requests.is_empty() {
+    /// Delivers requests and their answers until none are left, and says how many rounds it
+    /// took. Panics on a write loop.
+    pub fn simulate_until_quiet(&mut self, reactor: &mut Reactor) -> usize {
+        for round in 0..20 {
+            let requests = self.requests();
+            if requests.is_empty() {
+                return round;
+            }
             for event in self.simulate_events_for_requests(requests) {
                 reactor.handle_event(event);
             }
-            requests = self.requests();
         }
+        panic!("Rift and its apps never went quiet: a write loop");
     }
 
     pub fn make_app_and_settle(
@@ -641,7 +652,6 @@ impl Apps {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
-                        let old_frame = window.frame;
                         if mode == crate::actor::app::FrameMode::Position {
                             window.frame.origin = frame.origin;
                         } else {
@@ -649,7 +659,6 @@ impl Apps {
                                 CGRect::new(frame.origin, window.sizing.apply(frame.size));
                         }
                         // The app always answers a write with the frame it read back.
-                        let _ = old_frame;
                         if !window.animating {
                             events.push(Event::WindowFrameChanged(
                                 wid,
