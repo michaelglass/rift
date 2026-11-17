@@ -107,80 +107,17 @@ impl TargetState {
     }
 }
 
-/// The mouse button as macOS reported it with an observation, read once where the
-/// observation arrives. Trackpad tap-to-drag and three-finger drag may move windows with no
-/// button reported; see [`Mover::of`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Button {
-    Down,
-    Up,
-    Unknown,
-}
-
-impl Button {
-    pub fn reported(state: Option<crate::sys::event::MouseState>) -> Self {
-        match state {
-            Some(crate::sys::event::MouseState::Down) => Button::Down,
-            Some(crate::sys::event::MouseState::Up) => Button::Up,
-            None => Button::Unknown,
-        }
-    }
-}
-
-/// What the user's drag says about one window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hold {
-    /// The user is dragging this window.
-    This,
-    /// The user is dragging another window.
-    Other,
-    Nobody,
-}
-
-/// The pointer let go of `.0`. Only this ends a drag by release: it comes from the input tap,
-/// which reports every release, or from a fresh read of the button during a native drag (a
-/// release the tap missed). The button a window's frame report carries is never one.
+/// The pointer let go of `.0`. Only this ends a press or a drag by release: it comes from the
+/// input tap, which reports every release, or from a fresh read of the button finding it up
+/// (a release the tap missed). The button a window's frame report carries is never one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerReleased(pub MouseButton);
 
-/// Who moved a window whose frame changed without Rift asking.
+/// Who moved a window whose frame changed without Rift asking. It is read off the window's own
+/// placement: the user's, if their hand is on it; otherwise the app's (or anything but the
+/// pointer). No button state enters into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mover {
-    /// The user, dragging this window: its drag starts or continues.
     User,
-    /// The app (or anything but the pointer): a programmatic move.
     App,
-}
-
-impl Mover {
-    pub fn of(hold: Hold, button: Button) -> Self {
-        match (hold, button) {
-            // Its own drag continues whatever the button reads: only a release ends it.
-            (Hold::This, _) => Mover::User,
-            // One pointer, one drag: while it holds another window, this one isn't the user's.
-            (Hold::Other, _) => Mover::App,
-            (Hold::Nobody, Button::Down) => Mover::User,
-            // Without a button there's no telling a trackpad drag from an app moving itself;
-            // treat it as the app's (conservative: nothing starts a drag on no evidence).
-            (Hold::Nobody, Button::Up | Button::Unknown) => Mover::App,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_the_pointer_drags_a_window() {
-        use Button::*;
-        use Hold::*;
-        for button in [Down, Up, Unknown] {
-            assert_eq!(Mover::of(This, button), Mover::User, "{button:?}");
-            assert_eq!(Mover::of(Other, button), Mover::App, "{button:?}");
-        }
-        assert_eq!(Mover::of(Nobody, Down), Mover::User);
-        assert_eq!(Mover::of(Nobody, Up), Mover::App);
-        assert_eq!(Mover::of(Nobody, Unknown), Mover::App);
-    }
 }

@@ -91,7 +91,7 @@ use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
-use crate::model::drag::{Button, Mover, PointerReleased};
+use crate::model::drag::{Mover, PointerReleased};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::window_store::NativeFullscreenTransition;
@@ -349,6 +349,12 @@ pub enum Event {
     Gesture(crate::actor::gesture::Lifecycle),
     #[serde(skip)]
     DragMotion(crate::actor::drag::DragMotion),
+    /// The left button went down at `point` with no modifier drag taking it: the only thing a
+    /// native drag can start from.
+    #[serde(skip)]
+    PointerPressed {
+        point: CGPoint,
+    },
     #[serde(skip)]
     ModifierMouseDown {
         button: crate::actor::drag::MouseButton,
@@ -1269,6 +1275,7 @@ impl Reactor {
                 | Event::MouseMoved(..)
                 | Event::DragMotion(..)
                 | Event::ModifierMouseDown { .. }
+                | Event::PointerPressed { .. }
                 | Event::Gesture(..)
                 | Event::Command(Command::Layout(..))
                 | Event::Command(Command::Reactor(
@@ -1715,28 +1722,22 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
                 // A discovered frame that differs from the known one is a frame change whose
-                // notification hasn't reached Rift. With the button down that can be the first
-                // sign of a drag, so it is handled as the frame change it stands in for.
-                if self.pointer_may_be_dragging() {
-                    let moved: Vec<_> = new
-                        .iter()
-                        .filter(|(wid, info)| {
-                            self.state
-                                .windows
-                                .window(*wid)
-                                .is_some_and(|known| !known.frame_monotonic.same_as(info.frame))
-                        })
-                        .map(|(wid, info)| (*wid, info.frame))
-                        .collect();
-                    for (wid, frame) in moved {
-                        self.handle_event(Event::WindowFrameChanged(
-                            wid,
-                            frame,
-                            None,
-                            Requested(false),
-                            Some(MouseState::Down),
-                        ));
-                    }
+                // notification hasn't reached Rift. On the window the pointer is pressing, that
+                // is the drag showing up, so it is handled as the frame change it stands in for.
+                let pressed = self.state.windows.pressed_window();
+                let moved = new.iter().find_map(|(wid, info)| {
+                    let known = self.state.windows.window(*wid)?;
+                    (Some(*wid) == pressed && !known.frame_monotonic.same_as(info.frame))
+                        .then_some((*wid, info.frame))
+                });
+                if let Some((wid, frame)) = moved {
+                    self.handle_event(Event::WindowFrameChanged(
+                        wid,
+                        frame,
+                        None,
+                        Requested(false),
+                        None,
+                    ));
                 }
                 let refocus = self
                     .window_inventory_manager
@@ -1946,11 +1947,14 @@ impl Reactor {
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 let mission_control_active = self.is_mission_control_active();
-                // The button is read once, here, and only to say who moved this window. Nothing
-                // below sees it: frame handling gets the answer, and a drag ends only by a
-                // `PointerReleased`.
-                let button = Button::reported(mouse_state.or_else(self.read_button));
-                let mover = Mover::of(self.state.windows.hold_of(wid), button);
+                // Who moved it is read off the window itself: the user, if their hand is on it
+                // (a press named it), else the app. The button a report carries says nothing.
+                let _ = mouse_state;
+                let mover = if self.state.windows.is_gripped(wid) {
+                    Mover::User
+                } else {
+                    Mover::App
+                };
                 // A delayed move from an app can invalidate a parked frame even when
                 // WindowServer reports Rift's transaction id. Drop the stale hide
                 // target so the next layout can re-park the window.
@@ -2008,6 +2012,10 @@ impl Reactor {
                 };
                 let pending_target_space = server_id
                     .and_then(|server| self.pending_target_space_for_window_server_id(server));
+                if mover == Mover::App {
+                    // If a trackpad drag shows up here, the tap saw no press for it.
+                    debug!(?wid, "drag-evidence: window moved with no press on it");
+                }
                 let assigned_space = self.assigned_space_for_window_id(wid);
                 // Only the user's drag vouches for a window seen off its space; any other move
                 // stays doubtful until a snapshot confirms it.
@@ -2146,17 +2154,14 @@ impl Reactor {
                 return Ok(interaction_workflow::handle_cancel(&mut self.state));
             }
             Event::ModifierMouseDown { button, point, action } => {
-                let source = self.window_id_under_cursor().and_then(|window| {
+                // A modifier press is a press: the window under it is pressed, and only that
+                // press can become the drag.
+                self.pointer_pressed(point);
+                let source = self.state.windows.gripped().and_then(|window| {
                     let state = self.state.windows.window(window)?;
-                    self.state.windows.is_admitted(window).then_some((
-                        window,
-                        state.frame_monotonic,
-                        state.info.sys_id,
-                    ))
+                    Some((window, state.frame_monotonic, state.info.sys_id))
                 });
                 let Some((window, frame, server_id)) = source else {
-                    // A press over no window ends whatever drag there was.
-                    self.state.windows.end_drag();
                     return Ok(EventOutcome::no_change());
                 };
                 self.cancel_window_presentations(vec![window]);
@@ -2183,9 +2188,18 @@ impl Reactor {
                     action,
                     scene,
                 ) {
-                    Some(session) => self.state.windows.start_drag(window, session),
+                    Some(session) => {
+                        if let Some(pressed) = self.state.windows.pressed(window) {
+                            debug!(?window, "drag-evidence: drag started (modifier press)");
+                            pressed.start(session);
+                        }
+                    }
                     None => _ = self.state.windows.end_drag(),
                 }
+                return Ok(EventOutcome::no_change());
+            }
+            Event::PointerPressed { point } => {
+                self.pointer_pressed(point);
                 return Ok(EventOutcome::no_change());
             }
             Event::OverviewSelectWorkspace {
@@ -2355,6 +2369,7 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::MouseUp(button) => {
+                debug!(?button, gripped = ?self.state.windows.gripped(), "drag-evidence: release");
                 let final_space = self.state.windows.drag().and_then(|(window, session)| {
                     let source = session.source;
                     let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -4361,19 +4376,46 @@ impl Reactor {
     }
 
     /// The input tap reports every release. This covers one it missed: a fresh read finding
-    /// the button up while a native drag is held. A modifier drag's button is captured by the
-    /// tap, which always reports its real release.
+    /// the button up while the pointer is taken to be down on a window. A modifier drag's
+    /// button is captured by the tap, which always reports its real release.
     fn missed_release(&self) -> Option<PointerReleased> {
-        let (_, session) = self.state.windows.drag()?;
-        (session.kind != DragKind::ModifierMove
-            && Button::reported((self.read_button)()) == Button::Up)
-            .then_some(PointerReleased(MouseButton::Left))
+        let window = self.state.windows.gripped()?;
+        let modifier_drag = self
+            .state
+            .windows
+            .drag_on(window)
+            .is_some_and(|session| session.kind == DragKind::ModifierMove);
+        (!modifier_drag && (self.read_button)() == Some(MouseState::Up)).then(|| {
+            debug!(
+                ?window,
+                "drag-evidence: release (missed by the tap, button reads up)"
+            );
+            PointerReleased(MouseButton::Left)
+        })
     }
 
-    /// With the button down the user may be dragging a window before Rift has seen the drag
-    /// start.
-    fn pointer_may_be_dragging(&self) -> bool {
-        Button::reported((self.read_button)()) == Button::Down
+    /// The pointer went down at `point`: the tracked, admitted window under it is pressed.
+    /// Anything else (empty space, a window Rift doesn't manage) presses nothing, and whatever
+    /// the pointer held before is let go.
+    fn pointer_pressed(&mut self, point: CGPoint) {
+        let window =
+            self.tracked_window_at(point).filter(|wid| self.state.windows.is_admitted(*wid));
+        debug!(?window, ?point, "drag-evidence: press");
+        match window {
+            Some(window) => self.state.windows.press(window),
+            None => _ = self.state.windows.end_drag(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn tracked_window_at(&self, point: CGPoint) -> Option<WindowId> {
+        self.state.windows.tracked_window_id(window_server::get_window_at_point(point)?)
+    }
+
+    /// Tests have no window server to ask: the window whose known frame contains the point.
+    #[cfg(test)]
+    fn tracked_window_at(&self, point: CGPoint) -> Option<WindowId> {
+        self.state.windows.window_at(point)
     }
 
     fn advance_workspace_transfers(&mut self) -> EventOutcome {
@@ -4735,7 +4777,7 @@ impl Reactor {
         let action = crate::common::config::MouseAction::Move;
         let session =
             Session::modifier(source, MouseButton::Left, point, action, DragScene::default());
-        self.state.windows.start_drag(window, session.unwrap());
+        self.state.windows.press_and_drag(window, session.unwrap());
     }
 
     /// Moves the pointer of the current drag `dx` to the right.
@@ -4755,7 +4797,7 @@ impl Reactor {
         if self.state.windows.drag_on(wid).is_none() {
             let server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
-            self.state.windows.start_drag(
+            self.state.windows.press_and_drag(
                 wid,
                 Session::native(
                     DragSource {
