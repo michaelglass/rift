@@ -955,17 +955,8 @@ impl Input {
                 } else {
                     crate::actor::drag::MouseButton::Right
                 };
-                let action = if button == crate::actor::drag::MouseButton::Left {
-                    state.mouse_settings.action1
-                } else {
-                    state.mouse_settings.action2
-                };
-                if state.mouse_features_enabled
-                    && action != MouseAction::None
-                    && mouse_modifier_held(
-                        state.mouse_settings.modifier,
-                        CGEvent::flags(Some(event)),
-                    )
+                if let Some(action) =
+                    state.modifier_mouse_action(button, CGEvent::flags(Some(event)))
                 {
                     state.captured_button = Some(button);
                     self.events_tx.send(Event::ModifierMouseDown {
@@ -1391,6 +1382,22 @@ unsafe extern "C-unwind" fn event_tap_invalidated(user_info: *mut std::ffi::c_vo
 }
 
 impl State {
+    /// The configured modifier action this press triggers, if any; such a press is consumed.
+    fn modifier_mouse_action(
+        &self,
+        button: crate::actor::drag::MouseButton,
+        flags: CGEventFlags,
+    ) -> Option<MouseAction> {
+        let action = match button {
+            crate::actor::drag::MouseButton::Left => self.mouse_settings.action1,
+            crate::actor::drag::MouseButton::Right => self.mouse_settings.action2,
+        };
+        (self.mouse_features_enabled
+            && action != MouseAction::None
+            && mouse_modifier_held(self.mouse_settings.modifier, flags))
+        .then_some(action)
+    }
+
     fn hide_mouse(&mut self) {
         if let Err(e) = event::hide_mouse() {
             warn!("Failed to hide mouse: {e:?}");
