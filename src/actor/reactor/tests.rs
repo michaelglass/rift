@@ -197,8 +197,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
 
     let mut target = frame;
     target.origin.x = 200.0;
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target);
+    reactor.transaction_manager.stamp([(wsid, target)]);
 
     let mut parked = frame;
     parked.origin.x += frame.size.width;
@@ -1688,8 +1687,7 @@ fn reactor_with_window_moved_to_space2()
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     assert!(reactor.assign_test_window_to_workspace(space2, wid, space2_workspace));
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, moved_frame);
+    reactor.transaction_manager.stamp([(wsid, moved_frame)]);
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
 
     (reactor, wid, wsid, space1, space2, moved_frame)
@@ -1859,8 +1857,7 @@ fn matching_rift_frame_clears_pending_target() {
         CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
         frame.size,
     );
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+    let txid = reactor.transaction_manager.stamp([(wsid, target_frame)]);
 
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
@@ -2187,10 +2184,11 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     // A report of somewhere else while a write is with the app (a step on its way),
     // duplicate minimize edges, and events for unknown windows.
     reactor.place_window(wid, at(40.0));
-    let current = reactor.transaction_manager.get_last_sent_txid(wsid);
+    // An id that is not the write in flight.
+    let other = reactor.transaction_manager.store.next_id();
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
-        (moved(wid, at(60.0), Some(current.next()), false), true),
+        (moved(wid, at(60.0), Some(other), false), true),
         (Event::WindowMinimized(wid), false),
         (Event::WindowMinimized(wid), true),
         (Event::WindowDeminiaturized(wid), false),
@@ -2530,9 +2528,8 @@ fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pend
 
     assert!(reactor.assign_test_window_to_workspace(space1, wid, space1_workspace));
     reactor.state.windows.set_window_server_space(wsid, Some(space1));
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
     let target_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+    reactor.transaction_manager.stamp([(wsid, target_frame)]);
 
     window_server_appeared(&mut reactor, wsid, space2, SpaceEventKind::User);
 

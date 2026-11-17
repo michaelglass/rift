@@ -245,8 +245,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
         },
         frame.mid(),
     );
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, frame);
+    reactor.transaction_manager.stamp([(wsid, frame)]);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);
 

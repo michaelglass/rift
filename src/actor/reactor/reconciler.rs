@@ -393,12 +393,13 @@ impl Reconciler {
     pub(crate) fn forget(&mut self, window: WindowId) { self.set(window, Sync::Settled); }
 }
 
-/// One app's share of an arrange pass: its windows that only move, and those that also resize.
+/// One app's share of an arrange pass: its windows that only move, and those that also resize,
+/// and the targets to record under the batch's transaction id.
 #[derive(Default)]
 struct Batch {
     positions: Vec<Write>,
     frames: Vec<Write>,
-    servers: Vec<WindowServerId>,
+    targets: Vec<(WindowServerId, CGRect)>,
 }
 
 fn frames_of(writes: Vec<Write>) -> Vec<(WindowId, CGRect)> {
@@ -426,13 +427,7 @@ impl Reactor {
     /// The transaction id the app protocol wants on a write, recorded with its target.
     fn stamp(&self, window: WindowId, frame: CGRect) -> TransactionId {
         let server_id = self.state.windows.window(window).and_then(|state| state.info.sys_id);
-        server_id
-            .map(|server_id| {
-                let transaction = self.transaction_manager.generate_next_txid(server_id);
-                self.transaction_manager.store_txid(server_id, transaction, frame);
-                transaction
-            })
-            .unwrap_or_default()
+        self.transaction_manager.stamp(server_id.map(|server_id| (server_id, frame)))
     }
 
     fn send_one(&mut self, write: Write, handle: AppThreadHandle) {
@@ -561,7 +556,7 @@ impl Reactor {
                         Want::Place => false,
                     };
                     let batch = per_app.entry((wid.pid, constrained)).or_default();
-                    batch.servers.extend(window.info.sys_id);
+                    batch.targets.extend(window.info.sys_id.map(|server_id| (server_id, target)));
                     if position_only && size_unchanged {
                         batch.positions.push(write);
                     } else {
@@ -571,7 +566,7 @@ impl Reactor {
             }
         }
 
-        for ((pid, constrained), Batch { positions, frames, servers }) in per_app {
+        for ((pid, constrained), Batch { positions, frames, targets }) in per_app {
             let sent = positions.iter().chain(&frames).map(|write| write.window);
             let Some(app) = self.app_manager.apps.get(&pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
@@ -581,22 +576,8 @@ impl Reactor {
                 continue;
             };
             let handle = app.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
-            // One transaction id for the app's whole batch, as its protocol expects. Ids are
-            // counted per window, so it is the newest of the batch's windows' next ids: one taken
-            // from a window written less often would repeat an id another window was already
-            // sent, and an answer to that older write would pass for this one.
-            let transaction = servers
-                .iter()
-                .map(|&server_id| self.transaction_manager.generate_next_txid(server_id))
-                .max()
-                .unwrap_or_default();
-            for write in positions.iter().chain(&frames) {
-                if let Some(server_id) =
-                    self.state.windows.window(write.window).and_then(|state| state.info.sys_id)
-                {
-                    self.transaction_manager.store_txid(server_id, transaction, write.frame);
-                }
-            }
+            // One transaction id for the app's whole batch, as its protocol expects.
+            let transaction = self.transaction_manager.stamp(targets);
             let requests = [
                 (!positions.is_empty()).then(|| (frames_of(positions), FrameMode::Position)),
                 (!frames.is_empty()).then(|| (frames_of(frames), FrameMode::Full)),
