@@ -78,6 +78,7 @@ use super::input;
 use crate::actor::app::{
     AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, WindowInventoryToken, pid_t,
 };
+use crate::actor::drag::{DragKind, DragScene, DragSource, MouseButton, Session};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -1373,7 +1374,9 @@ impl Reactor {
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
         self.retire_presentations();
-        self.drag_manager.sync_motion_gate(self.state.windows.drag());
+        let held = self.state.windows.drag();
+        self.drag_manager.sync_motion_gate(held);
+        self.drag_manager.sync_preview(held);
     }
 
     fn dispatch_layout_command(
@@ -1745,7 +1748,6 @@ impl Reactor {
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
-                    &mut self.drag_manager,
                     window_workflow::WindowDestroyedPayload { window: wid },
                 );
                 outcome.focused_window = raised_window;
@@ -1764,7 +1766,6 @@ impl Reactor {
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
-                    &mut self.drag_manager,
                     window_workflow::WindowDestroyedPayload { window: wid },
                 );
                 outcome.focused_window = raised_window;
@@ -1829,7 +1830,6 @@ impl Reactor {
                 return topology_workflow::handle_window_server_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
-                    &mut self.drag_manager,
                     topology_workflow::WindowServerLifecyclePayload {
                         window_server_id: wsid,
                         space: sid,
@@ -1932,7 +1932,6 @@ impl Reactor {
                     window_workflow::classify_window_frame_change(
                         &mut self.state,
                         &self.transaction_manager,
-                        &mut self.drag_manager,
                         wid,
                         new_frame,
                         last_seen,
@@ -2009,7 +2008,6 @@ impl Reactor {
                 let mut outcome = window_workflow::handle_window_frame_changed(
                     &mut self.state,
                     &mut self.layout_manager,
-                    &mut self.drag_manager,
                     window_workflow::WindowFrameChangedPayload {
                         window: wid,
                         new_frame,
@@ -2082,46 +2080,39 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::DragMotion(motion) => {
-                let settings = self.config.settings.drag_drop;
-                let Some((window, session)) = self.state.windows.held_mut() else {
+                let Some(session) = self.state.windows.drag_mut() else {
                     return Ok(EventOutcome::no_change());
                 };
-                let mut intent_changed = session.motion(&settings, motion);
-                if session.kind == crate::actor::drag::DragKind::ModifierMove {
-                    let last_frame = session.source.last_frame;
-                    let current_space = self
+                let mut intent_changed = false;
+                if session.kind == DragKind::ModifierMove {
+                    // The display under the pointer decides what a modifier move can drop onto.
+                    let frame = session.modifier_frame_at(motion.point);
+                    let space = self
+                        .space_state
                         .screen_for_point(motion.point)
                         .and_then(|screen| screen.space)
-                        .or_else(|| self.best_space_for_frame(&last_frame));
-                    if let Some(session) = self.state.windows.drag_on_mut(window)
-                        && session.update_current_space(current_space)
-                    {
-                        intent_changed |= session.motion(&settings, motion);
-                    }
+                        .or_else(|| self.space_state.best_space_for_frame(&frame));
+                    intent_changed |= session.update_current_space(space);
                 }
+                intent_changed |= session.motion(&self.config.settings.drag_drop, motion);
                 if intent_changed {
-                    self.resolve_drag_preview();
+                    resolve_drag_preview(
+                        session,
+                        &self.space_state,
+                        &self.layout_manager,
+                        &self.config,
+                    );
                 }
-                let Some((window, new_frame)) = self
-                    .state
-                    .windows
-                    .drag()
-                    .and_then(crate::actor::drag::Session::interactive_frame)
-                else {
+                let Some((window, new_frame)) = session.interactive_frame() else {
                     return Ok(EventOutcome::no_change());
                 };
                 return Ok(EventOutcome::no_change()
                     .with_interactive_window_frame_write(window, new_frame, false));
             }
             Event::DragCancel => {
-                return Ok(interaction_workflow::handle_cancel(
-                    &mut self.state,
-                    &mut self.drag_manager,
-                ));
+                return Ok(interaction_workflow::handle_cancel(&mut self.state));
             }
             Event::ModifierMouseDown { button, point, action } => {
-                // A new press ends whatever drag there was.
-                self.state.windows.end_drag();
                 let source = self.window_id_under_cursor().and_then(|window| {
                     let state = self.state.windows.window(window)?;
                     self.state.windows.is_admitted(window).then_some((
@@ -2131,7 +2122,8 @@ impl Reactor {
                     ))
                 });
                 let Some((window, frame, server_id)) = source else {
-                    self.drag_manager.sync_preview(None);
+                    // A press over no window ends whatever drag there was.
+                    self.state.windows.end_drag();
                     return Ok(EventOutcome::no_change());
                 };
                 self.cancel_window_presentations(vec![window]);
@@ -2145,8 +2137,8 @@ impl Reactor {
                 } else {
                     Default::default()
                 };
-                if let Some(session) = crate::actor::drag::Session::modifier(
-                    crate::actor::drag::DragSource {
+                match Session::modifier(
+                    DragSource {
                         window,
                         origin_frame: frame,
                         last_frame: frame,
@@ -2159,9 +2151,9 @@ impl Reactor {
                     action,
                     scene,
                 ) {
-                    self.state.windows.start_drag(session);
+                    Some(session) => self.state.windows.start_drag(session),
+                    None => _ = self.state.windows.end_drag(),
                 }
-                self.drag_manager.sync_preview(self.state.windows.drag());
                 return Ok(EventOutcome::no_change());
             }
             Event::OverviewSelectWorkspace {
@@ -2334,7 +2326,7 @@ impl Reactor {
                 let final_space = self.state.windows.drag().and_then(|session| {
                     let source = session.source;
                     let frame_space = || self.best_space_for_frame(&source.last_frame);
-                    if session.kind == crate::actor::drag::DragKind::ModifierMove {
+                    if session.kind == DragKind::ModifierMove {
                         frame_space()
                             .or(source.current_space)
                             .or_else(|| self.best_space_for_window_id(source.window))
@@ -3114,13 +3106,14 @@ impl Reactor {
         }
         // The input tap captured a modifier drag's button and always reports its real release,
         // so none is inferred from button state for it.
-        let modifier_drag = self
-            .state
-            .windows
-            .drag()
-            .is_some_and(|session| session.kind == crate::actor::drag::DragKind::ModifierMove);
-        if outcome.dispatch_mouse_up && !modifier_drag {
-            self.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        if outcome.dispatch_mouse_up
+            && !self
+                .state
+                .windows
+                .drag()
+                .is_some_and(|session| session.kind == DragKind::ModifierMove)
+        {
+            self.handle_event(Event::MouseUp(MouseButton::Left));
         }
 
         let mut layout_changed = false;
@@ -4538,8 +4531,6 @@ impl Reactor {
         for window in retired {
             outcome.absorb(window_workflow::apply_window_retirement(
                 &self.transaction_manager,
-                &mut self.drag_manager,
-                &mut self.state.windows,
                 window,
             ));
         }
@@ -4662,70 +4653,11 @@ impl Reactor {
     }
 
     fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
-        let center = frame.mid();
-        self.screen_for_point(center).and_then(|screen| screen.space).or_else(|| {
-            self.space_state
-                .screens
-                .iter()
-                .filter_map(|screen| {
-                    let space = screen.space?;
-                    let area = screen.frame.intersection(frame).area() as i64;
-                    if area > 0 { Some((area, space)) } else { None }
-                })
-                .max_by_key(|(area, _)| *area)
-                .map(|(_, space)| space)
-        })
+        self.space_state.best_space_for_frame(frame)
     }
 
-    fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {
+    fn drag_scene(&self, source: WindowId, space: SpaceId) -> DragScene {
         interaction_workflow::build_drag_scene(&self.state, &self.layout_manager, source, space)
-    }
-
-    fn resolve_drag_preview(&mut self) {
-        let settings = self.config.settings.drag_drop;
-        let Some(source) = self.state.windows.drag().map(|session| session.source) else {
-            return;
-        };
-        while let Some(mut intent) =
-            self.state.windows.drag().and_then(crate::actor::drag::Session::intent)
-        {
-            if intent.window == source.window
-                && !matches!(intent.action, crate::layout_engine::WindowDropAction::Move(_))
-            {
-                if let Some(session) = self.state.windows.drag_on_mut(source.window) {
-                    session.set_preview(&settings, intent, Some(source.origin_frame));
-                }
-                break;
-            }
-            let preview = loop {
-                let preview = self.space_state.screen_by_space(intent.space).and_then(|screen| {
-                    self.layout_manager.layout_engine.drop_preview_frame(
-                        intent.space,
-                        source.window,
-                        intent.window,
-                        intent.frame,
-                        intent.action,
-                        screen.frame,
-                        screen.display_uuid_opt(),
-                        &self.config.settings.ui.stack_line,
-                    )
-                });
-                let Some(result) = preview else { break None };
-                let action =
-                    result.action(intent.action, self.config.settings.drag_drop.drop_action);
-                if action == intent.action {
-                    break Some(result);
-                }
-                intent.action = action;
-            };
-            let Some(session) = self.state.windows.drag_on_mut(source.window) else {
-                break;
-            };
-            if !session.set_preview(&settings, intent, preview.map(|result| result.frame)) {
-                break;
-            }
-        }
-        self.drag_manager.sync_preview(self.state.windows.drag());
     }
 
     fn refresh_active_drag_scene(&mut self) {
@@ -4733,22 +4665,34 @@ impl Reactor {
             return;
         };
         let source = session.source;
-        if !source.tiled
-            || !matches!(
-                session.kind,
-                crate::actor::drag::DragKind::NativeMove
-                    | crate::actor::drag::DragKind::ModifierMove
-            )
-        {
+        if !source.tiled || !matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove) {
             return;
         }
         let Some(space) = source.current_space else { return };
         let scene = self.drag_scene(source.window, space);
-        let settings = self.config.settings.drag_drop;
-        if let Some(session) = self.state.windows.drag_on_mut(source.window) {
-            session.replace_scene(&settings, scene);
-        }
-        self.resolve_drag_preview();
+        let Some(session) = self.state.windows.drag_mut() else {
+            return;
+        };
+        session.replace_scene(&self.config.settings.drag_drop, scene);
+        resolve_drag_preview(session, &self.space_state, &self.layout_manager, &self.config);
+    }
+
+    #[cfg(test)]
+    fn start_modifier_drag(&mut self, source: DragSource, point: CGPoint) {
+        let action = crate::common::config::MouseAction::Move;
+        let session =
+            Session::modifier(source, MouseButton::Left, point, action, DragScene::default());
+        self.state.windows.start_drag(session.unwrap());
+    }
+
+    /// Moves the pointer of the current drag `dx` to the right.
+    #[cfg(test)]
+    fn nudge_drag(&mut self, dx: f64) {
+        let session = self.state.windows.drag_mut().unwrap();
+        let point = CGPoint::new(session.pointer.x + dx, session.pointer.y);
+        session.motion(&self.config.settings.drag_drop, crate::actor::drag::DragMotion {
+            point,
+        });
     }
 
     #[cfg(test)]
@@ -4756,8 +4700,8 @@ impl Reactor {
         if self.state.windows.drag_on(wid).is_none() {
             let server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
-            self.state.windows.start_drag(crate::actor::drag::Session::native(
-                crate::actor::drag::DragSource {
+            self.state.windows.start_drag(Session::native(
+                DragSource {
                     window: wid,
                     origin_frame: *frame,
                     last_frame: *frame,
@@ -4765,7 +4709,7 @@ impl Reactor {
                     current_space: origin_space,
                     tiled: true,
                 },
-                crate::actor::drag::DragScene::default(),
+                Default::default(),
             ));
         }
     }
@@ -6370,7 +6314,7 @@ impl Reactor {
     }
 
     fn screen_for_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
-        self.space_state.screens.iter().find(|screen| screen.frame.contains(point))
+        self.space_state.screen_for_point(point)
     }
 
     fn current_screen_center(&self) -> Option<CGPoint> {
@@ -6682,5 +6626,47 @@ impl Reactor {
                 warn!(error = ?e, "{}", context);
                 false
             })
+    }
+}
+
+/// Validate the drop the pointer is over, falling back through targets the layout can't take.
+fn resolve_drag_preview(
+    session: &mut Session,
+    space_state: &ForwardedSpaceState,
+    layout: &LayoutManager,
+    config: &Config,
+) {
+    let settings = &config.settings.drag_drop;
+    let source = session.source;
+    while let Some(mut intent) = session.intent() {
+        // The source's own tile only offers moves; anything else there is no drop.
+        if intent.window == source.window
+            && !matches!(intent.action, crate::layout_engine::WindowDropAction::Move(_))
+        {
+            break;
+        }
+        let preview = loop {
+            let preview = space_state.screen_by_space(intent.space).and_then(|screen| {
+                layout.layout_engine.drop_preview_frame(
+                    intent.space,
+                    source.window,
+                    intent.window,
+                    intent.frame,
+                    intent.action,
+                    screen.frame,
+                    screen.display_uuid_opt(),
+                    &config.settings.ui.stack_line,
+                )
+            });
+            let Some(result) = preview else { break None };
+            let action = result.action(intent.action, settings.drop_action);
+            if action == intent.action {
+                break Some(result);
+            }
+            intent.action = action;
+        };
+        if !session.set_preview(settings, intent, preview.map(|result| result.frame)) {
+            break;
+        }
     }
 }

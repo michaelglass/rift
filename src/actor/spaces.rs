@@ -25,13 +25,14 @@ use std::time::Instant;
 
 use dispatchr::queue;
 use dispatchr::time::Time;
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::MainThreadMarker;
 
 use crate::actor;
 use crate::actor::{reactor, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
+use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::DisplayReconfigFlags;
 use crate::sys::window_server;
@@ -147,6 +148,25 @@ impl ForwardedSpaceState {
     }
 
     pub fn first_known_space(&self) -> Option<SpaceId> { self.iter_known_spaces().next() }
+
+    pub fn screen_for_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
+        self.screens.iter().find(|screen| screen.frame.contains(point))
+    }
+
+    /// The space under the frame's centre, else the one it overlaps most.
+    pub fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
+        self.screen_for_point(frame.mid()).and_then(|screen| screen.space).or_else(|| {
+            self.screens
+                .iter()
+                .filter_map(|screen| {
+                    let space = screen.space?;
+                    let area = screen.frame.intersection(frame).area() as i64;
+                    if area > 0 { Some((area, space)) } else { None }
+                })
+                .max_by_key(|(area, _)| *area)
+                .map(|(_, space)| space)
+        })
+    }
 }
 
 pub struct AuthorityState {
