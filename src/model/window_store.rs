@@ -47,6 +47,16 @@ enum Grip {
     Dragging(Box<Session>),
 }
 
+/// What the pointer is doing with windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pointer {
+    Idle,
+    /// Down on a window that hasn't moved.
+    Pressing,
+    /// Dragging a window.
+    Dragging,
+}
+
 /// What the user's hand is doing with a window, for whoever observed that window change.
 pub(crate) enum Hand<'a> {
     /// The pointer is down on it and it hasn't moved yet: a change Rift didn't make starts
@@ -1944,6 +1954,15 @@ impl WindowStore {
             .filter(|(_, record)| record.frame().is_some_and(|frame| frame.contains(point)))
             .map(|(window, _)| *window)
             .min_by_key(|window| (window.pid, window.idx.get()))
+    }
+
+    /// What the pointer is doing, for whoever has a rule about it.
+    pub(crate) fn pointer(&self) -> Pointer {
+        match &self.windows.gripped {
+            None => Pointer::Idle,
+            Some(Gripped { grip: Grip::Pressed { .. }, .. }) => Pointer::Pressing,
+            Some(Gripped { grip: Grip::Dragging(_), .. }) => Pointer::Dragging,
+        }
     }
 
     /// Whether the user's hand is on `window`: pressed, or dragging it.
