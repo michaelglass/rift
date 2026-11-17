@@ -106,3 +106,81 @@ impl TargetState {
         }
     }
 }
+
+/// The mouse button as macOS reported it with an observation, read once where the
+/// observation arrives. Trackpad tap-to-drag and three-finger drag may move windows with no
+/// button reported; see [`Mover::of`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Down,
+    Up,
+    Unknown,
+}
+
+impl Button {
+    pub fn reported(state: Option<crate::sys::event::MouseState>) -> Self {
+        match state {
+            Some(crate::sys::event::MouseState::Down) => Button::Down,
+            Some(crate::sys::event::MouseState::Up) => Button::Up,
+            None => Button::Unknown,
+        }
+    }
+}
+
+/// What the user's drag says about one window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// The user is dragging this window.
+    This,
+    /// The pointer is moving another window by modifier drag.
+    OtherByModifier,
+    /// Another window is in a native drag.
+    OtherNative,
+    Nobody,
+}
+
+/// Who moved a window whose frame changed without Rift asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mover {
+    /// The user, dragging this window: its drag starts or continues.
+    User,
+    /// The app (or anything but the pointer): a programmatic move.
+    App,
+}
+
+impl Mover {
+    pub fn of(hold: Hold, button: Button) -> Self {
+        match (hold, button) {
+            // Its own drag continues even if a stale read says the button is up.
+            (Hold::This, _) => Mover::User,
+            // One pointer: while it moves another window by modifier, this one isn't the user's.
+            (Hold::OtherByModifier, _) => Mover::App,
+            // A native drag of another window can only have ended unseen if the pointer is now
+            // dragging this one.
+            (Hold::OtherNative | Hold::Nobody, Button::Down) => Mover::User,
+            // Without a button there's no telling a trackpad drag from an app moving itself;
+            // treat it as the app's (conservative: nothing starts a drag on no evidence).
+            (Hold::OtherNative | Hold::Nobody, Button::Up | Button::Unknown) => Mover::App,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_pointer_drags_a_window() {
+        use Button::*;
+        use Hold::*;
+        for button in [Down, Up, Unknown] {
+            assert_eq!(Mover::of(This, button), Mover::User, "{button:?}");
+            assert_eq!(Mover::of(OtherByModifier, button), Mover::App, "{button:?}");
+        }
+        for hold in [OtherNative, Nobody] {
+            assert_eq!(Mover::of(hold, Down), Mover::User, "{hold:?}");
+            assert_eq!(Mover::of(hold, Up), Mover::App, "{hold:?}");
+            assert_eq!(Mover::of(hold, Unknown), Mover::App, "{hold:?}");
+        }
+    }
+}

@@ -8,6 +8,7 @@ use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{Quiet, TransactionId, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
+use crate::model::drag::Mover;
 use crate::model::window_store::WindowStore;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::event::MouseState;
@@ -159,6 +160,7 @@ pub struct WindowFrameChangedPayload {
     pub window: WindowId,
     pub new_frame: CGRect,
     pub mouse_state: Option<MouseState>,
+    pub mover: Mover,
     pub old_space: Option<SpaceId>,
     pub new_space: Option<SpaceId>,
     pub old_space_active: bool,
@@ -256,6 +258,7 @@ pub fn handle_window_frame_changed(
         window: wid,
         new_frame,
         mouse_state,
+        mover,
         old_space,
         new_space,
         old_space_active,
@@ -319,11 +322,7 @@ pub fn handle_window_frame_changed(
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
-    let dragging = state.windows.is_admitted(wid)
-        // Another window's drag says nothing about this one: only its own hold or a held
-        // button makes this frame change a drag.
-        && (mouse_state == Some(MouseState::Down) || state.windows.drag_on(wid).is_some());
-    if dragging {
+    if state.windows.is_admitted(wid) && mover == Mover::User {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
         let followed = state

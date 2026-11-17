@@ -12333,8 +12333,10 @@ fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
 
 /// Two tiled windows on the first of two displays; the user is modifier-dragging the first
 /// when the second, which nobody is dragging, reports a frame on the other display. The tap
-/// captured the drag's button, so the frame change carries the button as up.
-fn other_window_moves_during_a_modifier_drag() -> (Reactor, WindowId, WindowId, SpaceId) {
+/// captured the drag's button; the frame change carries the button as `button`.
+fn other_window_moves_during_a_modifier_drag(
+    button: MouseState,
+) -> (Reactor, WindowId, WindowId, SpaceId) {
     let (mut apps, mut reactor) = test_context();
     let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
     let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
@@ -12364,14 +12366,14 @@ fn other_window_moves_during_a_modifier_drag() -> (Reactor, WindowId, WindowId, 
         on_display2,
         Some(apps.windows[&other].last_seen_txid),
         Requested(false),
-        Some(MouseState::Up),
+        Some(button),
     ));
     (reactor, held, other, space1)
 }
 
 #[test]
 fn another_window_moving_does_not_take_over_the_drag() {
-    let (reactor, held, other, _) = other_window_moves_during_a_modifier_drag();
+    let (reactor, held, other, _) = other_window_moves_during_a_modifier_drag(MouseState::Up);
     assert!(
         reactor.state.windows.drag_on(held).is_some(),
         "the user's drag was replaced"
@@ -12384,6 +12386,86 @@ fn another_window_moving_does_not_take_over_the_drag() {
 
 #[test]
 fn another_window_seen_off_its_space_during_a_drag_keeps_its_assignment() {
-    let (reactor, _, other, space1) = other_window_moves_during_a_modifier_drag();
+    let (reactor, _, other, space1) = other_window_moves_during_a_modifier_drag(MouseState::Up);
     assert_eq!(reactor.assigned_space_for_window_id(other), Some(space1));
+}
+
+#[test]
+fn another_window_moving_with_the_button_down_does_not_take_a_modifier_drag() {
+    // The button really is down, but it is moving the held window: one pointer, one drag.
+    let (reactor, held, other, space1) =
+        other_window_moves_during_a_modifier_drag(MouseState::Down);
+    assert!(
+        reactor.state.windows.drag_on(held).is_some(),
+        "the user's drag was replaced"
+    );
+    assert!(
+        reactor.state.windows.drag_on(other).is_none(),
+        "an undragged window became a drag"
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(other), Some(space1));
+}
+
+/// Two tiled windows on the first of two displays; returns the second window, its frame and
+/// the reactor, with its app's requests drained.
+fn tiled_window_beside_a_second_display() -> (Apps, Reactor, WindowId, CGRect) {
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(SpaceId::new(1)),
+        Some(SpaceId::new(2)),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let wid = WindowId::new(7, 2);
+    let frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let _ = apps.requests();
+    (apps, reactor, wid, frame)
+}
+
+#[test]
+fn a_window_crossing_a_display_before_its_drag_registers_is_not_snapped_back() {
+    // The user grabbed the window, but macOS reports it on the other display before any of its
+    // frame changes reach Rift: there is no drag session yet, only the button held down.
+    let (mut apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
+    reactor.read_button = || Some(MouseState::Down);
+    let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+    reactor.handle_event(Event::WindowServerAppeared(
+        wsid,
+        SpaceId::new(2),
+        SpaceEventKind::User,
+    ));
+    let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+    info.frame = CGRect::new(CGPoint::new(1100., frame.origin.y), frame.size);
+    reactor.discover_test_windows(wid.pid, vec![(wid, info)], vec![WindowId::new(7, 1), wid]);
+    let snapped = apps.requests().into_iter().find(|request| {
+        matches!(request, Request::SetWindowFrames(frames, ..)
+            if frames.iter().any(|(w, _)| *w == wid))
+    });
+    assert!(
+        snapped.is_none(),
+        "rift pulled the window back while the button was down: {snapped:?}"
+    );
+}
+
+#[test]
+fn a_window_moved_with_no_button_reported_is_not_dragged_or_reassigned() {
+    // Trackpad tap-to-drag and three-finger drag may report no button. Continuous foreign moves
+    // across the display edge then look exactly like an app moving its own window, so Rift
+    // starts no drag, and the window keeps its space until a snapshot confirms the move.
+    let (apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
+    for x in [800., 950., 1100.] {
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            CGRect::new(CGPoint::new(x, frame.origin.y), frame.size),
+            Some(apps.windows[&wid].last_seen_txid),
+            Requested(false),
+            Some(MouseState::Up),
+        ));
+    }
+    assert!(
+        reactor.state.windows.drag().is_none(),
+        "no evidence, yet a drag started"
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(SpaceId::new(1)));
 }
