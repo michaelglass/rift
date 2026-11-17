@@ -1143,15 +1143,37 @@ impl Reactor {
     async fn run_reactor_loop(reactor: Rc<RefCell<Reactor>>, mut events: Receiver) {
         const MAX_EVENT_BATCH: usize = 64;
 
-        while let Some((span, event)) = events.recv().await {
-            let _guard = span.enter();
-            Self::handle_thread_event(&reactor, event);
-            for _ in 1..MAX_EVENT_BATCH {
-                let Ok((span, event)) = events.try_recv() else {
-                    break;
-                };
-                let _guard = span.enter();
-                Self::handle_thread_event(&reactor, event);
+        // The reconciler's earliest write deadline, rearmed only when it changes: an app that
+        // never answers stops holding back what waits behind its write even if no other event
+        // arrives.
+        let mut deadline_timer = crate::sys::timer::Timer::manual();
+        let mut armed = None;
+        loop {
+            let deadline = reactor.borrow().reconciler.next_deadline();
+            if deadline != armed {
+                armed = deadline;
+                deadline_timer.set_next_fire(armed.map_or(Duration::MAX, |deadline| {
+                    deadline.saturating_duration_since(Instant::now())
+                }));
+            }
+            tokio::select! {
+                Some(()) = deadline_timer.next(), if armed.is_some() => {
+                    // Fires once per arm; rearm next turn even if the deadline is unchanged.
+                    armed = None;
+                    reactor.borrow_mut().expire_writes();
+                }
+                received = events.recv() => {
+                    let Some((span, event)) = received else { break };
+                    let _guard = span.enter();
+                    Self::handle_thread_event(&reactor, event);
+                    for _ in 1..MAX_EVENT_BATCH {
+                        let Ok((span, event)) = events.try_recv() else {
+                            break;
+                        };
+                        let _guard = span.enter();
+                        Self::handle_thread_event(&reactor, event);
+                    }
+                }
             }
         }
         reactor.borrow_mut().gesture_event(crate::actor::gesture::Lifecycle::Reset);
