@@ -79,7 +79,6 @@ pub(crate) struct EventOutcome {
     pub(crate) drop_haptic: bool,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
     pub(crate) interactive_window_frame_write: Option<WindowFrameWriteRequest>,
-    pub(crate) pointer_released: Option<crate::model::drag::PointerReleased>,
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
     pub(crate) stdout_lines: Vec<String>,
@@ -149,7 +148,6 @@ impl EventOutcome {
                 .append(&mut other.pre_layout_window_frame_writes);
             self.interactive_window_frame_write = other.interactive_window_frame_write.take();
         }
-        self.pointer_released = self.pointer_released.or(other.pointer_released);
         self.close_window = other.close_window.or(self.close_window);
         self.service_config_update =
             other.service_config_update.or(self.service_config_update.take());

@@ -215,12 +215,9 @@ impl Session {
         !matches!(self.target, TargetState::None)
     }
 
-    /// Follows a native drag's frame; a modifier drag's frame is Rift's to set.
-    /// Returns `false` when this is not a native drag.
-    pub fn update_native(&mut self, frame: CGRect, current_space: Option<SpaceId>) -> bool {
-        if !matches!(self.kind, DragKind::NativeMove | DragKind::NativeResize) {
-            return false;
-        }
+    /// Follows a native drag's frame. A modifier drag's frame is Rift's to set, and its echoes
+    /// never get here.
+    pub fn update_native(&mut self, frame: CGRect, current_space: Option<SpaceId>) {
         self.source.last_frame = frame;
         self.kind = if self.source.origin_frame.size.same_as(frame.size) {
             DragKind::NativeMove
@@ -231,7 +228,6 @@ impl Session {
             self.source.current_space = current_space;
             self.invalidate_drop();
         }
-        true
     }
 
     /// Where a modifier move puts the window when the pointer is at `point`.
@@ -928,7 +924,11 @@ mod tests {
     #[test]
     fn only_the_owning_button_finishes_a_modifier_drag() {
         let mut windows = tracked(&[w(1)]);
-        windows.press_and_drag(w(1), modifier(true, DragScene::default()));
+        windows.press_and_drag(
+            w(1),
+            crate::actor::drag::MouseButton::Left,
+            modifier(true, DragScene::default()),
+        );
         assert!(windows.finish_drag(PointerReleased(MouseButton::Right)).is_none());
         assert!(windows.drag().is_some());
         assert!(windows.finish_drag(PointerReleased(MouseButton::Left)).is_some());
@@ -938,8 +938,16 @@ mod tests {
     #[test]
     fn starting_a_drag_ends_the_last_one() {
         let mut windows = tracked(&[w(1), w(2)]);
-        windows.press_and_drag(w(1), native(true, rect(), DragScene::default()));
-        windows.press_and_drag(w(2), native(true, rect(), DragScene::default()));
+        windows.press_and_drag(
+            w(1),
+            crate::actor::drag::MouseButton::Left,
+            native(true, rect(), DragScene::default()),
+        );
+        windows.press_and_drag(
+            w(2),
+            crate::actor::drag::MouseButton::Left,
+            native(true, rect(), DragScene::default()),
+        );
         assert_eq!(windows.drag().map(|(window, _)| window), Some(w(2)));
         assert!(windows.drag_on(w(1)).is_none());
     }

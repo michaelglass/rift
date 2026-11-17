@@ -112,12 +112,3 @@ impl TargetState {
 /// (a release the tap missed). The button a window's frame report carries is never one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerReleased(pub MouseButton);
-
-/// Who moved a window whose frame changed without Rift asking. It is read off the window's own
-/// placement: the user's, if their hand is on it; otherwise the app's (or anything but the
-/// pointer). No button state enters into it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mover {
-    User,
-    App,
-}

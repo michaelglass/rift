@@ -1008,7 +1008,7 @@ impl Input {
                 let captured = self.state.borrow().captured_button == Some(button);
                 // Native AX moves/resizes acquire drag state even with drag/drop disabled.
                 // Always deliver releases so that state cannot keep layout writes blocked.
-                self.events_tx.send(Event::MouseUp(button));
+                self.events_tx.send(Event::PointerReleased(button));
                 if captured {
                     self.state.borrow_mut().captured_button = None;
                 }
@@ -2576,7 +2576,7 @@ mod tests {
                 assert!(input.on_event(event_type, &event, None));
                 assert!(matches!(
                     events_rx.try_recv().unwrap().1,
-                    Event::MouseUp(released) if released == button
+                    Event::PointerReleased(released) if released == button
                 ));
             }
         }
@@ -2604,7 +2604,7 @@ mod tests {
         );
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
-            Event::MouseUp(crate::actor::drag::MouseButton::Right)
+            Event::PointerReleased(crate::actor::drag::MouseButton::Right)
         ));
     }
 

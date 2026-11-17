@@ -1883,7 +1883,7 @@ fn matching_rift_frame_clears_pending_target() {
     assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
 
     // A user drag beginning during the transaction clears it instead of accepting it blindly.
-    reactor.state.windows.press(wid);
+    reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
         accepted,
@@ -1976,7 +1976,7 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
             CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
         );
         if mouse == MouseState::Down {
-            reactor.state.windows.press(wid);
+            reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
         }
 
         let outcome = reactor
@@ -2208,6 +2208,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         } else {
             reactor.state.windows.press_and_drag(
                 wid,
+                crate::actor::drag::MouseButton::Left,
                 crate::actor::drag::Session::native(source, Default::default()),
             );
         }
@@ -2235,7 +2236,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         assert!(reactor.test_active_workspace_windows(space).contains(&added));
         reactor.send_layout_event(LayoutEvent::WindowRemoved(added));
         assert_eq!(reactor.layout_update_count, before + 1);
-        reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
         assert!(!reactor.user_is_dragging());
         let before = reactor.layout_update_count;
         reactor.send_layout_event(observe());
@@ -2276,6 +2277,7 @@ fn cross_display_drag_clears_source_floating_position() {
     );
     reactor.state.windows.press_and_drag(
         wid,
+        crate::actor::drag::MouseButton::Left,
         crate::actor::drag::Session::native(
             crate::actor::drag::DragSource {
                 origin_frame: initial_frame,
@@ -2342,7 +2344,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         CGPoint::new(floating_frame.origin.x + 10., floating_frame.origin.y + 10.),
         floating_frame.size,
     );
-    reactor.state.windows.press(floating_wid);
+    reactor.state.windows.press(floating_wid, crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         floating_wid,
         latched_frame,
@@ -2367,7 +2369,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
     ));
     assert!(reactor.user_is_dragging());
     assert!(drop_target(&reactor).is_none());
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
 
     assert!(!reactor.user_is_dragging());
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating_wid));
@@ -2444,7 +2446,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
     ));
     assert!(reactor.user_is_dragging());
 
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
     assert!(!reactor.user_is_dragging());
 }
 
@@ -4255,7 +4257,7 @@ fn ignored_native_window_does_not_block_repeated_activation() {
 fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
     for woke in [true, false] {
         for input in [
-            Event::MouseUp(crate::actor::drag::MouseButton::Left),
+            Event::PointerReleased(crate::actor::drag::MouseButton::Left),
             Event::KeyboardInput,
         ] {
             let (mut apps, mut reactor) = test_context();
@@ -12114,7 +12116,9 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     }),
                 ));
                 if early == 7 {
-                    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+                    reactor.handle_event(Event::PointerReleased(
+                        crate::actor::drag::MouseButton::Left,
+                    ));
                 }
             }
             if early == 3 || early == 4 {
@@ -12435,7 +12439,7 @@ fn a_window_crossing_a_display_before_its_drag_registers_is_not_snapped_back() {
     // frame changes reach Rift: there is no drag session yet, only the press on the window.
     let (mut apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
     reactor.handle_event(Event::PointerPressed { point: frame.mid() });
-    assert_eq!(reactor.state.windows.pressed_window(), Some(wid));
+    assert_eq!(reactor.state.windows.is_pressed(wid), true);
     let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
     reactor.handle_event(Event::WindowServerAppeared(
         wsid,
@@ -12486,7 +12490,7 @@ fn a_window_moving_with_no_press_on_it_is_never_a_drag() {
                 Pointer::PressedOtherWindow => {
                     let point = reactor.state.windows.window(other).unwrap().frame_monotonic.mid();
                     reactor.handle_event(Event::PointerPressed { point });
-                    assert_eq!(reactor.state.windows.pressed_window(), Some(other));
+                    assert_eq!(reactor.state.windows.is_pressed(other), true);
                 }
             }
             for x in [800., 950., 1100.] {
@@ -12503,7 +12507,7 @@ fn a_window_moving_with_no_press_on_it_is_never_a_drag() {
                 reactor.state.windows.drag().is_none(),
                 "a drag started: {context}"
             );
-            assert!(reactor.state.windows.pressed(wid).is_none(), "{context}");
+            assert!(!reactor.state.windows.is_pressed(wid), "{context}");
             assert_eq!(
                 reactor.assigned_space_for_window_id(wid),
                 Some(SpaceId::new(1)),
@@ -12534,7 +12538,7 @@ fn a_click_holds_the_windows_transfer_only_until_release() {
     );
     assert!(!reactor.user_is_dragging(), "a press alone is not a drag");
 
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
     assert_eq!(reactor.state.windows.gripped(), None);
     assert!(reactor.state.windows.unheld(wid).is_some());
     assert_eq!(
@@ -12562,37 +12566,30 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
         } else {
             reactor.state.windows.press_and_drag(
                 wid,
+                crate::actor::drag::MouseButton::Left,
                 crate::actor::drag::Session::native(source, Default::default()),
             );
         }
+        // An observation of the gripped window itself is where a missed release is noticed.
         reactor.read_button = || Some(MouseState::Up);
-        let other = WindowId::new(7, 1);
-        let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic;
         reactor.handle_event(Event::WindowFrameChanged(
-            other,
-            CGRect::new(
-                CGPoint::new(other_frame.origin.x + 5., other_frame.origin.y),
-                other_frame.size,
-            ),
-            Some(apps.windows[&other].last_seen_txid),
+            wid,
+            CGRect::new(CGPoint::new(frame.origin.x + 5., frame.origin.y), frame.size),
+            Some(apps.windows[&wid].last_seen_txid),
             Requested(false),
             None,
         ));
         assert_eq!(reactor.user_is_dragging(), modifier, "modifier drag: {modifier}");
     }
-    // A press whose release was missed is cleared the same way.
+    // A press whose release was missed is cleared the same way, and the move that revealed it
+    // is then the app's: no drag starts.
     let (apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
     reactor.handle_event(Event::PointerPressed { point: frame.mid() });
     reactor.read_button = || Some(MouseState::Up);
-    let other = WindowId::new(7, 1);
-    let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic;
     reactor.handle_event(Event::WindowFrameChanged(
-        other,
-        CGRect::new(
-            CGPoint::new(other_frame.origin.x + 5., other_frame.origin.y),
-            other_frame.size,
-        ),
-        Some(apps.windows[&other].last_seen_txid),
+        wid,
+        CGRect::new(CGPoint::new(frame.origin.x + 5., frame.origin.y), frame.size),
+        Some(apps.windows[&wid].last_seen_txid),
         Requested(false),
         None,
     ));
