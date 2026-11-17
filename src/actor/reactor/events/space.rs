@@ -117,7 +117,6 @@ pub struct WindowServerAppearedObservations {
 pub fn handle_window_server_destroyed(
     state: &mut RiftState,
     transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
-    drag: &mut DragManager,
     payload: WindowServerLifecyclePayload,
     observations: WindowServerDestroyedObservations,
 ) -> anyhow::Result<EventOutcome> {
@@ -159,7 +158,6 @@ pub fn handle_window_server_destroyed(
                 outcome.absorb(window::handle_window_destroyed(
                     state,
                     transactions,
-                    drag,
                     window::WindowDestroyedPayload { window: wid },
                 ));
             }
@@ -332,7 +330,6 @@ pub fn handle_mission_control_native_entered(
 ) -> anyhow::Result<EventOutcome> {
     drag.suppress_preview(true);
     windows.end_drag();
-    drag.release_preview();
     let changed = !matches!(
         mission_control.mission_control_state,
         MissionControlState::Active

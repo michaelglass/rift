@@ -11,19 +11,15 @@ use objc2_core_foundation::{CGPoint, CGRect};
 use crate::actor::app::WindowId;
 use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
 use crate::layout_engine::{Direction, WindowDropAction};
+use crate::model::drag::TargetState;
 pub use crate::model::drag::{
     DragKind, DragScene, DragSceneTarget, DragSource, DropIntent, DropTarget, DropZone,
+    MouseButton, Session,
 };
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum MouseButton {
-    Left,
-    Right,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct DragMotion {
@@ -57,43 +53,6 @@ impl DragMotionPublisher {
     }
 
     pub fn wake_queued(&self) -> bool { self.0.wake_queued.load(Ordering::Acquire) }
-}
-
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub source: DragSource,
-    button: MouseButton,
-    pub pointer: CGPoint,
-    pub anchor_point: CGPoint,
-    pub scene: DragScene,
-    target: TargetState,
-    unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
-    pub kind: DragKind,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-enum TargetState {
-    #[default]
-    None,
-    Candidate(DropIntent),
-    Validated(DropTarget),
-}
-
-impl TargetState {
-    fn intent(self) -> Option<DropIntent> {
-        match self {
-            Self::Candidate(intent) => Some(intent),
-            Self::Validated(target) => Some(target.intent),
-            Self::None => None,
-        }
-    }
-
-    fn validated(self) -> Option<DropTarget> {
-        match self {
-            Self::Validated(target) => Some(target),
-            Self::None | Self::Candidate(_) => None,
-        }
-    }
 }
 
 impl Session {
@@ -145,8 +104,6 @@ impl Session {
             MouseAction::None => None,
         }
     }
-
-    pub fn button(&self) -> MouseButton { self.button }
 
     pub fn target(&self) -> Option<DropTarget> { self.target.validated() }
 
@@ -274,20 +231,23 @@ impl Session {
         true
     }
 
+    /// Where a modifier move puts the window when the pointer is at `point`.
+    pub fn modifier_frame_at(&self, point: CGPoint) -> CGRect {
+        CGRect::new(
+            CGPoint::new(
+                self.source.origin_frame.origin.x + (point.x - self.anchor_point.x),
+                self.source.origin_frame.origin.y + (point.y - self.anchor_point.y),
+            ),
+            self.source.origin_frame.size,
+        )
+    }
+
     pub fn motion(&mut self, settings: &DragDropSettings, motion: DragMotion) -> bool {
         let home_preview_changed = contains(self.source.origin_frame, self.pointer, 0.0)
             != contains(self.source.origin_frame, motion.point, 0.0);
         self.pointer = motion.point;
         if self.kind == DragKind::ModifierMove {
-            let dx = motion.point.x - self.anchor_point.x;
-            let dy = motion.point.y - self.anchor_point.y;
-            self.source.last_frame = CGRect::new(
-                CGPoint::new(
-                    self.source.origin_frame.origin.x + dx,
-                    self.source.origin_frame.origin.y + dy,
-                ),
-                self.source.origin_frame.size,
-            );
+            self.source.last_frame = self.modifier_frame_at(motion.point);
         }
         let next = if self.kind == DragKind::NativeResize
             || !self.source.tiled
@@ -576,6 +536,7 @@ mod tests {
     use objc2_core_foundation::CGSize;
 
     use super::*;
+    use crate::model::window_store::{WindowStore, WindowVisibility};
 
     fn frame(x: f64, y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
@@ -616,6 +577,13 @@ mod tests {
         }
     }
     fn settings() -> DragDropSettings { DragDropSettings::default() }
+    fn tracked(windows: &[WindowId]) -> WindowStore {
+        let mut store = WindowStore::default();
+        for window in windows {
+            store.set_visibility(*window, WindowVisibility::Visible);
+        }
+        store
+    }
     fn motion(drag: &mut Session, x: f64, y: f64) -> bool {
         drag.motion(&settings(), DragMotion { point: point(x, y) })
     }
@@ -951,7 +919,7 @@ mod tests {
 
     #[test]
     fn only_the_owning_button_finishes_a_modifier_drag() {
-        let mut windows = crate::model::window_store::WindowStore::default();
+        let mut windows = tracked(&[w(1)]);
         windows.start_drag(modifier(true, DragScene::default()));
         assert!(windows.finish_drag(MouseButton::Right).is_none());
         assert!(windows.drag().is_some());
@@ -961,12 +929,12 @@ mod tests {
 
     #[test]
     fn starting_a_drag_ends_the_last_one() {
-        let mut windows = crate::model::window_store::WindowStore::default();
+        let mut windows = tracked(&[w(1), w(2)]);
         windows.start_drag(native(true, rect(), DragScene::default()));
         let mut other = source(true);
         other.window = w(2);
         windows.start_drag(Session::native(other, DragScene::default()));
-        assert_eq!(windows.held().map(|(window, _)| window), Some(w(2)));
+        assert_eq!(windows.drag().map(|session| session.source.window), Some(w(2)));
         assert!(windows.drag_on(w(1)).is_none());
     }
 }

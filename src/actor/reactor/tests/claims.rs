@@ -234,8 +234,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
 fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-    start_modifier_drag(
-        &mut reactor,
+    reactor.start_modifier_drag(
         crate::actor::drag::DragSource {
             window: wid,
             origin_frame: frame,

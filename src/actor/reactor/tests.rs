@@ -1590,7 +1590,6 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     let outcome = topology_workflow::handle_window_server_destroyed(
         &mut reactor.state,
         &reactor.transaction_manager,
-        &mut reactor.drag_manager,
         topology_workflow::WindowServerLifecyclePayload {
             window_server_id: wsid,
             space: space1,
@@ -2201,13 +2200,8 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
             tiled: true,
         };
         if modifier {
-            start_modifier_drag(&mut reactor, source, frame.mid());
-            reactor.state.windows.held_mut().unwrap().1.motion(
-                &reactor.config.settings.drag_drop,
-                crate::actor::drag::DragMotion {
-                    point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
-                },
-            );
+            reactor.start_modifier_drag(source, frame.mid());
+            reactor.nudge_drag(30.0);
         } else {
             reactor
                 .state
@@ -2351,14 +2345,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         Some(MouseState::Down),
     ));
     assert!(reactor.is_in_drag());
-    assert!(
-        reactor
-            .state
-            .windows
-            .drag()
-            .and_then(crate::actor::drag::Session::target)
-            .is_none()
-    );
+    assert!(drop_target(&reactor).is_none());
 
     // Keep dragging with the swap still latched, then release.
     let released_frame = CGRect::new(
@@ -2373,14 +2360,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         Some(MouseState::Down),
     ));
     assert!(reactor.is_in_drag());
-    assert!(
-        reactor
-            .state
-            .windows
-            .drag()
-            .and_then(crate::actor::drag::Session::target)
-            .is_none()
-    );
+    assert!(drop_target(&reactor).is_none());
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
 
     assert!(!reactor.is_in_drag());
@@ -2410,13 +2390,8 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
         tiled: true,
     };
 
-    start_modifier_drag(&mut reactor, source, frame.mid());
-    reactor.state.windows.held_mut().unwrap().1.motion(
-        &reactor.config.settings.drag_drop,
-        crate::actor::drag::DragMotion {
-            point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
-        },
-    );
+    reactor.start_modifier_drag(source, frame.mid());
+    reactor.nudge_drag(30.0);
     assert!(reactor.is_in_drag());
     let before = reactor.layout_update_count;
     reactor.apply_event_outcome(EventOutcome::layout_changed(false));
@@ -2426,13 +2401,8 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     let move_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
     assert!(move_cancel.arrange.passes > 0);
 
-    start_modifier_drag(&mut reactor, source, frame.mid());
-    reactor.state.windows.held_mut().unwrap().1.motion(
-        &reactor.config.settings.drag_drop,
-        crate::actor::drag::DragMotion {
-            point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
-        },
-    );
+    reactor.start_modifier_drag(source, frame.mid());
+    reactor.nudge_drag(30.0);
     let mut config = reactor.config.clone();
     config.settings.drag_drop.enabled = false;
     let config_cancel = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
@@ -2448,8 +2418,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
     let (mut reactor, wid, _wsid, space, _space2, frame, _) =
         reactor_with_window_on_space1_two_displays();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-    start_modifier_drag(
-        &mut reactor,
+    reactor.start_modifier_drag(
         crate::actor::drag::DragSource {
             window: wid,
             origin_frame: frame,
@@ -3825,7 +3794,6 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     let outcome = topology_workflow::handle_window_server_destroyed(
         &mut reactor.state,
         &reactor.transaction_manager,
-        &mut reactor.drag_manager,
         topology_workflow::WindowServerLifecyclePayload {
             window_server_id: wsid,
             space,
@@ -6695,12 +6663,8 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         },
     );
     for retired in retired {
-        let outcome = window_workflow::apply_window_retirement(
-            &reactor.transaction_manager,
-            &mut reactor.drag_manager,
-            &mut reactor.state.windows,
-            retired,
-        );
+        let outcome =
+            window_workflow::apply_window_retirement(&reactor.transaction_manager, retired);
         reactor.apply_event_outcome(outcome);
     }
     assert!(reactor.state.windows.record(window).is_none());
@@ -7716,7 +7680,6 @@ fn authoritative_destruction_removes_window_server_backed_state() {
     let outcome = window_workflow::handle_window_destroyed(
         &mut reactor.state,
         &reactor.transaction_manager,
-        &mut reactor.drag_manager,
         window_workflow::WindowDestroyedPayload { window: wid },
     );
     reactor.apply_event_outcome(outcome);
@@ -10353,7 +10316,6 @@ fn fullscreen_exit_waits_for_ax_identity_without_losing_workspace() {
     let outcome = window_workflow::handle_window_destroyed(
         &mut reactor.state,
         &reactor.transaction_manager,
-        &mut reactor.drag_manager,
         window_workflow::WindowDestroyedPayload { window },
     );
     reactor.apply_event_outcome(outcome);
@@ -12104,7 +12066,6 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 let outcome = topology_workflow::handle_window_server_destroyed(
                     &mut reactor.state,
                     &reactor.transaction_manager,
-                    &mut reactor.drag_manager,
                     topology_workflow::WindowServerLifecyclePayload {
                         window_server_id: wsid,
                         space,
@@ -12315,19 +12276,8 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
     }
 }
 
-fn start_modifier_drag(
-    reactor: &mut Reactor,
-    source: crate::actor::drag::DragSource,
-    point: CGPoint,
-) {
-    let session = crate::actor::drag::Session::modifier(
-        source,
-        crate::actor::drag::MouseButton::Left,
-        point,
-        crate::common::config::MouseAction::Move,
-        crate::actor::drag::DragScene::default(),
-    );
-    reactor.state.windows.start_drag(session.unwrap());
+fn drop_target(reactor: &Reactor) -> Option<crate::actor::drag::DropTarget> {
+    reactor.state.windows.drag().and_then(crate::actor::drag::Session::target)
 }
 
 #[test]
@@ -12367,22 +12317,8 @@ fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
     reactor.handle_event(Event::WindowServerAppeared(wsid, space2, SpaceEventKind::User));
     let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
     info.frame = dragged;
-    reactor.request_window_inventory(wid.pid);
     let mut requests = apps.requests();
-    let token = requests
-        .iter()
-        .find_map(|request| match request {
-            Request::RefreshWindowInventory(token) => Some(*token),
-            _ => None,
-        })
-        .expect("inventory refresh requested");
-    reactor.handle_event(Event::WindowsDiscovered {
-        pid: wid.pid,
-        token,
-        successful: true,
-        new: vec![(wid, info)],
-        known_visible: vec![WindowId::new(7, 1), wid],
-    });
+    reactor.discover_test_windows(wid.pid, vec![(wid, info)], vec![WindowId::new(7, 1), wid]);
     requests.extend(apps.requests());
     let snapped = requests.iter().find(|request| {
         matches!(request, Request::SetWindowFrames(frames, ..)

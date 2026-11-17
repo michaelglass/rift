@@ -1,5 +1,6 @@
 use tracing::{trace, warn};
 
+use crate::actor::drag::{DragKind, DragScene, DragSceneTarget, MouseButton};
 use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
@@ -11,8 +12,8 @@ pub fn build_drag_scene(
     layout: &LayoutManager,
     source: crate::actor::app::WindowId,
     space: SpaceId,
-) -> crate::actor::drag::DragScene {
-    crate::actor::drag::DragScene {
+) -> DragScene {
+    DragScene {
         action_override: layout.layout_engine.drop_action_override(space),
         source_neighbors: layout.layout_engine.source_move_neighbors(space, source),
         targets: layout
@@ -21,7 +22,7 @@ pub fn build_drag_scene(
             .into_iter()
             .filter(|window| *window != source)
             .filter_map(|window| {
-                Some(crate::actor::drag::DragSceneTarget {
+                Some(DragSceneTarget {
                     window,
                     space,
                     frame: state.windows.window(window)?.frame_monotonic,
@@ -33,21 +34,18 @@ pub fn build_drag_scene(
 
 #[derive(Debug, Clone)]
 pub struct MouseUpPayload {
-    pub button: crate::actor::drag::MouseButton,
+    pub button: MouseButton,
     pub final_space: Option<SpaceId>,
 }
 
-pub fn handle_cancel(state: &mut RiftState, drag: &mut DragManager) -> EventOutcome {
-    drag.release_preview();
+pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
     let Some(cancelled) = state.windows.end_drag() else {
         return EventOutcome::no_change();
     };
     let source = cancelled.source;
     match (cancelled.kind, source.tiled) {
-        (crate::actor::drag::DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
-        (crate::actor::drag::DragKind::ModifierMove, false)
-            if source.last_frame != source.origin_frame =>
-        {
+        (DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
+        (DragKind::ModifierMove, false) if source.last_frame != source.origin_frame => {
             EventOutcome::no_change().with_pre_layout_window_frame_write(
                 source.window,
                 source.origin_frame,
@@ -68,13 +66,11 @@ pub fn handle_mouse_up(
     let Some(commit) = state.windows.finish_drag(payload.button) else {
         return Ok(outcome);
     };
-    drag.release_preview();
     let window = commit.source.window;
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target()
         && commit.source.current_space == Some(target.intent.space)
-        && state.windows.contains_window(window)
         && state.windows.contains_window(target.intent.window)
     {
         trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");

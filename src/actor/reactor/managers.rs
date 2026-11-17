@@ -69,8 +69,12 @@ impl DragManager {
         if cfg!(test) {
             return;
         }
-        let Some(target) = held
-            .and_then(Session::preview_target)
+        let Some(session) = held else {
+            self.release_preview();
+            return;
+        };
+        let Some(target) = session
+            .preview_target()
             .filter(|_| self.preview_enabled && !self.preview_suppressed)
         else {
             self.hide_preview();
@@ -420,8 +424,8 @@ impl LayoutManager {
         let skip_wid = reactor
             .state
             .windows
-            .held()
-            .and_then(|(window, session)| session.source.tiled.then_some(window));
+            .drag()
+            .and_then(|session| session.source.tiled.then_some(session.source.window));
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();

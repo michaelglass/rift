@@ -285,7 +285,7 @@ pub fn handle_config_updated(
             anyhow::anyhow!("configuration reload retained previous workspace graph: {error}")
         })?;
     let mut outcome = if config.settings.drag_drop != new_config.settings.drag_drop {
-        super::drag::handle_cancel(state, drag)
+        super::drag::handle_cancel(state)
     } else {
         EventOutcome::no_change()
     };
