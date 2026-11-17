@@ -178,7 +178,7 @@ pub fn handle_command_layout(
         outcome.display_switch_warp = Some(space);
     }
     if !response_changed || arrange_space_scope.is_some() {
-        if !outcome.pre_layout_window_frame_writes.is_empty() && command_space != workspace_space {
+        if !outcome.placements.is_empty() && command_space != workspace_space {
             outcome.arrange.secondary_space_scope = command_space;
         }
     }
@@ -207,7 +207,7 @@ pub(in crate::actor::reactor) fn request_window_transfer(
         && let Some(frame) = frame
     {
         layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
-        EventOutcome::no_change().with_pre_layout_window_frame_write(window, frame, true)
+        EventOutcome::no_change().with_placement(window, frame)
     } else {
         EventOutcome::no_change()
     }
