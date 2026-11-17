@@ -2083,11 +2083,15 @@ impl Reactor {
                         &self.config,
                     );
                 }
-                let Some(new_frame) = session.interactive_frame() else {
+                // The session is in hand, so this is the dragged window's own frame: the one
+                // write a dragged window gets.
+                let Some(write) = self.reconciler.follow(window, session) else {
                     return Ok(EventOutcome::no_change());
                 };
-                return Ok(EventOutcome::no_change()
-                    .with_interactive_window_frame_write(window, new_frame, false));
+                if !self.refreshes_blocked() && self.state.windows.can_place_window(window) {
+                    self.send_interactive(write);
+                }
+                return Ok(EventOutcome::no_change());
             }
             Event::DragCancel => {
                 return Ok(interaction_workflow::handle_cancel(&mut self.state));
@@ -3013,43 +3017,14 @@ impl Reactor {
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
         self.expire_writes();
-        for write in outcome
-            .pre_layout_window_frame_writes
-            .into_iter()
-            .chain(outcome.interactive_window_frame_write)
-        {
+        for write in outcome.pre_layout_window_frame_writes {
             if self.refreshes_blocked() {
                 break;
-            }
-            // Coalesced writes follow the pointer; they stop with the drag of their window.
-            if write.coalesced && self.state.windows.drag_on(write.window).is_none() {
-                continue;
             }
             if !self.state.windows.can_place_window(write.window) {
                 continue;
             }
-            if !write.coalesced {
-                self.place_window(write.window, write.frame, write.requested);
-                continue;
-            }
-            let window_server_id =
-                self.state.windows.window(write.window).and_then(|window| window.info.sys_id);
-            let transaction = if let Some(window_server_id) = window_server_id {
-                let transaction = self.transaction_manager.generate_next_txid(window_server_id);
-                self.transaction_manager.store_txid(window_server_id, transaction, write.frame);
-                transaction
-            } else {
-                TransactionId::default()
-            };
-            if let Some(app) = self.app_manager.apps.get(&write.window.pid) {
-                app.handle.send_interactive_frame(
-                    write.window,
-                    write.frame,
-                    write.set_size,
-                    transaction,
-                    crate::actor::app::FrameSource::Drag,
-                );
-            }
+            self.place_window(write.window, write.frame, write.requested);
         }
 
         #[cfg(test)]
