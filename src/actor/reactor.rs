@@ -1974,7 +1974,9 @@ impl Reactor {
                 let (old_space, new_space) = if assigned_space.is_some()
                     && new_space != assigned_space
                     && effective_mouse_state != Some(MouseState::Down)
-                    && !self.is_in_drag()
+                    // Only this window's own drag vouches for where it is; another window's
+                    // drag leaves this observation as doubtful as with no drag at all.
+                    && self.state.windows.drag_on(wid).is_none()
                 {
                     self.request_space_snapshot();
                     (assigned_space, assigned_space)
