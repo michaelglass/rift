@@ -369,6 +369,17 @@ impl Reconciler {
             .collect()
     }
 
+    /// When the earliest unanswered write stops being waited for.
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        self.unsettled
+            .values()
+            .filter_map(|sync| match sync {
+                Sync::InFlight { deadline, .. } => Some(*deadline),
+                Sync::Settled | Sync::Refused { .. } | Sync::Adrift => None,
+            })
+            .min()
+    }
+
     /// Whether a write to `window` is with its app.
     pub(crate) fn in_flight(&self, window: WindowId) -> bool {
         match self.sync(window) {
@@ -785,6 +796,22 @@ mod tests {
         assert_eq!(
             reconciler.answer(window(), at(13.), Owner::Rift),
             (refused, None)
+        );
+    }
+
+    #[test]
+    fn the_next_deadline_is_the_earliest_unanswered_write() {
+        let mut reconciler = Reconciler::default();
+        assert_eq!(reconciler.next_deadline(), None);
+        let start = reconciler.clock.now();
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
+        reconciler.clock.advance(Duration::from_millis(100));
+        _ = reconciler.want(WindowId::new(1, 2), at(10.), at(0.), Want::Arrange, Owner::Rift);
+        assert_eq!(reconciler.next_deadline(), Some(start + WRITE_DEADLINE));
+        _ = reconciler.answer(window(), at(10.), Owner::Rift);
+        assert_eq!(
+            reconciler.next_deadline(),
+            Some(start + Duration::from_millis(100) + WRITE_DEADLINE)
         );
     }
 
