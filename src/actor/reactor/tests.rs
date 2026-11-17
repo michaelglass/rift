@@ -327,10 +327,32 @@ fn it_ignores_stale_resize_events() {
     assert!(!requests.is_empty());
     let events_1 = apps.simulate_events_for_requests(requests);
 
+    // The second app changes where the first app's windows belong while their first writes
+    // are still unanswered: those new frames wait, one write per window at a time.
     reactor.handle_events(apps.make_app(2, make_windows(2)));
-    assert!(!apps.requests().is_empty());
+    let waiting = apps.requests();
+    assert!(!waiting.is_empty());
+    let first_app = |requests: &[Request]| {
+        requests.iter().any(|request| {
+            matches!(request, Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(wid, _)| wid.pid == 1))
+        })
+    };
+    assert!(
+        !first_app(&waiting),
+        "a second write went out before the first was answered"
+    );
 
+    // The answers to the first writes release what waited, once.
     for event in dbg!(events_1) {
+        reactor.handle_event(event);
+    }
+    let released = apps.requests();
+    assert!(
+        first_app(&released),
+        "the queued frames were not sent: {released:?}"
+    );
+    for event in apps.simulate_events_for_requests(released) {
         reactor.handle_event(event);
     }
     let requests = apps.requests();
@@ -416,19 +438,21 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
     ));
 
     reactor.handle_events(apps.make_app(1, make_windows(2)));
-    let events_1 = apps.simulate_events();
+    apps.simulate_until_quiet(&mut reactor);
     let state_1 = apps.windows.clone();
     assert!(!state_1.is_empty());
-
-    for event in events_1 {
-        reactor.handle_event(event);
-    }
     assert!(apps.requests().is_empty());
 
+    // The apps apply these writes, but their answers never reach Rift.
     reactor.handle_events(apps.make_app(2, make_windows(1)));
     let _events_2 = apps.simulate_events();
 
+    // The frames the destroy asks for wait behind the unanswered writes, and go out once
+    // Rift stops waiting for those.
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(2, 1)));
+    assert!(apps.simulate_events().is_empty());
+    reactor.reconciler.clock.advance(std::time::Duration::from_secs(1));
+    reactor.expire_writes();
     let _events_3 = apps.simulate_events();
     let state_3 = apps.windows;
 
@@ -3546,8 +3570,13 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         .map(|(_, frame)| frame)
         .expect("inactive-workspace window should still be laid out to a hidden position");
 
+    // Rift's write parking the window is still with the app.
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
     reactor.transaction_manager.store_txid(wsid, txid, hidden_target);
+    let known = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let _ = reactor
+        .reconciler
+        .want(wid, hidden_target, known, super::reconciler::Want::Place);
 
     assert!(!reactor.update_layout_or_warn(false, true, None));
     assert!(
@@ -12594,6 +12623,63 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
         None,
     ));
     assert_eq!(reactor.state.windows.gripped(), None, "{wid:?} stayed pressed");
+}
+
+/// Delivers requests and their answers until none are left, and says how many rounds it took.
+fn rounds_until_quiet(apps: &mut Apps, reactor: &mut Reactor) -> usize {
+    for round in 0..20 {
+        let requests = apps.requests();
+        if requests.is_empty() {
+            return round;
+        }
+        for event in apps.simulate_events_for_requests(requests) {
+            reactor.handle_event(event);
+        }
+    }
+    panic!("Rift and its apps never went quiet: a write loop");
+}
+
+#[test]
+fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_again() {
+    use super::reconciler::Sync;
+    use super::testing::TestSizing;
+    for sizing in [
+        TestSizing::AtLeast(CGSize::new(700., 0.)),
+        TestSizing::Cells(7.),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let stubborn = WindowId::new(1, 1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        apps.windows.get_mut(&stubborn).unwrap().sizing = sizing;
+
+        // Another window arrives; the stubborn one is asked to take a new size.
+        reactor.handle_events(apps.make_app(2, make_windows(1)));
+        rounds_until_quiet(&mut apps, &mut reactor);
+
+        let Sync::Refused { wanted, got } = reactor.reconciler.sync(stubborn) else {
+            panic!(
+                "{sizing:?}: expected a refusal, got {:?}",
+                reactor.reconciler.sync(stubborn)
+            );
+        };
+        assert!(!got.same_as(wanted));
+        assert!(
+            got.same_as(apps.windows[&stubborn].frame),
+            "one read-back: what the app did"
+        );
+        assert!(reactor.state.windows.window(stubborn).unwrap().frame_monotonic.same_as(got));
+
+        // Arranging again asks nothing more of it.
+        for _ in 0..3 {
+            let _ = reactor.update_layout_or_warn(false, false, None);
+            assert!(
+                apps.requests().is_empty(),
+                "{sizing:?}: a refused frame was asked again"
+            );
+        }
+    }
 }
 
 /// A layout as the appliers take it: without the dragged window.

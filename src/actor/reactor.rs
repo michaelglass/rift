@@ -482,6 +482,7 @@ pub struct Reactor {
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
     transaction_manager: transaction_manager::TransactionManager,
+    reconciler: reconciler::Reconciler,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
@@ -611,6 +612,7 @@ impl Reactor {
                 _window_notify_tx: window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
+            reconciler: Default::default(),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,
@@ -1051,13 +1053,19 @@ impl Reactor {
             == Some("com.apple.loginwindow")
     }
 
-    fn clear_pending_hidden_window_targets(&self) {
-        for (wid, window) in self.state.windows.iter_windows() {
-            if self.hidden_assigned_space_for_window_id(wid).is_none() {
-                continue;
-            }
-            if let Some(wsid) = window.info.sys_id {
-                self.transaction_manager.clear_target_for_window(wsid);
+    fn clear_pending_hidden_window_targets(&mut self) {
+        let hidden: Vec<_> = self
+            .state
+            .windows
+            .iter_windows()
+            .filter(|(wid, _)| self.hidden_assigned_space_for_window_id(*wid).is_some())
+            .map(|(wid, window)| (wid, window.info.sys_id))
+            .collect();
+        for (wid, server_id) in hidden {
+            // Whatever a parked window answered before the topology changed no longer holds.
+            self.reconciler.forget(wid);
+            if let Some(server_id) = server_id {
+                self.transaction_manager.clear_target_for_window(server_id);
             }
         }
     }
@@ -3004,6 +3012,7 @@ impl Reactor {
         // Some transitions need to place a window on its destination display
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
+        self.expire_writes();
         for write in outcome
             .pre_layout_window_frame_writes
             .into_iter()
@@ -4273,6 +4282,20 @@ impl Reactor {
         )
     }
 
+    /// Whether an answer carrying `last_seen` answers the latest write Rift sent `window`. The
+    /// transaction id is what ties an answer to its write; geometry cannot.
+    fn answers_latest_write(&self, window: WindowId, last_seen: Option<TransactionId>) -> bool {
+        let Some(seen) = last_seen else { return true };
+        let Some(server_id) =
+            self.state.windows.window(window).and_then(|window| window.info.sys_id)
+        else {
+            return true;
+        };
+        let waiting = self.reconciler.in_flight(window)
+            || self.transaction_manager.get_target_frame(server_id).is_some();
+        !waiting || seen == self.transaction_manager.get_last_sent_txid(server_id)
+    }
+
     /// Every observation of a window's frame comes through here: its change notification, or
     /// an inventory refresh that found it somewhere new. Rift's own echoes are recognised
     /// first; what is left is someone else's move, the user's if their hand is on the window.
@@ -4290,6 +4313,13 @@ impl Reactor {
         // Whose change this is, if not Rift's own echo, is read off the user's hand: on
         // this window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
+        if requested && self.answers_latest_write(wid, last_seen) {
+            let (_answer, queued) = self.reconciler.answer(wid, new_frame);
+            // The desire that waited behind the answered write goes out now.
+            if let Some(write) = queued {
+                self.send_arranged(write);
+            }
+        }
         // A delayed move from an app can invalidate a parked frame even when
         // WindowServer reports Rift's transaction id. Drop the stale hide
         // target so the next layout can re-park the window.
