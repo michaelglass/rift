@@ -11601,6 +11601,7 @@ fn display_refresh_reapplies_frames_when_macos_resized_windows_without_notificat
 }
 
 mod claims;
+mod fuzz;
 
 #[test]
 fn master_restore_returns_a_window_to_the_display_it_was_saved_on() {
