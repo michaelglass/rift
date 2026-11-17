@@ -94,7 +94,7 @@ use crate::model::broadcast::{
 use crate::model::drag::PointerReleased;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::window_store::{Hand, NativeFullscreenTransition};
+use crate::model::window_store::{Hand, NativeFullscreenTransition, Pointer};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -425,6 +425,22 @@ pub enum WindowInvalidationSource {
     AxDestroyedNotification,
     InvalidUiElement,
     StaleAxElement,
+}
+
+/// Things Rift does on its own initiative that have a rule about the pointer; see
+/// `Reactor::may`.
+#[derive(Debug, Clone, Copy)]
+enum Initiative {
+    /// Move-window-to-display and move-workspace-to-display commands.
+    MoveBetweenDisplays,
+    /// Arrangement and geometry layout passes.
+    Arrange,
+    /// Retiring windows an inventory refresh no longer reports.
+    RetireWindows,
+    /// Following a workspace switch with focus.
+    SwitchWorkspaceFocus,
+    /// Warping the pointer or focus to a window.
+    WarpFocus,
 }
 
 /// Where an observation of a window's frame came from.
@@ -1055,10 +1071,32 @@ impl Reactor {
         }
     }
 
-    /// Policies that hold while the user drags any window: deferring arrangement and
-    /// retirement, ignoring display moves, not warping focus, ending on button release.
-    /// A question about one window asks `drag_on(window)` instead.
-    fn user_is_dragging(&self) -> bool { self.state.windows.drag().is_some() }
+    /// Whether Rift may do `initiative` right now, given what the pointer is doing. Every
+    /// initiative states its rule for every pointer state: a new initiative, or a new pointer
+    /// state, doesn't compile until its rule is written. A question about one window asks the
+    /// store about that window instead.
+    fn may(&self, initiative: Initiative) -> bool {
+        use Initiative::*;
+        use Pointer::*;
+        match (initiative, self.state.windows.pointer()) {
+            // A press alone changes nothing: the window hasn't moved.
+            (MoveBetweenDisplays, Idle | Pressing) => true,
+            (Arrange, Idle | Pressing) => true,
+            (RetireWindows, Idle | Pressing) => true,
+            (SwitchWorkspaceFocus, Idle | Pressing) => true,
+            (WarpFocus, Idle | Pressing) => true,
+            // While the user drags a window, Rift keeps its hands off the layout and the
+            // pointer until the drop.
+            (MoveBetweenDisplays, Dragging) => false,
+            (Arrange, Dragging) => false,
+            (RetireWindows, Dragging) => false,
+            (SwitchWorkspaceFocus, Dragging) => false,
+            (WarpFocus, Dragging) => false,
+        }
+    }
+
+    #[cfg(test)]
+    fn user_is_dragging(&self) -> bool { self.state.windows.pointer() == Pointer::Dragging }
 
     fn is_mission_control_active(&self) -> bool {
         matches!(
@@ -2642,7 +2680,7 @@ impl Reactor {
                 selector,
                 window_id,
             })) => {
-                if self.user_is_dragging() {
+                if !self.may(Initiative::MoveBetweenDisplays) {
                     warn!("Ignoring move-window-to-display while a drag is active");
                     return Ok(EventOutcome::no_change());
                 }
@@ -2725,7 +2763,7 @@ impl Reactor {
                 selector,
                 wrap_around,
             })) => {
-                if self.user_is_dragging() {
+                if !self.may(Initiative::MoveBetweenDisplays) {
                     warn!("Ignoring move-workspace-to-display while a drag is active");
                     return Ok(EventOutcome::no_change());
                 }
@@ -3019,7 +3057,7 @@ impl Reactor {
         }
         let mut layout_changed = false;
         if outcome.arrange.passes > 0
-            && (!self.user_is_dragging() || outcome.arrange.window_was_destroyed)
+            && (self.may(Initiative::Arrange) || outcome.arrange.window_was_destroyed)
         {
             // Reducers have finished mutating the model; arrange each affected space once.
             layout_changed = if outcome.arrange.instant || outcome.arrange.force_frames {
@@ -4625,7 +4663,7 @@ impl Reactor {
             self.refocus_manager.stale_cleanup_state,
             StaleCleanupState::Suppressed
         ) || self.is_mission_control_active()
-            || self.user_is_dragging()
+            || !self.may(Initiative::RetireWindows)
         {
             Vec::new()
         } else {
@@ -5315,7 +5353,8 @@ impl Reactor {
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, workspace_switch_space);
         if geometry_changed
-            && (!self.user_is_dragging() || matches!(event_clone, LayoutEvent::WindowRemoved(_)))
+            && (self.may(Initiative::Arrange)
+                || matches!(event_clone, LayoutEvent::WindowRemoved(_)))
         {
             self.update_layout_or_warn(
                 false,
@@ -5779,7 +5818,7 @@ impl Reactor {
                 self.space_state.menu_bar_space = Some(space);
             }
         }
-        if self.user_is_dragging() {
+        if !self.may(Initiative::SwitchWorkspaceFocus) {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
         }
@@ -5890,7 +5929,7 @@ impl Reactor {
                 {
                     focus_window = Some(wid);
                     false
-                } else if !self.user_is_dragging() {
+                } else if self.may(Initiative::WarpFocus) {
                     self.try_focus_or_warp_without_raise(Some(space), &mut focus_window)
                 } else {
                     false
@@ -5910,7 +5949,7 @@ impl Reactor {
             if self.state.windows.is_temporarily_unavailable(wid) {
                 focus_window = None;
                 if let Some(space) = workspace_switch_space
-                    && !self.user_is_dragging()
+                    && self.may(Initiative::WarpFocus)
                 {
                     let _ = self.try_focus_or_warp_without_raise(Some(space), &mut focus_window);
                 }
