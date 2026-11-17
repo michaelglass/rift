@@ -3,7 +3,7 @@ use rift_protocol::WindowClaimFlags;
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
-use crate::model::drag::{PointerReleased, Session};
+use crate::model::drag::{MouseButton, PointerReleased, Session};
 use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -35,85 +35,173 @@ pub struct PendingWindowTransfer {
     pub status: TransferStatus,
 }
 
-/// Who places a window: Rift, which may have a transfer in flight, or the user, from the
-/// moment the pointer presses on it.
-///
-/// A transfer is requested and advanced through [`Unheld`], which only an unheld placement
-/// yields. So a window the user has pressed or is dragging cannot be transferred:
-/// re-observing it on a space other than its assignment has nothing to pull it back with.
-/// A drag starts only from [`Pressed`], which only a pressed placement yields, so a frame
-/// change on any other window has nothing to start one from.
+/// What the user's hand is doing with the one window it is on.
 #[derive(Debug)]
-enum Placement {
-    Unheld(Option<PendingWindowTransfer>),
+enum Grip {
     /// The pointer is down on the window. Its transfer, if any, waits: a release without a
     /// drag puts it back, a drag supersedes it.
     Pressed(Option<PendingWindowTransfer>),
-    Held(Box<Session>),
-}
-
-impl Default for Placement {
-    fn default() -> Self { Placement::Unheld(None) }
-}
-
-impl Placement {
-    fn transfer(&self) -> Option<PendingWindowTransfer> {
-        match self {
-            Placement::Unheld(transfer) => *transfer,
-            Placement::Pressed(_) | Placement::Held(_) => None,
-        }
-    }
-
-    fn transfer_mut(&mut self) -> Option<&mut PendingWindowTransfer> {
-        match self {
-            Placement::Unheld(transfer) => transfer.as_mut(),
-            Placement::Pressed(_) | Placement::Held(_) => None,
-        }
-    }
-
-    fn held(&self) -> Option<&Session> {
-        match self {
-            Placement::Held(session) => Some(session),
-            Placement::Unheld(_) | Placement::Pressed(_) => None,
-        }
-    }
-
-    fn held_mut(&mut self) -> Option<&mut Session> {
-        match self {
-            Placement::Held(session) => Some(session),
-            Placement::Unheld(_) | Placement::Pressed(_) => None,
-        }
-    }
-
-    /// The user's hand is on the window: pressed or dragging.
-    fn gripped(&self) -> bool { !matches!(self, Placement::Unheld(_)) }
-
-    /// The user let go: a waiting transfer resumes, a drag's session is returned.
-    fn let_go(&mut self) -> Option<Box<Session>> {
-        match std::mem::take(self) {
-            Placement::Held(session) => Some(session),
-            Placement::Pressed(transfer) | Placement::Unheld(transfer) => {
-                *self = Placement::Unheld(transfer);
-                None
-            }
-        }
-    }
-
-    /// Forgets a transfer, in flight or waiting; a hold ends only with its drag.
-    fn clear_transfer(&mut self) {
-        if let Placement::Unheld(transfer) | Placement::Pressed(transfer) = self {
-            *transfer = None;
-        }
-    }
+    Dragging(Box<Session>),
 }
 
 /// The pointer is down on a window that isn't dragged yet: the only thing a drag starts from.
-pub(crate) struct Pressed<'a>(&'a mut Placement);
+pub(crate) struct Pressed<'a>(&'a mut Grip);
 
 impl Pressed<'_> {
     /// The pressed window moved under the pointer, or a modifier press took it: the drag begins,
     /// superseding any transfer that was waiting.
-    pub(crate) fn start(self, session: Session) { *self.0 = Placement::Held(Box::new(session)); }
+    pub(crate) fn start(self, session: Session) { *self.0 = Grip::Dragging(Box::new(session)); }
+}
+
+/// A record Rift places: the window's data and the transfer in flight, if any.
+#[derive(Debug, Default)]
+struct Loose {
+    record: WindowRecord,
+    transfer: Option<PendingWindowTransfer>,
+}
+
+/// The record of the one window the user's hand is on. It has no transfer to request or
+/// advance: the user places this window.
+#[derive(Debug)]
+struct Gripped {
+    window: WindowId,
+    record: WindowRecord,
+    grip: Grip,
+}
+
+/// Every window's record, each in exactly one place: with the windows Rift places, or in the
+/// single slot for the window under the user's hand. One slot, so one press or drag at a time;
+/// no transfer in the slot, so a pressed or dragged window can't be pulled back to its
+/// assignment; and a drag starts only from the slot's [`Pressed`].
+#[derive(Debug, Default)]
+struct Records {
+    loose: HashMap<WindowId, Loose>,
+    gripped: Option<Gripped>,
+}
+
+impl Records {
+    fn get(&self, window: &WindowId) -> Option<&WindowRecord> {
+        match &self.gripped {
+            Some(gripped) if gripped.window == *window => Some(&gripped.record),
+            _ => self.loose.get(window).map(|loose| &loose.record),
+        }
+    }
+
+    fn get_mut(&mut self, window: &WindowId) -> Option<&mut WindowRecord> {
+        match &mut self.gripped {
+            Some(gripped) if gripped.window == *window => Some(&mut gripped.record),
+            _ => self.loose.get_mut(window).map(|loose| &mut loose.record),
+        }
+    }
+
+    fn contains_key(&self, window: &WindowId) -> bool { self.get(window).is_some() }
+
+    /// The record for `window`, tracked loose if it is new.
+    fn entry_or_default(&mut self, window: WindowId) -> &mut WindowRecord {
+        match &mut self.gripped {
+            Some(gripped) if gripped.window == window => &mut gripped.record,
+            _ => &mut self.loose.entry(window).or_default().record,
+        }
+    }
+
+    /// `window`'s loose record, tracked if it is new; `None` for the gripped window.
+    fn loose_or_new(&mut self, window: WindowId) -> Option<&mut Loose> {
+        match &self.gripped {
+            Some(gripped) if gripped.window == window => None,
+            _ => Some(self.loose.entry(window).or_default()),
+        }
+    }
+
+    /// Removes the record wherever it is; a press or drag on it ends with it.
+    fn remove(&mut self, window: &WindowId) -> Option<WindowRecord> {
+        if self.gripped_window() == Some(*window) {
+            return self.gripped.take().map(|gripped| gripped.record);
+        }
+        self.loose.remove(window).map(|loose| loose.record)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&WindowId, &WindowRecord)> {
+        let gripped = self.gripped.iter().map(|gripped| (&gripped.window, &gripped.record));
+        self.loose.iter().map(|(window, loose)| (window, &loose.record)).chain(gripped)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &WindowRecord> {
+        self.iter().map(|(_, record)| record)
+    }
+
+    fn transfer(&self, window: &WindowId) -> Option<PendingWindowTransfer> {
+        self.loose.get(window)?.transfer
+    }
+
+    fn transfers_mut(&mut self) -> impl Iterator<Item = &mut PendingWindowTransfer> {
+        self.loose.values_mut().filter_map(|loose| loose.transfer.as_mut())
+    }
+
+    /// Forgets a transfer, in flight or waiting behind a press.
+    fn clear_transfer(&mut self, window: &WindowId) {
+        match &mut self.gripped {
+            Some(Gripped {
+                window: pressed,
+                grip: Grip::Pressed(transfer),
+                ..
+            }) if pressed == window => *transfer = None,
+            _ => {
+                if let Some(loose) = self.loose.get_mut(window) {
+                    loose.transfer = None;
+                }
+            }
+        }
+    }
+
+    fn gripped_window(&self) -> Option<WindowId> {
+        self.gripped.as_ref().map(|gripped| gripped.window)
+    }
+
+    /// The pointer goes down on `window`: its record moves into the slot, its transfer waits.
+    fn press(&mut self, window: WindowId) {
+        self.let_go();
+        if let Some(loose) = self.loose.remove(&window) {
+            self.gripped = Some(Gripped {
+                window,
+                record: loose.record,
+                grip: Grip::Pressed(loose.transfer),
+            });
+        }
+    }
+
+    /// The user's hand comes off: the record goes back among the loose ones, with the transfer
+    /// that waited behind a press. A drag's session is returned.
+    fn let_go(&mut self) -> Option<(WindowId, Option<Session>)> {
+        let Gripped { window, record, grip } = self.gripped.take()?;
+        let (transfer, session) = match grip {
+            Grip::Pressed(transfer) => (transfer, None),
+            Grip::Dragging(session) => (None, Some(*session)),
+        };
+        self.loose.insert(window, Loose { record, transfer });
+        Some((window, session))
+    }
+
+    /// macOS rekeyed the gripped window: the grip moves to its new identity.
+    fn regrip(&mut self, from: WindowId, to: WindowId) {
+        let Some(Gripped { record, grip, .. }) = self.gripped.take() else {
+            return;
+        };
+        let replacement = self.loose.remove(&to).unwrap_or_default();
+        self.loose.insert(from, Loose { record, transfer: None });
+        self.gripped = Some(Gripped {
+            window: to,
+            record: replacement.record,
+            grip,
+        });
+    }
+}
+
+impl std::ops::Index<&WindowId> for Records {
+    type Output = WindowRecord;
+
+    fn index(&self, window: &WindowId) -> &WindowRecord {
+        self.get(window).expect("tracked window")
+    }
 }
 
 /// A window as Rift may place it: its transfer slot. Only a window the user hasn't pressed
@@ -222,7 +310,6 @@ pub struct WindowRecord {
     visibility: WindowVisibility,
     // AX invalidation retains ownership until fresh AX evidence or confirmed retirement.
     ax_invalidated: bool,
-    placement: Placement,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
     claim: Option<WindowClaim>,
@@ -267,8 +354,23 @@ impl WindowRecord {
     pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }
 
     pub fn visibility(&self) -> WindowVisibility { self.visibility }
+}
 
-    pub fn pending_transfer(&self) -> Option<PendingWindowTransfer> { self.placement.transfer() }
+/// A window's record together with its transfer in flight, if it has one.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordRef<'a> {
+    record: &'a WindowRecord,
+    transfer: Option<PendingWindowTransfer>,
+}
+
+impl std::ops::Deref for RecordRef<'_> {
+    type Target = WindowRecord;
+
+    fn deref(&self) -> &WindowRecord { self.record }
+}
+
+impl RecordRef<'_> {
+    pub fn pending_transfer(&self) -> Option<PendingWindowTransfer> { self.transfer }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,7 +442,7 @@ impl WindowServerRecord {
 pub struct WindowStore {
     topology_revision: u64,
     operation_generation: u64,
-    windows: HashMap<WindowId, WindowRecord>,
+    windows: Records,
     app_windows: HashMap<i32, HashSet<WindowId>>,
     window_servers: HashMap<WindowServerId, WindowServerRecord>,
     workspace_windows: HashMap<VirtualWorkspaceId, HashSet<WindowId>>,
@@ -541,7 +643,7 @@ impl WindowStore {
         self.is_admitted(wid)
             && self
                 .record(wid)
-                .and_then(WindowRecord::window_server_id)
+                .and_then(|record| record.window_server_id())
                 .is_some_and(|wsid| self.is_window_visible(wsid))
     }
 
@@ -667,11 +769,11 @@ impl WindowStore {
         wid: WindowId,
         wsid: Option<WindowServerId>,
     ) -> Option<WindowId> {
-        if let Some(old) = self.record(wid).and_then(WindowRecord::window_server_id)
+        if let Some(old) = self.record(wid).and_then(|record| record.window_server_id())
             && Some(old) != wsid
         {
             self.remove_window_server_state(old);
-            self.windows.get_mut(&wid).unwrap().placement.clear_transfer();
+            self.windows.clear_transfer(&wid);
         }
         let wsid = wsid?;
         let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
@@ -713,7 +815,7 @@ impl WindowStore {
         };
         window.info.is_minimized = true;
         window.is_manageable = false;
-        if let Some(wsid) = self.record(wid).and_then(WindowRecord::window_server_id) {
+        if let Some(wsid) = self.record(wid).and_then(|record| record.window_server_id()) {
             self.mark_window_hidden(wsid);
         }
         self.set_visibility(wid, WindowVisibility::Minimized);
@@ -944,7 +1046,7 @@ impl WindowStore {
     pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
         let wsid = window.info.sys_id;
         let retained_workspace = {
-            let record = self.windows.entry(window_id).or_default();
+            let record = self.windows.entry_or_default(window_id);
             record.state = Some(window);
             record.ax_invalidated = false;
             record.workspace
@@ -993,8 +1095,11 @@ impl WindowStore {
         }
     }
 
-    pub fn record(&self, window_id: WindowId) -> Option<&WindowRecord> {
-        self.windows.get(&window_id)
+    pub fn record(&self, window_id: WindowId) -> Option<RecordRef<'_>> {
+        Some(RecordRef {
+            record: self.windows.get(&window_id)?,
+            transfer: self.windows.transfer(&window_id),
+        })
     }
 
     pub fn contains_window(&self, window_id: WindowId) -> bool { self.window(window_id).is_some() }
@@ -1051,8 +1156,8 @@ impl WindowStore {
                 && record.workspace.is_none()
                 && !record.rule_floating
                 && record.claim.is_none()
-                // The drag keeps its window's record until it ends.
-                && !record.placement.gripped()
+                // The user's hand keeps its window's record until it lets go.
+                && self.windows.gripped_window() != Some(window_id)
         });
         if should_remove {
             self.windows.remove(&window_id);
@@ -1107,7 +1212,7 @@ impl WindowStore {
             record.window_id = None;
             self.prune_window_server_record(previous_wsid);
         }
-        let window = self.windows.entry(window_id).or_default();
+        let window = self.windows.entry_or_default(window_id);
         window.window_server_id = Some(wsid);
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         if let Some(pending_record) = pending_record {
@@ -1159,7 +1264,7 @@ impl WindowStore {
         let changed = record.visible != visible;
         record.visible = visible;
         if let Some(wid) = record.window_id {
-            self.windows.entry(wid).or_default().visibility = if visible {
+            self.windows.entry_or_default(wid).visibility = if visible {
                 WindowVisibility::Visible
             } else {
                 WindowVisibility::Hidden
@@ -1183,7 +1288,7 @@ impl WindowStore {
         for record in self.window_servers.values_mut() {
             record.visible = false;
             if let Some(wid) = record.window_id {
-                self.windows.entry(wid).or_default().visibility = WindowVisibility::Hidden;
+                self.windows.entry_or_default(wid).visibility = WindowVisibility::Hidden;
             }
         }
         self.window_servers.retain(|_, record| !record.is_empty());
@@ -1288,7 +1393,7 @@ impl WindowStore {
             fullscreen_space,
             transition,
         };
-        self.windows.entry(window_id).or_default();
+        self.windows.entry_or_default(window_id);
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         self.upsert_native_fullscreen_record(record)
     }
@@ -1491,7 +1596,7 @@ impl WindowStore {
         if let Some(old_assignment) = old {
             self.remove_window_from_workspace_index(window_id, old_assignment);
         }
-        self.windows.entry(window_id).or_default().workspace = Some(assignment);
+        self.windows.entry_or_default(window_id).workspace = Some(assignment);
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         self.add_window_to_workspace_index(window_id, assignment);
         if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
@@ -1525,10 +1630,8 @@ impl WindowStore {
 
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
         // A claim keeps its saved workspace until release; only workspace removal clears it.
-        let old = self.windows.get_mut(&window_id).and_then(|record| {
-            record.placement.clear_transfer();
-            record.workspace.take()
-        });
+        self.windows.clear_transfer(&window_id);
+        let old = self.windows.get_mut(&window_id).and_then(|record| record.workspace.take());
         if let Some(old_assignment) = old {
             self.remove_window_from_workspace_index(window_id, old_assignment);
         }
@@ -1556,8 +1659,6 @@ impl WindowStore {
         };
 
         let ax_invalidated = self.windows[&from].ax_invalidated;
-        // The placement, a drag's hold included, moves with the identity.
-        let pending = std::mem::take(&mut self.windows.get_mut(&from).unwrap().placement);
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -1569,27 +1670,33 @@ impl WindowStore {
             self.add_window_to_workspace_index(to, assignment);
         }
 
-        let target = self.windows.entry(to).or_default();
+        let target = self.windows.entry_or_default(to);
         if workspace.is_some() {
             target.workspace = workspace;
         }
         target.ax_invalidated |= ax_invalidated;
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
-        // A drag holding the replacement keeps it unless the drag held the old identity.
-        if pending.gripped() || !target.placement.gripped() {
-            target.placement = pending;
-        }
         target.floating_display_geometry = geom;
         self.app_windows.entry(to.pid).or_default().insert(to);
+        // The user's grip moves with the identity. So does a transfer, unless the replacement
+        // is the window under the user's hand.
+        if self.windows.gripped_window() == Some(from) {
+            self.windows.regrip(from, to);
+        } else {
+            let transfer = self.windows.transfer(&from);
+            if let Some(replacement) = self.windows.loose.get_mut(&to) {
+                replacement.transfer = transfer;
+            }
+        }
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
             source.ax_invalidated = false;
             source.rule_floating = false;
-            source.placement.clear_transfer();
             source.floating_display_geometry = None;
         }
+        self.windows.clear_transfer(&from);
         if let Some(mut claim) = self.windows.get_mut(&from).and_then(|r| r.claim.take()) {
             self.unindex_claim(claim.owner, from);
             // The recognized identity's claim wins. A claim taken on the provisional
@@ -1636,7 +1743,7 @@ impl WindowStore {
     }
 
     pub fn replace_rule_floating(&mut self, window_id: WindowId, value: bool) -> bool {
-        let record = self.windows.entry(window_id).or_default();
+        let record = self.windows.entry_or_default(window_id);
         let previous = std::mem::replace(&mut record.rule_floating, value);
         self.prune_window_record(window_id);
         previous
@@ -1752,10 +1859,8 @@ impl WindowStore {
             return;
         }
 
-        for record in self.windows.values_mut() {
-            if let Some(operation) = record.placement.transfer_mut()
-                && operation.requested_space == old_space
-            {
+        for operation in self.windows.transfers_mut() {
+            if operation.requested_space == old_space {
                 operation.requested_space = new_space;
             }
         }
@@ -1792,7 +1897,7 @@ impl WindowStore {
     }
 
     pub fn set_visibility(&mut self, window_id: WindowId, visibility: WindowVisibility) {
-        self.windows.entry(window_id).or_default().visibility = visibility;
+        self.windows.entry_or_default(window_id).visibility = visibility;
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
     }
 
@@ -1808,11 +1913,11 @@ impl WindowStore {
 
     /// The drag holding `window`, if the user is dragging it.
     pub(crate) fn drag_on(&self, window: WindowId) -> Option<&Session> {
-        self.record(window)?.placement.held()
+        self.drag().filter(|(held, _)| *held == window).map(|(_, session)| session)
     }
 
     pub(crate) fn drag_on_mut(&mut self, window: WindowId) -> Option<&mut Session> {
-        self.windows.get_mut(&window)?.placement.held_mut()
+        self.drag_mut().filter(|(held, _)| *held == window).map(|(_, session)| session)
     }
 
     /// Tests have no window server: the tracked window whose known frame contains `point`.
@@ -1827,26 +1932,16 @@ impl WindowStore {
     }
 
     /// Whether the user's hand is on `window`: pressed, or dragging it.
-    pub(crate) fn is_gripped(&self, window: WindowId) -> bool {
-        self.record(window).is_some_and(|record| record.placement.gripped())
-    }
+    pub(crate) fn is_gripped(&self, window: WindowId) -> bool { self.gripped() == Some(window) }
 
     /// The window the user's hand is on, pressed or dragged.
-    pub(crate) fn gripped(&self) -> Option<WindowId> {
-        self.windows
-            .iter()
-            .find_map(|(window, record)| record.placement.gripped().then_some(*window))
-    }
+    pub(crate) fn gripped(&self) -> Option<WindowId> { self.windows.gripped_window() }
 
     /// The pointer pressed on `window`, which is tracked. One pointer: whatever it held
     /// before is let go.
     pub(crate) fn press(&mut self, window: WindowId) {
         self.end_drag();
-        if let Some(record) = self.windows.get_mut(&window)
-            && let Placement::Unheld(transfer) = &mut record.placement
-        {
-            record.placement = Placement::Pressed(transfer.take());
-        }
+        self.windows.press(window);
     }
 
     /// Tests start a drag the only way there is: a press on the window, then its drag.
@@ -1858,85 +1953,101 @@ impl WindowStore {
 
     /// The window the pointer is down on, if no drag has started.
     pub(crate) fn pressed_window(&self) -> Option<WindowId> {
-        self.gripped().filter(|window| self.drag_on(*window).is_none())
+        match &self.windows.gripped {
+            Some(Gripped {
+                window, grip: Grip::Pressed(_), ..
+            }) => Some(*window),
+            Some(Gripped { grip: Grip::Dragging(_), .. }) | None => None,
+        }
     }
 
     /// `window` if the pointer is down on it and no drag has started.
     pub(crate) fn pressed(&mut self, window: WindowId) -> Option<Pressed<'_>> {
-        let placement = &mut self.windows.get_mut(&window)?.placement;
-        matches!(placement, Placement::Pressed(_)).then_some(Pressed(placement))
+        match &mut self.windows.gripped {
+            Some(Gripped { window: pressed, grip, .. })
+                if *pressed == window && matches!(grip, Grip::Pressed(_)) =>
+            {
+                Some(Pressed(grip))
+            }
+            _ => None,
+        }
     }
 
-    /// The user's drag and the window it holds: the record the session is found on.
+    /// The user's drag and the window it holds.
     pub(crate) fn drag(&self) -> Option<(WindowId, &Session)> {
-        self.windows
-            .iter()
-            .find_map(|(window, record)| Some((*window, record.placement.held()?)))
+        match &self.windows.gripped {
+            Some(Gripped {
+                window,
+                grip: Grip::Dragging(session),
+                ..
+            }) => Some((*window, session)),
+            Some(Gripped { grip: Grip::Pressed(_), .. }) | None => None,
+        }
     }
 
     pub(crate) fn drag_mut(&mut self) -> Option<(WindowId, &mut Session)> {
-        self.windows
-            .iter_mut()
-            .find_map(|(window, record)| Some((*window, record.placement.held_mut()?)))
+        match &mut self.windows.gripped {
+            Some(Gripped {
+                window,
+                grip: Grip::Dragging(session),
+                ..
+            }) => Some((*window, session)),
+            Some(Gripped { grip: Grip::Pressed(_), .. }) | None => None,
+        }
     }
 
     /// The user's hand comes off whatever it was on, without a drop (a cancel, Mission
     /// Control, the window leaving Rift's control). A drag's session is returned.
     pub(crate) fn end_drag(&mut self) -> Option<(WindowId, Session)> {
-        let window = self.gripped()?;
-        self.let_go(window)
-    }
-
-    fn let_go(&mut self, window: WindowId) -> Option<(WindowId, Session)> {
-        let session = self.windows.get_mut(&window)?.placement.let_go();
+        let (window, session) = self.windows.let_go()?;
         self.prune_window_record(window);
-        Some((window, *session?))
+        Some((window, session?))
     }
 
-    /// The pointer was released. A press ends; a drag ends only on the button that started it.
+    /// The pointer was released. A press ends on the left button, which made it; a drag ends
+    /// only on the button that started it.
     pub(crate) fn finish_drag(
         &mut self,
         PointerReleased(button): PointerReleased,
     ) -> Option<(WindowId, Session)> {
-        let window = self.gripped()?;
-        if self.drag_on(window).is_some_and(|session| session.button != button) {
+        let started_by = match &self.windows.gripped.as_ref()?.grip {
+            Grip::Pressed(_) => MouseButton::Left,
+            Grip::Dragging(session) => session.button,
+        };
+        if started_by != button {
             return None;
         }
-        self.let_go(window)
+        self.end_drag()
     }
 
     /// A window left Rift's control: a press or drag on it ends, and it is no longer a drop
     /// target.
     pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
         if self.is_gripped(window) {
-            self.let_go(window);
+            self.end_drag();
         } else if let Some((_, session)) = self.drag_mut() {
             session.forget_target(window);
         }
     }
 
     /// `window` as Rift may place it, tracking it if need be; `None` while the user's hand is
-    /// on it.
+    /// on it: the slot it is in has no transfer.
     pub(crate) fn unheld(&mut self, window: WindowId) -> Option<Unheld<'_>> {
         let placeable = self.can_place_window(window);
+        let loose = self.windows.loose_or_new(window)?;
         self.app_windows.entry(window.pid).or_default().insert(window);
-        let record = self.windows.entry(window).or_default();
-        let frame = record.frame();
-        match &mut record.placement {
-            Placement::Unheld(transfer) => Some(Unheld {
-                transfer,
-                frame,
-                placeable,
-                topology_revision: self.topology_revision,
-                generation: &mut self.operation_generation,
-            }),
-            Placement::Pressed(_) | Placement::Held(_) => None,
-        }
+        Some(Unheld {
+            frame: loose.record.frame(),
+            transfer: &mut loose.transfer,
+            placeable,
+            topology_revision: self.topology_revision,
+            generation: &mut self.operation_generation,
+        })
     }
 
     /// A new display set or Space identity is a new chance; unchanged topology never is.
     pub(crate) fn resume_deferred_transfers(&mut self) {
-        for operation in self.windows.values_mut().filter_map(|r| r.placement.transfer_mut()) {
+        for operation in self.windows.transfers_mut() {
             if operation.status == TransferStatus::Deferred {
                 operation.status = TransferStatus::Pending;
                 operation.attempts = 0;
@@ -1952,26 +2063,22 @@ impl WindowStore {
         revision: u64,
         observed: Option<SpaceId>,
     ) -> bool {
-        let Some(record) = self.windows.get_mut(&window_id) else {
-            return false;
-        };
-        if record.placement.transfer().is_some_and(|operation| {
+        let confirmed = self.windows.transfer(&window_id).is_some_and(|operation| {
             operation.generation == generation
                 && revision >= self.topology_revision
                 && revision >= operation.started_revision
                 && Some(operation.requested_space) == observed
                 && operation.last_revision.is_none_or(|last| revision >= last)
-        }) {
-            record.placement.clear_transfer();
-            true
-        } else {
-            false
+        });
+        if confirmed {
+            self.windows.clear_transfer(&window_id);
         }
+        confirmed
     }
 
     #[cfg(any(test, debug_assertions))]
     pub fn debug_assert_invariants(&self) {
-        for (&wid, record) in &self.windows {
+        for (&wid, record) in self.windows.iter() {
             debug_assert!(self.app_windows.get(&wid.pid).is_some_and(|ids| ids.contains(&wid)));
             if let Some(wsid) = record.window_server_id {
                 debug_assert_eq!(self.tracked_window_id(wsid), Some(wid));
@@ -1986,8 +2093,6 @@ impl WindowStore {
                 debug_assert!(self.owner_claims(claim.owner).contains(&wid));
             }
         }
-        let gripped = self.windows.values().filter(|record| record.placement.gripped());
-        debug_assert!(gripped.count() <= 1, "one pointer");
         for (&owner, ids) in &self.claims {
             debug_assert!(!ids.is_empty());
             debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));
@@ -2544,11 +2649,11 @@ mod tests {
         assert_eq!(store.track_window_server_id(wsid, second), Some(first));
 
         assert_eq!(
-            store.record(first).and_then(WindowRecord::window_server_id),
+            store.record(first).and_then(|record| record.window_server_id()),
             None
         );
         assert_eq!(
-            store.record(second).and_then(WindowRecord::window_server_id),
+            store.record(second).and_then(|record| record.window_server_id()),
             Some(wsid)
         );
         assert_eq!(store.tracked_window_id(wsid), Some(second));
@@ -2576,6 +2681,76 @@ mod tests {
         assert_eq!(store.workspace_windows(workspace), vec![replacement]);
         store.reconcile_ax_identity(replacement, Some(WindowServerId::new(71)));
         assert!(store.record(replacement).unwrap().pending_transfer().is_none());
+        store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn a_gripped_window_is_still_found_everywhere_it_was() {
+        // The gripped window's record lives in the slot, not among the loose ones. Lookups,
+        // counts, the workspace index and assignment iteration must not notice.
+        let mut store = WindowStore::default();
+        let (wid, other) = (WindowId::new(4, 1), WindowId::new(4, 2));
+        let wsid = WindowServerId::new(55);
+        let mut workspaces = WorkspaceStore::new();
+        let workspace = workspaces
+            .create_workspace(SpaceId::new(9), Some("Slot".to_string()))
+            .expect("workspace");
+        store.track_window_server_id(wsid, wid);
+        store.assign_window_to_workspace(wid, workspace);
+        store.assign_window_to_workspace(other, workspace);
+        let assignments = |store: &WindowStore| {
+            let mut all: Vec<_> = store.iter_workspace_assignments().collect();
+            all.sort_by_key(|(window, _)| window.idx.get());
+            all
+        };
+        let before = (
+            store.workspace_assignment_count(),
+            assignments(&store),
+            store.workspace_for_window(wid),
+            store.record(wid).unwrap().window_server_id(),
+            store.window_ids_for_pid(4).count(),
+        );
+
+        store.press(wid);
+        assert_eq!(store.gripped(), Some(wid));
+        let pressed = (
+            store.workspace_assignment_count(),
+            assignments(&store),
+            store.workspace_for_window(wid),
+            store.record(wid).unwrap().window_server_id(),
+            store.window_ids_for_pid(4).count(),
+        );
+        assert_eq!(pressed, before);
+        store.debug_assert_invariants();
+
+        // One slot: pressing another window lets go of the first.
+        store.press(other);
+        assert_eq!(store.gripped(), Some(other));
+        assert!(store.unheld(wid).is_some());
+        assert!(store.unheld(other).is_none());
+        store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn the_grip_follows_a_rekeyed_window_and_ends_with_a_removed_one() {
+        let mut store = WindowStore::default();
+        let (old, new) = (WindowId::new(30, 1), WindowId::new(30, 2));
+        let mut workspaces = WorkspaceStore::new();
+        let workspace = workspaces
+            .create_workspace(SpaceId::new(9), Some("Rekey".to_string()))
+            .expect("workspace");
+        store.assign_window_to_workspace(old, workspace);
+        store.press(old);
+
+        store.transfer_persistent_window_metadata(old, new);
+        assert_eq!(store.gripped(), Some(new));
+        assert_eq!(store.workspace_for_window(new), Some(workspace));
+        assert!(store.unheld(new).is_none());
+        store.debug_assert_invariants();
+
+        store.remove_window(new);
+        assert_eq!(store.gripped(), None);
+        assert!(store.record(new).is_none());
         store.debug_assert_invariants();
     }
 
