@@ -91,6 +91,7 @@ use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
+use crate::model::drag::{Button, Mover};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::window_store::NativeFullscreenTransition;
@@ -437,6 +438,8 @@ pub struct Reactor {
     pending_mouse_focus: Option<(WindowId, Instant)>,
     overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
+    /// A fresh read of the mouse button; cheap, so it is read where needed, never stored.
+    read_button: fn() -> Option<MouseState>,
     drag_manager: managers::DragManager,
     workspace_switch_manager: managers::WorkspaceSwitchManager,
     recording_manager: managers::RecordingManager,
@@ -535,6 +538,12 @@ impl Reactor {
             pending_mouse_focus: None,
             overview_focus: None,
             mouse_inventory_hit: None,
+            // Tests feed the button explicitly; they never read the real one.
+            read_button: if cfg!(test) {
+                || Some(MouseState::Up)
+            } else {
+                crate::sys::event::get_mouse_state
+            },
             drag_manager: managers::DragManager {
                 native_motion_active: std::sync::Arc::default(),
                 preview: None,
@@ -1705,6 +1714,30 @@ impl Reactor {
                     debug!(pid, ?token, successful, "Discarding stale AX window inventory");
                     return Ok(EventOutcome::default());
                 }
+                // A discovered frame that differs from the known one is a frame change whose
+                // notification hasn't reached Rift. With the button down that can be the first
+                // sign of a drag, so it is handled as the frame change it stands in for.
+                if self.pointer_may_be_dragging() {
+                    let moved: Vec<_> = new
+                        .iter()
+                        .filter(|(wid, info)| {
+                            self.state
+                                .windows
+                                .window(*wid)
+                                .is_some_and(|known| !known.frame_monotonic.same_as(info.frame))
+                        })
+                        .map(|(wid, info)| (*wid, info.frame))
+                        .collect();
+                    for (wid, frame) in moved {
+                        self.handle_event(Event::WindowFrameChanged(
+                            wid,
+                            frame,
+                            None,
+                            Requested(false),
+                            Some(MouseState::Down),
+                        ));
+                    }
+                }
                 let refocus = self
                     .window_inventory_manager
                     .refocus_after_refresh
@@ -1974,12 +2007,15 @@ impl Reactor {
                 let pending_target_space = server_id
                     .and_then(|server| self.pending_target_space_for_window_server_id(server));
                 let assigned_space = self.assigned_space_for_window_id(wid);
+                let mover = Mover::of(
+                    self.state.windows.hold_of(wid),
+                    Button::reported(effective_mouse_state),
+                );
+                // Only the user's drag vouches for a window seen off its space; any other move
+                // stays doubtful until a snapshot confirms it.
                 let (old_space, new_space) = if assigned_space.is_some()
                     && new_space != assigned_space
-                    && effective_mouse_state != Some(MouseState::Down)
-                    // Only this window's own drag vouches for where it is; another window's
-                    // drag leaves this observation as doubtful as with no drag at all.
-                    && self.state.windows.drag_on(wid).is_none()
+                    && mover == Mover::App
                 {
                     self.request_space_snapshot();
                     (assigned_space, assigned_space)
@@ -2017,6 +2053,7 @@ impl Reactor {
                         window: wid,
                         new_frame,
                         mouse_state: effective_mouse_state,
+                        mover,
                         old_space,
                         new_space,
                         old_space_active,
@@ -4334,6 +4371,12 @@ impl Reactor {
             frame,
             screen.is_some(),
         )
+    }
+
+    /// With the button down the user may be dragging a window before Rift has seen the drag
+    /// start.
+    fn pointer_may_be_dragging(&self) -> bool {
+        Button::reported((self.read_button)()) == Button::Down
     }
 
     fn advance_workspace_transfers(&mut self) -> EventOutcome {

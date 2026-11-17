@@ -3,7 +3,7 @@ use rift_protocol::WindowClaimFlags;
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
-use crate::model::drag::{MouseButton, Session};
+use crate::model::drag::{DragKind, Hold, MouseButton, Session};
 use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -1697,6 +1697,16 @@ impl WindowStore {
 
     pub(crate) fn drag_on_mut(&mut self, window: WindowId) -> Option<&mut Session> {
         self.windows.get_mut(&window)?.placement.held_mut()
+    }
+
+    /// What the user's drag says about `window`.
+    pub(crate) fn hold_of(&self, window: WindowId) -> Hold {
+        match self.drag() {
+            Some((held, _)) if held == window => Hold::This,
+            Some((_, session)) if session.kind == DragKind::ModifierMove => Hold::OtherByModifier,
+            Some(_) => Hold::OtherNative,
+            None => Hold::Nobody,
+        }
     }
 
     /// The user's drag and the window it holds: the record the session is found on.
