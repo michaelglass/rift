@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use objc2_core_foundation::CGRect;
 
-use crate::actor::reactor::transaction_manager::TransactionId;
+use crate::actor::reactor::transaction_manager::{TransactionCounter, TransactionId};
 use crate::sys::window_server::WindowServerId;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -13,15 +13,19 @@ pub struct TxRecord {
     pub target: Option<CGRect>,
 }
 
-/// Thread-safe cache mapping window server IDs to their last known transaction.
+/// Thread-safe cache mapping window server IDs to their last known transaction, and the one
+/// counter every transaction id comes from.
 #[derive(Clone, Default, Debug)]
-pub struct WindowTxStore(Arc<DashMap<WindowServerId, TxRecord>>);
+pub struct WindowTxStore {
+    records: Arc<DashMap<WindowServerId, TxRecord>>,
+    ids: Arc<TransactionCounter>,
+}
 
 impl WindowTxStore {
     pub fn new() -> Self { Self::default() }
 
     pub fn insert(&self, id: WindowServerId, txid: TransactionId, target: CGRect) {
-        match self.0.entry(id) {
+        match self.records.entry(id) {
             Entry::Occupied(mut entry) => {
                 *entry.get_mut() = TxRecord { txid, target: Some(target) }
             }
@@ -32,37 +36,38 @@ impl WindowTxStore {
     }
 
     pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> {
-        self.0.get(id).map(|entry| *entry)
+        self.records.get(id).map(|entry| *entry)
     }
 
-    pub fn remove(&self, id: &WindowServerId) { self.0.remove(id); }
+    pub fn remove(&self, id: &WindowServerId) { self.records.remove(id); }
 
     pub fn clear_target(&self, id: &WindowServerId) {
-        if let Some(mut record) = self.0.get_mut(id) {
+        if let Some(mut record) = self.records.get_mut(id) {
             record.target = None;
         }
     }
 
     /// A retiring presentation cannot clear a newer semantic transaction.
     pub fn clear_target_if_current(&self, id: &WindowServerId, txid: TransactionId) {
-        if let Some(mut record) = self.0.get_mut(id)
+        if let Some(mut record) = self.records.get_mut(id)
             && record.txid == txid
         {
             record.target = None;
         }
     }
 
-    pub fn next_txid(&self, id: WindowServerId) -> TransactionId { self.advance(id, None) }
+    /// The id of a new request.
+    pub fn next_id(&self) -> TransactionId { self.ids.next() }
 
-    fn advance(&self, id: WindowServerId, target: Option<CGRect>) -> TransactionId {
-        let mut record = self.0.entry(id).or_default();
-        record.txid = record.txid.next();
-        record.target = target;
-        record.txid
+    /// The id of a new request to `id`, recorded as its latest with no target yet.
+    pub fn next_txid(&self, id: WindowServerId) -> TransactionId {
+        let txid = self.next_id();
+        self.set_last_txid(id, txid);
+        txid
     }
 
     pub fn set_last_txid(&self, id: WindowServerId, txid: TransactionId) {
-        match self.0.entry(id) {
+        match self.records.entry(id) {
             Entry::Occupied(mut entry) => {
                 let record = entry.get_mut();
                 record.txid = txid;
@@ -92,7 +97,6 @@ mod tests {
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
         let txid = store.next_txid(wsid);
         store.insert(wsid, txid, target);
-        assert_eq!(txid, TransactionId::default().next());
         assert_eq!(store.get(&wsid).unwrap().target, Some(target));
 
         store.clear_target(&wsid);
@@ -115,17 +119,22 @@ mod tests {
     }
 
     #[test]
-    fn next_txid_advances_after_clearing_target() {
+    fn every_request_gets_its_own_id_whichever_window_it_writes() {
         let store = WindowTxStore::new();
-        let wsid = WindowServerId::new(2);
+        let (first, second) = (WindowServerId::new(2), WindowServerId::new(4));
 
-        let txid_1 = store.next_txid(wsid);
+        let txid_1 = store.next_txid(first);
         let target = CGRect::new(CGPoint::new(1.0, 2.0), CGSize::new(3.0, 4.0));
-        store.insert(wsid, txid_1, target);
-        store.clear_target(&wsid);
+        store.insert(first, txid_1, target);
+        store.clear_target(&first);
+        let txid_2 = store.next_txid(second);
+        let txid_3 = store.next_txid(first);
 
-        let txid_2 = store.next_txid(wsid);
-        assert_eq!(txid_2, txid_1.next());
+        assert_ne!(txid_1, txid_2);
+        assert_ne!(txid_2, txid_3);
+        assert_ne!(txid_1, txid_3);
+        assert_eq!(store.last_txid(&first), txid_3);
+        assert_eq!(store.last_txid(&second), txid_2);
     }
 
     #[test]
@@ -136,7 +145,7 @@ mod tests {
         let target = CGRect::new(CGPoint::new(5.0, 6.0), CGSize::new(7.0, 8.0));
         store.insert(wsid, txid_1, target);
 
-        let txid_2 = txid_1.next();
+        let txid_2 = store.next_id();
         store.set_last_txid(wsid, txid_2);
 
         let record = store.get(&wsid).expect("tx record should exist");

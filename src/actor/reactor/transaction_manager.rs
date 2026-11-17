@@ -1,16 +1,24 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::window_server::WindowServerId;
 
-/// A per-window counter that tracks the last time the reactor sent a request to
-/// change the window frame.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Names one request that changes window frames. Ids come from one counter
+/// ([`TransactionCounter`]), so no two requests share one; only equality means anything.
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
-impl TransactionId {
-    pub fn next(self) -> Self { Self(self.0.wrapping_add(1)) }
+/// The one source of transaction ids, shared by every thread that sends frames.
+#[derive(Debug, Default)]
+pub struct TransactionCounter(AtomicU32);
+
+impl TransactionCounter {
+    pub fn next(&self) -> TransactionId {
+        TransactionId(self.0.fetch_add(1, Ordering::Relaxed).wrapping_add(1))
+    }
 }
 
 /// Manages window transaction IDs and their associated target frames.
@@ -41,9 +49,15 @@ impl TransactionManager {
     /// Clears the pending target for a window while preserving its last txid.
     pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
 
-    /// Generates the next transaction ID for a window.
-    pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
-        self.store.next_txid(wsid)
+    /// Mints the id of one request and records it, with its target, for each window the
+    /// request writes.
+    pub fn stamp(
+        &self,
+        targets: impl IntoIterator<Item = (WindowServerId, CGRect)>,
+    ) -> TransactionId {
+        let txid = self.store.next_id();
+        self.update_txid_entries(targets.into_iter().map(|(wsid, target)| (wsid, txid, target)));
+        txid
     }
 
     /// Sets the last sent transaction ID for a window.

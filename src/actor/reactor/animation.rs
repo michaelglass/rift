@@ -1070,18 +1070,13 @@ impl AnimationManager {
                 continue;
             }
             any_frame_changed = true;
-            let txid = window_server_id
-                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                .unwrap_or_default();
-
             let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
             };
-
-            if let Some(wsid) = window_server_id {
-                reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
-            }
+            let txid = reactor
+                .transaction_manager
+                .stamp(window_server_id.map(|wsid| (wsid, target_frame)));
             trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
             let handle = app_state.handle.with_scrolling_bounds(
                 bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
