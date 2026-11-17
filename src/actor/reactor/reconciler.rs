@@ -130,6 +130,18 @@ pub(crate) enum Verdict {
     Nothing,
 }
 
+/// An unprompted report of a window's frame, classified against what Rift asked for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Observation {
+    /// The frame Rift asked for, or the one it already knew: no news.
+    Ack { target: CGRect },
+    /// A write is with the app and nobody holds the window: a step on the way there (size
+    /// lands before position). The app's answer settles it.
+    InTransit,
+    /// Someone else put the window here: the user if their hand is on it, else its app.
+    Foreign { frame: CGRect },
+}
+
 /// The app's answer to a write, classified against the write it answers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Answer {
@@ -249,6 +261,30 @@ impl Reconciler {
                     self.set(window, Sync::Refused { wanted, got: frame });
                 }
                 (Answer::Unasked, None)
+            }
+        }
+    }
+
+    /// `window` reported `frame` unprompted; the model last saw it at `known`, and `held` says
+    /// whether the user's hand is on it. A report of the frame in flight is no news, and does
+    /// not end the wait: the app's answer does, and it can still differ.
+    pub(crate) fn observe(
+        &mut self,
+        window: WindowId,
+        frame: CGRect,
+        known: CGRect,
+        held: bool,
+    ) -> Observation {
+        match self.sync(window) {
+            Sync::InFlight { target, .. } if answers(target, frame) => Observation::Ack { target },
+            Sync::InFlight { .. } if !held => Observation::InTransit,
+            Sync::InFlight { .. } | Sync::Settled | Sync::Refused { .. } => {
+                if frame.same_as(known) {
+                    return Observation::Ack { target: known };
+                }
+                // Whatever Rift was waiting for, the window is someone else's now.
+                self.set(window, Sync::Settled);
+                Observation::Foreign { frame }
             }
         }
     }
@@ -585,6 +621,22 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_window_seen_somewhere_else_is_asked_again() {
+        let mut reconciler = Reconciler::default();
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        _ = reconciler.answer(window(), at(14.));
+        // Its app moved it: no longer the frame that was refused.
+        assert_eq!(
+            reconciler.observe(window(), at(90.), at(14.), false),
+            Observation::Foreign { frame: at(90.) }
+        );
+        assert_eq!(
+            sent(reconciler.want(window(), at(10.), at(90.), Want::Arrange)),
+            at(10.)
+        );
+    }
+
+    #[test]
     fn an_unanswered_write_times_out_into_a_refusal_and_releases_what_waited() {
         let mut reconciler = Reconciler::default();
         _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
@@ -610,6 +662,23 @@ mod tests {
         });
         assert_eq!(reconciler.answer(window(), at(20.)), (Answer::Unasked, None));
         assert_eq!(reconciler.sync(window()), Sync::Settled);
+    }
+
+    #[test]
+    fn a_report_of_the_target_is_no_news_and_the_answer_still_decides() {
+        let mut reconciler = Reconciler::default();
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange);
+        // Even with the user's hand on it: by geometry this is the write landing.
+        for held in [false, true] {
+            assert_eq!(
+                reconciler.observe(window(), at(10.), at(10.), held),
+                Observation::Ack { target: at(10.) }
+            );
+            assert!(reconciler.in_flight(window()));
+        }
+        // The app then answers with something else (it adjusted the size when it applied it).
+        let refused = Answer::Refused { wanted: at(10.), got: at(13.) };
+        assert_eq!(reconciler.answer(window(), at(13.)), (refused, None));
     }
 
     #[test]
