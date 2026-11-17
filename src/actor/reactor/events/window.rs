@@ -320,7 +320,9 @@ pub fn handle_window_frame_changed(
     }
 
     let dragging = state.windows.is_admitted(wid)
-        && (mouse_state == Some(MouseState::Down) || state.windows.drag().is_some());
+        // Another window's drag says nothing about this one: only its own hold or a held
+        // button makes this frame change a drag.
+        && (mouse_state == Some(MouseState::Down) || state.windows.drag_on(wid).is_some());
     if dragging {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
