@@ -5,6 +5,7 @@
 //! `Write` cannot be built anywhere else, and the reactor's senders take nothing but a `Write`,
 //! so a frame reaches an app only because the reconciler decided it should.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CGRect;
@@ -170,6 +171,11 @@ fn answers(target: CGRect, frame: CGRect) -> bool { frame.is_within(ACK_TOLERANC
 pub(crate) struct Reconciler {
     /// Windows with something outstanding. A window not in here is [`Sync::Settled`].
     unsettled: HashMap<WindowId, Sync>,
+    /// Every write sent, with its deadline, in the order sent. A deadline is the send time
+    /// plus [`WRITE_DEADLINE`], so this is also deadline order. An entry whose window has since
+    /// been answered or written again no longer matches its sync state and is dropped when it
+    /// reaches the front.
+    deadlines: VecDeque<(Instant, WindowId)>,
     pub(crate) clock: Clock,
 }
 
@@ -190,6 +196,7 @@ impl Reconciler {
     fn send(&mut self, window: WindowId, frame: CGRect, queued: Option<CGRect>) -> Write {
         let deadline = self.clock.now() + WRITE_DEADLINE;
         debug!(?window, ?frame, "reconcile: write");
+        self.deadlines.push_back((deadline, window));
         self.set(window, Sync::InFlight {
             target: frame,
             deadline,
@@ -208,8 +215,12 @@ impl Reconciler {
         owner: Owner,
     ) -> Verdict {
         // A write nobody answered in time no longer holds newer desires back. Whatever was
-        // queued behind it is older than `desired`.
-        _ = self.expire_one(window, known, owner);
+        // queued behind it is older than `desired`, so it is dropped.
+        if let Sync::InFlight { target, deadline, queued: _ } = self.sync(window)
+            && self.clock.now() >= deadline
+        {
+            self.time_out(window, target, known);
+        }
         match owner {
             Owner::Rift => {}
             Owner::User => {
@@ -337,47 +348,60 @@ impl Reconciler {
         }
     }
 
-    fn expire_one(&mut self, window: WindowId, known: CGRect, owner: Owner) -> Option<Write> {
-        let Sync::InFlight { target, deadline, queued } = self.sync(window) else {
-            return None;
-        };
-        if self.clock.now() < deadline {
-            return None;
-        }
+    /// The app did not answer the write of `target` in time: a refusal, with the window where
+    /// the model last saw it.
+    fn time_out(&mut self, window: WindowId, target: CGRect, known: CGRect) {
         debug!(?window, wanted = ?target, "reconcile: timeout");
         self.set(window, Sync::Refused { wanted: target, got: known });
-        self.release(window, queued, owner)
     }
 
-    /// Stops waiting for every write whose deadline has passed, and forgets windows that are
-    /// gone. `known` is where the model last saw a window, and whose it is. Returns the writes
-    /// that were queued behind the late ones.
+    /// The write a `deadlines` entry stands for, if it is still waiting: its target and what
+    /// was queued behind it.
+    fn waiting(&self, (deadline, window): (Instant, WindowId)) -> Option<(CGRect, Option<CGRect>)> {
+        match self.sync(window) {
+            Sync::InFlight { target, deadline: due, queued } if due == deadline => {
+                Some((target, queued))
+            }
+            Sync::InFlight { .. } | Sync::Settled | Sync::Refused { .. } | Sync::Adrift => None,
+        }
+    }
+
+    /// Stops waiting for every write whose deadline has passed. `known` is where the model last
+    /// saw a window, and whose it is; a window it no longer knows is forgotten. Returns the
+    /// writes that were queued behind the late ones.
     pub(crate) fn expire(
         &mut self,
         known: impl Fn(WindowId) -> Option<(CGRect, Owner)>,
     ) -> Vec<Write> {
-        let unsettled: Vec<WindowId> = self.unsettled.keys().copied().collect();
-        unsettled
-            .into_iter()
-            .filter_map(|window| match known(window) {
-                Some((known, owner)) => self.expire_one(window, known, owner),
-                None => {
-                    self.forget(window);
-                    None
+        let now = self.clock.now();
+        let mut released = Vec::new();
+        while let Some(&(deadline, window)) = self.deadlines.front()
+            && deadline <= now
+        {
+            self.deadlines.pop_front();
+            let Some((target, queued)) = self.waiting((deadline, window)) else {
+                continue;
+            };
+            match known(window) {
+                Some((known, owner)) => {
+                    self.time_out(window, target, known);
+                    released.extend(self.release(window, queued, owner));
                 }
-            })
-            .collect()
+                None => self.forget(window),
+            }
+        }
+        released
     }
 
     /// When the earliest unanswered write stops being waited for.
-    pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.unsettled
-            .values()
-            .filter_map(|sync| match sync {
-                Sync::InFlight { deadline, .. } => Some(*deadline),
-                Sync::Settled | Sync::Refused { .. } | Sync::Adrift => None,
-            })
-            .min()
+    pub(crate) fn next_deadline(&mut self) -> Option<Instant> {
+        while let Some(&entry) = self.deadlines.front() {
+            if self.waiting(entry).is_some() {
+                return Some(entry.0);
+            }
+            self.deadlines.pop_front();
+        }
+        None
     }
 
     /// Whether a write to `window` is with its app.
@@ -750,6 +774,23 @@ mod tests {
     }
 
     #[test]
+    fn a_desire_after_the_deadline_is_sent_not_held_behind_what_was_queued() {
+        let mut reconciler = Reconciler::default();
+        _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
+        _ = reconciler.want(window(), at(20.), at(0.), Want::Arrange, Owner::Rift);
+        reconciler.clock.advance(WRITE_DEADLINE);
+        // The app never answered; the queued frame is older than this desire.
+        assert_eq!(
+            sent(reconciler.want(window(), at(30.), at(0.), Want::Arrange, Owner::Rift)),
+            at(30.)
+        );
+        assert!(matches!(
+            reconciler.sync(window()),
+            Sync::InFlight { target, queued: None, .. } if target == at(30.)
+        ));
+    }
+
+    #[test]
     fn a_report_during_a_write_is_the_users_only_if_their_hand_is_on_the_window() {
         let mut reconciler = Reconciler::default();
         _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
@@ -817,7 +858,8 @@ mod tests {
     fn forgetting_a_window_drops_what_was_outstanding() {
         let mut reconciler = Reconciler::default();
         _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
-        // The window is gone from the model.
+        // The window is gone from the model by the time its write's deadline passes.
+        reconciler.clock.advance(WRITE_DEADLINE);
         assert!(reconciler.expire(|_| None).is_empty());
         assert_eq!(reconciler.sync(window()), Sync::Settled);
     }

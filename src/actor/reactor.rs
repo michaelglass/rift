@@ -1149,7 +1149,7 @@ impl Reactor {
         let mut deadline_timer = crate::sys::timer::Timer::manual();
         let mut armed = None;
         loop {
-            let deadline = reactor.borrow().reconciler.next_deadline();
+            let deadline = reactor.borrow_mut().reconciler.next_deadline();
             if deadline != armed {
                 armed = deadline;
                 deadline_timer.set_next_fire(armed.map_or(Duration::MAX, |deadline| {
@@ -3047,7 +3047,6 @@ impl Reactor {
         // Some transitions need to place a window on its destination display
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
-        self.expire_writes();
         for placement in outcome.placements {
             self.place_window(placement.window, placement.frame);
         }
