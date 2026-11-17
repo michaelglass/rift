@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 
 use super::animation::scrolling_bounds;
 use super::{Reactor, TransactionId};
-use crate::actor::app::{AppThreadHandle, FrameMode, Request, WindowId, pid_t};
+use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
+use crate::actor::drag::Session;
 use crate::common::collections::HashMap;
 use crate::model::window_store::WindowStore;
 use crate::sys::geometry::{IsWithin, Round, SameAs};
@@ -213,6 +214,15 @@ impl Reconciler {
         }
     }
 
+    /// The interactive frame of the window the user is dragging with the modifier held: the
+    /// drag's own desire, and the only write a dragged window gets. It is not tracked: the
+    /// next one replaces it in the app's queue, and the drop arranges the window afresh.
+    pub(crate) fn follow(&mut self, window: WindowId, session: &Session) -> Option<Write> {
+        let frame = session.interactive_frame()?;
+        self.set(window, Sync::Settled);
+        Some(Write { window, frame })
+    }
+
     /// The app answered its latest write to `window` with `frame`. Returns the queued write,
     /// if one was waiting behind it.
     pub(crate) fn answer(&mut self, window: WindowId, frame: CGRect) -> (Answer, Option<Write>) {
@@ -363,6 +373,20 @@ impl Reactor {
             state.frame_monotonic = write.frame;
         }
         self.send_one(write, handle, true);
+    }
+
+    /// Sends the interactive frame of the window the user is dragging.
+    pub(super) fn send_interactive(&mut self, write: Write) {
+        let transaction = self.stamp(write.window, write.frame);
+        if let Some(app) = self.app_manager.apps.get(&write.window.pid) {
+            app.handle.send_interactive_frame(
+                write.window,
+                write.frame,
+                false,
+                transaction,
+                FrameSource::Drag,
+            );
+        }
     }
 
     /// Stops waiting for writes whose apps did not answer in time, and sends what waited
