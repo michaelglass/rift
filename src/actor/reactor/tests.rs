@@ -12953,6 +12953,52 @@ fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
     );
 }
 
+#[test]
+fn a_layout_pass_during_a_drag_moves_no_window_of_a_scrolling_layout() {
+    let (mut apps, mut reactor, dragged, _other, _screen, _space) = two_tiled_windows();
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    // With an animation thread, a scrolling arrange also presents the viewport ("the camera").
+    let (tx, rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(tx);
+    let moved = drag_by(&apps, &mut reactor, dragged, 60., 40.);
+    apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    assert!(reactor.user_is_dragging());
+    apps.requests();
+
+    // Mid-drag, another app's window arrives and goes away: both arrange.
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    apps.windows.remove(&WindowId::new(2, 1));
+    reactor.handle_event(Event::WindowDestroyed(WindowId::new(2, 1)));
+    let mut manager = super::animation::AnimationManager::new();
+    while let Ok(message) = rx.commands.try_recv() {
+        manager.handle_message(message);
+    }
+    manager.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(1));
+
+    let moved: Vec<(WindowId, CGRect)> = apps
+        .requests()
+        .into_iter()
+        .flat_map(|request| match request {
+            Request::InteractiveFramesPending(queue) => {
+                let mut frames = Vec::new();
+                queue.drain_with(|wid, frame, _, _, _, _, _| frames.push((wid, frame)));
+                frames
+            }
+            Request::SetWindowFrames(frames, ..) => frames,
+            _ => Vec::new(),
+        })
+        .collect();
+    assert_eq!(
+        moved,
+        [],
+        "a drag changes nothing until the drop, the viewport's frames included"
+    );
+}
+
 /// A layout as the appliers take it.
 fn desired(layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
     super::reconciler::Desired::of(layout)

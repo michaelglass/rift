@@ -139,7 +139,7 @@ impl Reactor {
             let space = s.context.space;
             let gesture = (!s.released)
                 .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
-            let _ = self.present_camera(space, true, gesture, None);
+            let _ = self.present_camera(space, true, gesture);
         }
     }
 
@@ -167,7 +167,7 @@ impl Reactor {
     fn apply_viewport_frames(&mut self) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
-            let _ = self.present_camera(space, false, None, None);
+            let _ = self.present_camera(space, false, None);
             self.commit_presentations();
         }
     }
