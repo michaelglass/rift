@@ -2,13 +2,13 @@ use objc2_core_foundation::CGRect;
 use tracing::debug;
 
 use crate::actor::app::WindowId;
-use crate::actor::drag::{DragKind, DragScene, DragSource, Session};
+use crate::actor::drag::{DragKind, DragSource, Session};
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{Quiet, TransactionId, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
-use crate::model::drag::Mover;
+use crate::model::window_store::Hand;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -157,7 +157,6 @@ pub fn handle_window_visibility_changed(
 pub struct WindowFrameChangedPayload {
     pub window: WindowId,
     pub new_frame: CGRect,
-    pub mover: Mover,
     pub old_space: Option<SpaceId>,
     pub new_space: Option<SpaceId>,
     pub old_space_active: bool,
@@ -181,7 +180,6 @@ pub fn classify_window_frame_change(
     new_frame: CGRect,
     last_seen: Option<TransactionId>,
     requested: bool,
-    mover: Mover,
     mission_control_active: bool,
 ) -> FrameChangeDisposition {
     let Some(window) = state.windows.window(wid) else {
@@ -202,8 +200,8 @@ pub fn classify_window_frame_change(
         if seen != transactions.get_last_sent_txid(server) {
             return FrameChangeDisposition::Handled;
         }
-        // The user grabbed the window while Rift's own write was still in flight.
-        if mover == Mover::User {
+        // The user's hand is on the window while Rift's own write was still in flight: theirs.
+        if state.windows.is_gripped(wid) {
             transactions.clear_target_for_window(server);
         } else {
             if new_frame.same_as(target) {
@@ -239,7 +237,6 @@ pub fn handle_window_frame_changed(
     let WindowFrameChangedPayload {
         window: wid,
         new_frame,
-        mover,
         old_space,
         new_space,
         old_space_active,
@@ -303,25 +300,26 @@ pub fn handle_window_frame_changed(
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
-    if state.windows.is_admitted(wid) && mover == Mover::User {
-        let tiled = !layout.layout_engine.is_window_floating(wid);
-        let native_resize = !old_frame.size.same_as(new_frame.size);
-        let followed = state
-            .windows
-            .drag_on_mut(wid)
-            .is_some_and(|session| session.update_native(new_frame, new_space));
-        if !followed {
-            // The start of a user drag is intent, even when no workspace changes.
-            layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
-            let scene = if tiled && !native_resize {
-                new_space.map_or_else(DragScene::default, |space| {
-                    crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
-                })
-            } else {
-                Default::default()
-            };
-            // Only the window the pointer pressed can become a drag.
-            if let Some(pressed) = state.windows.pressed(wid) {
+    // This change isn't Rift's echo (the classifier filtered those). Whose it is depends on the
+    // user's hand: on this window and not yet moved, it starts the drag; dragging it, the drag
+    // follows; anywhere else, the app moved the window.
+    let admitted = state.windows.is_admitted(wid);
+    let tiled = !layout.layout_engine.is_window_floating(wid);
+    let native_resize = !old_frame.size.same_as(new_frame.size);
+    // A drag that starts here needs the drop scene, built before the hand is borrowed.
+    let scene = (admitted && state.windows.is_pressed(wid) && tiled && !native_resize)
+        .then_some(new_space)
+        .flatten()
+        .map(|space| {
+            crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
+        });
+    let moved_by_user = admitted
+        && match state.windows.hand_on(wid) {
+            Some(Hand::Dragging(session)) => {
+                session.update_native(new_frame, new_space);
+                true
+            }
+            Some(Hand::Pressed(pressed)) => {
                 tracing::debug!(?wid, "drag-evidence: drag started (pressed window moved)");
                 pressed.start(Session::native(
                     DragSource {
@@ -331,10 +329,15 @@ pub fn handle_window_frame_changed(
                         current_space: new_space,
                         tiled,
                     },
-                    scene,
+                    scene.unwrap_or_default(),
                 ));
+                // The start of a user drag is intent, even when no workspace changes.
+                layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
+                true
             }
-        }
+            None => false,
+        };
+    if moved_by_user {
         if native_resize && active_resize_space.is_some() {
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
                 wid,
