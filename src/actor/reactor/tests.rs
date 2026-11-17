@@ -450,8 +450,7 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
     // Rift stops waiting for those.
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(2, 1)));
     assert!(apps.simulate_events().is_empty());
-    reactor.reconciler.clock.advance(std::time::Duration::from_secs(1));
-    reactor.expire_writes();
+    reactor.test_expire_all_writes();
     let _events_3 = apps.simulate_events();
     let state_3 = apps.windows;
 
@@ -3420,7 +3419,7 @@ fn non_workspace_instant_layout_keeps_full_frame_batch() {
     let _ = apps.requests();
 
     let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
-    let layout = desired(&[(wid, target)]);
+    let layout = super::reconciler::Desired::of(vec![(wid, target)]);
     assert!(super::animation::AnimationManager::instant_layout(
         &mut reactor,
         space,
@@ -3456,7 +3455,7 @@ fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
     let _ = apps.requests();
 
     let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
-    let layout = desired(&[(wid, target)]);
+    let layout = super::reconciler::Desired::of(vec![(wid, target)]);
     assert!(super::animation::AnimationManager::workspace_switch_layout(
         &mut reactor,
         space,
@@ -5356,7 +5355,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     let right = WindowId::new(1, 2);
     let frame = |x| CGRect::new(CGPoint::new(x, 38.), CGSize::new(1284., 944.));
 
-    let layout = desired(&[(left, frame(228.)), (right, frame(1284.))]);
+    let layout = super::reconciler::Desired::of(vec![(left, frame(228.)), (right, frame(1284.))]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
@@ -5384,7 +5383,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
             .frame_monotonic
             .same_as(frame(228.))
     );
-    let layout = desired(&[(left, frame(-1056.)), (right, frame(228.))]);
+    let layout = super::reconciler::Desired::of(vec![(left, frame(-1056.)), (right, frame(228.))]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
@@ -5441,7 +5440,7 @@ fn animated_layout_handles_windows_without_server_ids() {
     apps.requests();
 
     let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let layout = desired(&[(WindowId::new(1, 1), target)]);
+    let layout = super::reconciler::Desired::of(vec![(WindowId::new(1, 1), target)]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
@@ -12666,20 +12665,6 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
     );
 }
 
-/// Delivers requests and their answers until none are left, and says how many rounds it took.
-fn rounds_until_quiet(apps: &mut Apps, reactor: &mut Reactor) -> usize {
-    for round in 0..20 {
-        let requests = apps.requests();
-        if requests.is_empty() {
-            return round;
-        }
-        for event in apps.simulate_events_for_requests(requests) {
-            reactor.handle_event(event);
-        }
-    }
-    panic!("Rift and its apps never went quiet: a write loop");
-}
-
 #[test]
 fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_again() {
     use super::reconciler::Sync;
@@ -12697,7 +12682,7 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
 
         // Another window arrives; the stubborn one is asked to take a new size.
         reactor.handle_events(apps.make_app(2, make_windows(1)));
-        rounds_until_quiet(&mut apps, &mut reactor);
+        apps.simulate_until_quiet(&mut reactor);
 
         let Sync::Refused { wanted, got } = reactor.reconciler.sync(stubborn) else {
             panic!(
@@ -12917,8 +12902,7 @@ fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
     for x in [600., 650.] {
         let elsewhere = CGRect::new(CGPoint::new(x, 300.), CGSize::new(200., 200.));
         reactor.place_window(right, elsewhere);
-        reactor.reconciler.clock.advance(std::time::Duration::from_secs(1));
-        reactor.expire_writes();
+        reactor.test_expire_all_writes();
     }
     let slow = apps.requests();
 
@@ -12992,9 +12976,4 @@ fn a_layout_pass_during_a_drag_moves_no_window_of_a_scrolling_layout() {
         [],
         "a drag changes nothing until the drop, the viewport's frames included"
     );
-}
-
-/// A layout as the appliers take it.
-fn desired(layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
-    super::reconciler::Desired::of(layout.to_vec())
 }
