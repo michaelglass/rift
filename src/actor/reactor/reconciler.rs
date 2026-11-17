@@ -233,8 +233,8 @@ impl Reconciler {
             Owner::Rift => {}
             Owner::User => {
                 debug!(?window, frame = ?desired, "reconcile: discarded (user's)");
-                // A placement's caller has already moved the model to `desired`, so what the
-                // model believes is no longer what the app was told. An answer still due
+                // A transfer's placement has already moved the model to `desired`, so what the
+                // model believes may no longer be what the app was told. An answer still due
                 // brings the truth; otherwise the next desire is sent regardless.
                 match (want, self.sync(window)) {
                     (
@@ -471,9 +471,20 @@ fn owner(windows: &WindowStore, window: WindowId) -> Owner {
 impl Reactor {
     pub(super) fn owner(&self, window: WindowId) -> Owner { owner(&self.state.windows, window) }
 
-    /// Where the model last saw `window`.
-    fn known_frame(&self, window: WindowId) -> Option<CGRect> {
-        self.state.windows.window(window).map(|state| state.frame_monotonic)
+    /// Asks the reconciler for `window` at `desired`. A desire it sends or queues is the model's
+    /// from then on: the window is taken to be there until a report says otherwise.
+    /// A window the model does not know is `Nothing`.
+    fn arrange_one(&mut self, window: WindowId, desired: CGRect, want: Want) -> Verdict {
+        let owner = self.owner(window);
+        let Some(state) = self.state.windows.window_mut(window) else {
+            return Verdict::Nothing;
+        };
+        let verdict = self.reconciler.want(window, desired, state.frame_monotonic, want, owner);
+        match verdict {
+            Verdict::Send(_) | Verdict::Queued => state.frame_monotonic = desired,
+            Verdict::Nothing => {}
+        }
+        verdict
     }
 
     /// The transaction id the app protocol wants on a write, recorded with its target.
@@ -507,13 +518,11 @@ impl Reactor {
         if !self.may_write(window) {
             return;
         }
-        let Some(known) = self.known_frame(window) else { return };
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
             return;
         };
         let handle = app.handle.clone();
-        let owner = self.owner(window);
-        match self.reconciler.want(window, frame, known, Want::Place, owner) {
+        match self.arrange_one(window, frame, Want::Place) {
             Verdict::Send(write) => self.send_one(write, handle),
             Verdict::Queued | Verdict::Nothing => {}
         }
@@ -584,36 +593,33 @@ impl Reactor {
         let mut any_desire_new = false;
 
         for &(wid, target) in frames {
-            let owner = self.owner(wid);
             let constrained = bounds.is_some()
                 && self.state.windows.workspace_for_window(wid) == active
                 && !self.layout_manager.layout_engine.is_window_floating(wid);
-            let Some(window) = self.state.windows.window_mut(wid) else {
+            let Some(window) = self.state.windows.window(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
                 continue;
             };
-            let current = window.frame_monotonic;
-            match self.reconciler.want(wid, target, current, want, owner) {
-                Verdict::Nothing => {}
+            let (current, server_id) = (window.frame_monotonic, window.info.sys_id);
+            let write = match self.arrange_one(wid, target, want) {
+                Verdict::Send(write) => write,
                 Verdict::Queued => {
                     any_desire_new = true;
-                    window.frame_monotonic = target;
+                    continue;
                 }
-                Verdict::Send(write) => {
-                    any_desire_new = true;
-                    window.frame_monotonic = target;
-                    let moves_only = match want {
-                        Want::ArrangePositions => current.size.same_as(target.size),
-                        Want::Arrange | Want::Place => false,
-                    };
-                    let batch = per_app.entry((wid.pid, constrained)).or_default();
-                    batch.targets.extend(window.info.sys_id.map(|server_id| (server_id, target)));
-                    if moves_only {
-                        batch.positions.push(write);
-                    } else {
-                        batch.frames.push(write);
-                    }
-                }
+                Verdict::Nothing => continue,
+            };
+            any_desire_new = true;
+            let moves_only = match want {
+                Want::ArrangePositions => current.size.same_as(target.size),
+                Want::Arrange | Want::Place => false,
+            };
+            let batch = per_app.entry((wid.pid, constrained)).or_default();
+            batch.targets.extend(server_id.map(|server_id| (server_id, target)));
+            if moves_only {
+                batch.positions.push(write);
+            } else {
+                batch.frames.push(write);
             }
         }
 
