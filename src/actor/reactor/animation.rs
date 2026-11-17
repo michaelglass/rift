@@ -1018,7 +1018,7 @@ impl AnimationManager {
             reactor.cancel_window_presentations(windows);
             let frames: Vec<_> =
                 layout.iter().copied().filter(|(wid, _)| !presented.contains(wid)).collect();
-            return reactor.arrange_frames(space, &frames, false, Want::Arrange) || camera;
+            return reactor.arrange_frames(space, &frames, Want::Arrange) || camera;
         }
         let Some(active_ws) =
             reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
@@ -1088,7 +1088,7 @@ impl AnimationManager {
                 window.frame_monotonic = target_frame;
             }
         }
-        any_frame_changed |= reactor.arrange_frames(space, &hidden, false, Want::Arrange);
+        any_frame_changed |= reactor.arrange_frames(space, &hidden, Want::Arrange);
 
         if !anim.is_empty() {
             if let Some(tx) = &reactor.animation_tx {
@@ -1110,7 +1110,8 @@ impl AnimationManager {
     }
 
     pub fn instant_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
-        Self::instant_layout_inner(reactor, space, desired, false, false)
+        reactor.cancel_window_presentations(desired.windows());
+        reactor.arrange_frames(space, desired.frames(), Want::Arrange)
     }
 
     /// Apply the position-only layout used while switching virtual workspaces.
@@ -1123,28 +1124,14 @@ impl AnimationManager {
         space: SpaceId,
         desired: &Desired,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, desired, true, false)
+        reactor.cancel_window_presentations(desired.windows());
+        reactor.arrange_frames(space, desired.frames(), Want::ArrangePositions)
     }
 
     /// Restore native geometry after a display change invalidated cached frames.
     pub fn reapply_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
-        Self::instant_layout_inner(reactor, space, desired, false, true)
-    }
-
-    fn instant_layout_inner(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        desired: &Desired,
-        position_only: bool,
-        force_frames: bool,
-    ) -> bool {
         reactor.cancel_window_presentations(desired.windows());
-        let want = if force_frames {
-            Want::Place
-        } else {
-            Want::Arrange
-        };
-        reactor.arrange_frames(space, desired.frames(), position_only, want)
+        reactor.arrange_frames(space, desired.frames(), Want::Place)
     }
 }
 

@@ -112,6 +112,9 @@ pub(crate) enum Sync {
 pub(crate) enum Want {
     /// Layout: nothing to send when the window is already known to be there.
     Arrange,
+    /// Layout during a workspace switch: as [`Want::Arrange`], and a window that keeps its size
+    /// is only moved (a position-only request).
+    ArrangePositions,
     /// A placement, or a layout after the cached frames stopped being trustworthy: send it
     /// whatever the model believes.
     Place,
@@ -235,7 +238,7 @@ impl Reconciler {
                 // brings the truth; otherwise the next desire is sent regardless.
                 match (want, self.sync(window)) {
                     (
-                        Want::Arrange,
+                        Want::Arrange | Want::ArrangePositions,
                         Sync::Settled | Sync::InFlight { .. } | Sync::Refused { .. } | Sync::Adrift,
                     )
                     | (Want::Place, Sync::InFlight { .. }) => {}
@@ -247,7 +250,10 @@ impl Reconciler {
             }
         }
         match (self.sync(window), want) {
-            (Sync::InFlight { target, deadline, queued: _ }, Want::Arrange | Want::Place) => {
+            (
+                Sync::InFlight { target, deadline, queued: _ },
+                Want::Arrange | Want::ArrangePositions | Want::Place,
+            ) => {
                 if desired.same_as(target) {
                     self.set(window, Sync::InFlight { target, deadline, queued: None });
                     return Verdict::Nothing;
@@ -259,18 +265,21 @@ impl Reconciler {
             }
             // Asking again for what was refused would be a retry loop. A window that has
             // since been seen somewhere else is no longer the one that refused.
-            (Sync::Refused { wanted, got }, Want::Arrange)
+            (Sync::Refused { wanted, got }, Want::Arrange | Want::ArrangePositions)
                 if desired.same_as(wanted) && known.same_as(got) =>
             {
                 Verdict::Nothing
             }
-            (Sync::Settled | Sync::Refused { .. }, Want::Arrange) if desired.same_as(known) => {
+            (Sync::Settled | Sync::Refused { .. }, Want::Arrange | Want::ArrangePositions)
+                if desired.same_as(known) =>
+            {
                 self.set(window, Sync::Settled);
                 Verdict::Nothing
             }
-            (Sync::Settled | Sync::Refused { .. } | Sync::Adrift, Want::Arrange | Want::Place) => {
-                Verdict::Send(self.send(window, desired, None))
-            }
+            (
+                Sync::Settled | Sync::Refused { .. } | Sync::Adrift,
+                Want::Arrange | Want::ArrangePositions | Want::Place,
+            ) => Verdict::Send(self.send(window, desired, None)),
         }
     }
 
@@ -567,7 +576,6 @@ impl Reactor {
         &mut self,
         space: SpaceId,
         frames: &[(WindowId, CGRect)],
-        position_only: bool,
         want: Want,
     ) -> bool {
         let bounds = scrolling_bounds(self, space);
@@ -594,13 +602,13 @@ impl Reactor {
                 Verdict::Send(write) => {
                     any_desire_new = true;
                     window.frame_monotonic = target;
-                    let size_unchanged = match want {
-                        Want::Arrange => current.size.same_as(target.size),
-                        Want::Place => false,
+                    let moves_only = match want {
+                        Want::ArrangePositions => current.size.same_as(target.size),
+                        Want::Arrange | Want::Place => false,
                     };
                     let batch = per_app.entry((wid.pid, constrained)).or_default();
                     batch.targets.extend(window.info.sys_id.map(|server_id| (server_id, target)));
-                    if position_only && size_unchanged {
+                    if moves_only {
                         batch.positions.push(write);
                     } else {
                         batch.frames.push(write);
