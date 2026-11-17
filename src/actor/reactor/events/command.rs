@@ -199,7 +199,11 @@ pub(in crate::actor::reactor) fn request_window_transfer(
     frame: Option<objc2_core_foundation::CGRect>,
     available: bool,
 ) -> EventOutcome {
-    if state.windows.request_transfer(window, frame, target, available)
+    // A window the user is dragging has no transfer to request: the drop places it.
+    if state
+        .windows
+        .unheld(window)
+        .is_some_and(|window| window.request_transfer(frame, target, available))
         && let Some(frame) = frame
     {
         layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);

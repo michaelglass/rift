@@ -1,10 +1,11 @@
 use tracing::{trace, warn};
 
-use crate::actor::drag::{DragKind, DragScene, DragSceneTarget, MouseButton};
+use crate::actor::drag::{DragKind, DragScene, DragSceneTarget};
 use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
 use crate::model::RiftState;
+use crate::model::drag::PointerReleased;
 use crate::sys::screen::SpaceId;
 
 pub fn build_drag_scene(
@@ -34,7 +35,7 @@ pub fn build_drag_scene(
 
 #[derive(Debug, Clone)]
 pub struct MouseUpPayload {
-    pub button: MouseButton,
+    pub released: PointerReleased,
     pub final_space: Option<SpaceId>,
 }
 
@@ -63,7 +64,7 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some((window, commit)) = state.windows.finish_drag(payload.button) else {
+    let Some((window, commit)) = state.windows.finish_drag(payload.released) else {
         return Ok(outcome);
     };
     let mut needs_layout = commit.source.tiled;

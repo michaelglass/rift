@@ -544,6 +544,7 @@ mod tests {
     use objc2_core_foundation::CGSize;
 
     use super::*;
+    use crate::model::drag::PointerReleased;
     use crate::model::window_store::{WindowStore, WindowVisibility};
 
     fn frame(x: f64, y: f64, width: f64, height: f64) -> CGRect {
@@ -928,9 +929,9 @@ mod tests {
     fn only_the_owning_button_finishes_a_modifier_drag() {
         let mut windows = tracked(&[w(1)]);
         windows.start_drag(w(1), modifier(true, DragScene::default()));
-        assert!(windows.finish_drag(MouseButton::Right).is_none());
+        assert!(windows.finish_drag(PointerReleased(MouseButton::Right)).is_none());
         assert!(windows.drag().is_some());
-        assert!(windows.finish_drag(MouseButton::Left).is_some());
+        assert!(windows.finish_drag(PointerReleased(MouseButton::Left)).is_some());
         assert!(windows.drag().is_none());
     }
 

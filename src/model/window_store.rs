@@ -3,7 +3,7 @@ use rift_protocol::WindowClaimFlags;
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
-use crate::model::drag::{DragKind, Hold, MouseButton, Session};
+use crate::model::drag::{Hold, PointerReleased, Session};
 use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -35,46 +35,48 @@ pub struct PendingWindowTransfer {
     pub status: TransferStatus,
 }
 
-/// Who decides where a window physically goes next: nobody, a transfer Rift requested, or
-/// the user, whose drag session lives here.
+/// Who places a window: Rift, which may have a transfer in flight, or the user, whose drag
+/// session lives here.
 ///
-/// A held window cannot also be transferring, and nothing can request a transfer for it, so
-/// re-observing it on a space other than its assignment cannot pull it back from under the
-/// pointer. The drop decides where it goes.
-#[derive(Debug, Default)]
+/// A transfer is requested and advanced through [`Unheld`], which only an unheld placement
+/// yields. So a window the user is dragging cannot be transferred: re-observing it on a space
+/// other than its assignment has nothing to pull it back with. The drop decides where it goes.
+#[derive(Debug)]
 enum Placement {
-    #[default]
-    Settled,
-    Transferring(PendingWindowTransfer),
+    Unheld(Option<PendingWindowTransfer>),
     Held(Box<Session>),
+}
+
+impl Default for Placement {
+    fn default() -> Self { Placement::Unheld(None) }
 }
 
 impl Placement {
     fn transfer(&self) -> Option<PendingWindowTransfer> {
         match self {
-            Placement::Transferring(operation) => Some(*operation),
-            Placement::Settled | Placement::Held(_) => None,
+            Placement::Unheld(transfer) => *transfer,
+            Placement::Held(_) => None,
         }
     }
 
     fn transfer_mut(&mut self) -> Option<&mut PendingWindowTransfer> {
         match self {
-            Placement::Transferring(operation) => Some(operation),
-            Placement::Settled | Placement::Held(_) => None,
+            Placement::Unheld(transfer) => transfer.as_mut(),
+            Placement::Held(_) => None,
         }
     }
 
     fn held(&self) -> Option<&Session> {
         match self {
             Placement::Held(session) => Some(session),
-            Placement::Settled | Placement::Transferring(_) => None,
+            Placement::Unheld(_) => None,
         }
     }
 
     fn held_mut(&mut self) -> Option<&mut Session> {
         match self {
             Placement::Held(session) => Some(session),
-            Placement::Settled | Placement::Transferring(_) => None,
+            Placement::Unheld(_) => None,
         }
     }
 
@@ -90,9 +92,106 @@ impl Placement {
 
     /// Forgets a transfer; a hold ends only with its drag.
     fn clear_transfer(&mut self) {
-        if matches!(self, Placement::Transferring(_)) {
-            *self = Placement::Settled;
+        if let Placement::Unheld(transfer) = self {
+            *transfer = None;
         }
+    }
+}
+
+/// A window as Rift may place it: its transfer slot. Only a window the user isn't dragging
+/// has one, so transfers are requested and advanced here and nowhere else.
+pub(crate) struct Unheld<'a> {
+    transfer: &'a mut Option<PendingWindowTransfer>,
+    frame: Option<objc2_core_foundation::CGRect>,
+    placeable: bool,
+    topology_revision: u64,
+    generation: &'a mut u64,
+}
+
+impl Unheld<'_> {
+    /// Coalesce repeated intent; only a new destination or newly available
+    /// lifecycle context can start physical work. Exhaustion preserves intent.
+    pub(crate) fn request_transfer(
+        self,
+        frame: Option<objc2_core_foundation::CGRect>,
+        target: SpaceId,
+        available: bool,
+    ) -> bool {
+        let available = available && self.placeable;
+        if let Some(operation) = self.transfer.as_mut()
+            && operation.requested_space == target
+        {
+            use crate::sys::geometry::SameAs;
+            let resumed = available && operation.status == TransferStatus::Unavailable;
+            // Newer geometry supersedes stale frames without resetting the budget.
+            let new_frame = frame.is_some_and(|frame| {
+                operation.requested_frame.is_none_or(|requested| !requested.same_as(frame))
+            });
+            if new_frame {
+                operation.requested_frame = frame;
+            }
+            if !available {
+                operation.status = TransferStatus::Unavailable;
+            } else if resumed {
+                operation.status = TransferStatus::Pending;
+                operation.attempts = 0;
+            }
+            let write = available && operation.requested_frame.is_some() && (resumed || new_frame);
+            if write {
+                operation.last_revision = Some(self.topology_revision);
+            }
+            return write;
+        }
+        *self.generation = self.generation.wrapping_add(1);
+        let write = available && frame.is_some();
+        *self.transfer = Some(PendingWindowTransfer {
+            generation: *self.generation,
+            requested_frame: frame,
+            requested_space: target,
+            started_revision: self.topology_revision,
+            last_revision: write.then_some(self.topology_revision),
+            attempts: 0,
+            status: if available {
+                TransferStatus::Pending
+            } else {
+                TransferStatus::Unavailable
+            },
+        });
+        write
+    }
+
+    /// Retry only on accepted, complete topology revisions, with a fixed budget.
+    /// Exhaustion keeps the logical intent; a frame acknowledgement never confirms Space membership.
+    pub(crate) fn advance_transfer(
+        self,
+        revision: u64,
+        available: bool,
+    ) -> Option<PendingWindowTransfer> {
+        let operation = self.transfer.as_mut()?;
+        if !(available && self.placeable) {
+            operation.status = TransferStatus::Unavailable;
+            return None;
+        }
+        if operation.status == TransferStatus::Unavailable {
+            operation.status = TransferStatus::Pending;
+            operation.attempts = 0;
+            operation.last_revision = None;
+        }
+        operation.requested_frame = operation.requested_frame.or(self.frame);
+        if operation.status != TransferStatus::Pending
+            || operation.requested_frame.is_none()
+            || operation.last_revision.is_some_and(|previous| revision <= previous)
+        {
+            return None;
+        }
+        operation.last_revision = Some(revision);
+        if operation.attempts >= 2 {
+            // Exhaustion changes retry authority, never accepted frame authority.
+            operation.status = TransferStatus::Deferred;
+            return None;
+        }
+        operation.attempts += 1;
+        Some(*operation)
     }
 }
 
@@ -1703,8 +1802,7 @@ impl WindowStore {
     pub(crate) fn hold_of(&self, window: WindowId) -> Hold {
         match self.drag() {
             Some((held, _)) if held == window => Hold::This,
-            Some((_, session)) if session.kind == DragKind::ModifierMove => Hold::OtherByModifier,
-            Some(_) => Hold::OtherNative,
+            Some(_) => Hold::Other,
             None => Hold::Nobody,
         }
     }
@@ -1746,8 +1844,11 @@ impl WindowStore {
         Some((window, *session))
     }
 
-    /// Only the button that started a drag ends it.
-    pub(crate) fn finish_drag(&mut self, button: MouseButton) -> Option<(WindowId, Session)> {
+    /// Only the release of the button that started a drag ends it.
+    pub(crate) fn finish_drag(
+        &mut self,
+        PointerReleased(button): PointerReleased,
+    ) -> Option<(WindowId, Session)> {
         let (window, _) = self.drag().filter(|(_, session)| session.button == button)?;
         self.take_drag(window)
     }
@@ -1761,99 +1862,22 @@ impl WindowStore {
         }
     }
 
-    /// Coalesce repeated intent; only a new destination or newly available
-    /// lifecycle context can start physical work. Exhaustion preserves intent.
-    pub(crate) fn request_transfer(
-        &mut self,
-        window: WindowId,
-        frame: Option<objc2_core_foundation::CGRect>,
-        target: SpaceId,
-        available: bool,
-    ) -> bool {
-        let available = available && self.can_place_window(window);
-        let record = self.windows.entry(window).or_default();
-        if matches!(record.placement, Placement::Held(_)) {
-            return false;
-        }
-        if let Some(operation) = record.placement.transfer_mut()
-            && operation.requested_space == target
-        {
-            use crate::sys::geometry::SameAs;
-            let resumed = available && operation.status == TransferStatus::Unavailable;
-            // Newer geometry supersedes stale frames without resetting the budget.
-            let new_frame = frame.is_some_and(|frame| {
-                operation.requested_frame.is_none_or(|requested| !requested.same_as(frame))
-            });
-            if new_frame {
-                operation.requested_frame = frame;
-            }
-            if !available {
-                operation.status = TransferStatus::Unavailable;
-            } else if resumed {
-                operation.status = TransferStatus::Pending;
-                operation.attempts = 0;
-            }
-            let write = available && operation.requested_frame.is_some() && (resumed || new_frame);
-            if write {
-                operation.last_revision = Some(self.topology_revision);
-            }
-            return write;
-        }
-        self.operation_generation = self.operation_generation.wrapping_add(1);
-        let write = available && frame.is_some();
-        record.placement = Placement::Transferring(PendingWindowTransfer {
-            generation: self.operation_generation,
-            requested_frame: frame,
-            requested_space: target,
-            started_revision: self.topology_revision,
-            last_revision: write.then_some(self.topology_revision),
-            attempts: 0,
-            status: if available {
-                TransferStatus::Pending
-            } else {
-                TransferStatus::Unavailable
-            },
-        });
+    /// `window` as Rift may place it, tracking it if need be; `None` while the user drags it.
+    pub(crate) fn unheld(&mut self, window: WindowId) -> Option<Unheld<'_>> {
+        let placeable = self.can_place_window(window);
         self.app_windows.entry(window.pid).or_default().insert(window);
-        write
-    }
-
-    /// Retry only on accepted, complete topology revisions, with a fixed budget.
-    /// Exhaustion keeps the logical intent; a frame acknowledgement never confirms Space membership.
-    pub(crate) fn advance_transfer(
-        &mut self,
-        window: WindowId,
-        revision: u64,
-        available: bool,
-    ) -> Option<PendingWindowTransfer> {
-        let available = available && self.can_place_window(window);
-        let record = self.windows.get_mut(&window)?;
+        let record = self.windows.entry(window).or_default();
         let frame = record.frame();
-        let operation = record.placement.transfer_mut()?;
-        if !available {
-            operation.status = TransferStatus::Unavailable;
-            return None;
+        match &mut record.placement {
+            Placement::Unheld(transfer) => Some(Unheld {
+                transfer,
+                frame,
+                placeable,
+                topology_revision: self.topology_revision,
+                generation: &mut self.operation_generation,
+            }),
+            Placement::Held(_) => None,
         }
-        if operation.status == TransferStatus::Unavailable {
-            operation.status = TransferStatus::Pending;
-            operation.attempts = 0;
-            operation.last_revision = None;
-        }
-        operation.requested_frame = operation.requested_frame.or(frame);
-        if operation.status != TransferStatus::Pending
-            || operation.requested_frame.is_none()
-            || operation.last_revision.is_some_and(|previous| revision <= previous)
-        {
-            return None;
-        }
-        operation.last_revision = Some(revision);
-        if operation.attempts >= 2 {
-            // Exhaustion changes retry authority, never accepted frame authority.
-            operation.status = TransferStatus::Deferred;
-            return None;
-        }
-        operation.attempts += 1;
-        Some(*operation)
     }
 
     /// A new display set or Space identity is a new chance; unchanged topology never is.
@@ -1884,7 +1908,7 @@ impl WindowStore {
                 && Some(operation.requested_space) == observed
                 && operation.last_revision.is_none_or(|last| revision >= last)
         }) {
-            record.placement = Placement::Settled;
+            record.placement.clear_transfer();
             true
         } else {
             false
@@ -1947,9 +1971,9 @@ mod tests {
         let (a, b) = (SpaceId::new(1), SpaceId::new(2));
         let frame = Some(objc2_core_foundation::CGRect::ZERO);
         store.accept_topology_revision(10);
-        assert!(store.request_transfer(window, frame, a, true));
+        assert!(store.unheld(window).unwrap().request_transfer(frame, a, true));
         let first = store.record(window).unwrap().pending_transfer().unwrap();
-        assert!(!store.request_transfer(window, frame, a, true));
+        assert!(!store.unheld(window).unwrap().request_transfer(frame, a, true));
         for (revision, observed) in [(9, Some(a)), (11, None), (11, Some(b))] {
             assert!(!store.confirm_transfer(window, first.generation, revision, observed));
         }
@@ -1960,23 +1984,26 @@ mod tests {
             (13, false),
             (14, false),
         ] {
-            assert_eq!(store.advance_transfer(window, revision, true).is_some(), writes);
+            assert_eq!(
+                store.unheld(window).unwrap().advance_transfer(revision, true).is_some(),
+                writes
+            );
         }
         assert_eq!(
             store.record(window).unwrap().pending_transfer().unwrap().status,
             TransferStatus::Deferred
         );
-        assert!(!store.request_transfer(window, frame, a, true));
-        assert!(!store.request_transfer(window, frame, b, false));
+        assert!(!store.unheld(window).unwrap().request_transfer(frame, a, true));
+        assert!(!store.unheld(window).unwrap().request_transfer(frame, b, false));
         let second = store.record(window).unwrap().pending_transfer().unwrap();
         assert!(second.generation > first.generation);
         assert!(!store.confirm_transfer(window, first.generation, 15, Some(a)));
-        assert!(store.advance_transfer(window, 15, true).is_some());
+        assert!(store.unheld(window).unwrap().advance_transfer(15, true).is_some());
         assert!(!store.confirm_transfer(window, second.generation, 14, Some(b)));
         assert!(store.confirm_transfer(window, second.generation, 16, Some(b)));
         assert!(store.record(window).unwrap().pending_transfer().is_none());
         store.accept_topology_revision(20);
-        store.request_transfer(window, frame, a, true);
+        store.unheld(window).unwrap().request_transfer(frame, a, true);
         let current = store.record(window).unwrap().pending_transfer().unwrap();
         assert!(!store.confirm_transfer(window, current.generation, 19, Some(a)));
         assert!(store.confirm_transfer(window, current.generation, 20, Some(a)));
@@ -2317,8 +2344,7 @@ mod tests {
         );
         window_store.replace_rule_floating(wid, true);
         assert!(
-            !window_store.request_transfer(
-                wid,
+            !window_store.unheld(wid).unwrap().request_transfer(
                 Some(objc2_core_foundation::CGRect::ZERO),
                 user_space,
                 true
@@ -2326,8 +2352,7 @@ mod tests {
             "rule reapplication must not override native fullscreen suspension"
         );
         window_store.restore_window_from_native_fullscreen(wid).unwrap();
-        assert!(window_store.request_transfer(
-            wid,
+        assert!(window_store.unheld(wid).unwrap().request_transfer(
             Some(objc2_core_foundation::CGRect::ZERO),
             user_space,
             true
@@ -2486,7 +2511,7 @@ mod tests {
         store.assign_window_to_workspace(old, workspace);
         store.replace_rule_floating(old, true);
         store.track_window_server_id(server, old);
-        store.request_transfer(old, None, SpaceId::new(8), true);
+        store.unheld(old).unwrap().request_transfer(None, SpaceId::new(8), true);
         let pending = store.record(old).unwrap().pending_transfer().unwrap();
         assert_eq!(store.reconcile_ax_identity(replacement, Some(server)), Some(old));
         assert_eq!(
@@ -2511,7 +2536,7 @@ mod tests {
             .expect("workspace");
         store.track_window_server_id(wsid, wid);
         store.assign_window_to_workspace(wid, workspace_id);
-        store.request_transfer(wid, None, SpaceId::new(9), true);
+        store.unheld(wid).unwrap().request_transfer(None, SpaceId::new(9), true);
 
         store.remove_windows_for_app(wid.pid);
 
