@@ -36,8 +36,11 @@ const WRITE_DEADLINE: Duration = Duration::from_millis(300);
 pub(crate) struct Desired(Vec<(WindowId, CGRect)>);
 
 impl Desired {
-    pub(crate) fn of(layout: &[(WindowId, CGRect)]) -> Self {
-        Self(layout.iter().map(|&(wid, frame)| (wid, frame.round())).collect())
+    pub(crate) fn of(mut layout: Vec<(WindowId, CGRect)>) -> Self {
+        for (_, frame) in &mut layout {
+            *frame = frame.round();
+        }
+        Self(layout)
     }
 
     pub(crate) fn frames(&self) -> &[(WindowId, CGRect)] { &self.0 }

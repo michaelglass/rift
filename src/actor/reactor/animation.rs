@@ -1013,6 +1013,10 @@ impl AnimationManager {
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
             // Nothing to animate: these are ordinary desires, reconciled like any other.
+            if presented.is_empty() {
+                reactor.cancel_window_presentations(desired.windows());
+                return reactor.arrange_frames(space, layout, Want::Arrange) || camera;
+            }
             let windows =
                 desired.windows().into_iter().filter(|wid| !presented.contains(wid)).collect();
             reactor.cancel_window_presentations(windows);

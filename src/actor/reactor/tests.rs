@@ -12996,5 +12996,5 @@ fn a_layout_pass_during_a_drag_moves_no_window_of_a_scrolling_layout() {
 
 /// A layout as the appliers take it.
 fn desired(layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
-    super::reconciler::Desired::of(layout)
+    super::reconciler::Desired::of(layout.to_vec())
 }
