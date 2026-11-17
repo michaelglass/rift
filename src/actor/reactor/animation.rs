@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use super::TransactionId;
-use super::reconciler::{Desired, Owner, Verdict, Want};
+use super::reconciler::{Desired, Owner, Want};
 use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
@@ -1042,10 +1042,17 @@ impl AnimationManager {
             anim.mark_handled(dragged);
         }
 
+        let mut hidden = Vec::new();
         for &(wid, target_frame) in layout {
             // The window the user holds keeps its slot, but its frame is theirs until the drop.
             if presented.contains(&wid) || reactor.owner(wid) == Owner::User {
                 anim.mark_handled(wid);
+                continue;
+            }
+            if reactor.state.windows.workspace_for_window(wid) != Some(active_ws) {
+                // A hidden window has nothing to animate: an ordinary desire.
+                anim.mark_handled(wid);
+                hidden.push((wid, target_frame));
                 continue;
             }
 
@@ -1063,28 +1070,6 @@ impl AnimationManager {
                 continue;
             }
             any_frame_changed = true;
-            if reactor.state.windows.workspace_for_window(wid) != Some(active_ws) {
-                // A hidden window has nothing to animate: an ordinary desire.
-                anim.mark_handled(wid);
-                trace!(
-                    ?wid,
-                    ?current_frame,
-                    ?target_frame,
-                    "Direct positioning hidden window"
-                );
-                let owner = reactor.owner(wid);
-                match reactor.reconciler.want(wid, target_frame, current_frame, Want::Place, owner)
-                {
-                    Verdict::Send(write) => reactor.send_arranged(write),
-                    Verdict::Queued => {
-                        if let Some(window) = reactor.state.windows.window_mut(wid) {
-                            window.frame_monotonic = target_frame;
-                        }
-                    }
-                    Verdict::Nothing => {}
-                }
-                continue;
-            }
             let txid = window_server_id
                 .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
                 .unwrap_or_default();
@@ -1108,6 +1093,7 @@ impl AnimationManager {
                 window.frame_monotonic = target_frame;
             }
         }
+        any_frame_changed |= reactor.arrange_frames(space, &hidden, false, Want::Arrange);
 
         if !anim.is_empty() {
             if let Some(tx) = &reactor.animation_tx {
