@@ -425,7 +425,7 @@ impl LayoutManager {
 
         let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
-            let desired = Desired::of(&layout);
+            let desired = Desired::of(layout);
             // Start native workspace moves before collecting stack tabs and building
             // IPC events. App actors can perform AX work while we publish the UI.
             let switch_dispatched = is_workspace_switch && !instant && !force_frames;
@@ -537,7 +537,7 @@ impl LayoutManager {
                 && reactor.workspace_switch_manager.pending_display_warp.is_none()
                 && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                     == LayoutMode::Scrolling
-                && let Some((_, frame)) = layout.iter().find(|(wid, _)| *wid == window)
+                && let Some((_, frame)) = desired.frames().iter().find(|(wid, _)| *wid == window)
             {
                 reactor.workspace_switch_manager.pending_focus_mouse_warp = None;
                 if reactor.screen_for_point(frame.mid()).is_some() {
