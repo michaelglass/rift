@@ -2791,6 +2791,40 @@ mod tests {
     }
 
     #[test]
+    fn the_grip_ends_when_the_gripped_windows_app_terminates() {
+        // Not only when the window itself is destroyed: an app that quits mid-press or mid-drag
+        // takes its windows' records with it, and the slot is one of the places they live.
+        for dragging in [false, true] {
+            let mut store = WindowStore::default();
+            let wid = WindowId::new(4, 1);
+            store.set_visibility(wid, WindowVisibility::Visible);
+            store.press(wid, MouseButton::Left);
+            if dragging && let Some(Hand::Pressed(pressed)) = store.hand_on(wid) {
+                let frame = objc2_core_foundation::CGRect::ZERO;
+                pressed.start(Session::native(
+                    crate::model::drag::DragSource {
+                        origin_frame: frame,
+                        last_frame: frame,
+                        origin_space: None,
+                        current_space: None,
+                        tiled: true,
+                    },
+                    Default::default(),
+                ));
+            }
+            assert_eq!(store.gripped(), Some(wid));
+            assert_eq!(store.pointer() == Pointer::Dragging, dragging);
+
+            store.remove_windows_for_app(wid.pid);
+
+            assert_eq!(store.gripped(), None, "dragging: {dragging}");
+            assert_eq!(store.pointer(), Pointer::Idle);
+            assert!(store.record(wid).is_none());
+            store.debug_assert_invariants();
+        }
+    }
+
+    #[test]
     fn app_cleanup_removes_all_indexes_and_pending_transfers() {
         let mut store = WindowStore::default();
         let wid = WindowId::new(4, 1);
