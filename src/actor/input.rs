@@ -228,11 +228,6 @@ impl Input {
                 | (1u64 << CGEventType::RightMouseUp.0)
                 | (1u64 << CGEventType::ScrollWheel.0);
         }
-        // Like mouse-up, the left press is part of the stable mask: it is what a native drag
-        // starts from, and rebuilding the tap around each drag would cost more than filtering.
-        if state.event_processing_enabled {
-            mask |= 1u64 << CGEventType::LeftMouseDown.0;
-        }
         if state.event_processing_enabled && state.mouse_features_enabled {
             if state.mouse_settings.action1 != MouseAction::None {
                 mask |= (1u64 << CGEventType::LeftMouseDown.0)
@@ -290,7 +285,7 @@ impl Input {
     }
 
     /// Plain left presses (what a native drag starts from) are reported by a listen-only
-    /// tap, so the active tap need not see a press it will not swallow.
+    /// tap, so the active tap holds a click only when it may swallow it.
     fn press_tap_wanted(&self) -> bool { self.state.borrow().event_processing_enabled }
 
     fn press_tap_missing(&self) -> bool {
@@ -2205,11 +2200,11 @@ mod tests {
         assert!(!input.press_tap_wanted());
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
-        // Releases, and the left press a native drag starts from, are always subscribed.
+        // Releases are always subscribed. The plain left press a native drag starts from goes to
+        // the listen-only press tap, so the active tap does not hold every click.
         assert!(input.press_tap_wanted());
-        let stable_release_mask = (1u64 << CGEventType::LeftMouseUp.0)
-            | (1u64 << CGEventType::RightMouseUp.0)
-            | (1u64 << CGEventType::LeftMouseDown.0);
+        let stable_release_mask =
+            (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(
@@ -2314,6 +2309,21 @@ mod tests {
         input.mission_control_active.set(true);
         input.on_left_press_observed(&left_press(CGEventFlags::empty()));
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn active_tap_holds_left_presses_only_where_it_may_swallow_them() {
+        let (input, _, _) = input();
+        let left_down = 1u64 << CGEventType::LeftMouseDown.0;
+        input.state.borrow_mut().event_processing_enabled = true;
+        input.state.borrow_mut().mouse_features_enabled = true;
+        input.state.borrow_mut().mouse_settings.action1 = MouseAction::None;
+        assert_eq!(input.desired_event_mask() & left_down, 0);
+        input.state.borrow_mut().mouse_settings.action1 = MouseAction::Move;
+        assert_ne!(input.desired_event_mask() & left_down, 0);
+        input.state.borrow_mut().mouse_settings.action1 = MouseAction::None;
+        input.mission_control_active.set(true);
+        assert_ne!(input.desired_event_mask() & left_down, 0);
     }
 
     #[test]
