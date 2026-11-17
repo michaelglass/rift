@@ -107,6 +107,9 @@ pub struct Input {
     gesture_filter: RefCell<gesture::Filter>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     tap_generation: Cell<u64>,
+    // Listen-only: reports plain left presses without macOS holding the click for rift.
+    press_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
+    press_tap_generation: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     binding_mode_specs: RefCell<BindingModeSpecs>,
     hotkeys: RefCell<Vec<HashMap<Hotkey, Vec<WmCommand>>>>,
@@ -122,6 +125,7 @@ impl Drop for Input {
         // Unregister callbacks before their state is destroyed.
         self.gesture_control.stop(&self.events_tx);
         self.tap.get_mut().take();
+        self.press_tap.get_mut().take();
     }
 }
 
@@ -182,6 +186,7 @@ struct CallbackCtx {
 #[derive(Clone, Copy, Debug)]
 enum Recovery {
     TapInvalidated(u64),
+    PressTapInvalidated(u64),
     NativeGestureHeld,
 }
 
@@ -284,10 +289,68 @@ impl Input {
         tap
     }
 
+    /// Plain left presses (what a native drag starts from) are reported by a listen-only
+    /// tap, so the active tap need not see a press it will not swallow.
+    fn press_tap_wanted(&self) -> bool { self.state.borrow().event_processing_enabled }
+
+    fn press_tap_missing(&self) -> bool {
+        self.press_tap_wanted() && self.press_tap.borrow().is_none()
+    }
+
+    fn sync_press_tap(&self, recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>) {
+        if !self.press_tap_wanted() {
+            self.press_tap.borrow_mut().take();
+            return;
+        }
+        if self.press_tap.borrow().is_some() {
+            return;
+        }
+        let generation = self.press_tap_generation.get().wrapping_add(1);
+        let ctx_ptr = Box::into_raw(Box::new(CallbackCtx {
+            this: self as *const Input,
+            recovery_tx: recovery_tx.clone(),
+            tap_generation: generation,
+        })) as *mut std::ffi::c_void;
+        let tap = unsafe {
+            crate::sys::event_tap::EventTap::new(
+                CGTapLoc::HIDEventTap,
+                CGTapOpt::ListenOnly,
+                1u64 << CGEventType::LeftMouseDown.0,
+                Some(press_callback),
+                ctx_ptr,
+                Some(drop_input_ctx),
+                // A press missed while disabled needs no reconciliation.
+                None,
+                Some(press_tap_invalidated),
+            )
+        };
+        let Some(tap) = tap else {
+            unsafe { drop_input_ctx(ctx_ptr) };
+            warn!("Failed to create listen-only press tap");
+            return;
+        };
+        self.press_tap_generation.set(generation);
+        *self.press_tap.borrow_mut() = Some(tap);
+    }
+
+    fn rebuild_invalidated_press_tap(
+        &self,
+        generation: u64,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
+        if generation != self.press_tap_generation.get() {
+            debug!(generation, "Ignoring invalidation from a replaced press tap");
+            return;
+        }
+        self.press_tap.borrow_mut().take();
+        self.sync_press_tap(recovery_tx);
+    }
+
     fn rebuild_event_tap_mask_if_needed(
         &self,
         recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
     ) {
+        self.sync_press_tap(recovery_tx);
         let next_mask = self.desired_event_mask();
         if next_mask == self.event_mask.get() && (next_mask == 0 || self.tap.borrow().is_some()) {
             return;
@@ -370,6 +433,8 @@ impl Input {
             gesture_filter: RefCell::new(gesture::Filter::default()),
             tap: RefCell::new(None),
             tap_generation: Cell::new(0),
+            press_tap: RefCell::new(None),
+            press_tap_generation: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
             binding_mode_specs: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(Vec::new()),
@@ -423,9 +488,14 @@ impl Input {
                 // select evaluates disabled futures too; defer timer creation
                 // so healthy taps allocate no timer and schedule no wakeup.
                 _ = async { Timer::sleep(Duration::from_secs(1)).with_tolerance(Duration::from_millis(100)).await },
-                    if this.tap.borrow().is_none() && this.desired_event_mask() != 0 => {
+                    if (this.tap.borrow().is_none() && this.desired_event_mask() != 0)
+                        || this.press_tap_missing() => {
+                    let tap_was_missing = this.tap.borrow().is_none();
                     this.rebuild_event_tap_mask_if_needed(&recovery_tx);
-                    if this.tap.borrow().is_some() { this.reconcile_after_tap_reenabled(); }
+                    // Only a recovered active tap can have lost state worth reconciling.
+                    if tap_was_missing && this.tap.borrow().is_some() {
+                        this.reconcile_after_tap_reenabled();
+                    }
                 }
                 maybe_recovery = recovery_rx.recv() => {
                     let Some(recovery) = maybe_recovery else { break };
@@ -433,6 +503,9 @@ impl Input {
                         Recovery::NativeGestureHeld => {}
                         Recovery::TapInvalidated(generation) => {
                             this.rebuild_invalidated_event_tap(generation, &recovery_tx);
+                        }
+                        Recovery::PressTapInvalidated(generation) => {
+                            this.rebuild_invalidated_press_tap(generation, &recovery_tx);
                         }
                     }
                 }
@@ -966,12 +1039,7 @@ impl Input {
                     });
                     return false;
                 }
-                // A plain left press names the window a native drag may then move.
-                if button == crate::actor::drag::MouseButton::Left {
-                    self.events_tx.send(Event::PointerPressed {
-                        point: CGEvent::location(Some(event)),
-                    });
-                }
+                // Plain left presses are reported by the listen-only tap (on_left_press_observed).
                 true
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
@@ -1003,6 +1071,30 @@ impl Input {
             }
             _ => true,
         }
+    }
+
+    /// The listen-only press tap's handler. It is the only reporter of `PointerPressed`, and
+    /// skips exactly the presses `on_event` consumes, whichever tap sees the press first.
+    fn on_left_press_observed(&self, event: &CGEvent) {
+        if self.mission_control_active.get() {
+            return;
+        }
+        let state = self.state.borrow();
+        if !state.event_processing_enabled
+            || state
+                .modifier_mouse_action(
+                    crate::actor::drag::MouseButton::Left,
+                    CGEvent::flags(Some(event)),
+                )
+                .is_some()
+        {
+            return;
+        }
+        drop(state);
+        // A plain left press names the window a native drag may then move.
+        self.events_tx.send(Event::PointerPressed {
+            point: CGEvent::location(Some(event)),
+        });
     }
 
     fn finish_overview_hotkey(&self) {
@@ -1357,6 +1449,33 @@ unsafe extern "C-unwind" fn input_callback(
         Ok(false) => core::ptr::null_mut(),
         Err(_) => event_ref.as_ptr(),
     }
+}
+
+unsafe extern "C-unwind" fn press_callback(
+    _proxy: CGEventTapProxy,
+    event_type: CGEventType,
+    event_ref: core::ptr::NonNull<CGEvent>,
+    user_info: *mut std::ffi::c_void,
+) -> *mut CGEvent {
+    // Listen-only: the return value is ignored and the click is never held.
+    if user_info.is_null() || event_type != CGEventType::LeftMouseDown {
+        return event_ref.as_ptr();
+    }
+    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    let event = unsafe { event_ref.as_ref() };
+    let this = unsafe { &*ctx.this };
+    if std::panic::catch_unwind(AssertUnwindSafe(|| this.on_left_press_observed(event))).is_err() {
+        error!("Panic while reporting a left press");
+    }
+    event_ref.as_ptr()
+}
+
+unsafe extern "C-unwind" fn press_tap_invalidated(user_info: *mut std::ffi::c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    let _ = ctx.recovery_tx.send(Recovery::PressTapInvalidated(ctx.tap_generation));
 }
 
 unsafe extern "C-unwind" fn event_tap_reenabled(user_info: *mut std::ffi::c_void) {
@@ -2083,9 +2202,11 @@ mod tests {
         assert!(input.hotkeys.borrow().is_empty());
         let keyboard_mask = 1u64 << CGEventType::KeyDown.0;
         assert_eq!(input.desired_event_mask(), keyboard_mask);
+        assert!(!input.press_tap_wanted());
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
         // Releases, and the left press a native drag starts from, are always subscribed.
+        assert!(input.press_tap_wanted());
         let stable_release_mask = (1u64 << CGEventType::LeftMouseUp.0)
             | (1u64 << CGEventType::RightMouseUp.0)
             | (1u64 << CGEventType::LeftMouseDown.0);
@@ -2122,6 +2243,77 @@ mod tests {
         *input.disable_hotkey.borrow_mut() =
             Some(Hotkey::new(Modifiers::empty(), KeyCode::ShiftLeft));
         assert_eq!(input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0), 0);
+    }
+
+    fn left_press(flags: CGEventFlags) -> objc2_core_foundation::CFRetained<CGEvent> {
+        let event = CGEvent::new_mouse_event(
+            None,
+            CGEventType::LeftMouseDown,
+            CGPoint::new(20.0, 30.0),
+            objc2_core_graphics::CGMouseButton::Left,
+        )
+        .unwrap();
+        CGEvent::set_flags(Some(&event), flags);
+        event
+    }
+
+    /// Both taps handle the press, in either order, as macOS may deliver it to both.
+    fn press_through_both_taps(input: &Input, event: &CGEvent) -> bool {
+        input.on_left_press_observed(event);
+        let passed = input.on_event(CGEventType::LeftMouseDown, event, None);
+        input.on_left_press_observed(event);
+        passed
+    }
+
+    #[test]
+    fn plain_left_press_is_reported_only_by_the_listen_only_tap() {
+        let (input, _, mut events_rx) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.event_processing_enabled = true;
+            state.mouse_features_enabled = true;
+            state.mouse_settings.action1 = MouseAction::Move;
+        }
+        let event = left_press(CGEventFlags::empty());
+        // The active tap passes the plain press through and reports nothing.
+        assert!(input.on_event(CGEventType::LeftMouseDown, &event, None));
+        assert!(events_rx.try_recv().is_err());
+        input.on_left_press_observed(&event);
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::PointerPressed { point } if point == CGPoint::new(20.0, 30.0)
+        ));
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn modifier_left_press_is_consumed_and_never_reported_as_a_pointer_press() {
+        let (input, _, mut events_rx) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.event_processing_enabled = true;
+            state.mouse_features_enabled = true;
+            state.mouse_settings.action1 = MouseAction::Move;
+            state.mouse_settings.modifier = MouseModifier::Fn;
+        }
+        let event = left_press(CGEventFlags::MaskSecondaryFn);
+        assert!(!press_through_both_taps(&input, &event));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::ModifierMouseDown { action: MouseAction::Move, .. }
+        ));
+        assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn listen_only_tap_skips_overview_presses_and_disabled_processing() {
+        let (input, _, mut events_rx) = input();
+        input.on_left_press_observed(&left_press(CGEventFlags::empty()));
+        assert!(events_rx.try_recv().is_err());
+        input.state.borrow_mut().event_processing_enabled = true;
+        input.mission_control_active.set(true);
+        input.on_left_press_observed(&left_press(CGEventFlags::empty()));
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[test]
