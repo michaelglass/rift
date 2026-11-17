@@ -12,6 +12,7 @@ use objc2_core_foundation::CGRect;
 use tracing::{debug, warn};
 
 use super::animation::scrolling_bounds;
+use super::managers::ScrollingDisplayBounds;
 use super::{Reactor, TransactionId};
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::actor::drag::Session;
@@ -222,12 +223,13 @@ impl Reconciler {
         want: Want,
         owner: Owner,
     ) -> Verdict {
+        let mut sync = self.sync(window);
         // A write nobody answered in time no longer holds newer desires back. Whatever was
         // queued behind it is older than `desired`, so it is dropped.
-        if let Sync::InFlight { target, deadline, queued: _ } = self.sync(window)
+        if let Sync::InFlight { target, deadline, queued: _ } = sync
             && self.clock.now() >= deadline
         {
-            self.time_out(window, target, known);
+            sync = self.time_out(window, target, known);
         }
         match owner {
             Owner::Rift => {}
@@ -236,7 +238,7 @@ impl Reconciler {
                 // A transfer's placement has already moved the model to `desired`, so what the
                 // model believes may no longer be what the app was told. An answer still due
                 // brings the truth; otherwise the next desire is sent regardless.
-                match (want, self.sync(window)) {
+                match (want, sync) {
                     (
                         Want::Arrange | Want::ArrangePositions,
                         Sync::Settled | Sync::InFlight { .. } | Sync::Refused { .. } | Sync::Adrift,
@@ -249,13 +251,15 @@ impl Reconciler {
                 return Verdict::Nothing;
             }
         }
-        match (self.sync(window), want) {
+        match (sync, want) {
             (
-                Sync::InFlight { target, deadline, queued: _ },
+                Sync::InFlight { target, deadline, queued },
                 Want::Arrange | Want::ArrangePositions | Want::Place,
             ) => {
                 if desired.same_as(target) {
-                    self.set(window, Sync::InFlight { target, deadline, queued: None });
+                    if queued.is_some() {
+                        self.set(window, Sync::InFlight { target, deadline, queued: None });
+                    }
                     return Verdict::Nothing;
                 }
                 debug!(?window, frame = ?desired, in_flight = ?target, "reconcile: queued");
@@ -270,7 +274,10 @@ impl Reconciler {
             {
                 Verdict::Nothing
             }
-            (Sync::Settled | Sync::Refused { .. }, Want::Arrange | Want::ArrangePositions)
+            (Sync::Settled, Want::Arrange | Want::ArrangePositions) if desired.same_as(known) => {
+                Verdict::Nothing
+            }
+            (Sync::Refused { .. }, Want::Arrange | Want::ArrangePositions)
                 if desired.same_as(known) =>
             {
                 self.set(window, Sync::Settled);
@@ -378,9 +385,11 @@ impl Reconciler {
 
     /// The app did not answer the write of `target` in time: a refusal, with the window where
     /// the model last saw it.
-    fn time_out(&mut self, window: WindowId, target: CGRect, known: CGRect) {
+    fn time_out(&mut self, window: WindowId, target: CGRect, known: CGRect) -> Sync {
         debug!(?window, wanted = ?target, "reconcile: timeout");
-        self.set(window, Sync::Refused { wanted: target, got: known });
+        let refused = Sync::Refused { wanted: target, got: known };
+        self.set(window, refused);
+        refused
     }
 
     /// The write a `deadlines` entry stands for, if it is still waiting: its target and what
@@ -528,6 +537,14 @@ impl Reactor {
         }
     }
 
+    /// Whether a write to `window` is held to `space`'s scrolling bounds (when its layout has
+    /// them): a tiled window of the space's active workspace.
+    fn in_scrolling_bounds(&self, window: WindowId, space: SpaceId) -> bool {
+        self.state.windows.workspace_for_window(window)
+            == self.layout_manager.layout_engine.workspaces().active_workspace(space)
+            && !self.layout_manager.layout_engine.is_window_floating(window)
+    }
+
     /// Sends a write layout asked for: the model takes the window to be there from now on.
     pub(super) fn send_arranged(&mut self, write: Write) {
         let window = write.window;
@@ -535,13 +552,9 @@ impl Reactor {
             self.reconciler.forget(window);
             return;
         };
-        let space = self.assigned_space_for_window_id(window);
-        let bounds = space
-            .filter(|space| {
-                self.state.windows.workspace_for_window(window)
-                    == self.layout_manager.layout_engine.workspaces().active_workspace(*space)
-                    && !self.layout_manager.layout_engine.is_window_floating(window)
-            })
+        let bounds = self
+            .assigned_space_for_window_id(window)
+            .filter(|&space| self.in_scrolling_bounds(window, space))
             .and_then(|space| scrolling_bounds(self, space));
         let handle = app.handle.with_scrolling_bounds(bounds);
         if let Some(state) = self.state.windows.window_mut(window) {
@@ -579,6 +592,37 @@ impl Reactor {
         }
     }
 
+    /// Sends one app's share of an arrange pass, under one transaction id as its protocol
+    /// expects: a position-only request and a full one, as needed.
+    fn send_batch(
+        &mut self,
+        pid: pid_t,
+        bounds: Option<ScrollingDisplayBounds>,
+        Batch { positions, frames, targets }: Batch,
+    ) {
+        let Some(app) = self.app_manager.apps.get(&pid) else {
+            debug!(?pid, "Skipping layout update for app - app no longer exists");
+            for write in positions.iter().chain(&frames) {
+                self.reconciler.forget(write.window);
+            }
+            return;
+        };
+        let handle = app.handle.with_scrolling_bounds(bounds);
+        let transaction = self.transaction_manager.stamp(targets);
+        let requests = [
+            (!positions.is_empty()).then(|| (frames_of(positions), FrameMode::Position)),
+            (!frames.is_empty()).then(|| (frames_of(frames), FrameMode::Full)),
+        ];
+        for (frames, mode) in requests.into_iter().flatten() {
+            let request =
+                Request::SetWindowFrames(frames, transaction, mode, true, Default::default());
+            if let Err(error) = handle.send(request) {
+                debug!(?pid, ?error, "Failed to send layout request - app may have quit");
+                break;
+            }
+        }
+    }
+
     /// Reconciles one space's frames with its apps, one request per app and kind of change.
     /// Returns whether any desire was new.
     pub(super) fn arrange_frames(
@@ -588,14 +632,11 @@ impl Reactor {
         want: Want,
     ) -> bool {
         let bounds = scrolling_bounds(self, space);
-        let active = self.layout_manager.layout_engine.workspaces().active_workspace(space);
         let mut per_app: HashMap<(pid_t, bool), Batch> = HashMap::default();
         let mut any_desire_new = false;
 
         for &(wid, target) in frames {
-            let constrained = bounds.is_some()
-                && self.state.windows.workspace_for_window(wid) == active
-                && !self.layout_manager.layout_engine.is_window_floating(wid);
+            let constrained = bounds.is_some() && self.in_scrolling_bounds(wid, space);
             let Some(window) = self.state.windows.window(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
                 continue;
@@ -623,30 +664,8 @@ impl Reactor {
             }
         }
 
-        for ((pid, constrained), Batch { positions, frames, targets }) in per_app {
-            let sent = positions.iter().chain(&frames).map(|write| write.window);
-            let Some(app) = self.app_manager.apps.get(&pid) else {
-                debug!(?pid, "Skipping layout update for app - app no longer exists");
-                for window in sent.collect::<Vec<_>>() {
-                    self.reconciler.forget(window);
-                }
-                continue;
-            };
-            let handle = app.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
-            // One transaction id for the app's whole batch, as its protocol expects.
-            let transaction = self.transaction_manager.stamp(targets);
-            let requests = [
-                (!positions.is_empty()).then(|| (frames_of(positions), FrameMode::Position)),
-                (!frames.is_empty()).then(|| (frames_of(frames), FrameMode::Full)),
-            ];
-            for (frames, mode) in requests.into_iter().flatten() {
-                let request =
-                    Request::SetWindowFrames(frames, transaction, mode, true, Default::default());
-                if let Err(error) = handle.send(request) {
-                    debug!(?pid, ?error, "Failed to send layout request - app may have quit");
-                    break;
-                }
-            }
+        for ((pid, constrained), batch) in per_app {
+            self.send_batch(pid, bounds.filter(|_| constrained), batch);
         }
 
         any_desire_new
