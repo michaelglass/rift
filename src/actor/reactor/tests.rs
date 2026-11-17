@@ -12306,3 +12306,33 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+#[test]
+fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    // Rift has written a frame the app hasn't applied yet: its reports still carry the
+    // transaction id it last saw.
+    let last_seen_by_app = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let in_flight = CGRect::new(CGPoint::new(frame.origin.x + 10.0, frame.origin.y), frame.size);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, in_flight);
+
+    // The user grabs the window and moves it somewhere that is neither where it was nor
+    // where Rift's write would put it.
+    let dragged = CGRect::new(
+        CGPoint::new(frame.origin.x + 60.0, frame.origin.y + 40.0),
+        frame.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged,
+        Some(last_seen_by_app),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+
+    assert!(
+        reactor.is_in_drag(),
+        "the user's move was discarded as a stale echo of Rift's in-flight write"
+    );
+}
