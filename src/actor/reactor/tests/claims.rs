@@ -220,7 +220,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
         None,
     ));
     assert_eq!(reactor.state.windows.window(wid).unwrap().frame_monotonic, moved);
-    assert!(!reactor.is_in_drag(), "an owner move is not a Rift drag");
+    assert!(!reactor.user_is_dragging(), "an owner move is not a Rift drag");
     let stored = |r: &Reactor| r.layout_manager.layout_engine.get_floating_position(workspace, wid);
     assert_eq!(stored(&reactor), Some(floating_frame));
 
@@ -251,7 +251,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
     reactor.animation_tx = Some(animation_tx);
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
     assert!(
         std::iter::from_fn(|| animation_rx.commands.try_recv().ok())
@@ -267,7 +267,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
         Requested(false),
         Some(crate::sys::event::MouseState::Down),
     ));
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
     assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
 }
 

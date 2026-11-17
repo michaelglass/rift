@@ -2207,7 +2207,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
                 crate::actor::drag::Session::native(source, Default::default()),
             );
         }
-        assert!(reactor.is_in_drag());
+        assert!(reactor.user_is_dragging());
         let added = WindowId::new(1, 2);
         let observe = || {
             LayoutEvent::TestWindowsObserved(
@@ -2232,7 +2232,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         reactor.send_layout_event(LayoutEvent::WindowRemoved(added));
         assert_eq!(reactor.layout_update_count, before + 1);
         reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-        assert!(!reactor.is_in_drag());
+        assert!(!reactor.user_is_dragging());
         let before = reactor.layout_update_count;
         reactor.send_layout_event(observe());
         assert_eq!(reactor.layout_update_count, before + 1);
@@ -2295,7 +2295,7 @@ fn cross_display_drag_clears_source_floating_position() {
     )
     .unwrap();
     assert!(outcome.arrange.passes > 0);
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(
@@ -2345,7 +2345,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         Requested(false),
         Some(MouseState::Down),
     ));
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
     assert!(drop_target(&reactor).is_none());
 
     // Keep dragging with the swap still latched, then release.
@@ -2360,11 +2360,11 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         Requested(false),
         Some(MouseState::Down),
     ));
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
     assert!(drop_target(&reactor).is_none());
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
 
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating_wid));
     let stored = reactor
         .layout_manager
@@ -2392,7 +2392,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
 
     reactor.start_modifier_drag(wid, source, frame.mid());
     reactor.nudge_drag(30.0);
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
     let before = reactor.layout_update_count;
     reactor.apply_event_outcome(EventOutcome::layout_changed(false));
     assert_eq!(reactor.layout_update_count, before);
@@ -2407,7 +2407,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     config.settings.drag_drop.enabled = false;
     let config_cancel = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
     assert_eq!(config_cancel.arrange.passes, 1);
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
     let before = reactor.layout_update_count;
     reactor.apply_event_outcome(config_cancel);
     assert_eq!(reactor.layout_update_count - before, 1);
@@ -2437,10 +2437,10 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
         Requested(false),
         Some(MouseState::Up),
     ));
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
 
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
 }
 
 #[test]
@@ -3153,7 +3153,7 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.insert_test_window_state(wid, frame, Some(WindowServerId::new(1)), true);
     reactor.ensure_active_drag(wid, &frame);
 
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
     reactor.drag_manager.sync_motion_gate(reactor.state.windows.drag());
     assert!(
         reactor
@@ -3166,7 +3166,7 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.communication_manager.input_tx = Some(input_tx);
     reactor.handle_event(Event::MissionControlNativeEntered);
 
-    assert!(!reactor.is_in_drag());
+    assert!(!reactor.user_is_dragging());
     assert!(
         !reactor
             .drag_manager
@@ -9476,7 +9476,7 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
                     Requested(false),
                     Some(MouseState::Up),
                 ));
-                assert!(!reactor.is_in_drag());
+                assert!(!reactor.user_is_dragging());
             }
             if returning && case == "closed" {
                 let closed = windows.pop().unwrap();
@@ -12309,7 +12309,7 @@ fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
         Requested(false),
         Some(MouseState::Down),
     ));
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
     let _ = apps.requests();
 
     // ...and with the button still down, the window server reports it on the other display, and
@@ -12328,7 +12328,7 @@ fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
         snapped.is_none(),
         "rift moved the window while the user was dragging it: {snapped:?}"
     );
-    assert!(reactor.is_in_drag());
+    assert!(reactor.user_is_dragging());
 }
 
 /// Two tiled windows on the first of two displays; the user is modifier-dragging the first
