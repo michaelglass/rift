@@ -320,9 +320,10 @@ pub fn handle_window_frame_changed(
             } else {
                 Default::default()
             };
-            state.windows.start_drag(
-                wid,
-                Session::native(
+            // Only the window the pointer pressed can become a drag.
+            if let Some(pressed) = state.windows.pressed(wid) {
+                tracing::debug!(?wid, "drag-evidence: drag started (pressed window moved)");
+                pressed.start(Session::native(
                     DragSource {
                         origin_frame: old_frame,
                         last_frame: new_frame,
@@ -331,8 +332,8 @@ pub fn handle_window_frame_changed(
                         tiled,
                     },
                     scene,
-                ),
-            );
+                ));
+            }
         }
         if native_resize && active_resize_space.is_some() {
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {

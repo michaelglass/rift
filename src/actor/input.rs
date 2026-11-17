@@ -225,6 +225,11 @@ impl Input {
                 | (1u64 << CGEventType::RightMouseUp.0)
                 | (1u64 << CGEventType::ScrollWheel.0);
         }
+        // Like mouse-up, the left press is part of the stable mask: it is what a native drag
+        // starts from, and rebuilding the tap around each drag would cost more than filtering.
+        if state.event_processing_enabled {
+            mask |= 1u64 << CGEventType::LeftMouseDown.0;
+        }
         if state.event_processing_enabled && state.mouse_features_enabled {
             if state.mouse_settings.action1 != MouseAction::None {
                 mask |= (1u64 << CGEventType::LeftMouseDown.0)
@@ -973,6 +978,12 @@ impl Input {
                         action,
                     });
                     return false;
+                }
+                // A plain left press names the window a native drag may then move.
+                if button == crate::actor::drag::MouseButton::Left {
+                    self.events_tx.send(Event::PointerPressed {
+                        point: CGEvent::location(Some(event)),
+                    });
                 }
                 true
             }
@@ -2078,8 +2089,10 @@ mod tests {
         assert_eq!(input.desired_event_mask(), keyboard_mask);
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
-        let stable_release_mask =
-            (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        // Releases, and the left press a native drag starts from, are always subscribed.
+        let stable_release_mask = (1u64 << CGEventType::LeftMouseUp.0)
+            | (1u64 << CGEventType::RightMouseUp.0)
+            | (1u64 << CGEventType::LeftMouseDown.0);
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(

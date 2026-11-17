@@ -3,7 +3,7 @@ use rift_protocol::WindowClaimFlags;
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
-use crate::model::drag::{Hold, PointerReleased, Session};
+use crate::model::drag::{PointerReleased, Session};
 use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -35,15 +35,20 @@ pub struct PendingWindowTransfer {
     pub status: TransferStatus,
 }
 
-/// Who places a window: Rift, which may have a transfer in flight, or the user, whose drag
-/// session lives here.
+/// Who places a window: Rift, which may have a transfer in flight, or the user, from the
+/// moment the pointer presses on it.
 ///
 /// A transfer is requested and advanced through [`Unheld`], which only an unheld placement
-/// yields. So a window the user is dragging cannot be transferred: re-observing it on a space
-/// other than its assignment has nothing to pull it back with. The drop decides where it goes.
+/// yields. So a window the user has pressed or is dragging cannot be transferred:
+/// re-observing it on a space other than its assignment has nothing to pull it back with.
+/// A drag starts only from [`Pressed`], which only a pressed placement yields, so a frame
+/// change on any other window has nothing to start one from.
 #[derive(Debug)]
 enum Placement {
     Unheld(Option<PendingWindowTransfer>),
+    /// The pointer is down on the window. Its transfer, if any, waits: a release without a
+    /// drag puts it back, a drag supersedes it.
+    Pressed(Option<PendingWindowTransfer>),
     Held(Box<Session>),
 }
 
@@ -55,50 +60,63 @@ impl Placement {
     fn transfer(&self) -> Option<PendingWindowTransfer> {
         match self {
             Placement::Unheld(transfer) => *transfer,
-            Placement::Held(_) => None,
+            Placement::Pressed(_) | Placement::Held(_) => None,
         }
     }
 
     fn transfer_mut(&mut self) -> Option<&mut PendingWindowTransfer> {
         match self {
             Placement::Unheld(transfer) => transfer.as_mut(),
-            Placement::Held(_) => None,
+            Placement::Pressed(_) | Placement::Held(_) => None,
         }
     }
 
     fn held(&self) -> Option<&Session> {
         match self {
             Placement::Held(session) => Some(session),
-            Placement::Unheld(_) => None,
+            Placement::Unheld(_) | Placement::Pressed(_) => None,
         }
     }
 
     fn held_mut(&mut self) -> Option<&mut Session> {
         match self {
             Placement::Held(session) => Some(session),
-            Placement::Unheld(_) => None,
+            Placement::Unheld(_) | Placement::Pressed(_) => None,
         }
     }
 
-    fn take_held(&mut self) -> Option<Box<Session>> {
+    /// The user's hand is on the window: pressed or dragging.
+    fn gripped(&self) -> bool { !matches!(self, Placement::Unheld(_)) }
+
+    /// The user let go: a waiting transfer resumes, a drag's session is returned.
+    fn let_go(&mut self) -> Option<Box<Session>> {
         match std::mem::take(self) {
             Placement::Held(session) => Some(session),
-            other => {
-                *self = other;
+            Placement::Pressed(transfer) | Placement::Unheld(transfer) => {
+                *self = Placement::Unheld(transfer);
                 None
             }
         }
     }
 
-    /// Forgets a transfer; a hold ends only with its drag.
+    /// Forgets a transfer, in flight or waiting; a hold ends only with its drag.
     fn clear_transfer(&mut self) {
-        if let Placement::Unheld(transfer) = self {
+        if let Placement::Unheld(transfer) | Placement::Pressed(transfer) = self {
             *transfer = None;
         }
     }
 }
 
-/// A window as Rift may place it: its transfer slot. Only a window the user isn't dragging
+/// The pointer is down on a window that isn't dragged yet: the only thing a drag starts from.
+pub(crate) struct Pressed<'a>(&'a mut Placement);
+
+impl Pressed<'_> {
+    /// The pressed window moved under the pointer, or a modifier press took it: the drag begins,
+    /// superseding any transfer that was waiting.
+    pub(crate) fn start(self, session: Session) { *self.0 = Placement::Held(Box::new(session)); }
+}
+
+/// A window as Rift may place it: its transfer slot. Only a window the user hasn't pressed
 /// has one, so transfers are requested and advanced here and nowhere else.
 pub(crate) struct Unheld<'a> {
     transfer: &'a mut Option<PendingWindowTransfer>,
@@ -1034,7 +1052,7 @@ impl WindowStore {
                 && !record.rule_floating
                 && record.claim.is_none()
                 // The drag keeps its window's record until it ends.
-                && record.placement.held().is_none()
+                && !record.placement.gripped()
         });
         if should_remove {
             self.windows.remove(&window_id);
@@ -1559,8 +1577,7 @@ impl WindowStore {
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
         // A drag holding the replacement keeps it unless the drag held the old identity.
-        if matches!(pending, Placement::Held(_)) || !matches!(target.placement, Placement::Held(_))
-        {
+        if pending.gripped() || !target.placement.gripped() {
             target.placement = pending;
         }
         target.floating_display_geometry = geom;
@@ -1798,13 +1815,56 @@ impl WindowStore {
         self.windows.get_mut(&window)?.placement.held_mut()
     }
 
-    /// What the user's drag says about `window`.
-    pub(crate) fn hold_of(&self, window: WindowId) -> Hold {
-        match self.drag() {
-            Some((held, _)) if held == window => Hold::This,
-            Some(_) => Hold::Other,
-            None => Hold::Nobody,
+    /// Tests have no window server: the tracked window whose known frame contains `point`.
+    #[cfg(test)]
+    pub(crate) fn window_at(&self, point: objc2_core_foundation::CGPoint) -> Option<WindowId> {
+        use crate::sys::geometry::CGRectExt;
+        self.windows
+            .iter()
+            .filter(|(_, record)| record.frame().is_some_and(|frame| frame.contains(point)))
+            .map(|(window, _)| *window)
+            .min_by_key(|window| (window.pid, window.idx.get()))
+    }
+
+    /// Whether the user's hand is on `window`: pressed, or dragging it.
+    pub(crate) fn is_gripped(&self, window: WindowId) -> bool {
+        self.record(window).is_some_and(|record| record.placement.gripped())
+    }
+
+    /// The window the user's hand is on, pressed or dragged.
+    pub(crate) fn gripped(&self) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find_map(|(window, record)| record.placement.gripped().then_some(*window))
+    }
+
+    /// The pointer pressed on `window`, which is tracked. One pointer: whatever it held
+    /// before is let go.
+    pub(crate) fn press(&mut self, window: WindowId) {
+        self.end_drag();
+        if let Some(record) = self.windows.get_mut(&window)
+            && let Placement::Unheld(transfer) = &mut record.placement
+        {
+            record.placement = Placement::Pressed(transfer.take());
         }
+    }
+
+    /// Tests start a drag the only way there is: a press on the window, then its drag.
+    #[cfg(test)]
+    pub(crate) fn press_and_drag(&mut self, window: WindowId, session: Session) {
+        self.press(window);
+        self.pressed(window).expect("a tracked window can be pressed").start(session);
+    }
+
+    /// The window the pointer is down on, if no drag has started.
+    pub(crate) fn pressed_window(&self) -> Option<WindowId> {
+        self.gripped().filter(|window| self.drag_on(*window).is_none())
+    }
+
+    /// `window` if the pointer is down on it and no drag has started.
+    pub(crate) fn pressed(&mut self, window: WindowId) -> Option<Pressed<'_>> {
+        let placement = &mut self.windows.get_mut(&window)?.placement;
+        matches!(placement, Placement::Pressed(_)).then_some(Pressed(placement))
     }
 
     /// The user's drag and the window it holds: the record the session is found on.
@@ -1820,49 +1880,43 @@ impl WindowStore {
             .find_map(|(window, record)| Some((*window, record.placement.held_mut()?)))
     }
 
-    /// The user's drag takes over `window`'s placement, superseding any transfer in flight.
-    /// There is one drag: starting one ends the last. The window is already tracked.
-    pub(crate) fn start_drag(&mut self, window: WindowId, session: Session) {
-        self.end_drag();
-        let record = self.windows.get_mut(&window);
-        debug_assert!(record.is_some(), "a drag holds a tracked window");
-        if let Some(record) = record {
-            record.placement = Placement::Held(Box::new(session));
-        }
-    }
-
-    /// The drop (or a cancel) decides where the window goes from here.
+    /// The user's hand comes off whatever it was on, without a drop (a cancel, Mission
+    /// Control, the window leaving Rift's control). A drag's session is returned.
     pub(crate) fn end_drag(&mut self) -> Option<(WindowId, Session)> {
-        let (window, _) = self.drag()?;
-        self.take_drag(window)
+        let window = self.gripped()?;
+        self.let_go(window)
     }
 
-    /// Ends the drag on `window`, which holds it.
-    fn take_drag(&mut self, window: WindowId) -> Option<(WindowId, Session)> {
-        let session = self.windows.get_mut(&window)?.placement.take_held()?;
+    fn let_go(&mut self, window: WindowId) -> Option<(WindowId, Session)> {
+        let session = self.windows.get_mut(&window)?.placement.let_go();
         self.prune_window_record(window);
-        Some((window, *session))
+        Some((window, *session?))
     }
 
-    /// Only the release of the button that started a drag ends it.
+    /// The pointer was released. A press ends; a drag ends only on the button that started it.
     pub(crate) fn finish_drag(
         &mut self,
         PointerReleased(button): PointerReleased,
     ) -> Option<(WindowId, Session)> {
-        let (window, _) = self.drag().filter(|(_, session)| session.button == button)?;
-        self.take_drag(window)
+        let window = self.gripped()?;
+        if self.drag_on(window).is_some_and(|session| session.button != button) {
+            return None;
+        }
+        self.let_go(window)
     }
 
-    /// A window left Rift's control: a drag holding it ends, and it is no longer a drop target.
+    /// A window left Rift's control: a press or drag on it ends, and it is no longer a drop
+    /// target.
     pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
-        match self.drag_mut() {
-            Some((held, _)) if held == window => _ = self.take_drag(window),
-            Some((_, session)) => session.forget_target(window),
-            None => {}
+        if self.is_gripped(window) {
+            self.let_go(window);
+        } else if let Some((_, session)) = self.drag_mut() {
+            session.forget_target(window);
         }
     }
 
-    /// `window` as Rift may place it, tracking it if need be; `None` while the user drags it.
+    /// `window` as Rift may place it, tracking it if need be; `None` while the user's hand is
+    /// on it.
     pub(crate) fn unheld(&mut self, window: WindowId) -> Option<Unheld<'_>> {
         let placeable = self.can_place_window(window);
         self.app_windows.entry(window.pid).or_default().insert(window);
@@ -1876,7 +1930,7 @@ impl WindowStore {
                 topology_revision: self.topology_revision,
                 generation: &mut self.operation_generation,
             }),
-            Placement::Held(_) => None,
+            Placement::Pressed(_) | Placement::Held(_) => None,
         }
     }
 
@@ -1932,8 +1986,8 @@ impl WindowStore {
                 debug_assert!(self.owner_claims(claim.owner).contains(&wid));
             }
         }
-        let held = self.windows.values().filter(|record| record.placement.held().is_some());
-        debug_assert!(held.count() <= 1, "one drag at a time");
+        let gripped = self.windows.values().filter(|record| record.placement.gripped());
+        debug_assert!(gripped.count() <= 1, "one pointer");
         for (&owner, ids) in &self.claims {
             debug_assert!(!ids.is_empty());
             debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));
