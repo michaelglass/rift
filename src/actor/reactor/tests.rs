@@ -1889,7 +1889,7 @@ fn matching_rift_frame_clears_pending_target() {
     // the accepted geometry is cached, the target stays pending, and nothing is arranged.
     let adjusted_target = CGRect::new(CGPoint::new(80.0, 40.0), frame.size);
     let accepted = CGRect::new(CGPoint::new(95.0, 40.0), frame.size);
-    reactor.place_window(wid, adjusted_target, true);
+    reactor.place_window(wid, adjusted_target);
     let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
     let outcome = reactor
         .dispatch_workflow(Event::WindowFrameChanged(
@@ -1914,7 +1914,7 @@ fn matching_rift_frame_clears_pending_target() {
     // A user drag beginning while a write is with the app clears it instead of waiting for
     // the app's answer.
     let dragged = CGRect::new(CGPoint::new(140.0, 90.0), frame.size);
-    reactor.place_window(wid, adjusted_target, true);
+    reactor.place_window(wid, adjusted_target);
     reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
@@ -2172,7 +2172,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let moved = |wid, frame, txid, requested| {
         Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
     };
-    reactor.place_window(wid, at(40.0), true);
+    reactor.place_window(wid, at(40.0));
     let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
     // Acknowledged, unchanged, and explicitly requested frames.
     for event in [
@@ -2186,7 +2186,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 
     // A report of somewhere else while a write is with the app (a step on its way),
     // duplicate minimize edges, and events for unknown windows.
-    reactor.place_window(wid, at(40.0), true);
+    reactor.place_window(wid, at(40.0));
     let current = reactor.transaction_manager.get_last_sent_txid(wsid);
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
@@ -3583,7 +3583,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     // Rift parked the window and the app answered with somewhere else: a refusal, which
     // Rift does not ask for again.
     let parked_elsewhere = reactor.state.windows.window(wid).unwrap().frame_monotonic;
-    reactor.place_window(wid, hidden_target, true);
+    reactor.place_window(wid, hidden_target);
     let _ = apps.requests();
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
@@ -8213,7 +8213,7 @@ fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() 
             .unwrap();
         assert!(!rx.recv().unwrap());
         assert_eq!(outcome.arrange.passes, 0);
-        assert!(outcome.pre_layout_window_frame_writes.is_empty());
+        assert!(outcome.placements.is_empty());
         assert_eq!(
             reactor.layout_manager.layout_engine.workspaces().workspace_for_window(
                 &reactor.state.windows,
@@ -8281,8 +8281,8 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
     assert_eq!(outcome.arrange.passes, 1);
     assert_eq!(outcome.arrange.space_scope, Some(destination));
     assert_eq!(outcome.arrange.secondary_space_scope, Some(source));
-    assert_eq!(outcome.pre_layout_window_frame_writes.len(), 1);
-    assert!(outcome.pre_layout_window_frame_writes[0].frame.origin.x >= 1000.0);
+    assert_eq!(outcome.placements.len(), 1);
+    assert!(outcome.placements[0].frame.origin.x >= 1000.0);
     assert_eq!(
         reactor
             .layout_manager
@@ -10912,7 +10912,7 @@ fn named_pin_reload_moves_immediately_without_growing_catalog() {
             };
             assert!(
                 outcome
-                    .pre_layout_window_frame_writes
+                    .placements
                     .iter()
                     .any(|write| { write.window == window && screen.contains(write.frame.mid()) }),
                 "reloading a named pin must prepare the native move before any workspace switch"
@@ -12645,7 +12645,7 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
     // transaction id it last saw.
     let last_seen_by_app = reactor.transaction_manager.get_last_sent_txid(wsid);
     let in_flight = CGRect::new(CGPoint::new(frame.origin.x + 10.0, frame.origin.y), frame.size);
-    reactor.place_window(wid, in_flight, true);
+    reactor.place_window(wid, in_flight);
     assert!(reactor.reconciler.in_flight(wid));
 
     // The user grabs the window and moves it somewhere that is neither where it was nor
@@ -12919,7 +12919,7 @@ fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
     // window's), and the app is slow to answer.
     for x in [600., 650.] {
         let elsewhere = CGRect::new(CGPoint::new(x, 300.), CGSize::new(200., 200.));
-        reactor.place_window(right, elsewhere, true);
+        reactor.place_window(right, elsewhere);
         reactor.reconciler.clock.advance(std::time::Duration::from_secs(1));
         reactor.expire_writes();
     }

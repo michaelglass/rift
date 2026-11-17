@@ -19,10 +19,9 @@ pub(crate) struct WindowDiscoveryRequest {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WindowFrameWriteRequest {
+pub(crate) struct WindowPlacement {
     pub(crate) window: WindowId,
     pub(crate) frame: CGRect,
-    pub(crate) requested: bool,
 }
 
 #[derive(Debug)]
@@ -75,7 +74,7 @@ pub(crate) struct EventOutcome {
     /// A workspace switch landed on this other display; carry the cursor there.
     pub(crate) display_switch_warp: Option<SpaceId>,
     pub(crate) drop_haptic: bool,
-    pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
+    pub(crate) placements: Vec<WindowPlacement>,
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
     pub(crate) stdout_lines: Vec<String>,
@@ -135,8 +134,7 @@ impl EventOutcome {
         self.post_arrange_mouse_warp =
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
         self.display_switch_warp = other.display_switch_warp.or(self.display_switch_warp);
-        self.pre_layout_window_frame_writes
-            .append(&mut other.pre_layout_window_frame_writes);
+        self.placements.append(&mut other.placements);
         self.close_window = other.close_window.or(self.close_window);
         self.service_config_update =
             other.service_config_update.or(self.service_config_update.take());
@@ -301,17 +299,8 @@ impl EventOutcome {
         self
     }
 
-    pub(crate) fn with_pre_layout_window_frame_write(
-        mut self,
-        window: WindowId,
-        frame: CGRect,
-        requested: bool,
-    ) -> Self {
-        self.pre_layout_window_frame_writes.push(WindowFrameWriteRequest {
-            window,
-            frame,
-            requested,
-        });
+    pub(crate) fn with_placement(mut self, window: WindowId, frame: CGRect) -> Self {
+        self.placements.push(WindowPlacement { window, frame });
         self
     }
 

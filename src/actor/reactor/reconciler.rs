@@ -435,13 +435,13 @@ impl Reactor {
             .unwrap_or_default()
     }
 
-    fn send_one(&mut self, write: Write, handle: AppThreadHandle, eui: bool) {
+    fn send_one(&mut self, write: Write, handle: AppThreadHandle) {
         let transaction = self.stamp(write.window, write.frame);
         if let Err(error) = handle.send(Request::set_window_frame(
             write.window,
             write.frame,
             transaction,
-            eui,
+            true,
         )) {
             warn!(window = ?write.window, %error, "failed to write window frame");
             self.reconciler.forget(write.window);
@@ -450,7 +450,7 @@ impl Reactor {
 
     /// Rift places `window` at `frame` (a transfer, a cancelled drag's way back, an app rule):
     /// sent whatever the model believes, unless a write is with the app, which it then follows.
-    pub(super) fn place_window(&mut self, window: WindowId, frame: CGRect, eui: bool) {
+    pub(super) fn place_window(&mut self, window: WindowId, frame: CGRect) {
         let Some(known) = self.known_frame(window) else { return };
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
             return;
@@ -458,7 +458,7 @@ impl Reactor {
         let handle = app.handle.clone();
         let owner = self.owner(window);
         match self.reconciler.want(window, frame, known, Want::Place, owner) {
-            Verdict::Send(write) => self.send_one(write, handle, eui),
+            Verdict::Send(write) => self.send_one(write, handle),
             Verdict::Queued | Verdict::Nothing => {}
         }
     }
@@ -482,7 +482,7 @@ impl Reactor {
         if let Some(state) = self.state.windows.window_mut(window) {
             state.frame_monotonic = write.frame;
         }
-        self.send_one(write, handle, true);
+        self.send_one(write, handle);
     }
 
     /// Sends the interactive frame of the window the user is dragging.

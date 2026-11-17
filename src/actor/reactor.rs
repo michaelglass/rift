@@ -3050,14 +3050,14 @@ impl Reactor {
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
         self.expire_writes();
-        for write in outcome.pre_layout_window_frame_writes {
+        for write in outcome.placements {
             if self.refreshes_blocked() {
                 break;
             }
             if !self.state.windows.can_place_window(write.window) {
                 continue;
             }
-            self.place_window(write.window, write.frame, write.requested);
+            self.place_window(write.window, write.frame);
         }
 
         #[cfg(test)]
@@ -4580,7 +4580,7 @@ impl Reactor {
                         outcome.absorb(
                             EventOutcome::layout_changed(false)
                                 .with_arrange_space_scope(Some(target))
-                                .with_pre_layout_window_frame_write(window, frame, true),
+                                .with_placement(window, frame),
                         );
                     }
                 }
@@ -5462,7 +5462,7 @@ impl Reactor {
                     frame,
                 );
             }
-            self.place_window(placement.window, frame, true);
+            self.place_window(placement.window, frame);
         }
     }
 
