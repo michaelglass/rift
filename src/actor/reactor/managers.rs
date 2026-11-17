@@ -12,6 +12,7 @@ use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
 use crate::actor::drag::{DragKind, Session};
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
+use crate::actor::reactor::reconciler::Desired;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
@@ -420,22 +421,17 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        // A tiled window the user is dragging is theirs to place until the drop.
-        let skip_wid = reactor
-            .state
-            .windows
-            .drag()
-            .and_then(|(window, session)| session.source.tiled.then_some(window));
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
+            let desired = Desired::of(&layout, &reactor.state.windows);
             // Start native workspace moves before collecting stack tabs and building
             // IPC events. App actors can perform AX work while we publish the UI.
             let switch_dispatched = is_workspace_switch && !instant && !force_frames;
             if switch_dispatched {
                 any_frame_changed |=
-                    AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+                    AnimationManager::workspace_switch_layout(reactor, space, &desired);
             }
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
                 let screen_frame = screen.frame;
@@ -526,20 +522,16 @@ impl LayoutManager {
             }
 
             if force_frames {
-                any_frame_changed |=
-                    AnimationManager::reapply_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |= AnimationManager::reapply_layout(reactor, space, &desired);
             } else if instant {
-                any_frame_changed |=
-                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
             } else if switch_dispatched {
                 // Already submitted before UI publication above.
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
-                any_frame_changed |=
-                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
             } else {
-                any_frame_changed |= AnimationManager::animate_layout(
-                    reactor, space, &layout, is_resize, skip_wid, true,
-                );
+                any_frame_changed |=
+                    AnimationManager::animate_layout(reactor, space, &desired, is_resize, true);
             }
             if let Some(window) = reactor.workspace_switch_manager.pending_focus_mouse_warp
                 && reactor.workspace_switch_manager.pending_display_warp.is_none()

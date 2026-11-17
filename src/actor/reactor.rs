@@ -13,6 +13,7 @@ mod main_window;
 mod managers;
 mod native_tabs;
 mod query;
+mod reconciler;
 mod replay;
 pub mod transaction_manager;
 mod transient_focus;

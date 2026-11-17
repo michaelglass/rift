@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use super::TransactionId;
+use super::reconciler::Desired;
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
@@ -17,7 +18,7 @@ use crate::layout_engine::systems::scrolling::{
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
-use crate::sys::geometry::{Round, SameAs};
+use crate::sys::geometry::SameAs;
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -1005,26 +1006,26 @@ impl AnimationManager {
     pub fn animate_layout(
         reactor: &mut Reactor,
         space: SpaceId,
-        layout: &[(WindowId, CGRect)],
+        desired: &Desired,
         is_resize: bool,
-        skip_wid: Option<WindowId>,
         allow_animation: bool,
     ) -> bool {
+        let layout = desired.frames();
+        // The animated path's own bookkeeping still names the dragged window: the camera must
+        // not present it, and a replaced animation must not carry it over.
+        let dragged = reactor.state.windows.drag().map(|(window, _)| window);
         reactor.retire_presentations();
         let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
         let animate_camera = allow_animation
             && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
-        let presentation = reactor.present_camera(space, animate_camera, None, skip_wid);
+        let presentation = reactor.present_camera(space, animate_camera, None, dragged);
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
-            let windows = layout
-                .iter()
-                .map(|(wid, _)| *wid)
-                .filter(|wid| !presented.contains(wid))
-                .collect();
+            let windows =
+                desired.windows().into_iter().filter(|wid| !presented.contains(wid)).collect();
             reactor.cancel_window_presentations(windows);
         }
         let Some(active_ws) =
@@ -1042,22 +1043,16 @@ impl AnimationManager {
         anim.display = screen.id.as_u32();
         let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
+        if let Some(dragged) = dragged {
+            anim.mark_handled(dragged);
+        }
 
         for &(wid, target_frame) in layout {
             if presented.contains(&wid) {
                 anim.mark_handled(wid);
                 continue;
             }
-            if skip_wid == Some(wid) {
-                anim.mark_handled(wid);
-                trace!(
-                    ?wid,
-                    "Skipping animated layout update for window currently being dragged"
-                );
-                continue;
-            }
 
-            let target_frame = target_frame.round();
             let Some(window) = reactor.state.windows.window(wid) else {
                 continue;
             };
@@ -1139,13 +1134,8 @@ impl AnimationManager {
         any_frame_changed
     }
 
-    pub fn instant_layout(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
-    ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, false, false)
+    pub fn instant_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
+        Self::instant_layout_inner(reactor, space, desired, false, false)
     }
 
     /// Apply the position-only layout used while switching virtual workspaces.
@@ -1156,42 +1146,30 @@ impl AnimationManager {
     pub fn workspace_switch_layout(
         reactor: &mut Reactor,
         space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
+        desired: &Desired,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, true, false)
+        Self::instant_layout_inner(reactor, space, desired, true, false)
     }
 
     /// Restore native geometry after a display change invalidated cached frames.
-    pub fn reapply_layout(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
-    ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, false, true)
+    pub fn reapply_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
+        Self::instant_layout_inner(reactor, space, desired, false, true)
     }
 
     fn instant_layout_inner(
         reactor: &mut Reactor,
         space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
+        desired: &Desired,
         position_only: bool,
         force_frames: bool,
     ) -> bool {
-        reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
+        reactor.cancel_window_presentations(desired.windows());
         let bounds = scrolling_bounds(reactor, space);
         let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
         let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
         let mut any_frame_changed = false;
 
-        for &(wid, target_frame) in layout {
-            if skip_wid == Some(wid) {
-                trace!(?wid, "Skipping layout update for window currently being dragged");
-                continue;
-            }
-
+        for &(wid, target_frame) in desired.frames() {
             let constrained = bounds.is_some()
                 && reactor.state.windows.workspace_for_window(wid) == active
                 && !reactor.layout_manager.layout_engine.is_window_floating(wid);
@@ -1200,7 +1178,6 @@ impl AnimationManager {
                 debug!(?wid, "Skipping layout - window no longer exists");
                 continue;
             };
-            let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
             if !force_frames && target_frame.same_as(current_frame) {
                 continue;

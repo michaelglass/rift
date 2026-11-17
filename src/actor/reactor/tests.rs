@@ -3389,11 +3389,11 @@ fn non_workspace_instant_layout_keeps_full_frame_batch() {
     let _ = apps.requests();
 
     let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
+    let layout = desired(&reactor, &[(wid, target)]);
     assert!(super::animation::AnimationManager::instant_layout(
         &mut reactor,
         space,
-        &[(wid, target)],
-        None,
+        &layout,
     ));
 
     let requests = apps.requests();
@@ -3425,11 +3425,11 @@ fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
     let _ = apps.requests();
 
     let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
+    let layout = desired(&reactor, &[(wid, target)]);
     assert!(super::animation::AnimationManager::workspace_switch_layout(
         &mut reactor,
         space,
-        &[(wid, target)],
-        None,
+        &layout,
     ));
 
     let requests = apps.requests();
@@ -5315,12 +5315,12 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     let right = WindowId::new(1, 2);
     let frame = |x| CGRect::new(CGPoint::new(x, 38.), CGSize::new(1284., 944.));
 
+    let layout = desired(&reactor, &[(left, frame(228.)), (right, frame(1284.))]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
-        &[(left, frame(228.)), (right, frame(1284.))],
+        &layout,
         false,
-        None,
         true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
@@ -5343,12 +5343,12 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
             .frame_monotonic
             .same_as(frame(228.))
     );
+    let layout = desired(&reactor, &[(left, frame(-1056.)), (right, frame(228.))]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
-        &[(left, frame(-1056.)), (right, frame(228.))],
+        &layout,
         false,
-        None,
         true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
@@ -5400,12 +5400,12 @@ fn animated_layout_handles_windows_without_server_ids() {
     apps.requests();
 
     let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let layout = desired(&reactor, &[(WindowId::new(1, 1), target)]);
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,
         space,
-        &[(WindowId::new(1, 1), target)],
+        &layout,
         true,
-        None,
         true,
     ));
 
@@ -12594,4 +12594,9 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
         None,
     ));
     assert_eq!(reactor.state.windows.gripped(), None, "{wid:?} stayed pressed");
+}
+
+/// A layout as the appliers take it: without the dragged window.
+fn desired(reactor: &Reactor, layout: &[(WindowId, CGRect)]) -> super::reconciler::Desired {
+    super::reconciler::Desired::of(layout, &reactor.state.windows)
 }
