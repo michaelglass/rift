@@ -12306,3 +12306,57 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+/// Two tiled windows on the first of two displays; the user is modifier-dragging the first
+/// when the second, which nobody is dragging, reports a frame on the other display. The tap
+/// captured the drag's button, so the frame change carries the button as up.
+fn other_window_moves_during_a_modifier_drag() -> (Reactor, WindowId, WindowId, SpaceId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let (held, other) = (WindowId::new(7, 1), WindowId::new(7, 2));
+    let held_frame = reactor.state.windows.window(held).unwrap().frame_monotonic;
+    reactor.drag_manager.actor.begin_modifier(
+        crate::actor::drag::DragSource {
+            window: held,
+            origin_frame: held_frame,
+            last_frame: held_frame,
+            origin_space: Some(space1),
+            current_space: Some(space1),
+            tiled: true,
+        },
+        held_frame.mid(),
+        crate::common::config::MouseAction::Move,
+        crate::actor::drag::DragScene::default(),
+    );
+    reactor.drag_manager.externally_controlled_window = Some(held);
+    let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic;
+    let on_display2 = CGRect::new(CGPoint::new(1100., other_frame.origin.y), other_frame.size);
+    reactor.handle_event(Event::WindowFrameChanged(
+        other,
+        on_display2,
+        Some(apps.windows[&other].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    (reactor, held, other, space1)
+}
+
+#[test]
+fn another_window_moving_does_not_take_over_the_drag() {
+    let (reactor, held, _, _) = other_window_moves_during_a_modifier_drag();
+    let dragged = reactor.drag_manager.actor.source().map(|source| source.window);
+    assert_eq!(dragged, Some(held), "the user's drag was replaced");
+}
+
+#[test]
+fn another_window_seen_off_its_space_during_a_drag_keeps_its_assignment() {
+    let (reactor, _, other, space1) = other_window_moves_during_a_modifier_drag();
+    assert_eq!(reactor.assigned_space_for_window_id(other), Some(space1));
+}
