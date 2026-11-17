@@ -2121,9 +2121,7 @@ impl Reactor {
                 let Some(write) = self.reconciler.follow(window, session) else {
                     return Ok(EventOutcome::no_change());
                 };
-                if !self.refreshes_blocked() && self.state.windows.can_place_window(window) {
-                    self.send_interactive(write);
-                }
+                self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
             }
             Event::DragCancel => {
@@ -3050,14 +3048,8 @@ impl Reactor {
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
         self.expire_writes();
-        for write in outcome.placements {
-            if self.refreshes_blocked() {
-                break;
-            }
-            if !self.state.windows.can_place_window(write.window) {
-                continue;
-            }
-            self.place_window(write.window, write.frame);
+        for placement in outcome.placements {
+            self.place_window(placement.window, placement.frame);
         }
 
         #[cfg(test)]

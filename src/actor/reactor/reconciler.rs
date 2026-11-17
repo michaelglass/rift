@@ -448,9 +448,18 @@ impl Reactor {
         }
     }
 
+    /// Whether a frame may be written to `window` at all: not while the display topology is
+    /// being re-read, and not to a hidden, minimized or native-fullscreen window.
+    fn may_write(&self, window: WindowId) -> bool {
+        !self.refreshes_blocked() && self.state.windows.can_place_window(window)
+    }
+
     /// Rift places `window` at `frame` (a transfer, a cancelled drag's way back, an app rule):
     /// sent whatever the model believes, unless a write is with the app, which it then follows.
     pub(super) fn place_window(&mut self, window: WindowId, frame: CGRect) {
+        if !self.may_write(window) {
+            return;
+        }
         let Some(known) = self.known_frame(window) else { return };
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
             return;
@@ -487,6 +496,9 @@ impl Reactor {
 
     /// Sends the interactive frame of the window the user is dragging.
     pub(super) fn send_interactive(&mut self, write: Write) {
+        if !self.may_write(write.window) {
+            return;
+        }
         let transaction = self.stamp(write.window, write.frame);
         if let Some(app) = self.app_manager.apps.get(&write.window.pid) {
             app.handle.send_interactive_frame(
