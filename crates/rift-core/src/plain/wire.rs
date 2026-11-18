@@ -10,7 +10,8 @@
 //! [`encode_frames`]): the Roc core's geometry entry takes a shape's words, which start with its
 //! layout system's tag (0 BSP, 1 traditional), and returns the frames' words. A scrolling strip
 //! (tag 2, [`encode_strip`]) returns where it placed everything ([`encode_placed`]); its column
-//! ids are the platform's, one word each.
+//! ids are the platform's, one word each. A settle question (tag 3, [`encode_settle`]) returns
+//! where the camera settles ([`encode_settled`]).
 
 use crate::core::{Desire, Effect, Event, Plan};
 use crate::layout::bsp::{Bsp, Children, Fill, Node, Slot};
@@ -500,17 +501,58 @@ pub fn encode_strip(strip: scrolling::Strip<WindowId, u64>) -> Vec<u64> {
 /// frames, the first snap and the rest, the bounds.
 pub fn encode_placed(placed: scrolling::Placed<WindowId, u64>) -> Vec<u64> {
     let mut words = Words::default();
-    words.spot(placed.first);
-    words.list(placed.rest, Words::spot);
-    words.list(placed.frames, |words, (window, frame)| {
-        words.window(window);
-        words.frame(frame);
-    });
-    words.snap(placed.snaps.0);
-    words.list(placed.snaps.1, Words::snap);
-    words.float(placed.bounds.0);
-    words.float(placed.bounds.1);
+    words.placed(placed);
     words.0
+}
+
+/// A settle question as words: tag 3, the view's width, the offsets a release projects and
+/// starts from, how ties go (0 niri, 1 anchored, 2 anchored towards a column, then its id), then
+/// the placement it settles on.
+pub fn encode_settle(
+    placed: scrolling::Placed<WindowId, u64>,
+    view: f64,
+    projected: f64,
+    from: f64,
+    how: scrolling::Settle<u64>,
+) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(3);
+    words.float(view);
+    words.float(projected);
+    words.float(from);
+    match how {
+        scrolling::Settle::Niri => words.word(0),
+        scrolling::Settle::Anchored => words.word(1),
+        scrolling::Settle::AnchoredTowards(column) => {
+            words.word(2);
+            words.word(column);
+        }
+    }
+    words.placed(placed);
+    words.0
+}
+
+/// Where the camera settles, as words: the column it shows, then the offset.
+pub fn encode_settled(settled: scrolling::Settled<u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(settled.column);
+    words.float(settled.offset);
+    words.0
+}
+
+impl Words {
+    fn placed(&mut self, placed: scrolling::Placed<WindowId, u64>) {
+        self.spot(placed.first);
+        self.list(placed.rest, Words::spot);
+        self.list(placed.frames, |words, (window, frame)| {
+            words.window(window);
+            words.frame(frame);
+        });
+        self.snap(placed.snaps.0);
+        self.list(placed.snaps.1, Words::snap);
+        self.float(placed.bounds.0);
+        self.float(placed.bounds.1);
+    }
 }
 
 /// A layout's frames (each window's, in order) as words.
@@ -1028,15 +1070,68 @@ pub fn decode_strip(words: &[u64]) -> Result<scrolling::Strip<WindowId, u64>, Wi
 /// Where a strip placed everything, as `words` hold it.
 pub fn decode_placed(words: &[u64]) -> Result<scrolling::Placed<WindowId, u64>, WireError> {
     let mut reader = Reader { words, at: 0 };
-    let placed = scrolling::Placed {
-        first: reader.spot()?,
-        rest: reader.list(Reader::spot)?,
-        frames: reader.list(|reader| Ok((reader.window()?, reader.frame()?)))?,
-        snaps: (reader.snap()?, reader.list(Reader::snap)?),
-        bounds: (reader.float()?, reader.float()?),
-    };
+    let placed = reader.placed()?;
     reader.done()?;
     Ok(placed)
+}
+
+/// A settle question, as `words` hold it.
+pub struct SettleQuestion {
+    pub placed: scrolling::Placed<WindowId, u64>,
+    pub view: f64,
+    pub projected: f64,
+    pub from: f64,
+    pub how: scrolling::Settle<u64>,
+}
+
+/// The settle question `words` hold.
+pub fn decode_settle(words: &[u64]) -> Result<SettleQuestion, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    match reader.word()? {
+        3 => {}
+        word => return reader.unknown(word),
+    }
+    let view = reader.float()?;
+    let projected = reader.float()?;
+    let from = reader.float()?;
+    let how = match reader.word()? {
+        0 => scrolling::Settle::Niri,
+        1 => scrolling::Settle::Anchored,
+        2 => scrolling::Settle::AnchoredTowards(reader.word()?),
+        word => return reader.unknown(word),
+    };
+    let placed = reader.placed()?;
+    reader.done()?;
+    Ok(SettleQuestion {
+        placed,
+        view,
+        projected,
+        from,
+        how,
+    })
+}
+
+/// Where the camera settles, as `words` hold it.
+pub fn decode_settled(words: &[u64]) -> Result<scrolling::Settled<u64>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    let settled = scrolling::Settled {
+        column: reader.word()?,
+        offset: reader.float()?,
+    };
+    reader.done()?;
+    Ok(settled)
+}
+
+impl Reader<'_> {
+    fn placed(&mut self) -> Read<scrolling::Placed<WindowId, u64>> {
+        Ok(scrolling::Placed {
+            first: self.spot()?,
+            rest: self.list(Reader::spot)?,
+            frames: self.list(|reader| Ok((reader.window()?, reader.frame()?)))?,
+            snaps: (self.snap()?, self.list(Reader::snap)?),
+            bounds: (self.float()?, self.float()?),
+        })
+    }
 }
 
 /// The frames `words` hold.
@@ -1440,5 +1535,62 @@ mod tests {
             decode_strip(&garbled),
             Err(WireError::Unknown { at: 0, word: 0 })
         );
+    }
+
+    #[test]
+    fn a_settle_question_and_its_answer_survive_the_wire() {
+        let row = |window| scrolling::Row {
+            window,
+            constraints: WindowConstraints::default(),
+            weight: 1.,
+        };
+        let column = |id| scrolling::Column {
+            id,
+            width: scrolling::Width::Fixed(300.),
+            first: row(W),
+            rest: vec![],
+        };
+        let strip = scrolling::Strip {
+            tiling: Rect {
+                x: 0.,
+                y: 0.,
+                w: 1000.,
+                h: 800.,
+            },
+            column_gap: 10.,
+            row_gap: 0.,
+            widths: scrolling::Widths {
+                ratio: 0.5,
+                min_ratio: 0.1,
+                max_ratio: 1.,
+                preserve_window_sizes: false,
+                expand_single_column: false,
+            },
+            alignment: scrolling::Alignment::Center,
+            navigation: scrolling::Navigation::Anchored,
+            first: column(7),
+            rest: vec![column(u64::MAX)],
+        };
+        let placed = strip.place();
+        for how in [
+            scrolling::Settle::Niri,
+            scrolling::Settle::Anchored,
+            scrolling::Settle::AnchoredTowards(u64::MAX),
+        ] {
+            let question = decode_settle(&encode_settle(placed.clone(), 1000., -20., 5., how))
+                .expect("a settle question");
+            assert_eq!(
+                (
+                    question.placed,
+                    question.view,
+                    question.projected,
+                    question.from,
+                    question.how
+                ),
+                (placed.clone(), 1000., -20., 5., how)
+            );
+        }
+        let settled = scrolling::Settled { column: u64::MAX, offset: -0.5 };
+        assert_eq!(decode_settled(&encode_settled(settled)), Ok(settled));
     }
 }
