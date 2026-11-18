@@ -16,7 +16,7 @@ use super::managers::ScrollingDisplayBounds;
 use super::{Reactor, TransactionId};
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::actor::drag::Session;
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::model::window_store::{Pointer, WindowStore};
 use crate::sys::geometry::{IsWithin, Round, SameAs};
 use crate::sys::screen::SpaceId;
@@ -481,38 +481,73 @@ fn owner(windows: &WindowStore, window: WindowId) -> Owner {
     }
 }
 
-/// The events after which what Rift believes about windows may be wrong in ways no report will
-/// tell it, so it re-reads them all (R5).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Lifecycle {
-    /// The user let go of a dragged window: reports lag a drag.
-    DragEnded,
-    /// The displays or spaces changed: macOS moves and resizes windows without telling.
-    SpacesChanged,
-    AppLaunched,
-    AppTerminated,
-    /// The machine woke: anything may have moved while it slept.
-    Woke,
-    /// Topology settled after a quarantine (sleep, lock, display teardown).
-    Recovered,
+/// Whose windows to re-read when the event queue drains (R5): after a drop, a display or Space
+/// change, an app's launch or quit, a wake, or the end of a topology quarantine, what Rift
+/// believes about windows may be wrong in ways no report will tell it. Requests coalesce, so a
+/// burst of such events costs one read per window.
+#[derive(Debug, Default)]
+pub(crate) enum Reread {
+    #[default]
+    Nothing,
+    /// Only these apps' windows: a launched app's are the only news.
+    Apps(HashSet<pid_t>),
+    /// Every app's windows but those of apps that are quitting.
+    All { quitting: HashSet<pid_t> },
+}
+
+impl Reread {
+    pub(crate) fn everything(&mut self) {
+        if !matches!(self, Reread::All { .. }) {
+            *self = Reread::All { quitting: HashSet::default() };
+        }
+    }
+
+    /// `pid` launched: its windows are read.
+    pub(crate) fn app(&mut self, pid: pid_t) {
+        match self {
+            Reread::Nothing => *self = Reread::Apps([pid].into_iter().collect()),
+            Reread::Apps(pids) => _ = pids.insert(pid),
+            Reread::All { quitting } => _ = quitting.remove(&pid),
+        }
+    }
+
+    /// `pid` is quitting: every other app's windows are read, and none of its own.
+    pub(crate) fn everything_but(&mut self, pid: pid_t) {
+        self.everything();
+        if let Reread::All { quitting } = self {
+            quitting.insert(pid);
+        }
+    }
 }
 
 /// The full reconcile.
 impl Reactor {
-    /// Re-reads the frame of every window of every app. Each read comes back as an unprompted
-    /// report and is classified like any other: no news, or someone else's move, which
-    /// re-derives where the window belongs and writes the difference. A write that timed out
-    /// (the app was busy) is asked again once its window is seen where it really is. Reading
-    /// is idempotent, so overlapping reconciles cost reads, not wrong writes.
-    pub(super) fn reconcile_all(&mut self, why: Lifecycle) {
-        if self.refreshes_blocked() {
-            // The topology is in flux; the snapshot that ends the quarantine reconciles.
-            debug!(?why, "reconcile: full, skipped while topology is unstable");
+    /// Sends what [`Reread`] gathered, once per drained event queue. Each read comes back as an
+    /// unprompted report and is classified like any other: no news, or someone else's move,
+    /// which re-derives where the window belongs and writes the difference. A write that timed
+    /// out (the app was busy) is asked again once its window is seen where it really is.
+    pub(crate) fn reread_windows(&mut self) {
+        let reread = std::mem::take(&mut self.reread);
+        if matches!(reread, Reread::Nothing) {
             return;
         }
-        debug!(?why, "reconcile: full");
-        for (&pid, app) in &self.app_manager.apps {
-            if let Err(error) = app.handle.send(Request::ReadFrames(pid)) {
+        if self.refreshes_blocked() {
+            // Discarded: the topology is in flux, and the snapshot that ends the quarantine
+            // asks again.
+            debug!(
+                ?reread,
+                "reconcile: re-read discarded while topology is unstable"
+            );
+            return;
+        }
+        debug!(?reread, "reconcile: re-read");
+        let wanted = |pid: &pid_t| match &reread {
+            Reread::Nothing => false,
+            Reread::Apps(pids) => pids.contains(pid),
+            Reread::All { quitting } => !quitting.contains(pid),
+        };
+        for (pid, app) in self.app_manager.apps.iter().filter(|(pid, _)| wanted(pid)) {
+            if let Err(error) = app.handle.send(Request::ReadFrames(*pid)) {
                 debug!(pid, %error, "reconcile: app gone before its frames were read");
             }
         }

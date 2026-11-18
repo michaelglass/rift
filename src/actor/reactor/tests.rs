@@ -13324,3 +13324,54 @@ fn a_tiled_window_dropped_on_another_display_is_in_only_that_displays_layout() {
         reactor.assigned_space_for_window_id(wid),
     );
 }
+
+#[test]
+fn rereads_coalesce_per_drained_queue_and_skip_quitting_apps() {
+    let mut reactor = test_reactor();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    let mut receivers = Vec::new();
+    for pid in [1, 2, 3] {
+        reactor.add_test_app(pid);
+        let (tx, rx) = actor::channel();
+        reactor.app_manager.apps.get_mut(&pid).unwrap().handle = AppThreadHandle::new_for_test(tx);
+        receivers.push(rx);
+    }
+    let mut reads = || -> Vec<pid_t> {
+        let mut pids: Vec<_> = receivers
+            .iter_mut()
+            .flat_map(|rx| std::iter::from_fn(move || rx.try_recv().ok()))
+            .filter_map(|(_, request)| match request {
+                Request::ReadFrames(pid) => Some(pid),
+                _ => None,
+            })
+            .collect();
+        pids.sort();
+        pids
+    };
+
+    // Whatever the setup's snapshot asked for.
+    reactor.reread_windows();
+    reads();
+
+    // A launch reads only the launched app's windows.
+    reactor.reread.app(2);
+    reactor.reread_windows();
+    assert_eq!(reads(), [2]);
+
+    // A quit, then a drop and a topology change in the same batch: one read per app, and
+    // none for the app that is quitting.
+    reactor.reread.everything_but(3);
+    reactor.reread.everything();
+    reactor.reread.everything();
+    reactor.reread_windows();
+    assert_eq!(reads(), [1, 2]);
+    reactor.reread_windows();
+    assert_eq!(
+        reads(),
+        [] as [pid_t; 0],
+        "nothing is left over for the next drain"
+    );
+}

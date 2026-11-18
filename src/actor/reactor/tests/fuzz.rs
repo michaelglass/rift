@@ -530,6 +530,8 @@ impl Sim {
                 )));
             }
         }
+        // Each step is one batch of the reactor's loop, which flushes when it drains.
+        self.reactor.reread_windows();
         self.apps.requests()
     }
 

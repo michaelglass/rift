@@ -580,6 +580,7 @@ pub struct Reactor {
     notification_manager: managers::NotificationManager,
     transaction_manager: transaction_manager::TransactionManager,
     reconciler: reconciler::Reconciler,
+    reread: reconciler::Reread,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
@@ -707,6 +708,7 @@ impl Reactor {
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
             reconciler: Default::default(),
+            reread: Default::default(),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,
@@ -1267,6 +1269,8 @@ impl Reactor {
                         let _guard = span.enter();
                         Self::handle_thread_event(&reactor, event);
                     }
+                    // Once per batch: the queue drained, or a long burst is cut into batches.
+                    reactor.borrow_mut().reread_windows();
                 }
             }
         }
@@ -1730,7 +1734,8 @@ impl Reactor {
             }
             Event::SystemWoke => {
                 self.suppress_auto_workspace_switch_until_input = true;
-                self.reconcile_all(reconciler::Lifecycle::Woke);
+                debug!("reconcile: re-read everything, woke");
+                self.reread.everything();
                 return Ok(system_workflow::handle_system_woke()?);
             }
             Event::SessionDidBecomeActive => {
@@ -1791,12 +1796,14 @@ impl Reactor {
                 if self.main_window_tracker.is_globally_frontmost(pid) {
                     outcome.app_requests.push((pid, Request::ApplicationGloballyActivated(pid)));
                 }
-                self.reconcile_all(reconciler::Lifecycle::AppLaunched);
+                debug!(pid, "reconcile: re-read the launched app");
+                self.reread.app(pid);
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
             Event::ApplicationTerminated(pid) => {
-                self.reconcile_all(reconciler::Lifecycle::AppTerminated);
+                debug!(pid, "reconcile: re-read everything but the quitting app");
+                self.reread.everything_but(pid);
                 return application_workflow::handle_application_terminated(pid);
             }
             Event::ApplicationThreadTerminated(pid) => {
@@ -2207,7 +2214,8 @@ impl Reactor {
                 let mut outcome = self.handle_authoritative_space_snapshot(space_state)?;
                 if recovering {
                     self.flush_deferred_window_inventory_refresh();
-                    self.reconcile_all(reconciler::Lifecycle::Recovered);
+                    debug!("reconcile: re-read everything, topology recovered");
+                    self.reread.everything();
                     outcome.refresh_window_inventories = false;
                 }
                 return Ok(outcome);
@@ -3979,7 +3987,8 @@ impl Reactor {
         }
         if display_set_changed || !space_remaps.is_empty() {
             outcome.absorb(self.rederive_exhausted_transfers());
-            self.reconcile_all(reconciler::Lifecycle::SpacesChanged);
+            debug!("reconcile: re-read everything, displays or Spaces changed");
+            self.reread.everything();
         }
         // Without structural change only a display whose Space changed is arranged,
         // and nothing for one now showing a fullscreen Space.
@@ -4668,7 +4677,10 @@ impl Reactor {
                     outcome.absorb(self.request_window_transfer(window, target, None));
                 }
             }
-            Pointer::Dragging(_) => self.reconcile_all(reconciler::Lifecycle::DragEnded),
+            Pointer::Dragging(_) => {
+                debug!("reconcile: re-read everything, drag ended");
+                self.reread.everything();
+            }
         }
         Ok(outcome)
     }
