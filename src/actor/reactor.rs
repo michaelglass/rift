@@ -429,10 +429,96 @@ pub enum WindowInvalidationSource {
     StaleAxElement,
 }
 
-/// Things Rift does on its own initiative that have a rule about the pointer; see
-/// `Reactor::may`.
+/// What a user command can disturb: the one fact about a command the pointer rule in
+/// `Reactor::may` needs. Parsed once, where a command enters `dispatch_workflow`.
+#[derive(Debug, Clone, Copy)]
+enum InputClass {
+    /// Changes which windows are where, shown, focused or raised, or where the pointer is.
+    Steering,
+    /// Touches no window and not the pointer: settings, binding modes, diagnostics, saving.
+    Inert,
+}
+
+impl InputClass {
+    fn of(command: &Command) -> Self {
+        use InputClass::*;
+        use ReactorCommand as R;
+        use layout::LayoutCommand as L;
+        use rift_protocol::MetricsCommand as M;
+        match command {
+            Command::Layout(
+                L::NextWindow
+                | L::PrevWindow
+                | L::MoveFocus(_)
+                | L::Ascend
+                | L::Descend
+                | L::MoveNode(_)
+                | L::JoinWindow(_)
+                | L::ConsumeOrExpelWindow(_)
+                | L::ToggleStack
+                | L::ToggleOrientation
+                | L::Balance
+                | L::UnjoinWindows
+                | L::ToggleFocusFloating
+                | L::ToggleWindowFloating
+                | L::ToggleWindowFloatingWithOptions(_)
+                | L::ToggleFullscreen
+                | L::ToggleFullscreenWithinGaps
+                | L::ResizeWindowGrow(_)
+                | L::ResizeWindowShrink(_)
+                | L::ResizeWindowBy { .. }
+                | L::ScrollStrip { .. }
+                | L::SnapStrip
+                | L::SwitchPresetColumnWidth { .. }
+                | L::CenterSelection
+                | L::NextWorkspace(_)
+                | L::PrevWorkspace(_)
+                | L::SwitchToWorkspace(_)
+                | L::MoveWindowToWorkspace { .. }
+                | L::SetWorkspaceLayout { .. }
+                | L::CreateWorkspace
+                | L::SwitchToLastWorkspace
+                | L::SwapWindows(..)
+                | L::MoveStackTab { .. }
+                | L::AdjustMasterRatio(_)
+                | L::AdjustMasterCount { .. }
+                | L::PromoteToMaster
+                | L::SwapMasterStack,
+            ) => Steering,
+            Command::Reactor(
+                R::RestoreLayout { .. }
+                | R::SwitchSpace(_)
+                | R::ToggleSpaceActivated
+                | R::FocusWindow { .. }
+                | R::ShowMissionControlAll
+                | R::ShowMissionControlCurrent
+                | R::DismissMissionControl
+                | R::MoveMouseToDisplay(_)
+                | R::FocusDisplay(_)
+                | R::CloseWindow { .. }
+                | R::MoveWindowToDisplay { .. }
+                | R::MoveWorkspaceToDisplay { .. },
+            ) => Steering,
+            Command::Reactor(
+                R::OpenSettings
+                | R::BindingMode(_)
+                | R::Debug
+                | R::Serialize
+                | R::SaveLayout { .. }
+                | R::SaveAndExit,
+            ) => Inert,
+            Command::Metrics(M::ShowTiming) => Inert,
+        }
+    }
+}
+
+/// Things Rift would do that have a rule about the pointer: its own initiatives, and the
+/// user's commands by class; see `Reactor::may`.
 #[derive(Debug, Clone, Copy)]
 enum Initiative {
+    /// A user command (hotkey, CLI, menu). One the pointer rule refuses is discarded, never
+    /// queued: after the drag nothing is replayed.
+    UserCommand(InputClass),
     /// Move-window-to-display and move-workspace-to-display commands.
     MoveBetweenDisplays,
     /// Arrangement and geometry layout passes.
@@ -1086,6 +1172,11 @@ impl Reactor {
         use Initiative::*;
         use Pointer::*;
         match (initiative, self.state.windows.pointer()) {
+            (UserCommand(InputClass::Inert), Idle | Pressing | Dragging) => true,
+            (UserCommand(InputClass::Steering), Idle | Pressing) => true,
+            // A command that would move, focus or reveal windows under the user's drag is
+            // dropped, not deferred to the drop.
+            (UserCommand(InputClass::Steering), Dragging) => false,
             // A press alone changes nothing: the window hasn't moved.
             (MoveBetweenDisplays, Idle | Pressing) => true,
             (Arrange, Idle | Pressing) => true,
@@ -1516,6 +1607,17 @@ impl Reactor {
             }
             self.transient_focus.windows.retain(|_, t| t.pid != *pid);
             event = Event::ApplicationThreadTerminated(*pid);
+        }
+        if let Event::Command(command) = &event {
+            let class = InputClass::of(command);
+            if !self.may(Initiative::UserCommand(class)) {
+                debug!(
+                    ?command,
+                    "mode-gate: discarded {class:?} during {:?}",
+                    self.state.windows.pointer()
+                );
+                return Ok(EventOutcome::no_change());
+            }
         }
         match &event {
             Event::WindowDestroyed(wid)
