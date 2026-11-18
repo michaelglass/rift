@@ -1,11 +1,11 @@
-//! Rift's core written in Roc, behind `rift_core::Core`.
+//! Rift's core written in Roc, stepped like `rift_core::RustCore`.
 //!
 //! The Roc app (`roc/core`) is linked in as a static archive built by `build.rs`. This crate is
-//! its host: it supplies Roc's allocator and crash hooks, and [`RocCore`] adapts the generated
-//! glue (`roc_platform_abi.rs`, regenerated with `roc/glue.sh` on every nightly bump) to the
-//! core's public types. The glue ABI never leaves this crate: events go in as `rift_core` plain
-//! data and effects come out as `rift_core` plain data, copied out of Roc memory and released
-//! at once, so the platform never holds a Roc allocation.
+//! its host: it supplies Roc's allocator and crash hooks, and [`RocCore`] steps it. Events go in
+//! and effects come out as words (`rift_core::plain::wire`), so the glue
+//! (`roc_platform_abi.rs`, regenerated with `roc/glue.sh` on every nightly bump) is three
+//! functions on word lists whatever the core grows. The effect words are copied out of Roc
+//! memory and released at once, so the platform never holds a Roc allocation.
 
 #[allow(clippy::all, non_camel_case_types, unused, unsafe_op_in_unsafe_fn)]
 #[path = "roc_platform_abi.rs"]
@@ -13,13 +13,10 @@ mod abi;
 
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
-use rift_core::plain::{Nanos, Plain, Rect, RequestId, WindowId};
-use rift_core::{
-    Answer, Core, Effect, Event, Initiative, InputClass, Note, Observation, Pointer, Want, Write,
-};
+use rift_core::plain::{Plain, wire};
+use rift_core::{Effect, Event};
 
 // ---------------------------------------------------------------------------------------------
 // Roc's runtime hooks. Roc runs on one thread (the caller's), so the counters are thread-local.
@@ -144,278 +141,7 @@ fn host() -> abi::RocHost {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Plain data to the glue's types and back.
-
-fn window_in(window: WindowId) -> abi::EventWantWindow {
-    abi::EventWantWindow {
-        idx: window.idx,
-        pid: window.pid,
-    }
-}
-
-fn window_out(window: abi::EffectWriteWindow) -> WindowId {
-    WindowId {
-        pid: window.pid,
-        idx: window.idx,
-    }
-}
-
-fn rect_in(rect: Rect) -> abi::EventWantDesired {
-    abi::EventWantDesired {
-        h: rect.h,
-        w: rect.w,
-        x: rect.x,
-        y: rect.y,
-    }
-}
-
-fn rect_out(rect: abi::EffectWriteFrame) -> Rect {
-    Rect {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w,
-        h: rect.h,
-    }
-}
-
-fn seen_in(seen: Option<RequestId>) -> abi::SeenOrUnnamed {
-    let mut out: abi::SeenOrUnnamed = unsafe { std::mem::zeroed() };
-    out.tag = match seen {
-        Some(request) => {
-            out.payload.seen = ManuallyDrop::new(request.0);
-            abi::SeenOrUnnamedTag::Seen
-        }
-        None => abi::SeenOrUnnamedTag::Unnamed,
-    };
-    out
-}
-
-/// The Roc core's platform predates the mode table's `Arranging` and `Hover` input classes and
-/// the `FollowActivation` initiative (the Roc port is paused). On the pointer's row each has
-/// exactly `UserInput(Steering)`'s rule, so it is asked as that; `step` puts the original
-/// initiative back on the answer.
-fn initiative_in(initiative: Initiative) -> abi::EventGate {
-    use abi::ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocusTag as Tag;
-    let mut gate: abi::EventGate = unsafe { std::mem::zeroed() };
-    gate.tag = match initiative {
-        Initiative::UserInput(class) => {
-            gate.payload.user_input = ManuallyDrop::new(match class {
-                InputClass::Steering | InputClass::Arranging | InputClass::Hover => {
-                    abi::InertOrSteering::Steering
-                }
-                InputClass::Inert => abi::InertOrSteering::Inert,
-            });
-            Tag::UserInput
-        }
-        Initiative::FollowActivation => {
-            gate.payload.user_input = ManuallyDrop::new(abi::InertOrSteering::Steering);
-            Tag::UserInput
-        }
-        Initiative::Arrange => Tag::Arrange,
-        Initiative::RetireWindows => Tag::RetireWindows,
-        Initiative::SwitchWorkspaceFocus => Tag::SwitchWorkspaceFocus,
-        Initiative::WarpFocus => Tag::WarpFocus,
-    };
-    gate
-}
-
-fn initiative_out(gate: &abi::EventGate) -> Initiative {
-    use abi::ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocusTag as Tag;
-    match gate.tag {
-        Tag::UserInput => {
-            Initiative::UserInput(match *unsafe { &gate.payload.user_input }.clone() {
-                abi::InertOrSteering::Steering => InputClass::Steering,
-                abi::InertOrSteering::Inert => InputClass::Inert,
-            })
-        }
-        Tag::Arrange => Initiative::Arrange,
-        Tag::RetireWindows => Initiative::RetireWindows,
-        Tag::SwitchWorkspaceFocus => Initiative::SwitchWorkspaceFocus,
-        Tag::WarpFocus => Initiative::WarpFocus,
-    }
-}
-
-/// The event in the glue's layout. A `Tick`'s list is allocated with Roc's allocator; Roc owns
-/// it once the event is passed in.
-fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
-    use abi::EventTag as Tag;
-    let mut out: abi::Event = unsafe { std::mem::zeroed() };
-    out.tag = match event {
-        Event::Pointer(pointer) => {
-            use abi::DraggingOrIdleOrPressingTag as P;
-            let mut slot: abi::EventPointer = unsafe { std::mem::zeroed() };
-            slot.tag = match pointer {
-                Pointer::Idle => P::Idle,
-                Pointer::Pressing(window) => {
-                    slot.payload.pressing = ManuallyDrop::new(window_in(window));
-                    P::Pressing
-                }
-                Pointer::Dragging(window) => {
-                    slot.payload.dragging = ManuallyDrop::new(window_in(window));
-                    P::Dragging
-                }
-            };
-            out.payload.pointer = ManuallyDrop::new(slot);
-            Tag::Pointer
-        }
-        Event::Want {
-            now,
-            request,
-            window,
-            desired,
-            known,
-            want,
-        } => {
-            out.payload.want = ManuallyDrop::new(abi::EventWant {
-                desired: rect_in(desired),
-                known: rect_in(known),
-                now: now.0,
-                request: request.0,
-                window: window_in(window),
-                want: match want {
-                    Want::Arrange => abi::ArrangeOrArrangePositionsOrPlace::Arrange,
-                    Want::ArrangePositions => {
-                        abi::ArrangeOrArrangePositionsOrPlace::ArrangePositions
-                    }
-                    Want::Place => abi::ArrangeOrArrangePositionsOrPlace::Place,
-                },
-            });
-            Tag::Want
-        }
-        Event::Follow { request, window, frame } => {
-            out.payload.follow = ManuallyDrop::new(abi::EventFollow {
-                frame: rect_in(frame),
-                request: request.0,
-                window: window_in(window),
-            });
-            Tag::Follow
-        }
-        Event::Answer {
-            now,
-            request,
-            seen,
-            window,
-            frame,
-        } => {
-            out.payload.answer = ManuallyDrop::new(abi::EventAnswer {
-                frame: rect_in(frame),
-                now: now.0,
-                request: request.0,
-                seen: seen_in(seen),
-                window: window_in(window),
-            });
-            Tag::Answer
-        }
-        Event::Report { window, frame, known } => {
-            out.payload.report = ManuallyDrop::new(abi::EventReport {
-                frame: rect_in(frame),
-                known: rect_in(known),
-                window: window_in(window),
-            });
-            Tag::Report
-        }
-        Event::Tick { now, request, known } => {
-            let known: Vec<abi::EventTickKnown> = known
-                .into_iter()
-                .map(|(window, frame)| abi::EventTickKnown {
-                    frame: rect_in(frame),
-                    window: window_in(window),
-                })
-                .collect();
-            let known = unsafe { abi::RocListWith::<_, false>::from_slice(&known, host) };
-            out.payload.tick = ManuallyDrop::new(abi::EventTick {
-                now: now.0,
-                request: request.0,
-                known,
-            });
-            Tag::Tick
-        }
-        Event::Forget { window } => {
-            out.payload.forget = ManuallyDrop::new(window_in(window));
-            Tag::Forget
-        }
-        Event::Gate { initiative } => {
-            out.payload.gate = ManuallyDrop::new(initiative_in(initiative));
-            Tag::Gate
-        }
-    };
-    out
-}
-
-fn effect_out(effect: &abi::Effect) -> Effect<Plain> {
-    use abi::EffectTag as Tag;
-    // SAFETY (each arm): the tag says which payload is initialised.
-    unsafe {
-        match effect.tag {
-            Tag::Write => {
-                let write = &*effect.payload.write;
-                Effect::Write(Write::from_foreign_core(
-                    window_out(write.window),
-                    rect_out(write.frame),
-                    RequestId(write.request),
-                ))
-            }
-            Tag::Queued => Effect::Queued {
-                window: window_out(*effect.payload.queued),
-            },
-            Tag::Answered => {
-                let answered = &*effect.payload.answered;
-                Effect::Answered {
-                    window: window_out(answered.window),
-                    answer: match answered.answer {
-                        abi::AckedOrRefusedOrUnasked::Acked => Answer::Acked,
-                        abi::AckedOrRefusedOrUnasked::Refused => Answer::Refused,
-                        abi::AckedOrRefusedOrUnasked::Unasked => Answer::Unasked,
-                    },
-                }
-            }
-            Tag::Stale => Effect::Stale {
-                window: window_out(*effect.payload.stale),
-            },
-            Tag::Late => Effect::Late {
-                window: window_out(*effect.payload.late),
-            },
-            Tag::Observed => {
-                let observed = &*effect.payload.observed;
-                Effect::Observed {
-                    window: window_out(observed.window),
-                    observation: match observed.observation {
-                        abi::AckOrForeignOrInTransit::Ack => Observation::Ack,
-                        abi::AckOrForeignOrInTransit::InTransit => Observation::InTransit,
-                        abi::AckOrForeignOrInTransit::Foreign => Observation::Foreign,
-                    },
-                }
-            }
-            Tag::Note => {
-                let note = &*effect.payload.note;
-                Effect::Note {
-                    window: window_out(note.window),
-                    note: match note.note {
-                        abi::DiscardedOrForgottenOrTimedOut::Discarded => Note::Discarded,
-                        abi::DiscardedOrForgottenOrTimedOut::TimedOut => Note::TimedOut,
-                        abi::DiscardedOrForgottenOrTimedOut::Forgotten => Note::Forgotten,
-                    },
-                }
-            }
-            Tag::Gate => {
-                let gate = &*effect.payload.gate;
-                Effect::Gate {
-                    initiative: initiative_out(&gate.initiative),
-                    allowed: gate.allowed,
-                }
-            }
-            Tag::Timer => {
-                let timer = &*effect.payload.timer;
-                Effect::Timer(match timer.tag {
-                    abi::ArmOrDisarmTag::Arm => Some(Nanos(*timer.payload.arm)),
-                    abi::ArmOrDisarmTag::Disarm => None,
-                })
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
+// The core.
 
 /// The Roc core. Holds the model's box, which only Roc can read or free; it is moved through
 /// every step and never shared, so Roc can update it in place.
@@ -440,30 +166,23 @@ impl Default for RocCore {
     }
 }
 
-impl Core<Plain> for RocCore {
-    fn step(&mut self, event: Event<Plain>) -> Vec<Effect<Plain>> {
-        let asked = match &event {
-            Event::Gate { initiative } => Some(*initiative),
-            _ => None,
-        };
-        let event = event_in(event, &self.host);
+impl RocCore {
+    /// One step on words: an event's words in, the effect list's words out.
+    pub fn step_words(&mut self, event: &[u64]) -> Vec<u64> {
+        // Roc takes ownership of the event list and releases it.
+        let event = unsafe { abi::RocListWith::from_slice(event, &self.host) };
         let stepped = unsafe { abi::roc_step(self.model, event) };
         self.model = stepped.model;
-        let effects = stepped
-            .effects
-            .as_slice()
-            .iter()
-            .map(effect_out)
-            .map(|effect| match (effect, asked) {
-                (Effect::Gate { allowed, .. }, Some(initiative)) => {
-                    Effect::Gate { initiative, allowed }
-                }
-                (effect, _) => effect,
-            })
-            .collect();
-        // The effects hold nothing refcounted: releasing the list frees its spine.
+        let effects = stepped.effects.as_slice().to_vec();
         unsafe { stepped.effects.decref(&self.host) };
         effects
+    }
+
+    /// One step, as `RustCore::step`. The Roc app only ever writes effects the wire can read:
+    /// a word list it cannot is a bug in one of the two codecs, so it panics.
+    pub fn step(&mut self, event: Event<Plain>) -> Vec<Effect<Plain>> {
+        let words = self.step_words(&wire::encode_event(event));
+        wire::decode_effects(&words).unwrap_or_else(|error| panic!("roc core effects: {error:?}"))
     }
 }
 
