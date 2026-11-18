@@ -2263,6 +2263,8 @@ impl Reactor {
                     Some(session) => {
                         debug!(?window, "drag-evidence: drag started (modifier press)");
                         self.state.begin_drag(window, session);
+                        // The user's drag takes the window from any animation presenting it.
+                        self.yield_to_user(window);
                     }
                     None => _ = self.state.let_go(),
                 }
@@ -4535,6 +4537,7 @@ impl Reactor {
         } else {
             Vec::new()
         };
+        let pressed = self.state.windows.pointer() == Pointer::Pressing(wid);
         let outcome = window_workflow::handle_window_frame_changed(
             &mut self.state,
             &mut self.layout_manager,
@@ -4552,6 +4555,10 @@ impl Reactor {
                 screens,
             },
         )?;
+        // The user's drag takes the window from any animation presenting it.
+        if pressed && self.state.windows.pointer() == Pointer::Dragging(wid) {
+            self.yield_to_user(wid);
+        }
         Ok(outcome)
     }
 

@@ -16,7 +16,6 @@ use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
 };
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
-use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
 use crate::sys::geometry::SameAs;
 use crate::sys::power;
@@ -176,6 +175,9 @@ pub(super) struct ViewportHandle {
     pub state: Arc<Mutex<PresentedCamera>>,
     windows: Vec<WindowId>,
     pub headless: Option<CameraAnimation>,
+    /// The request the camera's frames go out under, and the core holds its windows as
+    /// animating under. A camera that replaces one still presenting continues its request.
+    request: TransactionId,
 }
 
 #[derive(Debug)]
@@ -200,7 +202,6 @@ pub struct CameraAnimation {
     display: u32,
     animate: bool,
     scale: f64,
-    store: WindowTxStore,
     interval: Duration,
     bound: Option<super::managers::ScrollingDisplayBounds>,
 }
@@ -447,15 +448,6 @@ impl CameraAnimation {
         self.windows.sort_unstable_by_key(|w| w.wid.pid);
         for window in &mut self.windows {
             window.announced = false;
-            window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
-                let txid = self.store.next_txid(wsid);
-                if self.gesture.is_none() && !self.presentation.gesturing() {
-                    let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
-                    let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
-                    self.store.insert(wsid, txid, frame);
-                }
-                txid
-            });
             window.begin();
         }
     }
@@ -491,10 +483,31 @@ impl CameraAnimation {
 }
 
 impl Reactor {
-    pub(super) fn cancel_window_presentations(&mut self, mut windows: Vec<WindowId>) {
+    pub(super) fn cancel_window_presentations(&mut self, windows: Vec<WindowId>) {
         if windows.is_empty() {
             return;
         }
+        for (wid, frame) in self.stop_window_presentations(windows) {
+            if self.state.windows.window(wid).is_none() {
+                continue;
+            }
+            self.state.seen(wid, frame);
+            self.state.animation_stopped(wid);
+        }
+        self.commit_presentations();
+    }
+
+    /// The user took `window` (a drag began): nothing presents it any more, and an animation of
+    /// it settles where the model has it. (The presenter's last frame is not news: the user's
+    /// report is.)
+    pub(super) fn yield_to_user(&mut self, window: WindowId) {
+        self.stop_window_presentations(vec![window]);
+        self.state.animation_stopped(window);
+        self.commit_presentations();
+    }
+
+    /// Stops presenting `windows`; returns the last frame each presentation published.
+    fn stop_window_presentations(&mut self, mut windows: Vec<WindowId>) -> Vec<(WindowId, CGRect)> {
         windows.sort_unstable();
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
@@ -513,14 +526,7 @@ impl Reactor {
         if let Some(tx) = &self.animation_tx {
             frames.extend(tx.cancel(windows));
         }
-        for (wid, frame) in frames {
-            if self.state.windows.window(wid).is_none() {
-                continue;
-            }
-            self.state.seen(wid, frame);
-            self.state.animation_stopped(wid);
-        }
-        self.commit_presentations();
+        frames
     }
 
     pub(super) fn commit_presentations(&mut self) {
@@ -553,9 +559,11 @@ impl Reactor {
                         .and_then(|c| c.windows.iter().find(|w| w.wid == wid))
                         .map(|w| w.frame)
                 };
+                // The camera moves the window; its size is what the app has.
                 if let Some(frame) = frame
-                    && self.state.windows.window(wid).is_some()
+                    && let Some(window) = self.state.windows.window(wid)
                 {
+                    let frame = CGRect::new(frame.origin, window.frame_monotonic.size);
                     self.state.seen(wid, frame);
                 }
             }
@@ -572,7 +580,9 @@ impl Reactor {
             }
         }
         for space in completed {
-            self.presentations.remove(&space);
+            if let Some(camera) = self.presentations.remove(&space) {
+                self.state.animation_ended(camera.request);
+            }
             if self
                 .viewport_gesture
                 .as_ref()
@@ -598,8 +608,10 @@ impl Reactor {
             for (wid, frame) in frames {
                 if self.state.windows.window(wid).is_some() {
                     self.state.seen(wid, frame);
+                    self.state.animation_stopped(wid);
                 }
             }
+            self.state.animation_ended(camera.request);
             if let Some(tx) = &self.animation_tx {
                 let _ = tx.send(Message::StopCamera(space));
             }
@@ -646,7 +658,10 @@ impl Reactor {
             return None;
         };
         let (mut presentation, frames) = system.presentation(layout)?;
-        let previous = self.presentations.remove(&space).and_then(|p| p.headless);
+        let previous = self.presentations.remove(&space);
+        let request =
+            previous.as_ref().map_or_else(|| self.transaction_manager.mint(), |p| p.request);
+        let previous = previous.and_then(|p| p.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
                 .as_ref()
@@ -660,7 +675,7 @@ impl Reactor {
         });
         let now = Instant::now();
         let control = self.animation_tx.as_ref().map(|tx| tx.control.lock());
-        let windows = frames
+        let windows: Vec<PresentedWindow> = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
                 // A drag changes nothing until the drop: the viewport moves only Rift's windows.
@@ -683,11 +698,43 @@ impl Reactor {
                     leased: false,
                     frame,
                     move_from: CGPoint::ZERO,
-                    txid: TransactionId::default(),
+                    txid: request,
                 })
             })
             .collect();
         drop(control);
+        // The core decides what is pending: a camera Rift steers (no gesture) takes each window
+        // to its frame at the viewport's target offset, which is where it is pending until the
+        // camera ends; a gesture's camera has no target, so nothing is pending for its windows.
+        // A window whose whereabouts are unknown is written instead, and the camera leaves it.
+        let mut windows = windows;
+        if gesture.is_none() && !presentation.gesturing() {
+            let desires = windows
+                .iter()
+                .map(|w| {
+                    let frame = presentation.target_frame(w.to, w.fixed, scale);
+                    let frame = bound.map_or(frame, |bounds| bounds.apply(frame));
+                    rift_core::Desire { window: w.wid, frame, request }
+                })
+                .collect();
+            let animated = self.state.animate(desires);
+            windows.retain(|w| !animated.writes.iter().any(|write| write.window() == w.wid));
+            // The camera resizes (once, at its start) only what the core animates; any other
+            // window it presents starts at its target size.
+            for window in &mut windows {
+                if !animated.animations.iter().any(|&(wid, ..)| wid == window.wid) {
+                    window.from.size = window.to.size;
+                }
+            }
+            for write in animated.writes {
+                self.send_arranged(write);
+            }
+        } else {
+            for window in &windows {
+                self.state.forget(window.wid);
+            }
+        }
+        self.transaction_manager.record(request, windows.iter().filter_map(|w| w.wsid));
         if !animate {
             presentation.finish();
         }
@@ -710,7 +757,6 @@ impl Reactor {
             display,
             animate,
             scale,
-            store: self.transaction_manager.store.clone(),
             interval: Duration::from_secs_f64(1.0 / self.config.settings.animation_fps),
             bound,
         };
@@ -725,6 +771,7 @@ impl Reactor {
             state,
             windows: ids,
             headless: None,
+            request,
         });
         if let Some(tx) = &self.animation_tx {
             let _ = tx.send(Message::Camera(Box::new(next)));
@@ -1069,7 +1116,12 @@ impl AnimationManager {
                 request,
             });
         }
-        for (wid, from, to, request) in reactor.state.animate(desires) {
+        let animated = reactor.state.animate(desires);
+        for write in animated.writes {
+            any_frame_changed = true;
+            reactor.send_arranged(write);
+        }
+        for (wid, from, to, request) in animated.animations {
             any_frame_changed = true;
             let server_id = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id);
             reactor.transaction_manager.record(request, server_id);
@@ -1082,6 +1134,8 @@ impl AnimationManager {
             );
             anim.add_window(&handle, wid, from, to, request);
         }
+        // A hidden window's desire is written: an animation still presenting it stops first.
+        reactor.cancel_window_presentations(hidden.iter().map(|&(wid, _)| wid).collect());
         any_frame_changed |= reactor.arrange_frames(space, &hidden, Want::Arrange);
 
         if !anim.is_empty() {
@@ -1407,6 +1461,88 @@ impl Animation {
             window.end();
         }
         self.report_ended(self.windows.iter().map(|window| window.txid));
+    }
+}
+
+/// The animation thread, run in step with a test: every queued command is applied as the
+/// runner applies it, then every motion runs to its end on a virtual clock.
+#[cfg(test)]
+pub(crate) struct TestPresenter {
+    receiver: AnimationReceiver,
+    manager: AnimationManager,
+}
+
+#[cfg(test)]
+impl TestPresenter {
+    pub(crate) fn new(receiver: AnimationReceiver) -> Self {
+        Self {
+            receiver,
+            manager: AnimationManager::new(),
+        }
+    }
+
+    /// Whether no command is queued and nothing is moving.
+    pub(crate) fn idle(&self) -> bool {
+        self.receiver.commands.is_empty() && !self.manager.has_work()
+    }
+
+    pub(crate) fn present(&mut self) {
+        while let Ok(message) = self.receiver.commands.try_recv() {
+            let mut shared = self.receiver.control.lock();
+            match message {
+                Message::Displays(_) => {}
+                Message::StopCamera(space) => {
+                    for motion in &mut self.manager.motions {
+                        if let Motion::Viewport(camera) = motion
+                            && camera.identity.space == space
+                        {
+                            camera.stop();
+                        }
+                    }
+                    self.manager.retire();
+                }
+                Message::Stop(mut windows) => {
+                    windows.sort_unstable();
+                    self.manager.stop_windows(&windows);
+                    self.manager.retire();
+                    for wid in &windows {
+                        shared.cancelled.remove(wid);
+                        shared.frames.remove(wid);
+                    }
+                }
+                mut message => {
+                    let mut cancelled: Vec<_> = shared.cancelled.iter().copied().collect();
+                    cancelled.sort_unstable();
+                    self.manager.stop_windows(&cancelled);
+                    self.manager.retire();
+                    match &mut message {
+                        Message::Replace(a) => {
+                            a.windows.retain(|w| !shared.cancelled.contains(&w.wid))
+                        }
+                        Message::Camera(c) => {
+                            c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
+                            c.active = !c.windows.is_empty();
+                        }
+                        Message::Stop(..) | Message::StopCamera(..) | Message::Displays(..) => {
+                            unreachable!()
+                        }
+                    }
+                    self.manager.handle_message(message);
+                    self.manager.publish_frames(&mut shared, true);
+                    self.manager.retire();
+                }
+            }
+        }
+        let start = Instant::now();
+        for step in 1..=200 {
+            if !self.manager.has_work() {
+                break;
+            }
+            self.manager.tick_at(start + Duration::from_millis(50) * step);
+            let mut shared = self.receiver.control.lock();
+            self.manager.publish_frames(&mut shared, false);
+            self.manager.retire();
+        }
     }
 }
 
@@ -1774,7 +1910,6 @@ mod tests {
                 display: 1,
                 animate: true,
                 scale: 1.0,
-                store: WindowTxStore::new(),
                 interval: Duration::from_secs_f64(1.0 / 60.0),
                 bound: None,
             }
@@ -1966,7 +2101,6 @@ mod tests {
             &Default::default(),
         );
         system.begin_viewport_gesture(layout, now);
-        let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let camera = CameraAnimation {
             presentation: system.presentation(layout).unwrap().0,
@@ -2001,7 +2135,6 @@ mod tests {
             display: 1,
             animate: false,
             scale: 2.0,
-            store: store.clone(),
             interval: Duration::from_secs_f64(1.0 / 60.0),
             bound: None,
         };
@@ -2027,23 +2160,12 @@ mod tests {
                 "camera must use its cached 2x scale"
             );
         });
-        let presentation_txid = store.last_txid(&wsid);
         // Camera work remains eligible on consecutive 120Hz input refreshes.
         for tick in 1..=2 {
             let camera = camera_mut(&mut manager).unwrap();
             camera.presentation.update(0.001, Duration::from_millis(tick * 8));
             camera.sample(now + Duration::from_secs_f64(tick as f64 / 120.0));
             assert_eq!(collect_requests(&mut rx).len(), 1);
-            assert_eq!(
-                store.last_txid(&wsid),
-                presentation_txid,
-                "display sampling cannot advance transactions"
-            );
-            assert_eq!(
-                store.get(&wsid).unwrap().target,
-                None,
-                "free gestures have no semantic target"
-            );
         }
         camera_mut(&mut manager)
             .unwrap()

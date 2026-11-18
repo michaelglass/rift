@@ -25,7 +25,9 @@ pub use crate::reconciler::{
 
 /// The platform's types, and the little geometry and time the core needs of them.
 pub trait Kinds: Copy + Debug + PartialEq + 'static {
-    type Window: Copy + Eq + Hash + Debug;
+    /// Ordered so that what the core decides about several windows at once comes out in the
+    /// same order whatever the platform's types.
+    type Window: Copy + Ord + Hash + Debug;
     type Frame: Copy + PartialEq + Debug;
     type Time: Copy + Ord + Debug;
     /// The id a write goes out under, which the app echoes in its answer. The platform mints

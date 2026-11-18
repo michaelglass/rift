@@ -97,6 +97,8 @@ enum Step {
     MoveToWorkspace { w: usize, k: usize },
     /// The user asks rift to move the focused window to display `d`.
     MoveFocusedToDisplay { d: usize },
+    /// The user moves focus left or right (in a scrolling layout, the viewport follows).
+    Focus { right: bool },
     /// Time passes: every unanswered write is past its deadline.
     Tick,
     /// macOS asks for a full refresh (a wake): the display topology is re-sent as it is, with
@@ -126,6 +128,7 @@ impl Step {
             Step::Destroy { .. } => "destroy",
             Step::MoveToWorkspace { .. } => "command-move-to-workspace",
             Step::MoveFocusedToDisplay { .. } => "command-move-to-display",
+            Step::Focus { .. } => "command-focus",
             Step::Tick => "tick",
             Step::Sizing { .. } => "sizing",
         }
@@ -206,6 +209,7 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
                 w: rng.below(16),
                 k: rng.below(3),
             },
+            98 => Step::Focus { right: rng.below(2) == 1 },
             _ => Step::MoveFocusedToDisplay { d: rng.below(3) },
         })
         .collect()
@@ -276,15 +280,54 @@ struct Sim {
     /// Windows whose acknowledged frame rift stopped trusting this step (a display change, or
     /// the end of the user's drag), as the core's trace shows: written whatever it was.
     distrusted: BTreeSet<WindowId>,
+    /// The animation thread, on seeds with animation on.
+    presenter: Option<super::animation::TestPresenter>,
+    /// What the reactor sends itself (`communication_manager.events_tx`), on those seeds.
+    events: Option<crate::actor::Receiver<Event>>,
+    /// Events collected from `events`, not yet handled.
+    inbox: Vec<Event>,
+    /// The target of each window the core had a write or an animation in flight for before the
+    /// step.
+    in_flight_before: BTreeMap<WindowId, CGRect>,
+    /// The requests the core planned animations and cameras under.
+    animation_requests: Vec<TransactionId>,
 }
 
-fn display_count(seed: u64) -> usize { 2 + (seed % 2) as usize }
+/// What a case is set up with: two or three displays; on some seeds animation is on (the
+/// animation thread runs in step with the case, `TestPresenter`), and on some of those the
+/// first space's workspace is a scrolling layout, so every arrange there presents a camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Setup {
+    displays: usize,
+    animate: bool,
+    scrolling: bool,
+}
+
+impl Setup {
+    fn of(seed: u64) -> Self {
+        let animate = (seed / 2) % 2 == 1;
+        Setup {
+            displays: 2 + (seed % 2) as usize,
+            animate,
+            scrolling: animate && (seed / 4) % 2 == 1,
+        }
+    }
+
+    fn plain(displays: usize) -> Self {
+        Setup {
+            displays,
+            animate: false,
+            scrolling: false,
+        }
+    }
+}
 
 impl Sim {
     /// Every step the reactor takes through the core is recorded from the start
     /// (`reactor.state.core.trace`): the invariants read why rift wrote what it wrote, and the
     /// differential test replays it.
-    fn new(displays: usize) -> Self {
+    fn new(setup: Setup) -> Self {
+        let displays = setup.displays;
         let (mut apps, mut reactor) = test_context();
         *reactor.state.core.trace.borrow_mut() = Some(Vec::new());
         let screens: Vec<CGRect> = (0..displays)
@@ -329,7 +372,17 @@ impl Sim {
         }
         apps.simulate_until_quiet(&mut reactor);
         let live = windows.iter().copied().collect();
-        Sim {
+        let (presenter, events) = if setup.animate {
+            reactor.config.settings.animate = true;
+            let (tx, rx) = super::animation::AnimationSender::channel();
+            reactor.animation_tx = Some(tx);
+            let (events_tx, events) = crate::actor::channel();
+            reactor.communication_manager.events_tx = Some(events_tx);
+            (Some(super::animation::TestPresenter::new(rx)), Some(events))
+        } else {
+            (None, None)
+        };
+        let mut sim = Sim {
             apps,
             reactor,
             screens,
@@ -345,7 +398,57 @@ impl Sim {
             dragged_before: None,
             gave_up: BTreeSet::new(),
             distrusted: BTreeSet::new(),
+            presenter,
+            events,
+            inbox: Vec::new(),
+            animation_requests: Vec::new(),
+            in_flight_before: BTreeMap::new(),
+        };
+        if setup.scrolling {
+            sim.reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode: LayoutMode::Scrolling,
+            });
         }
+        if setup.animate {
+            sim.pending.extend(sim.apps.requests());
+            sim.drain().expect("the animated setup goes quiet");
+            sim.read_core_steps(0);
+        }
+        sim
+    }
+
+    /// Runs the animation thread's queued work, then hands the reactor what it sent itself
+    /// (an animation's end, a camera's finish).
+    fn present(&mut self) {
+        for _ in 0..20 {
+            if let Some(presenter) = &mut self.presenter {
+                presenter.present();
+            }
+            self.collect_events();
+            if self.inbox.is_empty() {
+                return;
+            }
+            for event in std::mem::take(&mut self.inbox) {
+                self.reactor.handle_event(event);
+            }
+        }
+    }
+
+    fn collect_events(&mut self) {
+        if let Some(events) = &mut self.events {
+            while let Ok((_, event)) = events.try_recv() {
+                self.inbox.push(event);
+            }
+        }
+    }
+
+    /// Nothing queued for the apps, the animation thread or the reactor.
+    fn quiet(&mut self) -> bool {
+        self.collect_events();
+        self.pending.is_empty()
+            && self.inbox.is_empty()
+            && self.presenter.as_ref().is_none_or(|presenter| presenter.idle())
     }
 
     fn pick(&self, w: usize) -> WindowId { self.windows[w % self.windows.len()] }
@@ -394,6 +497,15 @@ impl Sim {
         held.assigned_at_start = self.reactor.assigned_space_for_window_id(held.window);
     }
 
+    /// Whether the user can press `wid`: it is live and its middle is on a screen. (Before an
+    /// animation's frames reach it, a window can still be where a drag left it, off them all.)
+    fn pressable(&self, wid: WindowId) -> bool {
+        self.live.contains(&wid) && {
+            let mid = self.os_frame(wid).mid();
+            self.screens.iter().any(|screen| screen.contains(mid))
+        }
+    }
+
     fn held_window(&self) -> Option<WindowId> { self.held.as_ref().map(|held| held.window) }
 
     fn true_mouse(&self) -> MouseState {
@@ -410,6 +522,16 @@ impl Sim {
         self.distrusted.clear();
         let traced = self.core_steps();
         self.dragged_before = dragged(&self.reactor);
+        self.in_flight_before = self
+            .live
+            .iter()
+            .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
+                Sync::Animating { target, .. } | Sync::InFlight { target, .. } => {
+                    Some((wid, target))
+                }
+                Sync::Settled { .. } | Sync::Unknown | Sync::Refused { .. } => None,
+            })
+            .collect();
         self.settled_before = self
             .live
             .iter()
@@ -424,7 +546,7 @@ impl Sim {
         match step {
             Step::DragStart { w, dx, dy } => {
                 let wid = self.pick(w);
-                if self.held.is_none() && self.live.contains(&wid) {
+                if self.held.is_none() && self.pressable(wid) {
                     let assigned_at_start = self.reactor.assigned_space_for_window_id(wid);
                     let frame = offset(self.os_frame(wid), dx, dy);
                     press(&mut self.reactor, wid);
@@ -435,7 +557,7 @@ impl Sim {
             }
             Step::Press { w } => {
                 let wid = self.pick(w);
-                if self.held.is_none() && self.live.contains(&wid) {
+                if self.held.is_none() && self.pressable(wid) {
                     press(&mut self.reactor, wid);
                     // Nothing has moved yet, so there is no drag for rift to have seen.
                     let assigned_at_start = self.reactor.assigned_space_for_window_id(wid);
@@ -444,7 +566,7 @@ impl Sim {
             }
             Step::ModifierDrag { w, dx, dy } => {
                 let wid = self.pick(w);
-                if self.held.is_none() && self.live.contains(&wid) {
+                if self.held.is_none() && self.pressable(wid) {
                     let point = self.os_frame(wid).mid();
                     self.reactor.handle_event(Event::ModifierMouseDown {
                         button: crate::actor::drag::MouseButton::Left,
@@ -578,6 +700,9 @@ impl Sim {
                 for event in self.apps.simulate_events_for_requests(requests) {
                     self.reactor.handle_event(event);
                 }
+                // The animation thread's frames reach the apps behind what was already queued
+                // for them (one channel per app), so it runs after.
+                self.present();
             }
             Step::Destroy { w } => {
                 let wid = self.pick(w);
@@ -598,6 +723,16 @@ impl Sim {
                     follow: false,
                     window_id: Some(self.pick(w).idx.get()),
                 });
+            }
+            Step::Focus { right } => {
+                if let Some(held) = &mut self.held {
+                    held.command_during_drag = true;
+                }
+                self.reactor.handle_test_layout_command(LayoutCommand::MoveFocus(if right {
+                    Direction::Right
+                } else {
+                    Direction::Left
+                }));
             }
             Step::MoveFocusedToDisplay { d } => {
                 if let Some(held) = &mut self.held {
@@ -635,6 +770,14 @@ impl Sim {
                     _ = self.gave_up.insert(*window)
                 }
                 rift_core::Event::Distrust { windows } => self.distrusted.extend(windows),
+                // An animation that takes a window over supersedes the write it had in flight.
+                rift_core::Event::Animate { desires, .. } => {
+                    self.animation_requests.extend(desires.iter().map(|desire| desire.request));
+                    self.gave_up.extend(effects.iter().filter_map(|effect| match effect {
+                        rift_core::Effect::Animate { window, .. } => Some(*window),
+                        _ => None,
+                    }))
+                }
                 _ if effects
                     .iter()
                     .any(|effect| matches!(effect, rift_core::Effect::Ungrip { .. })) =>
@@ -658,12 +801,25 @@ impl Sim {
                 detail,
             })
         };
-        let writes = frames_written(emitted);
+        // A camera's one size write at its start goes out under the request the core planned
+        // the camera under: part of that presentation, not a write of its own.
+        let writes: Vec<_> = emitted
+            .iter()
+            .flat_map(|request| match request {
+                Request::SetWindowFrames(frames, txid, ..)
+                    if !self.animation_requests.contains(txid) =>
+                {
+                    frames.clone()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
         // 1. Liveness: a pressed, live window that moved under the pointer is the drag. Without
         // this, a drag that fails to start would quietly skip every invariant below.
         // Exceptions: a step that leaves the frame where it was moves nothing; and a move that
-        // lands on the very frame rift has in flight for the window is, by geometry, that
-        // write's acknowledgement (the next move starts the drag).
+        // lands on the very frame rift has in flight for the window (a write's or an
+        // animation's target) is, by geometry, its acknowledgement (the next move starts the
+        // drag).
         if matches!(
             step,
             Step::DragStart { .. } | Step::DragMove { .. } | Step::CrossDisplay { .. }
@@ -673,6 +829,10 @@ impl Sim {
             && !frames_written(&self.pending).iter().any(|(wid, frame)| {
                 *wid == held.window && frame.same_as(self.os_frame(held.window))
             })
+            && !self
+                .in_flight_before
+                .get(&held.window)
+                .is_some_and(|target| target.same_as(self.os_frame(held.window)))
             && dragged(&self.reactor) != Some(held.window)
         {
             return fail(
@@ -739,11 +899,21 @@ impl Sim {
                     ),
                 );
             }
-            // A modifier drag moves its own window by interactive frames, and only that window.
-            let modifier_drag = self.held.as_ref().filter(|held| held.modifier_pointer.is_some());
+            // A modifier drag moves its own window by interactive frames, and nothing else
+            // presents the held window. Without animation those are the only interactive frames;
+            // with it, a layout animation or a camera may present the other windows.
+            let held = self.held.as_ref().map(|held| held.window);
+            let modifier = self
+                .held
+                .as_ref()
+                .filter(|held| held.modifier_pointer.is_some())
+                .map(|held| held.window);
+            let animated = self.presenter.is_some();
+            let presentable = |w: WindowId| Some(w) == modifier || (animated && Some(w) != held);
             if emitted.iter().any(|request| match request {
-                Request::InteractiveFramesPending(frames) => modifier_drag
-                    .is_none_or(|held| frames.windows().into_iter().any(|w| w != held.window)),
+                Request::InteractiveFramesPending(frames) => {
+                    frames.windows().into_iter().any(|w| !presentable(w))
+                }
                 _ => false,
             }) {
                 return fail(
@@ -786,7 +956,10 @@ impl Sim {
                     | Sync::Unknown
                     | Sync::Animating { .. },
                 ) => {
-                    if self.moved != Some(wid) && !matches!(step, Step::Tick) {
+                    if self.moved != Some(wid)
+                        && !self.gave_up.contains(&wid)
+                        && !matches!(step, Step::Tick)
+                    {
                         return fail(
                             "only-the-reconciler-writes",
                             format!("{wid:?} was sent {frame:?} with nothing in flight"),
@@ -808,6 +981,7 @@ impl Sim {
             let placed = matches!(
                 step,
                 Step::MoveFocusedToDisplay { .. }
+                    | Step::Focus { .. }
                     | Step::MoveToWorkspace { .. }
                     | Step::Refresh { .. }
             );
@@ -870,7 +1044,7 @@ impl Sim {
         for _ in 0..20 {
             let emitted = self.run(Step::Deliver);
             self.pending.extend(emitted);
-            if self.pending.is_empty() {
+            if self.quiet() {
                 return Ok(());
             }
         }
@@ -972,11 +1146,11 @@ type Finding = (u64, Vec<Step>, Violation, Vec<Signature>);
 /// Runs `steps` from a fresh setup and returns the first violation whose signature is not in
 /// `past`. A violation in `past` is noted and the run carries on from rift's actual state, so
 /// one common bug doesn't hide the ones behind it. A panic is a violation.
-fn execute(displays: usize, steps: &[Step], past: &[Signature]) -> Result<(), Violation> {
+fn execute(setup: Setup, steps: &[Step], past: &[Signature]) -> Result<(), Violation> {
     let mut step_index = 0;
     let mut current: Option<Step> = None;
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let mut sim = Sim::new(displays);
+        let mut sim = Sim::new(setup);
         for (i, &step) in steps.iter().enumerate() {
             step_index = i;
             current = Some(step);
@@ -1013,12 +1187,12 @@ fn execute(displays: usize, steps: &[Step], past: &[Signature]) -> Result<(), Vi
 
 /// Drops steps while the same signature still fails.
 fn shrink(
-    displays: usize,
+    setup: Setup,
     mut steps: Vec<Step>,
     target: Signature,
     past: &[Signature],
 ) -> (Vec<Step>, Violation) {
-    let mut violation = execute(displays, &steps, past).unwrap_err();
+    let mut violation = execute(setup, &steps, past).unwrap_err();
     steps.truncate(violation.step + 1);
     loop {
         let mut progressed = false;
@@ -1026,7 +1200,7 @@ fn shrink(
         while i < steps.len() {
             let mut candidate = steps.clone();
             candidate.remove(i);
-            match execute(displays, &candidate, past) {
+            match execute(setup, &candidate, past) {
                 Err(v) if v.signature() == target => {
                     candidate.truncate(v.step + 1);
                     steps = candidate;
@@ -1055,12 +1229,12 @@ fn fuzz(cases: usize, len: usize) -> BTreeMap<Signature, Finding> {
     loop {
         let past: Vec<Signature> = found.keys().copied().collect();
         for seed in 0..cases as u64 {
-            let displays = display_count(seed);
+            let setup = Setup::of(seed);
             let steps = generate(seed, len);
-            if let Err(violation) = execute(displays, &steps, &past) {
+            if let Err(violation) = execute(setup, &steps, &past) {
                 let signature = violation.signature();
                 if !found.contains_key(&signature) {
-                    let (steps, violation) = shrink(displays, steps, signature, &past);
+                    let (steps, violation) = shrink(setup, steps, signature, &past);
                     found.insert(signature, (seed, steps, violation, past.clone()));
                 }
             }
@@ -1078,12 +1252,12 @@ fn describe(found: &BTreeMap<Signature, Finding>) -> String {
         .values()
         .map(|(seed, steps, violation, past)| {
             format!(
-                "\n[{} after {}] seed {seed}, {} displays: {}\n  execute({}, &{steps:?}, &{past:?})",
+                "\n[{} after {}] seed {seed}, {:?}: {}\n  execute({:?}, &{steps:?}, &{past:?})",
                 violation.invariant,
                 violation.step_kind,
-                display_count(*seed),
+                Setup::of(*seed),
                 violation.detail,
-                display_count(*seed),
+                Setup::of(*seed),
             )
         })
         .collect()
@@ -1152,8 +1326,8 @@ type PlainStep = (
 
 /// Runs `steps` (and the settling at the end) and returns every step the reactor took through
 /// the core, on plain data. Invariant violations are not this function's business.
-fn trace(displays: usize, steps: &[Step]) -> Vec<PlainStep> {
-    let mut sim = Sim::new(displays);
+fn trace(setup: Setup, steps: &[Step]) -> Vec<PlainStep> {
+    let mut sim = Sim::new(setup);
     let epoch = sim.reactor.state.core.clock.now();
     for &step in steps {
         let emitted = sim.run(step);
@@ -1182,7 +1356,7 @@ fn the_core_on_plain_data_decides_what_the_reactor_decided() {
     let len = budget("RIFT_FUZZ_STEPS", 30);
     let mut total = 0;
     for seed in 0..cases {
-        let recorded = trace(display_count(seed), &generate(seed, len));
+        let recorded = trace(Setup::of(seed), &generate(seed, len));
         let mut core = rift_core::RustCore::<rift_core::plain::Plain>::default();
         for (index, (event, effects)) in recorded.iter().enumerate() {
             assert_eq!(
@@ -1207,7 +1381,7 @@ fn dump_core_traces() {
     let cases = budget("RIFT_FUZZ_CASES", 200) as u64;
     let len = budget("RIFT_FUZZ_STEPS", 30);
     for seed in 0..cases {
-        let recorded = trace(display_count(seed), &generate(seed, len));
+        let recorded = trace(Setup::of(seed), &generate(seed, len));
         let json = serde_json::to_string(&recorded).unwrap();
         std::fs::write(dir.join(format!("seed-{seed}.json")), json).unwrap();
     }
@@ -1227,7 +1401,7 @@ fn another_apps_window_moving_does_not_take_over_the_drag() {
             mouse: Mouse::Truth,
         },
     ];
-    assert_eq!(execute(2, &steps, &[]), Ok(()));
+    assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
 }
 
 #[test]
@@ -1242,7 +1416,7 @@ fn another_apps_window_moving_with_the_button_reported_up_does_not_end_the_drag(
             mouse: Mouse::ReportsUp,
         },
     ];
-    assert_eq!(execute(2, &steps, &[]), Ok(()));
+    assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
 }
 
 #[test]
@@ -1256,7 +1430,7 @@ fn a_refresh_after_crossing_displays_snaps_the_dragged_window_back() {
             zero_min: false,
         },
     ];
-    assert_eq!(execute(3, &steps, &[]), Ok(()));
+    assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
 }
 
 #[test]
@@ -1264,7 +1438,7 @@ fn a_window_dropped_on_another_display_leaves_the_old_displays_layout() {
     // Found by the quiescence check, and present at checkpoint/a-before-reconciler: after a
     // native drag onto another display the window was in both displays' layouts, both frames
     // were written, and it ended on the old display's tile while assigned to the new display.
-    let mut sim = Sim::new(2);
+    let mut sim = Sim::new(Setup::plain(2));
     let wid = sim.pick(12);
     for step in [
         Step::DragStart { w: 12, dx: -36, dy: 22 },
