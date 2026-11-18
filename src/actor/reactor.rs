@@ -1033,37 +1033,30 @@ impl Reactor {
                 continue;
             }
             let resolved = self.resolve_native_space(wsid, None);
-            if let Some(fullscreen) = resolved.filter(|space| self.is_fullscreen_space(*space)) {
-                let user = self
-                    .state
-                    .windows
-                    .tracked_window_id(wsid)
-                    .and_then(|wid| self.assigned_space_for_window_id(wid));
-                if let Some(wid) =
-                    self.state.windows.observe_native_fullscreen(wsid, fullscreen, user, None)
-                {
-                    self.send_layout_event(LayoutEvent::WindowSuspended(wid));
+            let inactive_target = match missing_window(
+                resolved,
+                || native::Native::window_spaces(&self.native, wsid),
+                |space| self.is_fullscreen_space(space),
+                |space| self.is_space_active(space),
+                |space| native::Native::space_is_user(&self.native, space),
+                !self.space_state.fullscreen_spaces.is_empty(),
+            ) {
+                Missing::Keep => continue,
+                Missing::Fullscreen(fullscreen) => {
+                    let user = self
+                        .state
+                        .windows
+                        .tracked_window_id(wsid)
+                        .and_then(|wid| self.assigned_space_for_window_id(wid));
+                    if let Some(wid) =
+                        self.state.windows.observe_native_fullscreen(wsid, fullscreen, user, None)
+                    {
+                        self.send_layout_event(LayoutEvent::WindowSuspended(wid));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            // Live membership can precede the accepted Space inventory. Stale
-            // absence alone must not change layout participation or ownership.
-            if let Some(space) = resolved.filter(|space| self.is_space_active(*space))
-                && native::Native::window_spaces(&self.native, wsid).as_slice() == [space]
-            {
-                continue;
-            }
-            let inactive_target =
-                resolved.filter(|space| !self.is_space_active(*space)).filter(|space| {
-                    use native::Native;
-                    self.native.space_is_user(*space)
-                });
-            // Fullscreen topology can precede a positive entry observation.
-            // Preserve ownership, but another window's fullscreen is not evidence
-            // that this window is logically unavailable.
-            if inactive_target.is_none() && !self.space_state.fullscreen_spaces.is_empty() {
-                continue;
-            }
+                Missing::Absent { inactive_target } => inactive_target,
+            };
             if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
                 self.layout_manager.layout_engine.workspaces(),
                 wsid,
@@ -6819,6 +6812,37 @@ fn raise_buries_a_floater<L: PartialEq + Copy>(
                 .zip(levels(above))
                 .is_some_and(|(candidate, above)| candidate == above)
     })
+}
+
+/// What a window missing from an authoritative snapshot of the active Spaces comes to, from
+/// the Space it resolves to and, if that is active, the Spaces it is live on.
+#[derive(Debug, PartialEq)]
+enum Missing {
+    /// Not evidence of anything: live membership can precede the accepted Space inventory, and
+    /// fullscreen topology can precede a positive entry observation.
+    Keep,
+    /// It went fullscreen there.
+    Fullscreen(SpaceId),
+    /// It is gone from the active Spaces; to `inactive_target` if that is a user desktop.
+    Absent { inactive_target: Option<SpaceId> },
+}
+
+fn missing_window(
+    resolved: Option<SpaceId>,
+    live: impl FnOnce() -> Vec<SpaceId>,
+    is_fullscreen: impl Fn(SpaceId) -> bool,
+    is_active: impl Fn(SpaceId) -> bool,
+    is_user: impl Fn(SpaceId) -> bool,
+    fullscreen_topology: bool,
+) -> Missing {
+    match resolved {
+        Some(space) if is_fullscreen(space) => Missing::Fullscreen(space),
+        Some(space) if is_active(space) && live().as_slice() == [space] => Missing::Keep,
+        resolved => match resolved.filter(|&space| !is_active(space) && is_user(space)) {
+            None if fullscreen_topology => Missing::Keep,
+            inactive_target => Missing::Absent { inactive_target },
+        },
+    }
 }
 
 /// What a reported fullscreen exit comes to, read off the Spaces the window is on now.
