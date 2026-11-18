@@ -52,13 +52,8 @@ fn focus(
     input_rx
 }
 
-fn ffm_updates(rx: &mut actor::Receiver<input::Request>) -> Vec<bool> {
-    std::iter::from_fn(|| rx.try_recv().ok())
-        .filter_map(|(_, request)| match request {
-            input::Request::SetFocusFollowsMouseEnabled(enabled) => Some(enabled),
-            _ => None,
-        })
-        .collect()
+fn hover_admitted(reactor: &Reactor) -> bool {
+    reactor.may(Initiative::UserInput(InputClass::Hover))
 }
 
 #[test]
@@ -393,81 +388,61 @@ fn suppression_applies_only_while_the_flagged_claim_is_focused() {
     let (mut reactor, window, _, space, _, frame) = reactor_with_window_on_space1();
     let other = WindowId::new(window.pid, 2);
     reactor.add_test_window(other, WindowServerId::new(102), Some(space), frame);
-    let mut rx = focus(&mut reactor, window, space);
+    let _rx = focus(&mut reactor, window, space);
 
     reactor.claim_window(other, OWNER, SUPPRESS).unwrap();
-    assert!(
-        ffm_updates(&mut rx).is_empty(),
-        "an unfocused claim changes nothing"
-    );
+    assert!(hover_admitted(&reactor), "an unfocused claim changes nothing");
     reactor.claim_window(window, OWNER, NONE).unwrap();
-    assert!(ffm_updates(&mut rx).is_empty());
+    assert!(hover_admitted(&reactor));
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
-    reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    assert!(ffm_updates(&mut rx).is_empty());
+    assert!(!hover_admitted(&reactor));
     reactor.claim_window(window, OWNER, NONE).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [true]);
+    assert!(hover_admitted(&reactor));
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
+    assert!(!hover_admitted(&reactor));
 
-    // Focus moving to another window re-enables it; returning suppresses again.
+    // Focus moving to another window lifts it; returning pauses again.
     reactor.release_window(other, OWNER).unwrap();
     reactor.handle_event(Event::WindowServerFocusChanged(other, space));
     assert_eq!(reactor.main_window(), Some(other));
-    assert!(ffm_updates(&mut rx).contains(&true));
+    assert!(hover_admitted(&reactor));
     reactor.handle_event(Event::WindowServerFocusChanged(window, space));
-    assert!(ffm_updates(&mut rx).contains(&false));
+    assert!(!hover_admitted(&reactor));
 
     reactor.release_claims(OWNER);
-    assert_eq!(ffm_updates(&mut rx), [true]);
+    assert!(hover_admitted(&reactor));
 }
 
 #[test]
-fn suppression_respects_menu_mission_control_and_config() {
+fn suppression_and_menu_and_mission_control_are_independent_modes() {
     let (mut reactor, window, _, space, _, _) = reactor_with_window_on_space1();
-    let mut rx = focus(&mut reactor, window, space);
+    let _rx = focus(&mut reactor, window, space);
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
+    assert!(!hover_admitted(&reactor));
 
+    // Releasing the claim lifts only its own mode.
     reactor.menu_manager.menu_state = MenuState::Open(window.pid);
     reactor.release_window(window, OWNER).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
+    assert!(!hover_admitted(&reactor));
     reactor.menu_manager.menu_state = MenuState::Closed;
+    assert!(hover_admitted(&reactor));
 
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    reactor.set_mission_control_active(true);
-    ffm_updates(&mut rx);
+    reactor.handle_event(Event::MissionControlNativeEntered);
     reactor.release_window(window, OWNER).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
-    reactor.set_mission_control_active(false);
-
-    reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    ffm_updates(&mut rx);
-    reactor.config.settings.focus_follows_mouse = false;
-    reactor.release_window(window, OWNER).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
+    assert!(!hover_admitted(&reactor));
+    reactor.handle_event(Event::MissionControlNativeExited);
+    assert!(hover_admitted(&reactor));
 }
 
 #[test]
 fn destroying_the_focused_suppressing_window_restores_focus_follows_mouse() {
     let (mut reactor, window, _, space, _, _) = reactor_with_window_on_space1();
-    let mut rx = focus(&mut reactor, window, space);
+    let _rx = focus(&mut reactor, window, space);
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    assert_eq!(ffm_updates(&mut rx), [false]);
+    assert!(!hover_admitted(&reactor));
     reactor.handle_event(Event::WindowDestroyed(window));
-    assert!(ffm_updates(&mut rx).contains(&true));
-}
-
-#[test]
-fn unclaimed_windows_do_not_refresh_focus_policy_on_focus_changes() {
-    let (mut reactor, window, _, space, _, frame) = reactor_with_window_on_space1();
-    let other = WindowId::new(window.pid, 2);
-    reactor.add_test_window(other, WindowServerId::new(102), Some(space), frame);
-    let mut rx = focus(&mut reactor, window, space);
-    reactor.handle_event(Event::WindowServerFocusChanged(other, space));
-    reactor.handle_event(Event::WindowServerFocusChanged(window, space));
-    assert!(ffm_updates(&mut rx).is_empty());
+    assert!(hover_admitted(&reactor));
 }
 
 #[test]

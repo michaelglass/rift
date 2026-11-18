@@ -3166,10 +3166,24 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.handle_event(Event::MissionControlNativeEntered);
 
     assert!(!reactor.user_is_dragging());
-    assert!(reactor.drag_manager.preview_suppressed);
+    assert!(!reactor.may(Initiative::RetireWindows));
 
     reactor.handle_event(Event::MissionControlNativeExited);
-    assert!(!reactor.drag_manager.preview_suppressed);
+    assert!(reactor.may(Initiative::RetireWindows));
+}
+
+/// Dismissing Rift's overview is not leaving macOS's Mission Control: with no WM sender the
+/// dismissal used to clear the native state, re-admitting hover and retirement under it.
+#[test]
+fn dismissing_rifts_overview_leaves_native_mission_control_alone() {
+    let mut reactor = test_reactor();
+    assert!(reactor.communication_manager.wm_sender.is_none());
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::DismissMissionControl,
+    )));
+    assert!(reactor.is_native_mission_control_active());
+    assert!(!reactor.may(Initiative::RetireWindows));
 }
 
 #[test]
@@ -3688,6 +3702,74 @@ fn pending_removal_refocus_during_auto_switch_uses_workspace_selection() {
     );
 }
 
+/// An explicit focus supersedes a pending refocus: the refocus is discarded, so a later layout
+/// response does not take focus back to the refocus target.
+#[test]
+fn explicit_focus_discards_a_pending_refocus() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let chosen = WindowId::new(1, 2);
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.refocus_manager.refocus_state = RefocusState::Pending(space);
+
+    reactor.handle_layout_response(
+        layout::EventResponse {
+            focus_window: Some(chosen),
+            ..Default::default()
+        },
+        None,
+    );
+    let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
+        panic!("expected the explicit focus")
+    };
+    assert_eq!(request.focus_window.map(|(wid, _)| wid), Some(chosen));
+    assert_eq!(reactor.refocus_manager.refocus_state, RefocusState::None);
+
+    reactor.handle_layout_response(layout::EventResponse::default(), None);
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "nothing replays the superseded refocus"
+    );
+}
+
+/// An owed warp is paid to the focus as it is when the warp is paid: a newer focus intent in
+/// between is where the pointer lands, not the window focused when the warp was owed.
+#[test]
+fn an_owed_warp_lands_on_the_focus_when_paid() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+    reactor.workspace_switch_manager.owe_focus_warp();
+    let newer = WindowId::new(1, 2);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, newer));
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+
+    reactor.apply_event_outcome(EventOutcome::default());
+
+    let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+        .filter_map(|(_, request)| match request {
+            crate::actor::input::Request::Warp(point) => Some(point),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warps, vec![
+        reactor.window_center_on_known_screen(newer).unwrap()
+    ]);
+    assert_eq!(reactor.workspace_switch_manager.owed_warp, None, "paid once");
+}
+
 #[test]
 fn empty_layout_response_during_auto_switch_does_not_refocus_cursor() {
     let mut reactor = test_reactor();
@@ -3715,10 +3797,10 @@ fn empty_layout_response_during_auto_switch_does_not_refocus_cursor() {
         raise_rx.try_recv().is_err(),
         "an observational response must not steal focus"
     );
-    assert_eq!(
+    assert!(matches!(
         reactor.workspace_switch_manager.workspace_switch_state,
-        WorkspaceSwitchState::Active
-    );
+        WorkspaceSwitchState::Active(_)
+    ));
 }
 
 #[test]
@@ -4015,6 +4097,83 @@ fn same_app_native_focus_respects_auto_switch_guards() {
         assert!(
             apps.requests().is_empty(),
             "{guard} must not arrange hidden windows"
+        );
+    }
+}
+
+/// An activation refused after wake is discarded: the user's first input ends the mode without
+/// replaying it, and only a fresh activation is followed.
+#[test]
+fn activation_refused_after_wake_is_not_replayed_by_the_first_input() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let visible = WindowId::new(2, 1);
+    let hidden = WindowId::new(2, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+    let active = |reactor: &Reactor| {
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+    };
+
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+    assert_eq!(active(&reactor), Some(0), "discarded while awaiting input");
+    reactor.handle_event(Event::KeyboardInput);
+    assert_eq!(active(&reactor), Some(0), "the first input replays nothing");
+
+    reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+    reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+    assert_eq!(active(&reactor), Some(1), "a fresh activation is followed");
+}
+
+/// Nothing moves existing windows until the drop, and following an activation to another
+/// workspace moves all of them: a press or a drag refuses it. Discarded, not replayed at the
+/// release; only a fresh activation is followed.
+#[test]
+fn a_press_or_drag_discards_activation_follow_and_the_drop_replays_nothing() {
+    for drag in [false, true] {
+        let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let visible = WindowId::new(2, 1);
+        let hidden = WindowId::new(2, 2);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+        reactor.handle_event(Event::ApplicationGloballyActivated(2));
+        reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+        apps.simulate_until_quiet(&mut reactor);
+        let workspace = reactor.test_workspace(space, 1);
+        assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+        let active = |reactor: &Reactor| {
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+        };
+
+        if drag {
+            let frame = reactor.state.windows.window(visible).unwrap().frame_monotonic;
+            reactor.ensure_active_drag(visible, &frame);
+        } else {
+            reactor.state.windows.press(visible, crate::actor::drag::MouseButton::Left);
+        }
+        reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+        assert_eq!(active(&reactor), Some(0), "discarded (drag={drag})");
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            active(&reactor),
+            Some(0),
+            "the drop replays nothing (drag={drag})"
+        );
+
+        reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+        reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+        assert_eq!(
+            active(&reactor),
+            Some(1),
+            "a fresh activation is followed (drag={drag})"
         );
     }
 }
@@ -5138,49 +5297,113 @@ fn rediscovering_an_unchanged_inventory_does_not_raise_or_refocus() {
 #[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = test_reactor();
-    let (input_tx, mut input_rx) = actor::channel();
-    reactor.communication_manager.input_tx = Some(input_tx);
-
-    reactor.handle_event(Event::MenuOpened(1));
-    let disable = input_rx.try_recv().expect("menu-open should update event tap").1;
-    assert!(matches!(
-        disable,
-        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
     ));
+    let hover = Initiative::UserInput(InputClass::Hover);
+    reactor.handle_event(Event::MenuOpened(1));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
+    assert!(!reactor.may(hover));
 
     reactor.handle_event(Event::ApplicationDeactivated(1));
-    let enable = input_rx
-        .try_recv()
-        .expect("app deactivation should re-enable focus-follows-mouse")
-        .1;
-    assert!(matches!(
-        enable,
-        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
-    ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
+    assert!(reactor.may(hover));
 }
 
 #[test]
 fn stale_menu_open_state_is_cleared_when_other_app_activates() {
     let mut reactor = test_reactor();
-    let (input_tx, mut input_rx) = actor::channel();
-    reactor.communication_manager.input_tx = Some(input_tx);
-
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
+    ));
     reactor.handle_event(Event::MenuOpened(1));
-    let _ = input_rx.try_recv().expect("menu-open should update event tap");
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
 
     reactor.handle_event(Event::ApplicationGloballyActivated(2));
-    let enable = input_rx
-        .try_recv()
-        .expect("activation of another app should clear stale menu state")
-        .1;
-    assert!(matches!(
-        enable,
-        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
-    ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
+    assert!(reactor.may(Initiative::UserInput(InputClass::Hover)));
+}
+
+/// Layout commands while the topology is unsettled used to be dropped silently by the
+/// quarantine. They are a row of the mode table now: discarded (with a log line), and nothing
+/// replays once a fresh snapshot settles the topology.
+#[test]
+fn layout_command_during_unsettled_topology_is_discarded_and_not_replayed() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let active = |reactor: &Reactor| {
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+    };
+    assert_eq!(active(&reactor), Some(0));
+
+    reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+    assert!(!reactor.may(Initiative::UserInput(InputClass::Arranging)));
+    reactor.handle_loop_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    assert_eq!(active(&reactor), Some(0), "discarded while unsettled");
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.may(Initiative::UserInput(InputClass::Arranging)));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(active(&reactor), Some(0), "nothing replays once settled");
+
+    reactor.handle_loop_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    assert_eq!(active(&reactor), Some(1), "a fresh command acts");
+}
+
+/// A hover is discarded while a mode refuses it, and nothing replays when the mode ends: only
+/// the next sample acts. The probe is a hit on a window missing from the inventory, which asks
+/// its owner for an inventory.
+#[test]
+fn hover_refused_by_a_mode_is_discarded_and_not_replayed() {
+    let mut reactor = test_reactor();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    let pid = 91;
+    let wsid = WindowServerId::new(910);
+    let (app_tx, mut app_rx) = actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.mouse-discovery".into()),
+            localized_name: Some("Mouse Discovery".into()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+    reactor.state.windows.track_window_server_info(WindowServerInfo {
+        id: wsid,
+        pid,
+        layer: 0,
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    });
+    let asked = |rx: &mut actor::Receiver<Request>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|(_, request)| matches!(request, Request::RefreshWindowInventory(_)))
+    };
+
+    reactor.handle_event(Event::MenuOpened(7));
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    assert!(!asked(&mut app_rx), "discarded during the mode");
+    reactor.handle_event(Event::MenuClosed(7));
+    assert!(!asked(&mut app_rx), "nothing replays when the mode ends");
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    assert!(asked(&mut app_rx), "the next sample acts");
+
+    // Mission Control's exit re-reads inventories itself, so only the discard is probed here.
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    reactor.handle_loop_event(Event::MouseMoved(WindowServerId::new(911)));
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    assert!(!asked(&mut app_rx), "discarded during Mission Control");
 }
 
 #[test]
@@ -6905,6 +7128,36 @@ fn empty_inventory_retires_last_ordered_out_window_without_cached_visibility() {
     assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
 }
 
+/// No user Space on screen refuses retirement; the omission is discarded, not remembered, so the
+/// window survives the screens' return and only a later inventory can retire it.
+#[test]
+fn no_user_space_refuses_retirement_and_nothing_replays_when_screens_return() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    reactor.state.windows.mark_window_hidden(wsid);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+
+    reactor.handle_event(space_state_event(vec![], vec![]));
+    assert!(!reactor.may(Initiative::RetireWindows));
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    assert!(reactor.state.windows.record(wid).is_some(), "discarded");
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.may(Initiative::RetireWindows));
+    assert!(reactor.state.windows.record(wid).is_some(), "nothing replays");
+
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    assert!(
+        reactor.state.windows.record(wid).is_none(),
+        "a fresh inventory decides"
+    );
+}
+
 #[test]
 fn empty_inventory_keeps_window_parked_on_inactive_workspace() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
@@ -8308,6 +8561,41 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
         selected
     );
+}
+
+/// The overview's focus handoff expires with the echo window even if its raise never completes:
+/// it used to be read without its age in two places, so one lost completion made every later
+/// overview selection on that Space instant.
+#[test]
+fn a_lapsed_overview_focus_no_longer_makes_selections_instant() {
+    let mut reactor = test_reactor();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    let workspaces = reactor.query_workspaces(Some(space));
+    let select = |reactor: &mut Reactor, index: usize| {
+        reactor
+            .dispatch_workflow(Event::OverviewSelectWorkspace {
+                display: "test-display-1".into(),
+                workspace: workspaces[index].workspace_id,
+                window: None,
+                transition: None,
+            })
+            .unwrap()
+    };
+    let window = WindowId::new(1, 1);
+    reactor.overview_focus = Some(Expecting::now((space, window)));
+    assert!(
+        select(&mut reactor, 1).arrange.instant,
+        "a live handoff keeps arranges instant"
+    );
+    reactor.overview_focus = Some(Expecting::since(
+        (space, window),
+        Instant::now() - crate::common::expecting::ECHO_WINDOW,
+    ));
+    assert!(!select(&mut reactor, 0).arrange.instant, "a lapsed one does not");
 }
 
 #[test]
@@ -11774,7 +12062,7 @@ fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
     assert!(reactor.transient_blocks_mouse_focus());
     let (raise_tx, mut raise_rx) = actor::channel();
     reactor.communication_manager.raise_manager_tx = raise_tx;
-    reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(target)));
     assert!(raise_rx.try_recv().is_err());
     let wsid = reactor.test_window_server_id(about);
     reactor.handle_event(Event::WindowServerHidden(wsid));

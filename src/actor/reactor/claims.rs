@@ -26,14 +26,15 @@ impl Reactor {
         let wid = self.state.windows.resolve_claim_target(owner, wid).ok_or("Window not found")?;
         match self.state.windows.claim(wid) {
             Some(claim) if claim.owner != owner => return Err(OWNED_ELSEWHERE),
-            // Flags only affect focus policy, never layout.
+            // Flags only affect focus policy (the mode table reads them), never layout.
             Some(_) => {
-                self.with_claim_focus_policy(|r| r.state.windows.set_claim_flags(wid, flags));
+                self.state.windows.set_claim_flags(wid, flags);
                 return Ok(());
             }
             None => {}
         }
-        self.with_claim_focus_policy(|reactor| {
+        {
+            let reactor = &mut *self;
             // The owner takes over like a user drag: stop Rift's motion and pending writes.
             reactor.cancel_window_presentations(vec![wid]);
             if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
@@ -55,7 +56,7 @@ impl Reactor {
                 reactor.update_layout_or_warn(false, false, space);
             }
             reactor.maybe_send_menu_update();
-        });
+        }
         Ok(())
     }
 
@@ -84,14 +85,15 @@ impl Reactor {
     }
 
     fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
-        self.with_claim_focus_policy(|reactor| {
+        {
+            let reactor = &mut *self;
             let spaces: HashSet<_> =
                 windows.into_iter().filter_map(|wid| reactor.readmit(wid)).collect();
             for space in spaces {
                 reactor.update_layout_or_warn(false, false, Some(space));
             }
             reactor.maybe_send_menu_update();
-        });
+        }
     }
 
     /// Replays normal reconciliation for a released window; returns an active space to arrange.
@@ -125,14 +127,5 @@ impl Reactor {
         let space = self.best_space_for_window_id(wid)?;
         self.reassign_window_to_authoritative_space(wid, space, false);
         self.is_space_active(space).then_some(space)
-    }
-
-    /// Recompute focus-follows-mouse only when the focused window's claim policy changed.
-    fn with_claim_focus_policy(&mut self, change: impl FnOnce(&mut Self)) {
-        let suppressed = self.state.windows.suppresses_focus_follows_mouse(self.main_window());
-        change(self);
-        if suppressed != self.state.windows.suppresses_focus_follows_mouse(self.main_window()) {
-            self.update_focus_follows_mouse_state();
-        }
     }
 }

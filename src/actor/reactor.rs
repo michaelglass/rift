@@ -11,6 +11,7 @@ mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
+mod modes;
 mod native_tabs;
 mod query;
 mod reconciler;
@@ -65,7 +66,7 @@ use events::{
     system as system_workflow, window as window_workflow,
 };
 use main_window::MainWindowTracker;
-use managers::LayoutManager;
+use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Answer, Holder, Observation};
 pub use replay::{Record, replay};
@@ -88,6 +89,7 @@ use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
+use crate::common::expecting::{Echo, Expecting};
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
 use crate::model::RiftState;
 use crate::model::broadcast::{
@@ -113,7 +115,7 @@ pub use query::ReactorQueryHandle;
 pub(crate) use crate::model::reactor::{AppState, WindowState};
 pub use crate::model::reactor::{
     Command, DisplaySelector, MenuState, MissionControlState, ReactorCommand, RefocusState,
-    Requested, StaleCleanupState, WorkspaceSwitchOrigin, WorkspaceSwitchState,
+    Requested, WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 
 #[doc(hidden)]
@@ -427,8 +429,14 @@ pub enum WindowInvalidationSource {
 enum InputClass {
     /// Changes which windows are where, shown, focused or raised, or where the pointer is.
     Steering,
+    /// Steering that rearranges by Space assignment: layout commands and moves between
+    /// displays. Refused while the topology is unsettled as well as by everything that refuses
+    /// steering.
+    Arranging,
     /// Touches no window and not the pointer: settings, binding modes, diagnostics, saving.
     Inert,
+    /// The pointer resting over a window: focus follows mouse and autoraise.
+    Hover,
 }
 
 impl InputClass {
@@ -443,6 +451,7 @@ impl InputClass {
             // gesture in one event. A reset only ends a session.
             Event::Gesture(G::Begin { .. } | G::Workspace { .. }) => Some(Self::Steering),
             Event::Gesture(G::End { .. } | G::Reset) => None,
+            Event::MouseMoved(_) => Some(Self::Hover),
             _ => None,
         }
     }
@@ -491,7 +500,7 @@ impl InputClass {
                 | L::AdjustMasterCount { .. }
                 | L::PromoteToMaster
                 | L::SwapMasterStack,
-            ) => Steering,
+            ) => Arranging,
             Command::Reactor(
                 R::RestoreLayout { .. }
                 | R::SwitchSpace(_)
@@ -502,10 +511,11 @@ impl InputClass {
                 | R::DismissMissionControl
                 | R::MoveMouseToDisplay(_)
                 | R::FocusDisplay(_)
-                | R::CloseWindow { .. }
-                | R::MoveWindowToDisplay { .. }
-                | R::MoveWorkspaceToDisplay { .. },
+                | R::CloseWindow { .. },
             ) => Steering,
+            Command::Reactor(R::MoveWindowToDisplay { .. } | R::MoveWorkspaceToDisplay { .. }) => {
+                Arranging
+            }
             Command::Reactor(
                 R::OpenSettings
                 | R::BindingMode(_)
@@ -534,6 +544,8 @@ enum Initiative {
     SwitchWorkspaceFocus,
     /// Warping the pointer or focus to a window.
     WarpFocus,
+    /// Following an app's activation to the workspace holding its window.
+    FollowActivation,
 }
 
 /// Where a window is against where it belongs (its workspace's Space), as the accepted
@@ -572,8 +584,10 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
-    pending_mouse_focus: Option<(WindowId, Instant)>,
-    overview_focus: Option<(SpaceId, WindowId, Instant)>,
+    /// A mouse raise Rift sent: repeat hovers over that window wait for its completion.
+    pending_mouse_focus: Option<Expecting<WindowId>>,
+    /// The overview's selected window, being focused: arranges on its Space stay instant.
+    overview_focus: Option<Expecting<(SpaceId, WindowId)>>,
     mouse_inventory_hit: Option<WindowServerId>,
     /// A fresh read of the mouse button; cheap, so it is read where needed, never stored.
     read_button: fn() -> Option<MouseState>,
@@ -589,7 +603,8 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
-    suppress_auto_workspace_switch_until_input: bool,
+    /// Whether input has been seen since wake or session activation.
+    wake: modes::Wake,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     transient_focus: transient_focus::TransientFocusGuard,
     mouse_raise_token: tokio_util::sync::CancellationToken,
@@ -685,16 +700,13 @@ impl Reactor {
                 preview: None,
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
-                preview_suppressed: false,
                 haptics_enabled: config.settings.drag_drop.haptics_enabled,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
-                pending_workspace_switch_origin: None,
-                pending_focus_mouse_warp: None,
-                pending_display_warp: None,
+                owed_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
@@ -728,10 +740,9 @@ impl Reactor {
                 refocus_after_refresh: HashMap::default(),
             },
             refocus_manager: managers::RefocusManager {
-                stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
             },
-            suppress_auto_workspace_switch_until_input: false,
+            wake: modes::Wake::UserPresent,
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -1163,32 +1174,68 @@ impl Reactor {
         }
     }
 
-    /// Whether Rift may do `initiative` right now, given what the pointer is doing. Every
-    /// initiative states its rule for every pointer state: a new initiative, or a new pointer
-    /// state, doesn't compile until its rule is written. A question about one window asks the
-    /// store about that window instead.
-    fn may(&self, initiative: Initiative) -> bool {
-        use Initiative::*;
-        use Pointer::*;
-        match (initiative, self.state.windows.pointer()) {
-            (UserInput(InputClass::Inert), Idle | Pressing(_) | Dragging(_)) => true,
-            (UserInput(InputClass::Steering), Idle) => true,
-            // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
-            // input's effect on it would wait for the release, splitting it from the rest of
-            // the effect. Dropped instead, not deferred.
-            (UserInput(InputClass::Steering), Pressing(_) | Dragging(_)) => false,
-            // A press alone changes nothing: the window hasn't moved.
-            (Arrange, Idle | Pressing(_)) => true,
-            (RetireWindows, Idle | Pressing(_)) => true,
-            (SwitchWorkspaceFocus, Idle | Pressing(_)) => true,
-            (WarpFocus, Idle | Pressing(_)) => true,
-            // While the user drags a window, Rift keeps its hands off the layout and the
-            // pointer until the drop.
-            (Arrange, Dragging(_)) => false,
-            (RetireWindows, Dragging(_)) => false,
-            (SwitchWorkspaceFocus, Dragging(_)) => false,
-            (WarpFocus, Dragging(_)) => false,
+    /// Whether Rift may do `initiative` right now: whether every mode it is in admits it
+    /// (`modes::Mode`). A question about one window asks the store about that window instead.
+    fn may(&self, initiative: Initiative) -> bool { self.modes().refusal(initiative).is_none() }
+
+    /// The modes Rift is in, read from the facts now.
+    fn modes(&self) -> modes::Modes {
+        modes::Modes {
+            pointer: self.state.windows.pointer(),
+            menu: self.menu_manager.menu_state.clone(),
+            native_mission_control: self.mission_control_manager.mission_control_state.clone(),
+            modal: if self.transient_blocks_mouse_focus() {
+                modes::Modal::Frontmost
+            } else {
+                modes::Modal::Clear
+            },
+            viewport: if self.viewport_gesture.as_ref().is_some_and(|s| !s.released) {
+                modes::Viewport::Gesturing
+            } else {
+                modes::Viewport::Free
+            },
+            focus_claim: if self.state.windows.suppresses_focus_follows_mouse(self.main_window()) {
+                modes::FocusClaim::PausesHover
+            } else {
+                modes::FocusClaim::Free
+            },
+            user_spaces: if self.space_state.screens.iter().all(|screen| screen.space.is_none()) {
+                modes::UserSpaces::None
+            } else {
+                modes::UserSpaces::Shown
+            },
+            wake: self.wake,
+            workspace_switch: if self.workspace_switch_manager.active_workspace_switch.is_some()
+                || self.workspace_switch_manager.manual_switch_in_progress()
+            {
+                modes::WorkspaceSwitch::Switching
+            } else {
+                modes::WorkspaceSwitch::Idle
+            },
+            topology: if self.refreshes_blocked() {
+                modes::Topology::Unsettled
+            } else {
+                modes::Topology::Settled
+            },
         }
+    }
+
+    /// Whether the modes admit input of `class`. Refused input is discarded with one log line.
+    fn admit(&self, class: InputClass, input: &dyn std::fmt::Debug) -> bool {
+        let modes = self.modes();
+        let Some(mode) = modes.refusal(Initiative::UserInput(class)) else {
+            return true;
+        };
+        match class {
+            // Sampled pointer positions arrive at mouse rate for as long as the mode lasts.
+            InputClass::Hover => {
+                trace!(?input, "mode-gate: discarded {class:?} input during {mode:?}")
+            }
+            InputClass::Steering | InputClass::Arranging | InputClass::Inert => {
+                debug!(?input, "mode-gate: discarded {class:?} input during {mode:?}")
+            }
+        }
+        false
     }
 
     #[cfg(test)]
@@ -1196,7 +1243,7 @@ impl Reactor {
         matches!(self.state.windows.pointer(), Pointer::Dragging(_))
     }
 
-    fn is_mission_control_active(&self) -> bool {
+    fn is_native_mission_control_active(&self) -> bool {
         matches!(
             self.mission_control_manager.mission_control_state,
             MissionControlState::Active
@@ -1269,15 +1316,13 @@ impl Reactor {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::ReleaseClaims(release) => release.apply(&mut reactor.borrow_mut()),
             Event::MouseFocusPending(publisher) => {
-                if reactor.borrow().transient_blocks_mouse_focus() {
-                    publisher.take_latest();
+                // Asked before the WindowServer hit test; the resulting MouseMoved passes the
+                // same gate. A refused position is dropped: the next sample re-derives.
+                let point = publisher.take_latest();
+                if !reactor.borrow().admit(InputClass::Hover, &point) {
                     return;
                 }
-                if reactor.borrow().viewport_gesture.as_ref().is_some_and(|s| !s.released) {
-                    publisher.take_latest();
-                    return;
-                }
-                if let Some(point) = publisher.take_latest() {
+                if let Some(point) = point {
                     // Resolve against WindowServer when processing the latest position,
                     // rather than preserving an ID from an earlier input callback.
                     if let Some(window) = window_server::get_window_at_point(point) {
@@ -1350,7 +1395,7 @@ impl Reactor {
                 return;
             }
             Event::MouseMoved(wsid) => {
-                self.suppress_auto_workspace_switch_until_input = false;
+                self.wake = modes::Wake::UserPresent;
                 if let Some(window) = self.state.windows.tracked_window_id(wsid)
                     && (self.main_window() == Some(window)
                         || crate::sys::app::is_own_window_focused(window))
@@ -1388,15 +1433,7 @@ impl Reactor {
             return true;
         };
         self.release_if_missed();
-        if self.may(Initiative::UserInput(class)) {
-            return true;
-        }
-        debug!(
-            ?event,
-            "mode-gate: discarded {class:?} input during {:?}",
-            self.state.windows.pointer()
-        );
-        false
+        self.admit(class, event)
     }
 
     pub(crate) fn handle_ipc_command(&mut self, command: Command) {
@@ -1474,16 +1511,10 @@ impl Reactor {
                 | Event::WindowServerHidden(..)
                 | Event::WindowServerUnhidden(..)
                 | Event::WindowServerFocusChanged(..)
-                | Event::MouseMoved(..)
                 | Event::DragMotion(..)
                 | Event::ModifierMouseDown { .. }
                 | Event::PointerPressed { .. }
                 | Event::Gesture(..)
-                | Event::Command(Command::Layout(..))
-                | Event::Command(Command::Reactor(
-                    ReactorCommand::MoveWindowToDisplay { .. }
-                        | ReactorCommand::MoveWorkspaceToDisplay { .. }
-                ))
         )
     }
 
@@ -1544,7 +1575,7 @@ impl Reactor {
         // This signal only releases the lifecycle guard. Ordinary typing must
         // not commit camera presentations or trigger layout/focus side effects.
         if matches!(event, Event::KeyboardInput) {
-            self.suppress_auto_workspace_switch_until_input = false;
+            self.wake = modes::Wake::UserPresent;
             self.recording_manager.record.on_event(&event);
             return;
         }
@@ -1568,18 +1599,11 @@ impl Reactor {
         self.observe_transient_lifecycle(&event);
         let may_make_ready = matches!(&event, Event::SpaceStateChanged(_));
         let previously_focused_window = self.main_window();
-        let claim_suppressed_ffm =
-            self.state.windows.suppresses_focus_follows_mouse(previously_focused_window);
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
                 outcome.refresh_window_notifications |=
                     transient_count != self.transient_focus.windows.len();
                 let focused_window = self.main_window();
-                if claim_suppressed_ffm
-                    != self.state.windows.suppresses_focus_follows_mouse(focused_window)
-                {
-                    outcome = outcome.with_focus_follows_mouse_refresh();
-                }
                 if focused_window != previously_focused_window
                     && let Some(focused_window) = focused_window
                 {
@@ -1600,7 +1624,9 @@ impl Reactor {
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
         self.retire_presentations();
-        self.drag_manager.sync_preview(self.state.windows.drag());
+        // Mission Control shows thumbnails, not the windows a preview would outline.
+        let held = self.state.windows.drag().filter(|_| !self.is_native_mission_control_active());
+        self.drag_manager.sync_preview(held);
     }
 
     fn dispatch_layout_command(
@@ -1697,7 +1723,7 @@ impl Reactor {
             event,
             Event::PointerReleased(_) | Event::MouseMoved(_) | Event::Command(_)
         ) {
-            self.suppress_auto_workspace_switch_until_input = false;
+            self.wake = modes::Wake::UserPresent;
         }
 
         match event {
@@ -1706,13 +1732,13 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::SystemWoke => {
-                self.suppress_auto_workspace_switch_until_input = true;
+                self.wake = modes::Wake::AwaitingInput;
                 debug!("reconcile: re-read everything, woke");
                 self.reread.everything();
                 return Ok(system_workflow::handle_system_woke()?);
             }
             Event::SessionDidBecomeActive => {
-                self.suppress_auto_workspace_switch_until_input = true;
+                self.wake = modes::Wake::AwaitingInput;
                 return Ok(EventOutcome::default());
             }
             _ => {}
@@ -2108,7 +2134,7 @@ impl Reactor {
                 let observations = topology_workflow::WindowServerAppearedObservations {
                     resolved_space: resolved,
                     active_spaces: self.active_spaces.clone(),
-                    mission_control_active: self.is_mission_control_active(),
+                    mission_control_active: self.is_native_mission_control_active(),
                     last_known_user_space,
                     window_server_info,
                     app_known,
@@ -2304,9 +2330,12 @@ impl Reactor {
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
                 if let Some(stamp) = transition {
-                    self.overview_focus = window.map(|window| (space, window, stamp));
+                    self.overview_focus =
+                        window.map(|window| Expecting::since((space, window), stamp));
                 }
-                if transition.is_some() || self.overview_focus.is_some() {
+                let overview_focusing =
+                    self.overview_focus.as_ref().and_then(Expecting::live).is_some();
+                if transition.is_some() || overview_focusing {
                     self.stop_camera(space);
                 }
                 self.store_current_floating_positions(space);
@@ -2334,7 +2363,7 @@ impl Reactor {
                     EventOutcome::focus_changed(None, false)
                 };
                 outcome.overview_activation = transition.map(|stamp| (workspace, window, stamp));
-                outcome.arrange.instant = transition.is_some() || self.overview_focus.is_some();
+                outcome.arrange.instant = transition.is_some() || overview_focusing;
                 // The cursor is already on the overview's display; follow only a
                 // workspace that lives on another one.
                 if self
@@ -2457,14 +2486,9 @@ impl Reactor {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
             Event::MouseMoved(wsid) => {
-                if self.transient_blocks_mouse_focus() {
-                    return Ok(EventOutcome::default());
-                }
                 let window = self.state.windows.tracked_window_id(wsid);
                 if window.is_some_and(|window| {
-                    self.pending_mouse_focus.is_some_and(|(pending, started)| {
-                        pending == window && started.elapsed() < Duration::from_secs(1)
-                    })
+                    self.pending_mouse_focus.as_ref().and_then(Expecting::live) == Some(&window)
                 }) {
                     return Ok(EventOutcome::default());
                 }
@@ -2524,25 +2548,23 @@ impl Reactor {
                     &self.mouse_raise_token,
                 )?;
                 if !outcome.raise_requests.is_empty() {
-                    self.pending_mouse_focus = window.map(|window| (window, Instant::now()));
+                    self.pending_mouse_focus = window.map(Expecting::now);
                 }
                 return Ok(outcome);
             }
             Event::MissionControlNativeEntered => {
                 return topology_workflow::handle_mission_control_native_entered(
                     &mut self.mission_control_manager,
-                    &mut self.drag_manager,
                     &mut self.state.windows,
                 );
             }
             Event::MissionControlNativeExited => {
                 return topology_workflow::handle_mission_control_native_exited(
                     &mut self.mission_control_manager,
-                    &mut self.drag_manager,
                 );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
-                if self.pending_mouse_focus.is_some_and(|(window, _)| window == window_id) {
+                if self.pending_mouse_focus.as_ref().and_then(Expecting::live) == Some(&window_id) {
                     self.pending_mouse_focus = None;
                 }
                 let mut outcome = system_workflow::handle_raise_completed(
@@ -2551,8 +2573,13 @@ impl Reactor {
                         sequence: sequence_id,
                     },
                 )?;
-                if let Some((space, selected, _)) =
-                    self.overview_focus.filter(|(_, selected, _)| *selected == window_id)
+                // A late completion still finishes the handoff: the echo is what ends it.
+                if let Some((space, selected)) = self
+                    .overview_focus
+                    .map(|focus| match focus.settle() {
+                        Echo::Ours(focus) | Echo::Late(focus) => focus,
+                    })
+                    .filter(|(_, selected)| *selected == window_id)
                 {
                     self.overview_focus = None;
                     let selected = window_server::key_focused_window(space)
@@ -3029,10 +3056,7 @@ impl Reactor {
     fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
         // AX activation and inventory replies can arrive after overview preparation.
         // Until its focus completes, native layout work remains covered and instant.
-        if let Some((space, _, _)) = self
-            .overview_focus
-            .filter(|(_, _, started)| started.elapsed() < Duration::from_secs(1))
-        {
+        if let Some(&(space, _)) = self.overview_focus.as_ref().and_then(Expecting::live) {
             if outcome.arrange.space_scope.is_none_or(|scope| scope == space) {
                 outcome.arrange.instant = true;
             }
@@ -3047,8 +3071,8 @@ impl Reactor {
             || !outcome.finalize_created_windows.is_empty();
         #[cfg(test)]
         self.event_outcome_phase_trace.push("model");
-        if outcome.display_switch_warp.is_some() {
-            self.workspace_switch_manager.pending_display_warp = outcome.display_switch_warp;
+        if let Some(space) = outcome.display_switch_warp {
+            self.workspace_switch_manager.owed_warp = Some(OwedWarp::Display(space));
         }
         if !outcome.window_server_updates.is_empty() {
             self.update_partial_window_server_info(outcome.window_server_updates);
@@ -3175,7 +3199,7 @@ impl Reactor {
                     outcome.arrange.is_resize,
                     matches!(
                         self.workspace_switch_manager.workspace_switch_state,
-                        WorkspaceSwitchState::Active
+                        WorkspaceSwitchState::Active(_)
                     ),
                     outcome.arrange.space_scope,
                 )
@@ -3238,16 +3262,10 @@ impl Reactor {
         }
 
         for command in outcome.wm_commands {
-            let is_dismiss = matches!(
-                command,
-                crate::actor::wm_controller::WmCmd::DismissMissionControl
-            );
             if let Some(wm) = self.communication_manager.wm_sender.as_ref() {
                 wm.send(crate::actor::wm_controller::WmEvent::Command(
                     crate::actor::wm_controller::WmCommand::Wm(command),
                 ));
-            } else if is_dismiss {
-                self.set_mission_control_active(false);
             }
         }
         for event in outcome.wm_events {
@@ -3323,27 +3341,38 @@ impl Reactor {
             trace!("Workspace switch stabilized with no further frame changes");
         }
 
-        // Resolve focus requests that did not need arrangement, and relative display warps.
-        let focused = self.workspace_switch_manager.pending_focus_mouse_warp.take();
-        if let Some(space) = self.workspace_switch_manager.pending_display_warp.take() {
-            // Land at the same spot within the newly focused window that the cursor
-            // held in the old one, or the display itself when the workspace is empty.
-            let to = focused
-                .or_else(|| self.layout_manager.layout_engine.selected_window(space))
-                .and_then(|wid| self.window_frame_on_known_screen(wid))
-                .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
-            let from = self
-                .main_window()
-                .and_then(|wid| self.state.windows.window(wid))
-                .map(|window| window.frame_monotonic);
-            if let Some(to) = to
-                && let Some(input_tx) = &self.communication_manager.input_tx
-            {
-                _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
+        // Pay an owed warp, its target derived from the focus now.
+        match self.workspace_switch_manager.owed_warp.take() {
+            Some(OwedWarp::Display(space)) => {
+                // Land at the same spot within the newly focused window that the cursor
+                // held in the old one, or the display itself when the workspace is empty.
+                let to = self
+                    .layout_manager
+                    .layout_engine
+                    .selected_window(space)
+                    .and_then(|wid| self.window_frame_on_known_screen(wid))
+                    .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
+                let from = self
+                    .main_window()
+                    .and_then(|wid| self.state.windows.window(wid))
+                    .map(|window| window.frame_monotonic);
+                if let Some(to) = to
+                    && let Some(input_tx) = &self.communication_manager.input_tx
+                {
+                    _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
+                }
             }
-        } else if let Some(center) = focused.and_then(|wid| self.window_center_on_known_screen(wid))
-        {
-            self.warp_mouse(center);
+            Some(OwedWarp::Focus) => {
+                if let Some(center) = self
+                    .layout_manager
+                    .layout_engine
+                    .focused_window()
+                    .and_then(|wid| self.window_center_on_known_screen(wid))
+                {
+                    self.warp_mouse(center);
+                }
+            }
+            None => {}
         }
 
         #[cfg(test)]
@@ -3364,9 +3393,6 @@ impl Reactor {
 
                 self.notification_manager.last_sls_notification_ids = ids;
             }
-        }
-        if outcome.refresh_focus_follows_mouse {
-            self.update_focus_follows_mouse_state();
         }
         if outcome.refresh_layout_mode {
             self.update_event_tap_layout_mode();
@@ -3600,11 +3626,8 @@ impl Reactor {
         outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(target, window));
         if available {
             self.refocus_manager.refocus_state = RefocusState::Pending(target);
-            outcome.absorb(
-                EventOutcome::layout_changed(false)
-                    .with_arrange_space_scope(Some(target))
-                    .with_focus_follows_mouse_refresh(),
-            );
+            outcome
+                .absorb(EventOutcome::layout_changed(false).with_arrange_space_scope(Some(target)));
         }
         outcome
     }
@@ -3620,11 +3643,6 @@ impl Reactor {
         preserve_missing_assignments: bool,
         invalidated_spaces: &[SpaceId],
     ) {
-        self.refocus_manager.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
-            StaleCleanupState::Suppressed
-        } else {
-            StaleCleanupState::Enabled
-        };
         self.expose_all_spaces();
         if let Some(main_window) = self.main_window() {
             if let Some(space) = self.main_window_space() {
@@ -3807,7 +3825,7 @@ impl Reactor {
             // Geometry and membership always come from the newest revision.
             space_state = topology_workflow::merge_space_deltas(pending, space_state);
         }
-        if self.is_mission_control_active() {
+        if self.is_native_mission_control_active() {
             self.space_state.authoritative = false;
             self.pending_space_change_manager.pending_space_change = Some(space_state);
             return Ok(EventOutcome::default());
@@ -3931,7 +3949,6 @@ impl Reactor {
         self.space_state.display_space_ids = display_space_ids;
 
         if screens.is_empty() {
-            self.refocus_manager.stale_cleanup_state = StaleCleanupState::Suppressed;
             if !self.space_state.screens.is_empty() {
                 self.space_state.screens.clear();
                 self.expose_all_spaces();
@@ -3942,7 +3959,6 @@ impl Reactor {
             return Ok(outcome);
         }
 
-        self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         let previous_screens = std::mem::replace(&mut self.space_state.screens, screens);
         // macOS may resize windows without AX notifications during display changes.
         // Reapply the complete layout even when cached frames still match.
@@ -4443,7 +4459,7 @@ impl Reactor {
 
     /// Mission Control moves windows itself; nothing it shows is a drag or a placement.
     fn mission_control_moved_it(&mut self) -> bool {
-        let active = self.is_mission_control_active();
+        let active = self.is_native_mission_control_active();
         if active {
             self.state.windows.end_drag();
         }
@@ -4760,7 +4776,7 @@ impl Reactor {
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if self.is_mission_control_active() {
+        if self.is_native_mission_control_active() {
             return;
         }
         if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
@@ -4870,12 +4886,7 @@ impl Reactor {
         observed.extend(new.iter().filter_map(|(_, info)| {
             info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
         }));
-        let retired = if matches!(
-            self.refocus_manager.stale_cleanup_state,
-            StaleCleanupState::Suppressed
-        ) || self.is_mission_control_active()
-            || !self.may(Initiative::RetireWindows)
-        {
+        let retired = if !self.may(Initiative::RetireWindows) {
             Vec::new()
         } else {
             self.state.windows.reconcile_app_inventory(
@@ -5717,11 +5728,6 @@ impl Reactor {
 
         let candidate_frame = window.frame_monotonic;
 
-        if matches!(self.menu_manager.menu_state, MenuState::Open(_)) {
-            trace!(?wid, "Skipping autoraise while menu open");
-            return false;
-        }
-
         let Some(space) = space else {
             trace!(?wid, "Skipping mouse focus without a resolved space");
             return false;
@@ -5915,27 +5921,9 @@ impl Reactor {
             return EventOutcome::no_change();
         }
 
-        if self.suppress_auto_workspace_switch_until_input {
-            debug!(
-                pid,
-                "Skipping auto workspace switch for lifecycle-restored activation before user input"
-            );
-            return EventOutcome::no_change();
-        }
-
-        if self.workspace_switch_manager.active_workspace_switch.is_some() {
-            trace!(
-                "Skipping auto workspace switch for pid {} because a workspace switch is in progress",
-                pid
-            );
-            return EventOutcome::no_change();
-        }
-
-        if self.workspace_switch_manager.manual_switch_in_progress() {
-            debug!(
-                "Skipping auto workspace switch for pid {} because a manual switch is in progress",
-                pid
-            );
+        let modes = self.modes();
+        if let Some(mode) = modes.refusal(Initiative::FollowActivation) {
+            debug!(pid, "mode-gate: discarded activation follow during {mode:?}");
             return EventOutcome::no_change();
         }
 
@@ -6030,7 +6018,7 @@ impl Reactor {
         if let Some(space) = workspace_switch_space
             && matches!(
                 self.workspace_switch_manager.workspace_switch_state,
-                WorkspaceSwitchState::Active
+                WorkspaceSwitchState::Active(_)
             )
         {
             focus_window = self.visible_focus_candidate_in_active_workspace(space, focus_window);
@@ -6074,7 +6062,7 @@ impl Reactor {
             if let Some(space) = workspace_switch_space
                 && matches!(
                     self.workspace_switch_manager.workspace_switch_state,
-                    WorkspaceSwitchState::Active
+                    WorkspaceSwitchState::Active(_)
                 )
             {
                 if let Some(wid) = self.window_id_under_cursor().filter(|wid| {
@@ -6140,8 +6128,15 @@ impl Reactor {
         }
 
         if let Some(space) = pending_refocus_space {
-            // Preserve a removal refocus that an explicit focus request superseded.
-            if matches!(self.refocus_manager.refocus_state, RefocusState::None) {
+            if focus_window.is_some() {
+                // A newer focus intent supersedes the refocus: discarded, not replayed later.
+                debug!(
+                    ?space,
+                    ?focus_window,
+                    "refocus: superseded by an explicit focus; discarded"
+                );
+            } else if matches!(self.refocus_manager.refocus_state, RefocusState::None) {
+                // Not superseded, only not handled by this response (it raised windows).
                 self.refocus_manager.refocus_state = RefocusState::Pending(space);
             }
         }
@@ -6185,17 +6180,19 @@ impl Reactor {
                 .push(wid);
         }
         let focus_window_with_warp = focus_window.map(|wid| {
-            let warp = if self.workspace_switch_manager.pending_display_warp.is_some()
-                || (self.config.settings.mouse_follows_focus
-                    && (self.workspace_switch_manager.workspace_switch_state
-                        == WorkspaceSwitchState::Active
-                        || self.assigned_space_for_window_id(wid).is_some_and(|space| {
-                            self.layout_manager.layout_engine.active_layout_mode_at(space)
-                                == crate::common::config::LayoutMode::Scrolling
-                        })))
-            {
+            let warp = if matches!(
+                self.workspace_switch_manager.owed_warp,
+                Some(OwedWarp::Display(_))
+            ) || (self.config.settings.mouse_follows_focus
+                && (matches!(
+                    self.workspace_switch_manager.workspace_switch_state,
+                    WorkspaceSwitchState::Active(_)
+                ) || self.assigned_space_for_window_id(wid).is_some_and(|space| {
+                    self.layout_manager.layout_engine.active_layout_mode_at(space)
+                        == crate::common::config::LayoutMode::Scrolling
+                }))) {
                 // Scrolling resolves against the destination; workspace switches stay deferred.
-                self.workspace_switch_manager.pending_focus_mouse_warp = Some(wid);
+                self.workspace_switch_manager.owe_focus_warp();
                 None
             } else if self.config.settings.mouse_follows_focus {
                 self.window_center_on_known_screen(wid)
@@ -6451,7 +6448,6 @@ impl Reactor {
         if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner == pid) {
             debug!(pid, "Clearing menu-open state for deactivated app");
             self.menu_manager.menu_state = MenuState::Closed;
-            self.update_focus_follows_mouse_state();
         }
     }
 
@@ -6459,22 +6455,7 @@ impl Reactor {
         if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner != pid) {
             debug!(pid, "Clearing stale menu-open state after app focus changed");
             self.menu_manager.menu_state = MenuState::Closed;
-            self.update_focus_follows_mouse_state();
         }
-    }
-
-    fn set_focus_follows_mouse_enabled(&self, enabled: bool) {
-        if let Some(input_tx) = self.communication_manager.input_tx.as_ref() {
-            input_tx.send(input::Request::SetFocusFollowsMouseEnabled(enabled));
-        }
-    }
-
-    fn update_focus_follows_mouse_state(&mut self) {
-        let should_enable = self.config.settings.focus_follows_mouse
-            && matches!(self.menu_manager.menu_state, MenuState::Closed)
-            && !self.is_mission_control_active()
-            && !self.state.windows.suppresses_focus_follows_mouse(self.main_window());
-        self.set_focus_follows_mouse_enabled(should_enable);
     }
 
     fn update_event_tap_layout_mode(&mut self) {
@@ -6527,19 +6508,6 @@ impl Reactor {
         let modes_by_space = modes.iter().copied().collect();
         self.notification_manager.last_layout_modes_by_space = modes_by_space;
         input_tx.send(crate::actor::input::Request::LayoutModesChanged(modes));
-    }
-
-    fn set_mission_control_active(&mut self, active: bool) {
-        let new_state = if active {
-            MissionControlState::Active
-        } else {
-            MissionControlState::Inactive
-        };
-        if self.is_mission_control_active() == active {
-            return;
-        }
-        self.mission_control_manager.mission_control_state = new_state;
-        self.update_focus_follows_mouse_state();
     }
 
     fn refresh_windows_after_mission_control(&mut self) {
