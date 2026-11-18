@@ -1258,7 +1258,7 @@ impl Reactor {
         matches!(self.state.windows.pointer(), Pointer::Dragging(_))
     }
 
-    fn is_mission_control_active(&self) -> bool {
+    fn is_native_mission_control_active(&self) -> bool {
         matches!(
             self.mission_control_manager.mission_control_state,
             MissionControlState::Active
@@ -1646,7 +1646,7 @@ impl Reactor {
         }
         self.retire_presentations();
         // Mission Control shows thumbnails, not the windows a preview would outline.
-        let held = self.state.windows.drag().filter(|_| !self.is_mission_control_active());
+        let held = self.state.windows.drag().filter(|_| !self.is_native_mission_control_active());
         self.drag_manager.sync_preview(held);
     }
 
@@ -2170,7 +2170,7 @@ impl Reactor {
                 let observations = topology_workflow::WindowServerAppearedObservations {
                     resolved_space: resolved,
                     active_spaces: self.active_spaces.clone(),
-                    mission_control_active: self.is_mission_control_active(),
+                    mission_control_active: self.is_native_mission_control_active(),
                     last_known_user_space,
                     window_server_info,
                     app_known,
@@ -3300,16 +3300,10 @@ impl Reactor {
         }
 
         for command in outcome.wm_commands {
-            let is_dismiss = matches!(
-                command,
-                crate::actor::wm_controller::WmCmd::DismissMissionControl
-            );
             if let Some(wm) = self.communication_manager.wm_sender.as_ref() {
                 wm.send(crate::actor::wm_controller::WmEvent::Command(
                     crate::actor::wm_controller::WmCommand::Wm(command),
                 ));
-            } else if is_dismiss {
-                self.set_mission_control_active(false);
             }
         }
         for event in outcome.wm_events {
@@ -3869,7 +3863,7 @@ impl Reactor {
             // Geometry and membership always come from the newest revision.
             space_state = topology_workflow::merge_space_deltas(pending, space_state);
         }
-        if self.is_mission_control_active() {
+        if self.is_native_mission_control_active() {
             self.space_state.authoritative = false;
             self.pending_space_change_manager.pending_space_change = Some(space_state);
             return Ok(EventOutcome::default());
@@ -4498,7 +4492,7 @@ impl Reactor {
 
     /// Mission Control moves windows itself; nothing it shows is a drag or a placement.
     fn mission_control_moved_it(&mut self) -> bool {
-        let active = self.is_mission_control_active();
+        let active = self.is_native_mission_control_active();
         if active {
             self.state.windows.end_drag();
         }
@@ -4841,7 +4835,7 @@ impl Reactor {
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if self.is_mission_control_active() {
+        if self.is_native_mission_control_active() {
             return;
         }
         if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
@@ -6586,18 +6580,6 @@ impl Reactor {
         let modes_by_space = modes.iter().copied().collect();
         self.notification_manager.last_layout_modes_by_space = modes_by_space;
         input_tx.send(crate::actor::input::Request::LayoutModesChanged(modes));
-    }
-
-    fn set_mission_control_active(&mut self, active: bool) {
-        let new_state = if active {
-            MissionControlState::Active
-        } else {
-            MissionControlState::Inactive
-        };
-        if self.is_mission_control_active() == active {
-            return;
-        }
-        self.mission_control_manager.mission_control_state = new_state;
     }
 
     fn refresh_windows_after_mission_control(&mut self) {

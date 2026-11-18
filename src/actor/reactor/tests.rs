@@ -3203,6 +3203,20 @@ fn mission_control_enter_clears_active_drag_state() {
     assert!(reactor.may(Initiative::RetireWindows));
 }
 
+/// Dismissing Rift's overview is not leaving macOS's Mission Control: with no WM sender the
+/// dismissal used to clear the native state, re-admitting hover and retirement under it.
+#[test]
+fn dismissing_rifts_overview_leaves_native_mission_control_alone() {
+    let mut reactor = test_reactor();
+    assert!(reactor.communication_manager.wm_sender.is_none());
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::DismissMissionControl,
+    )));
+    assert!(reactor.is_native_mission_control_active());
+    assert!(!reactor.may(Initiative::RetireWindows));
+}
+
 #[test]
 fn it_ignores_windows_on_disabled_spaces() {
     let (mut apps, mut reactor) = test_context();
