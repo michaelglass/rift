@@ -403,9 +403,10 @@ impl Reactor {
         let request = self.state.tx.next_id();
         let desire = rift_core::Desire { window, frame, request };
         let (plans, _) = self.state.arrange(Want::Arrange, vec![desire]);
-        for write in
-            plans.into_iter().flat_map(|plan| plan.positions.into_iter().chain(plan.frames))
-        {
+        for write in plans.into_iter().flat_map(|plan| {
+            let (_, positions, frames) = plan.into_parts();
+            positions.into_iter().chain(frames)
+        }) {
             self.send_one(write, handle.clone());
         }
     }
@@ -465,8 +466,9 @@ impl Reactor {
         &mut self,
         pid: pid_t,
         bounds: Option<ScrollingDisplayBounds>,
-        rift_core::Plan { request, positions, frames }: rift_core::Plan<Rift>,
+        plan: rift_core::Plan<Rift>,
     ) {
+        let (request, positions, frames) = plan.into_parts();
         let Some(app) = self.app_manager.apps.get(&pid) else {
             debug!(?pid, "Skipping layout update for app - app no longer exists");
             for write in positions.iter().chain(&frames) {
@@ -513,7 +515,7 @@ impl Reactor {
             .collect();
         let (plans, any_desire_new) = self.state.arrange(want, desires);
         for plan in plans {
-            let (pid, constrained) = keys[&plan.request];
+            let (pid, constrained) = keys[&plan.request()];
             self.send_batch(pid, bounds.filter(|_| constrained), plan);
         }
         any_desire_new
@@ -581,7 +583,7 @@ impl RiftState {
                 // The latest request sent each window, which the app actors read.
                 Effect::Write(ref write) => self.sent(write),
                 Effect::Plan(ref plan) => {
-                    for write in plan.positions.iter().chain(&plan.frames) {
+                    for write in plan.positions().iter().chain(plan.frames()) {
                         self.sent(write);
                     }
                 }

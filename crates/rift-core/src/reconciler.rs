@@ -550,23 +550,21 @@ impl<K: Kinds> Reconciler<K> {
         Write { window, frame, request }
     }
 
-    /// What waited behind a write that has been answered or given up on: sent if the window is
-    /// Rift's, discarded if it is the user's now (the release re-derives it).
+    /// The desire `next` waited behind a write that has just been answered or given up on,
+    /// leaving the window `after`: it goes out now, unless the user's hand is on the window
+    /// (then it is discarded; the release re-derives the window's frame).
     fn release(
         &mut self,
         now: K::Time,
         request: K::Request,
         window: K::Window,
-        queued: Option<K::Frame>,
+        next: K::Frame,
         owner: Owner,
+        after: Sync<K>,
     ) -> Option<Write<K>> {
-        match (owner, queued) {
-            (Owner::Rift, Some(next)) => {
-                let before = self.sync(window).map_or(Before::Unknown, Self::before);
-                Some(self.send(now, request, window, next, before))
-            }
-            (Owner::Rift | Owner::User, None) => None,
-            (Owner::User, Some(_)) => {
+        match owner {
+            Owner::Rift => Some(self.send(now, request, window, next, Self::before(after))),
+            Owner::User => {
                 self.notes.push((window, Note::Discarded));
                 None
             }
@@ -605,19 +603,19 @@ impl<K: Kinds> Reconciler<K> {
             Some((Ordering::Less, _)) => return (Reply::NoNews, None),
             Some((Ordering::Equal, last)) => match sync {
                 Sync::InFlight { target, queued, .. } => {
-                    let answer = if answers::<K>(target, frame) {
-                        self.set(window, Sync::Settled { acked: frame, last: Some(last) });
-                        Answer::Acked
+                    let (answer, after) = if answers::<K>(target, frame) {
+                        (Answer::Acked, Sync::Settled { acked: frame, last: Some(last) })
                     } else {
                         let refused = Sync::Refused {
                             wanted: target,
                             got: frame,
                             request: last,
                         };
-                        self.set(window, refused);
-                        Answer::Refused
+                        (Answer::Refused, refused)
                     };
-                    let released = self.release(now, request, window, queued, owner);
+                    self.set(window, after);
+                    let released = queued
+                        .and_then(|next| self.release(now, request, window, next, owner, after));
                     return (Reply::Answered(answer), released);
                 }
                 Sync::Animating { target, .. } if answers::<K>(target, frame) => {
@@ -762,9 +760,11 @@ impl<K: Kinds> Reconciler<K> {
             let Some((target, queued, sent, before)) = self.waiting((deadline, window)) else {
                 continue;
             };
-            self.time_out(window, target, sent, before);
+            let after = self.time_out(window, target, sent, before);
             let owner = pointer.owner(window);
-            released.extend(self.release(now, request, window, queued, owner));
+            released.extend(
+                queued.and_then(|next| self.release(now, request, window, next, owner, after)),
+            );
         }
         released
     }
