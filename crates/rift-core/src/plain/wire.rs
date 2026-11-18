@@ -25,6 +25,8 @@ pub enum WireError {
     Truncated,
     /// A tag or enum index out of range, at this word.
     Unknown { at: usize, word: u64 },
+    /// A value its type rules out (a size not finite, or negative), at this word.
+    Invalid { at: usize, word: u64 },
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -95,16 +97,20 @@ impl Words {
         }
     }
 
-    /// Resizable or not, then the minimum the window reports (a resizable window's minimum
-    /// is advisory: the Roc core does not know respect_min_size yet).
+    /// How tiling may size the window (0 fixed, 1 resizable, 2 resizable at least its
+    /// minimum) and the minimum it reports, then its locks and maxima.
     fn constraints(&mut self, c: WindowConstraints) {
-        let min = c.sizing.reported_min();
-        self.flag(!matches!(c.sizing, Sizing::Fixed { .. }));
+        let (tag, min) = match c.sizing {
+            Sizing::Fixed { min } => (0, min),
+            Sizing::Resizable { advisory_min } => (1, advisory_min),
+            Sizing::ResizableAtLeastMin { min } => (2, min),
+        };
+        self.word(tag);
         for value in [
-            c.locked_width,
-            c.locked_height,
             min.width(),
             min.height(),
+            c.locked_width,
+            c.locked_height,
             c.max_width,
             c.max_height,
         ] {
@@ -538,17 +544,34 @@ impl Reader<'_> {
     }
 
     fn constraints(&mut self) -> Read<WindowConstraints> {
-        let is_resizable = self.flag()?;
-        let locked_width = self.float()?;
-        let locked_height = self.float()?;
-        let min = Size::reported(self.float()?, self.float()?);
+        let sizing: fn(Size) -> Sizing = match self.word()? {
+            0 => |min| Sizing::Fixed { min },
+            1 => |advisory_min| Sizing::Resizable { advisory_min },
+            2 => |min| Sizing::ResizableAtLeastMin { min },
+            word => return self.unknown(word),
+        };
         Ok(WindowConstraints {
-            sizing: Sizing::new(is_resizable, false, min),
-            locked_width,
-            locked_height,
+            sizing: sizing(self.size()?),
+            locked_width: self.float()?,
+            locked_height: self.float()?,
             max_width: self.float()?,
             max_height: self.float()?,
         })
+    }
+
+    /// A size as the core holds one, already parsed: each axis finite and not negative.
+    fn size(&mut self) -> Read<Size> {
+        let mut axis = || {
+            let word = self.word()?;
+            let value = f64::from_bits(word);
+            if value.is_finite() && value >= 0.0 {
+                Ok(value)
+            } else {
+                Err(WireError::Invalid { at: self.at - 1, word })
+            }
+        };
+        let (width, height) = (axis()?, axis()?);
+        Ok(Size::reported(width, height).unwrap_or(Size::ZERO))
     }
 
     fn node(&mut self) -> Read<Node<WindowId>> {
@@ -1040,6 +1063,48 @@ mod tests {
     }
 
     #[test]
+    fn every_sizing_survives_the_wire_and_a_size_the_core_could_not_hold_is_refused() {
+        let min = Size::reported(300., 120.);
+        let shape = |sizing| Bsp {
+            screen: Rect { x: 0., y: 0., w: 10., h: 10. },
+            gaps: Gaps::default(),
+            root: Node::Leaf {
+                slot: Slot::Window {
+                    window: W,
+                    constraints: Some(WindowConstraints { sizing, ..Default::default() }),
+                },
+                fill: Fill::Tiled,
+                stacked: false,
+            },
+            aspect: None,
+        };
+        for sizing in [
+            Sizing::new(false, false, min),
+            Sizing::new(true, false, min),
+            Sizing::new(true, true, min),
+            Sizing::new(true, false, None),
+        ] {
+            assert_eq!(decode_bsp(&encode_bsp(shape(sizing))), Ok(shape(sizing)));
+        }
+        let words = encode_bsp(shape(Sizing::new(true, true, min)));
+        let width = words.iter().position(|&w| w == 300f64.to_bits()).unwrap();
+        for bad in [-1f64, f64::NAN, f64::INFINITY] {
+            let mut garbled = words.clone();
+            garbled[width] = bad.to_bits();
+            assert_eq!(
+                decode_bsp(&garbled),
+                Err(WireError::Invalid { at: width, word: bad.to_bits() })
+            );
+        }
+        let mut garbled = words;
+        garbled[width - 1] = 7;
+        assert_eq!(
+            decode_bsp(&garbled),
+            Err(WireError::Unknown { at: width - 1, word: 7 })
+        );
+    }
+
+    #[test]
     fn a_bsp_shape_and_its_frames_survive_the_wire() {
         let leaf = |window, constraints, fill| Node::Leaf {
             slot: Slot::Window { window, constraints },
@@ -1083,7 +1148,7 @@ mod tests {
         constrained.root = leaf(
             V,
             Some(WindowConstraints {
-                sizing: Sizing::new(true, false, Size::reported(300., 0.)),
+                sizing: Sizing::new(true, true, Size::reported(300., 0.)),
                 ..Default::default()
             }),
             Fill::Tiled,
