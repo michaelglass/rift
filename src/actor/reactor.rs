@@ -4516,10 +4516,20 @@ impl Reactor {
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
-        let observation = match kind {
+        let holder = if gripped {
+            Holder::User
+        } else {
+            Holder::Nobody
+        };
+        let answered = match kind {
             ReportKind::Reply => {
                 let owner = self.owner(wid);
-                let (answer, queued) = self.reconciler.answer(wid, new_frame, owner);
+                self.reconciler.answer(wid, new_frame, owner)
+            }
+            ReportKind::Unprompted => None,
+        };
+        let observation = match answered {
+            Some((answer, queued)) => {
                 // The desire that waited behind the answered write goes out now.
                 if let Some(write) = queued {
                     self.send_arranged(write);
@@ -4531,23 +4541,13 @@ impl Reactor {
                 self.record_report(wid, new_frame, Some(new_frame), |at_target| match answer {
                     Answer::Acked => true,
                     Answer::Refused => false,
-                    Answer::Unasked | Answer::Late => at_target,
+                    Answer::Unasked => at_target,
                 });
-                return Ok(match answer {
-                    Answer::Acked | Answer::Refused | Answer::Unasked => EventOutcome::no_change(),
-                    // The layout may have moved on while the app was busy: re-derive, so a
-                    // window that landed on a stale target is written where it belongs now.
-                    Answer::Late => EventOutcome::no_change().with_arrange_passes(1),
-                });
+                return Ok(EventOutcome::no_change());
             }
-            ReportKind::Unprompted => {
-                let holder = if gripped {
-                    Holder::User
-                } else {
-                    Holder::Nobody
-                };
-                self.reconciler.observe(wid, new_frame, old_frame, holder)
-            }
+            // Unprompted, or an answer Rift had stopped waiting for, which is news like any
+            // other: what follows re-derives where the window belongs and writes the difference.
+            None => self.reconciler.observe(wid, new_frame, old_frame, holder),
         };
         if self.mission_control_moved_it() {
             return Ok(EventOutcome::no_change());
