@@ -280,9 +280,11 @@ pub(crate) fn emit_layout_events(
     let mut included: HashSet<WindowId> = HashSet::default();
     let visible: Vec<_> = state
         .windows
-        .iter_visible_window_server_ids()
-        .filter_map(|wsid| state.windows.tracked_window_id(wsid))
-        .filter(|wid| wid.pid == pid)
+        .window_ids_for_pid(pid)
+        .filter(|wid| {
+            let wsid = state.windows.record(*wid).and_then(|record| record.window_server_id());
+            wsid.is_some_and(|wsid| state.windows.is_window_visible(wsid))
+        })
         .filter(|wid| state.windows.can_reconcile_admission(*wid))
         .collect();
     let has_visible_window_server_windows = !visible.is_empty();

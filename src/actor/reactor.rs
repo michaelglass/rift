@@ -1648,13 +1648,7 @@ impl Reactor {
                 }
             }
             Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
-                let windows = self
-                    .state
-                    .windows
-                    .iter_windows()
-                    .filter(|(wid, _)| wid.pid == *pid)
-                    .map(|(wid, _)| wid)
-                    .collect();
+                let windows = self.state.windows.window_ids_for_pid(*pid).collect();
                 self.cancel_window_presentations(windows);
             }
             Event::SpaceStateChanged(snapshot)
