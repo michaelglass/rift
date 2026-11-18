@@ -34,13 +34,6 @@ pub fn build_drag_scene(
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct MouseUpPayload {
-    /// The drag the release dropped, with its session (the core decided the release ended it).
-    pub dropped: Option<(WindowId, Session)>,
-    pub final_space: Option<SpaceId>,
-}
-
 pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
     let Some((window, cancelled)) = state
         .let_go()
@@ -99,19 +92,20 @@ pub fn plan_drop(
     }
 }
 
+/// The release dropped `window`'s drag (`commit`; the core decided the release ended it) over
+/// `final_space`.
 pub fn handle_mouse_up(
     state: &mut RiftState,
     layout: &mut LayoutManager,
     drag: &mut DragManager,
-    payload: MouseUpPayload,
+    window: WindowId,
+    commit: Session,
+    final_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some((window, commit)) = payload.dropped else {
-        return Ok(outcome);
-    };
     let plan = plan_drop(
         &commit,
-        payload.final_space,
+        final_space,
         state.windows.is_admitted(window),
         |target| state.windows.contains_window(target),
     );
@@ -175,11 +169,11 @@ pub fn handle_mouse_up(
         }
     };
 
-    if let Some(space) = payload.final_space
+    if let Some(space) = final_space
         && layout.layout_engine.is_window_floating(window)
     {
         state.windows.clear_floating_display_geometry(window);
-        if commit.source.origin_space != payload.final_space {
+        if commit.source.origin_space != final_space {
             layout.layout_engine.remove_floating_position(window);
         }
         if let Some(workspace) = layout
