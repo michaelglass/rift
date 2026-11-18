@@ -1355,14 +1355,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rift-core-roc"
-version = "0.1.0"
-dependencies = [
- "rift-core",
- "serde_json",
-]
-
-[[package]]
 name = "rift-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1406,7 +1398,6 @@ dependencies = [
  "rift-client",
  "rift-config-derive",
  "rift-core",
- "rift-core-roc",
  "rift-protocol",
  "ron",
  "rustc-hash",
