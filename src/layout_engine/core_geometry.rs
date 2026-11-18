@@ -2,7 +2,7 @@
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_core::layout::traditional::{self, StackLine};
-use rift_core::layout::{Gaps, bsp};
+use rift_core::layout::{Gaps, Size, bsp};
 use rift_core::plain::Rect;
 
 use crate::actor::app::WindowId;
@@ -18,6 +18,11 @@ pub(crate) fn core_rect(rect: CGRect) -> Rect {
 
 pub(crate) fn cg_rect(rect: Rect) -> CGRect {
     CGRect::new(CGPoint::new(rect.x, rect.y), CGSize::new(rect.w, rect.h))
+}
+
+/// A size an app reported, as the core parses it (no size, or 0x0, is none).
+pub(crate) fn reported_size(size: Option<CGSize>) -> Option<Size> {
+    size.and_then(|size| Size::reported(size.width, size.height))
 }
 
 /// The gaps one screen uses (any per-display override already applied by the caller).

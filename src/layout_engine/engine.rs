@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use rift_core::layout::Sizing;
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -12,6 +13,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings, WorkspaceSelector};
 use crate::layout_engine::LayoutSystem;
+use crate::layout_engine::core_geometry::reported_size;
 use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::app_rules::{AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
@@ -1682,10 +1684,12 @@ impl LayoutEngine {
         if let Some(window) = window_store.window(wid) {
             let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
                 WindowLayoutConstraints {
-                    is_resizable: window.info.is_resizable,
+                    sizing: Sizing::new(
+                        window.info.is_resizable,
+                        false,
+                        reported_size(window.info.min_size),
+                    ),
                     locked_height: window.frame_monotonic().size.height,
-                    min_width: window.info.min_size.map_or(0.0, |size| size.width),
-                    min_height: window.info.min_size.map_or(0.0, |size| size.height),
                     max_width: window.info.max_size.map_or(0.0, |size| size.width),
                     max_height: window.info.max_size.map_or(0.0, |size| size.height),
                     ..Default::default()
@@ -2055,11 +2059,9 @@ impl LayoutEngine {
                 self.window_layout_constraints.insert(
                     wid,
                     WindowLayoutConstraints {
-                        is_resizable: info.is_resizable,
+                        sizing: Sizing::new(info.is_resizable, false, reported_size(info.min_size)),
                         locked_width: info.current_size.width,
                         locked_height: info.current_size.height,
-                        min_width: info.min_size.map_or(0.0, |s| s.width),
-                        min_height: info.min_size.map_or(0.0, |s| s.height),
                         max_width: info.max_size.map_or(0.0, |s| s.width),
                         max_height: info.max_size.map_or(0.0, |s| s.height),
                     }

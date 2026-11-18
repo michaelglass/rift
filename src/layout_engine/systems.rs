@@ -365,6 +365,8 @@ pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 
 #[cfg(test)]
 mod tests {
+    use rift_core::layout::{Size, Sizing};
+
     use super::{
         BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem,
         TraditionalLayoutSystem, WindowLayoutConstraints,
@@ -414,11 +416,9 @@ mod tests {
     #[test]
     fn axis_specific_fixed_detection_supports_one_axis_locked_other_resizable() {
         let c = WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::new(true, false, Size::reported(723.0, 470.0)),
             locked_width: 700.0,
             locked_height: 400.0,
-            min_width: 723.0,
-            min_height: 470.0,
             max_width: 723.0,
             max_height: 0.0,
         }
@@ -434,11 +434,9 @@ mod tests {
     #[test]
     fn non_resizable_zero_locked_size_is_not_treated_as_fixed() {
         let c = WindowLayoutConstraints {
-            is_resizable: false,
+            sizing: Sizing::new(false, false, Size::reported(0.0, 0.0)),
             locked_width: 0.0,
             locked_height: 0.0,
-            min_width: 0.0,
-            min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
         }
@@ -453,11 +451,9 @@ mod tests {
     #[test]
     fn non_resizable_positive_locked_size_remains_fixed() {
         let c = WindowLayoutConstraints {
-            is_resizable: false,
+            sizing: Sizing::new(false, false, Size::reported(0.0, 0.0)),
             locked_width: 640.0,
             locked_height: 360.0,
-            min_width: 0.0,
-            min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
         }
@@ -473,11 +469,9 @@ mod tests {
     #[test]
     fn positive_max_only_constraint_is_not_treated_as_fixed() {
         let c = WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
             locked_width: 0.0,
             locked_height: 0.0,
-            min_width: 0.0,
-            min_height: 0.0,
             max_width: 600.0,
             max_height: 480.0,
         }
