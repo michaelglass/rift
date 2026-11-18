@@ -460,13 +460,16 @@ answer = |model, read, whose, latest, sync, placed| {
 place : Model, WindowId, Sync, Rect, Rect, [User, Nobody] -> (Model, Reply)
 place = |model, window, sync, frame, known, hand| {
 	news = |{}| {
-		reply = if (same_as(frame, known)) NoNews else Foreign
-		match (sync, reply) {
-			# A refusal stands while the window stays where the model has it, and so do Rift's
-			# frames sent outside the core.
-			(Refused(_), NoNews) => (model, reply)
-			(Outside(_), NoNews) => (model, reply)
-			_ => (set(model, window, Settled({ acked: frame, last: last_of(sync) })), reply)
+		settled = |reply| (set(model, window, Settled({ acked: frame, last: last_of(sync) })), reply)
+		if same_as(frame, known) {
+			match sync {
+				# A refusal stands while the window stays where the model has it, and so do
+				# Rift's frames sent outside the core.
+				Refused(_) | Outside(_) => (model, NoNews)
+				Settled(_) | Unknown(_) | InFlight(_) | Animating(_) => settled(NoNews)
+			}
+		} else {
+			settled(Foreign)
 		}
 	}
 	match sync {
