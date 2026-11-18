@@ -7,7 +7,7 @@ build = "build.rs"
 [workspace]
 members = [".", "crates/rift-client", "crates/rift-core", "crates/rift-protocol", "crates/rift-config-derive"]
 resolver = "3"
-exclude = ["cgs"]
+exclude = ["cgs", "crates/rift-core-roc"]
 
 [[bin]]
 name = "rift"
