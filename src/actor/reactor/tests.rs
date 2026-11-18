@@ -1898,7 +1898,7 @@ fn matching_rift_frame_clears_pending_target() {
         reactor.transaction_manager.get_target_frame(wsid),
         Some(adjusted_target)
     );
-    assert_eq!(reactor.reconciler.sync(wid), super::reconciler::Sync::Refused {
+    assert_eq!(reactor.state.core.sync(wid), super::reconciler::Sync::Refused {
         wanted: adjusted_target,
         got: accepted
     });
@@ -1916,7 +1916,7 @@ fn matching_rift_frame_clears_pending_target() {
         Requested(false),
     ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
-    assert_eq!(reactor.reconciler.sync(wid), super::reconciler::Sync::Adrift);
+    assert_eq!(reactor.state.core.sync(wid), super::reconciler::Sync::Adrift);
     assert!(reactor.state.windows.drag_on(wid).is_some());
 }
 
@@ -13013,7 +13013,7 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
     let in_flight = CGRect::new(CGPoint::new(frame.origin.x + 10.0, frame.origin.y), frame.size);
     reactor.place_window(wid, in_flight);
     assert!(matches!(
-        reactor.reconciler.sync(wid),
+        reactor.state.core.sync(wid),
         super::reconciler::Sync::InFlight { .. }
     ));
 
@@ -13056,10 +13056,10 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
         reactor.handle_events(apps.make_app(2, make_windows(1)));
         apps.simulate_until_quiet(&mut reactor);
 
-        let Sync::Refused { wanted, got } = reactor.reconciler.sync(stubborn) else {
+        let Sync::Refused { wanted, got } = reactor.state.core.sync(stubborn) else {
             panic!(
                 "{sizing:?}: expected a refusal, got {:?}",
-                reactor.reconciler.sync(stubborn)
+                reactor.state.core.sync(stubborn)
             );
         };
         assert!(!got.same_as(wanted));
@@ -13483,7 +13483,7 @@ fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
     for event in apps.simulate_events_for_requests(slow) {
         reactor.handle_event(event);
     }
-    match reactor.reconciler.sync(right) {
+    match reactor.state.core.sync(right) {
         super::reconciler::Sync::InFlight { target, queued: None, .. } => {
             assert_eq!(target, new_right)
         }

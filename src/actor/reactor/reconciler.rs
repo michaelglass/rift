@@ -439,7 +439,8 @@ impl Reactor {
             return Verdict::Nothing;
         };
         let verdict =
-            self.reconciler
+            self.state
+                .core
                 .want(pointer, request, window, desired, state.frame_monotonic, want);
         match verdict {
             Verdict::Send(_) | Verdict::Queued => state.frame_monotonic = desired,
@@ -468,7 +469,7 @@ impl Reactor {
             true,
         )) {
             warn!(window = ?write.window(), %error, "failed to write window frame");
-            self.reconciler.forget(write.window());
+            self.state.core.forget(write.window());
         }
     }
 
@@ -507,7 +508,7 @@ impl Reactor {
     pub(super) fn send_arranged(&mut self, write: Write) {
         let window = write.window();
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
-            self.reconciler.forget(window);
+            self.state.core.forget(window);
             return;
         };
         let bounds = self
@@ -543,7 +544,7 @@ impl Reactor {
     pub(super) fn expire_writes(&mut self) {
         let request = self.transaction_manager.mint();
         let windows = &self.state.windows;
-        let queued = self.reconciler.expire(windows.pointer(), request, |window| {
+        let queued = self.state.core.expire(windows.pointer(), request, |window| {
             Some(windows.window(window)?.frame_monotonic)
         });
         for write in queued {
@@ -567,7 +568,7 @@ impl Reactor {
         let Some(app) = self.app_manager.apps.get(&pid) else {
             debug!(?pid, "Skipping layout update for app - app no longer exists");
             for write in positions.iter().chain(&frames) {
-                self.reconciler.forget(write.window());
+                self.state.core.forget(write.window());
             }
             return;
         };

@@ -17,6 +17,9 @@ use crate::sys::screen::SpaceId;
 #[derive(Debug, Default)]
 pub struct RiftState {
     pub windows: WindowStore,
+    /// The decisions: the core, stepped through its applier. Beside the window store so a
+    /// workflow that changes windows can tell the core in the same breath.
+    pub(crate) core: crate::actor::reactor::reconciler::Reconciler,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
