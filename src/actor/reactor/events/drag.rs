@@ -95,9 +95,7 @@ pub fn handle_mouse_up(
         if let Some(space) = payload.final_space
             && state.windows.is_admitted(window)
         {
-            if let Some(server_id) =
-                state.windows.window(window).and_then(|window| window.info.sys_id)
-            {
+            if let Some(server_id) = state.windows.server_id(window) {
                 state.windows.observe_native_space(server_id, space, true);
             }
             if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)

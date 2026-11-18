@@ -1015,8 +1015,7 @@ impl Sim {
         }
         // 11. The pending store the app actors read is the core's projection too.
         for &wid in &self.live {
-            let Some(wsid) = self.reactor.state.windows.window(wid).and_then(|w| w.info.sys_id)
-            else {
+            let Some(wsid) = self.reactor.state.windows.server_id(wid) else {
                 continue;
             };
             let stored = self.reactor.state.tx.target(wsid);

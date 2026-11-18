@@ -997,6 +997,11 @@ impl WindowStore {
         self.workspace_windows.entry(assignment).or_default().insert(window_id);
     }
 
+    /// The window server's id for `window`, if it has one.
+    pub(crate) fn server_id(&self, window: WindowId) -> Option<WindowServerId> {
+        self.window(window).and_then(|state| state.info.sys_id)
+    }
+
     pub(crate) fn window(&self, window_id: WindowId) -> Option<&WindowState> {
         self.windows.get(&window_id).and_then(|record| record.state.as_ref())
     }

@@ -235,15 +235,6 @@ impl Reconciler {
     pub(crate) fn next_deadline(&self) -> Option<Instant> { self.armed.get() }
 }
 
-/// One app's share of an arrange pass: the request it goes out under, its windows that only
-/// move, and those that also resize, and the targets to record under the request.
-struct Batch {
-    request: TransactionId,
-    positions: Vec<Write>,
-    frames: Vec<Write>,
-    targets: Vec<(WindowServerId, CGRect)>,
-}
-
 fn frames_of(writes: Vec<Write>) -> Vec<(WindowId, CGRect)> {
     writes.into_iter().map(|write| (write.window(), write.frame())).collect()
 }
@@ -430,12 +421,7 @@ impl Reactor {
         &mut self,
         pid: pid_t,
         bounds: Option<ScrollingDisplayBounds>,
-        Batch {
-            request,
-            positions,
-            frames,
-            targets: _,
-        }: Batch,
+        rift_core::Plan { request, positions, frames }: rift_core::Plan<Rift>,
     ) {
         let Some(app) = self.app_manager.apps.get(&pid) else {
             debug!(?pid, "Skipping layout update for app - app no longer exists");
@@ -484,22 +470,7 @@ impl Reactor {
         let (plans, any_desire_new) = self.state.arrange(want, desires);
         for plan in plans {
             let (pid, constrained) = keys[&plan.request];
-            let targets = plan
-                .positions
-                .iter()
-                .chain(&plan.frames)
-                .filter_map(|write| {
-                    let server_id = self.state.windows.window(write.window())?.info.sys_id?;
-                    Some((server_id, write.frame()))
-                })
-                .collect();
-            let batch = Batch {
-                request: plan.request,
-                positions: plan.positions,
-                frames: plan.frames,
-                targets,
-            };
-            self.send_batch(pid, bounds.filter(|_| constrained), batch);
+            self.send_batch(pid, bounds.filter(|_| constrained), plan);
         }
         any_desire_new
     }
@@ -522,13 +493,9 @@ pub(crate) struct Animated {
 /// ways the slot changes, each a core step whose effects are applied here.
 impl RiftState {
     fn sent(&self, write: &Write) {
-        if let Some(server_id) = self.server_id(write.window()) {
+        if let Some(server_id) = self.windows.server_id(write.window()) {
             self.tx.sent(server_id, write.request());
         }
-    }
-
-    fn server_id(&self, window: WindowId) -> Option<WindowServerId> {
-        self.windows.window(window).and_then(|state| state.info.sys_id)
     }
 
     /// Applies one grip step's effects to the store. `session` is what a `DragBegan` attaches.
@@ -548,12 +515,12 @@ impl RiftState {
                 Effect::Regrip { from, to } => self.windows.project_regrip(from, to),
                 // The pending store the app actors read is the core's pending frames.
                 Effect::Pending { window, target } => {
-                    if let Some(server_id) = self.server_id(window) {
+                    if let Some(server_id) = self.windows.server_id(window) {
                         self.tx.project_target(server_id, target);
                     }
                 }
                 Effect::Unpending { window } => {
-                    if let Some(server_id) = self.server_id(window) {
+                    if let Some(server_id) = self.windows.server_id(window) {
                         self.tx.clear_target(&server_id);
                     }
                 }
@@ -565,7 +532,7 @@ impl RiftState {
                     }
                 }
                 Effect::Animate { window, request, .. } => {
-                    if let Some(server_id) = self.server_id(window) {
+                    if let Some(server_id) = self.windows.server_id(window) {
                         self.tx.sent(server_id, request);
                     }
                 }
