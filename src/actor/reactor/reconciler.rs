@@ -175,9 +175,6 @@ pub(crate) enum Answer {
     /// Nothing tracked was waiting for it: the answer to one sent outside the reconciler (an
     /// animation frame, a drag's interactive frame), or to a write the user's hand overtook.
     Unasked,
-    /// The answer to a write Rift had stopped waiting for. The window moved after Rift last
-    /// decided where it belongs, so where it belongs is decided again.
-    Late,
 }
 
 fn answers(target: CGRect, frame: CGRect) -> bool { frame.is_within(ACK_TOLERANCE, target) }
@@ -280,8 +277,8 @@ impl Reconciler {
             {
                 Verdict::Nothing
             }
-            // Nothing to write. A refusal is kept: its answer may still come, late, and then
-            // where the window belongs is decided again (`Answer::Late`).
+            // Nothing to write. A refusal is kept: its answer may still come, late, and is then
+            // observed like any unprompted report.
             (Sync::Settled | Sync::Refused { .. }, Want::Arrange | Want::ArrangePositions)
                 if desired.same_as(known) =>
             {
@@ -319,14 +316,16 @@ impl Reconciler {
     }
 
     /// The app answered its latest write to `window` with `frame`. Returns the queued write,
-    /// if one was waiting behind it and the window is still Rift's.
+    /// if one was waiting behind it and the window is still Rift's. `None` when Rift had
+    /// stopped waiting (the write timed out, or was refused already): a late answer is not an
+    /// answer but news of where the window is, to be [observed](Self::observe) as unprompted.
     pub(crate) fn answer(
         &mut self,
         window: WindowId,
         frame: CGRect,
         owner: Owner,
-    ) -> (Answer, Option<Write>) {
-        match self.sync(window) {
+    ) -> Option<(Answer, Option<Write>)> {
+        Some(match self.sync(window) {
             Sync::Settled | Sync::Adrift => (Answer::Unasked, None),
             Sync::InFlight { target, deadline: _, queued } => {
                 let answer = if answers(target, frame) {
@@ -340,17 +339,11 @@ impl Reconciler {
                 };
                 (answer, self.release(window, queued, owner))
             }
-            Sync::Refused { wanted, got: _ } => {
-                // The answer Rift stopped waiting for, or a second look at a refusal.
-                if answers(wanted, frame) {
-                    debug!(?window, target = ?wanted, "reconcile: ack (late)");
-                    self.set(window, Sync::Settled);
-                } else {
-                    self.set(window, Sync::Refused { wanted, got: frame });
-                }
-                (Answer::Late, None)
+            Sync::Refused { .. } => {
+                debug!(?window, ?frame, "reconcile: late answer, observed as unprompted");
+                return None;
             }
-        }
+        })
     }
 
     /// `window` reported `frame` unprompted; the model last saw it at `known`. A report of the
@@ -802,14 +795,14 @@ mod tests {
             Verdict::Queued
         );
 
-        let (answer, next) = reconciler.answer(window(), at(10.5), Owner::Rift);
+        let (answer, next) = reconciler.answer(window(), at(10.5), Owner::Rift).unwrap();
         assert_eq!(answer, Answer::Acked);
         assert_eq!(next.map(|write| write.frame), Some(at(30.)));
         assert!(reconciler.in_flight(window()));
 
         assert_eq!(
             reconciler.answer(window(), at(30.), Owner::Rift),
-            (Answer::Acked, None)
+            Some((Answer::Acked, None))
         );
         assert_eq!(reconciler.sync(window()), Sync::Settled);
     }
@@ -829,7 +822,7 @@ mod tests {
         );
         assert_eq!(
             reconciler.answer(window(), at(10.), Owner::Rift),
-            (Answer::Acked, None)
+            Some((Answer::Acked, None))
         );
     }
 
@@ -839,7 +832,7 @@ mod tests {
         _ = reconciler.want(window(), at(10.), at(0.), Want::Arrange, Owner::Rift);
         assert_eq!(
             reconciler.answer(window(), at(14.), Owner::Rift),
-            (Answer::Refused, None)
+            Some((Answer::Refused, None))
         );
         assert_eq!(reconciler.sync(window()), Sync::Refused {
             wanted: at(10.),
@@ -899,9 +892,10 @@ mod tests {
             wanted: at(20.),
             got: at(0.)
         });
+        assert_eq!(reconciler.answer(window(), at(20.), Owner::Rift), None);
         assert_eq!(
-            reconciler.answer(window(), at(20.), Owner::Rift),
-            (Answer::Late, None)
+            reconciler.observe(window(), at(20.), at(0.), Holder::Nobody),
+            Observation::Foreign
         );
         assert_eq!(reconciler.sync(window()), Sync::Settled);
     }
@@ -918,10 +912,12 @@ mod tests {
             Verdict::Nothing
         );
         assert!(matches!(reconciler.sync(window()), Sync::Refused { .. }));
-        // It comes: the window is at the old target, which layout no longer wants.
+        // It comes: the window is at the old target, which layout no longer wants. Not an
+        // answer any more: news, observed as someone else's move.
+        assert_eq!(reconciler.answer(window(), at(20.), Owner::Rift), None);
         assert_eq!(
-            reconciler.answer(window(), at(20.), Owner::Rift),
-            (Answer::Late, None)
+            reconciler.observe(window(), at(20.), at(0.), Holder::Nobody),
+            Observation::Foreign
         );
         // Re-derived, the old desire is written.
         assert_eq!(
@@ -966,7 +962,7 @@ mod tests {
         // The answer to the abandoned write is nobody's.
         assert_eq!(
             reconciler.answer(window(), at(10.), Owner::Rift),
-            (Answer::Unasked, None)
+            Some((Answer::Unasked, None))
         );
         // After the drop the window is written even where the model believes it already is.
         assert_eq!(
@@ -990,7 +986,7 @@ mod tests {
         // The app then answers with something else (it adjusted the size when it applied it).
         assert_eq!(
             reconciler.answer(window(), at(13.), Owner::Rift),
-            (Answer::Refused, None)
+            Some((Answer::Refused, None))
         );
         assert_eq!(reconciler.sync(window()), Sync::Refused {
             wanted: at(10.),
