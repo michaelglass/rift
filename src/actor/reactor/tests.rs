@@ -14248,3 +14248,39 @@ fn a_raise_buries_a_floater_only_above_it_covered_entirely_at_the_same_level() {
         |wsid| (wsid == 2).then_some(CGRect::new(CGPoint::new(450., 0.), CGSize::new(100., 100.)));
     assert!(!raise_buries_a_floater(5, frame, &[2, 5], partly, same));
 }
+
+#[test]
+fn a_fullscreen_exit_is_read_off_the_spaces_the_window_is_on() {
+    let (desk, other, full, gone) = (
+        SpaceId::new(1),
+        SpaceId::new(2),
+        SpaceId::new(9),
+        SpaceId::new(7),
+    );
+    let is_fullscreen = |space| space == SpaceId::new(10);
+    let known = |space| space != gone;
+    assert_eq!(
+        fullscreen_exit(&[SpaceId::new(10)], full, is_fullscreen, known),
+        FullscreenExit::Reentered(SpaceId::new(10))
+    );
+    assert_eq!(
+        fullscreen_exit(&[full], full, is_fullscreen, known),
+        FullscreenExit::NotYet
+    );
+    assert_eq!(
+        fullscreen_exit(&[gone], full, is_fullscreen, known),
+        FullscreenExit::NotYet
+    );
+    assert_eq!(
+        fullscreen_exit(&[desk], full, is_fullscreen, known),
+        FullscreenExit::Over { landed: Some(desk) }
+    );
+    assert_eq!(
+        fullscreen_exit(&[desk, other], full, is_fullscreen, known),
+        FullscreenExit::Over { landed: None }
+    );
+    assert_eq!(
+        fullscreen_exit(&[], full, is_fullscreen, known),
+        FullscreenExit::Over { landed: None }
+    );
+}
