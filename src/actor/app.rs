@@ -612,6 +612,9 @@ pub enum Request {
     /// focused/main window and the quiet marker before notifying the reactor.
     ApplicationGloballyActivated(pid_t),
     WindowMaybeDestroyed(WindowId),
+    /// Re-read the frame of every window of app `pid` and report each as an unprompted
+    /// change: the reactor's full reconcile after a lifecycle event.
+    ReadFrames(pid_t),
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrames(
@@ -1477,6 +1480,35 @@ impl State {
                 // Destruction is verified by the reactor's revisioned inventory
                 // coordinator. Do not enumerate AX windows independently here.
                 self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
+                return Ok(false);
+            }
+            Request::ReadFrames(pid) => {
+                if pid != self.pid {
+                    return Ok(false);
+                }
+                let read: Vec<_> = self
+                    .windows
+                    .iter()
+                    .filter_map(|(&wid, window)| {
+                        Some((
+                            wid,
+                            window.elem.frame().ok()?,
+                            self.txid_for_window_state(window),
+                        ))
+                    })
+                    .collect();
+                for (wid, frame, txid) in read {
+                    if let Some(window) = self.windows.get_mut(&wid) {
+                        window.last_known_frame = frame;
+                    }
+                    self.send_event(Event::WindowFrameChanged(
+                        wid,
+                        frame,
+                        txid,
+                        Requested(false),
+                        None,
+                    ));
+                }
                 return Ok(false);
             }
             Request::CloseWindow(window_server_id) => {

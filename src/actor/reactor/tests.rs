@@ -6428,8 +6428,10 @@ fn post_wake_snapshot_replaces_an_inventory_that_never_replied() {
         Some(&fresh_token),
         "a late stale reply must not clear the replacement request",
     );
+    // The recovery also re-read every window's frame (the full reconcile); no other inventory.
     assert!(
-        app_rx.try_recv().is_err(),
+        std::iter::from_fn(|| app_rx.try_recv().ok())
+            .all(|(_, request)| !matches!(request, Request::RefreshWindowInventory(_))),
         "discarding the abandoned reply must not enqueue a third inventory",
     );
 }
@@ -12816,6 +12818,26 @@ fn a_layout_pass_during_a_drag_writes_no_window_until_the_release() {
     assert!(
         written.iter().any(|(wid, _)| *wid == dragged),
         "the drop arranges the dragged window: {written:?}"
+    );
+}
+
+#[test]
+fn a_drop_rereads_every_window_and_puts_back_one_moved_unreported_during_the_drag() {
+    let (mut apps, mut reactor, dragged, other, _screen, _space) = two_tiled_windows();
+    let theirs = slot(&reactor, other);
+    let moved = drag_by(&apps, &mut reactor, dragged, 0., 40.);
+    apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    // The other app's window moves and no notification says so.
+    let mut elsewhere = theirs;
+    elsewhere.origin.y += 120.;
+    apps.windows.get_mut(&other).unwrap().frame = elsewhere;
+
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(
+        apps.windows[&other].frame.same_as(theirs),
+        "the drop re-reads every window and writes back the one found off its slot: {:?} vs {theirs:?}",
+        apps.windows[&other].frame
     );
 }
 

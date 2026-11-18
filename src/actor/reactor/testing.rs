@@ -626,6 +626,17 @@ impl Apps {
             match request {
                 Request::Terminate => break,
                 Request::WindowMaybeDestroyed(_) => {}
+                Request::ReadFrames(pid) => {
+                    for (&wid, window) in self.windows.iter().filter(|(wid, _)| wid.pid == pid) {
+                        events.push(Event::WindowFrameChanged(
+                            wid,
+                            window.frame,
+                            Some(window.last_seen_txid),
+                            Requested(false),
+                            None,
+                        ));
+                    }
+                }
                 Request::RefreshWindowInventory(token) => {
                     if got_visible_windows {
                         continue;
