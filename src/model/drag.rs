@@ -4,11 +4,15 @@ use crate::actor::app::WindowId;
 use crate::layout_engine::WindowDropAction;
 use crate::sys::screen::SpaceId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Who moves the window during a drag.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DragKind {
-    NativeMove,
-    NativeResize,
-    ModifierMove,
+    /// The user moves or resizes it (title bar, edges); Rift follows its frame. Whether it is a
+    /// resize is read off the frames (`Session::resizing`), not stored.
+    Native,
+    /// Rift moves it by interactive frames, the pointer `anchor` away from where it was
+    /// pressed.
+    Modifier { anchor: CGPoint },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,7 +87,6 @@ impl From<MouseButton> for rift_core::Button {
 pub struct Session {
     pub source: DragSource,
     pub pointer: CGPoint,
-    pub anchor_point: CGPoint,
     pub scene: DragScene,
     pub(crate) target: TargetState,
     pub(crate) unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,

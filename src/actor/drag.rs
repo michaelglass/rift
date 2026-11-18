@@ -60,7 +60,6 @@ impl Session {
         Self {
             source,
             pointer,
-            anchor_point: pointer,
             scene,
             target: TargetState::None,
             unavailable: Vec::new(),
@@ -70,17 +69,21 @@ impl Session {
 
     /// The user started moving or resizing the window themselves.
     pub fn native(source: DragSource, scene: DragScene) -> Self {
-        let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        Self::new(source, pointer, scene, kind)
+        Self::new(source, pointer, scene, DragKind::Native)
     }
+
+    /// Whether a native drag is resizing the window (its size changed), not moving it.
+    pub fn resizing(&self) -> bool {
+        matches!(self.kind, DragKind::Native)
+            && !self.source.origin_frame.size.same_as(self.source.last_frame.size)
+    }
+
+    /// Whether Rift moves the window (a modifier drag).
+    pub fn is_modifier(&self) -> bool { matches!(self.kind, DragKind::Modifier { .. }) }
 
     /// A modifier press on a window; only a move action drags it.
     pub fn modifier(
@@ -90,7 +93,9 @@ impl Session {
         scene: DragScene,
     ) -> Option<Self> {
         match action {
-            MouseAction::Move => Some(Self::new(source, point, scene, DragKind::ModifierMove)),
+            MouseAction::Move => Some(Self::new(source, point, scene, DragKind::Modifier {
+                anchor: point,
+            })),
             MouseAction::None => None,
         }
     }
@@ -124,7 +129,7 @@ impl Session {
 
     /// The frame a modifier move puts the window at; the user moves a native drag themselves.
     pub fn interactive_frame(&self) -> Option<CGRect> {
-        (self.kind == DragKind::ModifierMove).then_some(self.source.last_frame)
+        self.is_modifier().then_some(self.source.last_frame)
     }
 
     fn invalidate_drop(&mut self) {
@@ -152,7 +157,7 @@ impl Session {
         self.scene = scene;
         self.invalidate_drop();
         if self.source.tiled
-            && matches!(self.kind, DragKind::NativeMove | DragKind::ModifierMove)
+            && !self.resizing()
             && self.source.origin_space == self.source.current_space
         {
             let next = hit_test_available(
@@ -209,11 +214,6 @@ impl Session {
     /// never get here.
     pub fn update_native(&mut self, frame: CGRect, current_space: Option<SpaceId>) {
         self.source.last_frame = frame;
-        self.kind = if self.source.origin_frame.size.same_as(frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
         if self.source.current_space != current_space {
             self.source.current_space = current_space;
             self.invalidate_drop();
@@ -221,14 +221,19 @@ impl Session {
     }
 
     /// Where a modifier move puts the window when the pointer is at `point`.
-    pub fn modifier_frame_at(&self, point: CGPoint) -> CGRect {
-        CGRect::new(
+    /// Where a modifier move puts the window when the pointer is at `point`; a native drag's
+    /// frame is the user's.
+    pub fn modifier_frame_at(&self, point: CGPoint) -> Option<CGRect> {
+        let DragKind::Modifier { anchor } = self.kind else {
+            return None;
+        };
+        Some(CGRect::new(
             CGPoint::new(
-                self.source.origin_frame.origin.x + (point.x - self.anchor_point.x),
-                self.source.origin_frame.origin.y + (point.y - self.anchor_point.y),
+                self.source.origin_frame.origin.x + (point.x - anchor.x),
+                self.source.origin_frame.origin.y + (point.y - anchor.y),
             ),
             self.source.origin_frame.size,
-        )
+        ))
     }
 
     pub fn motion(
@@ -240,10 +245,10 @@ impl Session {
         let home_preview_changed = contains(self.source.origin_frame, self.pointer, 0.0)
             != contains(self.source.origin_frame, motion.point, 0.0);
         self.pointer = motion.point;
-        if self.kind == DragKind::ModifierMove {
-            self.source.last_frame = self.modifier_frame_at(motion.point);
+        if let Some(frame) = self.modifier_frame_at(motion.point) {
+            self.source.last_frame = frame;
         }
-        let next = if self.kind == DragKind::NativeResize
+        let next = if self.resizing()
             || !self.source.tiled
             || self.source.origin_space != self.source.current_space
         {
@@ -877,19 +882,11 @@ mod tests {
     #[test]
     fn sessions_know_whether_the_user_or_rift_moves_the_window() {
         let moved = frame(20.0, 20.0, 200.0, 100.0);
-        assert_eq!(
-            native(false, moved, DragScene::default()).kind,
-            DragKind::NativeMove
-        );
+        let moved = native(false, moved, DragScene::default());
+        assert!(moved.kind == DragKind::Native && !moved.resizing());
         let resized = frame(0.0, 0.0, 300.0, 100.0);
-        assert_eq!(
-            native(false, resized, DragScene::default()).kind,
-            DragKind::NativeResize
-        );
-        assert_eq!(
-            modifier(false, DragScene::default()).kind,
-            DragKind::ModifierMove
-        );
+        assert!(native(false, resized, DragScene::default()).resizing());
+        assert!(modifier(false, DragScene::default()).is_modifier());
         let none = MouseAction::None;
         assert!(
             Session::modifier(source(false), point(1.0, 1.0), none, DragScene::default()).is_none()
