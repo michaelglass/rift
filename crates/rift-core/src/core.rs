@@ -22,12 +22,13 @@ pub struct Desire<K: Kinds> {
 }
 
 /// What one batch of an arrange pass sends: the windows that only move, and those that also
-/// resize, all under `request`.
+/// resize, all under `request`. Only the core makes one, starting with its first write, so a
+/// plan is never empty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan<K: Kinds> {
-    pub request: K::Request,
-    pub positions: Vec<Write<K>>,
-    pub frames: Vec<Write<K>>,
+    pub(crate) request: K::Request,
+    pub(crate) positions: Vec<Write<K>>,
+    pub(crate) frames: Vec<Write<K>>,
 }
 
 /// A fact for the core.
@@ -185,6 +186,19 @@ impl<K: Kinds> Default for RustCore<K> {
 }
 
 impl<K: Kinds> Plan<K> {
+    pub fn request(&self) -> K::Request { self.request }
+
+    /// The writes that only move their windows.
+    pub fn positions(&self) -> &[Write<K>] { &self.positions }
+
+    /// The writes that also resize.
+    pub fn frames(&self) -> &[Write<K>] { &self.frames }
+
+    /// The request, the moves and the resizes, taken apart.
+    pub fn into_parts(self) -> (K::Request, Vec<Write<K>>, Vec<Write<K>>) {
+        (self.request, self.positions, self.frames)
+    }
+
     /// A plan begun by its first write (a plan is never empty).
     fn starting(write: Write<K>, moves_only: bool) -> Self {
         let mut plan = Plan {
