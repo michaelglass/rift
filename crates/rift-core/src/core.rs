@@ -10,7 +10,7 @@
 
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Phase, Pointer, Release, Ungrip};
-use crate::reconciler::{Note, Planned, Reconciler, Reply, Verdict, Want, Write};
+use crate::reconciler::{Note, Planned, Reconciler, Reply, Stamp, Verdict, Want, Write};
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
 /// per batch the platform sends: an app, and whether its writes are held to scrolling bounds).
@@ -351,12 +351,12 @@ impl<K: Kinds> RustCore<K> {
                 effects
             }
             Event::AnimationEnded { now, request } => {
-                self.reconciler.animation_ended(now, request);
+                self.reconciler.animation_ended(now, Stamp::new(request));
                 vec![]
             }
             Event::AnimationStopped { window, request, at } => {
                 let seen = at.map(|frame| self.see(window, frame));
-                self.reconciler.animation_stopped(window, request);
+                self.reconciler.animation_stopped(window, Stamp::new(request));
                 seen.into_iter().collect()
             }
             Event::Follow { request, window, frame } => {
@@ -372,8 +372,15 @@ impl<K: Kinds> RustCore<K> {
                 as_of,
             } => {
                 let (owner, holder) = (pointer.owner(window), pointer.holder(window));
-                let (reply, released) =
-                    self.reconciler.observe(now, request, window, frame, as_of, owner, holder);
+                let (reply, released) = self.reconciler.observe(
+                    now,
+                    request,
+                    window,
+                    frame,
+                    as_of.map(Stamp::new),
+                    owner,
+                    holder,
+                );
                 // News of another window during a drag (someone else moved it): its desires are
                 // the user's until the drag ends, so it is re-derived then.
                 if reply == Reply::Foreign
