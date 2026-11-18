@@ -457,6 +457,40 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
+    /// A write to `window` is with its app: what was queued behind it is dropped, the write
+    /// itself still waited for. False when no write is in flight.
+    pub fn drop_queued(&mut self, window: K::Window) -> bool {
+        match self.sync(window) {
+            Some(Sync::InFlight {
+                target,
+                deadline,
+                queued,
+                request,
+                before,
+            }) => {
+                if queued.is_some() {
+                    let queued = None;
+                    self.set(window, Sync::InFlight {
+                        target,
+                        deadline,
+                        queued,
+                        request,
+                        before,
+                    });
+                }
+                true
+            }
+            Some(
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::Animating { .. }
+                | Sync::Refused { .. }
+                | Sync::Outside { .. },
+            )
+            | None => false,
+        }
+    }
+
     /// Rift sends `window` frames outside the core under `request` (a gesture's camera), and
     /// the platform says so: a read stamped with it is Rift's own. Whatever was pending for the
     /// window is superseded by those frames.
@@ -1581,5 +1615,25 @@ mod tests {
             reconciler.want(T0, RequestId(R.0 + 2), window(), at(20.), Owner::Rift),
             Verdict::Send(_)
         ));
+    }
+
+    #[test]
+    fn a_ceded_window_keeps_its_write_in_flight_and_drops_what_was_queued() {
+        let mut reconciler = with(at(0.));
+        let Verdict::Send(_) = want(&mut reconciler, T0, at(10.), at(0.)) else {
+            panic!("the first desire is written");
+        };
+        assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
+        assert!(reconciler.drop_queued(window()));
+        let Some(Sync::InFlight { target, queued, request, .. }) = reconciler.sync(window()) else {
+            panic!("the write is still in flight: {:?}", reconciler.sync(window()));
+        };
+        assert_eq!((target, queued, request), (at(10.), None, R));
+        // Its answer still resolves it.
+        assert_eq!(
+            report(&mut reconciler, at(10.), Some(R)),
+            Reply::Answered(Answer::Acked)
+        );
+        assert!(!reconciler.drop_queued(window()), "nothing is in flight now");
     }
 }
