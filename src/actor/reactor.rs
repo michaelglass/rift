@@ -2762,53 +2762,21 @@ impl Reactor {
                 selector,
                 wrap_around,
             })) => {
-                let Some(source_space) = self.workspace_command_space() else {
-                    warn!("Move workspace to display ignored: source space unavailable");
-                    return Ok(EventOutcome::no_change());
+                let resolved = self
+                    .workspace_command_space()
+                    .ok_or(Refusal::Warn("source space unavailable"))
+                    .and_then(|source| {
+                        Ok((source, self.target_display(source, &selector, wrap_around)?))
+                    });
+                let (source_space, (target_screen, target_space)) = match resolved {
+                    Ok(resolved) => resolved,
+                    Err(Refusal::Quiet) => return Ok(EventOutcome::no_change()),
+                    Err(Refusal::Warn(reason)) => {
+                        warn!(?selector, "Move workspace to display ignored: {reason}");
+                        return Ok(EventOutcome::no_change());
+                    }
                 };
-                let origin = self
-                    .space_state
-                    .screen_by_space(source_space)
-                    .map(|screen| screen.frame.mid())
-                    .or_else(|| self.current_screen_center());
-                let target_screen = if wrap_around {
-                    self.screen_for_selector_wrapping(&selector, origin)
-                } else {
-                    self.screen_for_selector(&selector, origin)
-                };
-                let Some(target_screen) = target_screen.cloned() else {
-                    warn!(
-                        ?selector,
-                        "Move workspace to display ignored: target display not found"
-                    );
-                    return Ok(EventOutcome::no_change());
-                };
-                let Some(target_space) =
-                    target_screen.space.filter(|space| self.is_space_active(*space))
-                else {
-                    warn!(
-                        ?selector,
-                        "Move workspace to display ignored: target space unavailable"
-                    );
-                    return Ok(EventOutcome::no_change());
-                };
-                // An explicit destination overrides the pin even while its display
-                // is unavailable; reconnecting must not undo the user's choice.
-                let workspaces = self.layout_manager.layout_engine.workspaces();
-                let rule_override = workspaces.active_workspace(source_space).and_then(|active| {
-                    let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
-                    let preferred = crate::sys::screen::resolve_display_preference(
-                        display,
-                        &self.space_state.screens,
-                        |screen| {
-                            screen.space.is_some_and(|space| self.active_spaces.contains(&space))
-                        },
-                    );
-                    let overridden = preferred
-                        .is_none_or(|screen| screen.display_uuid != target_screen.display_uuid);
-                    Some((active, overridden))
-                });
-
+                let rule_override = self.rule_override(source_space, &target_screen);
                 if source_space == target_space {
                     if let Some((id, overridden)) = rule_override {
                         self.layout_manager.layout_engine.workspaces_mut()[id].rule_overridden =
@@ -6530,6 +6498,28 @@ impl Reactor {
             return Err(Refusal::Quiet);
         }
         Ok((window, source, target))
+    }
+
+    /// Moving `source`'s active workspace to `target`'s display: the workspace a display rule
+    /// pins, and whether the move overrides that rule. An explicit destination overrides the pin
+    /// even while its display is unavailable; reconnecting must not undo the user's choice.
+    fn rule_override(
+        &self,
+        source: SpaceId,
+        target: &ScreenInfo,
+    ) -> Option<(crate::model::VirtualWorkspaceId, bool)> {
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let active = workspaces.active_workspace(source)?;
+        let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
+        let preferred = crate::sys::screen::resolve_display_preference(
+            display,
+            &self.space_state.screens,
+            |screen| screen.space.is_some_and(|space| self.active_spaces.contains(&space)),
+        );
+        Some((
+            active,
+            preferred.is_none_or(|screen| screen.display_uuid != target.display_uuid),
+        ))
     }
 
     /// The display `selector` names from `source`'s display (wrapping at the ends if `wrap`),
