@@ -5295,6 +5295,10 @@ fn rediscovering_an_unchanged_inventory_does_not_raise_or_refocus() {
 #[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = test_reactor();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
+    ));
     let hover = Initiative::UserInput(InputClass::Hover);
     reactor.handle_event(Event::MenuOpened(1));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
@@ -5308,12 +5312,48 @@ fn menu_open_state_is_cleared_when_owner_deactivates() {
 #[test]
 fn stale_menu_open_state_is_cleared_when_other_app_activates() {
     let mut reactor = test_reactor();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
+    ));
     reactor.handle_event(Event::MenuOpened(1));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
 
     reactor.handle_event(Event::ApplicationGloballyActivated(2));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
     assert!(reactor.may(Initiative::UserInput(InputClass::Hover)));
+}
+
+/// Layout commands while the topology is unsettled used to be dropped silently by the
+/// quarantine. They are a row of the mode table now: discarded (with a log line), and nothing
+/// replays once a fresh snapshot settles the topology.
+#[test]
+fn layout_command_during_unsettled_topology_is_discarded_and_not_replayed() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let active = |reactor: &Reactor| {
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+    };
+    assert_eq!(active(&reactor), Some(0));
+
+    reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+    assert!(!reactor.may(Initiative::UserInput(InputClass::Arranging)));
+    reactor.handle_loop_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    assert_eq!(active(&reactor), Some(0), "discarded while unsettled");
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.may(Initiative::UserInput(InputClass::Arranging)));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(active(&reactor), Some(0), "nothing replays once settled");
+
+    reactor.handle_loop_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    assert_eq!(active(&reactor), Some(1), "a fresh command acts");
 }
 
 /// A hover is discarded while a mode refuses it, and nothing replays when the mode ends: only

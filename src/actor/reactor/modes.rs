@@ -31,6 +31,7 @@ pub(super) struct Modes {
     pub(super) user_spaces: UserSpaces,
     pub(super) wake: Wake,
     pub(super) workspace_switch: WorkspaceSwitch,
+    pub(super) topology: Topology,
 }
 
 impl Modes {
@@ -47,6 +48,7 @@ impl Modes {
             user_spaces,
             wake,
             workspace_switch,
+            topology,
         } = self;
         [
             pointer as &dyn Mode,
@@ -58,6 +60,7 @@ impl Modes {
             user_spaces,
             wake,
             workspace_switch,
+            topology,
         ]
         .into_iter()
         .find(|mode| !mode.admits(initiative))
@@ -109,20 +112,30 @@ pub(super) enum WorkspaceSwitch {
     Switching,
 }
 
+/// Whether Rift's model of Spaces is authoritative: `Unsettled` while no authoritative sample
+/// is accepted or a topology invalidation is newer than it (the revision guard with the spaces
+/// actor). Window reports are quarantined before they reach the table
+/// (`Reactor::should_quarantine_unstable_topology`); this axis covers the user's input.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Topology {
+    Settled,
+    Unsettled,
+}
+
 use Initiative::*;
-use InputClass::{Hover, Inert, Steering};
+use InputClass::{Arranging, Hover, Inert, Steering};
 
 impl Mode for Pointer {
     fn admits(&self, initiative: Initiative) -> bool {
         use Pointer::*;
         match (initiative, self) {
             (UserInput(Inert), Idle | Pressing(_) | Dragging(_)) => true,
-            (UserInput(Steering | Hover), Idle) => true,
+            (UserInput(Steering | Arranging | Hover), Idle) => true,
             // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
             // input's effect on it would wait for the release, splitting it from the rest of
             // the effect. A hover sample from before the press would focus another window under
             // the held one.
-            (UserInput(Steering | Hover), Pressing(_) | Dragging(_)) => false,
+            (UserInput(Steering | Arranging | Hover), Pressing(_) | Dragging(_)) => false,
             // A press alone changes nothing: the window hasn't moved.
             (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Idle | Pressing(_)) => {
                 true
@@ -144,7 +157,7 @@ impl Mode for MenuState {
             (UserInput(Hover), MenuState::Open(_)) => false,
             (UserInput(Hover), MenuState::Closed) => true,
             (
-                UserInput(Steering | Inert)
+                UserInput(Steering | Arranging | Inert)
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
@@ -164,7 +177,7 @@ impl Mode for MissionControlState {
             (UserInput(Hover) | RetireWindows, MissionControlState::Active) => false,
             (UserInput(Hover) | RetireWindows, MissionControlState::Inactive) => true,
             (
-                UserInput(Steering | Inert)
+                UserInput(Steering | Arranging | Inert)
                 | Arrange
                 | SwitchWorkspaceFocus
                 | WarpFocus
@@ -182,7 +195,7 @@ impl Mode for Modal {
             (UserInput(Hover), Modal::Frontmost) => false,
             (UserInput(Hover), Modal::Clear) => true,
             (
-                UserInput(Steering | Inert)
+                UserInput(Steering | Arranging | Inert)
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
@@ -201,7 +214,7 @@ impl Mode for Viewport {
             (UserInput(Hover), Viewport::Gesturing) => false,
             (UserInput(Hover), Viewport::Free) => true,
             (
-                UserInput(Steering | Inert)
+                UserInput(Steering | Arranging | Inert)
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
@@ -219,7 +232,7 @@ impl Mode for FocusClaim {
             (UserInput(Hover), FocusClaim::PausesHover) => false,
             (UserInput(Hover), FocusClaim::Free) => true,
             (
-                UserInput(Steering | Inert)
+                UserInput(Steering | Arranging | Inert)
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
@@ -239,7 +252,7 @@ impl Mode for UserSpaces {
             (RetireWindows, UserSpaces::None) => false,
             (RetireWindows, UserSpaces::Shown) => true,
             (
-                UserInput(Steering | Inert | Hover)
+                UserInput(Steering | Arranging | Inert | Hover)
                 | Arrange
                 | SwitchWorkspaceFocus
                 | WarpFocus
@@ -256,7 +269,7 @@ impl Mode for Wake {
             (FollowActivation, Wake::AwaitingInput) => false,
             (FollowActivation, Wake::UserPresent) => true,
             (
-                UserInput(Steering | Inert | Hover)
+                UserInput(Steering | Arranging | Inert | Hover)
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
@@ -274,12 +287,34 @@ impl Mode for WorkspaceSwitch {
             (FollowActivation, WorkspaceSwitch::Switching) => false,
             (FollowActivation, WorkspaceSwitch::Idle) => true,
             (
-                UserInput(Steering | Inert | Hover)
+                UserInput(Steering | Arranging | Inert | Hover)
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
                 | WarpFocus,
                 WorkspaceSwitch::Switching | WorkspaceSwitch::Idle,
+            ) => true,
+        }
+    }
+}
+
+impl Mode for Topology {
+    fn admits(&self, initiative: Initiative) -> bool {
+        match (initiative, self) {
+            // Layout commands and hover act on Space assignments that are about to change.
+            // They used to be dropped silently by the quarantine; now each one logs.
+            (UserInput(Arranging | Hover), Topology::Unsettled) => false,
+            (UserInput(Arranging | Hover), Topology::Settled) => true,
+            // Unchanged from the quarantine: other commands pass; layout passes and retirement
+            // have their own topology checks.
+            (
+                UserInput(Steering | Inert)
+                | Arrange
+                | RetireWindows
+                | SwitchWorkspaceFocus
+                | WarpFocus
+                | FollowActivation,
+                Topology::Unsettled | Topology::Settled,
             ) => true,
         }
     }

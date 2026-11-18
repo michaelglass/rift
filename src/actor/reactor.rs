@@ -437,6 +437,10 @@ pub enum WindowInvalidationSource {
 enum InputClass {
     /// Changes which windows are where, shown, focused or raised, or where the pointer is.
     Steering,
+    /// Steering that rearranges by Space assignment: layout commands and moves between
+    /// displays. Refused while the topology is unsettled as well as by everything that refuses
+    /// steering.
+    Arranging,
     /// Touches no window and not the pointer: settings, binding modes, diagnostics, saving.
     Inert,
     /// The pointer resting over a window: focus follows mouse and autoraise.
@@ -504,7 +508,7 @@ impl InputClass {
                 | L::AdjustMasterCount { .. }
                 | L::PromoteToMaster
                 | L::SwapMasterStack,
-            ) => Steering,
+            ) => Arranging,
             Command::Reactor(
                 R::RestoreLayout { .. }
                 | R::SwitchSpace(_)
@@ -515,10 +519,11 @@ impl InputClass {
                 | R::DismissMissionControl
                 | R::MoveMouseToDisplay(_)
                 | R::FocusDisplay(_)
-                | R::CloseWindow { .. }
-                | R::MoveWindowToDisplay { .. }
-                | R::MoveWorkspaceToDisplay { .. },
+                | R::CloseWindow { .. },
             ) => Steering,
+            Command::Reactor(R::MoveWindowToDisplay { .. } | R::MoveWorkspaceToDisplay { .. }) => {
+                Arranging
+            }
             Command::Reactor(
                 R::OpenSettings
                 | R::BindingMode(_)
@@ -1232,6 +1237,11 @@ impl Reactor {
             } else {
                 modes::WorkspaceSwitch::Idle
             },
+            topology: if self.refreshes_blocked() {
+                modes::Topology::Unsettled
+            } else {
+                modes::Topology::Settled
+            },
         }
     }
 
@@ -1246,7 +1256,7 @@ impl Reactor {
             InputClass::Hover => {
                 trace!(?input, "mode-gate: discarded {class:?} input during {mode:?}")
             }
-            InputClass::Steering | InputClass::Inert => {
+            InputClass::Steering | InputClass::Arranging | InputClass::Inert => {
                 debug!(?input, "mode-gate: discarded {class:?} input during {mode:?}")
             }
         }
@@ -1526,16 +1536,10 @@ impl Reactor {
                 | Event::WindowServerHidden(..)
                 | Event::WindowServerUnhidden(..)
                 | Event::WindowServerFocusChanged(..)
-                | Event::MouseMoved(..)
                 | Event::DragMotion(..)
                 | Event::ModifierMouseDown { .. }
                 | Event::PointerPressed { .. }
                 | Event::Gesture(..)
-                | Event::Command(Command::Layout(..))
-                | Event::Command(Command::Reactor(
-                    ReactorCommand::MoveWindowToDisplay { .. }
-                        | ReactorCommand::MoveWorkspaceToDisplay { .. }
-                ))
         )
     }
 
