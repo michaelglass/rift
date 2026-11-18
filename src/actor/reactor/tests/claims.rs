@@ -223,6 +223,10 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
 fn claim_cancels_drag_animation_and_pending_geometry() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    // A write in flight: the pending store holds its target (the core's projection).
+    let moved = CGRect::new(CGPoint::new(frame.origin.x + 30.0, frame.origin.y), frame.size);
+    reactor.place_window(wid, moved);
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(moved));
     reactor.start_modifier_drag(
         wid,
         crate::actor::drag::DragSource {
@@ -234,7 +238,6 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
         },
         frame.mid(),
     );
-    reactor.transaction_manager.stamp([(wsid, frame)]);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);
 

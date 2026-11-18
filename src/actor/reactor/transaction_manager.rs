@@ -40,51 +40,18 @@ pub struct TransactionManager {
 impl TransactionManager {
     pub fn new(store: WindowTxStore) -> Self { Self { store } }
 
-    /// Stores a transaction ID for a window with its target frame.
-    pub fn store_txid(&self, wsid: WindowServerId, txid: TransactionId, target: CGRect) {
-        self.store.insert(wsid, txid, target);
-    }
-
-    /// Updates multiple transaction ID entries.
-    pub fn update_txid_entries<I>(&self, entries: I)
-    where I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)> {
-        for (wsid, txid, target) in entries {
-            self.store.insert(wsid, txid, target);
-        }
-    }
-
     /// Removes the transaction ID entry for a window.
     pub fn remove_for_window(&self, wsid: WindowServerId) { self.store.remove(&wsid); }
-
-    /// Clears the pending target for a window while preserving its last txid.
-    pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
 
     /// The id of a new request, recorded nowhere yet.
     pub fn mint(&self) -> TransactionId { self.store.next_id() }
 
-    /// Records `txid`, with its target, for each window a request sent under it writes.
-    pub fn record(
-        &self,
-        txid: TransactionId,
-        targets: impl IntoIterator<Item = (WindowServerId, CGRect)>,
-    ) {
-        self.update_txid_entries(targets.into_iter().map(|(wsid, target)| (wsid, txid, target)));
-    }
-
-    /// Mints the id of one request and records it, with its target, for each window the
-    /// request writes.
-    pub fn stamp(
-        &self,
-        targets: impl IntoIterator<Item = (WindowServerId, CGRect)>,
-    ) -> TransactionId {
-        let txid = self.store.next_id();
-        self.update_txid_entries(targets.into_iter().map(|(wsid, target)| (wsid, txid, target)));
-        txid
-    }
-
-    /// Sets the last sent transaction ID for a window.
-    pub fn set_last_sent_txid(&self, wsid: WindowServerId, txid: TransactionId) {
-        self.store.set_last_txid(wsid, txid);
+    /// Records `txid` as the latest request sent to each window in `windows`. Their pending
+    /// frames are the core's (`RiftState` projects them).
+    pub fn record(&self, txid: TransactionId, windows: impl IntoIterator<Item = WindowServerId>) {
+        for wsid in windows {
+            self.store.sent(wsid, txid);
+        }
     }
 
     /// Gets the last sent transaction ID for a window.

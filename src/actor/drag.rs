@@ -898,6 +898,7 @@ mod tests {
         crate::model::RiftState {
             windows: tracked(windows),
             core: Default::default(),
+            tx: Default::default(),
         }
     }
 

@@ -70,7 +70,7 @@ use events::{
 use main_window::MainWindowTracker;
 use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
-use reconciler::{Answer, Observation, Ungripped};
+use reconciler::{Observation, Ungripped};
 pub use replay::{Record, replay};
 use rift_core::{Initiative, InputClass};
 use rift_protocol::DirectionalDistance;
@@ -660,7 +660,10 @@ impl Reactor {
             binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
-            state: RiftState::default(),
+            state: RiftState {
+                tx: window_tx_store.clone(),
+                ..RiftState::default()
+            },
             space_state: ForwardedSpaceState::default(),
             last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
@@ -700,7 +703,9 @@ impl Reactor {
                 last_layout_modes_by_space: HashMap::default(),
                 _window_notify_tx: window_notify_tx,
             },
-            transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
+            transaction_manager: transaction_manager::TransactionManager::new(
+                window_tx_store.clone(),
+            ),
             reread: Default::default(),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
@@ -1031,9 +1036,6 @@ impl Reactor {
             .map(|&(wsid, observed)| {
                 let pending = self.transfer_keeps_assignment(wsid, observed);
                 let resolved = self.resolve_native_space(wsid, observed);
-                if let Some(space) = resolved {
-                    self.clear_pending_target_if_confirmed_space(wsid, space);
-                }
                 (wsid, if pending { observed } else { resolved })
             })
             .collect();
@@ -1132,22 +1134,9 @@ impl Reactor {
             .filter(|(wid, _)| self.hidden_assigned_space_for_window_id(*wid).is_some())
             .map(|(wid, window)| (wid, window.info.sys_id))
             .collect();
-        for (wid, server_id) in hidden {
+        for (wid, _) in hidden {
             // Whatever a parked window answered before the topology changed no longer holds.
             self.state.forget(wid);
-            if let Some(server_id) = server_id {
-                self.transaction_manager.clear_target_for_window(server_id);
-            }
-        }
-    }
-
-    fn clear_pending_target_if_confirmed_space(
-        &self,
-        wsid: WindowServerId,
-        confirmed_space: SpaceId,
-    ) {
-        if self.pending_target_space_for_window_server_id(wsid) == Some(confirmed_space) {
-            self.transaction_manager.clear_target_for_window(wsid);
         }
     }
 
@@ -1953,7 +1942,6 @@ impl Reactor {
                 let mut outcome = window_workflow::handle_window_created(
                     &mut self.state,
                     &mut self.layout_manager,
-                    &self.transaction_manager,
                     window_workflow::WindowCreatedPayload {
                         window_id: wid,
                         window,
@@ -2140,14 +2128,12 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested) => {
-                let kind = if !requested.0 {
-                    ReportKind::Unprompted
-                } else if self.answers_latest_outside_write(wid, last_seen) {
+                // Every write is the core's: whether an answer answers the write it has in
+                // flight (or one it has since replaced), the core decides.
+                let kind = if requested.0 {
                     ReportKind::Reply(last_seen)
                 } else {
-                    // The answer to a write Rift has since replaced: it says nothing about
-                    // the one that is with the app now.
-                    return Ok(EventOutcome::no_change());
+                    ReportKind::Unprompted
                 };
                 let mut outcome = self.observe_frame(wid, new_frame, kind)?;
                 outcome.focused_window = raised_window;
@@ -3126,9 +3112,6 @@ impl Reactor {
             }
         }
 
-        for (window_server_id, space) in outcome.confirmed_window_spaces {
-            self.clear_pending_target_if_confirmed_space(window_server_id, space);
-        }
         for (wsid, space, window) in outcome.fullscreen_restorations {
             let nested = self.reconcile_native_presence(wsid, space, window);
             self.apply_event_outcome(nested);
@@ -4422,25 +4405,6 @@ impl Reactor {
         Some(self.frame_on_display(window, frame, source, screen))
     }
 
-    /// Whether an answer carrying `last_seen` may answer the latest write `window` was sent,
-    /// as far as writes the core did not make are concerned (an animation's, whose target is
-    /// still pending). The transaction id is what ties an answer to its write; geometry cannot.
-    /// Whether it answers the core's own write in flight, the core decides.
-    fn answers_latest_outside_write(
-        &self,
-        window: WindowId,
-        last_seen: Option<TransactionId>,
-    ) -> bool {
-        let Some(seen) = last_seen else { return true };
-        let Some(server_id) =
-            self.state.windows.window(window).and_then(|window| window.info.sys_id)
-        else {
-            return true;
-        };
-        self.transaction_manager.get_target_frame(server_id).is_none()
-            || seen == self.transaction_manager.get_last_sent_txid(server_id)
-    }
-
     /// Mission Control moves windows itself; nothing it shows is a drag or a placement.
     fn mission_control_moved_it(&mut self) -> bool {
         let active = self.is_native_mission_control_active();
@@ -4450,31 +4414,14 @@ impl Reactor {
         active
     }
 
-    /// What a report of `frame` settled: `seen`, if the model now takes the window to be
-    /// there, and whether the target the app actor and the space bookkeeping still read
-    /// (`TransactionManager`) has been reached, which `reached` decides given whether the
-    /// report is at that target. A refused target stays pending: it still says where Rift
-    /// means the window to be.
-    fn record_report(
-        &mut self,
-        wid: WindowId,
-        frame: CGRect,
-        seen: Option<CGRect>,
-        reached: impl FnOnce(bool) -> bool,
-    ) {
-        let Some(window) = self.state.windows.window(wid) else {
+    /// What a report settled: `seen`, if the model now takes the window to be there. (The
+    /// pending frame the app actor and the space bookkeeping read is the core's projection.)
+    fn record_report(&mut self, wid: WindowId, seen: Option<CGRect>) {
+        if self.state.windows.window(wid).is_none() {
             return;
-        };
-        let server_id = window.info.sys_id;
+        }
         if let Some(seen) = seen {
             self.state.seen(wid, seen);
-        }
-        let Some(server_id) = server_id else { return };
-        let Some(target) = self.transaction_manager.get_target_frame(server_id) else {
-            return;
-        };
-        if reached(frame.same_as(target)) {
-            self.transaction_manager.clear_target_for_window(server_id);
         }
     }
 
@@ -4505,7 +4452,7 @@ impl Reactor {
             // The answer to a write Rift has since replaced: it says nothing about the one that
             // is with the app now.
             reconciler::Reply::Stale => return Ok(EventOutcome::no_change()),
-            reconciler::Reply::Answered(answer, queued) => {
+            reconciler::Reply::Answered(_, queued) => {
                 // The desire that waited behind the answered write goes out now.
                 if let Some(write) = queued {
                     self.send_arranged(write);
@@ -4514,11 +4461,7 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 }
                 // An answer is where the window is, whatever was asked of it.
-                self.record_report(wid, new_frame, Some(new_frame), |at_target| match answer {
-                    Answer::Acked => true,
-                    Answer::Refused => false,
-                    Answer::Unasked => at_target,
-                });
+                self.record_report(wid, Some(new_frame));
                 return Ok(EventOutcome::no_change());
             }
             // Unprompted, or an answer Rift had stopped waiting for, which is news like any
@@ -4530,16 +4473,15 @@ impl Reactor {
         }
         match observation {
             Observation::Ack => {
-                self.record_report(wid, new_frame, None, |at_target| at_target);
+                self.record_report(wid, None);
                 return Ok(EventOutcome::no_change());
             }
             Observation::InTransit => {
-                self.record_report(wid, new_frame, Some(new_frame), |_| false);
+                self.record_report(wid, Some(new_frame));
                 return Ok(EventOutcome::no_change());
             }
-            // Someone else's move: what follows works out whose, and what it means. The user's
-            // hand on the window ends whatever Rift had pending for it.
-            Observation::Foreign => self.record_report(wid, new_frame, None, |_| gripped),
+            // Someone else's move: what follows works out whose, and what it means.
+            Observation::Foreign => {}
         }
         let old_space = self.geometry_space_for_window(&old_frame, server_id);
         let new_space = self.geometry_space_for_window(&new_frame, server_id);

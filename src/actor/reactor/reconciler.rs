@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CGRect;
 use rift_core::reconciler::Note;
-pub(crate) use rift_core::{Answer, Observation, Owner, Want};
+pub(crate) use rift_core::{Observation, Owner, Want};
 use rift_core::{Core, Kinds, Release};
 use tracing::{debug, trace, warn};
 
@@ -162,6 +162,10 @@ impl Reconciler {
                 Effect::Animate { window, from, to, request } => {
                     debug!(?window, ?from, ?to, ?request, "reconcile: animate")
                 }
+                Effect::Pending { window, target } => {
+                    trace!(?window, ?target, "reconcile: pending")
+                }
+                Effect::Unpending { window } => trace!(?window, "reconcile: unpending"),
                 Effect::Plan(plan) => {
                     debug!(request = ?plan.request, positions = plan.positions.len(), frames = plan.frames.len(), "reconcile: plan")
                 }
@@ -213,6 +217,12 @@ impl Reconciler {
     #[cfg(test)]
     pub(crate) fn sync(&self, window: WindowId) -> Option<Sync> {
         self.core.borrow().reconciler().sync(window)
+    }
+
+    /// Rust-only read, not part of the boundary: the frame Rift has pending for `window`.
+    #[cfg(test)]
+    pub(crate) fn pending(&self, window: WindowId) -> Option<CGRect> {
+        self.core.borrow().reconciler().pending(window)
     }
 
     /// Steps the core; the caller (`RiftState`) applies what it projects onto the store.
@@ -337,15 +347,12 @@ impl Reactor {
         self.state.want(request, window, desired, want)
     }
 
-    /// Records a write's request, with its target, for the app protocol and the space
-    /// bookkeeping (`TransactionManager`).
+    /// Records a write's request as the latest sent to its window, for the app protocol
+    /// (`TransactionManager`).
     fn record(&self, write: &Write) {
         let server_id =
             self.state.windows.window(write.window()).and_then(|state| state.info.sys_id);
-        self.transaction_manager.record(
-            write.request(),
-            server_id.map(|server_id| (server_id, write.frame())),
-        );
+        self.transaction_manager.record(write.request(), server_id);
     }
 
     fn send_one(&mut self, write: Write, handle: AppThreadHandle) {
@@ -455,7 +462,7 @@ impl Reactor {
             return;
         };
         let handle = app.handle.with_scrolling_bounds(bounds);
-        self.transaction_manager.record(request, targets);
+        self.transaction_manager.record(request, targets.iter().map(|&(wsid, _)| wsid));
         let requests = [
             (!positions.is_empty()).then(|| (frames_of(positions), FrameMode::Position)),
             (!frames.is_empty()).then(|| (frames_of(frames), FrameMode::Full)),
@@ -526,6 +533,10 @@ pub(crate) struct Ungripped {
 /// The grip: the core decides, the window store's slot is its projection. These are the only
 /// ways the slot changes, each a core step whose effects are applied here.
 impl RiftState {
+    fn server_id(&self, window: WindowId) -> Option<WindowServerId> {
+        self.windows.window(window).and_then(|state| state.info.sys_id)
+    }
+
     /// Applies one grip step's effects to the store. `session` is what a `DragBegan` attaches.
     fn project(&mut self, effects: &[Effect], mut session: Option<Session>) -> Option<Ungripped> {
         let mut ungripped = None;
@@ -541,6 +552,17 @@ impl RiftState {
                     session.take().expect("a drag is asked for with its session"),
                 ),
                 Effect::Regrip { from, to } => self.windows.project_regrip(from, to),
+                // The pending store the app actors read is the core's pending frames.
+                Effect::Pending { window, target } => {
+                    if let Some(server_id) = self.server_id(window) {
+                        self.tx.project_target(server_id, target);
+                    }
+                }
+                Effect::Unpending { window } => {
+                    if let Some(server_id) = self.server_id(window) {
+                        self.tx.clear_target(&server_id);
+                    }
+                }
                 Effect::Seen { window, frame } => {
                     let state = self.windows.window_mut(window);
                     debug_assert!(state.is_some(), "the core sees a window the store lacks");
@@ -621,6 +643,7 @@ impl RiftState {
         frame: CGRect,
     ) -> Write {
         let effects = self.core.decide(Event::Follow { request, window, frame });
+        self.project(&effects, None);
         Reconciler::writes(effects)
             .next()
             .expect("the core writes the interactive frame it is given")
@@ -662,8 +685,9 @@ impl RiftState {
 
     /// `window` reported `frame` unprompted.
     pub(crate) fn observe(&mut self, window: WindowId, frame: CGRect) -> Observation {
-        self.core
-            .decide(Event::Report { window, frame })
+        let effects = self.core.decide(Event::Report { window, frame });
+        self.project(&effects, None);
+        effects
             .into_iter()
             .find_map(|effect| match effect {
                 Effect::Observed { observation, .. } => Some(observation),
@@ -684,7 +708,8 @@ impl RiftState {
     /// `window` is gone, or something outside the reconciler (an animation) now owns its
     /// frame: nothing is outstanding.
     pub(crate) fn forget(&mut self, window: WindowId) {
-        self.core.decide(Event::Forget { window });
+        let effects = self.core.decide(Event::Forget { window });
+        self.project(&effects, None);
     }
 
     /// The model takes `window` to be at `frame`: Rift accepted a report of it there, or put it
@@ -699,7 +724,8 @@ impl RiftState {
     pub(crate) fn suspend_fullscreen_ax_identity(&mut self, window: WindowId) -> bool {
         let suspended = self.windows.suspend_fullscreen_ax_identity(window);
         if suspended {
-            self.core.decide(Event::Unseen { window });
+            let effects = self.core.decide(Event::Unseen { window });
+            self.project(&effects, None);
         }
         suspended
     }
@@ -723,18 +749,21 @@ impl RiftState {
 
     /// The animation under `request` ended.
     pub(crate) fn animation_ended(&mut self, request: TransactionId) {
-        self.core.decide(Event::AnimationEnded { request });
+        let effects = self.core.decide(Event::AnimationEnded { request });
+        self.project(&effects, None);
     }
 
     /// The platform stopped `window`'s animation where the model now sees it.
     pub(crate) fn animation_stopped(&mut self, window: WindowId) {
-        self.core.decide(Event::AnimationStopped { window });
+        let effects = self.core.decide(Event::AnimationStopped { window });
+        self.project(&effects, None);
     }
 
     /// The displays changed: where the apps have these windows is unknown until they say
     /// (macOS resizes windows silently on a display change).
     pub(crate) fn distrust(&mut self, windows: Vec<WindowId>) {
-        self.core.decide(Event::Distrust { windows });
+        let effects = self.core.decide(Event::Distrust { windows });
+        self.project(&effects, None);
     }
 
     /// The app's window was read at `frame` (an inventory, the window server): the model sees it

@@ -836,6 +836,21 @@ impl Sim {
                 );
             }
         }
+        // 11. The pending store the app actors read is the core's projection too.
+        for &wid in &self.live {
+            let Some(wsid) = self.reactor.state.windows.window(wid).and_then(|w| w.info.sys_id)
+            else {
+                continue;
+            };
+            let stored = self.reactor.transaction_manager.get_target_frame(wsid);
+            let pending = self.reactor.state.core.pending(wid);
+            if stored != pending {
+                return fail(
+                    "pending-is-the-cores",
+                    format!("{wid:?}: the store has {stored:?} pending, the core {pending:?}"),
+                );
+            }
+        }
         // 9. Every live window stays assigned to some space.
         for &wid in &self.live {
             if self.reactor.assigned_space_for_window_id(wid).is_none() {

@@ -261,14 +261,9 @@ impl PresentedWindow {
         }
     }
 
-    fn cancel(&mut self, store: Option<&WindowTxStore>) {
+    fn cancel(&mut self) {
         self.leased = false;
         self.handle.cancel_window_animation(self.wid);
-        if let Some(store) = store
-            && let Some(wsid) = self.wsid
-        {
-            store.clear_target_if_current(&wsid, self.txid);
-        }
     }
 
     fn sample(&mut self, sample: Sample<'_>) -> Option<Frame> {
@@ -468,7 +463,7 @@ impl CameraAnimation {
     fn cancel_windows(&mut self, windows: &[WindowId]) {
         self.windows.retain_mut(|window| {
             if windows.binary_search(&window.wid).is_ok() {
-                window.cancel(Some(&self.store));
+                window.cancel();
                 false
             } else {
                 true
@@ -489,7 +484,7 @@ impl CameraAnimation {
     pub(super) fn stop(&mut self) {
         if std::mem::replace(&mut self.active, false) {
             for window in &mut self.windows {
-                window.cancel(Some(&self.store));
+                window.cancel();
             }
         }
     }
@@ -519,11 +514,8 @@ impl Reactor {
             frames.extend(tx.cancel(windows));
         }
         for (wid, frame) in frames {
-            let Some(window) = self.state.windows.window(wid) else {
+            if self.state.windows.window(wid).is_none() {
                 continue;
-            };
-            if let Some(wsid) = window.info.sys_id {
-                self.transaction_manager.clear_target_for_window(wsid);
             }
             self.state.seen(wid, frame);
             self.state.animation_stopped(wid);
@@ -1080,7 +1072,7 @@ impl AnimationManager {
         for (wid, from, to, request) in reactor.state.animate(desires) {
             any_frame_changed = true;
             let server_id = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id);
-            reactor.transaction_manager.record(request, server_id.map(|wsid| (wsid, to)));
+            reactor.transaction_manager.record(request, server_id);
             trace!(?wid, ?from, ?to, "Animating visible window");
             let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 continue;
@@ -1167,18 +1159,10 @@ impl Motion {
         }
     }
 
-    fn store(&self) -> Option<WindowTxStore> {
-        match self {
-            Self::Transition(_) => None,
-            Self::Viewport(c) => Some(c.store.clone()),
-        }
-    }
-
     fn stop_windows(&mut self, windows: &[WindowId]) {
-        let store = self.store();
         self.windows_mut().retain_mut(|window| {
             if windows.binary_search(&window.wid).is_ok() {
-                window.cancel(store.as_ref());
+                window.cancel();
                 false
             } else {
                 true
@@ -1192,9 +1176,8 @@ impl Motion {
     }
 
     fn stop(&mut self) {
-        let store = self.store();
         for window in self.windows_mut().iter_mut() {
-            window.cancel(store.as_ref());
+            window.cancel();
         }
         self.windows_mut().clear();
         if let Self::Viewport(c) = self {
@@ -1290,7 +1273,7 @@ impl ActiveAnimation {
                 old.from = old.frame;
                 next.windows.push(old);
             } else if !next.windows.iter().any(|w| w.wid == old.wid) {
-                old.cancel(None);
+                old.cancel();
                 next.report_ended([old.txid]);
             }
         }

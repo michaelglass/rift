@@ -35,6 +35,16 @@ impl WindowTxStore {
         }
     }
 
+    /// The core's pending frame for `id` (its projection): the record's id is kept.
+    pub fn project_target(&self, id: WindowServerId, target: CGRect) {
+        self.records.entry(id).or_default().target = Some(target);
+    }
+
+    /// The id of the latest request sent to `id`: its pending frame (the core's) is kept.
+    pub fn sent(&self, id: WindowServerId, txid: TransactionId) {
+        self.records.entry(id).or_default().txid = txid;
+    }
+
     pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> {
         self.records.get(id).map(|entry| *entry)
     }

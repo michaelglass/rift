@@ -24,7 +24,6 @@ pub struct WindowCreatedPayload {
 pub fn handle_window_created(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
-    transactions: &TransactionManager,
     payload: WindowCreatedPayload,
 ) -> anyhow::Result<EventOutcome> {
     let WindowCreatedPayload {
@@ -43,13 +42,6 @@ pub fn handle_window_created(
     let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
     let mut window_state: WindowState = window.into();
     window_state.manage_override = rule_override;
-    if let Some(wsid) = window_state.info.sys_id {
-        transactions.store_txid(
-            wsid,
-            transactions.get_last_sent_txid(wsid),
-            window_state.frame_monotonic,
-        );
-    }
 
     state.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);

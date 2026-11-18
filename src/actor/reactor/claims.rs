@@ -37,9 +37,7 @@ impl Reactor {
             let reactor = &mut *self;
             // The owner takes over like a user drag: stop Rift's motion and pending writes.
             reactor.cancel_window_presentations(vec![wid]);
-            if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                reactor.transaction_manager.clear_target_for_window(wsid);
-            }
+            reactor.state.forget(wid);
             reactor.state.forget_drag_window(wid);
             reactor.drag_manager.sync_preview(reactor.state.windows.drag());
             // Leave the projection (keeping floating state and the layout slot) before the
