@@ -11,16 +11,6 @@ use crate::sys::window_server::WindowServerId;
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
-impl TransactionId {
-    /// The id as a number, for plain data (a trace, the Roc core).
-    #[cfg(any(test, feature = "roc-core"))]
-    pub(crate) fn number(self) -> u32 { self.0 }
-
-    /// The id a plain number names (from the Roc core).
-    #[cfg(feature = "roc-core")]
-    pub(crate) fn from_number(number: u32) -> Self { TransactionId(number) }
-}
-
 /// The one source of transaction ids, shared by every thread that sends frames.
 #[derive(Debug, Default)]
 pub struct TransactionCounter(AtomicU32);

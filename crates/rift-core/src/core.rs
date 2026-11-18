@@ -13,19 +13,11 @@ use std::collections::HashMap;
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Initiative, Pointer, Release, Ungrip, may};
 use crate::reconciler::{
-    Answer, Note, Observation, Planned, Reconciler, Reply, Translate, Verdict, Want, Write,
+    Answer, Note, Observation, Planned, Reconciler, Reply, Verdict, Want, Write,
 };
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
 /// per batch the platform sends: an app, and whether its writes are held to scrolling bounds).
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
-    ))
-)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Desire<K: Kinds> {
     pub window: K::Window,
@@ -35,14 +27,6 @@ pub struct Desire<K: Kinds> {
 
 /// What one batch of an arrange pass sends: the windows that only move, and those that also
 /// resize, all under `request`.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
-    ))
-)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan<K: Kinds> {
     pub request: K::Request,
@@ -51,14 +35,6 @@ pub struct Plan<K: Kinds> {
 }
 
 /// A fact for the core.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
-    ))
-)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<K: Kinds> {
     /// `button` went down on `window` (a tracked window Rift manages), or on none. One hand:
@@ -151,14 +127,6 @@ pub enum Event<K: Kinds> {
 }
 
 /// A decision for the platform.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
-    ))
-)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect<K: Kinds> {
     /// Send this frame to the window's app under its request.
@@ -212,175 +180,6 @@ pub enum Effect<K: Kinds> {
     Ungrip { window: K::Window, why: Ungrip },
     /// The grip moved with its window's new identity.
     Regrip { from: K::Window, to: K::Window },
-}
-
-impl<K: Kinds> Event<K> {
-    /// The same event on another platform's types.
-    pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Event<J> {
-        match self {
-            Event::Press { window, button } => Event::Press {
-                window: window.map(|window| to.window(window)),
-                button,
-            },
-            Event::Drag { window } => Event::Drag { window: to.window(window) },
-            Event::Release(release) => Event::Release(release),
-            Event::LetGo => Event::LetGo,
-            Event::Gone { window } => Event::Gone { window: to.window(window) },
-            Event::Rekeyed { from, to: into } => Event::Rekeyed {
-                from: to.window(from),
-                to: to.window(into),
-            },
-            Event::Want {
-                now,
-                request,
-                window,
-                desired,
-                want,
-            } => Event::Want {
-                now: to.time(now),
-                request: to.request(request),
-                window: to.window(window),
-                desired: to.frame(desired),
-                want,
-            },
-            Event::Animate { now, desires } => Event::Animate {
-                now: to.time(now),
-                desires: desires
-                    .into_iter()
-                    .map(|desire| Desire {
-                        window: to.window(desire.window),
-                        frame: to.frame(desire.frame),
-                        request: to.request(desire.request),
-                    })
-                    .collect(),
-            },
-            Event::AnimationEnded { now, request } => Event::AnimationEnded {
-                now: to.time(now),
-                request: to.request(request),
-            },
-            Event::AnimationStopped { window, request } => Event::AnimationStopped {
-                window: to.window(window),
-                request: to.request(request),
-            },
-            Event::Arrange { now, want, desires } => Event::Arrange {
-                now: to.time(now),
-                want,
-                desires: desires
-                    .into_iter()
-                    .map(|desire| Desire {
-                        window: to.window(desire.window),
-                        frame: to.frame(desire.frame),
-                        request: to.request(desire.request),
-                    })
-                    .collect(),
-            },
-            Event::Follow { request, window, frame } => Event::Follow {
-                request: to.request(request),
-                window: to.window(window),
-                frame: to.frame(frame),
-            },
-            Event::Answer {
-                now,
-                request,
-                seen,
-                window,
-                frame,
-            } => Event::Answer {
-                now: to.time(now),
-                request: to.request(request),
-                seen: seen.map(|seen| to.request(seen)),
-                window: to.window(window),
-                frame: to.frame(frame),
-            },
-            Event::Report { window, frame } => Event::Report {
-                window: to.window(window),
-                frame: to.frame(frame),
-            },
-            Event::Seen { window, frame } => Event::Seen {
-                window: to.window(window),
-                frame: to.frame(frame),
-            },
-            Event::Unseen { window } => Event::Unseen { window: to.window(window) },
-            Event::Found { window, frame } => Event::Found {
-                window: to.window(window),
-                frame: to.frame(frame),
-            },
-            Event::Ceded { window } => Event::Ceded { window: to.window(window) },
-            Event::Distrust { windows } => Event::Distrust {
-                windows: windows.into_iter().map(|window| to.window(window)).collect(),
-            },
-            Event::Tick { now, request } => Event::Tick {
-                now: to.time(now),
-                request: to.request(request),
-            },
-            Event::Forget { window } => Event::Forget { window: to.window(window) },
-            Event::Gate { initiative } => Event::Gate { initiative },
-        }
-    }
-}
-
-impl<K: Kinds> Effect<K> {
-    /// The same effect on another platform's types.
-    pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Effect<J> {
-        match self {
-            Effect::Write(write) => Effect::Write(write.translate(to)),
-            Effect::Animate {
-                window,
-                from,
-                to: target,
-                request,
-            } => Effect::Animate {
-                window: to.window(window),
-                from: to.frame(from),
-                to: to.frame(target),
-                request: to.request(request),
-            },
-            Effect::Pending { window, target } => Effect::Pending {
-                window: to.window(window),
-                target: to.frame(target),
-            },
-            Effect::Unpending { window } => Effect::Unpending { window: to.window(window) },
-            Effect::Plan(plan) => Effect::Plan(Plan {
-                request: to.request(plan.request),
-                positions: plan.positions.into_iter().map(|w| w.translate(to)).collect(),
-                frames: plan.frames.into_iter().map(|w| w.translate(to)).collect(),
-            }),
-            Effect::Queued { window } => Effect::Queued { window: to.window(window) },
-            Effect::Seen { window, frame } => Effect::Seen {
-                window: to.window(window),
-                frame: to.frame(frame),
-            },
-            Effect::Answered { window, answer } => Effect::Answered {
-                window: to.window(window),
-                answer,
-            },
-            Effect::Stale { window } => Effect::Stale { window: to.window(window) },
-            Effect::Late { window } => Effect::Late { window: to.window(window) },
-            Effect::Observed { window, observation } => Effect::Observed {
-                window: to.window(window),
-                observation,
-            },
-            Effect::Note { window, note } => Effect::Note {
-                window: to.window(window),
-                note,
-            },
-            Effect::Gate { initiative, allowed } => Effect::Gate { initiative, allowed },
-            Effect::Timer(at) => Effect::Timer(at.map(|at| to.time(at))),
-            Effect::Grip { window } => Effect::Grip { window: to.window(window) },
-            Effect::DragBegan { window } => Effect::DragBegan { window: to.window(window) },
-            Effect::Ungrip { window, why } => Effect::Ungrip { window: to.window(window), why },
-            Effect::Regrip { from, to: into } => Effect::Regrip {
-                from: to.window(from),
-                to: to.window(into),
-            },
-        }
-    }
-}
-
-/// A core: the model behind one step function. The model is moved through `step` and never
-/// lent out, so a foreign core can keep it unique.
-pub trait Core<K: Kinds> {
-    fn step(&mut self, event: Event<K>) -> Vec<Effect<K>>;
 }
 
 /// The core written in Rust.
@@ -702,10 +501,10 @@ impl<K: Kinds> RustCore<K> {
     }
 }
 
-impl<K: Kinds> Core<K> for RustCore<K> {
+impl<K: Kinds> RustCore<K> {
     /// Decisions first, then the notes taken while deciding, then the pending frames that
     /// changed, then the timer if its deadline moved.
-    fn step(&mut self, event: Event<K>) -> Vec<Effect<K>> {
+    pub fn step(&mut self, event: Event<K>) -> Vec<Effect<K>> {
         let mut effects = self.decide(event);
         effects.extend(
             self.reconciler

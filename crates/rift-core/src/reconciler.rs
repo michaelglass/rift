@@ -23,14 +23,6 @@ pub const WRITE_DEADLINE: Duration = Duration::from_millis(300);
 
 /// A frame the reconciler decided to send, and the request it goes out under. Only a core can
 /// make one.
-#[cfg_attr(
-    feature = "serde",
-    derive(serde::Serialize, serde::Deserialize),
-    serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
-    ))
-)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Write<K: Kinds> {
     window: K::Window,
@@ -45,29 +37,6 @@ impl<K: Kinds> Write<K> {
 
     /// The id to send it under; the app's answer names it.
     pub fn request(&self) -> K::Request { self.request }
-
-    /// A write decided by a core implemented outside this crate (the Roc core's adapter). The
-    /// platform's senders still take only what came out of a [`Core`](crate::Core).
-    pub fn from_foreign_core(window: K::Window, frame: K::Frame, request: K::Request) -> Self {
-        Write { window, frame, request }
-    }
-
-    /// The same write on another platform's types (a recorded trace replayed on plain data).
-    pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Write<J> {
-        Write {
-            window: to.window(self.window),
-            frame: to.frame(self.frame),
-            request: to.request(self.request),
-        }
-    }
-}
-
-/// A way from one platform's types to another's.
-pub trait Translate<K: Kinds, J: Kinds> {
-    fn window(&self, window: K::Window) -> J::Window;
-    fn frame(&self, frame: K::Frame) -> J::Frame;
-    fn time(&self, time: K::Time) -> J::Time;
-    fn request(&self, request: K::Request) -> J::Request;
 }
 
 /// Where one window stands between what Rift asked of its app and what the app answered.
@@ -116,7 +85,6 @@ pub enum Before<K: Kinds> {
 }
 
 /// How a layout pass wants its frames.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Want {
     /// Layout: nothing to send when the app already has the window there.
@@ -151,7 +119,6 @@ pub enum Verdict<K: Kinds> {
 }
 
 /// An unprompted report of a window's frame, classified against what Rift asked for.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Observation {
     /// The frame Rift asked for, or the one the model already had: no news.
@@ -164,7 +131,6 @@ pub enum Observation {
 }
 
 /// The app's answer to a write, classified against the write it answers.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Answer {
     Acked,
@@ -191,7 +157,6 @@ pub enum Reply<K: Kinds> {
 }
 
 /// What the reconciler decided along the way that is not a write: the platform logs these.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Note {
     /// A desire for a window that is the user's was dropped.
