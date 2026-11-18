@@ -123,8 +123,27 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
-    pub pending_focus_mouse_warp: Option<WindowId>,
-    pub pending_display_warp: Option<crate::sys::screen::SpaceId>,
+    /// A pointer warp owed after the next arrange. Its target is read when it is paid, from
+    /// the focus then: a newer focus intent in between is where it lands, nothing stale.
+    pub owed_warp: Option<OwedWarp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwedWarp {
+    /// To the focused window's centre (mouse follows focus across a switch or a scroll).
+    Focus,
+    /// Into this Space's selected window at the spot the cursor held in the old one, or onto
+    /// the display when the workspace is empty. Includes a focus warp.
+    Display(crate::sys::screen::SpaceId),
+}
+
+impl WorkspaceSwitchManager {
+    /// Owe a focus warp; an owed display warp already lands on the focus.
+    pub fn owe_focus_warp(&mut self) {
+        if self.owed_warp.is_none() {
+            self.owed_warp = Some(OwedWarp::Focus);
+        }
+    }
 }
 
 impl WorkspaceSwitchManager {
@@ -510,13 +529,13 @@ impl LayoutManager {
                 any_frame_changed |=
                     AnimationManager::animate_layout(reactor, space, &desired, is_resize, true);
             }
-            if let Some(window) = reactor.workspace_switch_manager.pending_focus_mouse_warp
-                && reactor.workspace_switch_manager.pending_display_warp.is_none()
+            if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
+                && let Some(window) = reactor.layout_manager.layout_engine.focused_window()
                 && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                     == LayoutMode::Scrolling
                 && let Some((_, frame)) = desired.frames().iter().find(|(wid, _)| *wid == window)
             {
-                reactor.workspace_switch_manager.pending_focus_mouse_warp = None;
+                reactor.workspace_switch_manager.owed_warp = None;
                 if reactor.screen_for_point(frame.mid()).is_some() {
                     reactor.warp_mouse(frame.mid());
                 }
