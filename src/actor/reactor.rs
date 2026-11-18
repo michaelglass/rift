@@ -5605,70 +5605,14 @@ impl Reactor {
     }
 
     fn auto_switch_to_window_workspace(&mut self, window: Option<WindowId>) -> EventOutcome {
-        let Some(window) = window.filter(|wid| self.window_is_standard(*wid)) else {
+        let Some((window, space, workspace)) = self.auto_switch_target(window) else {
             return EventOutcome::no_change();
         };
-        if self.state.windows.is_temporarily_unavailable(window) {
-            return EventOutcome::no_change();
-        }
-        let pid = window.pid;
-        let Some(space) = self.best_space_for_window_id(window) else {
-            return EventOutcome::no_change();
-        };
-        let workspaces = self.layout_manager.layout_engine.workspaces();
-        let Some(workspace) = workspaces.workspace_for_window(&self.state.windows, space, window)
-        else {
-            return EventOutcome::no_change();
-        };
-        if workspaces.active_workspace(space).is_none_or(|active| active == workspace) {
-            return EventOutcome::no_change();
-        }
-        // A newly appearing native window can leave focus temporarily pointing
-        // at the app's old window until AX admission completes.
-        if self.state.windows.has_pending_window_for_pid(pid) {
-            return EventOutcome::no_change();
-        }
-
-        let modes = self.modes();
-        if let Some(mode) = modes.refusal(Initiative::FollowActivation) {
-            debug!(pid, "mode-gate: discarded activation follow during {mode:?}");
-            return EventOutcome::no_change();
-        }
-
-        if let Some(active_space) = self.raw_command_space()
-            && self.is_fullscreen_space(active_space)
-        {
-            debug!(
-                "Skipping auto workspace switch for pid {} because the active space is fullscreen",
-                pid
-            );
-            return EventOutcome::no_change();
-        }
-
-        if let Some(wsid) = self.activation_from_unmanageable_window(pid) {
-            debug!(
-                ?wsid,
-                "Skipping auto workspace switch for pid {} because the activated window is not manageable",
-                pid
-            );
-            return EventOutcome::no_change();
-        }
-
-        let Some(bundle_id_str) =
-            self.app_manager.apps.get(&pid).and_then(|app| app.info.bundle_id.as_ref())
-        else {
-            return EventOutcome::no_change();
-        };
-
-        if self.config.settings.auto_focus_blacklist.contains(bundle_id_str) {
-            debug!(
-                "App {} is blacklisted for auto-focus workspace switching, ignoring activation",
-                bundle_id_str
-            );
-            return EventOutcome::no_change();
-        }
-
-        debug!(?workspace, pid, "Auto-switching to focused window's workspace");
+        debug!(
+            ?workspace,
+            pid = window.pid,
+            "Auto-switching to focused window's workspace"
+        );
         self.store_current_floating_positions(space);
         self.workspace_switch_manager
             .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
@@ -5679,6 +5623,55 @@ impl Reactor {
             Some(window),
         );
         EventOutcome::layout_changed(false).with_layout_response(response, Some(space))
+    }
+
+    /// Whether an activation of `window` follows it to its workspace, and where: its space and
+    /// workspace, when that is not the active one and nothing says not to.
+    fn auto_switch_target(
+        &self,
+        window: Option<WindowId>,
+    ) -> Option<(WindowId, SpaceId, crate::model::VirtualWorkspaceId)> {
+        let window = window.filter(|wid| {
+            self.window_is_standard(*wid) && !self.state.windows.is_temporarily_unavailable(*wid)
+        })?;
+        let pid = window.pid;
+        let space = self.best_space_for_window_id(window)?;
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let workspace = workspaces.workspace_for_window(&self.state.windows, space, window)?;
+        // A newly appearing native window can leave focus temporarily pointing at the app's
+        // old window until AX admission completes.
+        if workspaces.active_workspace(space).is_none_or(|active| active == workspace)
+            || self.state.windows.has_pending_window_for_pid(pid)
+        {
+            return None;
+        }
+        if let Some(mode) = self.modes().refusal(Initiative::FollowActivation) {
+            debug!(pid, "mode-gate: discarded activation follow during {mode:?}");
+            return None;
+        }
+        if self.raw_command_space().is_some_and(|active| self.is_fullscreen_space(active)) {
+            debug!(
+                pid,
+                "Skipping auto workspace switch: the active space is fullscreen"
+            );
+            return None;
+        }
+        if let Some(wsid) = self.activation_from_unmanageable_window(pid) {
+            debug!(
+                ?wsid,
+                pid, "Skipping auto workspace switch: the activated window is not manageable"
+            );
+            return None;
+        }
+        let bundle_id = self.app_manager.apps.get(&pid)?.info.bundle_id.as_ref()?;
+        if self.config.settings.auto_focus_blacklist.contains(bundle_id) {
+            debug!(
+                bundle_id,
+                "Blacklisted for auto-focus workspace switching, ignoring activation"
+            );
+            return None;
+        }
+        Some((window, space, workspace))
     }
 
     fn handle_layout_response(
