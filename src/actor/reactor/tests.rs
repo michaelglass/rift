@@ -7507,7 +7507,11 @@ fn native_tab_creation_and_close_preserve_layout_slot_and_other_windows() {
         new_info.has_native_tabs = true;
         window_server::set_window_ordered_in_override(old_wsid, Some(old_ordered_in));
         if departure_first {
-            reactor.native_tab_successor = Some((WindowId::new(2, 20_003), frame));
+            reactor.native.key_focused = Some(WindowId::new(2, 20_003));
+            reactor
+                .native
+                .frames
+                .insert(WindowServerId::new(WindowId::new(2, 20_003).idx.get()), frame);
             reactor.handle_event(Event::WindowServerHidden(old_wsid));
             reactor.handle_event(Event::WindowServerDestroyed(
                 old_wsid,
@@ -7555,7 +7559,9 @@ fn native_tab_creation_and_close_preserve_layout_slot_and_other_windows() {
         let mut restored = old_info;
         restored.frame = frame;
         restored.has_native_tabs = false;
-        reactor.native_tab_successor = Some((WindowId::new(2, old_wsid.as_u32()), frame));
+        let successor = WindowId::new(2, old_wsid.as_u32());
+        reactor.native.key_focused = Some(successor);
+        reactor.native.frames.insert(old_wsid, frame);
         window_server::set_window_ordered_in_override(new_wsid, Some(false));
         reactor.handle_event(Event::WindowClosed(new_wsid));
         reactor.discover_test_windows(2, vec![(old, restored)], vec![old, separate]);
@@ -7631,7 +7637,11 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
         info.has_native_tabs = true;
         window_server::set_window_ordered_in_override(old_wsid, Some(false));
         if departure_first {
-            reactor.native_tab_successor = Some((WindowId::new(2, 20_003), frame));
+            reactor.native.key_focused = Some(WindowId::new(2, 20_003));
+            reactor
+                .native
+                .frames
+                .insert(WindowServerId::new(WindowId::new(2, 20_003).idx.get()), frame);
             reactor.handle_event(Event::WindowClosed(old_wsid));
             reactor.discover_test_windows(2, vec![(new, info)], vec![new, separate]);
         } else {
@@ -7654,7 +7664,9 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
         let mut restored = old_info;
         restored.frame = frame;
         restored.has_native_tabs = false;
-        reactor.native_tab_successor = Some((WindowId::new(2, old_wsid.as_u32()), frame));
+        let successor = WindowId::new(2, old_wsid.as_u32());
+        reactor.native.key_focused = Some(successor);
+        reactor.native.frames.insert(old_wsid, frame);
         window_server::set_window_ordered_in_override(new_wsid, Some(false));
         reactor.handle_event(Event::WindowClosed(new_wsid));
         reactor.discover_test_windows(2, vec![(old, restored)], vec![old, separate]);
@@ -7732,13 +7744,13 @@ fn native_tab_departure_preserves_focus_before_notifications_and_discovery() {
             ));
         }
         let native_new = WindowId::new(2, 20_002);
-        reactor.native_focus_for_removal = Some(native_new);
+        reactor.native.key_focused = Some(native_new);
         let wsid = reactor.test_window_server_id(old_tab);
         reactor.handle_event(Event::WindowServerHidden(wsid));
         window_server::set_window_ordered_in_override(wsid, Some(false));
         reactor.handle_event(Event::WindowServerDestroyed(wsid, space, SpaceEventKind::User));
         window_server::set_window_ordered_in_override(wsid, None);
-        reactor.native_focus_for_removal = None;
+        reactor.native.key_focused = None;
 
         let raises: Vec<_> = std::iter::from_fn(|| raise_rx.try_recv().ok()).collect();
         assert!(
@@ -7786,7 +7798,7 @@ fn native_tab_departure_keeps_recovery_without_a_native_successor() {
             }
             _ => None,
         };
-        reactor.native_focus_for_removal = native;
+        reactor.native.key_focused = native;
         let (raise_tx, mut raise_rx) = actor::channel();
         reactor.communication_manager.raise_manager_tx = raise_tx;
         let wsid = reactor.test_window_server_id(old_tab);
@@ -7794,7 +7806,7 @@ fn native_tab_departure_keeps_recovery_without_a_native_successor() {
         window_server::set_window_ordered_in_override(wsid, Some(false));
         reactor.handle_event(Event::WindowServerDestroyed(wsid, space, SpaceEventKind::User));
         window_server::set_window_ordered_in_override(wsid, None);
-        reactor.native_focus_for_removal = None;
+        reactor.native.key_focused = None;
 
         let raises: Vec<_> = std::iter::from_fn(|| raise_rx.try_recv().ok())
             .map(|(_, request)| request)
@@ -7915,7 +7927,7 @@ fn closing_focused_app_refocuses_surviving_app() {
     while raise_manager_rx.try_recv().is_ok() {}
 
     // A stale native snapshot must not suppress recovery after the whole app exits.
-    reactor.native_focus_for_removal = Some(WindowId::new(1, 99));
+    reactor.native.key_focused = Some(WindowId::new(1, 99));
     reactor.handle_event(Event::ApplicationThreadTerminated(1));
 
     let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
