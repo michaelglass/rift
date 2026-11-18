@@ -429,8 +429,8 @@ pub enum WindowInvalidationSource {
     StaleAxElement,
 }
 
-/// What a user command can disturb: the one fact about a command the pointer rule in
-/// `Reactor::may` needs. Parsed once, where a command enters `dispatch_workflow`.
+/// What user input (a command or a gesture) can disturb: the one fact about it the pointer
+/// rule in `Reactor::may` needs. Parsed once, where input enters `handle_loop_event`.
 #[derive(Debug, Clone, Copy)]
 enum InputClass {
     /// Changes which windows are where, shown, focused or raised, or where the pointer is.
@@ -440,6 +440,21 @@ enum InputClass {
 }
 
 impl InputClass {
+    /// The class of `event` if it is user input, `None` if it is anything else (a report, a
+    /// lifecycle event, a later phase of a gesture).
+    fn of_event(event: &Event) -> Option<Self> {
+        use crate::actor::gesture::Lifecycle as G;
+        match event {
+            Event::Command(command) => Some(Self::of(command)),
+            // Only a gesture's start is gated: a refused one never creates a viewport session,
+            // so its samples and its end find nothing to act on. A workspace swipe is a whole
+            // gesture in one event. A reset only ends a session.
+            Event::Gesture(G::Begin { .. } | G::Workspace { .. }) => Some(Self::Steering),
+            Event::Gesture(G::End { .. } | G::Reset) => None,
+            _ => None,
+        }
+    }
+
     fn of(command: &Command) -> Self {
         use InputClass::*;
         use ReactorCommand as R;
@@ -516,9 +531,9 @@ impl InputClass {
 /// user's commands by class; see `Reactor::may`.
 #[derive(Debug, Clone, Copy)]
 enum Initiative {
-    /// A user command (hotkey, CLI, menu). One the pointer rule refuses is discarded, never
-    /// queued: after the drag nothing is replayed.
-    UserCommand(InputClass),
+    /// User input: a command (hotkey, CLI, menu) or a gesture. Input the pointer rule refuses
+    /// is discarded, never queued: after the drag nothing is replayed.
+    UserInput(InputClass),
     /// Arrangement and geometry layout passes.
     Arrange,
     /// Retiring windows an inventory refresh no longer reports.
@@ -1167,12 +1182,12 @@ impl Reactor {
         use Initiative::*;
         use Pointer::*;
         match (initiative, self.state.windows.pointer()) {
-            (UserCommand(InputClass::Inert), Idle | Pressing | Dragging) => true,
-            (UserCommand(InputClass::Steering), Idle) => true,
+            (UserInput(InputClass::Inert), Idle | Pressing | Dragging) => true,
+            (UserInput(InputClass::Steering), Idle) => true,
             // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
-            // a command's effect on it would wait for the release, splitting it from the rest
-            // of the effect. Dropped instead, not deferred.
-            (UserCommand(InputClass::Steering), Pressing | Dragging) => false,
+            // input's effect on it would wait for the release, splitting it from the rest of
+            // the effect. Dropped instead, not deferred.
+            (UserInput(InputClass::Steering), Pressing | Dragging) => false,
             // A press alone changes nothing: the window hasn't moved.
             (Arrange, Idle | Pressing) => true,
             (RetireWindows, Idle | Pressing) => true,
@@ -1303,6 +1318,9 @@ impl Reactor {
             trace!(?event, "quarantined while native topology is unstable");
             return;
         }
+        if !self.admit_input(&event) {
+            return;
+        }
         let event = match event {
             Event::Gesture(event) => {
                 self.gesture_event(event);
@@ -1367,6 +1385,25 @@ impl Reactor {
         if !high_frequency {
             self.state.windows.debug_assert_invariants();
         }
+    }
+
+    /// The one gate for user input: whatever is not input passes; input passes when the pointer
+    /// rule allows its class. A release the tap missed is noticed first, so input is not refused
+    /// behind a press that has ended.
+    fn admit_input(&mut self, event: &Event) -> bool {
+        let Some(class) = InputClass::of_event(event) else {
+            return true;
+        };
+        self.release_if_missed();
+        if self.may(Initiative::UserInput(class)) {
+            return true;
+        }
+        debug!(
+            ?event,
+            "mode-gate: discarded {class:?} input during {:?}",
+            self.state.windows.pointer()
+        );
+        false
     }
 
     pub(crate) fn handle_ipc_command(&mut self, command: Command) {
@@ -1529,7 +1566,11 @@ impl Reactor {
     fn handle_event_traced(&mut self, event: Event) { self.handle_event_inner(event) }
 
     fn handle_event_inner(&mut self, event: Event) {
-        self.release_if_missed(&event);
+        if let Event::WindowFrameChanged(wid, ..) = &event
+            && self.state.windows.is_gripped(*wid)
+        {
+            self.release_if_missed();
+        }
         let transient_count = self.transient_focus.windows.len();
         self.observe_transient_lifecycle(&event);
         let may_make_ready = matches!(&event, Event::SpaceStateChanged(_));
@@ -1603,17 +1644,6 @@ impl Reactor {
             }
             self.transient_focus.windows.retain(|_, t| t.pid != *pid);
             event = Event::ApplicationThreadTerminated(*pid);
-        }
-        if let Event::Command(command) = &event {
-            let class = InputClass::of(command);
-            if !self.may(Initiative::UserCommand(class)) {
-                debug!(
-                    ?command,
-                    "mode-gate: discarded {class:?} during {:?}",
-                    self.state.windows.pointer()
-                );
-                return Ok(EventOutcome::no_change());
-            }
         }
         match &event {
             Event::WindowDestroyed(wid)
@@ -4644,17 +4674,12 @@ impl Reactor {
     }
 
     /// The input tap reports every release. This covers one it missed: before an observation
-    /// of the gripped window, or a command (which the mode gate refuses while a hand is on a
+    /// of the gripped window, or user input (which the mode gate refuses while a hand is on a
     /// window), is handled, a fresh read finding the button up lets go first. A modifier
     /// drag's button is captured by the tap, which always reports its real release.
-    fn release_if_missed(&mut self, event: &Event) {
-        let wid = match event {
-            Event::WindowFrameChanged(wid, ..) if self.state.windows.is_gripped(*wid) => *wid,
-            Event::Command(_) => match self.state.windows.gripped() {
-                Some(wid) => wid,
-                None => return,
-            },
-            _ => return,
+    fn release_if_missed(&mut self) {
+        let Some(wid) = self.state.windows.gripped() else {
+            return;
         };
         if self
             .state

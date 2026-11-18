@@ -517,6 +517,63 @@ mod tests {
     }
 
     #[test]
+    fn a_swipe_during_a_drag_does_nothing_and_nothing_happens_at_the_drop() {
+        let mut r = test_reactor_with_workspace_count(3);
+        let space = SpaceId::new(1);
+        r.handle_loop_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+            vec![Some(space)],
+        ));
+        let mut config = Config::default();
+        config.settings.layout.scrolling.gestures.enabled = true;
+        config.settings.gestures.haptics_enabled = false;
+        config.settings.gestures.skip_empty = false;
+        let settings = Settings::new(&config);
+        let control = Control::new(&config);
+        control.configure(settings, true, Vec::new());
+        let fingers = config.settings.layout.scrolling.gestures.fingers;
+        let context = Context::new(
+            1,
+            0,
+            space,
+            (LayoutMode::Scrolling, fingers),
+            settings,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let swipe = || {
+            super::super::Event::Gesture(Lifecycle::Workspace {
+                context: context.clone(),
+                next: true,
+                control: control.clone(),
+            })
+        };
+        let active =
+            |r: &Reactor| r.layout_manager.layout_engine.workspaces().active_workspace(space);
+        let wid = WindowId::new(1, 1);
+        let frame = CGRect::new(CGPoint::new(50.0, 50.0), CGSize::new(100.0, 100.0));
+        r.insert_test_window_state(
+            wid,
+            frame,
+            Some(crate::sys::window_server::WindowServerId::new(1)),
+            true,
+        );
+        let start = active(&r);
+        r.ensure_active_drag(wid, &frame);
+
+        r.handle_loop_event(swipe());
+        assert_eq!(active(&r), start, "a swipe mid-drag switched workspaces");
+        r.handle_loop_event(super::super::Event::PointerReleased(
+            crate::actor::drag::MouseButton::Left,
+        ));
+        assert_eq!(active(&r), start, "the swipe was replayed at the drop");
+
+        // The same swipe with the hand off runs.
+        r.handle_loop_event(swipe());
+        assert_ne!(active(&r), start);
+    }
+
+    #[test]
     fn workspace_gesture_with_one_workspace_leaves_switch_inactive() {
         for next in [true, false] {
             let settings = crate::common::config::VirtualWorkspaceSettings {
