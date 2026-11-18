@@ -233,11 +233,28 @@ remove = |model, window|
 		model
 	}
 
+## macOS replaced `from` by `to`: unless `to` is already known, `from`'s record moves to it. A
+## settled (or unknown) window keeps that; anything pending went to a dead identity, so where
+## the app has `to` is unknown. No desire moves across.
 rekey : Model, WindowId, WindowId -> Model
 rekey = |model, from, to| {
 	moved =
 		match model.windows.get(from) {
-			Ok(record) => if (model.windows.contains(to)) model else see(model, to, record.seen)
+			Ok({ seen, sync }) =>
+				if model.windows.contains(to) {
+					model
+				} else {
+					kept =
+						match sync {
+							Settled(_) => sync
+							Unknown(_) => sync
+							InFlight(_) => Unknown(last_of(sync))
+							Animating(_) => Unknown(last_of(sync))
+							Refused(_) => Unknown(last_of(sync))
+						}
+					{ ..model, windows: model.windows.insert(to, { seen, sync: kept }), touched: model.touched.append(to) }
+				}
+
 			Err(_) => model
 		}
 	remove(moved, from)
