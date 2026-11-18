@@ -13056,3 +13056,100 @@ fn a_layout_pass_during_a_drag_moves_no_window_of_a_scrolling_layout() {
         "a drag changes nothing until the drop, the viewport's frames included"
     );
 }
+
+#[test]
+fn a_tiled_window_dropped_on_another_display_is_in_only_that_displays_layout() {
+    // Found by the event-interleaving fuzzer. Two displays side by side, each with its own app's
+    // tiled windows.
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    for (pid, screen, space, count) in [(7, screen1, space1, 2), (8, screen2, space2, 3)] {
+        let infos = (1..=count)
+            .map(|i| {
+                make_window_info(
+                    CGRect::new(
+                        CGPoint::new(screen.origin.x + 100. * f64::from(i), 100.),
+                        CGSize::new(300., 200.),
+                    ),
+                    None,
+                    &format!("Window{pid}-{i}"),
+                    None,
+                )
+            })
+            .collect();
+        apps.make_app_and_settle(&mut reactor, pid, infos);
+        for idx in 1..=count {
+            let wsid = reactor.test_window_server_id(WindowId::new(pid, idx));
+            reactor.mark_test_window_visible_in_space(wsid, space);
+        }
+    }
+    apps.simulate_until_quiet(&mut reactor);
+    let wid = WindowId::new(8, 1);
+    let wsid = reactor.test_window_server_id(wid);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    let report = |apps: &mut Apps, reactor: &mut Reactor, frame: CGRect| {
+        apps.windows.get_mut(&wid).unwrap().frame = frame;
+        let last_seen = Some(apps.windows[&wid].last_seen_txid);
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            frame,
+            last_seen,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+    };
+
+    // The user grabs the window's title bar on the second display and drags it...
+    let start = apps.windows[&wid].frame;
+    reactor.handle_event(Event::PointerPressed { point: start.mid() });
+    let grabbed = CGRect::new(
+        CGPoint::new(start.origin.x - 36., start.origin.y + 22.),
+        start.size,
+    );
+    report(&mut apps, &mut reactor, grabbed);
+    assert!(reactor.user_is_dragging());
+    let moved = CGRect::new(
+        CGPoint::new(grabbed.origin.x + 138., grabbed.origin.y - 64.),
+        grabbed.size,
+    );
+    report(&mut apps, &mut reactor, moved);
+    // ...onto the first display, where the window server now reports it...
+    let dropped = CGRect::new(
+        CGPoint::new(moved.origin.x - 1000., moved.origin.y.max(0.)),
+        moved.size,
+    );
+    report(&mut apps, &mut reactor, dropped);
+    reactor.handle_event(Event::WindowServerAppeared(wsid, space1, SpaceEventKind::User));
+    // ...and lets go.
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    let requests = apps.requests();
+
+    let written: Vec<CGRect> = requests
+        .iter()
+        .filter_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => {
+                frames.iter().find(|(w, _)| *w == wid).map(|(_, frame)| *frame)
+            }
+            _ => None,
+        })
+        .collect();
+    let layouts = LayoutManager::calculate_layout(&mut reactor, None);
+    let placing: Vec<SpaceId> = layouts
+        .iter()
+        .filter(|(_, layout)| layout.iter().any(|(w, _)| *w == wid))
+        .map(|(space, _)| *space)
+        .collect();
+    assert_eq!(
+        placing,
+        vec![space1],
+        "the dropped window should be placed by the first display's layout only; it is \
+         assigned to {:?}, and rift wrote it to {written:?}",
+        reactor.assigned_space_for_window_id(wid),
+    );
+}

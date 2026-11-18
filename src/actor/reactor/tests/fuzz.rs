@@ -757,8 +757,11 @@ impl Sim {
         for (_, layout) in &layouts {
             let desired = Desired::of(layout.clone());
             for &(wid, frame) in desired.frames() {
-                if !self.live.contains(&wid) || claims(&layouts, wid) != 1 {
+                if !self.live.contains(&wid) {
                     continue;
+                }
+                if claims(&layouts, wid) != 1 {
+                    return Err(fail(format!("{wid:?} is in more than one layout")));
                 }
                 let sync = self.reactor.reconciler.sync(wid);
                 let observed = self.os_frame(wid);
@@ -996,11 +999,10 @@ fn a_refresh_after_crossing_displays_snaps_the_dragged_window_back() {
 }
 
 #[test]
-#[ignore = "known model bug, older than the reconciler: see the test body"]
 fn a_window_dropped_on_another_display_leaves_the_old_displays_layout() {
     // Found by the quiescence check, and present at checkpoint/a-before-reconciler: after a
-    // native drag onto another display the window is in both displays' layouts, both frames
-    // are written, and it ends on the old display's tile while assigned to the new display.
+    // native drag onto another display the window was in both displays' layouts, both frames
+    // were written, and it ended on the old display's tile while assigned to the new display.
     let mut sim = Sim::new(2);
     let wid = sim.pick(12);
     for step in [
