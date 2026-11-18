@@ -1,3 +1,4 @@
+mod core_geometry;
 pub mod engine;
 mod floating;
 pub(crate) mod graph;
@@ -5,6 +6,7 @@ pub mod systems;
 pub mod utils;
 pub(crate) mod workspaces;
 
+pub(crate) use core_geometry::{cg_rect, core_gaps, core_rect, tile_bsp};
 pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
     EventResponse, LayoutCommand, LayoutEngine, LayoutEvent, LayoutEventOutcome, ResolvedWindow,
