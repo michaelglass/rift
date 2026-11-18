@@ -357,9 +357,10 @@ want_from = |model, now, request, window, desired, known, sync| {
 				write({})
 			}
 
-		Settled({ acked, .. }) => if (same_as(desired, acked)) (model, Nothing) else write({})
+		# As near as an answer to this very desire would be (a terminal rounds to whole cells).
+		Settled({ acked, .. }) => if (answers(desired, acked)) (model, Nothing) else write({})
 		Animating({ target, .. }) => if (same_as(desired, target)) (model, Nothing) else write({})
-		Outside({ at, .. }) => if (same_as(desired, at)) (model, Nothing) else write({})
+		Outside({ at, .. }) => if (answers(desired, at)) (model, Nothing) else write({})
 		Unknown(_) => write({})
 	}
 }
@@ -590,8 +591,8 @@ animate_one = |model, now, request, window, desired, whose|
 					InFlight(_) | Unknown(_) => Written
 					Animating({ target, .. }) => if (same_as(target, desired)) There else NotThere
 					Refused({ wanted, .. }) => if (same_as(wanted, desired)) There else NotThere
-					Settled(_) => if (same_as(known, desired)) There else NotThere
-					Outside({ at, .. }) => if (same_as(at, desired)) There else NotThere
+					Settled(_) => if (answers(desired, known)) There else NotThere
+					Outside({ at, .. }) => if (answers(desired, at)) There else NotThere
 				}
 			match already {
 				Written => {
