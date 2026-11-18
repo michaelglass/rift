@@ -5502,51 +5502,19 @@ impl Reactor {
             return true;
         }
 
-        let order = {
-            let space_id = space.get();
-            crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
-        };
-        let candidate_u32 = candidate_wsid.as_u32();
-        let mut candidate_levels = None;
-
-        for above_u32 in order {
-            if above_u32 == candidate_u32 {
-                break;
-            }
-
-            let above_wsid = WindowServerId::new(above_u32);
-            let Some(above_wid) = self.state.windows.tracked_window_id(above_wsid) else {
-                continue;
-            };
-
-            if !self.layout_manager.layout_engine.is_window_floating(above_wid) {
-                continue;
-            }
-
-            let Some(above_state) = self.state.windows.window(above_wid) else {
-                continue;
-            };
-            let above_frame = above_state.frame_monotonic();
-            if !candidate_frame.contains_rect(above_frame) {
-                continue;
-            }
-
-            let (candidate_level, candidate_sub_level) =
-                *candidate_levels.get_or_insert_with(|| {
-                    (window_level(candidate_u32), window_sub_level(candidate_u32))
-                });
-            let above_level = window_level(above_u32);
-            let above_sub_level = window_sub_level(above_u32);
-            if candidate_level
-                .zip(above_level)
-                .is_some_and(|(candidate, above)| candidate == above)
-                && candidate_sub_level == above_sub_level
-            {
-                return false;
-            }
-        }
-
-        true
+        let order =
+            crate::sys::window_server::space_window_list_for_connection(&[space.get()], 0, false);
+        !raise_buries_a_floater(
+            candidate_wsid.as_u32(),
+            candidate_frame,
+            &order,
+            |above| {
+                let above = self.state.windows.tracked_window_id(WindowServerId::new(above))?;
+                self.layout_manager.layout_engine.is_window_floating(above).then_some(())?;
+                Some(self.state.windows.window(above)?.frame_monotonic())
+            },
+            |wsid| Some((window_level(wsid)?, window_sub_level(wsid))),
+        )
     }
 
     fn process_windows_for_app_rules(
@@ -6841,6 +6809,27 @@ fn plan_workspace_placements(
             })
             .collect()
     }
+}
+
+/// Whether raising `candidate` (at `frame`) would bury a floating window it covers entirely that
+/// is above it at the same level. `order` is the space's stacking order, front first;
+/// `floating(wsid)` the frame of the tracked floating window with that id; `levels(wsid)` its
+/// window level and sub-level, if known (asked only for windows that matter).
+fn raise_buries_a_floater<L: PartialEq + Copy>(
+    candidate: u32,
+    frame: CGRect,
+    order: &[u32],
+    floating: impl Fn(u32) -> Option<CGRect>,
+    levels: impl Fn(u32) -> Option<L>,
+) -> bool {
+    let mut candidate_levels = None;
+    order.iter().take_while(|&&above| above != candidate).any(|&above| {
+        floating(above).is_some_and(|above_frame| frame.contains_rect(above_frame))
+            && candidate_levels
+                .get_or_insert_with(|| levels(candidate))
+                .zip(levels(above))
+                .is_some_and(|(candidate, above)| candidate == above)
+    })
 }
 
 /// The workspace part of a broadcast (`Reactor::workspace_header`).

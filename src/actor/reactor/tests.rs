@@ -14214,3 +14214,25 @@ fn which_presentations_an_event_ends_and_whether_they_commit_first() {
     assert!(commits(&Event::WindowDestroyed(wid)));
     assert!(!commits(&Event::MenuOpened(1)));
 }
+
+#[test]
+fn a_raise_buries_a_floater_only_above_it_covered_entirely_at_the_same_level() {
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(500., 500.));
+    let inside = CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.));
+    let floating = |wsid| (wsid == 2).then_some(inside);
+    let same = |_| Some(0);
+    // Floater 2 above the candidate 5, inside it, same level: buried.
+    assert!(raise_buries_a_floater(5, frame, &[2, 5], floating, same));
+    // Below the candidate, it stays above nothing.
+    assert!(!raise_buries_a_floater(5, frame, &[5, 2], floating, same));
+    // At another level it stays visible.
+    assert!(!raise_buries_a_floater(5, frame, &[2, 5], floating, |w| Some(w)));
+    // Unknown levels are not the same level.
+    assert!(!raise_buries_a_floater(5, frame, &[2, 5], floating, |_| None::<
+        i32,
+    >));
+    // Not entirely covered.
+    let partly =
+        |wsid| (wsid == 2).then_some(CGRect::new(CGPoint::new(450., 0.), CGSize::new(100., 100.)));
+    assert!(!raise_buries_a_floater(5, frame, &[2, 5], partly, same));
+}
