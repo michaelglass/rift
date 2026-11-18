@@ -40,6 +40,7 @@ Event : [
 	Observe({ now : U64, request : U32, window : WindowId, frame : Rect, as_of : [AsOf(U32), Unstamped] }),
 	Tick({ now : U64, request : U32 }),
 	Forget(WindowId),
+	SentOutside({ window : WindowId, request : U32 }),
 ]
 
 Reply : [NoNews, InTransit, Acked, Refused, Foreign]
@@ -76,6 +77,10 @@ Sync : [
 	InFlight({ target : Rect, deadline : U64, queued : Waiting, request : U32, before : Before }),
 	Animating({ target : Rect, request : U32 }),
 	Refused({ wanted : Rect, got : Rect, request : U32 }),
+
+	## Rift moves the window outside the core (a gesture's camera) under `request`, which the
+	## platform reported; `at` is where the app last reported it.
+	Outside({ request : U32, at : Rect }),
 ]
 
 ## What the model has of one window: where it takes it to be, and where it stands.
@@ -187,6 +192,7 @@ last_of = |sync|
 		InFlight({ request, .. }) => Sent(request)
 		Animating({ request, .. }) => Sent(request)
 		Refused({ request, .. }) => Sent(request)
+		Outside({ request, .. }) => Sent(request)
 	}
 
 pending_of : Sync -> [Target(Rect), NoTarget]
@@ -197,6 +203,7 @@ pending_of = |sync|
 		Refused({ wanted, .. }) => Target(wanted)
 		Settled(_) => NoTarget
 		Unknown(_) => NoTarget
+		Outside(_) => NoTarget
 	}
 
 before_of : Sync -> Before
@@ -207,6 +214,7 @@ before_of = |sync|
 		Refused({ got, .. }) => AckedBefore(got)
 		Unknown(_) => UnknownBefore
 		InFlight({ before, .. }) => before
+		Outside({ at, .. }) => AckedBefore(at)
 	}
 
 ## A window's sync state changes; only a window the model knows has one.
@@ -251,6 +259,7 @@ rekey = |model, from, to| {
 							InFlight(_) => Unknown(last_of(sync))
 							Animating(_) => Unknown(last_of(sync))
 							Refused(_) => Unknown(last_of(sync))
+							Outside(_) => Unknown(last_of(sync))
 						}
 					{ ..model, windows: model.windows.insert(to, { seen, sync: kept }), touched: model.touched.append(to) }
 				}
@@ -270,7 +279,7 @@ distrust = |model, window|
 		Ok(record) =>
 			match record.sync {
 				InFlight(flight) => set(model, window, InFlight({ ..flight, before: UnknownBefore }))
-				Settled(_) | Refused(_) | Unknown(_) | Animating(_) => set(model, window, Unknown(last_of(record.sync)))
+				Settled(_) | Refused(_) | Unknown(_) | Animating(_) | Outside(_) => set(model, window, Unknown(last_of(record.sync)))
 			}
 	}
 
@@ -310,7 +319,7 @@ want = |model0, now, request, window, desired, whose|
 							(model0, sync0)
 						}
 
-					Settled(_) | Refused(_) | Unknown(_) | Animating(_) => (model0, sync0)
+					Settled(_) | Refused(_) | Unknown(_) | Animating(_) | Outside(_) => (model0, sync0)
 				}
 			match whose {
 				# Discarded, not queued: the release re-derives the window's frame.
@@ -350,6 +359,7 @@ want_from = |model, now, request, window, desired, known, sync| {
 
 		Settled({ acked, .. }) => if (same_as(desired, acked)) (model, Nothing) else write({})
 		Animating({ target, .. }) => if (same_as(desired, target)) (model, Nothing) else write({})
+		Outside({ at, .. }) => if (same_as(desired, at)) (model, Nothing) else write({})
 		Unknown(_) => write({})
 	}
 }
@@ -402,10 +412,11 @@ observe = |model, read, whose, hand| {
 							} else if stamp == latest {
 								answer(model, read, whose, latest, sync, placed)
 							} else {
-								own_frame(model, window, frame, Sent(latest), sync, placed)
+								# A stamp the core never heard of: placed by its geometry.
+								placed({})
 							}
 
-						NeverSent => own_frame(model, window, frame, NeverSent, sync, placed)
+						NeverSent => placed({})
 					}
 			}
 		}
@@ -436,18 +447,13 @@ answer = |model, read, whose, latest, sync, placed| {
 				(model, InTransit, [])
 			}
 
+		# One of Rift's frames sent outside the core: where the app has the window, the frames
+		# still coming.
+		Outside({ request, .. }) => (set(model, window, Outside({ request, at: frame })), InTransit, [])
 		# The answer to a write Rift stopped waiting for: news like any report.
 		Settled(_) | Unknown(_) | Refused(_) => placed({})
 	}
 }
-
-## A frame Rift sent outside the core (a camera's): where the app has the window.
-own_frame : Model, WindowId, Rect, Last, Sync, ({} -> (Model, Reply, List(WriteFx))) -> (Model, Reply, List(WriteFx))
-own_frame = |model, window, frame, last, sync, placed|
-	match sync {
-		Settled(_) | Unknown(_) => (set(model, window, Settled({ acked: frame, last })), InTransit, [])
-		InFlight(_) | Animating(_) | Refused(_) => placed({})
-	}
 
 ## An unstamped report, placed by its geometry.
 place : Model, WindowId, Sync, Rect, Rect, [User, Nobody] -> (Model, Reply)
@@ -455,8 +461,10 @@ place = |model, window, sync, frame, known, hand| {
 	news = |{}| {
 		reply = if (same_as(frame, known)) NoNews else Foreign
 		match (sync, reply) {
-			# A refusal stands while the window stays where the model has it.
+			# A refusal stands while the window stays where the model has it, and so do Rift's
+			# frames sent outside the core.
 			(Refused(_), NoNews) => (model, reply)
+			(Outside(_), NoNews) => (model, reply)
 			_ => (set(model, window, Settled({ acked: frame, last: last_of(sync) })), reply)
 		}
 	}
@@ -483,7 +491,7 @@ place = |model, window, sync, frame, known, hand| {
 				User => news({})
 			}
 
-		Settled(_) | Refused(_) | Unknown(_) => news({})
+		Settled(_) | Refused(_) | Unknown(_) | Outside(_) => news({})
 	}
 }
 
@@ -500,7 +508,7 @@ waiting = |model, entry|
 						NotWaiting
 					}
 
-				Settled(_) | Refused(_) | Unknown(_) | Animating(_) => NotWaiting
+				Settled(_) | Refused(_) | Unknown(_) | Animating(_) | Outside(_) => NotWaiting
 			}
 
 		Err(_) => NotWaiting
@@ -583,6 +591,7 @@ animate_one = |model, now, request, window, desired, whose|
 					Animating({ target, .. }) => if (same_as(target, desired)) There else NotThere
 					Refused({ wanted, .. }) => if (same_as(wanted, desired)) There else NotThere
 					Settled(_) => if (same_as(known, desired)) There else NotThere
+					Outside({ at, .. }) => if (same_as(at, desired)) There else NotThere
 				}
 			match already {
 				Written => {
@@ -623,7 +632,7 @@ animation_ended = |model0, now, request| {
 			|(_, record)|
 				match record.sync {
 					Animating({ request: sent, .. }) => sent == request
-					Settled(_) | Refused(_) | Unknown(_) | InFlight(_) => False
+					Settled(_) | Refused(_) | Unknown(_) | InFlight(_) | Outside(_) => False
 				},
 		).sort_with(|(a, _), (b, _)| window_order(a, b))
 	deadline = now + write_deadline_ns
@@ -635,7 +644,7 @@ animation_ended = |model0, now, request| {
 				$model = set(queued_up, window, InFlight({ target, deadline, queued: NoneWaiting, request, before: UnknownBefore }))
 			}
 
-			Settled(_) | Refused(_) | Unknown(_) | InFlight(_) => {}
+			Settled(_) | Refused(_) | Unknown(_) | InFlight(_) | Outside(_) => {}
 		}
 	}
 	$model
@@ -653,7 +662,7 @@ animation_stopped = |model, window, request|
 				InFlight({ request: sent, .. }) =>
 					if (sent == request) set(model, window, Unknown(Sent(request))) else model
 
-				Settled(_) | Refused(_) | Unknown(_) => model
+				Settled(_) | Refused(_) | Unknown(_) | Outside(_) => model
 			}
 	}
 
@@ -666,7 +675,7 @@ forget_sync = |model, window|
 			match sync {
 				Settled({ acked, .. }) => (model, AckedAt(acked))
 				Refused({ got, .. }) => (set(model, window, Settled({ acked: got, last: last_of(sync) })), AckedAt(got))
-				InFlight(_) | Animating(_) | Unknown(_) => (set(model, window, Unknown(last_of(sync))), NotAcked)
+				InFlight(_) | Animating(_) | Unknown(_) | Outside(_) => (set(model, window, Unknown(last_of(sync))), NotAcked)
 			}
 	}
 
@@ -735,6 +744,25 @@ rekey_grip = |model, from, to|
 			}
 
 		Idle => (model, [])
+	}
+
+## An outside owner took `window`: a write already sent is still waited for (only what was
+## queued behind it is dropped); anything else is forgotten.
+cede : Model, WindowId -> (Model, List(Effect))
+cede = |model, window|
+	match model.windows.get(window) {
+		Ok({ sync, .. }) =>
+			match sync {
+				InFlight(flight) =>
+					match flight.queued {
+						Waiting(_) => (set(model, window, InFlight({ ..flight, queued: NoneWaiting })), [])
+						NoneWaiting => (model, [])
+					}
+
+				Settled(_) | Unknown(_) | Animating(_) | Refused(_) | Outside(_) => forget(model, window)
+			}
+
+		Err(_) => forget(model, window)
 	}
 
 forget : Model, WindowId -> (Model, List(Effect))
@@ -918,8 +946,8 @@ decide = |model, event| {
 
 		Ceded(window) => {
 			(ungripped, fx) = ungrip_window(model, window)
-			(forgotten, more) = forget(ungripped, window)
-			(forgotten, fx.concat(more))
+			(ceded, more) = cede(ungripped, window)
+			(ceded, fx.concat(more))
 		}
 
 		Seen({ window, frame }) => {
@@ -981,6 +1009,11 @@ decide = |model, event| {
 		}
 
 		Forget(window) => forget(model, window)
+		SentOutside({ window, request }) =>
+			match model.windows.get(window) {
+				Ok({ seen, .. }) => (set(model, window, Outside({ request, at: seen })), [])
+				Err(_) => (model, [])
+			}
 	}
 }
 
@@ -1142,6 +1175,11 @@ parse_event = |words| {
 		}
 
 		17 => Forget(take_window(c).0)
+		18 => {
+			(window, c1) = take_window(c)
+			SentOutside({ window, request: take_u32(c1).0 })
+		}
+
 		_ => crash "wire: unknown event"
 	}
 }
