@@ -599,7 +599,6 @@ impl Reactor {
         stack_line_tx: stack_line::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
-        native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> (ReactorHandle, oneshot::Receiver<()>) {
         let (events_tx, events) = actor::channel();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -613,7 +612,6 @@ impl Reactor {
             one_space,
         );
         reactor.startup_ready = Some(ready_tx);
-        reactor.drag_manager.native_motion_active = native_motion_active;
         reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
         reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
@@ -664,7 +662,6 @@ impl Reactor {
                 crate::sys::event::get_mouse_state
             },
             drag_manager: managers::DragManager {
-                native_motion_active: std::sync::Arc::default(),
                 preview: None,
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
@@ -1285,7 +1282,11 @@ impl Reactor {
             Event::DragMotionPending(publisher) => {
                 let motion = publisher.take_latest();
                 let mut reactor = reactor.borrow_mut();
-                if let Some(motion) = motion {
+                // The tap publishes every mouse drag (text selection too); only a window drag
+                // follows it.
+                if let Some(motion) = motion
+                    && reactor.state.windows.drag().is_some()
+                {
                     reactor.handle_loop_event(Event::DragMotion(motion));
                 }
             }
@@ -1565,9 +1566,7 @@ impl Reactor {
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
         self.retire_presentations();
-        let held = self.state.windows.drag();
-        self.drag_manager.sync_motion_gate(held);
-        self.drag_manager.sync_preview(held);
+        self.drag_manager.sync_preview(self.state.windows.drag());
     }
 
     fn dispatch_layout_command(
