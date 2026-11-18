@@ -223,7 +223,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
 }
 
 #[test]
-fn claim_cancels_drag_animation_and_pending_geometry() {
+fn claim_cancels_drag_and_animation_and_still_waits_for_the_write_in_flight() {
     let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     // A write in flight: the pending store holds its target (the core's projection).
@@ -246,7 +246,10 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     assert!(!reactor.user_is_dragging());
-    assert_eq!(reactor.state.tx.target(wsid), None);
+    // The write already sent is still Rift's to hear back about: its target stays pending (the
+    // core's projection) until the app answers.
+    assert_eq!(reactor.state.core.pending(wid), Some(moved));
+    assert_eq!(reactor.state.tx.target(wsid), Some(moved));
     assert!(
         std::iter::from_fn(|| animation_rx.commands.try_recv().ok())
             .any(|message| matches!(message, animation::Message::Stop(ids) if ids == [wid]))
@@ -813,4 +816,33 @@ fn a_window_rekeyed_mid_write_after_a_destroy_still_reaches_its_slot() {
         actual, wanted,
         "the re-keyed window is left where the dead write found it"
     );
+}
+
+/// A window claimed while a write to it is with its app: the write is still Rift's to hear back
+/// about, so giving the window back does not send another over it.
+#[test]
+fn a_window_claimed_mid_write_keeps_its_write_and_gets_no_second_one() {
+    let (mut apps, mut reactor, space) = settled(3);
+    assert_eq!(reactor.claim_window(wid(1), OWNER, NONE), Ok(()));
+    let Some(target) = reactor.state.core.pending(wid(3)) else {
+        panic!("the claim reflows the space");
+    };
+    assert_eq!(reactor.claim_window(wid(3), OWNER, NONE), Ok(()));
+    assert!(
+        matches!(
+            reactor.state.core.sync(wid(3)),
+            Some(rift_core::Sync::InFlight { target: in_flight, .. }) if in_flight == target
+        ),
+        "the write sent before the claim is still in flight: {:?}",
+        reactor.state.core.sync(wid(3))
+    );
+    let sent_before = super::last_sent(&reactor, reactor.test_window_server_id(wid(3)));
+    assert_eq!(reactor.release_window(wid(3), OWNER), Ok(()));
+    assert_eq!(
+        super::last_sent(&reactor, reactor.test_window_server_id(wid(3))),
+        sent_before,
+        "nothing is sent over the unanswered write"
+    );
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(tiled(&mut reactor, space).len(), 2);
 }

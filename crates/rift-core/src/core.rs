@@ -55,8 +55,9 @@ pub enum Event<K: Kinds> {
     /// notification Rift accepted found it there, an app answered with it, or Rift put it there
     /// outside the reconciler (an animation, a placement it prepares).
     Seen { window: K::Window, frame: K::Frame },
-    /// An outside owner took `window` (a claim): a grip on it ends, and nothing is outstanding
-    /// (as [`Event::Forget`]); Rift keeps the window.
+    /// An outside owner took `window` (a claim): a grip on it ends, and nothing more is asked of
+    /// its app; a write already sent is still waited for (only what was queued behind it is
+    /// dropped), anything else is forgotten (as [`Event::Forget`]). Rift keeps the window.
     Ceded { window: K::Window },
     /// The model no longer sees `window`, though Rift keeps it (its accessibility identity is
     /// suspended during native fullscreen); it is seen again when it comes back.
@@ -290,7 +291,7 @@ impl<K: Kinds> RustCore<K> {
             }
             Event::Ceded { window } => {
                 let mut effects = self.ungrip_window(window);
-                effects.extend(self.forget(window));
+                effects.extend(self.cede(window));
                 effects
             }
             Event::Seen { window, frame } => vec![self.see(window, frame)],
@@ -383,6 +384,16 @@ impl<K: Kinds> RustCore<K> {
 
     /// Nothing is outstanding for `window`: the model takes it to be where the app
     /// acknowledged it, if that is known.
+    /// An outside owner took `window`: nothing more is asked of its app, but a write already
+    /// sent is still Rift's to hear back about, so it keeps its request and deadline (only what
+    /// was queued behind it is dropped). Anything else is forgotten.
+    fn cede(&mut self, window: K::Window) -> Option<Effect<K>> {
+        if self.reconciler.drop_queued(window) {
+            return None;
+        }
+        self.forget(window)
+    }
+
     fn forget(&mut self, window: K::Window) -> Option<Effect<K>> {
         let acked = self.reconciler.forget(window)?;
         let moved = self.reconciler.seen(window).is_some_and(|seen| seen != acked);
