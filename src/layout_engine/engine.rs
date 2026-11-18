@@ -1588,8 +1588,16 @@ impl LayoutEngine {
                 .active_layout()
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
             workspace.layout_system.remove_window(wid);
-            return (projected || self.floating.active_flat(workspace.space).contains(&wid))
-                .then_some(workspace.space);
+            let space = workspace.space;
+            // The assignment may already name the workspace the window is moving to (a drop or
+            // an app's move reassigns before the queued removal runs), so it leaves every other
+            // tree too: removal is from where the window is, not from where it is going.
+            for (id, workspace) in self.workspaces.workspaces.iter_mut() {
+                if id != assignment {
+                    workspace.layout_system.remove_window_and_rebalance_parent(wid);
+                }
+            }
+            return (projected || self.floating.active_flat(space).contains(&wid)).then_some(space);
         }
         let active_space = self.space_with_window(wid);
 
