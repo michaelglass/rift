@@ -1,0 +1,392 @@
+## A scrolling layout's strip (`rift_core::layout::scrolling`): columns side by side in world
+## space, each column's windows in rows sharing its height, and the camera's resting points.
+
+import Wire exposing [finished, put_float, put_list, put_rect, put_window, take, take_flag, take_float, take_list, take_rect, take_window]
+import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, solve, take_constraints]
+
+WindowId : { pid : I32, idx : U32 }
+
+Rect : { x : F64, y : F64, w : F64, h : F64 }
+
+## Words being read, and where.
+Words : { words : List(U64), at : U64 }
+
+## A value read and where the rest starts, or the words were malformed.
+Taken(a) : Try((a, Words), [Malformed])
+
+## A size an app reported, as rift parsed it: each axis finite and not negative.
+Size : { width : F64, height : F64 }
+
+## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
+## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
+Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
+
+WindowConstraints : {
+	sizing : Sizing,
+	locked_width : F64,
+	locked_height : F64,
+	max_width : F64,
+	max_height : F64,
+}
+
+AxisItem : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], weight : F64, can_grow : Bool }
+
+Widths : { ratio : F64, min_ratio : F64, max_ratio : F64, preserve_window_sizes : Bool, expand_single_column : Bool }
+
+## A window in a column: its constraints as reported, its share of the column's height.
+Row : { window : WindowId, constraints : WindowConstraints, weight : F64 }
+
+## A column with at least one window.
+Column : { id : U64, width : [Default, Proportion(F64), Exactly(F64)], first : Row, rest : List(Row) }
+
+## A strip with at least one column.
+Strip : {
+	tiling : Rect,
+	column_gap : F64,
+	row_gap : F64,
+	widths : Widths,
+	alignment : [Left, Center, Right],
+	navigation : [Anchored, Free],
+	first : Column,
+	rest : List(Column),
+}
+
+## A column in world space, and where the camera stops to show it.
+Spot : { id : U64, world_x : F64, width : F64, anchor : F64 }
+
+## A camera offset the camera may rest at, and the column it shows.
+Snap : { offset : F64, column : U64 }
+
+Placed : { first : Spot, rest : List(Spot), frames : List((WindowId, Rect)), snaps : (Snap, List(Snap)), bounds : (F64, F64) }
+
+## A column's place among the strip's, which decides its anchor.
+Position : [Only, First, Middle, Last]
+
+Scrolling := [].{
+
+	## The smallest row weight (Rust's 0.001).
+	least_weight : F64
+	least_weight = F64.from_bits(4562254508917369340)
+
+	proportional_width : F64, F64, F64 -> F64
+	proportional_width = |view, gap, ratio| max((view + gap) * ratio - gap, 1.0)
+
+	width_ratio : F64, F64, F64 -> F64
+	width_ratio = |view, gap, width| (width + gap) / max(view + gap, 1.0)
+
+	## `ratio` within the configured range (Rust's f64::clamp); a non-finite one is the smallest.
+	clamp_ratio : Widths, F64 -> F64
+	clamp_ratio = |widths, ratio| {
+		low = max(widths.min_ratio, 0.05)
+		high = max(widths.max_ratio, low)
+		if F64.is_finite(ratio) {
+			if ratio < low {
+				low
+			} else if ratio > high {
+				high
+			} else {
+				ratio
+			}
+		} else {
+			low
+		}
+	}
+
+	## The width a column asks for, before its windows' constraints.
+	requested_width : Strip, Column -> F64
+	requested_width = |strip, column| {
+		view = strip.tiling.w
+		gap = strip.column_gap
+		widths = strip.widths
+		only =
+			match strip.rest {
+				[] => True
+				[_, ..] => False
+			}
+		if widths.expand_single_column and only {
+			view
+		} else {
+			match column.width {
+				Exactly(width) => max(width, 1.0)
+				Proportion(ratio) => proportional_width(view, gap, clamp_ratio(widths, ratio))
+				Default => {
+					locked = column.first.constraints.locked_width
+					ratio =
+						if widths.preserve_window_sizes and F64.is_finite(locked) and locked > 0.0 {
+							width_ratio(view, gap, locked)
+						} else {
+							widths.ratio
+						}
+					proportional_width(view, gap, clamp_ratio(widths, ratio))
+				}
+			}
+		}
+	}
+
+	## The column's width: what it asks for, within what its windows allow.
+	column_width : Strip, Column, List((Row, WindowConstraints)) -> F64
+	column_width = |strip, column, rows| {
+		base = requested_width(strip, column)
+		bounds =
+			rows.fold(
+				{ low: 1.0, fixed: 0.0, high: NoMax, flexible: False },
+				|acc, (_, c)| {
+					high =
+						if c.max_width > 0.0 {
+							match acc.high {
+								Max(m) => Max(min(m, c.max_width))
+								NoMax => Max(c.max_width)
+							}
+						} else {
+							acc.high
+						}
+					{
+						low: max(acc.low, reported_min(c, True)),
+						fixed: max(
+							acc.fixed,
+							match fixed_for_axis(c, True) {
+								Fixed(v) => v
+								Free => 0.0
+							},
+						),
+						high,
+						flexible: acc.flexible or resizable_for_axis(c, True),
+					}
+				},
+			)
+		if bounds.flexible {
+			capped =
+				match bounds.high {
+					Max(m) => min(base, m)
+					NoMax => base
+				}
+			max(max(capped, bounds.low), bounds.fixed)
+		} else {
+			max(bounds.low, bounds.fixed)
+		}
+	}
+
+	## Where the camera stops to show a column.
+	anchor : Strip, F64, F64, Position -> F64
+	anchor = |strip, world_x, width, position| {
+		view = strip.tiling.w
+		right = world_x + width - view
+		if width >= view {
+			world_x
+		} else {
+			match position {
+				First => world_x
+				Last => right
+				Only | Middle =>
+					match strip.alignment {
+						Left => world_x
+						Center => world_x - max(view - width, 0.0) / 2.0
+						Right => right
+					}
+			}
+		}
+	}
+
+	## A column's spot, where the next one starts, and its windows' frames.
+	place_column : Strip, Column, Position, F64 -> (Spot, F64, List((WindowId, Rect)))
+	place_column = |strip, column, position, x| {
+		rows = [column.first].concat(column.rest).map(|row| (row, normalized(row.constraints)))
+		width = column_width(strip, column, rows)
+		available = max(strip.tiling.h - strip.row_gap * (rows.len() - 1).to_f64(), 0.0)
+		items =
+			rows.map(
+				|(row, c)| {
+					low = reported_min(c, False)
+					{
+						min: low,
+						fixed: fixed_for_axis(c, False),
+						max: if (c.max_height > 0.0) Max(c.max_height) else NoMax,
+						weight: max(row.weight - low, least_weight),
+						can_grow: resizable_for_axis(c, False),
+					}
+				},
+			)
+		(frames, _) =
+			List.map2(rows, solve(items, available), |pair, height| (pair, height)).fold(
+				([], strip.tiling.y),
+				|(out, y), ((row, c), height)| {
+					w0 = min(
+						max(
+							match fixed_for_axis(c, True) {
+								Fixed(v) => v
+								Free => width
+							},
+							reported_min(c, True),
+						),
+						width,
+					)
+					h0 = min(
+						max(
+							match fixed_for_axis(c, False) {
+								Fixed(v) => v
+								Free => height
+							},
+							reported_min(c, False),
+						),
+						height,
+					)
+					w = if (c.max_width > 0.0) min(w0, c.max_width) else w0
+					h = if (c.max_height > 0.0) min(h0, c.max_height) else h0
+					# As Rust's `y += height + row_gap`: the gap joins the height first.
+					(out.append((row.window, { x, y, w, h })), y + (height + strip.row_gap))
+				},
+			)
+		spot = { id: column.id, world_x: x, width, anchor: anchor(strip, x, width, position) }
+		(spot, x + width + strip.column_gap, frames)
+	}
+
+	## Where the columns and windows go, and where the camera may rest.
+	place : Strip -> Placed
+	place = |strip| {
+		first_position =
+			match strip.rest {
+				[] => Only
+				[_, ..] => First
+			}
+		(first, after_first, first_frames) = place_column(strip, strip.first, first_position, 0.0)
+		(rest, frames) =
+			match strip.rest {
+				[] => ([], first_frames)
+				[.. as middle, last] => {
+					(spots, x, gathered) =
+						middle.fold(
+							([], after_first, first_frames),
+							|(out, at, acc), column| {
+								(spot, next, placed) = place_column(strip, column, Middle, at)
+								(out.append(spot), next, acc.concat(placed))
+							},
+						)
+					(spot, _, placed) = place_column(strip, last, Last, x)
+					(spots.append(spot), gathered.concat(placed))
+				}
+			}
+		snaps = snaps_of(strip, first, rest)
+		(head, tail) = snaps
+		bounds =
+			tail.fold(
+				(head.offset, head.offset),
+				|(low, high), snap| (min(low, snap.offset), max(high, snap.offset)),
+			)
+		{ first, rest, frames, snaps, bounds }
+	}
+
+	## Anchored: each column's anchor. Free: the strip's two ends, then every column edge
+	## strictly between them.
+	snaps_of : Strip, Spot, List(Spot) -> (Snap, List(Snap))
+	snaps_of = |strip, first, rest|
+		match strip.navigation {
+			Anchored => ({ offset: first.anchor, column: first.id }, rest.map(|s| { offset: s.anchor, column: s.id }))
+			Free => {
+				view = strip.tiling.w
+				last =
+					match rest {
+						[.., spot] => spot
+						[] => first
+					}
+				left = first.world_x
+				right = last.world_x + last.width - view
+				between =
+					[first].concat(rest).fold(
+						[{ offset: right, column: last.id }],
+						|out, spot|
+							[spot.world_x, spot.world_x + spot.width - view].fold(
+								out,
+								|acc, offset| if (left < offset and offset < right) acc.append({ offset, column: spot.id }) else acc,
+							),
+					)
+				({ offset: left, column: first.id }, between)
+			}
+		}
+
+	take_row : Words -> Taken(Row)
+	take_row = |c0| {
+		(window, c1) = take_window(c0)?
+		(constraints, c2) = take_constraints(c1)?
+		(weight, c3) = take_float(c2)?
+		Ok(({ window, constraints, weight }, c3))
+	}
+
+	take_column : Words -> Taken(Column)
+	take_column = |c0| {
+		(id, c1) = take(c0)?
+		(tag, c2) = take(c1)?
+		(width, c3) =
+			match tag {
+				0 => Ok((Default, c2))
+				1 => {
+					(ratio, after) = take_float(c2)?
+					Ok((Proportion(ratio), after))
+				}
+
+				2 => {
+					(value, after) = take_float(c2)?
+					Ok((Exactly(value), after))
+				}
+
+				_ => Err(Malformed)
+			}?
+		(first, c4) = take_row(c3)?
+		(rest, c5) = take_list(c4, take_row)?
+		Ok(({ id, width, first, rest }, c5))
+	}
+
+	take_strip : Words -> Taken(Strip)
+	take_strip = |c0| {
+		(tiling, c1) = take_rect(c0)?
+		(column_gap, c2) = take_float(c1)?
+		(row_gap, c3) = take_float(c2)?
+		(ratio, c4) = take_float(c3)?
+		(min_ratio, c5) = take_float(c4)?
+		(max_ratio, c6) = take_float(c5)?
+		(preserve_window_sizes, c7) = take_flag(c6)?
+		(expand_single_column, c8) = take_flag(c7)?
+		(alignment_tag, c9) = take(c8)?
+		alignment =
+			match alignment_tag {
+				0 => Ok(Left)
+				1 => Ok(Center)
+				2 => Ok(Right)
+				_ => Err(Malformed)
+			}?
+		(navigation_tag, c10) = take(c9)?
+		navigation =
+			match navigation_tag {
+				0 => Ok(Anchored)
+				1 => Ok(Free)
+				_ => Err(Malformed)
+			}?
+		(first, c11) = take_column(c10)?
+		(rest, c12) = take_list(c11, take_column)?
+		widths = { ratio, min_ratio, max_ratio, preserve_window_sizes, expand_single_column }
+		Ok(({ tiling, column_gap, row_gap, widths, alignment, navigation, first, rest }, c12))
+	}
+
+	put_spot : List(U64), Spot -> List(U64)
+	put_spot = |words, spot| put_float(put_float(put_float(words.append(spot.id), spot.world_x), spot.width), spot.anchor)
+
+	put_snap : List(U64), Snap -> List(U64)
+	put_snap = |words, snap| put_float(words, snap.offset).append(snap.column)
+
+	put_placed : Placed -> List(U64)
+	put_placed = |placed| {
+		(head, tail) = placed.snaps
+		(low, high) = placed.bounds
+		spots = put_list(put_spot([], placed.first), placed.rest, put_spot)
+		framed = put_list(spots, placed.frames, |out, (window, frame)| put_rect(put_window(out, window), frame))
+		put_float(put_float(put_list(put_snap(framed, head), tail, put_snap), low), high)
+	}
+
+	## Where the strip `cursor` holds (after its system's tag), all of it, placed everything,
+	## as words.
+	placed_words : Words -> Try(List(U64), [Malformed])
+	placed_words = |cursor| {
+		(strip, rest) = take_strip(cursor)?
+		finished(rest)?
+		Ok(put_placed(place(strip)))
+	}
+}

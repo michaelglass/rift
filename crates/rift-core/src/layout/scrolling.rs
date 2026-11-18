@@ -329,6 +329,61 @@ impl<W: Copy, C: Copy> Strip<W, C> {
     }
 }
 
+impl<W, C> Strip<W, C> {
+    /// The same strip on other window and column ids (another platform's types).
+    pub fn map<V, D>(self, window: &impl Fn(W) -> V, column: &impl Fn(C) -> D) -> Strip<V, D> {
+        Strip {
+            tiling: self.tiling,
+            column_gap: self.column_gap,
+            row_gap: self.row_gap,
+            widths: self.widths,
+            alignment: self.alignment,
+            navigation: self.navigation,
+            first: self.first.map(window, column),
+            rest: self.rest.into_iter().map(|c| c.map(window, column)).collect(),
+        }
+    }
+}
+
+impl<W, C> Column<W, C> {
+    fn map<V, D>(self, window: &impl Fn(W) -> V, column: &impl Fn(C) -> D) -> Column<V, D> {
+        let row = |row: Row<W>| Row {
+            window: window(row.window),
+            constraints: row.constraints,
+            weight: row.weight,
+        };
+        Column {
+            id: column(self.id),
+            width: self.width,
+            first: row(self.first),
+            rest: self.rest.into_iter().map(row).collect(),
+        }
+    }
+}
+
+impl<W, C> Placed<W, C> {
+    /// The same placement on other window and column ids.
+    pub fn map<V, D>(self, window: &impl Fn(W) -> V, column: &impl Fn(C) -> D) -> Placed<V, D> {
+        let spot = |s: Spot<C>| Spot {
+            id: column(s.id),
+            world_x: s.world_x,
+            width: s.width,
+            anchor: s.anchor,
+        };
+        let snap = |s: Snap<C>| Snap {
+            offset: s.offset,
+            column: column(s.column),
+        };
+        Placed {
+            first: spot(self.first),
+            rest: self.rest.into_iter().map(spot).collect(),
+            frames: self.frames.into_iter().map(|(w, frame)| (window(w), frame)).collect(),
+            snaps: (snap(self.snaps.0), self.snaps.1.into_iter().map(snap).collect()),
+            bounds: self.bounds,
+        }
+    }
+}
+
 impl Position {
     fn first(only: bool) -> Self { if only { Self::Only } else { Self::First } }
 }

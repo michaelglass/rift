@@ -23,6 +23,7 @@ use std::ptr::NonNull;
 // Roc's runtime hooks. Roc runs on one thread (the caller's), so the counters are thread-local.
 use libmimalloc_sys::{mi_free as free, mi_malloc as malloc, mi_realloc as realloc};
 use rift_core::layout::bsp::Bsp;
+use rift_core::layout::scrolling::{Placed, Strip};
 use rift_core::layout::traditional::Traditional;
 use rift_core::plain::wire::WireError;
 use rift_core::plain::{Plain, Rect, WindowId, wire};
@@ -286,6 +287,13 @@ pub fn tile_bsp(shape: Bsp<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError>
 pub fn tile_traditional(shape: Traditional<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
     let words = tile_words(&wire::encode_traditional(shape))?;
     wire::decode_frames(&words).map_err(RocError::Unreadable)
+}
+
+/// Where a scrolling strip's columns, windows and camera go, as `Strip::place` computes them,
+/// computed by the Roc core.
+pub fn place_strip(strip: Strip<WindowId, u64>) -> Result<Placed<WindowId, u64>, RocError> {
+    let words = tile_words(&wire::encode_strip(strip))?;
+    wire::decode_placed(&words).map_err(RocError::Unreadable)
 }
 
 impl Drop for RocCore {

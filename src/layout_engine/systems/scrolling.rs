@@ -22,7 +22,7 @@ use crate::layout_engine::systems::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
-    Direction, LayoutId, ResizeOrientation, WindowDropAction, cg_rect, core_rect,
+    Direction, LayoutId, ResizeOrientation, WindowDropAction, cg_rect, core_rect, place_strip,
 };
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
@@ -467,7 +467,7 @@ impl Geometry {
             first,
             rest: columns.collect(),
         };
-        let placed = strip.place();
+        let placed = place_strip(&strip, |id: ColumnId| id.0);
         geometry.columns = std::iter::once(placed.first).chain(placed.rest).collect();
         geometry.frames = placed
             .frames
