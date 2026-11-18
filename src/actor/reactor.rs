@@ -1617,14 +1617,10 @@ impl Reactor {
             self.transient_focus.windows.retain(|_, t| t.pid != *pid);
             event = Event::ApplicationThreadTerminated(*pid);
         }
-        let restated = match &event {
-            Event::SpaceStateChanged(snapshot) => {
-                !snapshot.authoritative
-                    || self.space_revision_superseded(snapshot.revision)
-                    || (!snapshot.presentation_changed(&self.space_state)
-                        && !self.refreshes_blocked())
-            }
-            _ => false,
+        let restated = |snapshot: &ForwardedSpaceState| {
+            !snapshot.authoritative
+                || self.space_revision_superseded(snapshot.revision)
+                || (!snapshot.presentation_changed(&self.space_state) && !self.refreshes_blocked())
         };
         if let Some(cancelled) = cancels(&event, restated) {
             let windows = match cancelled {
@@ -6897,10 +6893,13 @@ enum Cancelled {
 }
 
 /// The presentations `event` ends: a window's when it goes away, an app's when it quits, all of
-/// them when the topology changes. A `restated` space snapshot (not authoritative, superseded,
-/// or presenting nothing new) is not a topology transition: cancelling then would strand a
-/// window midway through an otherwise valid animation.
-fn cancels(event: &Event, restated: bool) -> Option<Cancelled> {
+/// them when the topology changes. A space snapshot that is `restated` (not authoritative,
+/// superseded, or presenting nothing new) is not a topology transition: cancelling then would
+/// strand a window midway through an otherwise valid animation.
+fn cancels(
+    event: &Event,
+    restated: impl FnOnce(&ForwardedSpaceState) -> bool,
+) -> Option<Cancelled> {
     match event {
         Event::WindowDestroyed(wid) | Event::WindowInvalidated(wid, _) => {
             Some(Cancelled::Window(*wid))
@@ -6909,7 +6908,7 @@ fn cancels(event: &Event, restated: bool) -> Option<Cancelled> {
         Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
             Some(Cancelled::App(*pid))
         }
-        Event::SpaceStateChanged(_) if restated => None,
+        Event::SpaceStateChanged(snapshot) if restated(snapshot) => None,
         Event::MissionControlNativeEntered
         | Event::TopologyInvalidated(_)
         | Event::SpaceStateChanged(_)
