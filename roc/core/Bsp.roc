@@ -1,7 +1,7 @@
 ## A BSP layout's frames (`rift_core::layout::bsp`): every split divides its area in two along
 ## one axis, by a ratio, as far as its windows' constraints allow.
 
-import Wire exposing [take, take_flag, take_float, take_rect, take_u32, take_window]
+import Wire exposing [finished, take, take_flag, take_float, take_rect, take_u32, take_window]
 import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, min_for_axis, normalized, resizable_for_axis, solve, take_constraints, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
@@ -10,6 +10,9 @@ Rect : { x : F64, y : F64, w : F64, h : F64 }
 
 ## Words being read, and where.
 Words : { words : List(U64), at : U64 }
+
+## A value read and where the rest starts, or the words were malformed.
+Taken(a) : Try((a, Words), [Malformed])
 
 WindowConstraints : {
 	is_resizable : Bool,
@@ -147,111 +150,122 @@ Bsp := [].{
 			Root(root) => {
 				area = tiling_area(bsp.screen, bsp.gaps)
 				out = place(bsp, root, area, [])
-				match (bsp.aspect, out, root) {
-					(Aspect(ratio), [(window, frame)], Node.Leaf({ fill: Tiled, stacked: False, .. })) => {
-						(w, h) = if (frame.w > frame.h * ratio) (frame.h * ratio, frame.h) else (frame.w, frame.w / ratio)
-						[(window, { x: area.x + (area.w - w) / 2.0, y: area.y + (area.h - h) / 2.0, w, h })]
-					}
+				# A layout's only window, tiled and not stacked, is fitted to the aspect.
+				match (bsp.aspect, root) {
+					(Aspect(ratio), Node.Leaf({ fill: Tiled, stacked: False, .. })) =>
+						match out {
+							[(window, frame)] => {
+								(w, h) = if (frame.w > frame.h * ratio) (frame.h * ratio, frame.h) else (frame.w, frame.w / ratio)
+								[(window, { x: area.x + (area.w - w) / 2.0, y: area.y + (area.h - h) / 2.0, w, h })]
+							}
 
-					_ => out
+							[] | [_, _, ..] => out
+						}
+
+					(Aspect(_), Node.Leaf(_)) | (Aspect(_), Node.Split(_)) | (Free, _) => out
 				}
 			}
 		}
 
-	take_node : Words -> (Node, Words)
+	take_node : Words -> Taken(Node)
 	take_node = |c0| {
-		(tag, c1) = take(c0)
+		(tag, c1) = take(c0)?
 		match tag {
 			0 => {
-				(horizontal, c2) = take_flag(c1)
-				(bits, c3) = take_u32(c2)
+				(horizontal, c2) = take_flag(c1)?
+				(bits, c3) = take_u32(c2)?
 				ratio = F32.to_f64(F32.from_bits(bits))
-				(children_tag, c4) = take(c3)
+				(children_tag, c4) = take(c3)?
 				match children_tag {
 					0 => {
-						(child, c5) = take_node(c4)
-						(Node.Split({ horizontal, ratio, children: One(child) }), c5)
+						(child, c5) = take_node(c4)?
+						Ok((Node.Split({ horizontal, ratio, children: One(child) }), c5))
 					}
 
 					1 => {
-						(first, c5) = take_node(c4)
-						(second, c6) = take_node(c5)
-						(Node.Split({ horizontal, ratio, children: Two(first, second) }), c6)
+						(first, c5) = take_node(c4)?
+						(second, c6) = take_node(c5)?
+						Ok((Node.Split({ horizontal, ratio, children: Two(first, second) }), c6))
 					}
 
-					_ => crash "wire: unknown split children"
+					_ => Err(Malformed)
 				}
 			}
 
 			1 => {
-				(slot_tag, c2) = take(c1)
-				(slot, c3) =
-					match slot_tag {
-						0 => (Empty, c2)
-						1 => {
-							(window, after_window) = take_window(c2)
-							(flag, after_flag) = take(after_window)
-							match flag {
-								0 => (Window({ window, constraints: Unconstrained }), after_flag)
-								1 => {
-									(c, after) = take_constraints(after_flag)
-									(Window({ window, constraints: Constrained(c) }), after)
-								}
-
-								_ => crash "wire: unknown option"
-							}
-						}
-
-						_ => crash "wire: unknown slot"
-					}
-				(fill_tag, c4) = take(c3)
-				fill =
-					match fill_tag {
-						0 => Tiled
-						1 => Screen
-						2 => WithinGaps
-						_ => crash "wire: unknown fill"
-					}
-				(stacked, c5) = take_flag(c4)
-				(Node.Leaf({ slot, fill, stacked }), c5)
+				(slot, c3) = take_slot(c1)?
+				(fill, c4) = take_fill(c3)?
+				(stacked, c5) = take_flag(c4)?
+				Ok((Node.Leaf({ slot, fill, stacked }), c5))
 			}
 
-			_ => crash "wire: unknown node"
+			_ => Err(Malformed)
 		}
 	}
 
-	take_bsp : Words -> Shape
-	take_bsp = |c0| {
-		(screen, c1) = take_rect(c0)
-		(top, c2) = take_float(c1)
-		(left, c3) = take_float(c2)
-		(bottom, c4) = take_float(c3)
-		(right, c5) = take_float(c4)
-		(horizontal, c6) = take_float(c5)
-		(vertical, c7) = take_float(c6)
-		gaps = { top, left, bottom, right, horizontal, vertical }
-		(aspect_flag, c8) = take(c7)
-		(aspect, c9) =
-			match aspect_flag {
-				0 => (Free, c8)
-				1 => {
-					(ratio, after) = take_float(c8)
-					(Aspect(ratio), after)
+	take_slot : Words -> Taken(Slot)
+	take_slot = |c0| {
+		(tag, c1) = take(c0)?
+		match tag {
+			0 => Ok((Empty, c1))
+			1 => {
+				(window, c2) = take_window(c1)?
+				(constrained, c3) = take_flag(c2)?
+				if constrained {
+					(c, c4) = take_constraints(c3)?
+					Ok((Window({ window, constraints: Constrained(c) }), c4))
+				} else {
+					Ok((Window({ window, constraints: Unconstrained }), c3))
 				}
+			}
 
-				_ => crash "wire: unknown option"
-			}
-		(root_flag, c10) = take(c9)
-		root =
-			match root_flag {
-				0 => Nothing
-				1 => Root(take_node(c10).0)
-				_ => crash "wire: unknown option"
-			}
-		{ screen, gaps, aspect, root }
+			_ => Err(Malformed)
+		}
 	}
 
-	## The frames of the BSP shape `cursor` holds (after its system's tag).
-	frames_of : Words -> List((WindowId, Rect))
-	frames_of = |cursor| frames(take_bsp(cursor))
+	take_fill : Words -> Taken(Fill)
+	take_fill = |c0| {
+		(tag, c1) = take(c0)?
+		match tag {
+			0 => Ok((Tiled, c1))
+			1 => Ok((Screen, c1))
+			2 => Ok((WithinGaps, c1))
+			_ => Err(Malformed)
+		}
+	}
+
+	take_bsp : Words -> Taken(Shape)
+	take_bsp = |c0| {
+		(screen, c1) = take_rect(c0)?
+		(top, c2) = take_float(c1)?
+		(left, c3) = take_float(c2)?
+		(bottom, c4) = take_float(c3)?
+		(right, c5) = take_float(c4)?
+		(horizontal, c6) = take_float(c5)?
+		(vertical, c7) = take_float(c6)?
+		gaps = { top, left, bottom, right, horizontal, vertical }
+		(has_aspect, c8) = take_flag(c7)?
+		(aspect, c9) =
+			if has_aspect {
+				(ratio, after) = take_float(c8)?
+				(Aspect(ratio), after)
+			} else {
+				(Free, c8)
+			}
+		(has_root, c10) = take_flag(c9)?
+		if has_root {
+			(root, c11) = take_node(c10)?
+			Ok(({ screen, gaps, aspect, root: Root(root) }, c11))
+		} else {
+			Ok(({ screen, gaps, aspect, root: Nothing }, c10))
+		}
+	}
+
+	## The frames of the BSP shape `cursor` holds (after its system's tag), all of it.
+	frames_of : Words -> Try(List((WindowId, Rect)), [Malformed])
+	frames_of = |cursor| {
+		(shape, rest) = take_bsp(cursor)?
+		finished(rest)?
+		Ok(frames(shape))
+	}
 }

@@ -202,12 +202,14 @@ impl std::fmt::Debug for Shadowed {
 #[cfg(feature = "roc-core")]
 impl Shadowed {
     fn step(&mut self, event: Event) -> Vec<Effect> {
-        let decided: Vec<Effect> = self
-            .roc
-            .step(event.clone().translate(&self.plain))
-            .into_iter()
-            .map(|effect| effect.translate(&self.plain))
-            .collect();
+        // The Roc core rejecting an event rift encoded, or answering in words rift cannot read,
+        // is a bug in one of the two codecs: rift stops and says which.
+        let decided: Vec<Effect> = match self.roc.step(event.clone().translate(&self.plain)) {
+            Ok(effects) => {
+                effects.into_iter().map(|effect| effect.translate(&self.plain)).collect()
+            }
+            Err(error) => panic!("the Roc core gave no answer ({error:?}) to {event:?}"),
+        };
         let shadow = self.rust.step(event.clone());
         assert_eq!(
             decided, shadow,

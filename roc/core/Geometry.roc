@@ -10,6 +10,9 @@ Rect : { x : F64, y : F64, w : F64, h : F64 }
 ## Words being read, and where.
 Words : { words : List(U64), at : U64 }
 
+## A value read and where the rest starts, or the words were malformed.
+Taken(a) : Try((a, Words), [Malformed])
+
 WindowConstraints : {
 	is_resizable : Bool,
 	locked_width : F64,
@@ -208,11 +211,11 @@ Geometry := [].{
 			low: combine(acc.low, child.min),
 			fixed: match (acc.fixed, child.fixed) {
 				(Fixed(a), Fixed(b)) => Fixed(combine(a, b))
-				_ => Free
+				(Fixed(_), Free) | (Free, Fixed(_)) | (Free, Free) => Free
 			},
 			high: match (acc.high, child.max) {
 				(Max(a), Max(b)) => Max(combine(a, b))
-				_ => NoMax
+				(Max(_), NoMax) | (NoMax, Max(_)) | (NoMax, NoMax) => NoMax
 			},
 			can_grow: acc.can_grow or child.can_grow,
 			focused: max(
@@ -364,7 +367,7 @@ Geometry := [].{
 								(out.append({ ..placed, state: Set(assigned) }), max(remaining - assigned, 0.0))
 							}
 
-							_ => (out.append(placed), remaining)
+							(Growing, Free, True) | (Growing, Fixed(_), _) | (Set(_), _, _) => (out.append(placed), remaining)
 						},
 				)
 			grown = grow(settled, after_minima)
@@ -484,15 +487,15 @@ Geometry := [].{
 		settled
 	}
 
-	take_constraints : Words -> (WindowConstraints, Words)
+	take_constraints : Words -> Taken(WindowConstraints)
 	take_constraints = |c0| {
-		(is_resizable, c1) = take_flag(c0)
-		(locked_width, c2) = take_float(c1)
-		(locked_height, c3) = take_float(c2)
-		(min_width, c4) = take_float(c3)
-		(min_height, c5) = take_float(c4)
-		(max_width, c6) = take_float(c5)
-		(max_height, c7) = take_float(c6)
-		({ is_resizable, locked_width, locked_height, min_width, min_height, max_width, max_height }, c7)
+		(is_resizable, c1) = take_flag(c0)?
+		(locked_width, c2) = take_float(c1)?
+		(locked_height, c3) = take_float(c2)?
+		(min_width, c4) = take_float(c3)?
+		(min_height, c5) = take_float(c4)?
+		(max_width, c6) = take_float(c5)?
+		(max_height, c7) = take_float(c6)?
+		Ok(({ is_resizable, locked_width, locked_height, min_width, min_height, max_width, max_height }, c7))
 	}
 }

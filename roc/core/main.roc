@@ -4,7 +4,7 @@
 ## holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import Wire exposing [put_list, put_rect, put_window, take, take_list, take_rect, take_u32, take_window]
+import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
 import Bsp
 import Traditional
 
@@ -14,6 +14,9 @@ Rect : { x : F64, y : F64, w : F64, h : F64 }
 
 ## Words being read, and where.
 Words : { words : List(U64), at : U64 }
+
+## A value read and where the rest starts, or the words were malformed.
+Taken(a) : Try((a, Words), [Malformed])
 
 Desire : { window : WindowId, frame : Rect, request : U32 }
 
@@ -107,18 +110,24 @@ Model : {
 
 core = { init, step, tile }
 
-## Layout geometry: a shape's words (its layout system's tag first: 0 BSP, 1 traditional) in,
-## its frames' words out.
+## Layout geometry: a shape's words (its layout system's tag first: 0 BSP, 1 traditional) in;
+## out, a 0 and the frames' words, or a 1: the words were not a shape.
 tile : List(U64) -> List(U64)
-tile = |words| {
-	(system, cursor) = take({ words, at: 0 })
-	frames =
-		match system {
-			0 => Bsp.frames_of(cursor)
-			1 => Traditional.frames_of(cursor)
-			_ => crash "wire: unknown layout system"
-		}
-	put_list([], frames, |out, (window, frame)| put_rect(put_window(out, window), frame))
+tile = |words|
+	match shape_frames(words) {
+		Ok(frames) => [0].concat(put_list([], frames, |out, (window, frame)| put_rect(put_window(out, window), frame)))
+		# Not a shape: one explicit rejection.
+		Err(Malformed) => [1]
+	}
+
+shape_frames : List(U64) -> Try(List((WindowId, Rect)), [Malformed])
+shape_frames = |words| {
+	(system, cursor) = take({ words, at: 0 })?
+	match system {
+		0 => Bsp.frames_of(cursor)
+		1 => Traditional.frames_of(cursor)
+		_ => Err(Malformed)
+	}
 }
 
 init : {} -> Model
@@ -369,24 +378,16 @@ follow : Model, U32, WindowId, Rect -> (Model, WriteFx)
 follow = |model, request, window, frame|
 	(set(model, window, Settled({ acked: frame, last: Sent(request) })), { window, frame, request })
 
-## What waited behind a write that has been answered or given up on.
-release : Model, U64, U32, WindowId, Waiting, [Rift, User] -> (Model, List(WriteFx))
-release = |model, now, request, window, queued, whose|
-	match queued {
-		NoneWaiting => (model, [])
-		Waiting(next) =>
-			match whose {
-				User => (note(model, window, Discarded), [])
-				Rift => {
-					before =
-						match model.windows.get(window) {
-							Ok(record) => before_of(record.sync)
-							Err(_) => UnknownBefore
-						}
-					(sent, fx) = send(model, now, request, window, next, before)
-					(sent, [fx])
-				}
-			}
+## The desire `next` waited behind a write just answered or given up on, the window left
+## `after`: it goes out now, unless the user's hand is on the window (then it is discarded).
+release : Model, U64, U32, WindowId, Rect, [Rift, User], Sync -> (Model, List(WriteFx))
+release = |model, now, request, window, next, whose, after|
+	match whose {
+		User => (note(model, window, Discarded), [])
+		Rift => {
+			(sent, fx) = send(model, now, request, window, next, before_of(after))
+			(sent, [fx])
+		}
 	}
 
 Read : { now : U64, request : U32, window : WindowId, frame : Rect, as_of : [AsOf(U32), Unstamped] }
@@ -431,13 +432,18 @@ answer = |model, read, whose, latest, sync, placed| {
 	frame = read.frame
 	match sync {
 		InFlight({ target, queued, .. }) => {
-			(answered, reply) =
+			(after, reply) =
 				if answers(target, frame) {
-					(set(model, window, Settled({ acked: frame, last: Sent(latest) })), Acked)
+					(Settled({ acked: frame, last: Sent(latest) }), Acked)
 				} else {
-					(set(model, window, Refused({ wanted: target, got: frame, request: latest })), Refused)
+					(Refused({ wanted: target, got: frame, request: latest }), Refused)
 				}
-			(released, writes) = release(answered, read.now, read.request, window, queued, whose)
+			answered = set(model, window, after)
+			(released, writes) =
+				match queued {
+					Waiting(next) => release(answered, read.now, read.request, window, next, whose, after)
+					NoneWaiting => (answered, [])
+				}
 			(released, reply, writes)
 		}
 
@@ -524,27 +530,29 @@ expire = |model0, now, request, grip| {
 	var $released = []
 	var $going = True
 	while $going {
-		match $model.deadlines.first() {
-			Ok(entry) =>
-				if entry.deadline <= now {
-					popped = { ..$model, deadlines: $model.deadlines.drop_first(1) }
-					match waiting(popped, entry) {
-						NotWaiting => {
-							$model = popped
-						}
-
-						Waits({ target, queued, request: sent, before }) => {
-							(timed_out, _) = time_out(popped, entry.window, target, sent, before)
-							(after, writes) = release(timed_out, now, request, entry.window, queued, owner(grip, entry.window))
-							$model = after
-							$released = $released.concat(writes)
-						}
+		match $model.deadlines {
+			[entry, .. as later] if entry.deadline <= now => {
+				popped = { ..$model, deadlines: later }
+				match waiting(popped, entry) {
+					NotWaiting => {
+						$model = popped
 					}
-				} else {
-					$going = False
-				}
 
-			Err(_) => {
+					Waits({ target, queued, request: sent, before }) => {
+						(timed_out, after) = time_out(popped, entry.window, target, sent, before)
+						(released, writes) =
+							match queued {
+								Waiting(next) => release(timed_out, now, request, entry.window, next, owner(grip, entry.window), after)
+								NoneWaiting => (timed_out, [])
+							}
+						$model = released
+						$released = $released.concat(writes)
+					}
+				}
+			}
+
+			# The earliest deadline is still ahead, or there are none.
+			[_, ..] | [] => {
 				$going = False
 			}
 		}
@@ -559,8 +567,12 @@ next_deadline = |model0| {
 	var $found = Disarmed
 	var $going = True
 	while $going {
-		match $model.deadlines.first() {
-			Ok(entry) =>
+		match $model.deadlines {
+			[] => {
+				$going = False
+			}
+
+			[entry, .. as later] =>
 				match waiting($model, entry) {
 					Waits(_) => {
 						$found = Armed(entry.deadline)
@@ -568,13 +580,9 @@ next_deadline = |model0| {
 					}
 
 					NotWaiting => {
-						$model = { ..$model, deadlines: $model.deadlines.drop_first(1) }
+						$model = { ..$model, deadlines: later }
 					}
 				}
-
-			Err(_) => {
-				$going = False
-			}
 		}
 	}
 	($model, $found)
@@ -1024,167 +1032,214 @@ decide = |model, event| {
 ## Consecutive repeats collapse (as Rust's `Vec::dedup`).
 dedup : List(WindowId) -> List(WindowId)
 dedup = |windows| {
-	var $kept = []
-	for window in windows {
-		match $kept.last() {
-			Ok(previous) =>
-				if previous != window {
-					$kept = $kept.append(window)
-				}
-
-			Err(_) => {
-				$kept = $kept.append(window)
-			}
-		}
-	}
-	$kept
+	(kept, _) =
+		windows.fold(
+			([], Nothing),
+			|(out, last), window|
+				match last {
+					Last(previous) if previous == window => (out, last)
+					Last(_) | Nothing => (out.append(window), Last(window))
+				},
+		)
+	kept
 }
 
 ## Decisions first, then the notes taken while deciding, then the pending frames that changed,
 ## then the timer if its deadline moved.
 step : Model, List(U64) -> { model : Model, effects : List(U64) }
-step = |model0, words| {
-	(decided, decisions) = decide({ ..model0, notes: [], touched: [] }, parse_event(words))
-	pending =
-		dedup(decided.touched).map(
-			|window| {
-				target =
-					match decided.windows.get(window) {
-						Ok(record) => pending_of(record.sync)
-						Err(_) => NoTarget
-					}
-				Pending({ window, target })
-			},
-		)
-	(pruned, next) = next_deadline(decided)
-	timer = if (next == pruned.armed) [] else [Timer(next)]
-	effects = decisions.concat(pruned.notes).concat(pending).concat(timer)
-	{ model: { ..pruned, armed: next, notes: [], touched: [] }, effects: put_effects(effects) }
-}
+step = |model0, words|
+	match parse_event(words) {
+		Ok(event) => {
+			(decided, decisions) = decide({ ..model0, notes: [], touched: [] }, event)
+			pending =
+				dedup(decided.touched).map(
+					|window| {
+						target =
+							match decided.windows.get(window) {
+								Ok(record) => pending_of(record.sync)
+								# Removed this step: nothing is pending for it.
+								Err(_) => NoTarget
+							}
+						Pending({ window, target })
+					},
+				)
+			(pruned, next) = next_deadline(decided)
+			timer = if (next == pruned.armed) [] else [Timer(next)]
+			effects = decisions.concat(pruned.notes).concat(pending).concat(timer)
+			{ model: { ..pruned, armed: next, notes: [], touched: [] }, effects: [0].concat(put_effects(effects)) }
+		}
+
+		# Not an event: one explicit rejection, the model untouched.
+		Err(Malformed) => { model: model0, effects: [1] }
+	}
 
 # ---------------------------------------------------------------------------------------------
 # The wire: words in, words out (the layout is `rift_core::plain::wire`'s).
 
-take_desire : Words -> (Desire, Words)
+take_desire : Words -> Taken(Desire)
 take_desire = |cursor| {
-	(window, c1) = take_window(cursor)
-	(frame, c2) = take_rect(c1)
-	(request, c3) = take_u32(c2)
-	({ window, frame, request }, c3)
+	(window, c1) = take_window(cursor)?
+	(frame, c2) = take_rect(c1)?
+	(request, c3) = take_u32(c2)?
+	Ok(({ window, frame, request }, c3))
 }
 
-button_of : U64 -> Button
-button_of = |word|
+take_button : Words -> Taken(Button)
+take_button = |cursor| {
+	(word, rest) = take(cursor)?
 	match word {
-		0 => Left
-		1 => Right
-		_ => crash "wire: unknown button"
+		0 => Ok((Left, rest))
+		1 => Ok((Right, rest))
+		_ => Err(Malformed)
 	}
+}
 
-parse_event : List(U64) -> Event
+## The event `words` hold, all of them: anything else is `Malformed`.
+parse_event : List(U64) -> Try(Event, [Malformed])
 parse_event = |words| {
-	(tag, c) = take({ words, at: 0 })
+	(event, rest) = take_event({ words, at: 0 })?
+	finished(rest)?
+	Ok(event)
+}
+
+take_event : Words -> Taken(Event)
+take_event = |c0| {
+	(tag, c) = take(c0)?
 	match tag {
 		0 => {
-			(flag, c1) = take(c)
-			match flag {
-				0 => Press({ on: OnNothing, button: button_of(take(c1).0) })
-				1 => {
-					(window, c2) = take_window(c1)
-					Press({ on: OnWindow(window), button: button_of(take(c2).0) })
-				}
-
-				_ => crash "wire: unknown option"
+			(flag, c1) = take_flag(c)?
+			if flag {
+				(window, c2) = take_window(c1)?
+				(button, c3) = take_button(c2)?
+				Ok((Press({ on: OnWindow(window), button }), c3))
+			} else {
+				(button, c2) = take_button(c1)?
+				Ok((Press({ on: OnNothing, button }), c2))
 			}
 		}
 
-		1 => Drag(take_window(c).0)
-		2 =>
-			match take(c).0 {
-				0 => Release(ButtonUp(Left))
-				1 => Release(ButtonUp(Right))
-				2 => Release(Missed)
-				_ => crash "wire: unknown release"
-			}
+		1 => {
+			(window, c1) = take_window(c)?
+			Ok((Drag(window), c1))
+		}
 
-		3 => LetGo
-		4 => Gone(take_window(c).0)
+		2 => {
+			(word, c1) = take(c)?
+			match word {
+				0 => Ok((Release(ButtonUp(Left)), c1))
+				1 => Ok((Release(ButtonUp(Right)), c1))
+				2 => Ok((Release(Missed), c1))
+				_ => Err(Malformed)
+			}
+		}
+
+		3 => Ok((LetGo, c))
+		4 => {
+			(window, c1) = take_window(c)?
+			Ok((Gone(window), c1))
+		}
+
 		5 => {
-			(from, c1) = take_window(c)
-			Rekeyed({ from, to: take_window(c1).0 })
+			(from, c1) = take_window(c)?
+			(to, c2) = take_window(c1)?
+			Ok((Rekeyed({ from, to }), c2))
 		}
 
 		6 => {
-			(window, c1) = take_window(c)
-			Seen({ window, frame: take_rect(c1).0 })
+			(window, c1) = take_window(c)?
+			(frame, c2) = take_rect(c1)?
+			Ok((Seen({ window, frame }), c2))
 		}
 
-		7 => Ceded(take_window(c).0)
-		8 => Unseen(take_window(c).0)
-		9 => Distrust(take_list(c, take_window).0)
+		7 => {
+			(window, c1) = take_window(c)?
+			Ok((Ceded(window), c1))
+		}
+
+		8 => {
+			(window, c1) = take_window(c)?
+			Ok((Unseen(window), c1))
+		}
+
+		9 => {
+			(windows, c1) = take_list(c, take_window)?
+			Ok((Distrust(windows), c1))
+		}
+
 		10 => {
-			(now, c1) = take(c)
-			(how, c2) = take(c1)
-			desires = take_list(c2, take_desire).0
+			(now, c1) = take(c)?
+			(how, c2) = take(c1)?
+			(desires, c3) = take_list(c2, take_desire)?
 			match how {
-				0 => Arrange({ now, want: Arrange, desires })
-				1 => Arrange({ now, want: ArrangePositions, desires })
-				_ => crash "wire: unknown want"
+				0 => Ok((Arrange({ now, want: Arrange, desires }), c3))
+				1 => Ok((Arrange({ now, want: ArrangePositions, desires }), c3))
+				_ => Err(Malformed)
 			}
 		}
 
 		11 => {
-			(now, c1) = take(c)
-			Animate({ now, desires: take_list(c1, take_desire).0 })
+			(now, c1) = take(c)?
+			(desires, c2) = take_list(c1, take_desire)?
+			Ok((Animate({ now, desires }), c2))
 		}
 
 		12 => {
-			(now, c1) = take(c)
-			AnimationEnded({ now, request: take_u32(c1).0 })
+			(now, c1) = take(c)?
+			(request, c2) = take_u32(c1)?
+			Ok((AnimationEnded({ now, request }), c2))
 		}
 
 		13 => {
-			(window, c1) = take_window(c)
-			(request, c2) = take_u32(c1)
-			(flag, c3) = take(c2)
-			match flag {
-				0 => AnimationStopped({ window, request, at: NotPublished })
-				1 => AnimationStopped({ window, request, at: StoppedAt(take_rect(c3).0) })
-				_ => crash "wire: unknown option"
+			(window, c1) = take_window(c)?
+			(request, c2) = take_u32(c1)?
+			(published, c3) = take_flag(c2)?
+			if published {
+				(frame, c4) = take_rect(c3)?
+				Ok((AnimationStopped({ window, request, at: StoppedAt(frame) }), c4))
+			} else {
+				Ok((AnimationStopped({ window, request, at: NotPublished }), c3))
 			}
 		}
 
 		14 => {
-			(request, c1) = take_u32(c)
-			(window, c2) = take_window(c1)
-			Follow({ request, window, frame: take_rect(c2).0 })
+			(request, c1) = take_u32(c)?
+			(window, c2) = take_window(c1)?
+			(frame, c3) = take_rect(c2)?
+			Ok((Follow({ request, window, frame }), c3))
 		}
 
 		15 => {
-			(now, c1) = take(c)
-			(request, c2) = take_u32(c1)
-			(window, c3) = take_window(c2)
-			(frame, c4) = take_rect(c3)
-			(flag, c5) = take(c4)
-			match flag {
-				0 => Observe({ now, request, window, frame, as_of: Unstamped })
-				1 => Observe({ now, request, window, frame, as_of: AsOf(take_u32(c5).0) })
-				_ => crash "wire: unknown option"
+			(now, c1) = take(c)?
+			(request, c2) = take_u32(c1)?
+			(window, c3) = take_window(c2)?
+			(frame, c4) = take_rect(c3)?
+			(stamped, c5) = take_flag(c4)?
+			if stamped {
+				(as_of, c6) = take_u32(c5)?
+				Ok((Observe({ now, request, window, frame, as_of: AsOf(as_of) }), c6))
+			} else {
+				Ok((Observe({ now, request, window, frame, as_of: Unstamped }), c5))
 			}
 		}
 
 		16 => {
-			(now, c1) = take(c)
-			Tick({ now, request: take_u32(c1).0 })
+			(now, c1) = take(c)?
+			(request, c2) = take_u32(c1)?
+			Ok((Tick({ now, request }), c2))
 		}
 
-		17 => Forget(take_window(c).0)
+		17 => {
+			(window, c1) = take_window(c)?
+			Ok((Forget(window), c1))
+		}
+
 		18 => {
-			(window, c1) = take_window(c)
-			SentOutside({ window, request: take_u32(c1).0 })
+			(window, c1) = take_window(c)?
+			(request, c2) = take_u32(c1)?
+			Ok((SentOutside({ window, request }), c2))
 		}
 
-		_ => crash "wire: unknown event"
+		_ => Err(Malformed)
 	}
 }
 

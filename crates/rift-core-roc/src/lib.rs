@@ -24,6 +24,7 @@ use std::ptr::NonNull;
 use libmimalloc_sys::{mi_free as free, mi_malloc as malloc, mi_realloc as realloc};
 use rift_core::layout::bsp::Bsp;
 use rift_core::layout::traditional::Traditional;
+use rift_core::plain::wire::WireError;
 use rift_core::plain::{Plain, Rect, WindowId, wire};
 use rift_core::{Effect, Event};
 
@@ -218,54 +219,73 @@ impl Default for RocCore {
     }
 }
 
+/// Why the Roc core gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RocError {
+    /// The Roc core rejected the words it was handed: they were not an event (or a shape).
+    Rejected,
+    /// The Roc core answered with words this side cannot read.
+    Unreadable(WireError),
+}
+
+/// The words after Roc's verdict word: 0 and an answer, or 1, a rejection.
+fn answer(words: &[u64]) -> Result<&[u64], RocError> {
+    match words.split_first() {
+        Some((0, answer)) => Ok(answer),
+        Some((1, [])) => Err(RocError::Rejected),
+        Some((&word, _)) => Err(RocError::Unreadable(WireError::Unknown { at: 0, word })),
+        None => Err(RocError::Unreadable(WireError::Truncated)),
+    }
+}
+
 impl RocCore {
     /// One step on words: an event's words in, the effect list's words out (valid until the
-    /// next step).
-    pub fn step_words(&mut self, event: &[u64]) -> &[u64] {
+    /// next step), or why there are none.
+    pub fn step_words(&mut self, event: &[u64]) -> Result<&[u64], RocError> {
         let list = self.input.holding(event, &self.host);
         let stepped = unsafe { abi::roc_step(self.model, list) };
         self.model = stepped.model;
         self.effects.clear();
         self.effects.extend_from_slice(stepped.effects.as_slice());
         unsafe { stepped.effects.decref(&self.host) };
-        &self.effects
+        answer(&self.effects)
     }
 
-    /// One step, as `RustCore::step`. The Roc app only ever writes effects the wire can read:
-    /// a word list it cannot is a bug in one of the two codecs, so it panics.
-    pub fn step(&mut self, event: Event<Plain>) -> Vec<Effect<Plain>> {
+    /// One step, as `RustCore::step`.
+    pub fn step(&mut self, event: Event<Plain>) -> Result<Vec<Effect<Plain>>, RocError> {
         let mut words = std::mem::take(&mut self.words);
         wire::encode_event_into(&mut words, event);
-        self.step_words(&words);
+        let effects = self
+            .step_words(&words)
+            .and_then(|words| wire::decode_effects(words).map_err(RocError::Unreadable));
         self.words = words;
-        wire::decode_effects(&self.effects)
-            .unwrap_or_else(|error| panic!("roc core effects: {error:?}"))
+        effects
     }
 }
 
 /// Layout geometry on words: a shape's words (its layout system's tag first) in, its frames'
-/// words out. Pure: no model.
-pub fn tile_words(shape: &[u64]) -> Vec<u64> {
+/// words out, or why there are none. Pure: no model.
+pub fn tile_words(shape: &[u64]) -> Result<Vec<u64>, RocError> {
     let host = host();
     // Roc takes ownership of the shape's list and releases it.
     let shape = unsafe { abi::RocListWith::from_slice(shape, &host) };
     let frames = unsafe { abi::roc_tile(shape) };
-    let words = frames.as_slice().to_vec();
+    let words = answer(frames.as_slice()).map(<[u64]>::to_vec);
     unsafe { frames.decref(&host) };
     words
 }
 
 /// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core.
-pub fn tile_bsp(shape: Bsp<WindowId>) -> Vec<(WindowId, Rect)> {
-    let words = tile_words(&wire::encode_bsp(shape));
-    wire::decode_frames(&words).unwrap_or_else(|error| panic!("roc core frames: {error:?}"))
+pub fn tile_bsp(shape: Bsp<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
+    let words = tile_words(&wire::encode_bsp(shape))?;
+    wire::decode_frames(&words).map_err(RocError::Unreadable)
 }
 
 /// A traditional layout's frames, as `Traditional::frames` computes them, computed by the Roc
 /// core.
-pub fn tile_traditional(shape: Traditional<WindowId>) -> Vec<(WindowId, Rect)> {
-    let words = tile_words(&wire::encode_traditional(shape));
-    wire::decode_frames(&words).unwrap_or_else(|error| panic!("roc core frames: {error:?}"))
+pub fn tile_traditional(shape: Traditional<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
+    let words = tile_words(&wire::encode_traditional(shape))?;
+    wire::decode_frames(&words).map_err(RocError::Unreadable)
 }
 
 impl Drop for RocCore {
