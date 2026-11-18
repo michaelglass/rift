@@ -62,6 +62,9 @@ timing = ["dep:tracing-timing"]
 experimental = ["disable-axuielement-destroyed"]
 custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
+# The reactor's decisions come from the Roc core (crates/rift-core-roc, needs the pinned Roc
+# nightly); a Rust core shadows it and asserts the same effects at every step.
+roc-core = ["dep:rift-core-roc"]
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
@@ -197,6 +200,7 @@ embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
 rift-client = { path = "crates/rift-client" }
 rift-core = { path = "crates/rift-core" }
+rift-core-roc = { path = "crates/rift-core-roc", optional = true }
 rift-protocol = { path = "crates/rift-protocol" }
 multitouch = "0.3.2"
 
