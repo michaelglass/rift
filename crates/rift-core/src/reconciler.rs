@@ -721,11 +721,24 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
-    /// Something outside the reconciler (an animation, a topology change, a failed send) took
-    /// `window`'s frame: nothing is outstanding, and the app has it where the model has it.
-    pub fn forget(&mut self, window: K::Window, known: K::Frame) {
-        if self.syncs.contains_key(&window) {
-            self.set(window, Sync::Settled { acked: known });
+    /// Something outside the reconciler (a topology change, a claim, a failed send, a gesture)
+    /// took `window`'s frame: nothing is outstanding. What the app last acknowledged still
+    /// stands (a refusal's `got`); a write or an animation it may or may not have applied
+    /// leaves where it has the window unknown, never at a desire that was dropped. Returns the
+    /// acknowledged frame, which the model takes the window to be at.
+    pub fn forget(&mut self, window: K::Window) -> Option<K::Frame> {
+        let next = match self.sync(window)? {
+            Sync::Settled { acked } => return Some(acked),
+            Sync::Refused { got, .. } => Sync::Settled { acked: got },
+            Sync::InFlight { .. } | Sync::Animating { .. } | Sync::Unknown => Sync::Unknown,
+        };
+        self.set(window, next);
+        match next {
+            Sync::Settled { acked } => Some(acked),
+            Sync::InFlight { .. }
+            | Sync::Refused { .. }
+            | Sync::Animating { .. }
+            | Sync::Unknown => None,
         }
     }
 }
@@ -1151,6 +1164,25 @@ mod tests {
         // The superseded animation's end does not touch the write in flight.
         reconciler.animation_ended(T0, OLD);
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+    }
+
+    #[test]
+    fn forgetting_keeps_only_what_the_app_acknowledged() {
+        // A write in flight with a desire queued behind it: neither may have landed.
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
+        assert_eq!(reconciler.forget(window()), None);
+        assert_eq!(sync(&reconciler), Sync::Unknown);
+        // So the next desire goes out, even for the dropped one's frame.
+        assert_eq!(sent(want(&mut reconciler, T0, at(20.), at(20.))), at(20.));
+        // A refusal: the app acknowledged `got`.
+        _ = reconciler.answer(T0, OLD, Some(R), window(), at(15.), Owner::Rift);
+        assert!(matches!(sync(&reconciler), Sync::Refused { .. }));
+        assert_eq!(reconciler.forget(window()), Some(at(15.)));
+        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(15.) });
+        // Settled stays settled.
+        assert_eq!(reconciler.forget(window()), Some(at(15.)));
     }
 
     #[test]

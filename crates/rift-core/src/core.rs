@@ -599,12 +599,13 @@ impl<K: Kinds> RustCore<K> {
                 let released = self.reconciler.expire(now, request, lookup);
                 released.into_iter().flat_map(|write| self.written(write)).collect()
             }
-            Event::Forget { window } => {
-                if let Some(&known) = self.seen.get(&window) {
-                    self.reconciler.forget(window, known);
+            Event::Forget { window } => match self.reconciler.forget(window) {
+                // The model takes the window to be where the app acknowledged it.
+                Some(acked) if self.seen.get(&window).is_some_and(|&seen| seen != acked) => {
+                    vec![self.see(window, acked)]
                 }
-                vec![]
-            }
+                Some(_) | None => vec![],
+            },
             Event::Gate { initiative } => {
                 vec![Effect::Gate {
                     initiative,
