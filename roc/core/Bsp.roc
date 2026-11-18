@@ -2,7 +2,7 @@
 ## one axis, by a ratio, as far as its windows' constraints allow.
 
 import Wire exposing [finished, take, take_flag, take_float, take_rect, take_u32, take_window]
-import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, min_for_axis, normalized, resizable_for_axis, solve, take_constraints, tiling_area]
+import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, normalized, reported_min, resizable_for_axis, solve, take_constraints, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -14,12 +14,17 @@ Words : { words : List(U64), at : U64 }
 ## A value read and where the rest starts, or the words were malformed.
 Taken(a) : Try((a, Words), [Malformed])
 
+## A size an app reported, as rift parsed it: each axis finite and not negative.
+Size : { width : F64, height : F64 }
+
+## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
+## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
+Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
+
 WindowConstraints : {
-	is_resizable : Bool,
+	sizing : Sizing,
 	locked_width : F64,
 	locked_height : F64,
-	min_width : F64,
-	min_height : F64,
 	max_width : F64,
 	max_height : F64,
 }
@@ -60,7 +65,7 @@ Bsp := [].{
 				c = normalized(raw)
 				high = max_for_axis(c, horizontal)
 				{
-					min: min_for_axis(c, horizontal),
+					min: reported_min(c, horizontal),
 					fixed: fixed_for_axis(c, horizontal),
 					max: if (high > 0.0) Max(high) else NoMax,
 					can_grow: resizable_for_axis(c, horizontal),
@@ -90,8 +95,8 @@ Bsp := [].{
 				Fixed(v) => v
 				Free => value
 			}
-		desired_w0 = max(or_else(fixed_for_axis(c, True), target.w), min_for_axis(c, True))
-		desired_h0 = max(or_else(fixed_for_axis(c, False), target.h), min_for_axis(c, False))
+		desired_w0 = max(or_else(fixed_for_axis(c, True), target.w), reported_min(c, True))
+		desired_h0 = max(or_else(fixed_for_axis(c, False), target.h), reported_min(c, False))
 		desired_w = if (max_for_axis(c, True) > 0.0) min(desired_w0, max_for_axis(c, True)) else desired_w0
 		desired_h = if (max_for_axis(c, False) > 0.0) min(desired_h0, max_for_axis(c, False)) else desired_h0
 		{ ..target, w: max(min(desired_w, target.w), 0.0), h: max(min(desired_h, target.h), 0.0) }

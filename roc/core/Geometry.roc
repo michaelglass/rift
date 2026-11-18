@@ -1,7 +1,7 @@
 ## Layout geometry every system shares (`rift_core::layout` and `layout::axis`), bit for bit
 ## with the Rust: the float helpers are Rust's (`f64::round`, `max`, `min`, `sum`), not Roc's.
 
-import Wire exposing [take_flag, take_float]
+import Wire exposing [take, take_float]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -13,12 +13,17 @@ Words : { words : List(U64), at : U64 }
 ## A value read and where the rest starts, or the words were malformed.
 Taken(a) : Try((a, Words), [Malformed])
 
+## A size an app reported, as rift parsed it: each axis finite and not negative.
+Size : { width : F64, height : F64 }
+
+## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
+## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
+Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
+
 WindowConstraints : {
-	is_resizable : Bool,
+	sizing : Sizing,
 	locked_width : F64,
 	locked_height : F64,
-	min_width : F64,
-	min_height : F64,
 	max_width : F64,
 	max_height : F64,
 }
@@ -127,25 +132,42 @@ Geometry := [].{
 	normalized : WindowConstraints -> WindowConstraints
 	normalized = |c| {
 		clean = |v| if (F64.is_finite(v)) max(v, 0.0) else 0.0
-		min_width = clean(c.min_width)
-		min_height = clean(c.min_height)
+		low = reported_size(c.sizing)
 		max_width0 = clean(c.max_width)
 		max_height0 = clean(c.max_height)
-		max_width = if (max_width0 > 0.0 and max_width0 < min_width) min_width else max_width0
-		max_height = if (max_height0 > 0.0 and max_height0 < min_height) min_height else max_height0
+		max_width = if (max_width0 > 0.0 and max_width0 < low.width) low.width else max_width0
+		max_height = if (max_height0 > 0.0 and max_height0 < low.height) low.height else max_height0
 		{
-			is_resizable: c.is_resizable,
+			sizing: c.sizing,
 			locked_width: clean(c.locked_width),
 			locked_height: clean(c.locked_height),
-			min_width,
-			min_height,
 			max_width,
 			max_height,
 		}
 	}
 
-	min_for_axis : WindowConstraints, Bool -> F64
-	min_for_axis = |c, horizontal| if (horizontal) c.min_width else c.min_height
+	## The minimum the window reports, advisory or not.
+	reported_size : Sizing -> Size
+	reported_size = |sizing|
+		match sizing {
+			Fixed(size) | Resizable(size) | ResizableAtLeastMin(size) => size
+		}
+
+	## The window's reported minimum on an axis, advisory or not.
+	reported_min : WindowConstraints, Bool -> F64
+	reported_min = |c, horizontal| {
+		size = reported_size(c.sizing)
+		if (horizontal) size.width else size.height
+	}
+
+	## The minimum traditional tiling holds a window to: a resizable window's advisory minimum
+	## counts only under respect_min_size.
+	tiled_min : WindowConstraints, Bool -> F64
+	tiled_min = |c, horizontal|
+		match c.sizing {
+			Fixed(_) | ResizableAtLeastMin(_) => reported_min(c, horizontal)
+			Resizable(_) => 0.0
+		}
 
 	max_for_axis : WindowConstraints, Bool -> F64
 	max_for_axis = |c, horizontal| if (horizontal) c.max_width else c.max_height
@@ -153,14 +175,15 @@ Geometry := [].{
 	fixed_for_axis : WindowConstraints, Bool -> [Fixed(F64), Free]
 	fixed_for_axis = |c, horizontal| {
 		locked = if (horizontal) c.locked_width else c.locked_height
-		low = min_for_axis(c, horizontal)
+		low = reported_min(c, horizontal)
 		high = max_for_axis(c, horizontal)
 		if low > 0.0 and high > 0.0 and (low - high).abs() <= epsilon {
 			Fixed(high)
-		} else if !c.is_resizable {
-			if (locked > 0.0) Fixed(locked) else Free
 		} else {
-			Free
+			match c.sizing {
+				Fixed(_) => if (locked > 0.0) Fixed(locked) else Free
+				Resizable(_) | ResizableAtLeastMin(_) => Free
+			}
 		}
 	}
 
@@ -489,13 +512,38 @@ Geometry := [].{
 
 	take_constraints : Words -> Taken(WindowConstraints)
 	take_constraints = |c0| {
-		(is_resizable, c1) = take_flag(c0)?
-		(locked_width, c2) = take_float(c1)?
-		(locked_height, c3) = take_float(c2)?
-		(min_width, c4) = take_float(c3)?
-		(min_height, c5) = take_float(c4)?
-		(max_width, c6) = take_float(c5)?
-		(max_height, c7) = take_float(c6)?
-		Ok(({ is_resizable, locked_width, locked_height, min_width, min_height, max_width, max_height }, c7))
+		(tag, c1) = take(c0)?
+		(size, c2) = take_size(c1)?
+		sizing =
+			match tag {
+				0 => Ok(Fixed(size))
+				1 => Ok(Resizable(size))
+				2 => Ok(ResizableAtLeastMin(size))
+				_ => Err(Malformed)
+			}?
+		(locked_width, c3) = take_float(c2)?
+		(locked_height, c4) = take_float(c3)?
+		(max_width, c5) = take_float(c4)?
+		(max_height, c6) = take_float(c5)?
+		Ok(({ sizing, locked_width, locked_height, max_width, max_height }, c6))
+	}
+
+	## A size as rift parsed it: an axis that is not finite, or negative, is malformed.
+	take_size : Words -> Taken(Size)
+	take_size = |c0| {
+		(width, c1) = take_axis(c0)?
+		(height, c2) = take_axis(c1)?
+		Ok(({ width, height }, c2))
+	}
+
+	take_axis : Words -> Taken(F64)
+	take_axis = |c0| {
+		(value, c1) = take_float(c0)?
+		if F64.is_finite(value) and value >= 0.0 {
+			# As Rust's Size::reported: -0 is 0.
+			Ok((max(value, 0.0), c1))
+		} else {
+			Err(Malformed)
+		}
 	}
 }

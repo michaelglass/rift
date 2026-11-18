@@ -52,7 +52,7 @@ fn constraints(rng: &mut Rng) -> WindowConstraints {
     let locked_height = maybe(rng, 1000.);
     let min = Size::reported(maybe(rng, 900.), maybe(rng, 700.));
     let mut c = WindowConstraints {
-        sizing: Sizing::new(is_resizable, false, min),
+        sizing: Sizing::new(is_resizable, rng.chance(50), min),
         locked_width,
         locked_height,
         max_width: maybe(rng, 1800.),

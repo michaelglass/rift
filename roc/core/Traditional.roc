@@ -3,7 +3,7 @@
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
 import Wire exposing [finished, take, take_flag, take_float, take_list, take_rect, take_u32, take_window]
-import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, min_for_axis, normalized, round_rect, solve, take_constraints, tiling_area]
+import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, take_constraints, tiled_min, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -15,12 +15,17 @@ Words : { words : List(U64), at : U64 }
 ## A value read and where the rest starts, or the words were malformed.
 Taken(a) : Try((a, Words), [Malformed])
 
+## A size an app reported, as rift parsed it: each axis finite and not negative.
+Size : { width : F64, height : F64 }
+
+## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
+## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
+Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
+
 WindowConstraints : {
-	is_resizable : Bool,
+	sizing : Sizing,
 	locked_width : F64,
 	locked_height : F64,
-	min_width : F64,
-	min_height : F64,
 	max_width : F64,
 	max_height : F64,
 }
@@ -100,37 +105,40 @@ Traditional := [].{
 			{ ..rect, x: if (line.left) rect.x + reserve else rect.x, w: rect.w - reserve }
 		}
 
-	## A leaf's constraints along one axis: a resizable window's bounds are not honoured when
-	## splitting, only a fixed length is.
+	## A leaf's constraints along one axis: a resizable window keeps a locked axis and, under
+	## respect_min_size, its minimum; a fixed window keeps its locked length.
 	leaf_summary : WindowConstraints, Bool -> Summary
 	leaf_summary = |raw, horizontal| {
 		c = normalized(raw)
-		low = min_for_axis(c, horizontal)
+		low = tiled_min(c, horizontal)
 		high = if (max_for_axis(c, horizontal) > 0.0) Max(max_for_axis(c, horizontal)) else NoMax
-		if c.is_resizable {
-			match fixed_for_axis(c, horizontal) {
-				Fixed(fixed) => { min: low, fixed: Fixed(fixed), max: Max(fixed), can_grow: False }
-				Free => { min: 0.0, fixed: Free, max: high, can_grow: True }
-			}
-		} else {
-			fixed =
+		match c.sizing {
+			Resizable(_) | ResizableAtLeastMin(_) =>
 				match fixed_for_axis(c, horizontal) {
-					Fixed(v) => if (v > 0.0) Fixed(v) else Free
-					Free => Free
+					Fixed(fixed) => { min: fixed, fixed: Fixed(fixed), max: Max(fixed), can_grow: False }
+					Free => { min: low, fixed: Free, max: high, can_grow: True }
 				}
-			match fixed {
-				Fixed(v) =>
-					{
-						min: low,
-						fixed,
-						max: match high {
-							Max(m) => Max(m)
-							NoMax => Max(v)
-						},
-						can_grow: False,
-					}
 
-				Free => { min: low, fixed, max: high, can_grow: True }
+			Fixed(_) => {
+				fixed =
+					match fixed_for_axis(c, horizontal) {
+						Fixed(v) => if (v > 0.0) Fixed(v) else Free
+						Free => Free
+					}
+				match fixed {
+					Fixed(v) =>
+						{
+							min: low,
+							fixed,
+							max: match high {
+								Max(m) => Max(m)
+								NoMax => Max(v)
+							},
+							can_grow: False,
+						}
+
+					Free => { min: low, fixed, max: high, can_grow: True }
+				}
 			}
 		}
 	}

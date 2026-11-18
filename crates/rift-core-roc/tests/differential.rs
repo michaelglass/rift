@@ -114,3 +114,37 @@ fn words_that_are_not_an_event_or_a_shape_are_rejected_and_change_nothing() {
         "Roc allocations left live"
     );
 }
+
+#[test]
+fn a_minimum_the_core_could_not_hold_is_rejected_by_the_roc_core_too() {
+    use rift_core::layout::bsp::{Bsp, Fill, Node, Slot};
+    use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
+    let window = rift_core::plain::WindowId { pid: 7, idx: 1 };
+    let shape = Bsp {
+        screen: rift_core::plain::Rect { x: 0., y: 0., w: 800., h: 600. },
+        gaps: Gaps::default(),
+        root: Node::Leaf {
+            slot: Slot::Window {
+                window,
+                constraints: Some(WindowConstraints {
+                    sizing: Sizing::new(true, false, Size::reported(300., 120.)),
+                    ..Default::default()
+                }),
+            },
+            fill: Fill::Tiled,
+            stacked: false,
+        },
+        aspect: None,
+    };
+    let words = wire::encode_bsp(shape);
+    assert!(tile_words(&words).is_ok());
+    let width = words.iter().position(|&w| w == 300f64.to_bits()).unwrap();
+    for bad in [-1f64, f64::NAN, f64::INFINITY] {
+        let mut garbled = words.clone();
+        garbled[width] = bad.to_bits();
+        assert_eq!(tile_words(&garbled), Err(RocError::Rejected), "{bad}");
+    }
+    let mut garbled = words;
+    garbled[width - 1] = 7;
+    assert_eq!(tile_words(&garbled), Err(RocError::Rejected));
+}
