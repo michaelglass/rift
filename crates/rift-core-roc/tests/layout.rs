@@ -464,10 +464,28 @@ fn tile_timing() {
     let trad: Vec<Vec<u64>> =
         (0..200_000).map(|_| wire::encode_traditional(tshape(&mut rng))).collect();
     let strips: Vec<Vec<u64>> = (0..200_000).map(|_| wire::encode_strip(strip(&mut rng))).collect();
+    let floating: Vec<Vec<u64>> = (0..200_000)
+        .map(|_| {
+            let screen = Rect {
+                x: 0.,
+                y: 0.,
+                w: rng.length(400., 3000.),
+                h: rng.length(300., 2000.),
+            };
+            let windows = (0..1 + rng.below(6))
+                .map(|_| Newcomer {
+                    constraints: constraints(&mut rng),
+                    seen: Seen::Unseen,
+                })
+                .collect();
+            wire::encode_floating(Floating { screen, spread: rng.chance(50) }, windows)
+        })
+        .collect();
     for (name, shapes) in [
         ("bsp", &bsp),
         ("traditional", &trad),
         ("scrolling", &strips),
+        ("floating", &floating),
     ] {
         let mut best = std::time::Duration::MAX;
         for _ in 0..5 {
