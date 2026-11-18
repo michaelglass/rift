@@ -20,7 +20,9 @@ pub use crate::core::{Desire, Effect, Event, Plan, RustCore};
 pub use crate::pointer::{
     Button, Holder, Initiative, InputClass, Owner, Pointer, Release, Ungrip, may,
 };
-pub use crate::reconciler::{Answer, Note, Reconciler, Reply, Sync, Verdict, Want, Write};
+pub use crate::reconciler::{
+    Answer, Note, Reconciler, Reply, Sent, Stamp, Sync, Verdict, Want, Write,
+};
 
 /// The platform's types, and the little geometry and time the core needs of them.
 pub trait Kinds: Copy + Debug + PartialEq + 'static {
