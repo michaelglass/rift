@@ -226,7 +226,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
     // A write in flight: the pending store holds its target (the core's projection).
     let moved = CGRect::new(CGPoint::new(frame.origin.x + 30.0, frame.origin.y), frame.size);
     reactor.place_window(wid, moved);
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(moved));
+    assert_eq!(reactor.state.tx.target(wsid), Some(moved));
     reactor.start_modifier_drag(
         wid,
         crate::actor::drag::DragSource {
@@ -243,7 +243,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
 
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     assert!(!reactor.user_is_dragging());
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.state.tx.target(wsid), None);
     assert!(
         std::iter::from_fn(|| animation_rx.commands.try_recv().ok())
             .any(|message| matches!(message, animation::Message::Stop(ids) if ids == [wid]))

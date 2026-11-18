@@ -659,8 +659,7 @@ impl Reactor {
         };
         let (mut presentation, frames) = system.presentation(layout)?;
         let previous = self.presentations.remove(&space);
-        let request =
-            previous.as_ref().map_or_else(|| self.transaction_manager.mint(), |p| p.request);
+        let request = previous.as_ref().map_or_else(|| self.state.tx.next_id(), |p| p.request);
         let previous = previous.and_then(|p| p.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
@@ -731,11 +730,15 @@ impl Reactor {
                 self.send_arranged(write);
             }
         } else {
+            // A gesture's camera has no target: nothing is pending, but its frames go out
+            // under the request.
             for window in &windows {
                 self.state.forget(window.wid);
+                if let Some(wsid) = window.wsid {
+                    self.state.tx.sent(wsid, request);
+                }
             }
         }
-        self.transaction_manager.record(request, windows.iter().filter_map(|w| w.wsid));
         if !animate {
             presentation.finish();
         }
@@ -1095,7 +1098,7 @@ impl AnimationManager {
             anim.mark_handled(dragged);
         }
 
-        let request = reactor.transaction_manager.mint();
+        let request = reactor.state.tx.next_id();
         let mut hidden = Vec::new();
         let mut desires = Vec::new();
         for &(wid, target_frame) in layout {
@@ -1129,8 +1132,6 @@ impl AnimationManager {
         }
         for (wid, from, to, request) in animated.animations {
             any_frame_changed = true;
-            let server_id = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id);
-            reactor.transaction_manager.record(request, server_id);
             trace!(?wid, ?from, ?to, "Animating visible window");
             let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 continue;

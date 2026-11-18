@@ -33,6 +33,9 @@ impl WindowTxStore {
         self.records.entry(id).or_default().txid = txid;
     }
 
+    /// The frame Rift has pending for `id` (the core's, projected).
+    pub fn target(&self, id: WindowServerId) -> Option<CGRect> { self.get(&id)?.target }
+
     pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> {
         self.records.get(id).map(|entry| *entry)
     }

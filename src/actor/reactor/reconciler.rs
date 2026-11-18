@@ -340,16 +340,7 @@ impl Reactor {
         self.state.want(request, window, desired, want)
     }
 
-    /// Records a write's request as the latest sent to its window, for the app protocol
-    /// (`TransactionManager`).
-    fn record(&self, write: &Write) {
-        let server_id =
-            self.state.windows.window(write.window()).and_then(|state| state.info.sys_id);
-        self.transaction_manager.record(write.request(), server_id);
-    }
-
     fn send_one(&mut self, write: Write, handle: AppThreadHandle) {
-        self.record(&write);
         if let Err(error) = handle.send(Request::set_window_frame(
             write.window(),
             write.frame(),
@@ -377,7 +368,7 @@ impl Reactor {
             return;
         };
         let handle = app.handle.clone();
-        let request = self.transaction_manager.mint();
+        let request = self.state.tx.next_id();
         match self.arrange_one(window, frame, Want::Arrange, request) {
             Verdict::Send(write) => self.send_one(write, handle),
             Verdict::Queued | Verdict::Nothing => {}
@@ -412,7 +403,6 @@ impl Reactor {
         if !self.may_write(write.window()) {
             return;
         }
-        self.record(&write);
         if let Some(app) = self.app_manager.apps.get(&write.window().pid) {
             app.handle.send_interactive_frame(
                 write.window(),
@@ -427,7 +417,7 @@ impl Reactor {
     /// Stops waiting for writes whose apps did not answer in time, and sends what waited
     /// behind them.
     pub(super) fn expire_writes(&mut self) {
-        let request = self.transaction_manager.mint();
+        let request = self.state.tx.next_id();
         let queued = self.state.expire(request);
         for write in queued {
             self.send_arranged(write);
@@ -444,7 +434,7 @@ impl Reactor {
             request,
             positions,
             frames,
-            targets,
+            targets: _,
         }: Batch,
     ) {
         let Some(app) = self.app_manager.apps.get(&pid) else {
@@ -455,7 +445,6 @@ impl Reactor {
             return;
         };
         let handle = app.handle.with_scrolling_bounds(bounds);
-        self.transaction_manager.record(request, targets.iter().map(|&(wsid, _)| wsid));
         let requests = [
             (!positions.is_empty()).then(|| (frames_of(positions), FrameMode::Position)),
             (!frames.is_empty()).then(|| (frames_of(frames), FrameMode::Full)),
@@ -487,8 +476,7 @@ impl Reactor {
             .map(|&(window, frame)| {
                 let constrained = bounds.is_some() && self.in_scrolling_bounds(window, space);
                 let key = (window.pid, constrained);
-                let request =
-                    *batches.entry(key).or_insert_with(|| self.transaction_manager.mint());
+                let request = *batches.entry(key).or_insert_with(|| self.state.tx.next_id());
                 keys.insert(request, key);
                 rift_core::Desire { window, frame, request }
             })
@@ -533,6 +521,12 @@ pub(crate) struct Animated {
 /// The grip: the core decides, the window store's slot is its projection. These are the only
 /// ways the slot changes, each a core step whose effects are applied here.
 impl RiftState {
+    fn sent(&self, write: &Write) {
+        if let Some(server_id) = self.server_id(write.window()) {
+            self.tx.sent(server_id, write.request());
+        }
+    }
+
     fn server_id(&self, window: WindowId) -> Option<WindowServerId> {
         self.windows.window(window).and_then(|state| state.info.sys_id)
     }
@@ -561,6 +555,18 @@ impl RiftState {
                 Effect::Unpending { window } => {
                     if let Some(server_id) = self.server_id(window) {
                         self.tx.clear_target(&server_id);
+                    }
+                }
+                // The latest request sent each window, which the app actors read.
+                Effect::Write(ref write) => self.sent(write),
+                Effect::Plan(ref plan) => {
+                    for write in plan.positions.iter().chain(&plan.frames) {
+                        self.sent(write);
+                    }
+                }
+                Effect::Animate { window, request, .. } => {
+                    if let Some(server_id) = self.server_id(window) {
+                        self.tx.sent(server_id, request);
                     }
                 }
                 Effect::Seen { window, frame } => {

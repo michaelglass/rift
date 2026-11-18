@@ -116,7 +116,6 @@ pub struct WindowServerAppearedObservations {
 
 pub fn handle_window_server_destroyed(
     state: &mut RiftState,
-    transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
     payload: WindowServerLifecyclePayload,
     observations: WindowServerDestroyedObservations,
 ) -> anyhow::Result<EventOutcome> {
@@ -157,7 +156,6 @@ pub fn handle_window_server_destroyed(
             crate::model::window_store::NativeDeparture::Closed(wid) => {
                 outcome.absorb(window::handle_window_destroyed(
                     state,
-                    transactions,
                     window::WindowDestroyedPayload { window: wid },
                 ));
             }

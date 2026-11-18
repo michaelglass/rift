@@ -211,7 +211,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(target),
         "inventory must not feed a transient Rift-owned frame back into model geometry"
     );
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(target));
+    assert_eq!(reactor.state.tx.target(wsid), Some(target));
     assert_eq!(
         reactor.layout_update_count, layout_updates,
         "a passive inventory refresh must not schedule another arrange"
@@ -228,7 +228,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         "after inventory geometry becomes authoritative, arrange must restore the tiled frame"
     );
     assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
+        reactor.state.tx.target(wsid),
         Some(frame),
         "the authoritative inventory change must trigger a corrective frame transaction"
     );
@@ -1611,7 +1611,6 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     // can belong to a real desktop window with a different space or suitability.
     let outcome = topology_workflow::handle_window_server_destroyed(
         &mut reactor.state,
-        &reactor.transaction_manager,
         topology_workflow::WindowServerLifecyclePayload {
             window_server_id: wsid,
             space: space1,
@@ -1854,10 +1853,7 @@ fn matching_rift_frame_clears_pending_target() {
         frame.size,
     );
     reactor.place_window(wid, target_frame);
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(target_frame)
-    );
+    assert_eq!(reactor.state.tx.target(wsid), Some(target_frame));
     let txid = last_sent(&reactor, wsid);
 
     reactor.handle_event(Event::WindowFrameChanged(
@@ -1868,7 +1864,7 @@ fn matching_rift_frame_clears_pending_target() {
     ));
 
     assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
+        reactor.state.tx.target(wsid),
         None,
         "a confirmed Rift frame must clear the pending target"
     );
@@ -1897,10 +1893,7 @@ fn matching_rift_frame_clears_pending_target() {
         ))
         .unwrap();
     assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(accepted));
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(adjusted_target)
-    );
+    assert_eq!(reactor.state.tx.target(wsid), Some(adjusted_target));
     assert_eq!(
         reactor.state.core.sync(wid),
         Some(super::reconciler::Sync::Refused {
@@ -1927,7 +1920,7 @@ fn matching_rift_frame_clears_pending_target() {
         Some(txid),
         Requested(false),
     ));
-    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.state.tx.target(wsid), None);
     // Where the user put it is where the app has it, until their drag ends (then unknown).
     assert_eq!(
         reactor.state.core.sync(wid),
@@ -2181,7 +2174,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     // duplicate minimize edges, and events for unknown windows.
     reactor.place_window(wid, at(40.0));
     // An id that is not the write in flight.
-    let other = reactor.transaction_manager.store.next_id();
+    let other = reactor.state.tx.next_id();
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
     for (case, (event, checked)) in [
         (moved(wid, at(60.0), Some(other), false), true),
@@ -3468,7 +3461,7 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
     assert!(reactor.assign_test_window_to_workspace(space, wid, workspaces[0]));
     let _ = apps.requests();
     assert!(reactor.update_layout_or_warn(false, true, None));
-    let hidden_target = reactor.transaction_manager.get_target_frame(wsid).unwrap();
+    let hidden_target = reactor.state.tx.target(wsid).unwrap();
     let txid = last_sent(&reactor, wsid);
     let _ = apps.requests();
     let clamped = CGRect::new(
@@ -3881,7 +3874,6 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     }
     let outcome = topology_workflow::handle_window_server_destroyed(
         &mut reactor.state,
-        &reactor.transaction_manager,
         topology_workflow::WindowServerLifecyclePayload {
             window_server_id: wsid,
             space,
@@ -6895,8 +6887,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         },
     );
     for retired in retired {
-        let outcome =
-            window_workflow::apply_window_retirement(&reactor.transaction_manager, retired);
+        let outcome = window_workflow::apply_window_retirement(&reactor.state.tx, retired);
         reactor.apply_event_outcome(outcome);
     }
     assert!(reactor.state.windows.record(window).is_none());
@@ -7940,7 +7931,6 @@ fn authoritative_destruction_removes_window_server_backed_state() {
 
     let outcome = window_workflow::handle_window_destroyed(
         &mut reactor.state,
-        &reactor.transaction_manager,
         window_workflow::WindowDestroyedPayload { window: wid },
     );
     reactor.apply_event_outcome(outcome);
@@ -10607,7 +10597,6 @@ fn fullscreen_exit_waits_for_ax_identity_without_losing_workspace() {
     window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
     let outcome = window_workflow::handle_window_destroyed(
         &mut reactor.state,
-        &reactor.transaction_manager,
         window_workflow::WindowDestroyedPayload { window },
     );
     reactor.apply_event_outcome(outcome);
@@ -12485,7 +12474,6 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
             if early == 1 || early >= 6 {
                 let outcome = topology_workflow::handle_window_server_destroyed(
                     &mut reactor.state,
-                    &reactor.transaction_manager,
                     topology_workflow::WindowServerLifecyclePayload {
                         window_server_id: wsid,
                         space,
@@ -13712,11 +13700,7 @@ fn pend(reactor: &mut Reactor, wid: WindowId, target: CGRect) {
     reactor.state.distrust(vec![wid]);
     reactor.place_window(wid, target);
     let wsid = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id).unwrap();
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(target),
-        "pending"
-    );
+    assert_eq!(reactor.state.tx.target(wsid), Some(target), "pending");
 }
 
 /// The request Rift last sent the window (what the app's answers name).

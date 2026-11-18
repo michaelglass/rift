@@ -573,7 +573,6 @@ pub struct Reactor {
     recording_manager: managers::RecordingManager,
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
-    transaction_manager: transaction_manager::TransactionManager,
     reread: reconciler::Reread,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
@@ -701,9 +700,6 @@ impl Reactor {
                 last_layout_modes_by_space: HashMap::default(),
                 _window_notify_tx: window_notify_tx,
             },
-            transaction_manager: transaction_manager::TransactionManager::new(
-                window_tx_store.clone(),
-            ),
             reread: Default::default(),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
@@ -1964,7 +1960,6 @@ impl Reactor {
 
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
-                    &self.transaction_manager,
                     window_workflow::WindowDestroyedPayload { window: wid },
                 );
                 outcome.focused_window = raised_window;
@@ -1982,7 +1977,6 @@ impl Reactor {
                 self.state.windows.restore_window_from_native_fullscreen(wid);
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
-                    &self.transaction_manager,
                     window_workflow::WindowDestroyedPayload { window: wid },
                 );
                 outcome.focused_window = raised_window;
@@ -2046,7 +2040,6 @@ impl Reactor {
                 };
                 return topology_workflow::handle_window_server_destroyed(
                     &mut self.state,
-                    &self.transaction_manager,
                     topology_workflow::WindowServerLifecyclePayload {
                         window_server_id: wsid,
                         space: sid,
@@ -2217,7 +2210,7 @@ impl Reactor {
                 let Some(frame) = session.interactive_frame() else {
                     return Ok(EventOutcome::no_change());
                 };
-                let request = self.transaction_manager.mint();
+                let request = self.state.tx.next_id();
                 let write = self.state.follow(request, window, frame);
                 self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
@@ -4441,7 +4434,7 @@ impl Reactor {
         let gripped = self.state.windows.is_gripped(wid);
         let answered = match kind {
             ReportKind::Reply(seen) => {
-                let request = self.transaction_manager.mint();
+                let request = self.state.tx.next_id();
                 self.state.answer(request, seen, wid, new_frame)
             }
             ReportKind::Unprompted => reconciler::Reply::Late,
@@ -4823,10 +4816,7 @@ impl Reactor {
         };
         let mut outcome = EventOutcome::default();
         for window in retired {
-            outcome.absorb(window_workflow::apply_window_retirement(
-                &self.transaction_manager,
-                window,
-            ));
+            outcome.absorb(window_workflow::apply_window_retirement(&self.state.tx, window));
         }
         for (wid, info) in &new {
             if let Some(id) = info.sys_id
@@ -4843,7 +4833,6 @@ impl Reactor {
         let (new_windows, process_outcome) = window_discovery::process_window_list(
             &mut self.state,
             &mut self.layout_manager,
-            &self.transaction_manager,
             observed_windows,
         );
         outcome.absorb(process_outcome);
@@ -5061,7 +5050,7 @@ impl Reactor {
                 .then(|| self.assigned_space_for_window_id(wid))
                 .flatten();
         }
-        let target_frame = self.transaction_manager.get_target_frame(wsid)?;
+        let target_frame = self.state.tx.target(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         let target_space = self
             .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
