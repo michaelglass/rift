@@ -2,7 +2,7 @@
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_core::layout::traditional::{self, StackLine};
-use rift_core::layout::{Gaps, Size, bsp};
+use rift_core::layout::{Gaps, Size, bsp, scrolling};
 use rift_core::plain::Rect;
 
 use crate::actor::app::WindowId;
@@ -76,6 +76,29 @@ pub(crate) fn tile_bsp(shape: &bsp::Bsp<WindowId>) -> Vec<(WindowId, CGRect)> {
         }),
     );
     frames.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
+}
+
+/// Where a scrolling strip's columns, windows and camera go (column ids `C`, numbered for the
+/// Roc core by `number`).
+pub(crate) fn place_strip<C: Copy + PartialEq + std::fmt::Debug>(
+    strip: &scrolling::Strip<WindowId, C>,
+    number: impl Fn(C) -> u64,
+) -> scrolling::Placed<WindowId, C> {
+    let placed = strip.place();
+    #[cfg(feature = "roc-core")]
+    {
+        let roc = rift_core_roc::place_strip(strip.clone().map(&to_plain, &number)).unwrap_or_else(
+            |error| panic!("the Roc core placed nothing ({error:?}) for {strip:?}"),
+        );
+        assert_eq!(
+            roc,
+            placed.clone().map(&to_plain, &number),
+            "the Roc core and its Rust shadow place {strip:?} differently"
+        );
+    }
+    #[cfg(not(feature = "roc-core"))]
+    let _ = number;
+    placed
 }
 
 #[cfg(feature = "roc-core")]

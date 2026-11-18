@@ -1,9 +1,11 @@
-//! The Roc core's layout geometry against the Rust core's, on random BSP and traditional shapes:
+//! The Roc core's layout geometry against the Rust core's, on random BSP and traditional shapes
+//! and scrolling strips:
 //! the frames must be identical word for word (so float bits must match). The shapes lean on
 //! the edges: maxima under minima, locked axes, zero and full ratios, one-child splits, tiny and
 //! non-finite weights, stacks with bars, fractional screens.
 
 use rift_core::layout::bsp::{Bsp, Children, Fill, Node, Slot};
+use rift_core::layout::scrolling::{self, Strip};
 use rift_core::layout::traditional::{self, StackLine, Traditional};
 use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
 use rift_core::plain::{Rect, WindowId, wire};
@@ -260,6 +262,98 @@ fn the_roc_core_tiles_what_the_rust_core_tiles() {
     eprintln!("layout: {cases} BSP shapes, {windows} frames identical");
 }
 
+fn strip(rng: &mut Rng) -> Strip<WindowId, u64> {
+    let mut next_window = 1;
+    let mut column = |rng: &mut Rng, id: u64| {
+        let mut row = |rng: &mut Rng| {
+            next_window += 1;
+            scrolling::Row {
+                window: WindowId { pid: 3, idx: next_window },
+                constraints: constraints(rng),
+                weight: match rng.below(4) {
+                    0 => 1.,
+                    1 => rng.float(0., 3.),
+                    2 => rng.length(0., 900.),
+                    _ => rng.float(-1., 0.01),
+                },
+            }
+        };
+        let width = match rng.below(4) {
+            0 | 1 => scrolling::Width::Default,
+            2 => scrolling::Width::Proportion(if rng.chance(10) {
+                f64::NAN
+            } else {
+                rng.float(-0.2, 1.5)
+            }),
+            _ => scrolling::Width::Fixed(rng.length(-10., 2600.)),
+        };
+        let first = row(rng);
+        let rest = (0..rng.below(4)).map(|_| row(rng)).collect();
+        scrolling::Column { id, width, first, rest }
+    };
+    let id = rng.next();
+    let first = column(rng, id);
+    let rest = (0..rng.below(7))
+        .map(|_| {
+            let id = rng.next();
+            column(rng, id)
+        })
+        .collect();
+    Strip {
+        tiling: Rect {
+            x: rng.length(-500., 500.),
+            y: rng.length(-50., 100.),
+            w: rng.length(0., 2600.),
+            h: rng.length(0., 1600.),
+        },
+        column_gap: rng.length(0., 30.),
+        row_gap: rng.length(0., 30.),
+        widths: scrolling::Widths {
+            ratio: rng.float(0., 1.2),
+            min_ratio: rng.float(-0.1, 0.6),
+            max_ratio: rng.float(0., 1.2),
+            preserve_window_sizes: rng.chance(50),
+            expand_single_column: rng.chance(50),
+        },
+        alignment: match rng.below(3) {
+            0 => scrolling::Alignment::Left,
+            1 => scrolling::Alignment::Center,
+            _ => scrolling::Alignment::Right,
+        },
+        navigation: if rng.chance(50) {
+            scrolling::Navigation::Anchored
+        } else {
+            scrolling::Navigation::Free
+        },
+        first,
+        rest,
+    }
+}
+
+#[test]
+fn the_roc_core_places_scrolling_strips_as_the_rust_core_does() {
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0x5EED_57A1_C0DE_F00D);
+    let before = AllocationCount::now();
+    let (mut windows, mut snaps) = (0, 0);
+    for case in 0..cases {
+        let strip = strip(&mut rng);
+        let rust = strip.place();
+        windows += rust.frames.len();
+        snaps += 1 + rust.snaps.1.len();
+        let roc = tile_words(&wire::encode_strip(strip.clone()));
+        if roc != Ok(wire::encode_placed(rust.clone())) {
+            panic!(
+                "case {case}: {strip:#?}\n  roc:  {:?}\n  rust: {rust:?}",
+                roc.map(|words| wire::decode_placed(&words))
+            );
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} scrolling strips, {windows} frames and {snaps} snaps identical");
+}
+
 #[test]
 #[ignore]
 fn tile_timing() {
@@ -267,7 +361,12 @@ fn tile_timing() {
     let bsp: Vec<Vec<u64>> = (0..200_000).map(|_| wire::encode_bsp(shape(&mut rng))).collect();
     let trad: Vec<Vec<u64>> =
         (0..200_000).map(|_| wire::encode_traditional(tshape(&mut rng))).collect();
-    for (name, shapes) in [("bsp", &bsp), ("traditional", &trad)] {
+    let strips: Vec<Vec<u64>> = (0..200_000).map(|_| wire::encode_strip(strip(&mut rng))).collect();
+    for (name, shapes) in [
+        ("bsp", &bsp),
+        ("traditional", &trad),
+        ("scrolling", &strips),
+    ] {
         let mut best = std::time::Duration::MAX;
         for _ in 0..5 {
             let start = std::time::Instant::now();

@@ -17,15 +17,10 @@ fn main() {
         let home = std::env::var("HOME").unwrap();
         format!("{home}/.local/share/roc-nightly/current/roc")
     });
-    for file in [
-        "core/main.roc",
-        "core/Wire.roc",
-        "core/Bsp.roc",
-        "core/Geometry.roc",
-        "core/Traditional.roc",
-        "platform/main.roc",
-    ] {
-        println!("cargo:rerun-if-changed={}", roc_dir.join(file).display());
+    // The directories, not a list of modules: cargo rebuilds when any file in them changes, so
+    // a new module can't be left out (Scrolling.roc once was, and a stale core was tested).
+    for dir in ["core", "platform"] {
+        println!("cargo:rerun-if-changed={}", roc_dir.join(dir).display());
     }
     println!("cargo:rerun-if-env-changed=ROC");
     let archive = out.join("librift_core_roc.a");
