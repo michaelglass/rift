@@ -22,6 +22,7 @@ use super::*;
 use crate::actor::reactor::managers::LayoutManager;
 use crate::actor::reactor::reconciler::{Desired, Sync};
 use crate::actor::reactor::testing::TestSizing;
+use crate::sys::geometry::IsWithin;
 
 /// Signatures (invariant, step kind) this branch is known to fail. Each has a regression test.
 const KNOWN: &[(&str, &str)] = &[];
@@ -1261,7 +1262,9 @@ impl Sim {
                         | Sync::Animating { .. },
                     ) => false,
                 };
-                if !refused && !observed.same_as(frame) {
+                // Where layout wants it as near as the core takes an answer to be (an app
+                // rounding to whole cells lands a fraction short).
+                if !refused && !observed.is_within(rift_core::reconciler::ACK_TOLERANCE, frame) {
                     return Err(fail(format!(
                         "{wid:?} is at {observed:?}, layout wants {frame:?} ({sync:?})"
                     )));
@@ -1650,4 +1653,25 @@ fn a_window_dropped_into_another_displays_scrolling_layout_settles_where_layout_
         scrolling: true,
     };
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_rounding_app_settled_within_the_ack_tolerance_is_where_layout_wants_it() {
+    // Found by the 4000x60 sweep (seed 1280): a terminal (whole 7pt cells) dropped into a
+    // 400pt-tall tile answers 399. The core takes that as the answer to its write; quiescence
+    // compared with a tenth of a point and flagged it.
+    let steps = [
+        Step::DragStart { w: 10, dx: -95, dy: -75 },
+        Step::CrossDisplayLagging { to: 1 },
+        Step::Sizing {
+            w: 0,
+            sizing: TestSizing::Cells(7.0),
+        },
+        Step::MouseUp,
+        Step::Destroy { w: 14 },
+        Step::DragStart { w: 3, dx: -67, dy: 110 },
+        Step::HeldMovesButtonUp { dx: 129 },
+        Step::Deliver,
+    ];
+    assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
 }
