@@ -6,6 +6,7 @@ app [core] { pf: platform "../platform/main.roc" }
 
 import Wire exposing [put_list, put_rect, put_window, take, take_list, take_rect, take_u32, take_window]
 import Bsp
+import Traditional
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -99,7 +100,21 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, tile: Bsp.tile }
+core = { init, step, tile }
+
+## Layout geometry: a shape's words (its layout system's tag first: 0 BSP, 1 traditional) in,
+## its frames' words out.
+tile : List(U64) -> List(U64)
+tile = |words| {
+	(system, cursor) = take({ words, at: 0 })
+	frames =
+		match system {
+			0 => Bsp.frames_of(cursor)
+			1 => Traditional.frames_of(cursor)
+			_ => crash "wire: unknown layout system"
+		}
+	put_list([], frames, |out, (window, frame)| put_rect(put_window(out, window), frame))
+}
 
 init : {} -> Model
 init = |{}| {

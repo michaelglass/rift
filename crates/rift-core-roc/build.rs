@@ -21,6 +21,8 @@ fn main() {
         "core/main.roc",
         "core/Wire.roc",
         "core/Bsp.roc",
+        "core/Geometry.roc",
+        "core/Traditional.roc",
         "platform/main.roc",
     ] {
         println!("cargo:rerun-if-changed={}", roc_dir.join(file).display());

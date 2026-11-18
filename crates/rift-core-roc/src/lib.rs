@@ -19,6 +19,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use rift_core::layout::bsp::Bsp;
+use rift_core::layout::traditional::Traditional;
 use rift_core::plain::{Plain, Rect, WindowId, wire};
 use rift_core::{Effect, Event};
 
@@ -190,7 +191,8 @@ impl RocCore {
     }
 }
 
-/// Layout geometry on words: a BSP shape's words in, its frames' words out. Pure: no model.
+/// Layout geometry on words: a shape's words (its layout system's tag first) in, its frames'
+/// words out. Pure: no model.
 pub fn tile_words(shape: &[u64]) -> Vec<u64> {
     let host = host();
     // Roc takes ownership of the shape's list and releases it.
@@ -204,6 +206,13 @@ pub fn tile_words(shape: &[u64]) -> Vec<u64> {
 /// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core.
 pub fn tile_bsp(shape: Bsp<WindowId>) -> Vec<(WindowId, Rect)> {
     let words = tile_words(&wire::encode_bsp(shape));
+    wire::decode_frames(&words).unwrap_or_else(|error| panic!("roc core frames: {error:?}"))
+}
+
+/// A traditional layout's frames, as `Traditional::frames` computes them, computed by the Roc
+/// core.
+pub fn tile_traditional(shape: Traditional<WindowId>) -> Vec<(WindowId, Rect)> {
+    let words = tile_words(&wire::encode_traditional(shape));
     wire::decode_frames(&words).unwrap_or_else(|error| panic!("roc core frames: {error:?}"))
 }
 
