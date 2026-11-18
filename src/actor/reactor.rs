@@ -519,8 +519,6 @@ enum Initiative {
     /// A user command (hotkey, CLI, menu). One the pointer rule refuses is discarded, never
     /// queued: after the drag nothing is replayed.
     UserCommand(InputClass),
-    /// Move-window-to-display and move-workspace-to-display commands.
-    MoveBetweenDisplays,
     /// Arrangement and geometry layout passes.
     Arrange,
     /// Retiring windows an inventory refresh no longer reports.
@@ -1178,14 +1176,12 @@ impl Reactor {
             // dropped, not deferred to the drop.
             (UserCommand(InputClass::Steering), Dragging) => false,
             // A press alone changes nothing: the window hasn't moved.
-            (MoveBetweenDisplays, Idle | Pressing) => true,
             (Arrange, Idle | Pressing) => true,
             (RetireWindows, Idle | Pressing) => true,
             (SwitchWorkspaceFocus, Idle | Pressing) => true,
             (WarpFocus, Idle | Pressing) => true,
             // While the user drags a window, Rift keeps its hands off the layout and the
             // pointer until the drop.
-            (MoveBetweenDisplays, Dragging) => false,
             (Arrange, Dragging) => false,
             (RetireWindows, Dragging) => false,
             (SwitchWorkspaceFocus, Dragging) => false,
@@ -2822,10 +2818,6 @@ impl Reactor {
                 selector,
                 window_id,
             })) => {
-                if !self.may(Initiative::MoveBetweenDisplays) {
-                    warn!("Ignoring move-window-to-display while a drag is active");
-                    return Ok(EventOutcome::no_change());
-                }
                 let command_space = self.workspace_command_space();
                 let resolved_window = {
                     let workspaces = self.layout_manager.layout_engine.workspaces();
@@ -2905,10 +2897,6 @@ impl Reactor {
                 selector,
                 wrap_around,
             })) => {
-                if !self.may(Initiative::MoveBetweenDisplays) {
-                    warn!("Ignoring move-workspace-to-display while a drag is active");
-                    return Ok(EventOutcome::no_change());
-                }
                 let Some(source_space) = self.workspace_command_space() else {
                     warn!("Move workspace to display ignored: source space unavailable");
                     return Ok(EventOutcome::no_change());
