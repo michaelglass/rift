@@ -4,6 +4,7 @@
 
 pub mod axis;
 pub mod bsp;
+pub mod traditional;
 
 use crate::plain::Rect;
 
