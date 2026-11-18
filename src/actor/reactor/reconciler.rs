@@ -452,9 +452,12 @@ impl RiftState {
                 }
                 Effect::Grip { window } => self.windows.project_grip(window),
                 Effect::Regrip { from, to } => self.windows.project_regrip(from, to),
-                // The pending store the app actors read is the core's pending frames.
+                // The pending store the app actors read is the core's pending frames. It is keyed
+                // by window-server id, taken from the record: a suspended identity has no AX
+                // state, but its record (and its server id) remains.
                 Effect::Pending { window, target } => {
-                    if let Some(server_id) = self.windows.server_id(window) {
+                    let record = self.windows.record(window);
+                    if let Some(server_id) = record.and_then(|record| record.window_server_id()) {
                         self.tx.project_target(server_id, target);
                     }
                 }
@@ -564,11 +567,12 @@ impl RiftState {
     /// An accessibility destruction during native fullscreen may be an identity replacement:
     /// the window's state is suspended (the model no longer sees it), its record kept.
     pub(crate) fn suspend_fullscreen_ax_identity(&mut self, window: WindowId) -> bool {
-        let suspended = self.windows.suspend_fullscreen_ax_identity(window);
-        if suspended {
-            self.step(Event::Unseen { window });
+        if self.windows.native_fullscreen_record_for_window(window).is_none() {
+            return false;
         }
-        suspended
+        // The core forgets the window while its state is still there, then the state goes.
+        self.step(Event::Unseen { window });
+        self.windows.suspend_fullscreen_ax_identity(window)
     }
 
     /// An animated layout pass over `desires` (the active workspace's windows): which to

@@ -1853,6 +1853,37 @@ fn geometry_cross_display_frame_change_waits_for_authoritative_membership() {
     );
 }
 
+/// A window with a write in flight goes native fullscreen and macOS destroys its accessibility
+/// identity there (the identity is suspended, to be replaced). The core forgets the window, so
+/// the pending store (keyed by window-server id, which the replacement keeps) must forget its
+/// target too: the store is the core's projection, whether or not the AX state is present.
+#[test]
+fn a_suspended_fullscreen_identity_leaves_no_pending_target() {
+    let (mut reactor, wid, wsid, space1, _space2, frame) = reactor_with_window_on_space1();
+    let target = CGRect::new(
+        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
+        frame.size,
+    );
+    reactor.place_window(wid, target);
+    assert_eq!(reactor.state.tx.target(wsid), Some(target));
+    let fullscreen = SpaceId::new(0x400000000 + space1.get());
+    window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+    reactor.state.windows.set_window_server_space(wsid, Some(fullscreen));
+
+    reactor.handle_event(Event::WindowDestroyed(wid));
+
+    assert!(
+        reactor.state.windows.native_fullscreen_record_for_window(wid).is_some(),
+        "the identity is suspended, not removed"
+    );
+    assert_eq!(reactor.state.core.pending(wid), None);
+    assert_eq!(
+        reactor.state.tx.target(wsid),
+        None,
+        "the pending store keeps a target the core no longer has"
+    );
+}
+
 #[test]
 fn matching_rift_frame_clears_pending_target() {
     let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
