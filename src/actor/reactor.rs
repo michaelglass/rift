@@ -4393,15 +4393,21 @@ impl Reactor {
                 if let Some(write) = queued {
                     self.send_arranged(write);
                 }
-                if !self.mission_control_moved_it() {
-                    // An answer is where the window is, whatever was asked of it.
-                    self.record_report(wid, new_frame, Some(new_frame), |at_target| match answer {
-                        Answer::Acked => true,
-                        Answer::Refused => false,
-                        Answer::Unasked => at_target,
-                    });
+                if self.mission_control_moved_it() {
+                    return Ok(EventOutcome::no_change());
                 }
-                return Ok(EventOutcome::no_change());
+                // An answer is where the window is, whatever was asked of it.
+                self.record_report(wid, new_frame, Some(new_frame), |at_target| match answer {
+                    Answer::Acked => true,
+                    Answer::Refused => false,
+                    Answer::Unasked | Answer::Late => at_target,
+                });
+                return Ok(match answer {
+                    Answer::Acked | Answer::Refused | Answer::Unasked => EventOutcome::no_change(),
+                    // The layout may have moved on while the app was busy: re-derive, so a
+                    // window that landed on a stale target is written where it belongs now.
+                    Answer::Late => EventOutcome::no_change().with_arrange_passes(1),
+                });
             }
             ReportKind::Unprompted => {
                 let holder = if gripped {
