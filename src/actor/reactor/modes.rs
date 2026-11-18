@@ -126,29 +126,9 @@ use Initiative::*;
 use InputClass::{Arranging, Hover, Inert, Steering};
 
 impl Mode for Pointer {
-    fn admits(&self, initiative: Initiative) -> bool {
-        use Pointer::*;
-        match (initiative, self) {
-            (UserInput(Inert), Idle | Pressing(_) | Dragging(_)) => true,
-            (UserInput(Steering | Arranging | Hover), Idle) => true,
-            // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
-            // input's effect on it would wait for the release, splitting it from the rest of
-            // the effect. A hover sample from before the press would focus another window under
-            // the held one.
-            (UserInput(Steering | Arranging | Hover), Pressing(_) | Dragging(_)) => false,
-            // A press alone changes nothing: the window hasn't moved.
-            (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Idle | Pressing(_)) => {
-                true
-            }
-            // While the user drags a window, Rift keeps its hands off the layout and the
-            // pointer until the drop.
-            (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Dragging(_)) => false,
-            // Following an activation switches workspace, which moves every window; nothing moves
-            // existing windows until the drop, and a press may become a drag.
-            (FollowActivation, Idle) => true,
-            (FollowActivation, Pressing(_) | Dragging(_)) => false,
-        }
-    }
+    /// The pointer's row is the core's (`rift_core::may`): the core owns what the hand is doing,
+    /// and the rule that follows from it.
+    fn admits(&self, initiative: Initiative) -> bool { rift_core::may(initiative, *self) }
 }
 
 impl Mode for MenuState {
