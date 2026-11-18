@@ -8,7 +8,7 @@ use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{Quiet, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
-use crate::model::window_store::Hand;
+use crate::model::window_store::{Hand, Pointer};
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -246,12 +246,13 @@ pub fn handle_window_frame_changed(
     let tiled = !layout.layout_engine.is_window_floating(wid);
     let native_resize = !old_frame.size.same_as(new_frame.size);
     // A drag that starts here needs the drop scene, built before the hand is borrowed.
-    let scene = (admitted && state.windows.is_pressed(wid) && tiled && !native_resize)
-        .then_some(new_space)
-        .flatten()
-        .map(|space| {
-            crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
-        });
+    let scene =
+        (admitted && state.windows.pointer() == Pointer::Pressing(wid) && tiled && !native_resize)
+            .then_some(new_space)
+            .flatten()
+            .map(|space| {
+                crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
+            });
     let moved_by_user = admitted
         && match state.windows.hand_on(wid) {
             Some(Hand::Dragging(session)) => {

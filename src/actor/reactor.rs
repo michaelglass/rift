@@ -1182,28 +1182,30 @@ impl Reactor {
         use Initiative::*;
         use Pointer::*;
         match (initiative, self.state.windows.pointer()) {
-            (UserInput(InputClass::Inert), Idle | Pressing | Dragging) => true,
+            (UserInput(InputClass::Inert), Idle | Pressing(_) | Dragging(_)) => true,
             (UserInput(InputClass::Steering), Idle) => true,
             // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
             // input's effect on it would wait for the release, splitting it from the rest of
             // the effect. Dropped instead, not deferred.
-            (UserInput(InputClass::Steering), Pressing | Dragging) => false,
+            (UserInput(InputClass::Steering), Pressing(_) | Dragging(_)) => false,
             // A press alone changes nothing: the window hasn't moved.
-            (Arrange, Idle | Pressing) => true,
-            (RetireWindows, Idle | Pressing) => true,
-            (SwitchWorkspaceFocus, Idle | Pressing) => true,
-            (WarpFocus, Idle | Pressing) => true,
+            (Arrange, Idle | Pressing(_)) => true,
+            (RetireWindows, Idle | Pressing(_)) => true,
+            (SwitchWorkspaceFocus, Idle | Pressing(_)) => true,
+            (WarpFocus, Idle | Pressing(_)) => true,
             // While the user drags a window, Rift keeps its hands off the layout and the
             // pointer until the drop.
-            (Arrange, Dragging) => false,
-            (RetireWindows, Dragging) => false,
-            (SwitchWorkspaceFocus, Dragging) => false,
-            (WarpFocus, Dragging) => false,
+            (Arrange, Dragging(_)) => false,
+            (RetireWindows, Dragging(_)) => false,
+            (SwitchWorkspaceFocus, Dragging(_)) => false,
+            (WarpFocus, Dragging(_)) => false,
         }
     }
 
     #[cfg(test)]
-    fn user_is_dragging(&self) -> bool { self.state.windows.pointer() == Pointer::Dragging }
+    fn user_is_dragging(&self) -> bool {
+        matches!(self.state.windows.pointer(), Pointer::Dragging(_))
+    }
 
     fn is_mission_control_active(&self) -> bool {
         matches!(
@@ -4629,7 +4631,6 @@ impl Reactor {
     /// The pointer let go: a press ends, a drag drops.
     fn pointer_released(&mut self, released: PointerReleased) -> anyhow::Result<EventOutcome> {
         let pointer = self.state.windows.pointer();
-        let held = self.state.windows.gripped();
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
             let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -4661,14 +4662,13 @@ impl Reactor {
             Pointer::Idle => {}
             // A press moved nothing, but layout may have wanted the pressed window elsewhere,
             // and the press discarded its transfer: whether it still owes one is read now.
-            Pointer::Pressing => {
+            Pointer::Pressing(window) => {
                 outcome = outcome.with_arrange_passes(1);
-                if let Some((window, target)) = held.and_then(|w| Some((w, self.owed_transfer(w)?)))
-                {
+                if let Some(target) = self.owed_transfer(window) {
                     outcome.absorb(self.request_window_transfer(window, target, None));
                 }
             }
-            Pointer::Dragging => self.reconcile_all(reconciler::Lifecycle::DragEnded),
+            Pointer::Dragging(_) => self.reconcile_all(reconciler::Lifecycle::DragEnded),
         }
         Ok(outcome)
     }
@@ -4678,7 +4678,7 @@ impl Reactor {
     /// window), is handled, a fresh read finding the button up lets go first. A modifier
     /// drag's button is captured by the tap, which always reports its real release.
     fn release_if_missed(&mut self) {
-        let Some(wid) = self.state.windows.gripped() else {
+        let (Pointer::Pressing(wid) | Pointer::Dragging(wid)) = self.state.windows.pointer() else {
             return;
         };
         if self

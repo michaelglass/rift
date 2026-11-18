@@ -58,10 +58,10 @@ enum Grip {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pointer {
     Idle,
-    /// Down on a window that hasn't moved.
-    Pressing,
-    /// Dragging a window.
-    Dragging,
+    /// Down on this window, which hasn't moved.
+    Pressing(WindowId),
+    /// Dragging this window.
+    Dragging(WindowId),
 }
 
 /// What the user's hand is doing with a window, for whoever observed that window change.
@@ -1956,13 +1956,23 @@ impl WindowStore {
     pub(crate) fn pointer(&self) -> Pointer {
         match &self.windows.gripped {
             None => Pointer::Idle,
-            Some(Gripped { grip: Grip::Pressed { .. }, .. }) => Pointer::Pressing,
-            Some(Gripped { grip: Grip::Dragging(_), .. }) => Pointer::Dragging,
+            Some(Gripped {
+                window,
+                grip: Grip::Pressed { .. },
+                ..
+            }) => Pointer::Pressing(*window),
+            Some(Gripped {
+                window,
+                grip: Grip::Dragging(_),
+                ..
+            }) => Pointer::Dragging(*window),
         }
     }
 
     /// Whether the user's hand is on `window`: pressed, or dragging it.
-    pub(crate) fn is_gripped(&self, window: WindowId) -> bool { self.gripped() == Some(window) }
+    pub(crate) fn is_gripped(&self, window: WindowId) -> bool {
+        matches!(self.pointer(), Pointer::Pressing(held) | Pointer::Dragging(held) if held == window)
+    }
 
     /// The window the user's hand is on, pressed or dragged.
     pub(crate) fn gripped(&self) -> Option<WindowId> { self.windows.gripped_window() }
@@ -1995,11 +2005,6 @@ impl WindowStore {
             Grip::Dragging(session) => Hand::Dragging(session),
             grip @ Grip::Pressed { .. } => Hand::Pressed(Pressed(grip)),
         })
-    }
-
-    /// Whether the pointer is down on `window` with no drag started.
-    pub(crate) fn is_pressed(&self, window: WindowId) -> bool {
-        self.is_gripped(window) && self.drag().is_none()
     }
 
     /// The user's drag and the window it holds.
@@ -2796,7 +2801,7 @@ mod tests {
                 ));
             }
             assert_eq!(store.gripped(), Some(wid));
-            assert_eq!(store.pointer() == Pointer::Dragging, dragging);
+            assert_eq!(matches!(store.pointer(), Pointer::Dragging(_)), dragging);
 
             store.remove_windows_for_app(wid.pid);
 
