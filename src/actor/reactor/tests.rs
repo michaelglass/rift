@@ -9907,7 +9907,7 @@ fn shared_window_transfer_keeps_logical_target_through_stale_native_membership()
         ));
         assert_eq!(reactor.state.windows.workspace_for_window(window), Some(target));
         assert_eq!(
-            reactor.state.windows.record(window).unwrap().pending_transfer().is_none(),
+            reactor.state.windows.record(window).unwrap().transfer().is_none(),
             complete && observed == b
         );
     }
@@ -10190,7 +10190,7 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
             state.active_window_spaces.extend(visible.iter().copied());
         })
     };
-    let pending = |r: &Reactor| r.state.windows.record(window).unwrap().pending_transfer().unwrap();
+    let transfer = |r: &Reactor| r.state.windows.record(window).unwrap().transfer();
     let on_right = |apps: &Apps| shared_right().contains(apps.windows[&window].frame.mid());
     window_server_appeared(&mut reactor, wsids[0], fullscreen, SpaceEventKind::Fullscreen);
     reactor.handle_event(snapshot(Some(a), None, true, &[]));
@@ -10207,10 +10207,7 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
         reactor.layout_manager.layout_engine.workspaces()[ids[0]].space,
         a
     );
-    assert_eq!(
-        pending(&reactor).status,
-        crate::model::window_store::TransferStatus::Unavailable
-    );
+    assert_eq!(transfer(&reactor), Some(crate::model::Transfer::Waiting));
     assert!(on_right(&apps), "no frame write reaches a fullscreen window");
     reactor.handle_event(snapshot(Some(a2), Some(b), false, &[]));
     assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
@@ -10220,7 +10217,9 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
     apps.simulate_until_quiet(&mut reactor);
     assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_none());
     assert_eq!(reactor.state.windows.workspace_for_window(window), Some(ids[0]));
-    assert_eq!(pending(&reactor).requested_space, a);
+    // Still owed: its workspace is on the laptop's dormant Space, nothing is written yet.
+    assert_eq!(transfer(&reactor), Some(crate::model::Transfer::Waiting));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(a));
     assert!(on_right(&apps));
     // The owner returns: the same transfer resumes onto the laptop.
     reactor.handle_event(snapshot(Some(a), Some(b), false, &[(wsids[0], b)]));
@@ -10380,24 +10379,66 @@ fn fullscreen_exit_waits_for_ax_identity_without_losing_workspace() {
     assert!(!has_window_in_layout(&mut reactor, user, screen, window));
 }
 
-#[test]
-fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership() {
-    let (mut reactor, window, wsid, _, target, _) = reactor_with_window_on_space1();
-    let stale = reactor.state.windows.window(window).unwrap().frame_monotonic;
-    let written = CGRect::new(CGPoint::new(1300., 200.), CGSize::new(700., 500.));
-    reactor.state.windows.window_mut(window).unwrap().frame_monotonic = written;
-    reactor.track_test_window_server_info(wsid, window.pid, stale);
-    let store = &mut reactor.state.windows;
-    store.unheld(window).unwrap().request_transfer(Some(written), target, true);
-    let generation = store.record(window).unwrap().pending_transfer().unwrap().generation;
-    for revision in [11, 12, 13] {
-        store.unheld(window).unwrap().advance_transfer(revision, true);
+/// The window of [`reactor_with_window_on_space1_two_displays`], assigned to the second
+/// display's workspace and moved there once, then kept on the first display by macOS through
+/// every retry. Returns the frame Rift wrote.
+fn refuse_a_transfer_to_space2(
+    reactor: &mut Reactor,
+    window: WindowId,
+    wsid: WindowServerId,
+    screens: [CGRect; 2],
+) -> CGRect {
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    let elsewhere = reactor.test_workspace(space2, 0);
+    assert!(reactor.assign_test_window_to_workspace(space2, window, elsewhere));
+    let outcome = reactor.request_window_transfer(window, space2, None);
+    reactor.apply_event_outcome(outcome);
+    let written = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    assert!(
+        screens[1].contains(written.mid()),
+        "written onto the second display"
+    );
+    for _ in 0..3 {
+        let mut state = forwarded_space_state(make_screen_snapshots(screens.to_vec(), vec![
+            Some(space1),
+            Some(space2),
+        ]));
+        state.membership_complete = true;
+        state.active_window_spaces.insert(wsid, space1);
+        reactor.handle_event(Event::SpaceStateChanged(state));
     }
-    assert_eq!(store.record(window).unwrap().frame(), Some(written));
-    assert!(store.record(window).unwrap().pending_transfer().unwrap().exhausted());
-    assert!(!store.confirm_transfer(window, generation, 14, None));
-    assert!(store.confirm_transfer(window, generation, 14, Some(target)));
-    assert_eq!(store.record(window).unwrap().frame(), Some(written));
+    assert_eq!(
+        reactor.state.windows.record(window).unwrap().transfer(),
+        Some(crate::model::Transfer::Refused { on: Some(space1) })
+    );
+    written
+}
+
+#[test]
+fn a_refused_transfer_keeps_the_written_geometry_and_ends_when_the_window_arrives() {
+    // Each retry derives the frame again from the layout; nothing re-derived moves the model's
+    // frame off what was written. The window turning up on its workspace's Space ends it.
+    let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let written = refuse_a_transfer_to_space2(&mut reactor, window, wsid, [screen1, screen2]);
+    assert_eq!(
+        reactor.state.windows.window(window).unwrap().frame_monotonic,
+        written
+    );
+    let snapshot = |observed: Option<SpaceId>| {
+        let mut state = forwarded_space_state(make_screen_snapshots(vec![screen1, screen2], vec![
+            Some(space1),
+            Some(space2),
+        ]));
+        state.membership_complete = true;
+        state.active_window_spaces.extend(observed.map(|space| (wsid, space)));
+        Event::SpaceStateChanged(state)
+    };
+    reactor.handle_event(snapshot(None));
+    assert!(reactor.state.windows.record(window).unwrap().transfer().is_some());
+    reactor.handle_event(snapshot(Some(space2)));
+    assert_eq!(reactor.state.windows.record(window).unwrap().transfer(), None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(space2));
 }
 
 #[test]
@@ -10405,15 +10446,7 @@ fn an_exhausted_transfer_no_longer_owed_is_discarded() {
     let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
         reactor_with_window_on_space1_two_displays();
     let home = reactor.test_workspace(space1, 0);
-    let elsewhere = reactor.test_workspace(space2, 0);
-    assert!(reactor.assign_test_window_to_workspace(space2, window, elsewhere));
-    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
-    let store = &mut reactor.state.windows;
-    store.unheld(window).unwrap().request_transfer(Some(frame), space2, true);
-    for revision in [101, 102, 103] {
-        store.unheld(window).unwrap().advance_transfer(revision, true);
-    }
-    assert!(store.record(window).unwrap().pending_transfer().unwrap().exhausted());
+    refuse_a_transfer_to_space2(&mut reactor, window, wsid, [screen1, screen2]);
 
     // The user puts the window's workspace assignment back where macOS left the window: the
     // refused move is no longer owed, so nothing waits on it.
@@ -10425,29 +10458,18 @@ fn an_exhausted_transfer_no_longer_owed_is_discarded() {
     state.membership_complete = true;
     state.active_window_spaces.insert(wsid, space1);
     reactor.handle_event(Event::SpaceStateChanged(state));
-    assert_eq!(
-        reactor.state.windows.record(window).unwrap().pending_transfer(),
-        None
-    );
+    assert_eq!(reactor.state.windows.record(window).unwrap().transfer(), None);
 }
 
 #[test]
 fn a_new_display_set_re_derives_an_exhausted_transfer_instead_of_resuming_it() {
     let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
         reactor_with_window_on_space1_two_displays();
-    let elsewhere = reactor.test_workspace(space2, 0);
-    assert!(reactor.assign_test_window_to_workspace(space2, window, elsewhere));
-    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
-    let store = &mut reactor.state.windows;
-    store.unheld(window).unwrap().request_transfer(Some(frame), space2, true);
-    for revision in [101, 102, 103] {
-        store.unheld(window).unwrap().advance_transfer(revision, true);
-    }
-    let refused = store.record(window).unwrap().pending_transfer().unwrap();
-    assert!(refused.exhausted());
+    refuse_a_transfer_to_space2(&mut reactor, window, wsid, [screen1, screen2]);
+    let refused = crate::model::Transfer::Refused { on: Some(space1) };
 
     // The displays change and the window is still seen on the first one: it is still owed the
-    // move, so the transfer is requested afresh, fitted to the displays there are now.
+    // move, so the transfer is begun afresh, fitted to the displays there are now.
     let snapshot = |display_set_changed| {
         let mut state = forwarded_space_state(make_screen_snapshots(vec![screen1, screen2], vec![
             Some(space1),
@@ -10459,18 +10481,52 @@ fn a_new_display_set_re_derives_an_exhausted_transfer_instead_of_resuming_it() {
         Event::SpaceStateChanged(state)
     };
     reactor.handle_event(snapshot(false));
-    let unchanged = reactor.state.windows.record(window).unwrap().pending_transfer().unwrap();
     assert_eq!(
-        unchanged.generation, refused.generation,
+        reactor.state.windows.record(window).unwrap().transfer(),
+        Some(refused),
         "unchanged topology is no new chance"
     );
-    assert!(unchanged.exhausted());
 
     reactor.handle_event(snapshot(true));
-    let fresh = reactor.state.windows.record(window).unwrap().pending_transfer().unwrap();
-    assert_eq!(fresh.requested_space, space2);
-    assert!(fresh.generation > refused.generation, "re-derived, not resumed");
-    assert!(!fresh.exhausted());
+    let fresh = reactor.state.windows.record(window).unwrap().transfer().unwrap();
+    assert!(
+        matches!(fresh, crate::model::Transfer::Moving { retries: 0, .. }),
+        "re-derived, not resumed: {fresh:?}"
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(space2));
+}
+
+#[test]
+fn a_window_macos_refused_to_move_takes_the_space_the_user_then_puts_it_on() {
+    // The user's latest action wins. macOS kept the window on the first display's Space; the
+    // user then puts it on another Space (in Mission Control) and switches to it. That is
+    // where the window is assigned now: the refused move does not pull it back.
+    let (mut reactor, window, wsid, _, space2, screen1, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    refuse_a_transfer_to_space2(&mut reactor, window, wsid, [screen1, screen2]);
+    let space3 = SpaceId::new(3);
+    let mut state = forwarded_space_state(make_screen_snapshots(vec![screen1, screen2], vec![
+        Some(space3),
+        Some(space2),
+    ]));
+    state.membership_complete = true;
+    state.active_window_spaces.insert(wsid, space3);
+    reactor.handle_event(Event::SpaceStateChanged(state));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(space3));
+    assert_eq!(reactor.state.windows.record(window).unwrap().transfer(), None);
+
+    // While it stays where macOS left it, the refused move keeps its assignment.
+    let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    refuse_a_transfer_to_space2(&mut reactor, window, wsid, [screen1, screen2]);
+    let mut state = forwarded_space_state(make_screen_snapshots(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    state.membership_complete = true;
+    state.active_window_spaces.insert(wsid, space1);
+    reactor.handle_event(Event::SpaceStateChanged(state));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(space2));
 }
 
 #[test]
@@ -10620,7 +10676,7 @@ fn native_return_waits_for_a_global_destination_without_losing_eviction() {
             Some(2)
         );
         assert!(reactor.test_workspace_ids(original).is_empty());
-        assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+        assert!(reactor.state.windows.record(window).unwrap().transfer().is_none());
         assert!(
             apps.requests().is_empty(),
             "incomplete recovery must not write geometry"
@@ -11689,8 +11745,13 @@ fn master_restore_returns_a_window_to_the_display_it_was_saved_on() {
     let _ = std::fs::remove_file(path);
 
     assert_eq!(reactor.assigned_space_for_window_id(window), Some(a));
-    let pending = reactor.state.windows.record(window).unwrap().pending_transfer();
-    assert_eq!(pending.map(|transfer| transfer.requested_space), Some(a));
+    // The move to the assigned display is under way and its frame is written there.
+    assert!(matches!(
+        reactor.state.windows.record(window).unwrap().transfer(),
+        Some(crate::model::Transfer::Moving { .. })
+    ));
+    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    assert!(shared_left().contains(frame.mid()));
 }
 
 #[test]
@@ -11725,6 +11786,7 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
         Some(shared_left()),
         shared_right(),
     );
+    apps.requests();
 
     reactor.handle_loop_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
         path: path.clone(),
@@ -11733,11 +11795,17 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
     })));
     let _ = std::fs::remove_file(path);
 
-    let pending = reactor.state.windows.record(window).unwrap().pending_transfer();
-    assert_eq!(
-        pending.and_then(|transfer| transfer.requested_frame),
-        Some(saved)
-    );
+    // The move back writes the saved frame, derived from the restored floating position.
+    let written: Vec<_> = apps
+        .requests()
+        .into_iter()
+        .flat_map(|request| match request {
+            Request::SetWindowFrames(frames, ..) => frames,
+            _ => vec![],
+        })
+        .filter_map(|(wid, frame)| (wid == window).then_some(frame))
+        .collect();
+    assert_eq!(written.first(), Some(&saved), "{written:?}");
 }
 
 #[test]
@@ -12120,7 +12188,7 @@ fn rule_owned_window_survives_late_cross_display_notifications() {
             s.active_window_spaces.insert(wsid, a);
         },
     ));
-    assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+    assert!(reactor.state.windows.record(window).unwrap().transfer().is_none());
     let before = test_layout(&mut reactor, a, shared_left());
     let focused = reactor.layout_manager.layout_engine.focused_window();
     apps.requests();
@@ -12129,7 +12197,7 @@ fn rule_owned_window_survives_late_cross_display_notifications() {
         reactor.send_layout_event(LayoutEvent::WindowAdded(b, window));
     }
     assert_eq!(reactor.layout_manager.layout_engine.focused_window(), focused);
-    assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+    assert!(reactor.state.windows.record(window).unwrap().transfer().is_none());
     assert!(apps.requests().is_empty(), "duplicates must not write geometry");
     assert_eq!(reactor.state.windows.workspace_for_window(window), Some(owner));
     assert_eq!(test_layout(&mut reactor, a, shared_left()), before);
@@ -12638,12 +12706,9 @@ fn a_click_discards_the_windows_transfer_and_the_release_re_derives_it() {
     assert!(reactor.assign_test_window_to_workspace(SpaceId::new(2), wid, elsewhere));
     reactor.space_state.membership_complete = true;
     reactor.space_state.active_window_spaces.insert(wsid, SpaceId::new(1));
-    reactor.state.windows.unheld(wid).unwrap().request_transfer(
-        Some(frame),
-        SpaceId::new(2),
-        false,
-    );
-    let before = reactor.state.windows.record(wid).unwrap().pending_transfer().unwrap();
+    reactor.state.windows.unheld(wid).unwrap().begin_transfer(false);
+    let before = reactor.state.windows.record(wid).unwrap().transfer().unwrap();
+    assert_eq!(before, crate::model::Transfer::Waiting);
 
     reactor.handle_event(Event::PointerPressed { point: frame.mid() });
     assert!(
@@ -12654,23 +12719,22 @@ fn a_click_discards_the_windows_transfer_and_the_release_re_derives_it() {
 
     reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
     assert_eq!(reactor.state.windows.gripped(), None);
-    let after = reactor.state.windows.record(wid).unwrap().pending_transfer().unwrap();
-    assert_eq!(after.requested_space, SpaceId::new(2));
-    assert!(after.generation > before.generation, "re-derived, not restored");
+    // Re-derived: the second display is available now, so the move is written.
+    let after = reactor.state.windows.record(wid).unwrap().transfer().unwrap();
+    assert!(
+        matches!(after, crate::model::Transfer::Moving { retries: 0, .. }),
+        "re-derived, not restored: {after:?}"
+    );
 
     // A window already where it belongs owes nothing: the release requests no transfer.
     let (_apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
     let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
     reactor.space_state.membership_complete = true;
     reactor.space_state.active_window_spaces.insert(wsid, SpaceId::new(1));
-    reactor.state.windows.unheld(wid).unwrap().request_transfer(
-        Some(frame),
-        SpaceId::new(2),
-        false,
-    );
+    reactor.state.windows.unheld(wid).unwrap().begin_transfer(false);
     reactor.handle_event(Event::PointerPressed { point: frame.mid() });
     reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
-    assert!(reactor.state.windows.record(wid).unwrap().pending_transfer().is_none());
+    assert!(reactor.state.windows.record(wid).unwrap().transfer().is_none());
 }
 
 #[test]
