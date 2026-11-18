@@ -1348,6 +1348,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rift-core"
+version = "0.1.0"
+
+[[package]]
 name = "rift-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1390,6 +1394,7 @@ dependencies = [
  "regex",
  "rift-client",
  "rift-config-derive",
+ "rift-core",
  "rift-protocol",
  "ron",
  "rustc-hash",
