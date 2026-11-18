@@ -55,7 +55,8 @@ pub enum Event<K: Kinds> {
     /// notification Rift accepted found it there, an app answered with it, or Rift put it there
     /// outside the reconciler (an animation, a placement it prepares).
     Seen { window: K::Window, frame: K::Frame },
-    /// An outside owner took `window` (a claim): a grip on it ends; Rift keeps the window.
+    /// An outside owner took `window` (a claim): a grip on it ends, and nothing is outstanding
+    /// (as [`Event::Forget`]); Rift keeps the window.
     Ceded { window: K::Window },
     /// The model no longer sees `window`, though Rift keeps it (its accessibility identity is
     /// suspended during native fullscreen); it is seen again when it comes back.
@@ -79,11 +80,13 @@ pub enum Event<K: Kinds> {
     },
     /// The animation under `request` ended.
     AnimationEnded { now: K::Time, request: K::Request },
-    /// The platform stopped presenting `window` (its frames went out under `request`), where
-    /// the model now sees it; frames of `request` the app had not applied are dropped.
+    /// The platform stopped presenting `window` (its frames went out under `request`), at the
+    /// last frame it published (`at`), where the model now takes it to be; frames of `request`
+    /// the app had not applied are dropped.
     AnimationStopped {
         window: K::Window,
         request: K::Request,
+        at: Option<K::Frame>,
     },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
     Follow {
@@ -289,7 +292,11 @@ impl<K: Kinds> RustCore<K> {
                 }
                 vec![]
             }
-            Event::Ceded { window } => self.ungrip_window(window),
+            Event::Ceded { window } => {
+                let mut effects = self.ungrip_window(window);
+                effects.extend(self.forget(window));
+                effects
+            }
             Event::Seen { window, frame } => vec![self.see(window, frame)],
             Event::Unseen { window } => {
                 self.reconciler.remove(window);
@@ -328,9 +335,10 @@ impl<K: Kinds> RustCore<K> {
                 self.reconciler.animation_ended(now, request);
                 vec![]
             }
-            Event::AnimationStopped { window, request } => {
+            Event::AnimationStopped { window, request, at } => {
+                let seen = at.map(|frame| self.see(window, frame));
                 self.reconciler.animation_stopped(window, request);
-                vec![]
+                seen.into_iter().collect()
             }
             Event::Follow { request, window, frame } => {
                 vec![Effect::Write(
@@ -355,14 +363,16 @@ impl<K: Kinds> RustCore<K> {
                 let released = self.reconciler.expire(now, request, pointer);
                 released.into_iter().flat_map(|write| self.written(write)).collect()
             }
-            Event::Forget { window } => match self.reconciler.forget(window) {
-                // The model takes the window to be where the app acknowledged it.
-                Some(acked) if self.reconciler.seen(window).is_some_and(|seen| seen != acked) => {
-                    vec![self.see(window, acked)]
-                }
-                Some(_) | None => vec![],
-            },
+            Event::Forget { window } => self.forget(window).into_iter().collect(),
         }
+    }
+
+    /// Nothing is outstanding for `window`: the model takes it to be where the app
+    /// acknowledged it, if that is known.
+    fn forget(&mut self, window: K::Window) -> Option<Effect<K>> {
+        let acked = self.reconciler.forget(window)?;
+        let moved = self.reconciler.seen(window).is_some_and(|seen| seen != acked);
+        moved.then(|| self.see(window, acked))
     }
 
     /// One arrange pass: each desire asked of the reconciler in layout order; the writes it
