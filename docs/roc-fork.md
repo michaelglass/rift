@@ -53,10 +53,22 @@ tag per event and effect, one word per field (a pid sign-extended, a float as it
 option as a flag word, a list as its length. The words are both the Roc core's boundary and the
 recorded-trace format.
 
+### Layout geometry (first layout slice)
+
+`rift_core::layout` holds the geometry the tiling systems share (the axis solver, window
+constraints, the tiling area) and a BSP layout's frames: `Bsp { screen, gaps, root, aspect }`,
+the layout's tree pruned to what takes space (`Split { horizontal, ratio, children: One | Two }`,
+`Leaf { slot: Empty | Window { window, constraints }, fill: Tiled | Screen | WithinGaps,
+stacked }`), and `Bsp::frames`. It is a pure function, not a step: the frames are needed in the
+middle of the engine's layout pass, and geometry needs no model. The engine still owns the BSP
+trees and describes the shape on every arrange (`BspLayoutSystem::shape`); when tree ownership
+moves into the core, the shape becomes the core's own state and the description goes.
+
 ## What lives where
 
 - **Core (pure):** the reconciler (writes, acks, refusals, deadlines, the queued desire, the
-  animation's targets, plans), where the model sees each window, the hand, the timer.
+  animation's targets, plans), where the model sees each window, the hand, the timer; and the
+  geometry of BSP layouts and the axis solver.
 - **Platform (the reactor, Rust):** everything effectful, and what has not moved yet: layout
   (which makes the desires), workspaces and spaces, focus and raise, the mode table, config,
   window admission. `RiftState::step` applies each step's effects in one place (`project`); the
@@ -82,6 +94,13 @@ recorded-trace format.
   `Shadowed`: the Roc core decides (the event translated to plain data, across as words, its
   effects translated back), the Rust core steps the same event beside it, and the two must
   decide identical effects or rift stops. `Plainly` is the one translation both ways.
+- `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
+  `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
+  rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
+  Bit for bit means Rust's float semantics written out: `f64::round` (half away from zero,
+  keeping a zero's sign; Roc's own is `floor(x + 0.5)`), `max`/`min` as arm64's
+  `fmaxnm`/`fminnm` (+0 beats -0 for max), `sum` from -0. `roc/core/Wire.roc` holds the word
+  primitives both modules use.
 - Pinned nightly: `roc/NIGHTLY`. After a bump, run `roc/glue.sh`. The glue is now 1,469 generated
   lines (it was 4,020 with typed events and effects) and only three functions use it.
 
@@ -96,7 +115,13 @@ recorded-trace format.
   recorded effects (so float bits must match). 16 committed seeds (every fuzzer setup: plain,
   animated, animated with a scrolling camera) = 2,715 steps; 2000 × 40 = 339,772 steps; 4000 ×
   60 = **847,945 steps, identical**, no Roc allocation live afterwards.
-- With `--features roc-core`: all 963 reactor tests pass, and the fuzzer at 2000 × 40 and 4000
+- `crates/rift-core-roc/tests/layout.rs`: random BSP shapes leaning on the edges (maxima under
+  minima, locked axes, ratios 0 and 1, one-child splits, fractional screens) through both
+  geometries: 200,000 shapes, **1,057,049 frames identical word for word** (20,000 shapes by
+  default). Its first failure was a signed zero (`round(-0.3)` is -0 in Rust).
+- A planted bug in `Bsp.roc` fails the BSP and engine tests under `roc-core`: the Roc geometry
+  is on rift's path. The fuzzer drives no BSP layout yet.
+- With `--features roc-core`: all reactor tests pass, and the fuzzer at 2000 × 40 and 4000
   × 60 finds nothing, every step agreeing with the Rust shadow.
 - Coverage of the 4000 × 60 corpus by event: Observe 335,314, Arrange 191,974, Seen 177,126,
   Animate 60,787, Release 23,185, AnimationEnded 16,612, Press 13,597, Drag 12,771, Tick 6,388,
@@ -151,6 +176,11 @@ Build:
   module. The nightly tarball has no glue specs (`ROC_SRC` points at a checkout).
 - No `F64 -> F64` rounding; the core never rounds.
 - Record patterns are closed: `{ target, .. }` is needed against a bigger record.
+- `module [..]` headers are deprecated in favour of type modules (`Wire := [].{ .. }`), and
+  `roc build` exits 2 on any warning, which fails a cargo build script. Type modules do not
+  expose type aliases; structural aliases are interchangeable, so each module declares its own
+  `Rect`. Recursive types must be nominal (`Node := [..]`, built as `Node.Split(..)`).
+- `List.set` returns a `Try`; there is no `List.range`.
 - Names in a `match` branch shadow top-level definitions as an error (`Release(release)` next to
   a `release` function).
 - `List.update` returns a `Try` (index out of bounds), so updating a found index needs a second
@@ -169,7 +199,9 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Request ids, the grip, the model's frame | M | Done, Rust and Roc. |
 | One pending store, plans, animation targets | M–L | Done, Rust and Roc. |
 | `DragKind` union | M | Done on the Rust line (platform side; the drop target is derived there until layout moves). |
-| Layout engine | L+ | **Next.** Trees, systems (bsp, stack, scrolling, floating), floating positions, persistence. Slice per layout system. |
+| Layout geometry: BSP | M | Done, Rust and Roc (the engine describes the shape; the core computes the frames). |
+| Layout geometry: traditional (stack, master-stack), scrolling, floating | M each | **Next**: the same for the other systems; the axis solver is already the core's. Scrolling has cached world geometry (`prepare_layout`) to carry. |
+| Layout trees into the core | L+ | Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
