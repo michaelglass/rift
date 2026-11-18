@@ -70,6 +70,22 @@ struct PresenterControl {
     cancelled: HashSet<WindowId>,
 }
 impl PresenterControl {
+    /// The cancelled windows, sorted (as `stop_windows` takes them).
+    fn cancelled_sorted(&self) -> Vec<WindowId> {
+        let mut cancelled: Vec<_> = self.cancelled.iter().copied().collect();
+        cancelled.sort_unstable();
+        cancelled
+    }
+
+    /// The stop of `windows` reached the presenter: their cancellation and published frames
+    /// are done with.
+    fn forget_stopped(&mut self, windows: &[WindowId]) {
+        for wid in windows {
+            self.cancelled.remove(wid);
+            self.frames.remove(wid);
+        }
+    }
+
     fn frame(&self, wid: WindowId, fallback: CGRect) -> CGRect {
         self.frames.get(&wid).map_or(fallback, |(_, frame, _)| *frame)
     }
@@ -810,6 +826,43 @@ pub(super) fn scrolling_bounds(
 impl AnimationManager {
     pub fn new() -> Self { Self::default() }
 
+    /// Applies one command to this display's motions. A stop's shared bookkeeping is the
+    /// caller's, once for every display ([`PresenterControl::forget_stopped`]).
+    fn apply(&mut self, shared: &mut PresenterControl, mut message: Message) {
+        match &mut message {
+            Message::Displays(_) => return,
+            Message::StopCamera(space) => {
+                for motion in &mut self.motions {
+                    if let Motion::Viewport(camera) = motion
+                        && camera.identity.space == *space
+                    {
+                        camera.stop();
+                    }
+                }
+                self.retire();
+                return;
+            }
+            Message::Stop(windows) => {
+                windows.sort_unstable();
+                self.stop_windows(windows);
+                self.retire();
+                return;
+            }
+            // A command queued before cancellation cannot resurrect its windows or replay an
+            // obsolete instant-layout target.
+            Message::Replace(a) => a.windows.retain(|w| !shared.cancelled.contains(&w.wid)),
+            Message::Camera(c) => {
+                c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
+                c.active = !c.windows.is_empty();
+            }
+        }
+        self.stop_windows(&shared.cancelled_sorted());
+        self.retire();
+        self.handle_message(message);
+        self.publish_frames(shared, true);
+        self.retire();
+    }
+
     /// One runner for all displays. Commands are semantic work; display wakes
     /// are bounded to one permit and each link retains only its newest timing.
     pub fn run(receiver: AnimationReceiver) {
@@ -836,20 +889,19 @@ impl AnimationManager {
                             });
                         }
                         Message::StopCamera(space) => {
+                            let mut shared = control.lock();
                             for d in displays.values_mut() {
-                                for motion in &mut d.manager.motions {
-                                    if let Motion::Viewport(camera) = motion && camera.identity.space == space { camera.stop(); }
-                                }
-                                d.manager.retire();
+                                d.manager.apply(&mut shared, Message::StopCamera(space));
                             }
                         }
-                        Message::Stop(mut windows) => {
-                            windows.sort_unstable();
-                            for d in displays.values_mut() { d.manager.stop_windows(&windows); d.manager.retire(); }
+                        Message::Stop(windows) => {
                             let mut shared = control.lock();
-                            for wid in &windows { shared.cancelled.remove(wid); shared.frames.remove(wid); }
+                            for d in displays.values_mut() {
+                                d.manager.apply(&mut shared, Message::Stop(windows.clone()));
+                            }
+                            shared.forget_stopped(&windows);
                         }
-                        mut message => {
+                        message @ (Message::Replace(_) | Message::Camera(_)) => {
                             let display = match &message {
                                 Message::Replace(a) => a.display,
                                 Message::Camera(c) => c.display,
@@ -859,24 +911,7 @@ impl AnimationManager {
                                 manager: Self::new(), link: DisplayLink::for_display(display, wake.clone()),
                                 fallback_deadline: Instant::now(),
                             });
-                            let mut shared = control.lock();
-                            let mut cancelled: Vec<_> = shared.cancelled.iter().copied().collect();
-                            cancelled.sort_unstable();
-                            entry.manager.stop_windows(&cancelled);
-                            entry.manager.retire();
-                            // A command queued before cancellation cannot resurrect its
-                            // windows or replay an obsolete instant-layout target.
-                            match &mut message {
-                                Message::Replace(a) => a.windows.retain(|w| !shared.cancelled.contains(&w.wid)),
-                                Message::Camera(c) => {
-                                    c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
-                                    c.active = !c.windows.is_empty();
-                                }
-                                _ => unreachable!(),
-                            }
-                            entry.manager.handle_message(message);
-                            entry.manager.publish_frames(&mut shared, true);
-                            entry.manager.retire();
+                            entry.manager.apply(&mut control.lock(), message);
                             entry.link.set_paused(!entry.manager.has_work());
                             entry.fallback_deadline = Instant::now();
                         }
@@ -887,11 +922,7 @@ impl AnimationManager {
             }
             let now = Instant::now();
             let mut shared = control.lock();
-            let cancelled: Vec<_> = {
-                let mut w: Vec<_> = shared.cancelled.iter().copied().collect();
-                w.sort_unstable();
-                w
-            };
+            let cancelled = shared.cancelled_sorted();
             for DisplayPresenter {
                 manager,
                 link,
@@ -1497,49 +1528,12 @@ impl TestPresenter {
     pub(crate) fn present(&mut self) {
         while let Ok(message) = self.receiver.commands.try_recv() {
             let mut shared = self.receiver.control.lock();
-            match message {
-                Message::Displays(_) => {}
-                Message::StopCamera(space) => {
-                    for motion in &mut self.manager.motions {
-                        if let Motion::Viewport(camera) = motion
-                            && camera.identity.space == space
-                        {
-                            camera.stop();
-                        }
-                    }
-                    self.manager.retire();
-                }
-                Message::Stop(mut windows) => {
-                    windows.sort_unstable();
-                    self.manager.stop_windows(&windows);
-                    self.manager.retire();
-                    for wid in &windows {
-                        shared.cancelled.remove(wid);
-                        shared.frames.remove(wid);
-                    }
-                }
-                mut message => {
-                    let mut cancelled: Vec<_> = shared.cancelled.iter().copied().collect();
-                    cancelled.sort_unstable();
-                    self.manager.stop_windows(&cancelled);
-                    self.manager.retire();
-                    match &mut message {
-                        Message::Replace(a) => {
-                            a.windows.retain(|w| !shared.cancelled.contains(&w.wid))
-                        }
-                        Message::Camera(c) => {
-                            c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
-                            c.active = !c.windows.is_empty();
-                        }
-                        Message::Stop(..) | Message::StopCamera(..) | Message::Displays(..) => {
-                            unreachable!()
-                        }
-                    }
-                    self.manager.handle_message(message);
-                    self.manager.publish_frames(&mut shared, true);
-                    self.manager.retire();
-                }
-            }
+            let stopped = match &message {
+                Message::Stop(windows) => windows.clone(),
+                _ => vec![],
+            };
+            self.manager.apply(&mut shared, message);
+            shared.forget_stopped(&stopped);
         }
         let start = Instant::now();
         for step in 1..=200 {
