@@ -4541,10 +4541,13 @@ impl Reactor {
             .and_then(|window| self.best_space_for_window_id(window).map(|space| (space, window)));
         // The core decides whether the release ends the grip (only its own button does).
         let ended = self.state.release(released);
+        let changed = ended.as_ref().is_some_and(|ended| !ended.changed.is_empty());
         let (pressed, dropped) = match ended {
             None => (None, None),
-            Some(Ungripped { window, session: None }) => (Some(window), None),
-            Some(Ungripped { window, session: Some(session) }) => (None, Some((window, session))),
+            Some(Ungripped { window, session: None, .. }) => (Some(window), None),
+            Some(Ungripped {
+                window, session: Some(session), ..
+            }) => (None, Some((window, session))),
         };
         let drag_ended = dropped.is_some();
         let mut outcome = interaction_workflow::handle_mouse_up(
@@ -4569,6 +4572,11 @@ impl Reactor {
         if drag_ended {
             debug!("reconcile: re-read everything, drag ended");
             self.reread.everything();
+        }
+        // Windows whose model frame changed during the drag had their desires discarded:
+        // the core now has them unknown, so this pass writes them.
+        if changed {
+            outcome = outcome.with_arrange_passes(1);
         }
         Ok(outcome)
     }

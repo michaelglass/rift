@@ -40,19 +40,40 @@ pub enum Ungrip {
 
 /// What the user's hand is doing: the core's own state, of which the platform's window store
 /// holds the projection. One hand, so one grip; a drag starts only from a press of its window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Grip<W> {
     Idle,
-    Pressed { window: W, button: Button },
-    Dragging { window: W, button: Button },
+    /// `button` holds `window`.
+    Held {
+        window: W,
+        button: Button,
+        phase: Phase<W>,
+    },
+}
+
+/// Whether the held window has moved under the hand yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Phase<W> {
+    Pressed,
+    /// The windows whose model frame changed during the drag: every desire is the user's then,
+    /// so they are re-derived when it ends.
+    Dragging {
+        changed: Vec<W>,
+    },
 }
 
 impl<W: Copy> Grip<W> {
-    pub(crate) fn pointer(self) -> Pointer<W> {
-        match self {
+    pub(crate) fn pointer(&self) -> Pointer<W> {
+        match *self {
             Grip::Idle => Pointer::Idle,
-            Grip::Pressed { window, .. } => Pointer::Pressing(window),
-            Grip::Dragging { window, .. } => Pointer::Dragging(window),
+            Grip::Held {
+                window, phase: Phase::Pressed, ..
+            } => Pointer::Pressing(window),
+            Grip::Held {
+                window,
+                phase: Phase::Dragging { .. },
+                ..
+            } => Pointer::Dragging(window),
         }
     }
 }
