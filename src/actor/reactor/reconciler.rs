@@ -159,6 +159,9 @@ impl Reconciler {
         for effect in &effects {
             match effect {
                 Effect::Timer(at) => self.armed.set(*at),
+                Effect::Animate { window, from, to, request } => {
+                    debug!(?window, ?from, ?to, ?request, "reconcile: animate")
+                }
                 Effect::Plan(plan) => {
                     debug!(request = ?plan.request, positions = plan.positions.len(), frames = plan.frames.len(), "reconcile: plan")
                 }
@@ -699,6 +702,33 @@ impl RiftState {
             self.core.decide(Event::Unseen { window });
         }
         suspended
+    }
+
+    /// An animated layout pass: which of `desires` (the active workspace's windows) to animate,
+    /// each `(window, from, to, request)`. The model sees each at its target from now on.
+    pub(crate) fn animate(
+        &mut self,
+        desires: Vec<rift_core::Desire<Rift>>,
+    ) -> Vec<(WindowId, CGRect, CGRect, TransactionId)> {
+        let effects = self.core.decide(Event::Animate { desires });
+        self.project(&effects, None);
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Animate { window, from, to, request } => Some((window, from, to, request)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The animation under `request` ended.
+    pub(crate) fn animation_ended(&mut self, request: TransactionId) {
+        self.core.decide(Event::AnimationEnded { request });
+    }
+
+    /// The platform stopped `window`'s animation where the model now sees it.
+    pub(crate) fn animation_stopped(&mut self, window: WindowId) {
+        self.core.decide(Event::AnimationStopped { window });
     }
 
     /// The displays changed: where the apps have these windows is unknown until they say

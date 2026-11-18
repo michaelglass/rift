@@ -109,6 +109,14 @@ pub enum Event<K: Kinds> {
         want: Want,
         desires: Vec<Desire<K>>,
     },
+    /// An animated layout pass over the active workspace's windows (in layout order): which of
+    /// them to animate, each from where the model has it to its desire. Each desire names the
+    /// request the animation's frames go out under.
+    Animate { desires: Vec<Desire<K>> },
+    /// The animation under `request` ended.
+    AnimationEnded { request: K::Request },
+    /// The platform stopped `window`'s animation where the model now sees it.
+    AnimationStopped { window: K::Window },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
     Follow {
         request: K::Request,
@@ -148,6 +156,13 @@ pub enum Event<K: Kinds> {
 pub enum Effect<K: Kinds> {
     /// Send this frame to the window's app under its request.
     Write(Write<K>),
+    /// Animate `window` from `from` to `to`, its frames under `request`.
+    Animate {
+        window: K::Window,
+        from: K::Frame,
+        to: K::Frame,
+        request: K::Request,
+    },
     /// Send one batch of an arrange pass.
     Plan(Plan<K>),
     /// A write is with the app; the desire waits behind it.
@@ -216,6 +231,22 @@ impl<K: Kinds> Event<K> {
                 desired: to.frame(desired),
                 want,
             },
+            Event::Animate { desires } => Event::Animate {
+                desires: desires
+                    .into_iter()
+                    .map(|desire| Desire {
+                        window: to.window(desire.window),
+                        frame: to.frame(desire.frame),
+                        request: to.request(desire.request),
+                    })
+                    .collect(),
+            },
+            Event::AnimationEnded { request } => {
+                Event::AnimationEnded { request: to.request(request) }
+            }
+            Event::AnimationStopped { window } => {
+                Event::AnimationStopped { window: to.window(window) }
+            }
             Event::Arrange { now, want, desires } => Event::Arrange {
                 now: to.time(now),
                 want,
@@ -278,6 +309,17 @@ impl<K: Kinds> Effect<K> {
     pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Effect<J> {
         match self {
             Effect::Write(write) => Effect::Write(write.translate(to)),
+            Effect::Animate {
+                window,
+                from,
+                to: target,
+                request,
+            } => Effect::Animate {
+                window: to.window(window),
+                from: to.frame(from),
+                to: to.frame(target),
+                request: to.request(request),
+            },
             Effect::Plan(plan) => Effect::Plan(Plan {
                 request: to.request(plan.request),
                 positions: plan.positions.into_iter().map(|w| w.translate(to)).collect(),
@@ -475,6 +517,28 @@ impl<K: Kinds> RustCore<K> {
                 }
             }
             Event::Arrange { now, want, desires } => self.arrange(now, want, desires),
+            Event::Animate { desires } => {
+                let mut effects = Vec::new();
+                for Desire { window, frame: to, request } in desires {
+                    let Some(&from) = self.seen.get(&window) else { continue };
+                    let owner = pointer.owner(window);
+                    if self.reconciler.animate(request, window, to, from, owner) {
+                        effects.push(Effect::Animate { window, from, to, request });
+                        effects.push(self.see(window, to));
+                    }
+                }
+                effects
+            }
+            Event::AnimationEnded { request } => {
+                self.reconciler.animation_ended(request);
+                vec![]
+            }
+            Event::AnimationStopped { window } => {
+                if let Some(&known) = self.seen.get(&window) {
+                    self.reconciler.animation_stopped(window, known);
+                }
+                vec![]
+            }
             Event::Follow { request, window, frame } => {
                 vec![Effect::Write(
                     self.reconciler.follow(request, window, frame),

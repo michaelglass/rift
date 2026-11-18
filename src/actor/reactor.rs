@@ -347,6 +347,10 @@ pub enum Event {
     Gesture(crate::actor::gesture::Lifecycle),
     #[serde(skip)]
     DragMotion(crate::actor::drag::DragMotion),
+    /// The animation whose frames went out under this request ended (from the animation
+    /// thread).
+    #[serde(skip)]
+    AnimationEnded(TransactionId),
     /// The left button went down at `point` with no modifier drag taking it: the only thing a
     /// native drag can start from.
     #[serde(skip)]
@@ -2195,6 +2199,10 @@ impl Reactor {
                 self.space_state.menu_bar_space = menu_bar_space;
                 self.space_state.command_space = command_space;
                 return Ok(EventOutcome::default());
+            }
+            Event::AnimationEnded(request) => {
+                self.state.animation_ended(request);
+                return Ok(EventOutcome::no_change());
             }
             Event::DragMotion(motion) => {
                 let Some((window, session)) = self.state.windows.drag_mut() else {
