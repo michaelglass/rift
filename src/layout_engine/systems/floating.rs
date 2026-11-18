@@ -1,4 +1,5 @@
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::CGRect;
+use rift_core::layout::floating;
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +8,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::{
-    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
+    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem, cg_rect, core_rect,
 };
 use crate::model::tree::NodeId;
 
@@ -69,7 +70,13 @@ impl FloatingLayoutSystem {
                     return None;
                 }
                 let frame = self.frame(wid).unwrap_or_else(|| {
-                    Self::default_frame(screen, WindowLayoutConstraints::default())
+                    cg_rect(
+                        floating::Floating {
+                            screen: core_rect(screen),
+                            spread: false,
+                        }
+                        .default_frame(WindowLayoutConstraints::default()),
+                    )
                 });
                 Some(self.inner.stack_group_container_info(
                     node,
@@ -211,78 +218,31 @@ impl FloatingLayoutSystem {
         })
     }
 
-    fn default_frame(screen: CGRect, limits: WindowLayoutConstraints) -> CGRect {
-        let limits = limits.normalized();
-        let dimension = |value: f64, horizontal| {
-            if let Some(fixed) = limits.fixed_for_axis(horizontal) {
-                return fixed;
-            }
-            let value = value.max(limits.reported_min(horizontal));
-            let max = limits.max_for_axis(horizontal);
-            if max > 0.0 { value.min(max) } else { value }
-        };
-        let size = CGSize::new(
-            dimension(screen.size.width * 0.7, true),
-            dimension(screen.size.height * 0.7, false),
-        );
-        CGRect::new(
-            CGPoint::new(
-                screen.mid().x - size.width / 2.,
-                screen.mid().y - size.height / 2.,
-            ),
-            size,
-        )
-    }
-
     pub(crate) fn spread_initial_windows(&mut self) { self.spread_on_initialization = true; }
 
-    fn cascade_frame(frame: CGRect, screen: CGRect, index: usize, count: usize) -> CGRect {
-        if count <= 1 {
-            return frame;
-        }
-        let slots = (count - 1) as f64;
-        let available_x = (screen.size.width - frame.size.width).max(0.0);
-        let available_y = (screen.size.height - frame.size.height).max(0.0);
-        let span_x = (slots * 36.0).min(available_x);
-        let span_y = (slots * 36.0).min(available_y);
-        let fraction = index as f64 / slots;
-        CGRect::new(
-            CGPoint::new(
-                screen.origin.x + available_x / 2.0 - span_x / 2.0 + span_x * fraction,
-                screen.origin.y + available_y / 2.0 - span_y / 2.0 + span_y * fraction,
-            ),
-            frame.size,
-        )
-    }
-
-    fn initial_frame(
+    /// The layout's first frames for `windows`, in order, as the core places them.
+    fn first_frames(
         &self,
         screen: CGRect,
-        limits: WindowLayoutConstraints,
-        live: Option<CGRect>,
-        index: usize,
-        count: usize,
-    ) -> CGRect {
-        let default = Self::default_frame(screen, limits);
-        let mut frame = live.unwrap_or(default);
-        let size = CGSize::new(
-            frame.size.width.min(default.size.width),
-            frame.size.height.min(default.size.height),
-        );
-        if size != frame.size {
-            frame = CGRect::new(
-                CGPoint::new(
-                    screen.mid().x - size.width / 2.,
-                    screen.mid().y - size.height / 2.,
-                ),
-                size,
-            );
+        windows: &[WindowId],
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        seen: impl Fn(WindowId) -> floating::Seen,
+    ) -> Vec<CGRect> {
+        let newcomers: Vec<_> = windows
+            .iter()
+            .map(|&wid| floating::Newcomer {
+                constraints: constraints.get(&wid).copied().unwrap_or_default(),
+                seen: seen(wid),
+            })
+            .collect();
+        floating::Floating {
+            screen: core_rect(screen),
+            spread: self.spread_on_initialization,
         }
-        if self.spread_on_initialization {
-            Self::cascade_frame(frame, screen, index, count)
-        } else {
-            frame
-        }
+        .first_frames(&newcomers)
+        .into_iter()
+        .map(cg_rect)
+        .collect()
     }
 
     pub(crate) fn initialize_frames(
@@ -293,19 +253,18 @@ impl FloatingLayoutSystem {
         get_frame: &impl Fn(WindowId) -> Option<CGRect>,
     ) {
         let windows = self.inner.all_windows_in_layout(layout);
-        let count = windows.len();
-        for (index, wid) in windows.into_iter().enumerate() {
+        // A window with a frame already keeps it: what it is seen at doesn't matter.
+        let first = self.first_frames(screen, &windows, constraints, |wid| {
             if self.frames.contains_key(&wid) {
-                continue;
+                return floating::Seen::Unseen;
             }
-            let frame = self.initial_frame(
-                screen,
-                constraints.get(&wid).copied().unwrap_or_default(),
-                get_frame(wid),
-                index,
-                count,
-            );
-            self.frames.insert(wid, frame);
+            match get_frame(wid) {
+                Some(frame) => floating::Seen::Live(core_rect(frame)),
+                None => floating::Seen::Unseen,
+            }
+        });
+        for (wid, frame) in windows.into_iter().zip(first) {
+            self.frames.entry(wid).or_insert(frame);
         }
         self.spread_on_initialization = false;
     }
@@ -385,26 +344,18 @@ impl LayoutSystem for FloatingLayoutSystem {
         _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let windows = self.inner.all_windows_in_layout(layout);
-        let count = windows.len();
+        let first = self.first_frames(screen, &windows, constraints, |_| floating::Seen::Unseen);
         windows
             .into_iter()
-            .enumerate()
-            .filter(|(_, wid)| self.inner.window_participates(*wid))
-            .map(|(index, wid)| {
+            .zip(first)
+            .filter(|(wid, _)| self.inner.window_participates(*wid))
+            .map(|(wid, first)| {
                 let frame = self
                     .inner
                     .window_node(layout, wid)
                     .and_then(|node| self.inner.fullscreen_frame(node, screen, gaps))
                     .or_else(|| self.frames.get(&wid).copied())
-                    .unwrap_or_else(|| {
-                        self.initial_frame(
-                            screen,
-                            constraints.get(&wid).copied().unwrap_or_default(),
-                            None,
-                            index,
-                            count,
-                        )
-                    });
+                    .unwrap_or(first);
                 (wid, frame)
             })
             .collect()
@@ -659,6 +610,8 @@ impl LayoutSystem for FloatingLayoutSystem {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::{CGPoint, CGSize};
+
     use super::*;
     use crate::sys::geometry::CGRectExt;
 
