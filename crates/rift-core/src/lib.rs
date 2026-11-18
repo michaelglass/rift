@@ -7,6 +7,7 @@
 //! and a foreign core (Roc) runs it on [`plain`] data, which crosses as words ([`plain::wire`]).
 
 pub mod core;
+pub mod layout;
 pub mod plain;
 pub mod pointer;
 pub mod reconciler;
