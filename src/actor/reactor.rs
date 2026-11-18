@@ -2200,12 +2200,11 @@ impl Reactor {
                 // while most of its frame is still on the old one.
                 let space =
                     self.space_state.screen_for_point(motion.point).and_then(|screen| screen.space);
-                let entered = (space != session.source.current_space).then(|| {
-                    let scene = space
-                        .filter(|_| session.source.tiled && !session.resizing())
-                        .map(|space| self.drag_scene(window, space))
-                        .unwrap_or_default();
-                    (space, scene)
+                let entered = session.entering(space).map(|scene_space| {
+                    (
+                        space,
+                        scene_space.map(|s| self.drag_scene(window, s)).unwrap_or_default(),
+                    )
                 });
                 let Some(session) = self.state.windows.drag_on_mut(window) else {
                     return Ok(EventOutcome::no_change());
@@ -2215,14 +2214,18 @@ impl Reactor {
                     session.enter_display(space, scene);
                     intent_changed = true;
                 }
-                intent_changed |= session.motion(window, &self.config.settings.drag_drop, motion);
+                let settings = &self.config.settings.drag_drop;
+                intent_changed |= session.motion(window, settings, motion);
                 if intent_changed {
-                    resolve_drag_preview(
+                    session.resolve_preview(
                         window,
-                        session,
-                        &self.space_state,
-                        &self.layout_manager,
-                        &self.config,
+                        settings,
+                        drop_previews(
+                            window,
+                            &self.space_state,
+                            &self.layout_manager,
+                            &self.config,
+                        ),
                     );
                 }
                 // The session is in hand, so this is the dragged window's own frame: the one
@@ -4953,22 +4956,17 @@ impl Reactor {
         let Some((window, session)) = self.state.windows.drag() else {
             return;
         };
-        let source = session.source;
-        if !source.tiled || session.resizing() {
-            return;
-        }
-        let Some(space) = source.current_space else { return };
+        let Some(space) = session.scene_space() else { return };
         let scene = self.drag_scene(window, space);
         let Some(session) = self.state.windows.drag_on_mut(window) else {
             return;
         };
-        session.replace_scene(window, &self.config.settings.drag_drop, scene);
-        resolve_drag_preview(
+        let settings = &self.config.settings.drag_drop;
+        session.replace_scene(window, settings, scene);
+        session.resolve_preview(
             window,
-            session,
-            &self.space_state,
-            &self.layout_manager,
-            &self.config,
+            settings,
+            drop_previews(window, &self.space_state, &self.layout_manager, &self.config),
         );
     }
 
@@ -6855,44 +6853,25 @@ impl Reactor {
     }
 }
 
-/// Validate the drop the pointer is over, falling back through targets the layout can't take.
-fn resolve_drag_preview(
+/// What the layout makes of each drop of `window` a drag offers: the frame it would give it.
+fn drop_previews<'a>(
     window: WindowId,
-    session: &mut Session,
-    space_state: &ForwardedSpaceState,
-    layout: &LayoutManager,
-    config: &Config,
-) {
-    let settings = &config.settings.drag_drop;
-    while let Some(mut intent) = session.intent() {
-        // The source's own tile only offers moves; anything else there is no drop.
-        if intent.window == window
-            && !matches!(intent.action, crate::layout_engine::WindowDropAction::Move(_))
-        {
-            break;
-        }
-        let preview = loop {
-            let preview = space_state.screen_by_space(intent.space).and_then(|screen| {
-                layout.layout_engine.drop_preview_frame(
-                    intent.space,
-                    window,
-                    intent.window,
-                    intent.frame,
-                    intent.action,
-                    screen.frame,
-                    screen.display_uuid_opt(),
-                    &config.settings.ui.stack_line,
-                )
-            });
-            let Some(result) = preview else { break None };
-            let action = result.action(intent.action, settings.drop_action);
-            if action == intent.action {
-                break Some(result);
-            }
-            intent.action = action;
-        };
-        if !session.set_preview(window, settings, intent, preview.map(|result| result.frame)) {
-            break;
-        }
+    space_state: &'a ForwardedSpaceState,
+    layout: &'a LayoutManager,
+    config: &'a Config,
+) -> impl Fn(&crate::actor::drag::DropIntent) -> Option<crate::layout_engine::engine::DropPreview> + 'a
+{
+    move |intent| {
+        let screen = space_state.screen_by_space(intent.space)?;
+        layout.layout_engine.drop_preview_frame(
+            intent.space,
+            window,
+            intent.window,
+            intent.frame,
+            intent.action,
+            screen.frame,
+            screen.display_uuid_opt(),
+            &config.settings.ui.stack_line,
+        )
     }
 }
