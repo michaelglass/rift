@@ -612,9 +612,9 @@ pub enum Request {
     /// focused/main window and the quiet marker before notifying the reactor.
     ApplicationGloballyActivated(pid_t),
     WindowMaybeDestroyed(WindowId),
-    /// Re-read the frame of every window of app `pid` and report each as an unprompted
+    /// Re-read the frame of every window of this app and report each as an unprompted
     /// change: the reactor's full reconcile after a lifecycle event.
-    ReadFrames(pid_t),
+    ReadFrames,
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrames(
@@ -1482,32 +1482,26 @@ impl State {
                 self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
                 return Ok(false);
             }
-            Request::ReadFrames(pid) => {
-                if pid != self.pid {
-                    return Ok(false);
-                }
-                let read: Vec<_> = self
+            Request::ReadFrames => {
+                // Every read is reported, even one equal to `last_known_frame`: the reactor
+                // drops reports while the topology is unstable, after this actor recorded
+                // them, so what this actor last saw is not what the reactor knows.
+                let mouse_state = event::get_mouse_state();
+                let windows: Vec<_> = self
                     .windows
                     .iter()
-                    .filter_map(|(&wid, window)| {
-                        Some((
-                            wid,
-                            window.elem.frame().ok()?,
-                            self.txid_for_window_state(window),
-                        ))
+                    .map(|(&wid, window)| {
+                        (wid, window.elem.clone(), self.txid_for_window_state(window))
                     })
                     .collect();
-                for (wid, frame, txid) in read {
-                    if let Some(window) = self.windows.get_mut(&wid) {
-                        window.last_known_frame = frame;
+                for (wid, elem, txid) in windows {
+                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame())) {
+                        Ok(Some(frame)) => {
+                            self.report_unrequested_frame(wid, frame, txid, mouse_state)
+                        }
+                        Ok(None) => {}
+                        Err(error) => debug!(?wid, ?error, "reconcile: frame unreadable"),
                     }
-                    self.send_event(Event::WindowFrameChanged(
-                        wid,
-                        frame,
-                        txid,
-                        Requested(false),
-                        None,
-                    ));
                 }
                 return Ok(false);
             }
@@ -1863,16 +1857,7 @@ impl State {
                         return;
                     }
                 };
-                if let Some(window) = self.windows.get_mut(&wid) {
-                    window.last_known_frame = frame;
-                }
-                self.send_event(Event::WindowFrameChanged(
-                    wid,
-                    frame,
-                    txid,
-                    Requested(false),
-                    mouse_state,
-                ));
+                self.report_unrequested_frame(wid, frame, txid, mouse_state);
             }
             AxNotificationKind::WindowMiniaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
@@ -2599,6 +2584,26 @@ impl State {
         }
 
         false
+    }
+
+    /// `wid` was seen at `frame`, a change Rift didn't request: remembered, and reported.
+    fn report_unrequested_frame(
+        &mut self,
+        wid: WindowId,
+        frame: CGRect,
+        txid: Option<TransactionId>,
+        mouse_state: Option<event::MouseState>,
+    ) {
+        if let Some(window) = self.windows.get_mut(&wid) {
+            window.last_known_frame = frame;
+        }
+        self.send_event(Event::WindowFrameChanged(
+            wid,
+            frame,
+            txid,
+            Requested(false),
+            mouse_state,
+        ));
     }
 
     fn handle_ax_result<T>(

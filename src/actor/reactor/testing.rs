@@ -620,6 +620,7 @@ impl Apps {
     pub fn simulate_events_for_requests(&mut self, requests: Vec<Request>) -> Vec<Event> {
         let mut events = vec![];
         let mut got_visible_windows = false;
+        let mut read_frames = false;
         for request in requests {
             let Some((request, _)) = request.authorized() else {
                 continue;
@@ -628,15 +629,21 @@ impl Apps {
             match request {
                 Request::Terminate => break,
                 Request::WindowMaybeDestroyed(_) => {}
-                Request::ReadFrames(pid) => {
-                    for (&wid, window) in self.windows.iter().filter(|(wid, _)| wid.pid == pid) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            window.frame,
-                            Some(window.last_seen_txid),
-                            Requested(false),
-                            None,
-                        ));
+                // The apps share one channel here, so a read is not attributable to its app:
+                // every window is reported, once per batch of requests. (Which apps are read
+                // is covered where each app has its own channel.)
+                Request::ReadFrames => {
+                    if !read_frames {
+                        read_frames = true;
+                        for (&wid, window) in &self.windows {
+                            events.push(Event::WindowFrameChanged(
+                                wid,
+                                window.frame,
+                                Some(window.last_seen_txid),
+                                Requested(false),
+                                None,
+                            ));
+                        }
                     }
                 }
                 Request::RefreshWindowInventory(token) => {
