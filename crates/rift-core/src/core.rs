@@ -171,8 +171,6 @@ pub struct RustCore<K: Kinds> {
     grip: Grip<K::Window>,
     /// The pending frames as last told to the platform (`Effect::Pending`).
     projected: HashMap<K::Window, K::Frame>,
-    /// Where the model takes each window it knows to be: its last-seen frame.
-    seen: HashMap<K::Window, K::Frame>,
     /// The deadline the platform's timer is armed for.
     armed: Option<K::Time>,
 }
@@ -183,7 +181,6 @@ impl<K: Kinds> Default for RustCore<K> {
             reconciler: Reconciler::default(),
             grip: Grip::Idle,
             projected: HashMap::new(),
-            seen: HashMap::new(),
             armed: None,
         }
     }
@@ -200,13 +197,13 @@ impl<K: Kinds> RustCore<K> {
 
     /// Where the model sees `window`, for the platform's check (in debug builds) that its
     /// projection agrees. Not part of the boundary.
-    pub fn seen(&self, window: K::Window) -> Option<K::Frame> { self.seen.get(&window).copied() }
+    pub fn seen(&self, window: K::Window) -> Option<K::Frame> { self.reconciler.seen(window) }
 
     /// The model takes `window` to be at `frame` from now on. A window it did not know has
     /// just appeared, and its app has it there.
     fn see(&mut self, window: K::Window, frame: K::Frame) -> Effect<K> {
-        match self.seen.insert(window, frame) {
-            None => self.reconciler.appear(window, frame),
+        match self.reconciler.see(window, frame) {
+            None => {}
             Some(before) => {
                 if let Grip::Held {
                     window: held,
@@ -294,7 +291,6 @@ impl<K: Kinds> RustCore<K> {
             }
             Event::LetGo => self.ungrip(Ungrip::LetGo).into_iter().collect(),
             Event::Gone { window } => {
-                self.seen.remove(&window);
                 let effects = self.ungrip_window(window);
                 self.reconciler.remove(window);
                 effects
@@ -308,19 +304,13 @@ impl<K: Kinds> RustCore<K> {
             Event::Ceded { window } => self.ungrip_window(window),
             Event::Seen { window, frame } => vec![self.see(window, frame)],
             Event::Unseen { window } => {
-                self.seen.remove(&window);
+                self.reconciler.remove(window);
                 vec![]
             }
             Event::Rekeyed { from, to } => {
                 // The new identity inherits where the old one was seen unless it is seen itself
                 // (the platform moves the window's state the same way).
-                if let Some(frame) = self.seen.remove(&from)
-                    && !self.seen.contains_key(&to)
-                {
-                    self.seen.insert(to, frame);
-                    self.reconciler.appear(to, frame);
-                }
-                self.reconciler.remove(from);
+                self.reconciler.rekey(from, to);
                 self.rekey_grip(from, to)
             }
             Event::Want {
@@ -330,12 +320,8 @@ impl<K: Kinds> RustCore<K> {
                 desired,
                 want,
             } => {
-                // A window the model does not know is not written.
-                let Some(&known) = self.seen.get(&window) else {
-                    return vec![];
-                };
                 let owner = pointer.owner(window);
-                match self.reconciler.want(now, request, window, desired, known, want, owner) {
+                match self.reconciler.want(now, request, window, desired, want, owner) {
                     Verdict::Send(write) => self.written(write).into(),
                     Verdict::Queued => vec![Effect::Queued { window }, self.see(window, desired)],
                     Verdict::Nothing => vec![],
@@ -345,9 +331,11 @@ impl<K: Kinds> RustCore<K> {
             Event::Animate { now, desires } => {
                 let mut effects = Vec::new();
                 for Desire { window, frame: to, request } in desires {
-                    let Some(&from) = self.seen.get(&window) else { continue };
+                    let Some(from) = self.reconciler.seen(window) else {
+                        continue;
+                    };
                     let owner = pointer.owner(window);
-                    match self.reconciler.animate(now, request, window, to, from, owner) {
+                    match self.reconciler.animate(now, request, window, to, owner) {
                         Planned::Animate => {
                             effects.push(Effect::Animate { window, from, to, request });
                             effects.push(self.see(window, to));
@@ -367,9 +355,7 @@ impl<K: Kinds> RustCore<K> {
                 vec![]
             }
             Event::AnimationStopped { window, request } => {
-                if let Some(&known) = self.seen.get(&window) {
-                    self.reconciler.animation_stopped(window, request, known);
-                }
+                self.reconciler.animation_stopped(window, request);
                 vec![]
             }
             Event::Follow { request, window, frame } => {
@@ -384,27 +370,20 @@ impl<K: Kinds> RustCore<K> {
                 frame,
                 as_of,
             } => {
-                let Some(&known) = self.seen.get(&window) else {
-                    return vec![];
-                };
                 let (owner, holder) = (pointer.owner(window), pointer.holder(window));
-                let (reply, released) = self
-                    .reconciler
-                    .observe(now, request, window, frame, known, as_of, owner, holder);
+                let (reply, released) =
+                    self.reconciler.observe(now, request, window, frame, as_of, owner, holder);
                 let mut effects = vec![Effect::Replied { window, reply }];
                 effects.extend(released.into_iter().flat_map(|write| self.written(write)));
                 effects
             }
             Event::Tick { now, request } => {
-                let seen = &self.seen;
-                let lookup =
-                    |window: K::Window| seen.contains_key(&window).then(|| pointer.owner(window));
-                let released = self.reconciler.expire(now, request, lookup);
+                let released = self.reconciler.expire(now, request, pointer);
                 released.into_iter().flat_map(|write| self.written(write)).collect()
             }
             Event::Forget { window } => match self.reconciler.forget(window) {
                 // The model takes the window to be where the app acknowledged it.
-                Some(acked) if self.seen.get(&window).is_some_and(|&seen| seen != acked) => {
+                Some(acked) if self.reconciler.seen(window).is_some_and(|seen| seen != acked) => {
                     vec![self.see(window, acked)]
                 }
                 Some(_) | None => vec![],
@@ -425,9 +404,11 @@ impl<K: Kinds> RustCore<K> {
         } in desires
         {
             // A window the model does not know is not written.
-            let Some(&known) = self.seen.get(&window) else { continue };
+            let Some(known) = self.reconciler.seen(window) else {
+                continue;
+            };
             let owner = pointer.owner(window);
-            match self.reconciler.want(now, request, window, desired, known, want, owner) {
+            match self.reconciler.want(now, request, window, desired, want, owner) {
                 Verdict::Send(write) => {
                     let moves_only = match want {
                         Want::ArrangePositions => K::same_size(known, desired),
