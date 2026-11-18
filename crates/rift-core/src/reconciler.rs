@@ -8,6 +8,7 @@
 //! Time is never read here: every call that needs it is handed `now`. Nor are request ids
 //! minted here: every call that may write is handed the `request` its writes go out under.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
@@ -564,9 +565,14 @@ impl<K: Kinds> Reconciler<K> {
         let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
             return (Reply::Foreign, None);
         };
-        match (as_of, sync.last()) {
-            (Some(as_of), Some(last)) if as_of < last => return (Reply::NoNews, None),
-            (Some(as_of), Some(last)) if as_of == last => match sync {
+        let stamped = match (as_of, sync.last()) {
+            (Some(as_of), Some(last)) => Some((as_of.cmp(&last), last)),
+            // Unstamped, or a stamp with nothing sent this window: placed by geometry.
+            (None, _) | (Some(_), None) => None,
+        };
+        match stamped {
+            Some((Ordering::Less, _)) => return (Reply::NoNews, None),
+            Some((Ordering::Equal, last)) => match sync {
                 Sync::InFlight { target, queued, .. } => {
                     let answer = if answers::<K>(target, frame) {
                         self.set(window, Sync::Settled { acked: frame, last: Some(last) });
@@ -597,9 +603,9 @@ impl<K: Kinds> Reconciler<K> {
                 // The answer to a write Rift stopped waiting for: news like any report.
                 Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Refused { .. } => {}
             },
-            // A stamp the core never heard of (newer than anything sent this window, or with
-            // nothing sent): not Rift's, so placed by its geometry like any report.
-            _ => {}
+            // A stamp the core never heard of (newer than anything sent this window), or none:
+            // not Rift's, so placed by its geometry like any report.
+            Some((Ordering::Greater, _)) | None => {}
         }
         (self.place(window, sync, frame, known, holder), None)
     }
@@ -644,21 +650,25 @@ impl<K: Kinds> Reconciler<K> {
                 Holder::User | Holder::Nobody,
             )
             | (Sync::Animating { .. }, Holder::User) => {
-                let reply = if K::same_as(frame, known) {
+                let settled = Sync::Settled {
+                    acked: frame,
+                    last: sync.last(),
+                };
+                if K::same_as(frame, known) {
+                    match sync {
+                        // A refusal stands while the window stays where the model has it, and
+                        // so do Rift's frames sent outside the core.
+                        Sync::Refused { .. } | Sync::Outside { .. } => {}
+                        Sync::Settled { .. }
+                        | Sync::Unknown { .. }
+                        | Sync::InFlight { .. }
+                        | Sync::Animating { .. } => self.set(window, settled),
+                    }
                     Reply::NoNews
                 } else {
+                    self.set(window, settled);
                     Reply::Foreign
-                };
-                match (sync, reply) {
-                    // A refusal stands while the window stays where the model has it, and so do
-                    // Rift's frames sent outside the core.
-                    (Sync::Refused { .. } | Sync::Outside { .. }, Reply::NoNews) => {}
-                    _ => self.set(window, Sync::Settled {
-                        acked: frame,
-                        last: sync.last(),
-                    }),
                 }
-                reply
             }
         }
     }
@@ -784,10 +794,14 @@ impl<K: Kinds> Reconciler<K> {
             .windows
             .iter()
             .filter_map(|(&window, record)| match record.sync {
-                Sync::Animating { target, request: sent } if sent == request => {
-                    Some((window, target))
+                Sync::Animating { target, request: sent } => {
+                    (sent == request).then_some((window, target))
                 }
-                _ => None,
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::InFlight { .. }
+                | Sync::Refused { .. }
+                | Sync::Outside { .. } => None,
             })
             .collect();
         ended.sort_unstable_by_key(|&(window, _)| window);
