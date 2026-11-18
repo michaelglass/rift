@@ -635,11 +635,13 @@ impl Apps {
                     if !read_frames {
                         read_frames = true;
                         for (&wid, window) in &self.windows {
+                            // A read Rift asked for, stamped with the request applied.
                             events.push(Event::WindowFrameChanged(
                                 wid,
                                 window.frame,
-                                Some(window.last_seen_txid),
-                                Requested(false),
+                                (window.last_seen_txid != TransactionId::default())
+                                    .then_some(window.last_seen_txid),
+                                Requested(true),
                             ));
                         }
                     }

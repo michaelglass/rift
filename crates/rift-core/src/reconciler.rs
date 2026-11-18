@@ -118,15 +118,19 @@ pub enum Verdict<K: Kinds> {
     Nothing,
 }
 
-/// An unprompted report of a window's frame, classified against what Rift asked for.
+/// What a report of a window's frame meant.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Observation {
-    /// The frame Rift asked for, or the one the model already had: no news.
-    Ack,
-    /// A write is with the app and nobody holds the window: a step on the way there (size
-    /// lands before position). The app's answer settles it.
+pub enum Reply {
+    /// Nothing new: a read from before the app applied Rift's latest word, the frame Rift asked
+    /// for, or where the model already had the window.
+    NoNews,
+    /// Rift's own frame on its way (a step of a write or an animation, or a frame Rift sent
+    /// outside the core): the model takes it, nothing is re-derived.
     InTransit,
-    /// Someone else put the window here: the user if their hand is on it, else its app.
+    /// The app's answer to the write in flight.
+    Answered(Answer),
+    /// Someone else put the window here (the user if their hand is on it, else its app), or
+    /// the app's answer to a write Rift stopped waiting for: news, to re-derive from.
     Foreign,
 }
 
@@ -136,24 +140,6 @@ pub enum Answer {
     Acked,
     /// The app put the window somewhere else ([`Sync::Refused`] says where).
     Refused,
-    /// Nothing tracked was waiting for it: the answer to one sent outside the reconciler (an
-    /// animation frame, a drag's interactive frame), or to a write the user's hand overtook.
-    /// It still says where the window is.
-    Unasked,
-}
-
-/// What an app's reply to a write turned out to be.
-#[derive(Debug, PartialEq)]
-pub enum Reply<K: Kinds> {
-    /// The answer to the write in flight (or to none tracked), and the write that waited
-    /// behind it.
-    Answered(Answer, Option<Write<K>>),
-    /// Rift had stopped waiting: not an answer but news of where the window is, to be
-    /// [observed](Reconciler::observe) as unprompted.
-    Late,
-    /// The answer to a write Rift has since replaced: it says nothing about the one with the
-    /// app now, and is dropped.
-    Stale,
 }
 
 /// What the reconciler decided along the way that is not a write: the platform logs these.
@@ -443,94 +429,89 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
-    /// The app answered a write to `window` with `frame`; `seen` is the request its answer
-    /// names, if it names one. What waited behind the write goes out under `request`.
+    /// `window` was read at `frame`; the model last saw it at `known`. `as_of` is the newest
+    /// request the app had applied to the window when it read the frame, if the read is
+    /// stamped (an answer, a read Rift asked for); a notification is not. What waited behind
+    /// an answered write goes out under `request`.
+    ///
+    /// One rule: a read from before Rift's latest word is no news; one made after it is the
+    /// app's answer to it (an ack or a refusal of a write, a step or the landing of an
+    /// animation, else news); one made after a frame Rift sent outside the core (a camera) is
+    /// that frame. An unstamped report is placed by its geometry.
     #[allow(clippy::too_many_arguments)]
-    pub fn answer(
+    pub fn observe(
         &mut self,
         now: K::Time,
         request: K::Request,
-        seen: Option<K::Request>,
-        window: K::Window,
-        frame: K::Frame,
-        owner: Owner,
-    ) -> Reply<K> {
-        match self.sync(window) {
-            None => Reply::Answered(Answer::Unasked, None),
-            // The answer to Rift's latest word, which it stopped waiting for (a timeout, a
-            // forget): news like any report. An answer to anything older is stale.
-            Some(Sync::Settled { .. } | Sync::Unknown)
-                if let (Some(seen), Some(&last)) = (seen, self.last_sent.get(&window)) =>
-            {
-                if seen == last {
-                    Reply::Late
-                } else {
-                    Reply::Stale
-                }
-            }
-            // Not an answer to anything Rift tracks, but where the app has the window.
-            Some(Sync::Settled { .. } | Sync::Unknown) => {
-                self.set(window, Sync::Settled { acked: frame });
-                Reply::Answered(Answer::Unasked, None)
-            }
-            // The answer to a write the animation replaced: it says nothing about the animation.
-            Some(Sync::Animating { request: sent, .. })
-                if seen.is_some_and(|seen| seen != sent) =>
-            {
-                Reply::Stale
-            }
-            // A frame of the animation, or one that landed on its target (which settles it).
-            Some(Sync::Animating { target, .. }) => {
-                if answers::<K>(target, frame) {
-                    self.set(window, Sync::Settled { acked: frame });
-                }
-                Reply::Answered(Answer::Unasked, None)
-            }
-            Some(Sync::InFlight { request: sent, .. }) if seen.is_some_and(|seen| seen != sent) => {
-                Reply::Stale
-            }
-            Some(Sync::InFlight { target, queued, .. }) => {
-                let answer = if answers::<K>(target, frame) {
-                    self.set(window, Sync::Settled { acked: frame });
-                    Answer::Acked
-                } else {
-                    self.set(window, Sync::Refused { wanted: target, got: frame });
-                    Answer::Refused
-                };
-                Reply::Answered(answer, self.release(now, request, window, queued, owner))
-            }
-            Some(Sync::Refused { .. }) => Reply::Late,
-        }
-    }
-
-    /// `window` reported `frame` unprompted; the model last saw it at `known`. A report of the
-    /// frame in flight is no news, and does not end the wait: the app's answer does, and it can
-    /// still differ. Any other report is where the app has the window.
-    pub fn observe(
-        &mut self,
         window: K::Window,
         frame: K::Frame,
         known: K::Frame,
+        as_of: Option<K::Request>,
+        owner: Owner,
         holder: Holder,
-    ) -> Observation {
+    ) -> (Reply, Option<Write<K>>) {
         let Some(sync) = self.sync(window) else {
-            return Observation::Foreign;
+            return (Reply::Foreign, None);
         };
+        let last = self.last_sent.get(&window).copied();
+        match (as_of, last) {
+            (Some(as_of), Some(last)) if as_of < last => return (Reply::NoNews, None),
+            (Some(as_of), Some(last)) if as_of == last => match sync {
+                Sync::InFlight { target, queued, .. } => {
+                    let answer = if answers::<K>(target, frame) {
+                        self.set(window, Sync::Settled { acked: frame });
+                        Answer::Acked
+                    } else {
+                        self.set(window, Sync::Refused { wanted: target, got: frame });
+                        Answer::Refused
+                    };
+                    let released = self.release(now, request, window, queued, owner);
+                    return (Reply::Answered(answer), released);
+                }
+                Sync::Animating { target, .. } if answers::<K>(target, frame) => {
+                    self.set(window, Sync::Settled { acked: frame });
+                    return (Reply::Answered(Answer::Acked), None);
+                }
+                Sync::Animating { .. } => return (Reply::InTransit, None),
+                // The answer to a write Rift stopped waiting for: news like any report.
+                Sync::Settled { .. } | Sync::Unknown | Sync::Refused { .. } => {}
+            },
+            // A frame Rift sent outside the core (a camera's): where the app has the window.
+            (Some(_), _) if matches!(sync, Sync::Settled { .. } | Sync::Unknown) => {
+                self.set(window, Sync::Settled { acked: frame });
+                return (Reply::InTransit, None);
+            }
+            _ => {}
+        }
+        (self.place(window, sync, frame, known, holder), None)
+    }
+
+    /// An unstamped report, placed by its geometry. A report of the frame in flight is no
+    /// news, and does not end the wait: the app's answer does, and it can still differ. Any
+    /// other report is where the app has the window.
+    fn place(
+        &mut self,
+        window: K::Window,
+        sync: Sync<K>,
+        frame: K::Frame,
+        known: K::Frame,
+        holder: Holder,
+    ) -> Reply {
         match (sync, holder) {
             (Sync::InFlight { target, .. }, Holder::User | Holder::Nobody)
                 if answers::<K>(target, frame) =>
             {
-                Observation::Ack
+                Reply::NoNews
             }
-            (Sync::InFlight { .. }, Holder::Nobody) => Observation::InTransit,
+            (Sync::InFlight { .. }, Holder::Nobody) => Reply::InTransit,
             // The animation is moving the window: a report on its target settles it, any other
-            // is a frame on the way (or a read from before it), no news.
+            // is a frame on the way.
             (Sync::Animating { target, .. }, Holder::Nobody) => {
                 if answers::<K>(target, frame) {
                     self.set(window, Sync::Settled { acked: frame });
-                    Observation::Ack
+                    Reply::NoNews
                 } else {
-                    Observation::InTransit
+                    Reply::InTransit
                 }
             }
             (
@@ -538,17 +519,17 @@ impl<K: Kinds> Reconciler<K> {
                 Holder::User | Holder::Nobody,
             )
             | (Sync::Animating { .. }, Holder::User) => {
-                let observation = if K::same_as(frame, known) {
-                    Observation::Ack
+                let reply = if K::same_as(frame, known) {
+                    Reply::NoNews
                 } else {
-                    Observation::Foreign
+                    Reply::Foreign
                 };
-                match (sync, observation) {
+                match (sync, reply) {
                     // A refusal stands while the window stays where the model has it.
-                    (Sync::Refused { .. }, Observation::Ack) => {}
+                    (Sync::Refused { .. }, Reply::NoNews) => {}
                     _ => self.set(window, Sync::Settled { acked: frame }),
                 }
-                observation
+                reply
             }
         }
     }
@@ -760,7 +741,6 @@ mod tests {
     type Reconciler = super::Reconciler<Plain>;
     type Sync = super::Sync<Plain>;
     type Verdict = super::Verdict<Plain>;
-    type Reply = super::Reply<Plain>;
 
     /// The request every write in these tests goes out under, and an older one.
     const R: RequestId = RequestId(2);
@@ -816,9 +796,16 @@ mod tests {
         assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
         assert_eq!(want(&mut reconciler, T0, at(30.), at(20.)), Verdict::Queued);
 
-        let Reply::Answered(answer, next) =
-            reconciler.answer(T0, R, None, window(), at(10.5), Owner::Rift)
-        else {
+        let (Reply::Answered(answer), next) = reconciler.observe(
+            T0,
+            R,
+            window(),
+            at(10.5),
+            at(10.5),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        ) else {
             panic!("expected an answer");
         };
         assert_eq!(answer, Answer::Acked);
@@ -826,8 +813,17 @@ mod tests {
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
 
         assert_eq!(
-            reconciler.answer(T0, R, None, window(), at(30.), Owner::Rift),
-            Reply::Answered(Answer::Acked, None)
+            reconciler.observe(
+                T0,
+                R,
+                window(),
+                at(30.),
+                at(30.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(30.) });
     }
@@ -839,8 +835,17 @@ mod tests {
         assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
         assert_eq!(want(&mut reconciler, T0, at(10.), at(20.)), Verdict::Nothing);
         assert_eq!(
-            reconciler.answer(T0, R, None, window(), at(10.), Owner::Rift),
-            Reply::Answered(Answer::Acked, None)
+            reconciler.observe(
+                T0,
+                R,
+                window(),
+                at(10.),
+                at(10.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
         );
     }
 
@@ -849,8 +854,17 @@ mod tests {
         let mut reconciler = with(at(0.));
         _ = want(&mut reconciler, T0, at(10.), at(0.));
         assert_eq!(
-            reconciler.answer(T0, R, None, window(), at(14.), Owner::Rift),
-            Reply::Answered(Answer::Refused, None)
+            reconciler.observe(
+                T0,
+                R,
+                window(),
+                at(14.),
+                at(14.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Refused), None)
         );
         assert_eq!(sync(&reconciler), Sync::Refused {
             wanted: at(10.),
@@ -866,10 +880,30 @@ mod tests {
     fn a_refused_window_seen_somewhere_else_is_asked_again() {
         let mut reconciler = with(at(0.));
         _ = want(&mut reconciler, T0, at(10.), at(0.));
-        _ = reconciler.answer(T0, R, None, window(), at(14.), Owner::Rift);
+        _ = reconciler.observe(
+            T0,
+            R,
+            window(),
+            at(14.),
+            at(14.),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        );
         assert_eq!(
-            reconciler.observe(window(), at(90.), at(14.), Holder::Nobody),
-            Observation::Foreign
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(90.),
+                    at(14.),
+                    None,
+                    Owner::Rift,
+                    Holder::Nobody
+                )
+                .0,
+            Reply::Foreign
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(90.) });
         assert_eq!(sent(want(&mut reconciler, T0, at(10.), at(90.))), at(10.));
@@ -893,14 +927,34 @@ mod tests {
         let t2 = t1 + WRITE_DEADLINE;
         assert!(reconciler.expire(t2, R, |_| Some(Owner::Rift)).is_empty());
         assert_eq!(sync(&reconciler), Sync::Refused { wanted: at(20.), got: at(0.) });
-        // Its answer, when it comes, is news.
+        // Its answer, when it comes, is news (the model had it where the app acknowledged it).
         assert_eq!(
-            reconciler.answer(t2, R, None, window(), at(20.), Owner::Rift),
-            Reply::Late
+            reconciler.observe(
+                t2,
+                R,
+                window(),
+                at(20.),
+                at(0.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Foreign, None)
         );
         assert_eq!(
-            reconciler.observe(window(), at(20.), at(0.), Holder::Nobody),
-            Observation::Foreign
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(20.),
+                    at(0.),
+                    None,
+                    Owner::Rift,
+                    Holder::Nobody
+                )
+                .0,
+            Reply::Foreign
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(20.) });
     }
@@ -940,8 +994,19 @@ mod tests {
         let mut reconciler = with(at(10.));
         reconciler.distrust(window());
         assert_eq!(
-            reconciler.observe(window(), at(10.), at(10.), Holder::Nobody),
-            Observation::Ack
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(10.),
+                    at(10.),
+                    None,
+                    Owner::Rift,
+                    Holder::Nobody
+                )
+                .0,
+            Reply::NoNews
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(10.) });
         assert_eq!(want(&mut reconciler, T0, at(10.), at(10.)), Verdict::Nothing);
@@ -963,20 +1028,51 @@ mod tests {
         let mut reconciler = with(at(0.));
         _ = want(&mut reconciler, T0, at(10.), at(0.));
         assert_eq!(
-            reconciler.observe(window(), at(5.), at(10.), Holder::Nobody),
-            Observation::InTransit
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(5.),
+                    at(10.),
+                    None,
+                    Owner::Rift,
+                    Holder::Nobody
+                )
+                .0,
+            Reply::InTransit
         );
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
         // The user holds it: theirs, and Rift stops waiting.
         assert_eq!(
-            reconciler.observe(window(), at(70.), at(10.), Holder::User),
-            Observation::Foreign
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(70.),
+                    at(10.),
+                    None,
+                    Owner::Rift,
+                    Holder::User
+                )
+                .0,
+            Reply::Foreign
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(70.) });
-        // The answer to the abandoned write is not Rift's to wait for, but says where it is.
+        // The answer to the abandoned write is not Rift's to wait for: news, where it says.
         assert_eq!(
-            reconciler.answer(T0, R, None, window(), at(10.), Owner::Rift),
-            Reply::Answered(Answer::Unasked, None)
+            reconciler.observe(
+                T0,
+                R,
+                window(),
+                at(10.),
+                at(70.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Foreign, None)
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(10.) });
     }
@@ -987,14 +1083,25 @@ mod tests {
         _ = want(&mut reconciler, T0, at(10.), at(0.));
         for holder in [Holder::Nobody, Holder::User] {
             assert_eq!(
-                reconciler.observe(window(), at(10.), at(10.), holder),
-                Observation::Ack
+                reconciler
+                    .observe(T0, R, window(), at(10.), at(10.), None, Owner::Rift, holder)
+                    .0,
+                Reply::NoNews
             );
             assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
         }
         assert_eq!(
-            reconciler.answer(T0, R, None, window(), at(13.), Owner::Rift),
-            Reply::Answered(Answer::Refused, None)
+            reconciler.observe(
+                T0,
+                R,
+                window(),
+                at(13.),
+                at(13.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Refused), None)
         );
         assert_eq!(sync(&reconciler), Sync::Refused {
             wanted: at(10.),
@@ -1009,13 +1116,31 @@ mod tests {
         let t1 = later(WRITE_DEADLINE);
         _ = reconciler.want(t1, R, window(), at(20.), at(0.), Want::Arrange, Owner::Rift);
         assert_eq!(
-            reconciler.answer(t1, R, Some(OLD), window(), at(10.), Owner::Rift),
-            Reply::Stale
+            reconciler.observe(
+                t1,
+                R,
+                window(),
+                at(10.),
+                at(10.),
+                Some(OLD),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::NoNews, None)
         );
         assert!(matches!(sync(&reconciler), Sync::InFlight { request: R, .. }));
         assert_eq!(
-            reconciler.answer(t1, R, Some(R), window(), at(20.), Owner::Rift),
-            Reply::Answered(Answer::Acked, None)
+            reconciler.observe(
+                t1,
+                R,
+                window(),
+                at(20.),
+                at(20.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
         );
     }
 
@@ -1029,7 +1154,16 @@ mod tests {
         let t1 = later(Duration::from_millis(100));
         _ = reconciler.want(t1, R, other, at(10.), at(0.), Want::Arrange, Owner::Rift);
         assert_eq!(reconciler.next_deadline(), Some(T0 + WRITE_DEADLINE));
-        _ = reconciler.answer(t1, R, None, window(), at(10.), Owner::Rift);
+        _ = reconciler.observe(
+            t1,
+            R,
+            window(),
+            at(10.),
+            at(10.),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        );
         assert_eq!(reconciler.next_deadline(), Some(t1 + WRITE_DEADLINE));
     }
 
@@ -1077,19 +1211,50 @@ mod tests {
         );
         // The answer to a write from before the animation.
         assert_eq!(
-            reconciler.answer(T0, OLD, Some(OLD), window(), at(0.), Owner::Rift),
-            Reply::Stale
+            reconciler.observe(
+                T0,
+                OLD,
+                window(),
+                at(0.),
+                at(0.),
+                Some(OLD),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::NoNews, None)
         );
         // A read from before the animation reached the app, or a frame on the way.
         assert_eq!(
-            reconciler.observe(window(), at(0.), at(100.), Holder::Nobody),
-            Observation::InTransit
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(0.),
+                    at(100.),
+                    None,
+                    Owner::Rift,
+                    Holder::Nobody
+                )
+                .0,
+            Reply::InTransit
         );
         assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
         // The user's hand takes it wherever it is.
         assert_eq!(
-            reconciler.observe(window(), at(30.), at(100.), Holder::User),
-            Observation::Foreign
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(30.),
+                    at(100.),
+                    None,
+                    Owner::Rift,
+                    Holder::User
+                )
+                .0,
+            Reply::Foreign
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(30.) });
         // A report on the target settles it.
@@ -1098,8 +1263,19 @@ mod tests {
             Planned::Animate
         );
         assert_eq!(
-            reconciler.observe(window(), at(100.), at(100.), Holder::Nobody),
-            Observation::Ack
+            reconciler
+                .observe(
+                    T0,
+                    R,
+                    window(),
+                    at(100.),
+                    at(100.),
+                    None,
+                    Owner::Rift,
+                    Holder::Nobody
+                )
+                .0,
+            Reply::NoNews
         );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(100.) });
     }
@@ -1112,11 +1288,29 @@ mod tests {
             Planned::Animate
         );
         assert_eq!(
-            reconciler.answer(T0, OLD, Some(R), window(), at(40.), Owner::Rift),
-            Reply::Answered(Answer::Unasked, None)
+            reconciler.observe(
+                T0,
+                OLD,
+                window(),
+                at(40.),
+                at(40.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::InTransit, None)
         );
         assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
-        _ = reconciler.answer(T0, OLD, Some(R), window(), at(100.), Owner::Rift);
+        _ = reconciler.observe(
+            T0,
+            OLD,
+            window(),
+            at(100.),
+            at(100.),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        );
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(100.) });
         // Its end changes nothing any more.
         reconciler.animation_ended(T0, R);
@@ -1131,7 +1325,16 @@ mod tests {
             Planned::Animate
         );
         // The app keeps the window short of the target (a minimum size, a rounding).
-        _ = reconciler.answer(T0, OLD, Some(R), window(), at(96.), Owner::Rift);
+        _ = reconciler.observe(
+            T0,
+            OLD,
+            window(),
+            at(96.),
+            at(96.),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        );
         assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
         // Its end waits for the app's answer to it, as a write does: not held forever.
         reconciler.animation_ended(T0, R);
@@ -1140,7 +1343,16 @@ mod tests {
         );
         // The answer, however late, is a refusal; it is not asked again, by a desire or by an
         // animation.
-        _ = reconciler.answer(T0, OLD, Some(R), window(), at(96.), Owner::Rift);
+        _ = reconciler.observe(
+            T0,
+            OLD,
+            window(),
+            at(96.),
+            at(96.),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        );
         assert_eq!(sync(&reconciler), Sync::Refused {
             wanted: at(100.),
             got: at(96.)
@@ -1222,7 +1434,16 @@ mod tests {
         // So the next desire goes out, even for the dropped one's frame.
         assert_eq!(sent(want(&mut reconciler, T0, at(20.), at(20.))), at(20.));
         // A refusal: the app acknowledged `got`.
-        _ = reconciler.answer(T0, OLD, Some(R), window(), at(15.), Owner::Rift);
+        _ = reconciler.observe(
+            T0,
+            OLD,
+            window(),
+            at(15.),
+            at(15.),
+            Some(R),
+            Owner::Rift,
+            Holder::Nobody,
+        );
         assert!(matches!(sync(&reconciler), Sync::Refused { .. }));
         assert_eq!(reconciler.forget(window()), Some(at(15.)));
         assert_eq!(sync(&reconciler), Sync::Settled { acked: at(15.) });

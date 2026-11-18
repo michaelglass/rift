@@ -68,7 +68,7 @@ use events::{
 use main_window::MainWindowTracker;
 use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
-use reconciler::{Observation, Ungripped};
+use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
 use rift_core::{Initiative, InputClass};
 use rift_protocol::DirectionalDistance;
@@ -534,17 +534,6 @@ enum Placement {
     Away(SpaceId),
     /// Belongs on this Space, but no complete snapshot shows where it is.
     Unseen(SpaceId),
-}
-
-/// What a report of a window's frame is to Rift.
-#[derive(Debug, Clone, Copy)]
-enum ReportKind {
-    /// The app's answer to a write, naming the request it answers (if it names one): the frame
-    /// it read back. The core decides whether it answers the write it has in flight.
-    Reply(Option<TransactionId>),
-    /// The app's change notification, or an inventory refresh that found the window at a frame
-    /// Rift didn't know.
-    Unprompted,
 }
 
 pub struct Reactor {
@@ -1914,7 +1903,7 @@ impl Reactor {
                     .then_some((*wid, info.frame))
                 });
                 if let Some((wid, frame)) = moved {
-                    let outcome = self.observe_frame(wid, frame, ReportKind::Unprompted)?;
+                    let outcome = self.observe_frame(wid, frame, None)?;
                     self.apply_event_outcome(outcome);
                 }
                 let refocus = self
@@ -2119,14 +2108,10 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested) => {
-                // Every write is the core's: whether an answer answers the write it has in
-                // flight (or one it has since replaced), the core decides.
-                let kind = if requested.0 {
-                    ReportKind::Reply(last_seen)
-                } else {
-                    ReportKind::Unprompted
-                };
-                let mut outcome = self.observe_frame(wid, new_frame, kind)?;
+                // A read Rift asked for is stamped with the newest request the app had applied;
+                // a notification is not. What it means, the core decides.
+                let as_of = last_seen.filter(|_| requested.0);
+                let mut outcome = self.observe_frame(wid, new_frame, as_of)?;
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
@@ -4419,7 +4404,7 @@ impl Reactor {
         &mut self,
         wid: WindowId,
         new_frame: CGRect,
-        kind: ReportKind,
+        as_of: Option<TransactionId>,
     ) -> anyhow::Result<EventOutcome> {
         let Some(window) = self.state.windows.window(wid) else {
             return Ok(EventOutcome::no_change());
@@ -4428,47 +4413,26 @@ impl Reactor {
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
-        let answered = match kind {
-            ReportKind::Reply(seen) => {
-                let request = self.state.tx.next_id();
-                self.state.answer(request, seen, wid, new_frame)
-            }
-            ReportKind::Unprompted => reconciler::Reply::Late,
-        };
-        let observation = match answered {
-            // The answer to a write Rift has since replaced: it says nothing about the one that
-            // is with the app now.
-            reconciler::Reply::Stale => return Ok(EventOutcome::no_change()),
-            reconciler::Reply::Answered(_, queued) => {
-                // The desire that waited behind the answered write goes out now.
-                if let Some(write) = queued {
-                    self.send_arranged(write);
-                }
-                if self.mission_control_moved_it() {
-                    return Ok(EventOutcome::no_change());
-                }
-                // An answer is where the window is, whatever was asked of it.
-                self.record_report(wid, Some(new_frame));
-                return Ok(EventOutcome::no_change());
-            }
-            // Unprompted, or an answer Rift had stopped waiting for, which is news like any
-            // other: what follows re-derives where the window belongs and writes the difference.
-            reconciler::Reply::Late => self.state.observe(wid, new_frame),
-        };
-        if self.mission_control_moved_it() {
-            return Ok(EventOutcome::no_change());
+        let request = self.state.tx.next_id();
+        let (reply, released) = self.state.observe(request, wid, new_frame, as_of);
+        // The desire that waited behind an answered write goes out now.
+        if let Some(write) = released {
+            self.send_arranged(write);
         }
-        match observation {
-            Observation::Ack => {
-                self.record_report(wid, None);
-                return Ok(EventOutcome::no_change());
-            }
-            Observation::InTransit => {
-                self.record_report(wid, Some(new_frame));
+        match reply {
+            Reply::NoNews => return Ok(EventOutcome::no_change()),
+            // Rift's own frame: where the model takes the window to be.
+            Reply::InTransit | Reply::Answered(_) => {
+                if !self.mission_control_moved_it() {
+                    self.record_report(wid, Some(new_frame));
+                }
                 return Ok(EventOutcome::no_change());
             }
             // Someone else's move: what follows works out whose, and what it means.
-            Observation::Foreign => {}
+            Reply::Foreign if self.mission_control_moved_it() => {
+                return Ok(EventOutcome::no_change());
+            }
+            Reply::Foreign => {}
         }
         let old_space = self.geometry_space_for_window(&old_frame, server_id);
         let new_space = self.geometry_space_for_window(&new_frame, server_id);

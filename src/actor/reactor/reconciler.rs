@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CGRect;
 use rift_core::{Kinds, Release};
-pub(crate) use rift_core::{Observation, Owner, Want};
+pub(crate) use rift_core::{Owner, Want};
 use tracing::{debug, warn};
 
 use super::animation::scrolling_bounds;
@@ -50,7 +50,7 @@ impl Kinds for Rift {
 pub(crate) type Sync = rift_core::Sync<Rift>;
 pub(crate) type Write = rift_core::Write<Rift>;
 pub(crate) type Verdict = rift_core::Verdict<Rift>;
-pub(crate) type Reply = rift_core::Reply<Rift>;
+pub(crate) use rift_core::Reply;
 pub(crate) type Event = rift_core::Event<Rift>;
 pub(crate) type Effect = rift_core::Effect<Rift>;
 
@@ -584,51 +584,35 @@ impl RiftState {
             .expect("the core writes the interactive frame it is given")
     }
 
-    /// The app answered a write to `window` with `frame`, naming the request `seen` (if it
-    /// named one). What waited behind the write goes out under `request`.
-    pub(crate) fn answer(
+    /// `window` was read at `frame`, as of the request `as_of` (a read Rift asked for) or
+    /// unstamped (a notification). What it meant, and the write that waited behind an answered
+    /// one, which goes out under `request`.
+    pub(crate) fn observe(
         &mut self,
         request: TransactionId,
-        seen: Option<TransactionId>,
         window: WindowId,
         frame: CGRect,
-    ) -> Reply {
+        as_of: Option<TransactionId>,
+    ) -> (Reply, Option<Write>) {
         let now = self.core.clock.now();
-        let effects = self.core.decide(Event::Answer {
+        let effects = self.core.decide(Event::Observe {
             now,
             request,
-            seen,
             window,
             frame,
+            as_of,
         });
         self.project(&effects, None);
-        let mut reply = Reply::Late;
-        let mut queued = None;
+        let mut reply = Reply::NoNews;
+        let mut released = None;
         for effect in effects {
             match effect {
-                Effect::Answered { answer, .. } => reply = Reply::Answered(answer, None),
-                Effect::Stale { .. } => reply = Reply::Stale,
-                Effect::Write(write) => queued = Some(write),
+                Effect::Replied { reply: replied, .. } => reply = replied,
+                Effect::Write(write) => released = Some(write),
                 _ => {}
             }
         }
-        match reply {
-            Reply::Answered(answer, None) => Reply::Answered(answer, queued),
-            reply => reply,
-        }
-    }
-
-    /// `window` reported `frame` unprompted.
-    pub(crate) fn observe(&mut self, window: WindowId, frame: CGRect) -> Observation {
-        let effects = self.core.decide(Event::Report { window, frame });
-        self.project(&effects, None);
-        effects
-            .into_iter()
-            .find_map(|effect| match effect {
-                Effect::Observed { observation, .. } => Some(observation),
-                _ => None,
-            })
-            .expect("the core classifies every report on a window it sees")
+        (reply, released)
     }
 
     /// Stops waiting for writes past their deadline; returns what waited behind them, which

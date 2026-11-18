@@ -12,9 +12,7 @@ use std::collections::HashMap;
 
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Pointer, Release, Ungrip};
-use crate::reconciler::{
-    Answer, Note, Observation, Planned, Reconciler, Reply, Verdict, Want, Write,
-};
+use crate::reconciler::{Note, Planned, Reconciler, Reply, Verdict, Want, Write};
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
 /// per batch the platform sends: an app, and whether its writes are held to scrolling bounds).
@@ -106,17 +104,16 @@ pub enum Event<K: Kinds> {
         window: K::Window,
         frame: K::Frame,
     },
-    /// The app answered a write to `window`: it is at `frame`. `seen` is the request the answer
-    /// names, if it names one.
-    Answer {
+    /// `window` was read at `frame`. `as_of` is the newest request the app had applied to it
+    /// when it read the frame, for a read Rift asked for (an answer, a re-read); a notification
+    /// carries none. What waited behind an answered write goes out under `request`.
+    Observe {
         now: K::Time,
         request: K::Request,
-        seen: Option<K::Request>,
         window: K::Window,
         frame: K::Frame,
+        as_of: Option<K::Request>,
     },
-    /// `window` reported `frame` unprompted.
-    Report { window: K::Window, frame: K::Frame },
     /// The deadline timer fired.
     Tick { now: K::Time, request: K::Request },
     /// Something outside the core (an animation, a topology change) took `window`'s frame, or
@@ -148,19 +145,8 @@ pub enum Effect<K: Kinds> {
     /// The model takes `window` to be at `frame` from now on (its projection, `frame_monotonic`
     /// in rift's window store).
     Seen { window: K::Window, frame: K::Frame },
-    /// What the app's answer was.
-    Answered { window: K::Window, answer: Answer },
-    /// The answer names a write Rift has since replaced: dropped, it says nothing about the
-    /// write with the app now.
-    Stale { window: K::Window },
-    /// The answer came after Rift stopped waiting: it is news, and comes back as a
-    /// [`Event::Report`].
-    Late { window: K::Window },
-    /// What an unprompted report was.
-    Observed {
-        window: K::Window,
-        observation: Observation,
-    },
+    /// What a read of `window` meant.
+    Replied { window: K::Window, reply: Reply },
     /// Something decided along the way, for the log.
     Note { window: K::Window, note: Note },
     /// Arm the deadline timer for this time, or disarm it (`None`).
@@ -367,31 +353,23 @@ impl<K: Kinds> RustCore<K> {
                     self.reconciler.follow(request, window, frame),
                 )]
             }
-            Event::Answer {
+            Event::Observe {
                 now,
                 request,
-                seen,
                 window,
                 frame,
+                as_of,
             } => {
-                let owner = pointer.owner(window);
-                match self.reconciler.answer(now, request, seen, window, frame, owner) {
-                    Reply::Answered(answer, queued) => {
-                        let mut effects = vec![Effect::Answered { window, answer }];
-                        effects.extend(queued.into_iter().flat_map(|write| self.written(write)));
-                        effects
-                    }
-                    Reply::Late => vec![Effect::Late { window }],
-                    Reply::Stale => vec![Effect::Stale { window }],
-                }
-            }
-            Event::Report { window, frame } => {
                 let Some(&known) = self.seen.get(&window) else {
                     return vec![];
                 };
-                let holder = pointer.holder(window);
-                let observation = self.reconciler.observe(window, frame, known, holder);
-                vec![Effect::Observed { window, observation }]
+                let (owner, holder) = (pointer.owner(window), pointer.holder(window));
+                let (reply, released) = self
+                    .reconciler
+                    .observe(now, request, window, frame, known, as_of, owner, holder);
+                let mut effects = vec![Effect::Replied { window, reply }];
+                effects.extend(released.into_iter().flat_map(|write| self.written(write)));
+                effects
             }
             Event::Tick { now, request } => {
                 let seen = &self.seen;
@@ -561,17 +539,17 @@ mod tests {
         assert_eq!(*target, at(10.));
         assert_eq!((write.window(), write.frame()), (W, at(10.)));
         assert_eq!(*timer, Some(Nanos(0) + WRITE_DEADLINE));
-        let effects = core.step(Event::Answer {
+        let effects = core.step(Event::Observe {
             now: Nanos(5),
             request: RequestId(2),
-            seen: Some(RequestId(1)),
             window: W,
             frame: at(10.),
+            as_of: Some(RequestId(1)),
         });
         assert_eq!(effects, vec![
-            Effect::Answered {
+            Effect::Replied {
                 window: W,
-                answer: Answer::Acked
+                reply: crate::Reply::Answered(crate::Answer::Acked)
             },
             Effect::Unpending { window: W },
             Effect::Timer(None),

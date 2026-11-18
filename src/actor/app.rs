@@ -1217,11 +1217,6 @@ impl State {
         record.target.map(|_| record.txid)
     }
 
-    fn txid_for_window_state(&self, window: &AppWindowState) -> Option<TransactionId> {
-        self.txid_from_store(window.window_server_id)
-            .or_else(|| Self::some_txid(window.last_seen_txid))
-    }
-
     fn some_txid(txid: TransactionId) -> Option<TransactionId> {
         if txid == TransactionId::default() {
             None
@@ -1536,12 +1531,14 @@ impl State {
                     .windows
                     .iter()
                     .map(|(&wid, window)| {
-                        (wid, window.elem.clone(), self.txid_for_window_state(window))
+                        (wid, window.elem.clone(), Self::some_txid(window.last_seen_txid))
                     })
                     .collect();
-                for (wid, elem, txid) in windows {
+                // A read Rift asked for, stamped with the newest request this actor applied to
+                // the window (it applies requests in order, so the read reflects them all).
+                for (wid, elem, applied) in windows {
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame())) {
-                        Ok(Some(frame)) => self.report_unrequested_frame(wid, frame, txid),
+                        Ok(Some(frame)) => self.report_frame(wid, frame, applied, Requested(true)),
                         Ok(None) => {}
                         Err(error) => debug!(?wid, ?error, "reconcile: frame unreadable"),
                     }
@@ -1844,7 +1841,7 @@ impl State {
                             trace!(?wid, ?notif, "Ignoring notification during owned frame writes");
                             return;
                         }
-                        (self.txid_for_window_state(window), window.frame_source)
+                        (None, window.frame_source)
                     }
                     Err(err) => {
                         match err {
@@ -1889,7 +1886,7 @@ impl State {
                         return;
                     }
                 };
-                self.report_unrequested_frame(wid, frame, txid);
+                self.report_frame(wid, frame, txid, Requested(false));
             }
             AxNotificationKind::WindowMiniaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
@@ -2614,17 +2611,19 @@ impl State {
         false
     }
 
-    /// `wid` was seen at `frame`, a change Rift didn't request: remembered, and reported.
-    fn report_unrequested_frame(
+    /// `wid` was seen at `frame`: remembered, and reported (a read Rift asked for, stamped
+    /// with the request applied, or a notification).
+    fn report_frame(
         &mut self,
         wid: WindowId,
         frame: CGRect,
-        txid: Option<TransactionId>,
+        applied: Option<TransactionId>,
+        requested: Requested,
     ) {
         if let Some(window) = self.windows.get_mut(&wid) {
             window.last_known_frame = frame;
         }
-        self.send_event(Event::WindowFrameChanged(wid, frame, txid, Requested(false)));
+        self.send_event(Event::WindowFrameChanged(wid, frame, applied, requested));
     }
 
     fn handle_ax_result<T>(
