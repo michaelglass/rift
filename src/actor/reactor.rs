@@ -70,7 +70,7 @@ use events::{
 use main_window::MainWindowTracker;
 use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
-use reconciler::{Answer, Observation};
+use reconciler::{Answer, Observation, Ungripped};
 pub use replay::{Record, replay};
 use rift_core::{Initiative, InputClass};
 use rift_protocol::DirectionalDistance;
@@ -4607,7 +4607,6 @@ impl Reactor {
 
     /// The pointer let go: a press ends, a drag drops.
     fn pointer_released(&mut self, released: rift_core::Release) -> anyhow::Result<EventOutcome> {
-        let pointer = self.state.windows.pointer();
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
             let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -4626,10 +4625,13 @@ impl Reactor {
             .window_id_under_cursor()
             .and_then(|window| self.best_space_for_window_id(window).map(|space| (space, window)));
         // The core decides whether the release ends the grip (only its own button does).
-        let dropped = self
-            .state
-            .release(released)
-            .and_then(|ungripped| Some((ungripped.window, ungripped.session?)));
+        let ended = self.state.release(released);
+        let (pressed, dropped) = match ended {
+            None => (None, None),
+            Some(Ungripped { window, session: None }) => (Some(window), None),
+            Some(Ungripped { window, session: Some(session) }) => (None, Some((window, session))),
+        };
+        let drag_ended = dropped.is_some();
         let mut outcome = interaction_workflow::handle_mouse_up(
             &mut self.state,
             &mut self.layout_manager,
@@ -4639,21 +4641,19 @@ impl Reactor {
         if let Some((space, window)) = focused {
             outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
         }
-        // What the hand held back is re-derived from what is true now, not replayed.
-        match pointer {
-            Pointer::Idle => {}
+        // What the hand held back is re-derived from what is true now, not replayed, and only
+        // for what this release ended (a release of another button ends nothing).
+        if let Some(window) = pressed {
             // A press moved nothing, but layout may have wanted the pressed window elsewhere,
             // and the press discarded its transfer: whether it still owes one is read now.
-            Pointer::Pressing(window) => {
-                outcome = outcome.with_arrange_passes(1);
-                if let Some(target) = self.owed_transfer(window) {
-                    outcome.absorb(self.request_window_transfer(window, target, None));
-                }
+            outcome = outcome.with_arrange_passes(1);
+            if let Some(target) = self.owed_transfer(window) {
+                outcome.absorb(self.request_window_transfer(window, target, None));
             }
-            Pointer::Dragging(_) => {
-                debug!("reconcile: re-read everything, drag ended");
-                self.reread.everything();
-            }
+        }
+        if drag_ended {
+            debug!("reconcile: re-read everything, drag ended");
+            self.reread.everything();
         }
         Ok(outcome)
     }
