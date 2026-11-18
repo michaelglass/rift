@@ -83,6 +83,8 @@ pub(crate) struct EventOutcome {
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
     pub(crate) stdout_lines: Vec<String>,
+    /// Rift quits (the layout is saved).
+    pub(crate) exit: bool,
     pub(crate) reapply_app_rules: Vec<WindowId>,
     pub(crate) finalize_created_windows: Vec<WindowId>,
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,

@@ -336,7 +336,10 @@ pub fn handle_command_reactor_save_and_exit(
         return Ok(EventOutcome::no_change()
             .with_stdout_line(format!("Could not save master file; Rift is still running: {e}")));
     }
-    std::process::exit(0);
+    Ok(EventOutcome {
+        exit: true,
+        ..EventOutcome::no_change()
+    })
 }
 
 fn save_layout(
