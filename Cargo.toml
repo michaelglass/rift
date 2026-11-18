@@ -201,6 +201,8 @@ rift-protocol = { path = "crates/rift-protocol" }
 multitouch = "0.3.2"
 
 [dev-dependencies]
+# Traces of the reactor's core steps are saved as JSON for the Roc core to replay.
+rift-core = { path = "crates/rift-core", features = ["serde"] }
 pretty_assertions = "1.4.0"
 tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }

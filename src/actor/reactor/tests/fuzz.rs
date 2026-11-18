@@ -20,7 +20,7 @@ use test_log::test;
 
 use super::*;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::actor::reactor::reconciler::{Desired, Sync};
+use crate::actor::reactor::reconciler::{Desired, Rift, Sync};
 use crate::actor::reactor::testing::TestSizing;
 
 /// Signatures (invariant, step kind) this branch is known to fail. Each has a regression test.
@@ -250,8 +250,17 @@ struct Sim {
 fn display_count(seed: u64) -> usize { 2 + (seed % 2) as usize }
 
 impl Sim {
-    fn new(displays: usize) -> Self {
+    fn new(displays: usize) -> Self { Self::build(displays, false) }
+
+    /// As [`Sim::new`], with every step the reactor takes through the core recorded from the
+    /// start (`reactor.reconciler.trace`).
+    fn recording(displays: usize) -> Self { Self::build(displays, true) }
+
+    fn build(displays: usize, record: bool) -> Self {
         let (mut apps, mut reactor) = test_context();
+        if record {
+            *reactor.reconciler.trace.borrow_mut() = Some(Vec::new());
+        }
         let screens: Vec<CGRect> = (0..displays)
             .map(|i| {
                 CGRect::new(
@@ -950,6 +959,104 @@ fn drag_invariants_hold_across_interleavings() {
     // but don't fail, since a smaller budget can simply miss it.
     if !fixed.is_empty() {
         eprintln!("fuzz: known signature(s) not reproduced this run: {fixed:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The core boundary: every seed's run, as the steps the reactor took through the core.
+
+/// Rift's types to plain data, with times counted from `epoch`.
+struct ToPlain {
+    epoch: std::time::Instant,
+}
+
+impl rift_core::Translate<Rift, rift_core::plain::Plain> for ToPlain {
+    fn window(&self, window: WindowId) -> rift_core::plain::WindowId {
+        rift_core::plain::WindowId {
+            pid: window.pid,
+            idx: window.idx.get(),
+        }
+    }
+
+    fn frame(&self, frame: CGRect) -> rift_core::plain::Rect {
+        rift_core::plain::Rect {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            w: frame.size.width,
+            h: frame.size.height,
+        }
+    }
+
+    fn time(&self, time: std::time::Instant) -> rift_core::plain::Nanos {
+        rift_core::plain::Nanos((time - self.epoch).as_nanos() as u64)
+    }
+}
+
+type PlainStep = (
+    rift_core::Event<rift_core::plain::Plain>,
+    Vec<rift_core::Effect<rift_core::plain::Plain>>,
+);
+
+/// Runs `steps` (and the settling at the end) and returns every step the reactor took through
+/// the core, on plain data. Invariant violations are not this function's business.
+fn trace(displays: usize, steps: &[Step]) -> Vec<PlainStep> {
+    let mut sim = Sim::recording(displays);
+    let epoch = sim.reactor.reconciler.clock.now();
+    for &step in steps {
+        let emitted = sim.run(step);
+        sim.pending.extend(emitted);
+    }
+    _ = sim.settle(steps.len());
+    let to = ToPlain { epoch };
+    let recorded = sim.reactor.reconciler.trace.borrow_mut().take().unwrap_or_default();
+    recorded
+        .into_iter()
+        .map(|(event, effects)| {
+            (
+                event.translate(&to),
+                effects.into_iter().map(|effect| effect.translate(&to)).collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_core_on_plain_data_decides_what_the_reactor_decided() {
+    // The reactor runs the core on its own types; replayed on plain data (what a foreign core
+    // sees), every step must decide exactly the same effects.
+    use rift_core::Core;
+    let cases = budget("RIFT_FUZZ_CASES", 200) as u64;
+    let len = budget("RIFT_FUZZ_STEPS", 30);
+    let mut total = 0;
+    for seed in 0..cases {
+        let recorded = trace(display_count(seed), &generate(seed, len));
+        let mut core = rift_core::RustCore::<rift_core::plain::Plain>::default();
+        for (index, (event, effects)) in recorded.iter().enumerate() {
+            assert_eq!(
+                &core.step(event.clone()),
+                effects,
+                "seed {seed}, core step {index}: {event:?}"
+            );
+        }
+        total += recorded.len();
+    }
+    assert!(total > 0, "the fuzzer took no steps through the core");
+}
+
+/// Writes every seed's trace to `$RIFT_TRACE_DIR/seed-<n>.json`, for the Roc core's
+/// differential test (`crates/rift-core-roc`). Run explicitly:
+/// `RIFT_TRACE_DIR=… cargo test dump_core_traces -- --ignored`.
+#[test]
+#[ignore]
+fn dump_core_traces() {
+    let dir = std::path::PathBuf::from(std::env::var("RIFT_TRACE_DIR").expect("RIFT_TRACE_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases = budget("RIFT_FUZZ_CASES", 200) as u64;
+    let len = budget("RIFT_FUZZ_STEPS", 30);
+    for seed in 0..cases {
+        let recorded = trace(display_count(seed), &generate(seed, len));
+        let json = serde_json::to_string(&recorded).unwrap();
+        std::fs::write(dir.join(format!("seed-{seed}.json")), json).unwrap();
     }
 }
 

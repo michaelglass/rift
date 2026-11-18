@@ -39,8 +39,6 @@ impl Kinds for Rift {
 
     fn is_within(a: CGRect, tolerance: f64, b: CGRect) -> bool { a.is_within(tolerance, b) }
 
-    fn round(frame: CGRect) -> CGRect { frame.round() }
-
     fn after(time: Instant, duration: Duration) -> Instant { time + duration }
 }
 

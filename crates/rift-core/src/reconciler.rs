@@ -21,6 +21,14 @@ pub const ACK_TOLERANCE: f64 = 1.5;
 pub const WRITE_DEADLINE: Duration = Duration::from_millis(300);
 
 /// A frame the reconciler decided to send. Only this crate can make one.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound(
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>"
+    ))
+)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Write<K: Kinds> {
     window: K::Window,
@@ -31,6 +39,10 @@ impl<K: Kinds> Write<K> {
     pub fn window(&self) -> K::Window { self.window }
 
     pub fn frame(&self) -> K::Frame { self.frame }
+
+    /// A write decided by a core implemented outside this crate (the Roc core's adapter). The
+    /// platform's senders still take only what came out of a [`Core`](crate::Core).
+    pub fn from_foreign_core(window: K::Window, frame: K::Frame) -> Self { Write { window, frame } }
 
     /// The same write on another platform's types (a recorded trace replayed on plain data).
     pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Write<J> {
@@ -70,6 +82,7 @@ pub enum Sync<K: Kinds> {
 }
 
 /// How strongly Rift wants a frame.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Want {
     /// Layout: nothing to send when the window is already known to be there.
@@ -94,6 +107,7 @@ pub enum Verdict<K: Kinds> {
 }
 
 /// An unprompted report of a window's frame, classified against what Rift asked for.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Observation {
     /// The frame Rift asked for, or the one it already knew: no news.
@@ -106,6 +120,7 @@ pub enum Observation {
 }
 
 /// The app's answer to a write, classified against the write it answers.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Answer {
     Acked,
@@ -117,6 +132,7 @@ pub enum Answer {
 }
 
 /// What the reconciler decided along the way that is not a write: the platform logs these.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Note {
     /// A desire for a window that is the user's was dropped.
