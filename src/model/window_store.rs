@@ -128,8 +128,6 @@ impl Records {
         }
     }
 
-    fn contains_key(&self, window: &WindowId) -> bool { self.get(window).is_some() }
-
     /// The record for `window`, tracked loose if it is new.
     fn entry_or_default(&mut self, window: WindowId) -> &mut WindowRecord {
         match &mut self.gripped {
@@ -2079,7 +2077,7 @@ impl WindowStore {
             debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));
         }
         for (&pid, ids) in &self.app_windows {
-            debug_assert!(ids.iter().all(|wid| wid.pid == pid && self.windows.contains_key(wid)));
+            debug_assert!(ids.iter().all(|wid| wid.pid == pid && self.windows.get(wid).is_some()));
         }
         for (&wsid, server) in &self.window_servers {
             if let Some(wid) = server.window_id {

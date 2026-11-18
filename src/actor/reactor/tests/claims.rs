@@ -212,13 +212,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
 
     // The owner moves it; Rift neither records nor fights the geometry.
     let moved = CGRect::new(CGPoint::new(300., 200.), floating_frame.size);
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        moved,
-        None,
-        Requested(false),
-        None,
-    ));
+    reactor.handle_event(Event::WindowFrameChanged(wid, moved, None, Requested(false)));
     assert_eq!(reactor.state.windows.window(wid).unwrap().frame_monotonic, moved);
     assert!(!reactor.user_is_dragging(), "an owner move is not a Rift drag");
     let stored = |r: &Reactor| r.layout_manager.layout_engine.get_floating_position(workspace, wid);
@@ -259,13 +253,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
 
     // Rift-controlled drags never start on a claimed window.
     let moved = CGRect::new(CGPoint::new(50., 50.), frame.size);
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        moved,
-        None,
-        Requested(false),
-        Some(crate::sys::event::MouseState::Down),
-    ));
+    reactor.handle_event(Event::WindowFrameChanged(wid, moved, None, Requested(false)));
     assert!(!reactor.user_is_dragging());
     assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
 }
@@ -583,7 +571,7 @@ fn window_queries_place_claimed_windows_from_cached_spaces_only() {
         (-5000., [true, false]),
     ] {
         moved.origin.x = x;
-        let event = Event::WindowFrameChanged(wid, moved, None, Requested(false), None);
+        let event = Event::WindowFrameChanged(wid, moved, None, Requested(false));
         reactor.handle_event(event);
         // With no native Space known, the saved workspace's Space reports it.
         assert_eq!(listed_on(&reactor), listed, "x = {x}");
@@ -611,7 +599,7 @@ fn rekeying_a_claimed_window_schedules_no_rift_work() {
 
     let window_server_queries = window_server::window_space_query_count();
     let arrangements = layout_updates(&mut reactor, |r| {
-        r.handle_event(Event::WindowCreated(replacement, info, None, None))
+        r.handle_event(Event::WindowCreated(replacement, info, None))
     });
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(arrangements, 0);

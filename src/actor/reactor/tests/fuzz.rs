@@ -334,7 +334,6 @@ impl Sim {
             frame,
             last_seen,
             Requested(false),
-            Some(mouse),
         ));
     }
 
