@@ -547,6 +547,8 @@ enum Initiative {
     SwitchWorkspaceFocus,
     /// Warping the pointer or focus to a window.
     WarpFocus,
+    /// Following an app's activation to the workspace holding its window.
+    FollowActivation,
 }
 
 /// Where a window is against where it belongs (its workspace's Space), as the accepted
@@ -604,7 +606,8 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
-    suppress_auto_workspace_switch_until_input: bool,
+    /// Whether input has been seen since wake or session activation.
+    wake: modes::Wake,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     transient_focus: transient_focus::TransientFocusGuard,
     mouse_raise_token: tokio_util::sync::CancellationToken,
@@ -706,7 +709,6 @@ impl Reactor {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
-                pending_workspace_switch_origin: None,
                 owed_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
@@ -743,7 +745,7 @@ impl Reactor {
             refocus_manager: managers::RefocusManager {
                 refocus_state: RefocusState::None,
             },
-            suppress_auto_workspace_switch_until_input: false,
+            wake: modes::Wake::UserPresent,
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -1222,6 +1224,14 @@ impl Reactor {
             } else {
                 modes::UserSpaces::Shown
             },
+            wake: self.wake,
+            workspace_switch: if self.workspace_switch_manager.active_workspace_switch.is_some()
+                || self.workspace_switch_manager.manual_switch_in_progress()
+            {
+                modes::WorkspaceSwitch::Switching
+            } else {
+                modes::WorkspaceSwitch::Idle
+            },
         }
     }
 
@@ -1400,7 +1410,7 @@ impl Reactor {
                 return;
             }
             Event::MouseMoved(wsid) => {
-                self.suppress_auto_workspace_switch_until_input = false;
+                self.wake = modes::Wake::UserPresent;
                 if let Some(window) = self.state.windows.tracked_window_id(wsid)
                     && (self.main_window() == Some(window)
                         || crate::sys::app::is_own_window_focused(window))
@@ -1586,7 +1596,7 @@ impl Reactor {
         // This signal only releases the lifecycle guard. Ordinary typing must
         // not commit camera presentations or trigger layout/focus side effects.
         if matches!(event, Event::KeyboardInput) {
-            self.suppress_auto_workspace_switch_until_input = false;
+            self.wake = modes::Wake::UserPresent;
             self.recording_manager.record.on_event(&event);
             return;
         }
@@ -1748,7 +1758,7 @@ impl Reactor {
             event,
             Event::PointerReleased(_) | Event::MouseMoved(_) | Event::Command(_)
         ) {
-            self.suppress_auto_workspace_switch_until_input = false;
+            self.wake = modes::Wake::UserPresent;
         }
 
         match event {
@@ -1757,13 +1767,13 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::SystemWoke => {
-                self.suppress_auto_workspace_switch_until_input = true;
+                self.wake = modes::Wake::AwaitingInput;
                 debug!("reconcile: re-read everything, woke");
                 self.reread.everything();
                 return Ok(system_workflow::handle_system_woke()?);
             }
             Event::SessionDidBecomeActive => {
-                self.suppress_auto_workspace_switch_until_input = true;
+                self.wake = modes::Wake::AwaitingInput;
                 return Ok(EventOutcome::default());
             }
             _ => {}
@@ -3227,7 +3237,7 @@ impl Reactor {
                     outcome.arrange.is_resize,
                     matches!(
                         self.workspace_switch_manager.workspace_switch_state,
-                        WorkspaceSwitchState::Active
+                        WorkspaceSwitchState::Active(_)
                     ),
                     outcome.arrange.space_scope,
                 )
@@ -5989,27 +5999,9 @@ impl Reactor {
             return EventOutcome::no_change();
         }
 
-        if self.suppress_auto_workspace_switch_until_input {
-            debug!(
-                pid,
-                "Skipping auto workspace switch for lifecycle-restored activation before user input"
-            );
-            return EventOutcome::no_change();
-        }
-
-        if self.workspace_switch_manager.active_workspace_switch.is_some() {
-            trace!(
-                "Skipping auto workspace switch for pid {} because a workspace switch is in progress",
-                pid
-            );
-            return EventOutcome::no_change();
-        }
-
-        if self.workspace_switch_manager.manual_switch_in_progress() {
-            debug!(
-                "Skipping auto workspace switch for pid {} because a manual switch is in progress",
-                pid
-            );
+        let modes = self.modes();
+        if let Some(mode) = modes.refusal(Initiative::FollowActivation) {
+            debug!(pid, "mode-gate: discarded activation follow during {mode:?}");
             return EventOutcome::no_change();
         }
 
@@ -6104,7 +6096,7 @@ impl Reactor {
         if let Some(space) = workspace_switch_space
             && matches!(
                 self.workspace_switch_manager.workspace_switch_state,
-                WorkspaceSwitchState::Active
+                WorkspaceSwitchState::Active(_)
             )
         {
             focus_window = self.visible_focus_candidate_in_active_workspace(space, focus_window);
@@ -6148,7 +6140,7 @@ impl Reactor {
             if let Some(space) = workspace_switch_space
                 && matches!(
                     self.workspace_switch_manager.workspace_switch_state,
-                    WorkspaceSwitchState::Active
+                    WorkspaceSwitchState::Active(_)
                 )
             {
                 if let Some(wid) = self.window_id_under_cursor().filter(|wid| {
@@ -6270,12 +6262,13 @@ impl Reactor {
                 self.workspace_switch_manager.owed_warp,
                 Some(OwedWarp::Display(_))
             ) || (self.config.settings.mouse_follows_focus
-                && (self.workspace_switch_manager.workspace_switch_state
-                    == WorkspaceSwitchState::Active
-                    || self.assigned_space_for_window_id(wid).is_some_and(|space| {
-                        self.layout_manager.layout_engine.active_layout_mode_at(space)
-                            == crate::common::config::LayoutMode::Scrolling
-                    }))) {
+                && (matches!(
+                    self.workspace_switch_manager.workspace_switch_state,
+                    WorkspaceSwitchState::Active(_)
+                ) || self.assigned_space_for_window_id(wid).is_some_and(|space| {
+                    self.layout_manager.layout_engine.active_layout_mode_at(space)
+                        == crate::common::config::LayoutMode::Scrolling
+                }))) {
                 // Scrolling resolves against the destination; workspace switches stay deferred.
                 self.workspace_switch_manager.owe_focus_warp();
                 None

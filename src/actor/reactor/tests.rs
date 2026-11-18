@@ -3827,10 +3827,10 @@ fn empty_layout_response_during_auto_switch_does_not_refocus_cursor() {
         raise_rx.try_recv().is_err(),
         "an observational response must not steal focus"
     );
-    assert_eq!(
+    assert!(matches!(
         reactor.workspace_switch_manager.workspace_switch_state,
-        WorkspaceSwitchState::Active
-    );
+        WorkspaceSwitchState::Active(_)
+    ));
 }
 
 #[test]
@@ -4129,6 +4129,36 @@ fn same_app_native_focus_respects_auto_switch_guards() {
             "{guard} must not arrange hidden windows"
         );
     }
+}
+
+/// An activation refused after wake is discarded: the user's first input ends the mode without
+/// replaying it, and only a fresh activation is followed.
+#[test]
+fn activation_refused_after_wake_is_not_replayed_by_the_first_input() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let visible = WindowId::new(2, 1);
+    let hidden = WindowId::new(2, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+    let active = |reactor: &Reactor| {
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+    };
+
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+    assert_eq!(active(&reactor), Some(0), "discarded while awaiting input");
+    reactor.handle_event(Event::KeyboardInput);
+    assert_eq!(active(&reactor), Some(0), "the first input replays nothing");
+
+    reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+    reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+    assert_eq!(active(&reactor), Some(1), "a fresh activation is followed");
 }
 
 #[test]

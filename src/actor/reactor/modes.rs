@@ -29,6 +29,8 @@ pub(super) struct Modes {
     pub(super) viewport: Viewport,
     pub(super) focus_claim: FocusClaim,
     pub(super) user_spaces: UserSpaces,
+    pub(super) wake: Wake,
+    pub(super) workspace_switch: WorkspaceSwitch,
 }
 
 impl Modes {
@@ -43,6 +45,8 @@ impl Modes {
             viewport,
             focus_claim,
             user_spaces,
+            wake,
+            workspace_switch,
         } = self;
         [
             pointer as &dyn Mode,
@@ -52,6 +56,8 @@ impl Modes {
             viewport,
             focus_claim,
             user_spaces,
+            wake,
+            workspace_switch,
         ]
         .into_iter()
         .find(|mode| !mode.admits(initiative))
@@ -88,6 +94,21 @@ pub(super) enum UserSpaces {
     None,
 }
 
+/// Whether the user has given input since the machine woke or the session became active.
+/// Until they have, app activations are loginwindow handing focus back, not requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wake {
+    UserPresent,
+    AwaitingInput,
+}
+
+/// A workspace switch is in progress: Rift's own (still settling) or the user's.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum WorkspaceSwitch {
+    Idle,
+    Switching,
+}
+
 use Initiative::*;
 use InputClass::{Hover, Inert, Steering};
 
@@ -109,6 +130,9 @@ impl Mode for Pointer {
             // While the user drags a window, Rift keeps its hands off the layout and the
             // pointer until the drop.
             (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Dragging(_)) => false,
+            // Unchanged from before the table: following an app's activation ignores the
+            // pointer. (Open question for the owner: should a drag refuse it?)
+            (FollowActivation, Idle | Pressing(_) | Dragging(_)) => true,
         }
     }
 }
@@ -124,7 +148,8 @@ impl Mode for MenuState {
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
-                | WarpFocus,
+                | WarpFocus
+                | FollowActivation,
                 MenuState::Open(_) | MenuState::Closed,
             ) => true,
         }
@@ -139,7 +164,11 @@ impl Mode for MissionControlState {
             (UserInput(Hover) | RetireWindows, MissionControlState::Active) => false,
             (UserInput(Hover) | RetireWindows, MissionControlState::Inactive) => true,
             (
-                UserInput(Steering | Inert) | Arrange | SwitchWorkspaceFocus | WarpFocus,
+                UserInput(Steering | Inert)
+                | Arrange
+                | SwitchWorkspaceFocus
+                | WarpFocus
+                | FollowActivation,
                 MissionControlState::Active | MissionControlState::Inactive,
             ) => true,
         }
@@ -157,7 +186,8 @@ impl Mode for Modal {
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
-                | WarpFocus,
+                | WarpFocus
+                | FollowActivation,
                 Modal::Frontmost | Modal::Clear,
             ) => true,
         }
@@ -175,7 +205,8 @@ impl Mode for Viewport {
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
-                | WarpFocus,
+                | WarpFocus
+                | FollowActivation,
                 Viewport::Gesturing | Viewport::Free,
             ) => true,
         }
@@ -192,7 +223,8 @@ impl Mode for FocusClaim {
                 | Arrange
                 | RetireWindows
                 | SwitchWorkspaceFocus
-                | WarpFocus,
+                | WarpFocus
+                | FollowActivation,
                 FocusClaim::PausesHover | FocusClaim::Free,
             ) => true,
         }
@@ -207,8 +239,47 @@ impl Mode for UserSpaces {
             (RetireWindows, UserSpaces::None) => false,
             (RetireWindows, UserSpaces::Shown) => true,
             (
-                UserInput(Steering | Inert | Hover) | Arrange | SwitchWorkspaceFocus | WarpFocus,
+                UserInput(Steering | Inert | Hover)
+                | Arrange
+                | SwitchWorkspaceFocus
+                | WarpFocus
+                | FollowActivation,
                 UserSpaces::None | UserSpaces::Shown,
+            ) => true,
+        }
+    }
+}
+
+impl Mode for Wake {
+    fn admits(&self, initiative: Initiative) -> bool {
+        match (initiative, self) {
+            (FollowActivation, Wake::AwaitingInput) => false,
+            (FollowActivation, Wake::UserPresent) => true,
+            (
+                UserInput(Steering | Inert | Hover)
+                | Arrange
+                | RetireWindows
+                | SwitchWorkspaceFocus
+                | WarpFocus,
+                Wake::AwaitingInput | Wake::UserPresent,
+            ) => true,
+        }
+    }
+}
+
+impl Mode for WorkspaceSwitch {
+    fn admits(&self, initiative: Initiative) -> bool {
+        match (initiative, self) {
+            // The activation is most likely the switch's own focus landing.
+            (FollowActivation, WorkspaceSwitch::Switching) => false,
+            (FollowActivation, WorkspaceSwitch::Idle) => true,
+            (
+                UserInput(Steering | Inert | Hover)
+                | Arrange
+                | RetireWindows
+                | SwitchWorkspaceFocus
+                | WarpFocus,
+                WorkspaceSwitch::Switching | WorkspaceSwitch::Idle,
             ) => true,
         }
     }
