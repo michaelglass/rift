@@ -12956,6 +12956,39 @@ fn a_steering_command_during_a_drag_is_discarded_and_not_replayed_at_the_drop() 
 }
 
 #[test]
+fn a_display_move_during_a_drag_is_discarded_and_not_replayed_at_the_drop() {
+    for command in [
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: None,
+        },
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    ] {
+        let (mut apps, mut reactor, wid, _frame) = tiled_window_beside_a_second_display();
+        let other = WindowId::new(7, 1);
+        let moved = drag_by(&apps, &mut reactor, wid, 0., 40.);
+        apps.windows.get_mut(&wid).unwrap().frame = moved;
+        assert!(reactor.user_is_dragging());
+
+        reactor.handle_event(Event::Command(Command::Reactor(command.clone())));
+        let requests = apps.requests();
+        assert!(requests.is_empty(), "{command:?} acted mid-drag: {requests:?}");
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+        apps.simulate_until_quiet(&mut reactor);
+        for window in [wid, other] {
+            assert_eq!(
+                reactor.assigned_space_for_window_id(window),
+                Some(SpaceId::new(1)),
+                "{command:?} moved {window:?} at the drop"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_steering_command_after_the_drop_runs() {
     let (mut apps, mut reactor, dragged, other, _screen, space) = two_tiled_windows();
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, other));
