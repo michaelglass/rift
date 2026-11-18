@@ -13142,6 +13142,53 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
     }
 }
 
+#[test]
+fn an_app_that_rounds_within_the_ack_tolerance_settles_off_by_less_than_it_and_is_not_asked_again()
+{
+    // A terminal rounds down to whole cells. When that takes less than the core's ack tolerance
+    // off the tile, the answer is the write's acknowledgement: the window settles a fraction of a
+    // point short of its tile on the far edges (its origin is exact) and is not asked again.
+    use super::reconciler::Sync;
+    use super::testing::TestSizing;
+    use crate::sys::geometry::IsWithin;
+    let tolerance = rift_core::reconciler::ACK_TOLERANCE;
+    let (mut apps, mut reactor) = test_context();
+    // One tile, the whole screen: 995x400, one point over whole 7pt cells each way.
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(995., 400.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    let terminal = WindowId::new(1, 1);
+    let events = apps.make_app(1, make_windows(1));
+    apps.windows.get_mut(&terminal).unwrap().sizing = TestSizing::Cells(7.);
+    reactor.handle_events(events);
+    apps.simulate_until_quiet(&mut reactor);
+
+    let tile = LayoutManager::calculate_layout(&mut reactor, Some(space))
+        .into_iter()
+        .flat_map(|(_, layout)| layout)
+        .find_map(|(wid, frame)| (wid == terminal).then_some(frame))
+        .unwrap();
+    let got = apps.windows[&terminal].frame;
+    assert!(!got.same_as(tile), "the app did not round: {got:?}");
+    assert!(
+        got.origin.same_as(tile.origin),
+        "rounding moved its origin: {got:?} vs {tile:?}"
+    );
+    assert!(got.is_within(tolerance, tile), "{got:?} vs {tile:?}");
+    let Some(Sync::Settled { acked, .. }) = reactor.state.core.sync(terminal) else {
+        panic!("expected settled, got {:?}", reactor.state.core.sync(terminal));
+    };
+    assert!(acked.same_as(got));
+    for _ in 0..3 {
+        let _ = reactor.update_layout_or_warn(false, false, None);
+        assert_eq!(
+            frames_written(&apps.requests()),
+            [],
+            "a settled frame was asked again"
+        );
+    }
+}
+
 /// The frames a batch of requests writes (a modifier drag's interactive frames are not
 /// `SetWindowFrames`).
 fn frames_written(requests: &[Request]) -> Vec<(WindowId, CGRect)> {
