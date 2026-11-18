@@ -38,11 +38,10 @@ pub struct PendingWindowTransfer {
 /// What the user's hand is doing with the one window it is on.
 #[derive(Debug)]
 enum Grip {
-    /// `button` is down on the window. Its transfer, if any, waits: a release without a
-    /// drag puts it back, a drag supersedes it.
+    /// `button` is down on the window. A transfer it had was discarded at the press: the
+    /// release re-derives one from where the window is and where it is assigned.
     Pressed {
         button: MouseButton,
-        waiting: Option<PendingWindowTransfer>,
     },
     Dragging(Box<Session>),
 }
@@ -70,8 +69,7 @@ pub(crate) enum Hand<'a> {
 pub(crate) struct Pressed<'a>(&'a mut Grip);
 
 impl Pressed<'_> {
-    /// The pressed window moved under the pointer, or a modifier press took it: the drag begins,
-    /// superseding any transfer that was waiting.
+    /// The pressed window moved under the pointer, or a modifier press took it: the drag begins.
     pub(crate) fn start(self, session: Session) { *self.0 = Grip::Dragging(Box::new(session)); }
 }
 
@@ -159,19 +157,10 @@ impl Records {
         self.loose.values_mut().filter_map(|loose| loose.transfer.as_mut())
     }
 
-    /// Forgets a transfer, in flight or waiting behind a press.
+    /// Forgets a transfer. Only a loose window has one.
     fn clear_transfer(&mut self, window: &WindowId) {
-        match &mut self.gripped {
-            Some(Gripped {
-                window: pressed,
-                grip: Grip::Pressed { waiting, .. },
-                ..
-            }) if pressed == window => *waiting = None,
-            _ => {
-                if let Some(loose) = self.loose.get_mut(window) {
-                    loose.transfer = None;
-                }
-            }
+        if let Some(loose) = self.loose.get_mut(window) {
+            loose.transfer = None;
         }
     }
 
@@ -179,30 +168,28 @@ impl Records {
         self.gripped.as_ref().map(|gripped| gripped.window)
     }
 
-    /// The pointer goes down on `window`: its record moves into the slot, its transfer waits.
+    /// The pointer goes down on `window`: its record moves into the slot. Its transfer is
+    /// discarded, not set aside: the user places this window now, and the release re-derives.
     fn press(&mut self, window: WindowId, button: MouseButton) {
         self.let_go();
-        if let Some(loose) = self.loose.remove(&window) {
+        if let Some(Loose { record, .. }) = self.loose.remove(&window) {
             self.gripped = Some(Gripped {
                 window,
-                record: loose.record,
-                grip: Grip::Pressed {
-                    button,
-                    waiting: loose.transfer,
-                },
+                record,
+                grip: Grip::Pressed { button },
             });
         }
     }
 
-    /// The user's hand comes off: the record goes back among the loose ones, with the transfer
-    /// that waited behind a press. A drag's session is returned.
+    /// The user's hand comes off: the record goes back among the loose ones, with no transfer.
+    /// A drag's session is returned.
     fn let_go(&mut self) -> Option<(WindowId, Option<Session>)> {
         let Gripped { window, record, grip } = self.gripped.take()?;
-        let (transfer, session) = match grip {
-            Grip::Pressed { waiting, .. } => (waiting, None),
-            Grip::Dragging(session) => (None, Some(*session)),
+        let session = match grip {
+            Grip::Pressed { .. } => None,
+            Grip::Dragging(session) => Some(*session),
         };
-        self.loose.insert(window, Loose { record, transfer });
+        self.loose.insert(window, Loose { record, transfer: None });
         Some((window, session))
     }
 
