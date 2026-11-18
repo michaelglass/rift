@@ -4037,7 +4037,6 @@ impl Reactor {
         pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
         invalidated_spaces: &[SpaceId],
     ) -> EventOutcome {
-        use crate::model::virtual_workspace::WorkspaceTransferReason;
         let mut outcome = EventOutcome::no_change();
         if self.refreshes_blocked() {
             return outcome;
@@ -4047,122 +4046,16 @@ impl Reactor {
         {
             return outcome;
         }
-        let screens = &self.space_state.screens;
-        let live = |screen: &ScreenInfo| {
-            screen.space.is_some_and(|space| self.active_spaces.contains(&space))
-        };
-        // Native desktop switches (including entering fullscreen) do not change
-        // physical ownership. Retry deferred pins when a user desktop returns.
-        let resolve_pins = pins_only.is_some()
-            || preserve_membership
-            || screens.len() != previous_screens.len()
-            || screens.iter().any(|screen| {
-                previous_screens
-                    .iter()
-                    .find(|old| old.display_uuid == screen.display_uuid)
-                    .is_none_or(|old| {
-                        old.frame != screen.frame || (old.space.is_none() && screen.space.is_some())
-                    })
-            });
-        // Plan only from the accepted topology. Switching away from a desktop
-        // still in the native inventory is dormancy; losing it is departure,
-        // even when its display stays connected and borrows another desktop.
-        let placements: Vec<_> = {
-            let engine = &self.layout_manager.layout_engine;
-            // Resolve each configured display once, rather than scanning all pins
-            // and displays again for every workspace.
-            let mut rule_targets = HashMap::default();
-            engine
-                .workspaces()
-                .catalog()
-                .enumerate()
-                .filter(|(_, id)| pins_only.is_none_or(|ids| ids.contains(id)))
-                .filter_map(|(index, id)| {
-                    let workspace = &engine.workspaces()[id];
-                    let owner = engine.display_uuid_for_space(workspace.space);
-                    let home = workspace
-                        .home_space
-                        .zip(workspace.preferred_display.as_deref())
-                        .filter(|_| pins_only.is_none());
-                    let native_owner =
-                        self.space_state.display_space_ids.iter().find_map(|(display, spaces)| {
-                            spaces.contains(&workspace.space).then_some(display.as_str())
-                        });
-                    let desktop_lost =
-                        invalidated_spaces.contains(&workspace.space) && native_owner.is_none();
-                    let home_target = home.and_then(|(space, display)| {
-                        let target = screens.iter().position(|screen| {
-                            live(screen) && screen.display_uuid_opt() == Some(display)
-                        })?;
-                        let returned = !previous_screens
-                            .iter()
-                            .any(|screen| screen.display_uuid_opt() == Some(display))
-                            && self
-                                .space_state
-                                .display_space_ids
-                                .get(display)
-                                .is_some_and(|spaces| !spaces.contains(&space));
-                        (screens[target].space == Some(space) || returned).then_some(target)
-                    });
-                    let rehome =
-                        home_target.filter(|&target| screens[target].space != workspace.home_space);
-                    let ruled = engine
-                        .workspaces()
-                        .matching_rules(index, &workspace.name)
-                        .find_map(|rule| rule.display.as_deref())
-                        .filter(|_| !workspace.rule_overridden)
-                        .and_then(|rule_display| {
-                            *rule_targets.entry(rule_display).or_insert_with(|| {
-                                crate::sys::screen::resolve_display_preference(
-                                    rule_display,
-                                    screens,
-                                    live,
-                                )
-                                .and_then(|target| {
-                                    screens.iter().position(|screen| std::ptr::eq(screen, target))
-                                })
-                            })
-                        });
-                    let placement = if let Some(target) = ruled {
-                        ((resolve_pins || desktop_lost)
-                            && (native_owner.or(owner) != screens[target].display_uuid_opt()
-                                || desktop_lost))
-                            .then_some((
-                                target,
-                                if desktop_lost {
-                                    WorkspaceTransferReason::DisplayDeparture
-                                } else {
-                                    WorkspaceTransferReason::Restoration
-                                },
-                            ))
-                    } else if let Some(target) =
-                        home_target.filter(|&target| screens[target].space != Some(workspace.space))
-                    {
-                        Some((target, WorkspaceTransferReason::Restoration))
-                    } else if pins_only.is_none()
-                        && (desktop_lost
-                            || (home.is_some()
-                                && owner.is_some_and(|display| {
-                                    !screens
-                                        .iter()
-                                        .any(|screen| screen.display_uuid_opt() == Some(display))
-                                        && (previously_active.contains(&workspace.space)
-                                            || engine.last_space_for_display_uuid(display)
-                                                == Some(workspace.space))
-                                })))
-                    {
-                        screens
-                            .iter()
-                            .position(|screen| live(screen) && screen.display_uuid_opt() == owner)
-                            .or_else(|| screens.iter().position(live))
-                            .map(|target| (target, WorkspaceTransferReason::DisplayDeparture))
-                    } else {
-                        None
-                    };
-                    (rehome.is_some() || placement.is_some()).then_some((id, rehome, placement))
-                })
-                .collect()
-        };
+        let placements = plan_workspace_placements(
+            &self.layout_manager.layout_engine,
+            &self.space_state,
+            &self.active_spaces,
+            previous_screens,
+            previously_active,
+            preserve_membership,
+            pins_only,
+            invalidated_spaces,
+        );
         // Commit ownership and remembered presentation together, then dispatch
         // native effects through the same boundary as commands and app rules.
         for (id, rehome, placement) in placements {
@@ -6813,6 +6706,140 @@ impl Reactor {
                 warn!(error = ?e, "{}", context);
                 false
             })
+    }
+}
+
+/// Which workspaces move home (a screen index) or move display (a screen index and why) after a
+/// topology change, planned only from the accepted topology: `space_state` and `active_spaces`
+/// now, `previous_screens` and `previously_active` before.
+#[allow(clippy::too_many_arguments)]
+fn plan_workspace_placements(
+    engine: &crate::layout_engine::LayoutEngine,
+    space_state: &ForwardedSpaceState,
+    active_spaces: &HashSet<SpaceId>,
+    previous_screens: &[ScreenInfo],
+    previously_active: &HashSet<SpaceId>,
+    preserve_membership: bool,
+    pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
+    invalidated_spaces: &[SpaceId],
+) -> Vec<(
+    crate::model::VirtualWorkspaceId,
+    Option<usize>,
+    Option<(usize, crate::model::virtual_workspace::WorkspaceTransferReason)>,
+)> {
+    use crate::model::virtual_workspace::WorkspaceTransferReason;
+    let screens = &space_state.screens;
+    let live =
+        |screen: &ScreenInfo| screen.space.is_some_and(|space| active_spaces.contains(&space));
+    // Native desktop switches (including entering fullscreen) do not change
+    // physical ownership. Retry deferred pins when a user desktop returns.
+    let resolve_pins = pins_only.is_some()
+        || preserve_membership
+        || screens.len() != previous_screens.len()
+        || screens.iter().any(|screen| {
+            previous_screens
+                .iter()
+                .find(|old| old.display_uuid == screen.display_uuid)
+                .is_none_or(|old| {
+                    old.frame != screen.frame || (old.space.is_none() && screen.space.is_some())
+                })
+        });
+    // Plan only from the accepted topology. Switching away from a desktop
+    // still in the native inventory is dormancy; losing it is departure,
+    // even when its display stays connected and borrows another desktop.
+    {
+        // Resolve each configured display once, rather than scanning all pins
+        // and displays again for every workspace.
+        let mut rule_targets = HashMap::default();
+        engine
+            .workspaces()
+            .catalog()
+            .enumerate()
+            .filter(|(_, id)| pins_only.is_none_or(|ids| ids.contains(id)))
+            .filter_map(|(index, id)| {
+                let workspace = &engine.workspaces()[id];
+                let owner = engine.display_uuid_for_space(workspace.space);
+                let home = workspace
+                    .home_space
+                    .zip(workspace.preferred_display.as_deref())
+                    .filter(|_| pins_only.is_none());
+                let native_owner =
+                    space_state.display_space_ids.iter().find_map(|(display, spaces)| {
+                        spaces.contains(&workspace.space).then_some(display.as_str())
+                    });
+                let desktop_lost =
+                    invalidated_spaces.contains(&workspace.space) && native_owner.is_none();
+                let home_target = home.and_then(|(space, display)| {
+                    let target = screens.iter().position(|screen| {
+                        live(screen) && screen.display_uuid_opt() == Some(display)
+                    })?;
+                    let returned = !previous_screens
+                        .iter()
+                        .any(|screen| screen.display_uuid_opt() == Some(display))
+                        && space_state
+                            .display_space_ids
+                            .get(display)
+                            .is_some_and(|spaces| !spaces.contains(&space));
+                    (screens[target].space == Some(space) || returned).then_some(target)
+                });
+                let rehome =
+                    home_target.filter(|&target| screens[target].space != workspace.home_space);
+                let ruled = engine
+                    .workspaces()
+                    .matching_rules(index, &workspace.name)
+                    .find_map(|rule| rule.display.as_deref())
+                    .filter(|_| !workspace.rule_overridden)
+                    .and_then(|rule_display| {
+                        *rule_targets.entry(rule_display).or_insert_with(|| {
+                            crate::sys::screen::resolve_display_preference(
+                                rule_display,
+                                screens,
+                                live,
+                            )
+                            .and_then(|target| {
+                                screens.iter().position(|screen| std::ptr::eq(screen, target))
+                            })
+                        })
+                    });
+                let placement = if let Some(target) = ruled {
+                    ((resolve_pins || desktop_lost)
+                        && (native_owner.or(owner) != screens[target].display_uuid_opt()
+                            || desktop_lost))
+                        .then_some((
+                            target,
+                            if desktop_lost {
+                                WorkspaceTransferReason::DisplayDeparture
+                            } else {
+                                WorkspaceTransferReason::Restoration
+                            },
+                        ))
+                } else if let Some(target) =
+                    home_target.filter(|&target| screens[target].space != Some(workspace.space))
+                {
+                    Some((target, WorkspaceTransferReason::Restoration))
+                } else if pins_only.is_none()
+                    && (desktop_lost
+                        || (home.is_some()
+                            && owner.is_some_and(|display| {
+                                !screens
+                                    .iter()
+                                    .any(|screen| screen.display_uuid_opt() == Some(display))
+                                    && (previously_active.contains(&workspace.space)
+                                        || engine.last_space_for_display_uuid(display)
+                                            == Some(workspace.space))
+                            })))
+                {
+                    screens
+                        .iter()
+                        .position(|screen| live(screen) && screen.display_uuid_opt() == owner)
+                        .or_else(|| screens.iter().position(live))
+                        .map(|target| (target, WorkspaceTransferReason::DisplayDeparture))
+                } else {
+                    None
+                };
+                (rehome.is_some() || placement.is_some()).then_some((id, rehome, placement))
+            })
+            .collect()
     }
 }
 
