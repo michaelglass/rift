@@ -1,5 +1,15 @@
 # The core boundary, in Rust and in Roc
 
+> **Paused 2026-11-18.** The owner paused the Roc rewrite until the Rust rearch is finished.
+> The Roc port stopped at bookmark `experiment/roc-paused` (`uslyquzy`), green on both cores:
+> the Roc core implements the reconciler with request ids, the mode gate and the timer, and with
+> `--features roc-core` the reactor ran all 949 tests on it, shadowed by the Rust core. It did
+> not get the grip (press/drag) or the window lifecycle. `roc/`, `crates/rift-core-roc` and the
+> `roc-core` feature stay in the tree, **frozen at `experiment/roc-paused`**: they are outside the
+> cargo workspace, nothing updates them, and they will drift from `rift-core` (they stop building
+> against it). `cargo test --workspace` does not need them. The Rust line continues on
+> `experiment/rust-core`; its replay test (`RustCore` on the reactor's recorded traces) stays green.
+
 Experiment on bookmark `experiment/roc`, on top of `experiment/listen-only-tap`. The Roc code
 may be thrown away; the boundary (`crates/rift-core`) is the part meant to go back to rift.
 
