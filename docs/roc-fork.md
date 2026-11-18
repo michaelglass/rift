@@ -148,7 +148,25 @@ wire encode and decode.
 | synthetic, 10 windows | mean 123 ns, p99 1 µs | mean 704 ns, p99 5 µs | mean 863 ns, p99 6 µs |
 | synthetic, 2000 windows | mean 136 ns, p99 250 ns | mean 702 ns, p99 792 ns | mean 971 ns, p99 1 µs |
 
-- Roc is about 5× the Rust core per step; both are far under a frame (16 ms) and under the cost
+- **Host allocator and buffers (after the rebase onto `fix/native-drag-destination`, 4000 × 60
+  corpus, 819,643 steps, means):**
+
+  | | Roc words | `RocCore::step` | Roc allocations per step |
+  |---|---|---|---|
+  | before (system malloc, counted, a list and two Vecs per step) | 548 ns | 680 ns | 5.62 |
+  | boundary buffers reused (event list, encoding, effects copy) | 543 ns | 611 ns | 4.63 |
+  | mimalloc behind `roc_alloc`/`roc_realloc`/`roc_dealloc` | 432 ns (p50 375) | 500 ns | 4.63 |
+  | counting only in test builds | about 13 ns less (3%) | | |
+
+  The Rust core is about 97 ns. Of the original gap (about 450 ns): allocation (the allocator's
+  speed, the counter, the per-step input list) was about 130 ns; the boundary itself (the FFI
+  call, Roc parsing the event and writing a small effect list, the host's copy) is about 110 ns,
+  measured with a Roc step that parses and answers without deciding; the Rust side's wire encode
+  and decode is about 70 ns more in `RocCore::step`; Roc's decisions are the rest, about 320 ns,
+  some 3.3× the Rust core's. The remaining 4.6 allocations per step are Roc's own (the model's
+  rebox, the effect list, the lists a step builds); no arena. Size-class pools were not tried:
+  mimalloc already serves these small blocks from thread-local free lists.
+; both are far under a frame (16 ms) and under the cost
   of one AX call.
 - Flat from 10 to 2000 windows: the model stays unique and Roc updates it in place.
 - Allocations: about 5.5 per step (the event list, the model's unbox/rebox, the effect list,

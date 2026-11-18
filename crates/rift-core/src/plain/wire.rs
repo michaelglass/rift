@@ -368,9 +368,17 @@ impl Words {
 
 /// `event` as words.
 pub fn encode_event(event: Event<Plain>) -> Vec<u64> {
-    let mut words = Words::default();
-    words.event(event);
-    words.0
+    let mut words = Vec::new();
+    encode_event_into(&mut words, event);
+    words
+}
+
+/// `event` as words, into `words` (cleared first; its allocation is kept).
+pub fn encode_event_into(words: &mut Vec<u64>, event: Event<Plain>) {
+    let mut writer = Words(std::mem::take(words));
+    writer.0.clear();
+    writer.event(event);
+    *words = writer.0;
 }
 
 /// `effects` as words.
