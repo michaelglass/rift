@@ -157,12 +157,16 @@ wire encode and decode.
 - At `experiment/roc-paused` the Roc core was ~130 ns per step against Rust's ~35 ns: today's
   core does more per step (a record per window, pending targets for every touched window, plans)
   and the wire codec runs in Roc.
-- **Seen once, not explained:** one Roc core carried across all 4000 seeds (each seed's clock
-  starting at 0 again, which no real session does) had steps of 40–100 ms at random events;
-  per-seed cores have none over 45 µs. Likely the deadline list: with time running backwards,
-  deadlines that never come pile up, and `drop_first` followed by `append` may copy the whole
-  list in Roc where Rust's `VecDeque` does not. Not a production path, but the deadline queue
-  is the first thing to look at if Roc ever shows spikes.
+- **Long sessions (`tests/session.rs`):** one core over the recorded seeds back to back, each
+  shifted so its clock and request ids carry on (time only moves forward): 4000 seeds × 5 =
+  4,239,725 steps over 14.4 simulated hours, slowest Roc step 216 µs, decisions identical to the
+  Rust core's throughout, at most 5 Roc allocations live. The default test (the committed seeds,
+  200 rounds, 2.1 h) fails if more than 10 steps take over 5 ms. An earlier run had shown 40–100
+  ms steps on one core carried across seeds whose clocks restart; it does not reproduce, neither
+  with time running backwards nor on the build that showed it (`b9675712`, rerun three times:
+  slowest step under 1 ms), so it was the machine (other builds running), not the core. The
+  deadline queue cannot grow with a forward clock: a due or stale entry is dropped, so it holds
+  only the writes of the last 300 ms.
 
 Build:
 

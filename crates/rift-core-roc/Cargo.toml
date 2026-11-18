@@ -22,6 +22,10 @@ name = "layout"
 required-features = ["roc"]
 
 [[test]]
+name = "session"
+required-features = ["roc"]
+
+[[test]]
 name = "measure"
 required-features = ["roc"]
 
