@@ -282,11 +282,11 @@ fn display_count(seed: u64) -> usize { 2 + (seed % 2) as usize }
 
 impl Sim {
     /// Every step the reactor takes through the core is recorded from the start
-    /// (`reactor.reconciler.trace`): the invariants read why rift wrote what it wrote, and the
+    /// (`reactor.state.core.trace`): the invariants read why rift wrote what it wrote, and the
     /// differential test replays it.
     fn new(displays: usize) -> Self {
         let (mut apps, mut reactor) = test_context();
-        *reactor.reconciler.trace.borrow_mut() = Some(Vec::new());
+        *reactor.state.core.trace.borrow_mut() = Some(Vec::new());
         let screens: Vec<CGRect> = (0..displays)
             .map(|i| {
                 CGRect::new(
@@ -413,7 +413,7 @@ impl Sim {
         self.settled_before = self
             .live
             .iter()
-            .filter(|&&wid| self.reactor.reconciler.sync(wid) == Sync::Settled)
+            .filter(|&&wid| self.reactor.state.core.sync(wid) == Sync::Settled)
             .filter_map(|&wid| {
                 let known = self.reactor.state.windows.window(wid)?.frame_monotonic;
                 Some((wid, (known, self.os_frame(wid))))
@@ -616,14 +616,14 @@ impl Sim {
     }
 
     fn core_steps(&self) -> usize {
-        self.reactor.reconciler.trace.borrow().as_ref().map_or(0, Vec::len)
+        self.reactor.state.core.trace.borrow().as_ref().map_or(0, Vec::len)
     }
 
     /// What the core decided since step `from` that the invariants need: a modifier drag's
     /// interactive frame, or the core forgetting a window, ends rift's wait for it; and a
     /// placement is written whatever rift believed.
     fn read_core_steps(&mut self, from: usize) {
-        let trace = self.reactor.reconciler.trace.borrow();
+        let trace = self.reactor.state.core.trace.borrow();
         for (event, effects) in &trace.as_ref().expect("recording")[from..] {
             let wrote =
                 || effects.iter().any(|effect| matches!(effect, rift_core::Effect::Write(_)));
@@ -762,7 +762,7 @@ impl Sim {
             }
             // 6. Only the reconciler writes: what rift sent is what the reconciler has in
             // flight. (A write it stopped waiting for within the same step is the exception.)
-            match self.reactor.reconciler.sync(wid) {
+            match self.reactor.state.core.sync(wid) {
                 Sync::InFlight { target, .. } => {
                     if !frame.same_as(target) {
                         return fail(
@@ -875,7 +875,7 @@ impl Sim {
                 if claims(&layouts, wid) != 1 {
                     return Err(fail(format!("{wid:?} is in more than one layout")));
                 }
-                let sync = self.reactor.reconciler.sync(wid);
+                let sync = self.reactor.state.core.sync(wid);
                 let observed = self.os_frame(wid);
                 let refused = match sync {
                     Sync::Refused { .. } => true,
@@ -1107,14 +1107,14 @@ type PlainStep = (
 /// the core, on plain data. Invariant violations are not this function's business.
 fn trace(displays: usize, steps: &[Step]) -> Vec<PlainStep> {
     let mut sim = Sim::new(displays);
-    let epoch = sim.reactor.reconciler.clock.now();
+    let epoch = sim.reactor.state.core.clock.now();
     for &step in steps {
         let emitted = sim.run(step);
         sim.pending.extend(emitted);
     }
     _ = sim.settle(steps.len());
     let to = ToPlain { epoch };
-    let recorded = sim.reactor.reconciler.trace.borrow_mut().take().unwrap_or_default();
+    let recorded = sim.reactor.state.core.trace.borrow_mut().take().unwrap_or_default();
     recorded
         .into_iter()
         .map(|(event, effects)| {

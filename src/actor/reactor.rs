@@ -14,7 +14,7 @@ mod managers;
 mod modes;
 mod native_tabs;
 mod query;
-mod reconciler;
+pub(crate) mod reconciler;
 mod replay;
 #[cfg(feature = "roc-core")]
 mod roc_bridge;
@@ -573,7 +573,6 @@ pub struct Reactor {
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
     transaction_manager: transaction_manager::TransactionManager,
-    reconciler: reconciler::Reconciler,
     reread: reconciler::Reread,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
@@ -699,7 +698,6 @@ impl Reactor {
                 _window_notify_tx: window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
-            reconciler: Default::default(),
             reread: Default::default(),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
@@ -1133,7 +1131,7 @@ impl Reactor {
             .collect();
         for (wid, server_id) in hidden {
             // Whatever a parked window answered before the topology changed no longer holds.
-            self.reconciler.forget(wid);
+            self.state.core.forget(wid);
             if let Some(server_id) = server_id {
                 self.transaction_manager.clear_target_for_window(server_id);
             }
@@ -1255,7 +1253,7 @@ impl Reactor {
         let mut deadline_timer = crate::sys::timer::Timer::manual();
         let mut armed = None;
         loop {
-            let deadline = reactor.borrow_mut().reconciler.next_deadline();
+            let deadline = reactor.borrow_mut().state.core.next_deadline();
             if deadline != armed {
                 armed = deadline;
                 deadline_timer.set_next_fire(armed.map_or(Duration::MAX, |deadline| {
@@ -2230,7 +2228,7 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 let request = self.transaction_manager.mint();
-                let write = self.reconciler.follow(request, window, frame);
+                let write = self.state.core.follow(request, window, frame);
                 self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
             }
@@ -4496,7 +4494,7 @@ impl Reactor {
         let answered = match kind {
             ReportKind::Reply(seen) => {
                 let request = self.transaction_manager.mint();
-                self.reconciler.answer(pointer, request, seen, wid, new_frame)
+                self.state.core.answer(pointer, request, seen, wid, new_frame)
             }
             ReportKind::Unprompted => reconciler::Reply::Late,
         };
@@ -4522,7 +4520,7 @@ impl Reactor {
             }
             // Unprompted, or an answer Rift had stopped waiting for, which is news like any
             // other: what follows re-derives where the window belongs and writes the difference.
-            reconciler::Reply::Late => self.reconciler.observe(pointer, wid, new_frame, old_frame),
+            reconciler::Reply::Late => self.state.core.observe(pointer, wid, new_frame, old_frame),
         };
         if self.mission_control_moved_it() {
             return Ok(EventOutcome::no_change());

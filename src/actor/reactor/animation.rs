@@ -1086,7 +1086,7 @@ impl AnimationManager {
                 bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
             );
             anim.add_window(&handle, wid, current_frame, target_frame, txid);
-            reactor.reconciler.forget(wid);
+            reactor.state.core.forget(wid);
 
             if let Some(window) = reactor.state.windows.window_mut(wid) {
                 window.frame_monotonic = target_frame;

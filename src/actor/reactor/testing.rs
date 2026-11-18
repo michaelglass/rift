@@ -64,7 +64,7 @@ impl Reactor {
 
     /// Time passes: every unanswered write is past its deadline, and Rift stops waiting for it.
     pub fn test_expire_all_writes(&mut self) {
-        self.reconciler.clock.advance(std::time::Duration::from_secs(1));
+        self.state.core.clock.advance(std::time::Duration::from_secs(1));
         self.expire_writes();
     }
 
