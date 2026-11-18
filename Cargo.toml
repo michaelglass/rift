@@ -7,7 +7,7 @@ build = "build.rs"
 [workspace]
 members = [".", "crates/rift-client", "crates/rift-core", "crates/rift-protocol", "crates/rift-config-derive"]
 resolver = "3"
-exclude = ["cgs", "crates/rift-core-roc"]
+exclude = ["cgs"]
 
 [[bin]]
 name = "rift"
@@ -62,6 +62,9 @@ timing = ["dep:tracing-timing"]
 experimental = ["disable-axuielement-destroyed"]
 custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
+# The Roc core decides (crates/rift-core-roc; needs the pinned Roc nightly), with the Rust core
+# stepped beside it as a shadow that must decide the same effects.
+roc-core = ["dep:rift-core-roc", "rift-core-roc/roc"]
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
@@ -197,6 +200,7 @@ embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
 rift-client = { path = "crates/rift-client" }
 rift-core = { path = "crates/rift-core" }
+rift-core-roc = { path = "crates/rift-core-roc", optional = true }
 rift-protocol = { path = "crates/rift-protocol" }
 multitouch = "0.3.2"
 
