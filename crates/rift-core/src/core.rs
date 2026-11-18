@@ -118,8 +118,12 @@ pub enum Event<K: Kinds> {
     },
     /// The animation under `request` ended.
     AnimationEnded { now: K::Time, request: K::Request },
-    /// The platform stopped `window`'s animation where the model now sees it.
-    AnimationStopped { window: K::Window },
+    /// The platform stopped presenting `window` (its frames went out under `request`), where
+    /// the model now sees it; frames of `request` the app had not applied are dropped.
+    AnimationStopped {
+        window: K::Window,
+        request: K::Request,
+    },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
     Follow {
         request: K::Request,
@@ -254,9 +258,10 @@ impl<K: Kinds> Event<K> {
                 now: to.time(now),
                 request: to.request(request),
             },
-            Event::AnimationStopped { window } => {
-                Event::AnimationStopped { window: to.window(window) }
-            }
+            Event::AnimationStopped { window, request } => Event::AnimationStopped {
+                window: to.window(window),
+                request: to.request(request),
+            },
             Event::Arrange { now, want, desires } => Event::Arrange {
                 now: to.time(now),
                 want,
@@ -546,6 +551,10 @@ impl<K: Kinds> RustCore<K> {
                             effects.push(self.see(window, to));
                         }
                         Planned::Write(write) => effects.extend(self.written(write)),
+                        Planned::Queued => {
+                            effects.push(Effect::Queued { window });
+                            effects.push(self.see(window, to));
+                        }
                         Planned::Nothing => {}
                     }
                 }
@@ -555,9 +564,9 @@ impl<K: Kinds> RustCore<K> {
                 self.reconciler.animation_ended(now, request);
                 vec![]
             }
-            Event::AnimationStopped { window } => {
+            Event::AnimationStopped { window, request } => {
                 if let Some(&known) = self.seen.get(&window) {
-                    self.reconciler.animation_stopped(window, known);
+                    self.reconciler.animation_stopped(window, request, known);
                 }
                 vec![]
             }

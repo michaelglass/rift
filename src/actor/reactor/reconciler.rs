@@ -765,8 +765,8 @@ impl RiftState {
     }
 
     /// The platform stopped `window`'s animation where the model now sees it.
-    pub(crate) fn animation_stopped(&mut self, window: WindowId) {
-        let effects = self.core.decide(Event::AnimationStopped { window });
+    pub(crate) fn animation_stopped(&mut self, window: WindowId, request: TransactionId) {
+        let effects = self.core.decide(Event::AnimationStopped { window, request });
         self.project(&effects, None);
     }
 
