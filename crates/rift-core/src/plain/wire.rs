@@ -11,10 +11,12 @@
 //! layout system's tag (0 BSP, 1 traditional), and returns the frames' words. A scrolling strip
 //! (tag 2, [`encode_strip`]) returns where it placed everything ([`encode_placed`]); its column
 //! ids are the platform's, one word each. A settle question (tag 3, [`encode_settle`]) returns
-//! where the camera settles ([`encode_settled`]).
+//! where the camera settles ([`encode_settled`]); a floating layout's newcomers (tag 4,
+//! [`encode_floating`]) their first frames ([`encode_rects`]).
 
 use crate::core::{Desire, Effect, Event, Plan};
 use crate::layout::bsp::{Bsp, Children, Fill, Node, Slot};
+use crate::layout::floating::{Floating, Newcomer, Seen};
 use crate::layout::traditional::{self, StackLine, Traditional};
 use crate::layout::{Gaps, Size, Sizing, WindowConstraints, scrolling};
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
@@ -553,6 +555,33 @@ impl Words {
         self.float(placed.bounds.0);
         self.float(placed.bounds.1);
     }
+}
+
+/// A floating layout's newcomers as words: tag 4, the screen, whether they spread, then the
+/// windows in order (each its constraints and, as an option, the frame it is seen at).
+pub fn encode_floating(floating: Floating, windows: Vec<Newcomer>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(4);
+    words.frame(floating.screen);
+    words.flag(floating.spread);
+    words.list(windows, |words, window| {
+        words.constraints(window.constraints);
+        words.option(
+            match window.seen {
+                Seen::Live(frame) => Some(frame),
+                Seen::Unseen => None,
+            },
+            Words::frame,
+        );
+    });
+    words.0
+}
+
+/// Frames without windows (a floating layout's first frames, in its windows' order) as words.
+pub fn encode_rects(rects: Vec<Rect>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.list(rects, Words::frame);
+    words.0
 }
 
 /// A layout's frames (each window's, in order) as words.
@@ -1111,6 +1140,38 @@ pub fn decode_settle(words: &[u64]) -> Result<SettleQuestion, WireError> {
     })
 }
 
+/// A floating layout's newcomers, as `words` hold them.
+pub fn decode_floating(words: &[u64]) -> Result<(Floating, Vec<Newcomer>), WireError> {
+    let mut reader = Reader { words, at: 0 };
+    match reader.word()? {
+        4 => {}
+        word => return reader.unknown(word),
+    }
+    let floating = Floating {
+        screen: reader.frame()?,
+        spread: reader.flag()?,
+    };
+    let windows = reader.list(|reader| {
+        Ok(Newcomer {
+            constraints: reader.constraints()?,
+            seen: match reader.option(Reader::frame)? {
+                Some(frame) => Seen::Live(frame),
+                None => Seen::Unseen,
+            },
+        })
+    })?;
+    reader.done()?;
+    Ok((floating, windows))
+}
+
+/// The frames `words` hold, without windows.
+pub fn decode_rects(words: &[u64]) -> Result<Vec<Rect>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    let rects = reader.list(Reader::frame)?;
+    reader.done()?;
+    Ok(rects)
+}
+
 /// Where the camera settles, as `words` hold it.
 pub fn decode_settled(words: &[u64]) -> Result<scrolling::Settled<u64>, WireError> {
     let mut reader = Reader { words, at: 0 };
@@ -1592,5 +1653,38 @@ mod tests {
         }
         let settled = scrolling::Settled { column: u64::MAX, offset: -0.5 };
         assert_eq!(decode_settled(&encode_settled(settled)), Ok(settled));
+    }
+
+    #[test]
+    fn a_floating_layouts_newcomers_and_their_first_frames_survive_the_wire() {
+        let floating = Floating {
+            screen: Rect {
+                x: -10.,
+                y: 0.,
+                w: 1000.,
+                h: 800.,
+            },
+            spread: true,
+        };
+        let windows = vec![
+            Newcomer {
+                constraints: WindowConstraints {
+                    sizing: Sizing::new(false, false, Size::reported(10., 20.)),
+                    locked_width: 400.,
+                    ..Default::default()
+                },
+                seen: Seen::Live(Rect { x: 1., y: 2., w: 3., h: 4. }),
+            },
+            Newcomer {
+                constraints: WindowConstraints::default(),
+                seen: Seen::Unseen,
+            },
+        ];
+        assert_eq!(
+            decode_floating(&encode_floating(floating, windows.clone())),
+            Ok((floating, windows.clone()))
+        );
+        let first = floating.first_frames(&windows);
+        assert_eq!(decode_rects(&encode_rects(first.clone())), Ok(first));
     }
 }
