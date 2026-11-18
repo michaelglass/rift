@@ -158,11 +158,9 @@ impl RaiseManager {
                     "Processing layout response with {} raise_windows",
                     request.raise_windows.len()
                 );
-                self.queued_sequences.push_back((request, None));
+                self.enqueue(request, None);
             }
-            Event::MouseRaiseRequest(request, token) => {
-                self.queued_sequences.push_back((request, Some(token)));
-            }
+            Event::MouseRaiseRequest(request, token) => self.enqueue(request, Some(token)),
             Event::RaiseCompleted { window_id, sequence_id } => {
                 trace!("Raise completed for {:?} in sequence {}", window_id, sequence_id);
 
@@ -226,6 +224,23 @@ impl RaiseManager {
                 break;
             }
         }
+    }
+
+    /// Queues a request behind the active sequence. A focus is the user's (or Rift's) latest
+    /// intent: it discards every queued focus before it, which would otherwise run first and
+    /// briefly focus, and possibly switch workspace to, a stale target. Stacking-only requests
+    /// stay queued in order: they carry no intent, only the z-order a layout pass needs.
+    fn enqueue(&mut self, request: RaiseRequest, token: Option<CancellationToken>) {
+        if request.focus_window.is_some() {
+            self.queued_sequences.retain(|(queued, _)| {
+                let stale = queued.focus_window.is_some();
+                if stale {
+                    debug!(focus = ?queued.focus_window, "raise: queued focus superseded; discarded");
+                }
+                !stale
+            });
+        }
+        self.queued_sequences.push_back((request, token));
     }
 
     fn process_queued_responses(&mut self) -> bool {
@@ -742,6 +757,46 @@ mod tests {
         });
     }
 
+    /// Focus requests queued behind a busy sequence are intents, and only the latest one runs:
+    /// an older queued focus is discarded when a newer one arrives, never replayed before it.
+    #[test]
+    fn a_newer_focus_supersedes_queued_focus_requests() {
+        Executor::run(async {
+            let mut manager = RaiseManager::new();
+            let (handles, mut rx) = create_test_app_handles();
+            let stacked = WindowId::new(1, 1);
+            manager.handle_message(create_layout_response(
+                vec![stacked],
+                None,
+                handles.clone(),
+                Quiet::No,
+            ));
+            let stale = WindowId::new(1, 2);
+            let latest = WindowId::new(1, 3);
+            for window in [stale, latest] {
+                manager.handle_message(create_layout_response(
+                    vec![],
+                    Some((window, None)),
+                    handles.clone(),
+                    Quiet::No,
+                ));
+            }
+            assert_eq!(manager.queued_sequences.len(), 1);
+            collect_requests(&mut rx);
+
+            manager.handle_message(Event::RaiseCompleted {
+                window_id: stacked,
+                sequence_id: 1,
+            });
+            let requests = collect_requests(&mut rx);
+            assert!(
+                !find_raise_request(&requests, stale),
+                "the stale focus never runs"
+            );
+            assert!(find_raise_request(&requests, latest));
+        });
+    }
+
     #[test]
     fn test_timeout_clears_pending_and_triggers_focus() {
         Executor::run(async {
@@ -881,7 +936,8 @@ mod tests {
             // Send three layout responses:
             // 1. First has one regular raise + focus
             // 2. Second has no regular raises, only focus (will start immediately when first completes)
-            // 3. Third has one regular raise + focus
+            // 3. Third has one regular raise and no focus (a newer focus would discard the
+            //    second's: only the latest focus intent runs)
             let msg1 = create_layout_response(
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
@@ -896,7 +952,7 @@ mod tests {
             );
             let msg3 = create_layout_response(
                 vec![WindowId::new(1, 4)],
-                Some((WindowId::new(1, 5), None)),
+                None,
                 app_handles.clone(),
                 Quiet::No,
             );
