@@ -43,11 +43,15 @@ fn traces() -> Vec<(String, Vec<u64>)> {
 fn the_roc_core_decides_what_the_rust_core_decided() {
     let before = AllocationCount::now();
     let mut steps = 0;
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
     for (name, words) in traces() {
         let trace = wire::decode_trace(&words).unwrap_or_else(|error| panic!("{name}: {error:?}"));
         let mut rust = RustCore::<Plain>::default();
         let mut roc = RocCore::default();
         for (index, (event, recorded)) in trace.into_iter().enumerate() {
+            let kind = format!("{event:?}");
+            let kind = kind.split([' ', '(', '{']).next().unwrap_or_default().to_owned();
+            *kinds.entry(kind).or_default() += 1;
             let from_rust = rust.step(event.clone());
             assert_eq!(
                 &from_rust, &recorded,
@@ -73,4 +77,5 @@ fn the_roc_core_decides_what_the_rust_core_decided() {
         "differential: {steps} steps identical; Roc allocated {} times",
         after.allocated - before.allocated
     );
+    eprintln!("differential: events by kind: {kinds:?}");
 }
