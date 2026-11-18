@@ -89,6 +89,7 @@ use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
+use crate::common::expecting::{Echo, Expecting};
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
 use crate::model::RiftState;
 use crate::model::broadcast::{
@@ -584,8 +585,10 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
-    pending_mouse_focus: Option<(WindowId, Instant)>,
-    overview_focus: Option<(SpaceId, WindowId, Instant)>,
+    /// A mouse raise Rift sent: repeat hovers over that window wait for its completion.
+    pending_mouse_focus: Option<Expecting<WindowId>>,
+    /// The overview's selected window, being focused: arranges on its Space stay instant.
+    overview_focus: Option<Expecting<(SpaceId, WindowId)>>,
     mouse_inventory_hit: Option<WindowServerId>,
     /// A fresh read of the mouse button; cheap, so it is read where needed, never stored.
     read_button: fn() -> Option<MouseState>,
@@ -2355,9 +2358,12 @@ impl Reactor {
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
                 if let Some(stamp) = transition {
-                    self.overview_focus = window.map(|window| (space, window, stamp));
+                    self.overview_focus =
+                        window.map(|window| Expecting::since((space, window), stamp));
                 }
-                if transition.is_some() || self.overview_focus.is_some() {
+                let overview_focusing =
+                    self.overview_focus.as_ref().and_then(Expecting::live).is_some();
+                if transition.is_some() || overview_focusing {
                     self.stop_camera(space);
                 }
                 self.store_current_floating_positions(space);
@@ -2385,7 +2391,7 @@ impl Reactor {
                     EventOutcome::focus_changed(None, false)
                 };
                 outcome.overview_activation = transition.map(|stamp| (workspace, window, stamp));
-                outcome.arrange.instant = transition.is_some() || self.overview_focus.is_some();
+                outcome.arrange.instant = transition.is_some() || overview_focusing;
                 // The cursor is already on the overview's display; follow only a
                 // workspace that lives on another one.
                 if self
@@ -2511,9 +2517,7 @@ impl Reactor {
             Event::MouseMoved(wsid) => {
                 let window = self.state.windows.tracked_window_id(wsid);
                 if window.is_some_and(|window| {
-                    self.pending_mouse_focus.is_some_and(|(pending, started)| {
-                        pending == window && started.elapsed() < Duration::from_secs(1)
-                    })
+                    self.pending_mouse_focus.as_ref().and_then(Expecting::live) == Some(&window)
                 }) {
                     return Ok(EventOutcome::default());
                 }
@@ -2573,7 +2577,7 @@ impl Reactor {
                     &self.mouse_raise_token,
                 )?;
                 if !outcome.raise_requests.is_empty() {
-                    self.pending_mouse_focus = window.map(|window| (window, Instant::now()));
+                    self.pending_mouse_focus = window.map(Expecting::now);
                 }
                 return Ok(outcome);
             }
@@ -2589,7 +2593,7 @@ impl Reactor {
                 );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
-                if self.pending_mouse_focus.is_some_and(|(window, _)| window == window_id) {
+                if self.pending_mouse_focus.as_ref().and_then(Expecting::live) == Some(&window_id) {
                     self.pending_mouse_focus = None;
                 }
                 let mut outcome = system_workflow::handle_raise_completed(
@@ -2598,8 +2602,13 @@ impl Reactor {
                         sequence: sequence_id,
                     },
                 )?;
-                if let Some((space, selected, _)) =
-                    self.overview_focus.filter(|(_, selected, _)| *selected == window_id)
+                // A late completion still finishes the handoff: the echo is what ends it.
+                if let Some((space, selected)) = self
+                    .overview_focus
+                    .map(|focus| match focus.settle() {
+                        Echo::Ours(focus) | Echo::Late(focus) => focus,
+                    })
+                    .filter(|(_, selected)| *selected == window_id)
                 {
                     self.overview_focus = None;
                     let selected = window_server::key_focused_window(space)
@@ -3076,10 +3085,7 @@ impl Reactor {
     fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
         // AX activation and inventory replies can arrive after overview preparation.
         // Until its focus completes, native layout work remains covered and instant.
-        if let Some((space, _, _)) = self
-            .overview_focus
-            .filter(|(_, _, started)| started.elapsed() < Duration::from_secs(1))
-        {
+        if let Some(&(space, _)) = self.overview_focus.as_ref().and_then(Expecting::live) {
             if outcome.arrange.space_scope.is_none_or(|scope| scope == space) {
                 outcome.arrange.instant = true;
             }

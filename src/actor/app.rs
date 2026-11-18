@@ -25,6 +25,7 @@ use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::actor::wm_controller::{self, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
+use crate::common::expecting::{Echo, Expecting};
 use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 use crate::model::tx_store::WindowTxStore;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -723,14 +724,14 @@ pub fn spawn_app_thread(
 enum PendingActivation {
     #[default]
     None,
-    Ax(Instant, Quiet),
+    Ax(Expecting<Quiet>),
     Hidden(Quiet, Option<WindowId>),
 }
 
 impl PendingActivation {
     fn ax_activated(&mut self, quiet: Quiet) {
         if !matches!(self, Self::Hidden(..)) {
-            *self = Self::Ax(Instant::now(), quiet);
+            *self = Self::Ax(Expecting::now(quiet));
         }
     }
 
@@ -748,8 +749,11 @@ impl PendingActivation {
     ) -> Option<(Quiet, Option<WindowId>)> {
         let pending = std::mem::take(self);
         let context = initiated.unwrap_or_else(|| match pending {
-            Self::Ax(at, quiet) if at.elapsed() < Duration::from_millis(1000) => (quiet, None),
-            _ => (Quiet::No, None),
+            Self::Ax(quiet) => match quiet.settle() {
+                Echo::Ours(quiet) => (quiet, None),
+                Echo::Late(_) => (Quiet::No, None),
+            },
+            Self::None | Self::Hidden(..) => (Quiet::No, None),
         });
         if hidden {
             *self = Self::Hidden(context.0, context.1);
@@ -780,7 +784,8 @@ struct State {
     windows: HashMap<WindowId, AppWindowState>,
     elem_to_wid: HashMap<AXUIElement, WindowId>,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
+    /// An activation Rift requested; the sender wakes the raise awaiting it.
+    last_activated: Option<Expecting<(Quiet, Option<WindowId>, oneshot::Sender<()>)>>,
     pending_activation: PendingActivation,
     is_hidden: bool,
     is_frontmost: bool,
@@ -2136,16 +2141,16 @@ impl State {
     }
 
     fn take_activation_context(&mut self) -> (Quiet, Option<WindowId>) {
-        match self.last_activated.take() {
-            Some((ts, quiet_activation, quiet_window_change, tx)) => {
+        match self.last_activated.take().map(Expecting::settle) {
+            Some(Echo::Ours((quiet_activation, quiet_window_change, tx))) => {
                 _ = tx.send(());
-                if ts.elapsed() < Duration::from_millis(1000) {
-                    trace!("by us");
-                    (quiet_activation, quiet_window_change)
-                } else {
-                    trace!("by user");
-                    (Quiet::No, None)
-                }
+                trace!("by us");
+                (quiet_activation, quiet_window_change)
+            }
+            Some(Echo::Late((_, _, tx))) => {
+                _ = tx.send(());
+                trace!("by user");
+                (Quiet::No, None)
             }
             None => {
                 trace!("by user");
@@ -2208,10 +2213,11 @@ impl State {
     ) -> Result<(), RaiseError> {
         let app = this.app.clone();
         let (tx, rx) = oneshot::channel();
-        if let Some((_, _, _, prev_tx)) =
+        if let Some(previous) =
             this.last_activated
-                .replace((Instant::now(), quiet_activation, quiet_window_change, tx))
+                .replace(Expecting::now((quiet_activation, quiet_window_change, tx)))
         {
+            let (_, _, prev_tx) = previous.forget();
             let _ = prev_tx.send(());
         }
         drop(this);
@@ -2785,7 +2791,8 @@ fn collect_visible_window_server_info(
 
 impl Drop for State {
     fn drop(&mut self) {
-        if let Some((_, _, _, tx)) = self.last_activated.take() {
+        if let Some(activation) = self.last_activated.take() {
+            let (_, _, tx) = activation.forget();
             let _ = tx.send(());
         }
         self.enhanced_ui.restore_if_needed(&self.app);
