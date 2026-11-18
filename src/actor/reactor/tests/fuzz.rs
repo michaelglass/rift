@@ -1453,3 +1453,48 @@ fn a_lagging_inventory_read_during_another_drag_is_no_news() {
     ];
     assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
 }
+
+#[test]
+fn a_camera_moving_windows_during_a_drag_does_not_unsettle_them_at_the_drop() {
+    // Windows a scrolling camera moves while another window is dragged are Rift's own frames,
+    // not news: the drop must not hand them back unknown (they would be written to a frame
+    // taken mid-camera instead of riding it).
+    let steps = [
+        Step::Press { w: 7 },
+        Step::DragMove { dx: -58, dy: 63 },
+        Step::ForeignMove {
+            w: 12,
+            to: 1,
+            mouse: Mouse::Truth,
+        },
+        Step::MouseUp,
+        Step::ForeignMove {
+            w: 5,
+            to: 0,
+            mouse: Mouse::Truth,
+        },
+        Step::ForeignMove {
+            w: 14,
+            to: 0,
+            mouse: Mouse::Truth,
+        },
+        Step::ModifierDrag { w: 5, dx: -140, dy: 144 },
+        Step::ForeignMove {
+            w: 15,
+            to: 2,
+            mouse: Mouse::Truth,
+        },
+        Step::ForeignMove {
+            w: 1,
+            to: 0,
+            mouse: Mouse::Truth,
+        },
+        Step::Deliver,
+    ];
+    let setup = Setup {
+        displays: 3,
+        animate: true,
+        scrolling: true,
+    };
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}

@@ -55,8 +55,9 @@ pub(crate) enum Grip<W> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Phase<W> {
     Pressed,
-    /// The windows whose model frame changed during the drag: every desire is the user's then,
-    /// so they are re-derived when it ends.
+    /// The windows someone else moved during the drag (a read with news): every desire is the
+    /// user's then, so they are re-derived when it ends. Rift's own frames coming back (a
+    /// camera's, an answer to its write) are not news.
     Dragging {
         changed: Vec<W>,
     },

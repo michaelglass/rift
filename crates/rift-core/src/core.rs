@@ -193,22 +193,7 @@ impl<K: Kinds> RustCore<K> {
     /// The model takes `window` to be at `frame` from now on. A window it did not know has
     /// just appeared, and its app has it there.
     fn see(&mut self, window: K::Window, frame: K::Frame) -> Effect<K> {
-        match self.reconciler.see(window, frame) {
-            None => {}
-            Some(before) => {
-                if let Grip::Held {
-                    window: held,
-                    phase: Phase::Dragging { changed },
-                    ..
-                } = &mut self.grip
-                    && *held != window
-                    && before != frame
-                    && !changed.contains(&window)
-                {
-                    changed.push(window);
-                }
-            }
-        }
+        self.reconciler.see(window, frame);
         Effect::Seen { window, frame }
     }
 
@@ -361,6 +346,19 @@ impl<K: Kinds> RustCore<K> {
                 let (owner, holder) = (pointer.owner(window), pointer.holder(window));
                 let (reply, released) =
                     self.reconciler.observe(now, request, window, frame, as_of, owner, holder);
+                // News of another window during a drag (someone else moved it): its desires are
+                // the user's until the drag ends, so it is re-derived then.
+                if reply == Reply::Foreign
+                    && let Grip::Held {
+                        window: held,
+                        phase: Phase::Dragging { changed },
+                        ..
+                    } = &mut self.grip
+                    && *held != window
+                    && !changed.contains(&window)
+                {
+                    changed.push(window);
+                }
                 let mut effects = vec![Effect::Replied { window, reply }];
                 effects.extend(released.into_iter().flat_map(|write| self.written(write)));
                 effects
@@ -540,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_whose_model_frame_changed_during_a_drag_is_handed_back_unknown() {
+    fn a_window_a_read_moved_during_a_drag_is_handed_back_unknown() {
         let mut core = RustCore::<Plain>::default();
         let other = WindowId { pid: 8, idx: 1 };
         core.step(Event::Seen { window: W, frame: at(0.) });
@@ -551,7 +549,13 @@ mod tests {
         });
         core.step(Event::Drag { window: W });
         // A read moves the other window's model frame; its desires are the user's now.
-        core.step(Event::Seen { window: other, frame: at(520.) });
+        core.step(Event::Observe {
+            now: Nanos(0),
+            request: RequestId(1),
+            window: other,
+            frame: at(520.),
+            as_of: None,
+        });
         let effects = core.step(Event::Release(Release::Button(Button::Left)));
         assert!(effects.contains(&Effect::Ungrip {
             window: W,
