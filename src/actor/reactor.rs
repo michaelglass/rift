@@ -2192,18 +2192,28 @@ impl Reactor {
                 return Ok(EventOutcome::no_change());
             }
             Event::DragMotion(motion) => {
-                let Some((window, session)) = self.state.windows.drag_mut() else {
+                let Some((window, session)) = self.state.windows.drag() else {
+                    return Ok(EventOutcome::no_change());
+                };
+                // The display under the pointer is where the drag drops, a native drag's as a
+                // modifier drag's: macOS moves a dragged window to the pointer's display too,
+                // while most of its frame is still on the old one.
+                let space =
+                    self.space_state.screen_for_point(motion.point).and_then(|screen| screen.space);
+                let entered = (space != session.source.current_space).then(|| {
+                    let scene = space
+                        .filter(|_| session.source.tiled && !session.resizing())
+                        .map(|space| self.drag_scene(window, space))
+                        .unwrap_or_default();
+                    (space, scene)
+                });
+                let Some(session) = self.state.windows.drag_on_mut(window) else {
                     return Ok(EventOutcome::no_change());
                 };
                 let mut intent_changed = false;
-                if let Some(frame) = session.modifier_frame_at(motion.point) {
-                    // The display under the pointer decides what a modifier move can drop onto.
-                    let space = self
-                        .space_state
-                        .screen_for_point(motion.point)
-                        .and_then(|screen| screen.space)
-                        .or_else(|| self.space_state.best_space_for_frame(&frame));
-                    intent_changed |= session.update_current_space(space);
+                if let Some((space, scene)) = entered {
+                    session.enter_display(space, scene);
+                    intent_changed = true;
                 }
                 intent_changed |= session.motion(window, &self.config.settings.drag_drop, motion);
                 if intent_changed {
