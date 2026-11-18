@@ -12506,7 +12506,10 @@ fn a_window_crossing_a_display_before_its_drag_registers_is_not_snapped_back() {
     // frame changes reach Rift: there is no drag session yet, only the press on the window.
     let (mut apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
     reactor.handle_event(Event::PointerPressed { point: frame.mid() });
-    assert_eq!(reactor.state.windows.is_pressed(wid), true);
+    assert_eq!(
+        (reactor.state.windows.pointer() == crate::model::window_store::Pointer::Pressing(wid)),
+        true
+    );
     let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
     reactor.handle_event(Event::WindowServerAppeared(
         wsid,
@@ -12557,7 +12560,11 @@ fn a_window_moving_with_no_press_on_it_is_never_a_drag() {
                 Pointer::PressedOtherWindow => {
                     let point = reactor.state.windows.window(other).unwrap().frame_monotonic.mid();
                     reactor.handle_event(Event::PointerPressed { point });
-                    assert_eq!(reactor.state.windows.is_pressed(other), true);
+                    assert_eq!(
+                        (reactor.state.windows.pointer()
+                            == crate::model::window_store::Pointer::Pressing(other)),
+                        true
+                    );
                 }
             }
             for x in [800., 950., 1100.] {
@@ -12574,7 +12581,11 @@ fn a_window_moving_with_no_press_on_it_is_never_a_drag() {
                 reactor.state.windows.drag().is_none(),
                 "a drag started: {context}"
             );
-            assert!(!reactor.state.windows.is_pressed(wid), "{context}");
+            assert!(
+                !(reactor.state.windows.pointer()
+                    == crate::model::window_store::Pointer::Pressing(wid)),
+                "{context}"
+            );
             assert_eq!(
                 reactor.assigned_space_for_window_id(wid),
                 Some(SpaceId::new(1)),
@@ -13006,7 +13017,10 @@ fn a_steering_command_during_a_press_is_discarded_and_not_replayed_at_the_releas
         apps.simulate_until_quiet(&mut reactor);
         let (home, theirs) = (slot(&reactor, pressed), slot(&reactor, other));
         reactor.handle_event(Event::PointerPressed { point: home.mid() });
-        assert!(reactor.state.windows.is_pressed(pressed));
+        assert!(
+            (reactor.state.windows.pointer()
+                == crate::model::window_store::Pointer::Pressing(pressed))
+        );
 
         reactor.handle_loop_event(Event::Command(command.clone()));
         let requests = apps.requests();
@@ -13032,7 +13046,9 @@ fn a_press_whose_release_was_missed_does_not_swallow_commands() {
     reactor.handle_event(Event::PointerPressed {
         point: slot(&reactor, pressed).mid(),
     });
-    assert!(reactor.state.windows.is_pressed(pressed));
+    assert!(
+        (reactor.state.windows.pointer() == crate::model::window_store::Pointer::Pressing(pressed))
+    );
     // The tap never reported the release; the button reads up.
     reactor.read_button = || Some(MouseState::Up);
 

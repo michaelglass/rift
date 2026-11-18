@@ -474,9 +474,10 @@ fn frames_of(writes: Vec<Write>) -> Vec<(WindowId, CGRect)> {
 /// Whose `window`'s frame is: the user's while their hand is on it, and every window's while
 /// they drag one.
 fn owner(windows: &WindowStore, window: WindowId) -> Owner {
-    match (windows.pointer(), windows.is_gripped(window)) {
-        (Pointer::Dragging, _) | (Pointer::Pressing | Pointer::Idle, true) => Owner::User,
-        (Pointer::Pressing | Pointer::Idle, false) => Owner::Rift,
+    match windows.pointer() {
+        Pointer::Dragging(_) => Owner::User,
+        Pointer::Pressing(pressed) if pressed == window => Owner::User,
+        Pointer::Pressing(_) | Pointer::Idle => Owner::Rift,
     }
 }
 
