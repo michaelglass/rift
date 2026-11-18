@@ -1632,52 +1632,27 @@ impl Reactor {
             self.transient_focus.windows.retain(|_, t| t.pid != *pid);
             event = Event::ApplicationThreadTerminated(*pid);
         }
-        match &event {
-            Event::WindowDestroyed(wid) | Event::WindowInvalidated(wid, _) => {
-                self.cancel_window_presentations(vec![*wid]);
-            }
-            Event::WindowClosed(wsid) => {
-                if let Some(wid) = self.state.windows.tracked_window_id(*wsid) {
-                    self.cancel_window_presentations(vec![wid]);
-                }
-            }
-            Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
-                let windows = self.state.windows.window_ids_for_pid(*pid).collect();
-                self.cancel_window_presentations(windows);
-            }
-            Event::SpaceStateChanged(snapshot)
-                if !snapshot.authoritative
+        let restated = match &event {
+            Event::SpaceStateChanged(snapshot) => {
+                !snapshot.authoritative
                     || self.space_revision_superseded(snapshot.revision)
                     || (!snapshot.presentation_changed(&self.space_state)
-                        && !self.refreshes_blocked()) =>
-            {
-                // Restated membership is not a topology transition. Cancelling here
-                // can strand a window midway through an otherwise valid animation.
+                        && !self.refreshes_blocked())
             }
-            Event::MissionControlNativeEntered
-            | Event::TopologyInvalidated(_)
-            | Event::SpaceStateChanged(_)
-            | Event::SystemWoke => {
-                let windows = self.state.windows.iter_windows().map(|(wid, _)| wid).collect();
-                self.cancel_window_presentations(windows);
-            }
-            _ => {}
+            _ => false,
+        };
+        if let Some(cancelled) = cancels(&event, restated) {
+            let windows = match cancelled {
+                Cancelled::Window(wid) => vec![wid],
+                Cancelled::Closed(wsid) => {
+                    self.state.windows.tracked_window_id(wsid).into_iter().collect()
+                }
+                Cancelled::App(pid) => self.state.windows.window_ids_for_pid(pid).collect(),
+                Cancelled::All => self.state.windows.iter_windows().map(|(wid, _)| wid).collect(),
+            };
+            self.cancel_window_presentations(windows);
         }
-        // These notifications neither inspect camera position nor edit geometry.
-        if !matches!(
-            event,
-            Event::WindowFrameChanged(_, _, _, Requested(true))
-                | Event::WindowTitleChanged(..)
-                | Event::MenuOpened(_)
-                | Event::MenuClosed(_)
-                | Event::WindowInventoryRefreshRequested(_)
-                | Event::RaiseCompleted { .. }
-                | Event::RaiseTimeout { .. }
-                | Event::ApplicationDeactivated(_)
-                | Event::ApplicationGloballyDeactivated(_)
-                | Event::SessionDidBecomeActive
-                | Event::ActiveDisplayChanged { .. }
-        ) {
+        if commits(&event) {
             self.commit_presentations();
         }
         self.log_event(&event);
@@ -6835,6 +6810,56 @@ impl Reactor {
                 false
             })
     }
+}
+
+/// Whose presentations (animations, cameras) an event ends before it is handled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Cancelled {
+    Window(WindowId),
+    Closed(WindowServerId),
+    App(pid_t),
+    All,
+}
+
+/// The presentations `event` ends: a window's when it goes away, an app's when it quits, all of
+/// them when the topology changes. A `restated` space snapshot (not authoritative, superseded,
+/// or presenting nothing new) is not a topology transition: cancelling then would strand a
+/// window midway through an otherwise valid animation.
+fn cancels(event: &Event, restated: bool) -> Option<Cancelled> {
+    match event {
+        Event::WindowDestroyed(wid) | Event::WindowInvalidated(wid, _) => {
+            Some(Cancelled::Window(*wid))
+        }
+        Event::WindowClosed(wsid) => Some(Cancelled::Closed(*wsid)),
+        Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
+            Some(Cancelled::App(*pid))
+        }
+        Event::SpaceStateChanged(_) if restated => None,
+        Event::MissionControlNativeEntered
+        | Event::TopologyInvalidated(_)
+        | Event::SpaceStateChanged(_)
+        | Event::SystemWoke => Some(Cancelled::All),
+        _ => None,
+    }
+}
+
+/// Whether presentations commit before `event` is handled: all but the notifications that
+/// neither inspect camera position nor edit geometry.
+fn commits(event: &Event) -> bool {
+    !matches!(
+        event,
+        Event::WindowFrameChanged(_, _, _, Requested(true))
+            | Event::WindowTitleChanged(..)
+            | Event::MenuOpened(_)
+            | Event::MenuClosed(_)
+            | Event::WindowInventoryRefreshRequested(_)
+            | Event::RaiseCompleted { .. }
+            | Event::RaiseTimeout { .. }
+            | Event::ApplicationDeactivated(_)
+            | Event::ApplicationGloballyDeactivated(_)
+            | Event::SessionDidBecomeActive
+            | Event::ActiveDisplayChanged { .. }
+    )
 }
 
 /// What the layout makes of each drop of `window` a drag offers: the frame it would give it.

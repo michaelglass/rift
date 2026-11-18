@@ -14194,3 +14194,23 @@ fn a_native_drag_frame_that_jumps_to_another_display_does_not_move_the_target() 
         after.preview_area
     );
 }
+
+#[test]
+fn which_presentations_an_event_ends_and_whether_they_commit_first() {
+    let wid = WindowId::new(1, 1);
+    let snapshot = || space_state_event(vec![CGRect::ZERO], vec![Some(SpaceId::new(1))]);
+    assert_eq!(
+        cancels(&Event::WindowDestroyed(wid), false),
+        Some(Cancelled::Window(wid))
+    );
+    assert_eq!(
+        cancels(&Event::ApplicationTerminated(1), false),
+        Some(Cancelled::App(1))
+    );
+    assert_eq!(cancels(&snapshot(), false), Some(Cancelled::All));
+    // A restated snapshot is not a topology transition.
+    assert_eq!(cancels(&snapshot(), true), None);
+    assert_eq!(cancels(&Event::MenuOpened(1), false), None);
+    assert!(commits(&Event::WindowDestroyed(wid)));
+    assert!(!commits(&Event::MenuOpened(1)));
+}
