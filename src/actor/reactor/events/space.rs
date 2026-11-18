@@ -2,7 +2,7 @@ use tracing::{debug, trace};
 
 use crate::actor::app::Request;
 use crate::actor::reactor::events::{EventOutcome, window};
-use crate::actor::reactor::managers::{DragManager, MissionControlManager};
+use crate::actor::reactor::managers::MissionControlManager;
 use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
@@ -325,10 +325,8 @@ pub fn handle_window_server_appeared(
 
 pub fn handle_mission_control_native_entered(
     mission_control: &mut MissionControlManager,
-    drag: &mut DragManager,
     windows: &mut crate::model::window_store::WindowStore,
 ) -> anyhow::Result<EventOutcome> {
-    drag.suppress_preview(true);
     windows.end_drag();
     mission_control.mission_control_state = MissionControlState::Active;
     Ok(EventOutcome::focus_changed(None, false))
@@ -336,9 +334,7 @@ pub fn handle_mission_control_native_entered(
 
 pub fn handle_mission_control_native_exited(
     mission_control: &mut MissionControlManager,
-    drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
-    drag.suppress_preview(false);
     mission_control.mission_control_state = MissionControlState::Inactive;
     let mut outcome = EventOutcome::layout_changed(false);
     outcome.recover_after_mission_control = true;

@@ -28,6 +28,7 @@ pub(super) struct Modes {
     pub(super) modal: Modal,
     pub(super) viewport: Viewport,
     pub(super) focus_claim: FocusClaim,
+    pub(super) user_spaces: UserSpaces,
 }
 
 impl Modes {
@@ -41,6 +42,7 @@ impl Modes {
             modal,
             viewport,
             focus_claim,
+            user_spaces,
         } = self;
         [
             pointer as &dyn Mode,
@@ -49,6 +51,7 @@ impl Modes {
             modal,
             viewport,
             focus_claim,
+            user_spaces,
         ]
         .into_iter()
         .find(|mode| !mode.admits(initiative))
@@ -75,6 +78,14 @@ pub(super) enum Viewport {
 pub(super) enum FocusClaim {
     Free,
     PausesHover,
+}
+
+/// Whether any screen shows a user Space. `None` with no displays at all (asleep, lid closed)
+/// and while every screen shows a system or fullscreen Space.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum UserSpaces {
+    Shown,
+    None,
 }
 
 use Initiative::*;
@@ -124,15 +135,11 @@ impl Mode for MissionControlState {
     fn admits(&self, initiative: Initiative) -> bool {
         match (initiative, self) {
             // macOS's Mission Control is on screen: the windows under the pointer are its
-            // thumbnails, not windows to focus.
-            (UserInput(Hover), MissionControlState::Active) => false,
-            (UserInput(Hover), MissionControlState::Inactive) => true,
+            // thumbnails, not windows to focus, and app inventories omit windows it shows.
+            (UserInput(Hover) | RetireWindows, MissionControlState::Active) => false,
+            (UserInput(Hover) | RetireWindows, MissionControlState::Inactive) => true,
             (
-                UserInput(Steering | Inert)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus,
+                UserInput(Steering | Inert) | Arrange | SwitchWorkspaceFocus | WarpFocus,
                 MissionControlState::Active | MissionControlState::Inactive,
             ) => true,
         }
@@ -187,6 +194,21 @@ impl Mode for FocusClaim {
                 | SwitchWorkspaceFocus
                 | WarpFocus,
                 FocusClaim::PausesHover | FocusClaim::Free,
+            ) => true,
+        }
+    }
+}
+
+impl Mode for UserSpaces {
+    fn admits(&self, initiative: Initiative) -> bool {
+        match (initiative, self) {
+            // With no user Space on screen, an inventory that omits a window is no evidence
+            // that it is gone.
+            (RetireWindows, UserSpaces::None) => false,
+            (RetireWindows, UserSpaces::Shown) => true,
+            (
+                UserInput(Steering | Inert | Hover) | Arrange | SwitchWorkspaceFocus | WarpFocus,
+                UserSpaces::None | UserSpaces::Shown,
             ) => true,
         }
     }

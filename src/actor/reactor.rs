@@ -114,7 +114,7 @@ pub use query::ReactorQueryHandle;
 pub(crate) use crate::model::reactor::{AppState, WindowState};
 pub use crate::model::reactor::{
     Command, DisplaySelector, MenuState, MissionControlState, ReactorCommand, RefocusState,
-    Requested, StaleCleanupState, WorkspaceSwitchOrigin, WorkspaceSwitchState,
+    Requested, WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 
 #[doc(hidden)]
@@ -697,7 +697,6 @@ impl Reactor {
                 preview: None,
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
-                preview_suppressed: false,
                 haptics_enabled: config.settings.drag_drop.haptics_enabled,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
@@ -740,7 +739,6 @@ impl Reactor {
                 refocus_after_refresh: HashMap::default(),
             },
             refocus_manager: managers::RefocusManager {
-                stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
             },
             suppress_auto_workspace_switch_until_input: false,
@@ -1217,6 +1215,11 @@ impl Reactor {
             } else {
                 modes::FocusClaim::Free
             },
+            user_spaces: if self.space_state.screens.iter().all(|screen| screen.space.is_none()) {
+                modes::UserSpaces::None
+            } else {
+                modes::UserSpaces::Shown
+            },
         }
     }
 
@@ -1630,7 +1633,9 @@ impl Reactor {
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
         self.retire_presentations();
-        self.drag_manager.sync_preview(self.state.windows.drag());
+        // Mission Control shows thumbnails, not the windows a preview would outline.
+        let held = self.state.windows.drag().filter(|_| !self.is_mission_control_active());
+        self.drag_manager.sync_preview(held);
     }
 
     fn dispatch_layout_command(
@@ -2575,14 +2580,12 @@ impl Reactor {
             Event::MissionControlNativeEntered => {
                 return topology_workflow::handle_mission_control_native_entered(
                     &mut self.mission_control_manager,
-                    &mut self.drag_manager,
                     &mut self.state.windows,
                 );
             }
             Event::MissionControlNativeExited => {
                 return topology_workflow::handle_mission_control_native_exited(
                     &mut self.mission_control_manager,
-                    &mut self.drag_manager,
                 );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
@@ -3658,11 +3661,6 @@ impl Reactor {
         preserve_missing_assignments: bool,
         invalidated_spaces: &[SpaceId],
     ) {
-        self.refocus_manager.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
-            StaleCleanupState::Suppressed
-        } else {
-            StaleCleanupState::Enabled
-        };
         self.expose_all_spaces();
         if let Some(main_window) = self.main_window() {
             if let Some(space) = self.main_window_space() {
@@ -3969,7 +3967,6 @@ impl Reactor {
         self.space_state.display_space_ids = display_space_ids;
 
         if screens.is_empty() {
-            self.refocus_manager.stale_cleanup_state = StaleCleanupState::Suppressed;
             if !self.space_state.screens.is_empty() {
                 self.space_state.screens.clear();
                 self.expose_all_spaces();
@@ -3980,7 +3977,6 @@ impl Reactor {
             return Ok(outcome);
         }
 
-        self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         let previous_screens = std::mem::replace(&mut self.space_state.screens, screens);
         // macOS may resize windows without AX notifications during display changes.
         // Reapply the complete layout even when cached frames still match.
@@ -4929,12 +4925,7 @@ impl Reactor {
         observed.extend(new.iter().filter_map(|(_, info)| {
             info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
         }));
-        let retired = if matches!(
-            self.refocus_manager.stale_cleanup_state,
-            StaleCleanupState::Suppressed
-        ) || self.is_mission_control_active()
-            || !self.may(Initiative::RetireWindows)
-        {
+        let retired = if !self.may(Initiative::RetireWindows) {
             Vec::new()
         } else {
             self.state.windows.reconcile_app_inventory(
