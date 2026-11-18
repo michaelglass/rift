@@ -7,12 +7,14 @@ use std::time::Duration;
 use crate::Kinds;
 
 /// A window: its app's pid and its index within the app.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WindowId {
     pub pid: i32,
     pub idx: u32,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,
@@ -22,6 +24,7 @@ pub struct Rect {
 }
 
 /// Monotonic nanoseconds since the platform started its clock.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Nanos(pub u64);
 
@@ -33,6 +36,7 @@ impl Add<Duration> for Nanos {
 
 fn within(a: f64, tolerance: f64, b: f64) -> bool { (a - b).abs() < tolerance }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plain;
 
@@ -46,16 +50,6 @@ impl Kinds for Plain {
             && within(a.y, tolerance, b.y)
             && within(a.w, tolerance, b.w)
             && within(a.h, tolerance, b.h)
-    }
-
-    fn round(frame: Rect) -> Rect {
-        let (x, y) = (frame.x.round(), frame.y.round());
-        Rect {
-            x,
-            y,
-            w: (frame.x + frame.w).round() - x,
-            h: (frame.y + frame.h).round() - y,
-        }
     }
 
     fn after(time: Nanos, duration: Duration) -> Nanos { time + duration }

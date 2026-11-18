@@ -29,8 +29,6 @@ pub trait Kinds: Copy + Debug + PartialEq + 'static {
 
     /// Whether `a` is within `tolerance` of `b` on every edge, origin and size alike.
     fn is_within(a: Self::Frame, tolerance: f64, b: Self::Frame) -> bool;
-    /// `frame` with its corners rounded to whole points.
-    fn round(frame: Self::Frame) -> Self::Frame;
     /// `duration` after `time`.
     fn after(time: Self::Time, duration: Duration) -> Self::Time;
 

@@ -10,6 +10,14 @@ use crate::pointer::{Initiative, Pointer, may};
 use crate::reconciler::{Answer, Note, Observation, Reconciler, Translate, Verdict, Want, Write};
 
 /// A fact for the core.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound(
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>"
+    ))
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<K: Kinds> {
     /// The pointer is now doing this. (The platform still owns the press and drag model; this
@@ -51,6 +59,14 @@ pub enum Event<K: Kinds> {
 }
 
 /// A decision for the platform.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound(
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>"
+    ))
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect<K: Kinds> {
     /// Send this frame to the window's app. The model takes the window to be there from now on.

@@ -3,6 +3,7 @@
 //! refuses is discarded, never queued).
 
 /// What the pointer is doing with windows.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pointer<W> {
     Idle,
@@ -13,6 +14,7 @@ pub enum Pointer<W> {
 }
 
 /// Whose a window's frame is right now.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Owner {
     /// Rift's: layout and placements decide where it goes.
@@ -25,6 +27,7 @@ pub enum Owner {
 }
 
 /// Whether the user's hand is on a window a report is about.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Holder {
     User,
@@ -52,6 +55,7 @@ impl<W: PartialEq + Copy> Pointer<W> {
 }
 
 /// What user input does, as far as the pointer rule in [`may`] needs.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InputClass {
     /// Changes which windows are where, shown, focused or raised, or where the pointer is.
@@ -68,6 +72,7 @@ pub enum InputClass {
 
 /// Things Rift would do that have a rule about the pointer: its own initiatives, and the
 /// user's commands by class.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Initiative {
     /// User input: a command (hotkey, CLI, menu) or a gesture. Input the pointer rule refuses

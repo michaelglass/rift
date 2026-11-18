@@ -1350,6 +1350,9 @@ dependencies = [
 [[package]]
 name = "rift-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "rift-protocol"
