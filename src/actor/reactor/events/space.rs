@@ -325,9 +325,9 @@ pub fn handle_window_server_appeared(
 
 pub fn handle_mission_control_native_entered(
     mission_control: &mut MissionControlManager,
-    windows: &mut crate::model::window_store::WindowStore,
+    state: &mut crate::model::RiftState,
 ) -> anyhow::Result<EventOutcome> {
-    windows.end_drag();
+    state.let_go();
     mission_control.mission_control_state = MissionControlState::Active;
     Ok(EventOutcome::focus_changed(None, false))
 }

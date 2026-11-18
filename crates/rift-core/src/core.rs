@@ -9,7 +9,7 @@
 //! writes under; each [`Write`] says which, and the app's answer names it back.
 
 use crate::Kinds;
-use crate::pointer::{Initiative, Pointer, may};
+use crate::pointer::{Button, Grip, Initiative, Pointer, Release, Ungrip, may};
 use crate::reconciler::{
     Answer, Note, Observation, Reconciler, Reply, Translate, Verdict, Want, Write,
 };
@@ -25,9 +25,23 @@ use crate::reconciler::{
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<K: Kinds> {
-    /// The pointer is now doing this. (The platform still owns the press and drag model; this
-    /// is its fact, sent when it changes.)
-    Pointer(Pointer<K::Window>),
+    /// `button` went down on `window` (a tracked window Rift manages), or on none. One hand:
+    /// whatever it held is let go first.
+    Press {
+        window: Option<K::Window>,
+        button: Button,
+    },
+    /// The pressed window's movement is the user's drag (its first move under the pointer, or
+    /// a modifier press). A drag starts only from a press of that window.
+    Drag { window: K::Window },
+    /// The pointer was released.
+    Release(Release),
+    /// The hand comes off without a drop: a cancel, Mission Control.
+    LetGo,
+    /// `window` left Rift's control: a grip on it ends.
+    Gone { window: K::Window },
+    /// macOS replaced window `from` by `to` (same window, new identity): a grip moves with it.
+    Rekeyed { from: K::Window, to: K::Window },
     /// Layout wants `window` at `desired`; the model last saw it at `known`.
     Want {
         now: K::Time,
@@ -111,17 +125,32 @@ pub enum Effect<K: Kinds> {
     },
     /// Arm the deadline timer for this time, or disarm it (`None`).
     Timer(Option<K::Time>),
+    /// The hand is on `window` now (pressed): its record goes into the grip slot.
+    Grip { window: K::Window },
+    /// The press on `window` became a drag: the platform attaches the drag's session.
+    DragBegan { window: K::Window },
+    /// The hand came off `window`, for `why`: its record leaves the slot.
+    Ungrip { window: K::Window, why: Ungrip },
+    /// The grip moved with its window's new identity.
+    Regrip { from: K::Window, to: K::Window },
 }
 
 impl<K: Kinds> Event<K> {
     /// The same event on another platform's types.
     pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Event<J> {
         match self {
-            Event::Pointer(pointer) => Event::Pointer(match pointer {
-                Pointer::Idle => Pointer::Idle,
-                Pointer::Pressing(window) => Pointer::Pressing(to.window(window)),
-                Pointer::Dragging(window) => Pointer::Dragging(to.window(window)),
-            }),
+            Event::Press { window, button } => Event::Press {
+                window: window.map(|window| to.window(window)),
+                button,
+            },
+            Event::Drag { window } => Event::Drag { window: to.window(window) },
+            Event::Release(release) => Event::Release(release),
+            Event::LetGo => Event::LetGo,
+            Event::Gone { window } => Event::Gone { window: to.window(window) },
+            Event::Rekeyed { from, to: into } => Event::Rekeyed {
+                from: to.window(from),
+                to: to.window(into),
+            },
             Event::Want {
                 now,
                 request,
@@ -193,6 +222,13 @@ impl<K: Kinds> Effect<K> {
             },
             Effect::Gate { initiative, allowed } => Effect::Gate { initiative, allowed },
             Effect::Timer(at) => Effect::Timer(at.map(|at| to.time(at))),
+            Effect::Grip { window } => Effect::Grip { window: to.window(window) },
+            Effect::DragBegan { window } => Effect::DragBegan { window: to.window(window) },
+            Effect::Ungrip { window, why } => Effect::Ungrip { window: to.window(window), why },
+            Effect::Regrip { from, to: into } => Effect::Regrip {
+                from: to.window(from),
+                to: to.window(into),
+            },
         }
     }
 }
@@ -207,7 +243,7 @@ pub trait Core<K: Kinds> {
 #[derive(Debug)]
 pub struct RustCore<K: Kinds> {
     reconciler: Reconciler<K>,
-    pointer: Pointer<K::Window>,
+    grip: Grip<K::Window>,
     /// The deadline the platform's timer is armed for.
     armed: Option<K::Time>,
 }
@@ -216,7 +252,7 @@ impl<K: Kinds> Default for RustCore<K> {
     fn default() -> Self {
         RustCore {
             reconciler: Reconciler::default(),
-            pointer: Pointer::Idle,
+            grip: Grip::Idle,
             armed: None,
         }
     }
@@ -227,13 +263,73 @@ impl<K: Kinds> RustCore<K> {
     /// reactor's timer coeffect). Not part of the boundary: a foreign core has no such door.
     pub fn reconciler(&self) -> &Reconciler<K> { &self.reconciler }
 
+    /// Read access to what the hand is doing, for the platform's check (in debug builds) that
+    /// its projection of the grip agrees. Not part of the boundary.
+    pub fn pointer(&self) -> Pointer<K::Window> { self.grip.pointer() }
+
+    /// The hand comes off whatever it holds, for `why`.
+    fn ungrip(&mut self, why: Ungrip) -> Option<Effect<K>> {
+        let window = match self.grip {
+            Grip::Idle => return None,
+            Grip::Pressed { window, .. } | Grip::Dragging { window, .. } => window,
+        };
+        self.grip = Grip::Idle;
+        Some(Effect::Ungrip { window, why })
+    }
+
     fn decide(&mut self, event: Event<K>) -> Vec<Effect<K>> {
-        let pointer = self.pointer;
+        let pointer = self.grip.pointer();
         match event {
-            Event::Pointer(now) => {
-                self.pointer = now;
-                vec![]
+            Event::Press { window, button } => {
+                let let_go = self.ungrip(Ungrip::LetGo);
+                let pressed = window.map(|window| {
+                    self.grip = Grip::Pressed { window, button };
+                    Effect::Grip { window }
+                });
+                let_go.into_iter().chain(pressed).collect()
             }
+            Event::Drag { window } => match self.grip {
+                Grip::Pressed { window: pressed, button } if pressed == window => {
+                    self.grip = Grip::Dragging { window, button };
+                    vec![Effect::DragBegan { window }]
+                }
+                Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+            },
+            Event::Release(release) => {
+                let ends = match (release, self.grip) {
+                    (Release::Missed, Grip::Pressed { .. } | Grip::Dragging { .. }) => true,
+                    (
+                        Release::Button(released),
+                        Grip::Pressed { button, .. } | Grip::Dragging { button, .. },
+                    ) => released == button,
+                    (Release::Missed | Release::Button(_), Grip::Idle) => false,
+                };
+                if ends {
+                    self.ungrip(Ungrip::Released).into_iter().collect()
+                } else {
+                    vec![]
+                }
+            }
+            Event::LetGo => self.ungrip(Ungrip::LetGo).into_iter().collect(),
+            Event::Gone { window } => match self.grip {
+                Grip::Pressed { window: held, .. } | Grip::Dragging { window: held, .. }
+                    if held == window =>
+                {
+                    self.ungrip(Ungrip::Gone).into_iter().collect()
+                }
+                Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+            },
+            Event::Rekeyed { from, to } => match self.grip {
+                Grip::Pressed { window, button } if window == from => {
+                    self.grip = Grip::Pressed { window: to, button };
+                    vec![Effect::Regrip { from, to }]
+                }
+                Grip::Dragging { window, button } if window == from => {
+                    self.grip = Grip::Dragging { window: to, button };
+                    vec![Effect::Regrip { from, to }]
+                }
+                Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+            },
             Event::Want {
                 now,
                 request,
@@ -326,6 +422,7 @@ impl<K: Kinds> Core<K> for RustCore<K> {
 mod tests {
     use super::*;
     use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
+    use crate::pointer::Ungrip;
     use crate::reconciler::WRITE_DEADLINE;
 
     fn at(x: f64) -> Rect { Rect { x, y: 0., w: 400., h: 300. } }
@@ -365,9 +462,63 @@ mod tests {
     }
 
     #[test]
+    fn a_grip_ends_only_on_its_own_button_and_a_drag_starts_only_from_its_press() {
+        let other = WindowId { pid: 7, idx: 2 };
+        let mut core = RustCore::<Plain>::default();
+        assert_eq!(core.step(Event::Drag { window: W }), vec![], "no press, no drag");
+        core.step(Event::Press {
+            window: Some(W),
+            button: Button::Left,
+        });
+        assert_eq!(core.step(Event::Drag { window: other }), vec![]);
+        assert_eq!(core.step(Event::Drag { window: W }), vec![Effect::DragBegan {
+            window: W
+        }]);
+        assert_eq!(core.step(Event::Release(Release::Button(Button::Right))), vec![]);
+        assert_eq!(core.step(Event::Release(Release::Button(Button::Left))), vec![
+            Effect::Ungrip {
+                window: W,
+                why: Ungrip::Released
+            }
+        ]);
+        // One hand: a press elsewhere lets go of what it held.
+        core.step(Event::Press {
+            window: Some(W),
+            button: Button::Left,
+        });
+        assert_eq!(
+            core.step(Event::Press {
+                window: Some(other),
+                button: Button::Left
+            }),
+            vec![
+                Effect::Ungrip { window: W, why: Ungrip::LetGo },
+                Effect::Grip { window: other },
+            ]
+        );
+        let renamed = WindowId { pid: 7, idx: 3 };
+        assert_eq!(core.step(Event::Rekeyed { from: other, to: renamed }), vec![
+            Effect::Regrip { from: other, to: renamed }
+        ]);
+        assert_eq!(core.step(Event::Gone { window: other }), vec![]);
+        assert_eq!(core.step(Event::Gone { window: renamed }), vec![
+            Effect::Ungrip {
+                window: renamed,
+                why: Ungrip::Gone
+            }
+        ]);
+    }
+
+    #[test]
     fn a_desire_for_a_pressed_window_is_discarded_and_steering_input_refused() {
         let mut core = RustCore::<Plain>::default();
-        assert_eq!(core.step(Event::Pointer(Pointer::Pressing(W))), vec![]);
+        assert_eq!(
+            core.step(Event::Press {
+                window: Some(W),
+                button: Button::Left
+            }),
+            vec![Effect::Grip { window: W }]
+        );
         let effects = core.step(Event::Want {
             now: Nanos(0),
             request: RequestId(1),

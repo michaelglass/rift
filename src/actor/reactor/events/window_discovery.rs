@@ -136,7 +136,7 @@ pub(crate) fn process_window_list(
 
     for window in observed {
         let ObservedWindow { wid, info } = window;
-        if let Some(previous) = state.windows.reconcile_ax_identity(wid, info.sys_id) {
+        if let Some(previous) = state.reconcile_ax_identity(wid, info.sys_id) {
             layout.layout_engine.transfer_persistent_window_identity(previous, wid);
             outcome =
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));

@@ -1,11 +1,12 @@
 use tracing::{trace, warn};
 
+use crate::actor::app::WindowId;
 use crate::actor::drag::{DragKind, DragScene, DragSceneTarget};
 use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
 use crate::model::RiftState;
-use crate::model::drag::PointerReleased;
+use crate::model::drag::Session;
 use crate::sys::screen::SpaceId;
 
 pub fn build_drag_scene(
@@ -35,12 +36,16 @@ pub fn build_drag_scene(
 
 #[derive(Debug, Clone)]
 pub struct MouseUpPayload {
-    pub released: PointerReleased,
+    /// The drag the release dropped, with its session (the core decided the release ended it).
+    pub dropped: Option<(WindowId, Session)>,
     pub final_space: Option<SpaceId>,
 }
 
 pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
-    let Some((window, cancelled)) = state.windows.end_drag() else {
+    let Some((window, cancelled)) = state
+        .let_go()
+        .and_then(|ungripped| Some((ungripped.window, ungripped.session?)))
+    else {
         return EventOutcome::no_change();
     };
     let source = cancelled.source;
@@ -60,7 +65,7 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    let Some((window, commit)) = state.windows.finish_drag(payload.released) else {
+    let Some((window, commit)) = payload.dropped else {
         return Ok(outcome);
     };
     let mut needs_layout = commit.source.tiled;

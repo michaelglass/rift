@@ -40,7 +40,7 @@ impl Reactor {
             if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
                 reactor.transaction_manager.clear_target_for_window(wsid);
             }
-            reactor.state.windows.forget_drag_window(wid);
+            reactor.state.forget_drag_window(wid);
             reactor.drag_manager.sync_preview(reactor.state.windows.drag());
             // Leave the projection (keeping floating state and the layout slot) before the
             // claim takes the assignment, but arrange only after: no write may target it.

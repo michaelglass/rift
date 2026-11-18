@@ -1908,7 +1908,7 @@ fn matching_rift_frame_clears_pending_target() {
     // the app's answer.
     let dragged = CGRect::new(CGPoint::new(140.0, 90.0), frame.size);
     reactor.place_window(wid, adjusted_target);
-    reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
+    reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
         dragged,
@@ -2000,7 +2000,7 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
             CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
         );
         if mouse == MouseState::Down {
-            reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
+            reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
         }
 
         let outcome = reactor
@@ -2216,7 +2216,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
             reactor.start_modifier_drag(wid, source, frame.mid());
             reactor.nudge_drag(30.0);
         } else {
-            reactor.state.windows.press_and_drag(
+            reactor.state.press_and_drag(
                 wid,
                 crate::actor::drag::MouseButton::Left,
                 crate::actor::drag::Session::native(source, Default::default()),
@@ -2285,7 +2285,7 @@ fn cross_display_drag_clears_source_floating_position() {
         CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
         initial_frame.size,
     );
-    reactor.state.windows.press_and_drag(
+    reactor.state.press_and_drag(
         wid,
         crate::actor::drag::MouseButton::Left,
         crate::actor::drag::Session::native(
@@ -2300,12 +2300,16 @@ fn cross_display_drag_clears_source_floating_position() {
         ),
     );
 
+    let dropped = reactor
+        .state
+        .release(rift_core::Release::Button(rift_core::Button::Left))
+        .and_then(|ungripped| Some((ungripped.window, ungripped.session?)));
     let outcome = crate::actor::reactor::events::drag::handle_mouse_up(
         &mut reactor.state,
         &mut reactor.layout_manager,
         &mut reactor.drag_manager,
         crate::actor::reactor::events::drag::MouseUpPayload {
-            released: crate::model::drag::PointerReleased(crate::actor::drag::MouseButton::Left),
+            dropped,
             final_space: Some(space2),
         },
     )
@@ -2354,7 +2358,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         CGPoint::new(floating_frame.origin.x + 10., floating_frame.origin.y + 10.),
         floating_frame.size,
     );
-    reactor.state.windows.press(floating_wid, crate::actor::drag::MouseButton::Left);
+    reactor.state.press(Some(floating_wid), crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         floating_wid,
         latched_frame,
@@ -3881,7 +3885,7 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     .unwrap();
     reactor.apply_event_outcome(outcome);
     assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.reconcile_app_inventory(
         activated.pid,
         &[same_app_visible],
         &HashSet::default(),
@@ -4156,7 +4160,7 @@ fn a_press_or_drag_discards_activation_follow_and_the_drop_replays_nothing() {
             let frame = reactor.state.windows.window(visible).unwrap().frame_monotonic;
             reactor.ensure_active_drag(visible, &frame);
         } else {
-            reactor.state.windows.press(visible, crate::actor::drag::MouseButton::Left);
+            reactor.state.press(Some(visible), crate::actor::drag::MouseButton::Left);
         }
         reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
         assert_eq!(active(&reactor), Some(0), "discarded (drag={drag})");
@@ -6865,7 +6869,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         window,
         super::WindowInvalidationSource::StaleAxElement,
     ));
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.reconcile_app_inventory(
         window.pid,
         &[WindowId::new(1, 1), WindowId::new(1, 3)],
         &HashSet::default(),
@@ -8885,7 +8889,7 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
                     ));
                 }
                 reactor.state.windows.observe_native_visibility(wsid, visible);
-                let result = reactor.state.windows.reconcile_app_inventory(
+                let result = reactor.state.reconcile_app_inventory(
                     wid.pid,
                     &[],
                     &if inactive {
@@ -8932,7 +8936,7 @@ fn inventory_observes_only_eligible_omitted_windows() {
     );
     let omitted_wsid = reactor.test_window_server_id(windows[1]);
     let mut observed = Vec::new();
-    let retired = reactor.state.windows.reconcile_app_inventory(
+    let retired = reactor.state.reconcile_app_inventory(
         1,
         &windows[..1],
         &[windows[3]].into_iter().collect(),
@@ -12482,7 +12486,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 .unwrap();
                 reactor.apply_event_outcome(outcome);
             } else if early == 2 {
-                let retired = reactor.state.windows.reconcile_app_inventory(
+                let retired = reactor.state.reconcile_app_inventory(
                     1,
                     &[WindowId::new(1, 1), WindowId::new(1, 3)],
                     &HashSet::default(),
@@ -12974,7 +12978,7 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
         if modifier {
             reactor.start_modifier_drag(wid, source, frame.mid());
         } else {
-            reactor.state.windows.press_and_drag(
+            reactor.state.press_and_drag(
                 wid,
                 crate::actor::drag::MouseButton::Left,
                 crate::actor::drag::Session::native(source, Default::default()),
@@ -13019,7 +13023,7 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
 
     // The user grabs the window and moves it somewhere that is neither where it was nor
     // where Rift's write would put it.
-    reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
+    reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
     let dragged = CGRect::new(
         CGPoint::new(frame.origin.x + 60.0, frame.origin.y + 40.0),
         frame.size,

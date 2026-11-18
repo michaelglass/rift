@@ -41,7 +41,7 @@ fn user_dragging(reactor: &Reactor) -> bool { reactor.user_is_dragging() }
 /// The pointer goes down on `wid`. (The simulated windows can overlap, so the press names the
 /// window instead of a point for the reactor's test double to resolve.)
 fn press(reactor: &mut Reactor, wid: WindowId) {
-    reactor.state.windows.press(wid, crate::actor::drag::MouseButton::Left);
+    reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
 }
 
 // ---------------------------------------------------------------------------------------------

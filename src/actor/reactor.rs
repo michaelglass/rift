@@ -98,10 +98,9 @@ use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
-use crate::model::drag::PointerReleased;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::window_store::{Hand, NativeFullscreenTransition, Pointer};
+use crate::model::window_store::{NativeFullscreenTransition, Pointer};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -2264,18 +2263,15 @@ impl Reactor {
                         current_space: space,
                         tiled,
                     },
-                    button,
                     point,
                     action,
                     scene,
                 ) {
                     Some(session) => {
-                        if let Some(Hand::Pressed(pressed)) = self.state.windows.hand_on(window) {
-                            debug!(?window, "drag-evidence: drag started (modifier press)");
-                            pressed.start(session);
-                        }
+                        debug!(?window, "drag-evidence: drag started (modifier press)");
+                        self.state.begin_drag(window, session);
                     }
-                    None => _ = self.state.windows.end_drag(),
+                    None => _ = self.state.let_go(),
                 }
                 return Ok(EventOutcome::no_change());
             }
@@ -2453,7 +2449,7 @@ impl Reactor {
             }
             Event::PointerReleased(button) => {
                 debug!(?button, gripped = ?self.state.windows.gripped(), "drag-evidence: release");
-                return self.pointer_released(PointerReleased(button));
+                return self.pointer_released(rift_core::Release::Button(button.into()));
             }
             Event::MenuOpened(pid) => {
                 return Ok(system_workflow::handle_menu_opened(&mut self.menu_manager, pid)?);
@@ -2531,7 +2527,7 @@ impl Reactor {
             Event::MissionControlNativeEntered => {
                 return topology_workflow::handle_mission_control_native_entered(
                     &mut self.mission_control_manager,
-                    &mut self.state.windows,
+                    &mut self.state,
                 );
             }
             Event::MissionControlNativeExited => {
@@ -4442,7 +4438,7 @@ impl Reactor {
     fn mission_control_moved_it(&mut self) -> bool {
         let active = self.is_native_mission_control_active();
         if active {
-            self.state.windows.end_drag();
+            self.state.let_go();
         }
         active
     }
@@ -4490,11 +4486,10 @@ impl Reactor {
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
-        let pointer = self.state.windows.pointer();
         let answered = match kind {
             ReportKind::Reply(seen) => {
                 let request = self.transaction_manager.mint();
-                self.state.core.answer(pointer, request, seen, wid, new_frame)
+                self.state.core.answer(request, seen, wid, new_frame)
             }
             ReportKind::Unprompted => reconciler::Reply::Late,
         };
@@ -4520,7 +4515,7 @@ impl Reactor {
             }
             // Unprompted, or an answer Rift had stopped waiting for, which is news like any
             // other: what follows re-derives where the window belongs and writes the difference.
-            reconciler::Reply::Late => self.state.core.observe(pointer, wid, new_frame, old_frame),
+            reconciler::Reply::Late => self.state.core.observe(wid, new_frame, old_frame),
         };
         if self.mission_control_moved_it() {
             return Ok(EventOutcome::no_change());
@@ -4611,7 +4606,7 @@ impl Reactor {
     }
 
     /// The pointer let go: a press ends, a drag drops.
-    fn pointer_released(&mut self, released: PointerReleased) -> anyhow::Result<EventOutcome> {
+    fn pointer_released(&mut self, released: rift_core::Release) -> anyhow::Result<EventOutcome> {
         let pointer = self.state.windows.pointer();
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
@@ -4630,11 +4625,16 @@ impl Reactor {
         let focused = self
             .window_id_under_cursor()
             .and_then(|window| self.best_space_for_window_id(window).map(|space| (space, window)));
+        // The core decides whether the release ends the grip (only its own button does).
+        let dropped = self
+            .state
+            .release(released)
+            .and_then(|ungripped| Some((ungripped.window, ungripped.session?)));
         let mut outcome = interaction_workflow::handle_mouse_up(
             &mut self.state,
             &mut self.layout_manager,
             &mut self.drag_manager,
-            interaction_workflow::MouseUpPayload { released, final_space },
+            interaction_workflow::MouseUpPayload { dropped, final_space },
         )?;
         if let Some((space, window)) = focused {
             outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
@@ -4675,11 +4675,8 @@ impl Reactor {
         {
             return;
         }
-        let Some(button) = self.state.windows.grip_button() else {
-            return;
-        };
         debug!(window = ?wid, "drag-evidence: release (missed by the tap, button reads up)");
-        match self.pointer_released(PointerReleased(button)) {
+        match self.pointer_released(rift_core::Release::Missed) {
             Ok(outcome) => self.apply_event_outcome(outcome),
             Err(error) => warn!(%error, "releasing a missed pointer failed"),
         }
@@ -4692,14 +4689,11 @@ impl Reactor {
         let window =
             self.tracked_window_at(point).filter(|wid| self.state.windows.is_admitted(*wid));
         debug!(?window, ?point, "drag-evidence: press");
-        match window {
-            Some(window) => {
-                // The user places this window now: a transition Rift was presenting stops.
-                self.cancel_window_presentations(vec![window]);
-                self.state.windows.press(window, button);
-            }
-            None => _ = self.state.windows.end_drag(),
+        if let Some(window) = window {
+            // The user places this window now: a transition Rift was presenting stops.
+            self.cancel_window_presentations(vec![window]);
         }
+        self.state.press(window, button);
     }
 
     #[cfg(not(test))]
@@ -4869,7 +4863,7 @@ impl Reactor {
         let retired = if !self.may(Initiative::RetireWindows) {
             Vec::new()
         } else {
-            self.state.windows.reconcile_app_inventory(
+            self.state.reconcile_app_inventory(
                 pid,
                 &observed,
                 &inactive_windows,
@@ -5039,9 +5033,8 @@ impl Reactor {
     #[cfg(test)]
     fn start_modifier_drag(&mut self, window: WindowId, source: DragSource, point: CGPoint) {
         let action = crate::common::config::MouseAction::Move;
-        let session =
-            Session::modifier(source, MouseButton::Left, point, action, DragScene::default());
-        self.state.windows.press_and_drag(window, MouseButton::Left, session.unwrap());
+        let session = Session::modifier(source, point, action, DragScene::default());
+        self.state.press_and_drag(window, MouseButton::Left, session.unwrap());
     }
 
     /// Moves the pointer of the current drag `dx` to the right.
@@ -5061,7 +5054,7 @@ impl Reactor {
         if self.state.windows.drag_on(wid).is_none() {
             let server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
-            self.state.windows.press_and_drag(
+            self.state.press_and_drag(
                 wid,
                 MouseButton::Left,
                 Session::native(

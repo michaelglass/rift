@@ -13,6 +13,54 @@ pub enum Pointer<W> {
     Dragging(W),
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Right,
+}
+
+/// A release the platform saw.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// The input tap reported this button going up.
+    Button(Button),
+    /// A fresh read found the button up although the tap reported no release (it missed one).
+    Missed,
+}
+
+/// Why the user's hand came off a window.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ungrip {
+    /// The button that pressed it went up: a press ends, a drag drops.
+    Released,
+    /// Without a drop: a press elsewhere or on nothing, a cancel, Mission Control.
+    LetGo,
+    /// The window left Rift's control (destroyed, retired, replaced).
+    Gone,
+}
+
+/// What the user's hand is doing: the core's own state, of which the platform's window store
+/// holds the projection. One hand, so one grip; a drag starts only from a press of its window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Grip<W> {
+    Idle,
+    Pressed { window: W, button: Button },
+    Dragging { window: W, button: Button },
+}
+
+impl<W: Copy> Grip<W> {
+    pub(crate) fn pointer(self) -> Pointer<W> {
+        match self {
+            Grip::Idle => Pointer::Idle,
+            Grip::Pressed { window, .. } => Pointer::Pressing(window),
+            Grip::Dragging { window, .. } => Pointer::Dragging(window),
+        }
+    }
+}
+
 /// Whose a window's frame is right now.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]

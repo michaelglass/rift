@@ -56,16 +56,9 @@ impl DragMotionPublisher {
 }
 
 impl Session {
-    fn new(
-        source: DragSource,
-        button: MouseButton,
-        pointer: CGPoint,
-        scene: DragScene,
-        kind: DragKind,
-    ) -> Self {
+    fn new(source: DragSource, pointer: CGPoint, scene: DragScene, kind: DragKind) -> Self {
         Self {
             source,
-            button,
             pointer,
             anchor_point: pointer,
             scene,
@@ -86,21 +79,18 @@ impl Session {
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        Self::new(source, MouseButton::Left, pointer, scene, kind)
+        Self::new(source, pointer, scene, kind)
     }
 
     /// A modifier press on a window; only a move action drags it.
     pub fn modifier(
         source: DragSource,
-        button: MouseButton,
         point: CGPoint,
         action: MouseAction,
         scene: DragScene,
     ) -> Option<Self> {
         match action {
-            MouseAction::Move => {
-                Some(Self::new(source, button, point, scene, DragKind::ModifierMove))
-            }
+            MouseAction::Move => Some(Self::new(source, point, scene, DragKind::ModifierMove)),
             MouseAction::None => None,
         }
     }
@@ -540,7 +530,6 @@ mod tests {
     use objc2_core_foundation::CGSize;
 
     use super::*;
-    use crate::model::drag::PointerReleased;
     use crate::model::window_store::{WindowStore, WindowVisibility};
 
     fn frame(x: f64, y: f64, width: f64, height: f64) -> CGRect {
@@ -597,14 +586,7 @@ mod tests {
         Session::native(source, scene)
     }
     fn modifier(tiled: bool, scene: DragScene) -> Session {
-        Session::modifier(
-            source(tiled),
-            MouseButton::Left,
-            point(100.0, 50.0),
-            MouseAction::Move,
-            scene,
-        )
-        .unwrap()
+        Session::modifier(source(tiled), point(100.0, 50.0), MouseAction::Move, scene).unwrap()
     }
 
     #[test]
@@ -910,45 +892,42 @@ mod tests {
         );
         let none = MouseAction::None;
         assert!(
-            Session::modifier(
-                source(false),
-                MouseButton::Left,
-                point(1.0, 1.0),
-                none,
-                DragScene::default()
-            )
-            .is_none()
+            Session::modifier(source(false), point(1.0, 1.0), none, DragScene::default()).is_none()
         );
+    }
+
+    /// The core with `windows` tracked: the grip's rules are the core's, the slot the store's.
+    fn hand(windows: &[WindowId]) -> crate::model::RiftState {
+        crate::model::RiftState {
+            windows: tracked(windows),
+            core: Default::default(),
+        }
     }
 
     #[test]
     fn only_the_owning_button_finishes_a_modifier_drag() {
-        let mut windows = tracked(&[w(1)]);
-        windows.press_and_drag(
-            w(1),
-            crate::actor::drag::MouseButton::Left,
-            modifier(true, DragScene::default()),
-        );
-        assert!(windows.finish_drag(PointerReleased(MouseButton::Right)).is_none());
-        assert!(windows.drag().is_some());
-        assert!(windows.finish_drag(PointerReleased(MouseButton::Left)).is_some());
-        assert!(windows.drag().is_none());
+        let mut state = hand(&[w(1)]);
+        state.press_and_drag(w(1), MouseButton::Left, modifier(true, DragScene::default()));
+        assert!(state.release(rift_core::Release::Button(rift_core::Button::Right)).is_none());
+        assert!(state.windows.drag().is_some());
+        assert!(state.release(rift_core::Release::Button(rift_core::Button::Left)).is_some());
+        assert!(state.windows.drag().is_none());
     }
 
     #[test]
     fn starting_a_drag_ends_the_last_one() {
-        let mut windows = tracked(&[w(1), w(2)]);
-        windows.press_and_drag(
+        let mut state = hand(&[w(1), w(2)]);
+        state.press_and_drag(
             w(1),
-            crate::actor::drag::MouseButton::Left,
+            MouseButton::Left,
             native(true, rect(), DragScene::default()),
         );
-        windows.press_and_drag(
+        state.press_and_drag(
             w(2),
-            crate::actor::drag::MouseButton::Left,
+            MouseButton::Left,
             native(true, rect(), DragScene::default()),
         );
-        assert_eq!(windows.drag().map(|(window, _)| window), Some(w(2)));
-        assert!(windows.drag_on(w(1)).is_none());
+        assert_eq!(state.windows.drag().map(|(window, _)| window), Some(w(2)));
+        assert!(state.windows.drag_on(w(1)).is_none());
     }
 }
