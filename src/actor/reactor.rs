@@ -3433,33 +3433,36 @@ impl Reactor {
                 }
                 if let Some(wsid) = record.window_server_id {
                     let membership = native::Native::window_spaces(&self.native, wsid);
-                    if let Some(space) =
-                        membership.iter().copied().find(|space| self.is_fullscreen_space(*space))
-                    {
-                        // macOS can replace a fullscreen Space during display churn
-                        // without the window ever returning to normal management.
-                        self.state.windows.observe_native_fullscreen(
-                            wsid,
-                            space,
-                            record.last_known_user_space,
-                            None,
-                        );
-                        continue;
-                    }
-                    if membership.iter().any(|space| {
-                        *space == record.fullscreen_space
-                            || !self
-                                .space_state
-                                .display_space_ids
-                                .values()
-                                .any(|spaces| spaces.contains(space))
-                    }) {
-                        continue;
-                    }
-                    if membership.len() == 1 {
-                        self.state
-                            .windows
-                            .note_fullscreen_exit(record.current_window_id, membership[0]);
+                    let known = |space: SpaceId| {
+                        self.space_state
+                            .display_space_ids
+                            .values()
+                            .any(|spaces| spaces.contains(&space))
+                    };
+                    match fullscreen_exit(
+                        &membership,
+                        record.fullscreen_space,
+                        |space| self.is_fullscreen_space(space),
+                        known,
+                    ) {
+                        // macOS can replace a fullscreen Space during display churn without
+                        // the window ever returning to normal management.
+                        FullscreenExit::Reentered(space) => {
+                            self.state.windows.observe_native_fullscreen(
+                                wsid,
+                                space,
+                                record.last_known_user_space,
+                                None,
+                            );
+                            continue;
+                        }
+                        FullscreenExit::NotYet => continue,
+                        FullscreenExit::Over { landed: Some(space) } => {
+                            self.state
+                                .windows
+                                .note_fullscreen_exit(record.current_window_id, space);
+                        }
+                        FullscreenExit::Over { landed: None } => {}
                     }
                 }
             }
@@ -6816,6 +6819,34 @@ fn raise_buries_a_floater<L: PartialEq + Copy>(
                 .zip(levels(above))
                 .is_some_and(|(candidate, above)| candidate == above)
     })
+}
+
+/// What a reported fullscreen exit comes to, read off the Spaces the window is on now.
+#[derive(Debug, PartialEq)]
+enum FullscreenExit {
+    /// It is in another fullscreen Space.
+    Reentered(SpaceId),
+    /// It is still in its fullscreen Space, or in one no display has: not over yet.
+    NotYet,
+    /// Over; it landed on `landed` if it is on exactly one Space.
+    Over { landed: Option<SpaceId> },
+}
+
+fn fullscreen_exit(
+    membership: &[SpaceId],
+    fullscreen_space: SpaceId,
+    is_fullscreen: impl Fn(SpaceId) -> bool,
+    known: impl Fn(SpaceId) -> bool,
+) -> FullscreenExit {
+    if let Some(&space) = membership.iter().find(|&&space| is_fullscreen(space)) {
+        return FullscreenExit::Reentered(space);
+    }
+    if membership.iter().any(|&space| space == fullscreen_space || !known(space)) {
+        return FullscreenExit::NotYet;
+    }
+    FullscreenExit::Over {
+        landed: (membership.len() == 1).then(|| membership[0]),
+    }
 }
 
 /// The workspace part of a broadcast (`Reactor::workspace_header`).
