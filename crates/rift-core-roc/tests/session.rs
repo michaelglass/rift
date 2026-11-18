@@ -124,7 +124,7 @@ fn a_long_session_decides_the_same_and_has_no_slow_step() {
     for (index, event) in events.iter().enumerate() {
         let words = wire::encode_event(event.clone());
         let start = Instant::now();
-        let decided = roc.step_words(&words);
+        let decided = roc.step_words(&words).map(<[u64]>::to_vec);
         let took = start.elapsed();
         slowest = slowest.max(took);
         if took > Duration::from_millis(5) {
@@ -132,7 +132,7 @@ fn a_long_session_decides_the_same_and_has_no_slow_step() {
         }
         let shadow = wire::encode_effects(rust.step(event.clone()));
         assert!(
-            decided == shadow,
+            decided == Ok(shadow),
             "step {index}: the cores disagree on {event:?}"
         );
         live_peak = live_peak.max(AllocationCount::now().live() - before.live());

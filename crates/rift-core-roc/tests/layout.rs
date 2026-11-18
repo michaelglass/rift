@@ -223,10 +223,10 @@ fn the_roc_core_tiles_traditional_layouts_as_the_rust_core_does() {
         let rust = shape.frames();
         windows += rust.len();
         let roc = tile_words(&wire::encode_traditional(shape.clone()));
-        if roc != wire::encode_frames(rust.clone()) {
+        if roc != Ok(wire::encode_frames(rust.clone())) {
             panic!(
                 "case {case}: {shape:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                wire::decode_frames(&roc)
+                roc.map(|words| wire::decode_frames(&words))
             );
         }
     }
@@ -246,10 +246,10 @@ fn the_roc_core_tiles_what_the_rust_core_tiles() {
         let rust = shape.frames();
         windows += rust.len();
         let roc = tile_words(&wire::encode_bsp(shape.clone()));
-        if roc != wire::encode_frames(rust.clone()) {
+        if roc != Ok(wire::encode_frames(rust.clone())) {
             panic!(
                 "case {case}: {shape:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                wire::decode_frames(&roc)
+                roc.map(|words| wire::decode_frames(&words))
             );
         }
     }

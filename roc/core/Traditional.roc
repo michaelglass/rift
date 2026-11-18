@@ -2,7 +2,7 @@
 ## their children out along an axis by weight, or stack them with an offset (one shown on top),
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
-import Wire exposing [take, take_flag, take_float, take_list, take_rect, take_u32, take_window]
+import Wire exposing [finished, take, take_flag, take_float, take_list, take_rect, take_u32, take_window]
 import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, min_for_axis, normalized, round_rect, solve, take_constraints, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
@@ -11,6 +11,9 @@ Rect : { x : F64, y : F64, w : F64, h : F64 }
 
 ## Words being read, and where.
 Words : { words : List(U64), at : U64 }
+
+## A value read and where the rest starts, or the words were malformed.
+Taken(a) : Try((a, Words), [Malformed])
 
 WindowConstraints : {
 	is_resizable : Bool,
@@ -310,99 +313,104 @@ Traditional := [].{
 			Root(root) => place(shape, root, shape.area, [])
 		}
 
-	take_fill : Words -> (Fill, Words)
+	take_fill : Words -> Taken(Fill)
 	take_fill = |cursor| {
-		(word, rest) = take(cursor)
+		(word, rest) = take(cursor)?
 		match word {
-			0 => (Tiled, rest)
-			1 => (Screen, rest)
-			2 => (WithinGaps, rest)
-			_ => crash "wire: unknown fill"
+			0 => Ok((Tiled, rest))
+			1 => Ok((Screen, rest))
+			2 => Ok((WithinGaps, rest))
+			_ => Err(Malformed)
 		}
 	}
 
-	take_child : Words -> (Child, Words)
+	take_child : Words -> Taken(Child)
 	take_child = |cursor| {
-		(bits, after_size) = take_u32(cursor)
-		(node, after) = take_node(after_size)
-		({ size: F32.from_bits(bits), node }, after)
+		(bits, after_size) = take_u32(cursor)?
+		(node, after) = take_node(after_size)?
+		Ok(({ size: F32.from_bits(bits), node }, after))
 	}
 
-	take_node : Words -> (Node, Words)
+	take_node : Words -> Taken(Node)
 	take_node = |c0| {
-		(tag, c1) = take(c0)
+		(tag, c1) = take(c0)?
 		match tag {
 			0 => {
-				(window, c2) = take_window(c1)
-				(flag, c3) = take(c2)
+				(window, c2) = take_window(c1)?
+				(constrained, c3) = take_flag(c2)?
 				(constraints, c4) =
-					match flag {
-						0 => (Unconstrained, c3)
-						1 => {
-							(c, after) = take_constraints(c3)
-							(Constrained(c), after)
-						}
-
-						_ => crash "wire: unknown option"
+					if constrained {
+						(c, after) = take_constraints(c3)?
+						(Constrained(c), after)
+					} else {
+						(Unconstrained, c3)
 					}
-				(fill, c5) = take_fill(c4)
-				(Node.Window({ window, constraints, fill }), c5)
+				(fill, c5) = take_fill(c4)?
+				Ok((Node.Window({ window, constraints, fill }), c5))
 			}
 
 			1 => {
-				(horizontal, c2) = take_flag(c1)
-				(fill, c3) = take_fill(c2)
-				(first, c4) = take_child(c3)
-				(rest, c5) = take_list(c4, take_child)
-				(Node.Axis({ horizontal, fill, first, rest }), c5)
+				(horizontal, c2) = take_flag(c1)?
+				(fill, c3) = take_fill(c2)?
+				(first, c4) = take_child(c3)?
+				(rest, c5) = take_list(c4, take_child)?
+				Ok((Node.Axis({ horizontal, fill, first, rest }), c5))
 			}
 
 			2 => {
-				(horizontal, c2) = take_flag(c1)
-				(fill, c3) = take_fill(c2)
-				(before, c4) = take_list(c3, take_child)
-				(focused, c5) = take_child(c4)
-				(after, c6) = take_list(c5, take_child)
-				(Node.Stack({ horizontal, fill, before, focused, after }), c6)
+				(horizontal, c2) = take_flag(c1)?
+				(fill, c3) = take_fill(c2)?
+				(before, c4) = take_list(c3, take_child)?
+				(focused, c5) = take_child(c4)?
+				(after, c6) = take_list(c5, take_child)?
+				Ok((Node.Stack({ horizontal, fill, before, focused, after }), c6))
 			}
 
-			_ => crash "wire: unknown node"
+			_ => Err(Malformed)
 		}
 	}
 
-	take_shape : Words -> Shape
+	take_shape : Words -> Taken(Shape)
 	take_shape = |c0| {
-		(screen, c1) = take_rect(c0)
-		(area, c2) = take_rect(c1)
-		(top, c3) = take_float(c2)
-		(left, c4) = take_float(c3)
-		(bottom, c5) = take_float(c4)
-		(right, c6) = take_float(c5)
-		(horizontal, c7) = take_float(c6)
-		(vertical, c8) = take_float(c7)
-		(stack_offset, c9) = take_float(c8)
-		(thickness, c10) = take_float(c9)
-		(spacing, c11) = take_float(c10)
-		(line_top, c12) = take_flag(c11)
-		(line_left, c13) = take_flag(c12)
-		(root_flag, c14) = take(c13)
-		root =
-			match root_flag {
-				0 => Nothing
-				1 => Root(take_node(c14).0)
-				_ => crash "wire: unknown option"
+		(screen, c1) = take_rect(c0)?
+		(area, c2) = take_rect(c1)?
+		(top, c3) = take_float(c2)?
+		(left, c4) = take_float(c3)?
+		(bottom, c5) = take_float(c4)?
+		(right, c6) = take_float(c5)?
+		(horizontal, c7) = take_float(c6)?
+		(vertical, c8) = take_float(c7)?
+		(stack_offset, c9) = take_float(c8)?
+		(thickness, c10) = take_float(c9)?
+		(spacing, c11) = take_float(c10)?
+		(line_top, c12) = take_flag(c11)?
+		(line_left, c13) = take_flag(c12)?
+		(has_root, c14) = take_flag(c13)?
+		(root, c15) =
+			if has_root {
+				(node, after) = take_node(c14)?
+				(Root(node), after)
+			} else {
+				(Nothing, c14)
 			}
-		{
-			screen,
-			area,
-			gaps: { top, left, bottom, right, horizontal, vertical },
-			stack_offset,
-			stack_line: { thickness, spacing, top: line_top, left: line_left },
-			root,
-		}
+		Ok((
+			{
+				screen,
+				area,
+				gaps: { top, left, bottom, right, horizontal, vertical },
+				stack_offset,
+				stack_line: { thickness, spacing, top: line_top, left: line_left },
+				root,
+			},
+			c15,
+		))
 	}
 
-	## The frames of the traditional shape `cursor` holds (after its system's tag).
-	frames_of : Words -> List((WindowId, Rect))
-	frames_of = |cursor| frames(take_shape(cursor))
+	## The frames of the traditional shape `cursor` holds (after its system's tag), all of it.
+	frames_of : Words -> Try(List((WindowId, Rect)), [Malformed])
+	frames_of = |cursor| {
+		(shape, rest) = take_shape(cursor)?
+		finished(rest)?
+		Ok(frames(shape))
+	}
 }

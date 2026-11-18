@@ -52,7 +52,9 @@ pub(crate) fn tile_traditional(
     let frames = shadowed(
         shape,
         frames,
-        rift_core_roc::tile_traditional(shape.clone().map(&to_plain)),
+        rift_core_roc::tile_traditional(shape.clone().map(&to_plain)).unwrap_or_else(|error| {
+            panic!("the Roc core gave no frames ({error:?}) for {shape:?}")
+        }),
     );
     frames.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
 }
@@ -64,7 +66,9 @@ pub(crate) fn tile_bsp(shape: &bsp::Bsp<WindowId>) -> Vec<(WindowId, CGRect)> {
     let frames = shadowed(
         shape,
         frames,
-        rift_core_roc::tile_bsp(shape.clone().map(&to_plain)),
+        rift_core_roc::tile_bsp(shape.clone().map(&to_plain)).unwrap_or_else(|error| {
+            panic!("the Roc core gave no frames ({error:?}) for {shape:?}")
+        }),
     );
     frames.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
 }

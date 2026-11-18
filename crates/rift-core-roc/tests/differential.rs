@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use rift_core::RustCore;
 use rift_core::plain::{Plain, wire};
-use rift_core_roc::{AllocationCount, RocCore};
+use rift_core_roc::{AllocationCount, RocCore, RocError, tile_words};
 
 fn traces() -> Vec<(String, Vec<u64>)> {
     let dir = std::env::var("RIFT_TRACE_DIR")
@@ -57,9 +57,9 @@ fn the_roc_core_decides_what_the_rust_core_decided() {
                 &from_rust, &recorded,
                 "{name} step {index}: Rust core, {event:?}"
             );
-            let from_roc = roc.step_words(&wire::encode_event(event.clone()));
-            if from_roc != wire::encode_effects(recorded.clone()) {
-                let decoded = wire::decode_effects(&from_roc);
+            let from_roc = roc.step_words(&wire::encode_event(event.clone())).map(<[u64]>::to_vec);
+            if from_roc.as_ref() != Ok(&wire::encode_effects(recorded.clone())) {
+                let decoded = from_roc.map(|words| wire::decode_effects(&words));
                 panic!(
                     "{name} step {index}: Roc core, {event:?}\n  roc:      {decoded:?}\n  recorded: {recorded:?}"
                 );
@@ -78,4 +78,39 @@ fn the_roc_core_decides_what_the_rust_core_decided() {
         after.allocated - before.allocated
     );
     eprintln!("differential: events by kind: {kinds:?}");
+}
+
+#[test]
+fn words_that_are_not_an_event_or_a_shape_are_rejected_and_change_nothing() {
+    let before = AllocationCount::now();
+    let mut roc = RocCore::default();
+    let mut rust = RustCore::<Plain>::default();
+    let window = rift_core::plain::WindowId { pid: 7, idx: 1 };
+    let seen = rift_core::Event::Seen {
+        window,
+        frame: rift_core::plain::Rect { x: 0., y: 0., w: 100., h: 100. },
+    };
+    let good = wire::encode_event(seen.clone());
+    let mut trailing = good.clone();
+    trailing.push(0);
+    for words in [
+        vec![],
+        vec![99],
+        good[..good.len() - 1].to_vec(),
+        trailing,
+        vec![0, 7],
+    ] {
+        assert_eq!(roc.step_words(&words), Err(RocError::Rejected), "{words:?}");
+    }
+    // Nothing was decided on a rejection: the cores still agree.
+    assert_eq!(roc.step(seen.clone()).map_err(|_| ()), Ok(rust.step(seen)));
+    for words in [vec![], vec![7], vec![0, 0]] {
+        assert_eq!(tile_words(&words), Err(RocError::Rejected), "{words:?}");
+    }
+    drop(roc);
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
 }
