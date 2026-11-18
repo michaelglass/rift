@@ -1,210 +1,353 @@
 # The core boundary, in Rust and in Roc
 
-> **Paused 2026-11-18.** The owner paused the Roc rewrite until the Rust rearch is finished.
-> The Roc port stopped at bookmark `experiment/roc-paused` (`uslyquzy`), green on both cores:
-> the Roc core implements the reconciler with request ids, the mode gate and the timer, and with
-> `--features roc-core` the reactor ran all 949 tests on it, shadowed by the Rust core. It did
-> not get the grip (press/drag) or the window lifecycle. `roc/` and `crates/rift-core-roc` stay in
-> the tree, **frozen at `experiment/roc-paused`**: outside the cargo workspace, updated by nothing,
-> and drifting from `rift-core`. The Rust line (`experiment/rust-core`) has since deleted the
-> translation layer the Roc core needed: `Event`/`Effect`/`Write::translate` and `Translate`, the
-> plain-data types (`plain.rs`, now test-only), the serde derives, `Write::from_foreign_core`, the
-> `Core` trait, `roc_bridge.rs`, the `roc-core` feature and the plain-data replay test. **A Roc
-> resume re-adds that layer** from `experiment/roc-paused`.
+The goal: all of rift's decisions in a pure core, `step(model, event) -> effects`, written in
+Roc, with the Rust platform doing only effects (AX, taps, CG/SkyLight, run loops, IPC, the
+animation presenter). Each slice of rift moves into the core in Rust first (`RustCore`), then
+the Roc app takes it over, held to the Rust core decision for decision.
 
-Experiment on bookmark `experiment/roc`, on top of `experiment/listen-only-tap`. The Roc code
-may be thrown away; the boundary (`crates/rift-core`) is the part meant to go back to rift.
+History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) while the Rust
+rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
+The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
 ## The boundary
 
-One step function. Events are facts the platform parsed; effects are decisions as data. The
-model stays behind the trait and is moved through every step, never lent out.
-
 ```rust
 // crates/rift-core
-pub trait Core<K: Kinds> { fn step(&mut self, event: Event<K>) -> Vec<Effect<K>>; }
+impl<K: Kinds> RustCore<K> { pub fn step(&mut self, event: Event<K>) -> Vec<Effect<K>>; }
 
-pub trait Kinds {                     // the platform's types
-    type Window; type Frame; type Time;
+pub trait Kinds {                         // the platform's types
+    type Window: Ord + Hash; type Frame; type Time: Ord; type Request: Ord;
     fn is_within(a: Frame, tolerance: f64, b: Frame) -> bool;
     fn after(t: Time, d: Duration) -> Time;
-}
-
-pub enum Event<K> {
-    Pointer(Pointer<K::Window>),      // Idle | Pressing(w) | Dragging(w), sent when it changes
-    Want   { now, window, desired, known, want: Want },  // layout's desire; Arrange | ArrangePositions | Place
-    Follow { window, frame },         // modifier drag's interactive frame
-    Answer { now, window, frame },    // the app's reply to its latest write
-    Report { window, frame, known },  // unprompted frame report
-    Tick   { now, known: Vec<(Window, Frame)> },  // deadline timer fired; absent = gone
-    Forget { window },                // an animation / topology change took the frame
-    Gate   { initiative: Initiative },// the mode gate: may Rift do this now?
-}
-
-pub enum Effect<K> {
-    Write(Write<K>),                  // send this frame (only a Core can make one)
-    Queued { window },                // the desire waits behind the write in flight
-    Answered { window, answer },      // Acked | Refused | Unasked
-    Late { window },                  // answer after giving up: comes back as a Report
-    Observed { window, observation }, // Ack | InTransit | Foreign
-    Note { window, note },            // Discarded | TimedOut | Forgotten (for the log)
-    Gate { initiative, allowed },     // refused = discarded, never queued
-    Timer(Option<Time>),              // arm the deadline timer at, or disarm
+    fn same_size(a: Frame, b: Frame) -> bool;
 }
 ```
 
-Order inside one step is fixed: decisions, then notes, then the timer if its deadline moved.
+Events are facts the platform parsed: the hand (`Press`, `Drag`, `Release`, `LetGo`), the
+window lifecycle (`Seen`, `Unseen`, `Gone`, `Ceded`, `Rekeyed`, `Distrust`, `Forget`), layout's
+desires (`Arrange { now, want, desires }`, `Animate { now, desires }`), the animation's end
+(`AnimationEnded`, `AnimationStopped`), a modifier drag's frame (`Follow`), a window's reported
+frame (`Observe { now, request, window, frame, as_of }`) and the deadline timer (`Tick`).
 
-`RustCore<K>` holds the reconciler (moved here unchanged in behaviour; it is handed `now`
-instead of reading a clock), the pointer as last told, and the armed deadline. rift runs it as
-`RustCore<Rift>` on its own `WindowId`/`CGRect`/`Instant`, so the reactor converts nothing.
-`plain::Plain` instantiates it on i32/u32 ids, f64 rects and u64 nanoseconds: what a foreign
-core sees.
+Effects are decisions: `Write` (only the core can make one), `Animate`, `Plan` (an arrange
+pass's writes, per request, position-only vs full), `Queued`, `Seen` (where the model now takes
+a window to be), `Pending` (a window's pending target, for every window whose state changed),
+`Replied` (what a report was: NoNews, InTransit, Acked, Refused, Foreign), `Note`, `Timer`, and
+the grip's `Grip`, `DragBegan`, `Ungrip`, `Regrip`. Order in a step is fixed: decisions, notes,
+pending targets, then the timer if its deadline moved.
+
+The model, one record per window: `seen` (where the model takes it to be) and `sync`, one of
+`Settled { acked, last }`, `Unknown { last }`, `InFlight { target, deadline, queued, request,
+before }`, `Animating { target, request }`, `Refused { wanted, got, request }`; the hand,
+`Grip::Idle | Held { window, button, phase: Pressed | Dragging { changed } }`; and the armed
+deadline. The one rule for reads: a report stamped older than the window's latest request is no
+news; stamped with it, it is the answer; newer, stamped when nothing was sent, or unstamped, it
+is placed by geometry. A frame Rift sends outside the core (the gesture camera) is announced
+with `SentOutside { window, request }`, so nothing is inferred from a stamp.
+
+### Plain data and the wire
+
+`rift_core::plain` instantiates the core on plain types (`WindowId { pid: i32, idx: u32 }`,
+`Rect` of f64, `RequestId(u32)`, `Nanos(u64)`); `Translate` and `Event`/`Effect::translate`
+move a step between platforms' types. `plain::wire` puts events and effects into u64 words: a
+tag per event and effect, one word per field (a pid sign-extended, a float as its bits), an
+option as a flag word, a list as its length. The words are both the Roc core's boundary and the
+recorded-trace format. Both sides parse a word list once, whole, into a typed value: words that
+are not one (an unknown tag or flag, a field out of range, a list longer than the words left,
+words left over) are one explicit rejection, never a crash inside a decode. The Roc core
+answers `0` and the effects (or frames), or `1`: rejected, the model untouched; the host
+returns `Result<_, RocError>` (`Rejected`, or `Unreadable` for Roc words it cannot read), and
+rift under `roc-core` stops naming the error.
+
+### Layout geometry (first layout slice)
+
+`rift_core::layout` holds the geometry the tiling systems share (the axis solver, window
+constraints, the tiling area) and a BSP layout's frames: `Bsp { screen, gaps, root, aspect }`,
+the layout's tree pruned to what takes space (a layout where nothing does has no shape, so
+`root` is a node, never empty; `Split { horizontal, ratio, children: One | Two }`,
+`Leaf { slot: Empty | Window { window, constraints }, fill: Tiled | Screen | WithinGaps,
+stacked }`), and `Bsp::frames`. It is a pure function, not a step: the frames are needed in the
+middle of the engine's layout pass, and geometry needs no model. The engine still owns the BSP
+trees and describes the shape on every arrange (`BspLayoutSystem::shape`); when tree ownership
+moves into the core, the shape becomes the core's own state and the description goes.
 
 ## What lives where
 
-- **Core (pure):** the reconciler (`Sync`: Settled / InFlight / Refused / Adrift, the one write
-  in flight plus one queued, deadlines in send order), whose a window is (`Owner`, from the
-  pointer), whose hand a report is under (`Holder`), the drag mode gate (`may`), the timer.
-- **Platform (the reactor, Rust):** everything effectful and everything not yet moved: the
-  window store with the press/drag model (`Records`, `Grip`), layout (`calculate_layout` makes
-  the desires), `frame_monotonic` (the model's last-seen frame, sent as `known`), the
-  transaction ids of the app protocol, the senders, the run loop's timer.
-- `src/actor/reactor/reconciler.rs` is the thin applier: each former reconciler call is now
-  "tell the pointer if it changed, step one event, turn the effects back into what the reactor
-  acts on". In test builds it records every step.
-
-Three Rust-only reads remain on `RustCore` (a foreign core has no such door):
-`sync` (tests and fuzzer invariants), `in_flight` (the transaction-id check in
-`answers_latest_write`), and `due` (the adapter uses it to send `Tick` only the known frames of
-windows whose writes are due; a host without it sends every window it knows, which decides the
-same).
+- **Core (pure):** the reconciler (writes, acks, refusals, deadlines, the queued desire, the
+  animation's targets, plans), where the model sees each window, the hand, the timer; and the
+  geometry of BSP layouts and the axis solver.
+- **Platform (the reactor, Rust):** everything effectful, and what has not moved yet: layout
+  (which makes the desires), workspaces and spaces, focus and raise, the mode table, config,
+  window admission. `RiftState::step` applies each step's effects in one place (`project`); the
+  window store's `frame_monotonic` and the transaction store's targets are projections of
+  effects, with debug assertions that store and core agree.
 
 ## The Roc side
 
-- `roc/platform`: requires `core : { init : {} -> model, step : model, Event -> { model, effects
-  : List(Effect) } }`, provides `roc_init`, `roc_step`, `roc_release_model`; target
+- `roc/platform/main.roc`: requires `core : { init : {} -> model, step : model, List(U64) -> {
+  model, effects : List(U64) } }`; provides `roc_init`, `roc_step`, `roc_release_model`; target
   `arm64mac: { inputs: [app], output: Archive }`. The model crosses only as `Box(Model)`.
-- `roc/core/main.roc`: `RustCore` ported decision for decision (~340 lines). State inside the
-  variants (`InFlight({ target, deadline, queued })`, `Queued : [Waiting(Rect), NoneWaiting]`),
-  exhaustive matches without wildcards.
-- `crates/rift-core-roc` (outside the workspace: building it needs the nightly): `build.rs` runs
-  `roc build` and links the archive; `RocCore` implements `Core<Plain>`, converts to and from the
-  generated glue, copies effects out and releases the Roc list at once; the allocator hooks count
-  allocations; `roc_crashed` aborts.
-- Pinned nightly: `roc/NIGHTLY`. After a bump, run `roc/glue.sh` (the glue ABI changes between
-  nightlies).
+- `roc/core/main.roc` (~1,260 lines, ~330 of them the wire codec): `RustCore` ported decision for
+  decision. State inside the variants, `Option`s as small tag unions (`Last : [Sent(U32),
+  NeverSent]`, `Waiting : [Waiting(Rect), NoneWaiting]`), every match naming its variants. The
+  app parses the event's words into its own `Event` union at the start of `step` and writes the
+  effects' words at the end.
+- `crates/rift-core-roc`: a member of rift's workspace (cargo makes every path dependency inside
+  it one, `exclude` or not) but **empty unless its `roc` feature is on**, so rift's own build
+  never needs the Roc nightly (`ROC=/nonexistent cargo test --workspace` passes). With `roc`,
+  `build.rs` runs `roc build` and links the archive; `RocCore::step_words` steps on words,
+  `RocCore::step` adds the wire; the allocator hooks count allocations; `roc_crashed` aborts.
+- In rift, `--features roc-core` (which turns on `rift-core-roc/roc`) makes the reactor's core
+  `Shadowed`: the Roc core decides (the event translated to plain data, across as words, its
+  effects translated back), the Rust core steps the same event beside it, and the two must
+  decide identical effects or rift stops. `Plainly` is the one translation both ways.
+- `roc/core/Traditional.roc`: the traditional geometry (stack and master-stack layouts are
+  traditional trees); `roc/core/Geometry.roc`: what the systems share (Rust's float helpers,
+  constraints, the tiling area, the axis solver). A shape's words start with its system's tag
+  (0 BSP, 1 traditional) and `main.roc`'s `tile` dispatches on it.
+- `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
+  `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
+  rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
+  Bit for bit means Rust's float semantics written out: `f64::round` (half away from zero,
+  keeping a zero's sign; Roc's own is `floor(x + 0.5)`), `max`/`min` as arm64's
+  `fmaxnm`/`fminnm` (+0 beats -0 for max), `sum` from -0. `roc/core/Wire.roc` holds the word
+  primitives both modules use.
+- Pinned nightly: `roc/NIGHTLY`. After a bump, run `roc/glue.sh`. The glue is now 1,469 generated
+  lines (it was 4,020 with typed events and effects) and only three functions use it.
 
 ## Evidence
 
-- `cargo test --workspace`: 949 pass. The reactor makes every frame-write and mode-gate decision
-  by stepping `RustCore<Rift>`.
-- `the_core_on_plain_data_decides_what_the_reactor_decided` (fuzz.rs): every fuzzer seed's run is
-  recorded, translated to plain data and replayed through `RustCore<Plain>`; same effects at every
-  step (200 seeds × 30 steps by default).
-- `crates/rift-core-roc/tests/differential.rs`: the recorded traces replayed through both cores.
-  2000 seeds × 40 steps = **413,825 core steps, identical effect streams**, no Roc allocation
-  live afterwards. The same on the `-safe` nightly. A planted bug (ack tolerance 1.5 → 2.5) fails
-  it at seed 1 step 230.
-- Coverage gap (at `experiment/roc-paused`; the Rust line's fuzzer now drives modifier drags,
-  animated layouts and a scrolling camera, see `Setup` in fuzz.rs): `Follow` and `Forget` never
-  occurred in these traces (counts: Gate 158,926, Want 136,164, Report 67,135, Answer 33,699,
-  Pointer 14,299, Tick 3,602).
+- `cargo test --workspace`: 963 pass (1 ignored, the trace dump), fuzzer clean at 2000 × 40.
+- `the_core_on_plain_data_decides_what_the_reactor_decided` (fuzz.rs): every seed's run,
+  translated to plain data, replayed through `RustCore<Plain>`: the same effects at every step,
+  and every event and effect survives the wire.
+- `crates/rift-core-roc/tests/differential.rs` (`cargo test -p rift-core-roc --features roc`):
+  recorded traces replayed through both cores, the Roc core compared **word for word** with the
+  recorded effects (so float bits must match). 16 committed seeds (every fuzzer setup: plain,
+  animated, animated with a scrolling camera) = 2,715 steps; 2000 × 40 = 339,772 steps; 4000 ×
+  60 = **847,945 steps, identical**, no Roc allocation live afterwards.
+- `crates/rift-core-roc/tests/layout.rs`: random traditional shapes (tiny, zero and NaN
+  weights, stacks with bars and focused children, fills): 200,000 shapes, **2,446,623 frames
+  identical word for word**; and random BSP shapes leaning on the edges (maxima under
+  minima, locked axes, ratios 0 and 1, one-child splits, fractional screens) through both
+  geometries: 200,000 shapes, **1,057,049 frames identical word for word** (20,000 shapes by
+  default). Its first failure was a signed zero (`round(-0.3)` is -0 in Rust).
+- A planted bug in `Bsp.roc` fails the BSP and engine tests under `roc-core`: the Roc geometry
+  is on rift's path. The fuzzer drives no BSP layout yet.
+- With `--features roc-core`: all reactor tests pass, and the fuzzer at 2000 × 40 and 4000
+  × 60 finds nothing, every step agreeing with the Rust shadow.
+- Coverage of the 4000 × 60 corpus by event: Observe 335,314, Arrange 191,974, Seen 177,126,
+  Animate 60,787, Release 23,185, AnimationEnded 16,612, Press 13,597, Drag 12,771, Tick 6,388,
+  Gone 4,397, Follow 3,727, AnimationStopped 1,718, Forget 349. **Never in the corpus:**
+  `LetGo`, `Rekeyed`, `Ceded`, `Unseen`, `Distrust`; the Roc core decides those only in the
+  reactor tests under `roc-core` (shadowed). The fuzzer should drive them.
 
-Measured (`tests/measure.rs`, release, M-series laptop, adapter conversions included):
+### Measured
 
-| | Rust core | Roc core |
-|---|---|---|
-| fuzzer corpus, per step | mean 35 ns, p99 125 ns | mean 127 ns, p99 333 ns |
-| synthetic, 10 → 2000 windows | mean 53–56 ns, p99 125 ns | mean 162–169 ns, p99 ~291 ns |
-| Roc allocations | | ~2.2 per step (model box + effect list), 4 live, 0 after drop |
-| 1M steps, 500 windows | | live allocations flat at 4, 0 after drop |
+`tests/measure.rs` (`cargo test --release -p rift-core-roc --features roc --test measure --
+--ignored --nocapture`), release, M-series laptop. "Roc words" is the step across the
+boundary (the Roc app parses the event and writes the effects); "Roc step" adds the Rust side's
+wire encode and decode.
 
-Flat latency from 10 to 2000 windows (half of them refused, so the model tracks ~1000) shows
-the model stays unique: Roc updates it in place, it never copies it.
-Build: `roc build` of the archive ~2 s; clean `cargo build --release` of the Roc crate 2.8 s.
+| per step | Rust core | Roc words | Roc step |
+|---|---|---|---|
+| fuzzer corpus (4000 seeds, 847,945 steps, a fresh core per seed) | mean 95 ns, p50 83 ns, p99 416 ns, max 79 µs | mean 538 ns, p50 459 ns, p99 2 µs, max 45 µs | mean 682 ns, p50 625 ns, p99 2 µs |
+| synthetic, 10 windows | mean 123 ns, p99 1 µs | mean 704 ns, p99 5 µs | mean 863 ns, p99 6 µs |
+| synthetic, 2000 windows | mean 136 ns, p99 250 ns | mean 702 ns, p99 792 ns | mean 971 ns, p99 1 µs |
 
-## Roc friction found (nightly-2026-11-15-f25da45)
+- **Host allocator and buffers (after the rebase onto `fix/native-drag-destination`, 4000 × 60
+  corpus, 819,643 steps, means):**
 
-- `output: Archive` links into cargo with nothing but `rustc-link-lib=static` (the research
-  could not find an example; it works).
-- The glue's names for structural records are hashes (`AnonStructE34ca824b553e6e2`), with
-  per-position aliases (`EventWantWindow`); one record shape gets one name everywhere. Nominal
-  records in the platform would read better.
-- The generated glue is not clean under Rust 2024 (`unsafe_op_in_unsafe_fn`): allowed on the
-  module.
-- The nightly tarball has no glue specs: `roc glue` needs `RustGlue.roc` from a roc checkout at
-  the same commit (`ROC_SRC`).
-- No `F64 -> F64` rounding (only `round_to_i64_try` and friends). The core never rounds, so
-  `Kinds::round` was dropped; rounding stays in the reactor's `Desired::of`.
-- Record patterns are closed: `InFlight({ target })` against a three-field record is a "can
-  never match" type error; it needs `{ target, .. }`. The message does say which field is
-  missing.
-- No `Option`: the core's `Option`s became small tag unions (`Waiting | NoneWaiting`,
-  `Arm(U64) | Disarm`). Arguably better.
-- Unbox and rebox per step costs one allocation and free per step. Cheap; noted because a
-  per-step allocation count of 0 is not reachable with `Box(Model)` round-tripping.
-- `var` + `while` made the deadline-queue loops direct ports of the Rust.
-- Nothing crashed, leaked or miscompiled on 413k steps.
+  | | Roc words | `RocCore::step` | Roc allocations per step |
+  |---|---|---|---|
+  | before (system malloc, counted, a list and two Vecs per step) | 548 ns | 680 ns | 5.62 |
+  | boundary buffers reused (event list, encoding, effects copy) | 543 ns | 611 ns | 4.63 |
+  | mimalloc behind `roc_alloc`/`roc_realloc`/`roc_dealloc` | 432 ns (p50 375) | 500 ns | 4.63 |
+  | counting only in test builds | about 13 ns less (3%) | | |
 
-## The Rust line since the pause (`experiment/rust-core`)
+  The Rust core is about 97 ns. Of the original gap (about 450 ns): allocation (the allocator's
+  speed, the counter, the per-step input list) was about 130 ns; the boundary itself (the FFI
+  call, Roc parsing the event and writing a small effect list, the host's copy) is about 110 ns,
+  measured with a Roc step that parses and answers without deciding; the Rust side's wire encode
+  and decode is about 70 ns more in `RocCore::step`; Roc's decisions are the rest, about 320 ns,
+  some 3.3× the Rust core's. The remaining 4.6 allocations per step are Roc's own (the model's
+  rebox, the effect list, the lists a step builds); no arena. Size-class pools were not tried:
+  mimalloc already serves these small blocks from thread-local free lists.
+; both are far under a frame (16 ms) and under the cost
+  of one AX call.
+- Flat from 10 to 2000 windows: the model stays unique and Roc updates it in place.
+- Allocations: about 5.5 per step (the event list, the model's unbox/rebox, the effect list,
+  and whatever the step builds), at most 4 live in a session, 0 after every core is dropped; a
+  million steps over 500 windows keep live allocations flat at 4.
+- At `experiment/roc-paused` the Roc core was ~130 ns per step against Rust's ~35 ns: today's
+  core does more per step (a record per window, pending targets for every touched window, plans)
+  and the wire codec runs in Roc.
+- **Long sessions (`tests/session.rs`):** one core over the recorded seeds back to back, each
+  shifted so its clock and request ids carry on (time only moves forward): 4000 seeds × 5 =
+  4,239,725 steps over 14.4 simulated hours, slowest Roc step 216 µs, decisions identical to the
+  Rust core's throughout, at most 5 Roc allocations live. The default test (the committed seeds,
+  200 rounds, 2.1 h) fails if more than 10 steps take over 5 ms. An earlier run had shown 40–100
+  ms steps on one core carried across seeds whose clocks restart; it does not reproduce, neither
+  with time running backwards nor on the build that showed it (`b9675712`, rerun three times:
+  slowest step under 1 ms), so it was the machine (other builds running), not the core. The
+  deadline queue cannot grow with a forward clock: a due or stale entry is dropped, so it holds
+  only the writes of the last 300 ms.
 
-The sections above describe the boundary as it was at `experiment/roc-paused`. On the Rust
-line it has since grown; the reactor keeps applying, the core keeps deciding.
+- **No index in the geometry (index audit), a known cost.** The owner chose unrepresentable
+  states over microseconds ("premature bug-fixing rather than premature optimisation"):
+  the solver walks segment records instead of indexing parallel lists, a traditional stack is a
+  zipper and an axis a first and the rest (in the Rust core too), and children are zipped with
+  their lengths and frames. Tile, best of 5 over 200,000 random shapes: BSP 4.04 → 4.9 µs per
+  shape, traditional 5.6–5.9 → 8.1 µs. If a profile ever asks, optimise inside these
+  structures (the measured costs: bigger records than parallel float lists, and one list for
+  each zip). The per-step core is unaffected.
+- **Hardening: parse at the boundary, protective types, narrow signatures (the owner's "a, and
+  then some").** What changed, Rust core first and Roc in parity:
+  - *Parse once.* `Wire.roc` reads with `Try` (`Taken(a) : Try((a, Words), [Malformed])`),
+    chained with `?`; `finished` rejects leftover words; `take_u32`/`take_window` check ranges,
+    `take_list` checks the length against the words left. No `crash` remains in Roc's decode.
+    Known cost: Roc words ~418 → ~486 ns per step (+16%); tile unchanged.
+  - *`Sent<R>` and `Stamp<R>`.* A request the core sent (constructible only in the reconciler)
+    and an id the platform handed back (compares only against a `Sent`): the as_of rule is an
+    `Ordering` match with no inference branch. Rules out: treating a platform id as one of ours.
+  - *A plan only the core makes* (`Plan`'s fields private, `Plan::starting(write, ..)`): a plan
+    always has its write, so the empty plan branch is gone.
+  - *Narrowed signatures (the corollary: a check that can move to the caller means the
+    parameter is too loose).* `release` takes the queued desire and the state the window was
+    left in, not an `Option` and a lookup: its "nothing queued" and "window unknown" branches
+    moved to (or vanished from) its callers. `time_out` and `waiting` take and give a `Sent`.
+    `Bsp::frames` / `Traditional::frames` take a shape whose root is a node: the "nothing takes
+    space" branch moved to rift's builders, which already knew it, and off the wire.
+  - *Empty is a state, not an unwrap.* The deadline queue is matched `[] | [entry, .. as
+    later]`; `dedup` folds `[Nothing, Last(window)]`. No `first()`, `last()` or
+    `drop_first(1)` left in Roc.
+  - *No wildcard over state.* Every `_ =>` over core state is spelled out, in rift-core and
+    Roc (gather's `Fixed`/`Free` and `Max`/`NoMax` pairs, the minima pass, BSP aspect fitting,
+    the queue). The only `_ =>` left in Roc map an unknown wire tag to `Err(Malformed)`.
 
-- **Request ids.** The platform mints the app protocol's transaction id per step and hands it
-  in (`Want`, `Follow`, `Answer`, `Tick`); every `Write` carries it; an `Answer` names the
-  request it answers (`seen`) and the core drops one naming a replaced write (`Stale`). The
-  reactor only guards writes the core did not make (`answers_latest_outside_write`).
-- **The grip.** The core owns what the hand is doing (`Press`, `Drag`, `Release`, `LetGo`,
-  `Gone`, `Ceded`, `Rekeyed`; effects `Grip`, `DragBegan`, `Ungrip`, `Regrip`) and its rules
-  (one hand, a drag only from a press of its window, a release only on the grip's button). The
-  window store's gripped slot keeps its record-in-slot type and is changed only by
-  `RiftState`'s grip methods, each applying a core step.
-- **The model's frame.** The core keeps where the model sees each window (`Seen`, `Unseen`,
-  `Gone`, `Rekeyed`); `WindowState::frame_monotonic` is its projection, set only from
-  `Effect::Seen`. `known` is gone from `Want`/`Report`/`Tick`, and with it the last Rust-only
-  read on a production path (`due`).
-- **Where the applier lives.** `RiftState` (window store + core) has every core call; each
-  applies the step's projected effects in one place (`RiftState::project`), with debug
-  assertions that store and core agree. The fuzzer has an invariant for it too.
-- **Fuzzer.** Modifier drags, wakes and named workspace moves; the invariants read the core's
-  own trace for why rift wrote what it wrote.
+  What is left, and why:
+  - *Ratio newtype (0..1).* Every writer clamps to 0.05..0.95 or uses 0.5; the boundary that
+    could carry a bad ratio is persistence (serde of saved layouts), which is rift's, not the
+    core's. Worth doing there, with the layout trees.
+  - *Seen / acked / desired frame newtypes.* No bug has mixed them (seed 59 was a semantic bug),
+    and `seen` legitimately takes desired values; the states (`Settled { acked }`, `InFlight {
+    target }`) already name them.
+  - *Request ids minted by the core.* The platform mints them from a counter shared with other
+    writers, so the core cannot; `Sent`/`Stamp` give the protection that matters.
+  - *Window id vs window-server id.* Distinct types already, on the platform side; the core
+    sees only window ids.
+  - *`keys[&plan.request()]` in rift's reconciler.* An index into the platform's own map of
+    in-flight batches, keyed by the request it minted; not core state.
+  - *The `roc` feature between a Rust-only commit and its Roc parity.* A Rust-only commit that
+    changes the wire (b71d8cd9) leaves the Roc build's layout test failing until the next
+    commit; the Roc-free workspace, which the play line uses, is green at every commit.
+- **Pure functions.** No Roc function is effectful (`=>`): the platform's entry points are
+  pure too. rift-core reads no clock, randomness or I/O (time and request ids come in as
+  arguments); the Roc host only moves words and memory.
 
-Remaining Rust-only read: `sync` (tests and the fuzzer's invariants).
+Build:
+
+| | time |
+|---|---|
+| `roc check core/main.roc` | 0.02–0.26 s |
+| `roc build --opt=speed` (archive, 464 KB) | 8.7–10 s |
+| rift with `roc-core`, after touching `main.roc` (Roc build + relinking rift) | 32 s |
+| rift without it, after touching `rift-core` | 16 s |
+
+## Roc: the design we follow, and what is left (nightly-2026-11-15-f25da45)
+
+Sources are the Roc checkout at the pinned commit (`f25da45`): `docs/langref/`, `design.md`,
+`docs/mini-tutorial-new-compiler.md`, `src/build/roc/Builtin.roc`, `src/cli/main.zig`. Earlier
+notes called several of these friction; they are Roc's design, and the core follows them.
+
+### Design we follow
+
+- **No `Option`, no null.** Failures are `Try`, absence is a descriptive tag union (mini
+  tutorial, "`Try`": "Roc does not have `null`, `nil`, `undefined`, or anything similar").
+  The core says what absence means: `Last : [Sent(U32), NeverSent]`, `Waiting : [Waiting(Rect),
+  NoneWaiting]`, `Armed : [Armed(U64), Disarmed]`.
+- **`List.get` / `List.set` return `Try`** (langref `lists.md`: "there's no such thing as an
+  'index out of bounds' crash in Roc"). So an index the code knows is valid means the data
+  structure is wrong: the index audit replaced those with shapes where it cannot happen (a
+  stack is a zipper, an axis a first and the rest, frames and lengths are zipped with the
+  children, a stack's frame is a formula of its position).
+- **Closed and open records.** `{ target }` is a closed record (pattern), `{ target, .. }` an
+  open one (langref `records.md`, "Open Record Types"; `pattern-matching.md`).
+- **Type modules.** A file `Wire.roc` defines `Wire := …` and exposes only that type's
+  associated items; everything else at the top level, type aliases included, is private
+  (langref `modules.md`, "Hiding implementation details"). The old `module [..]` header is
+  deprecated (the compiler's diagnostic at this commit). Structural aliases are
+  interchangeable, so each module declares the `Rect` it uses.
+- **Warnings exit 2.** Every `roc` command that finishes with warnings exits 2, so CI fails
+  (mini tutorial; `src/cli/main.zig`, `exitOnWarnings`: "the one warning exit policy"). The
+  build script treats it as a failure, and the core is kept warning-free.
+- **Shadowing is a warning** (langref `naming.md`, "Shadowing"), which with the exit policy
+  fails a build: a match branch binding `release` next to a `release` function had to be
+  renamed.
+- **Recursive types are nominal** (langref `types.md`, "Recursive Types"; `boxes.md`):
+  `Node := [..]`, built as `Node.Split(..)`.
+- **Ranges are syntax**, `0..<n` (langref `numbers.md`, "Ranges"; `loops.md`), not a
+  `List.range`. (The hand-written `indices_to` this replaced was a misreading, and the audit
+  removed the need for it.)
+- **`where` clauses ask for methods**, not record fields (langref `static-dispatch.md`): a
+  function over records names their alias instead.
+
+### Not yet implemented
+
+- **Alias modules** (exposing a type alias as a module): "planned for after 0.1.0 and have not
+  been implemented yet" (langref `modules.md`, "Alias modules").
+
+### Unknown (behaviour at this commit, not documented)
+
+- **`F64` rounding.** `round_to_*_try` rounds by `floor(x + 0.5)` (`Builtin.roc`,
+  `f64_round_to_whole`), which differs from Rust's `f64::round` at `0.49999999999999994` and
+  loses the sign of a zero; there is no `F64 -> F64` round or floor. The geometry writes Rust's
+  rounding out (`Geometry.round`) to stay bit-identical.
+- **`F64.max` / `F64.min`** are `if a > b then a else b` (`Builtin.roc`): NaN and signed-zero
+  behaviour is not specified; the geometry writes out arm64's `fmaxnm`/`fminnm`.
+- **Glue and packaging** (only the three boundary functions use it now): structural records
+  are named by hash, the generated Rust is not clean under Rust 2024
+  (`unsafe_op_in_unsafe_fn`, allowed on the module), and the nightly tarball has no glue specs
+  (`roc/glue.sh` takes `ROC_SRC`).
+
+### Worked well
+
+- `output: Archive` links into cargo with nothing but `rustc-link-lib=static`.
+- `var` with `while` / `for` makes the deadline loops and the wire codec direct ports.
+- Nothing crashed, leaked or miscompiled on 829,148 differential steps, 4.2 million session
+  steps and 3.5 million geometry frames.
 
 ## Roadmap: to "the reactor is only an applier"
 
-Sizes are rough (S: a day, M: a few days, L: a week or more of careful slicing); each slice
-moves state into the core, deletes reactor code, and keeps the fuzzer and the replay test green.
+Each slice moves state into the core (Rust first), deletes reactor code, keeps the fuzzer, the
+replay test and the differential green, and ends with the Roc app deciding it.
 
-| Slice | Size | What moves | Risks |
-|---|---|---|---|
-| (a) acknowledged frame in the reconciler | M | `Sync::Settled { acked }`; `Sync::Adrift` and `Want::Place` go | Behaviour: after a drag and after a display change the reconciler trusts reports/re-reads instead of forcing writes; leans on the R5 re-read. Needs the owner's call on the details (below). |
-| (b) one pending store | M | **Done.** `TransactionManager`/`WindowTxStore` keep only ids; pending targets live in the core (`Reconciler::pending`), the store's targets are their projection (`Effect::Pending`/`Unpending`), the camera's included | The space bookkeeping (`pending_target_space_for_window_server_id`, `rift_owns_geometry`) and the app actor still read the projection across threads. |
-| (c) reconcile as a pure Plan | M | `arrange_frames`' batching (per app, position-only vs full) becomes a core-built `Plan`; the reactor sends it | Scrolling bounds and app handles are platform data; the plan must name them by key, not hold them. |
-| (d) animation behind the applier | L | **Done** for targets: layout transitions and the scrolling camera are planned by the core (`Event::Animate`, `Sync::Animating`); the animation thread only presents and reports the end | The presenter's display-link timing and the gesture camera keep their own state; cancellation is still platform-side (`cancel_window_presentations`, `yield_to_user`), not an effect. |
-| (e) `DragKind` union, derived drop target | M | Native vs modifier drag with state inside the variants; the drop target computed from pointer and layout, not stored | The drop scene is built from layout data the core does not have yet; derive it on the platform side until layout moves. |
-| Window lifecycle complete | M | Admission, visibility, minimize, claims as core events | Overlaps the `rust-followups` agent (store indexes, transfers). |
-| Layout engine | L+ | Trees, systems (bsp, stack, scrolling, floating), floating positions, persistence | The largest piece; `calculate_layout` is already a function of state, but the engine mutates the window store and has its own caches. Slice per layout system. |
-| Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and pending snapshot merge | The spaces actor's revision/guard protocol and the Mission Control snapshot hold-and-replay (modes #1-#3). Owned now by the `mode-table` agent. |
-| Focus and raise | M | Focus follows mouse, raise sequencing, the ~1 s "ignore until" windows | Raise FIFO replay (mode #25) conflicts with discard-never-queue; app-actor latency. |
-| The mode table | L | The other ~30 modes of MODES-inventory as one `Mode x InputClass` table in the core | Modes overlap (needs a set of active modes); several are queue/replay today (#1, #2, #23-#25, #29). Coordinate with `mode-table`. |
-| Config | S-M | Parsed config as data the core is initialized and updated with | Hot reload changes rules mid-flight; config types derive macros live in `rift-config-derive`. |
+| Slice | Size | State |
+|---|---|---|
+| Reconciler (writes, acks, deadlines, queued desire) | M | Done, Rust and Roc. |
+| Request ids, the grip, the model's frame | M | Done, Rust and Roc. |
+| One pending store, plans, animation targets | M–L | Done, Rust and Roc. |
+| `DragKind` union | M | Done on the Rust line (platform side; the drop target is derived there until layout moves). |
+| Layout geometry: BSP | M | Done, Rust and Roc (the engine describes the shape; the core computes the frames). |
+| Layout geometry: traditional (stack, master-stack) | M | Done, Rust and Roc (`layout::traditional`, `Traditional.roc`); the stack bar's group frames use the core's `stack_frames`. |
+| Layout geometry: scrolling, floating | M each | **Next.** Scrolling has cached world geometry (`prepare_layout`) to carry. |
+| Layout trees into the core | L+ | Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
+| Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
+| Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
+| Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
+| The mode table | L | The other ~30 modes as one `Mode x InputClass` table in the core. |
+| Config | S–M | Parsed config as data the core is initialized and updated with. |
 
-Out of the core for good: AX calls, event taps, CG/SkyLight, run loops and timers, IPC,
-the animation presenter itself.
+**roc-2 ends** when the layout trees are the core's and the slices above them have moved.
 
-## Next slice (as written at `experiment/roc-paused`)
+**After roc-2, in a new fork: a publishable macOS platform for Roc, and a fat Roc rift on it.**
+The platform is general, not rift's: its API has no rift types. About ten primitives, each an
+effect as data with request ids and opaque handles: accessibility elements and attributes (get,
+set, observe), window-server windows and spaces (queries), apps (launch, terminate, activate),
+the input tap driven by a policy table that the app pushes, timers, and files and IPC. Per-app
+worker threads stay native, inside the platform; every decision moves into the Roc app, whose
+step stays pure. Rift is one app on that platform. Host code extracted from rift for it stays
+Apache-2.0, keeping rift's and glide-wm's attribution.
 
-
-1. Request ids on `Write`, answers carrying them: `answers_latest_write` and `in_flight` move into
-   the core (removes a Rust-only read; the transaction ids become platform detail).
-2. The press/drag model (`Records`/`Grip`, `PointerReleased`) into the core: pointer events
-   (`Pressed{window, button}`, `Moved`, `Released`) instead of the adapter telling it the
-   pointer's state. Then `Owner`/`Holder` have one source.
-3. `frame_monotonic` owned by the core (inventory and animation send events), so `Want`/`Report`
-   stop carrying `known` and `Tick` stops needing `due`.
-4. The fuzzer drives modifier drags and an animation, so `Follow`/`Forget` are covered.
-5. Run `RocCore` inside the reactor behind a cargo feature (a translating `Core<Rift>` adapter),
-   so the 949 reactor tests run on the Roc core too.
+Out of the core for good: AX calls, event taps, CG/SkyLight, run loops and timers, IPC, the
+animation presenter itself.

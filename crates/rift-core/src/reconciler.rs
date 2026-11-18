@@ -38,6 +38,11 @@ impl<K: Kinds> Write<K> {
 
     /// The id to send it under; the app's answer names it.
     pub fn request(&self) -> K::Request { self.request }
+
+    /// Only the core (and its plain-data translation and wire format) makes a write.
+    pub(crate) fn new(window: K::Window, frame: K::Frame, request: K::Request) -> Self {
+        Write { window, frame, request }
+    }
 }
 
 /// Where one window stands between what Rift asked of its app and what the app answered.

@@ -20,7 +20,7 @@ use test_log::test;
 
 use super::*;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::actor::reactor::reconciler::{Desired, Sync};
+use crate::actor::reactor::reconciler::{Desired, Plainly, Sync};
 use crate::actor::reactor::testing::TestSizing;
 use crate::sys::geometry::IsWithin;
 
@@ -1659,6 +1659,89 @@ fn drag_invariants_hold_across_interleavings() {
     // but don't fail, since a smaller budget can simply miss it.
     if !fixed.is_empty() {
         eprintln!("fuzz: known signature(s) not reproduced this run: {fixed:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The core boundary: every seed's run, as the steps the reactor took through the core.
+
+type PlainStep = (
+    rift_core::Event<rift_core::plain::Plain>,
+    Vec<rift_core::Effect<rift_core::plain::Plain>>,
+);
+
+/// The steps the reactor took through the core on one case, on plain data.
+fn trace(setup: Setup, steps: &[Step]) -> Vec<PlainStep> {
+    let mut sim = Sim::new(setup);
+    let epoch = sim.reactor.state.core.clock.now();
+    for &step in steps {
+        let emitted = sim.run(step);
+        sim.pending.extend(emitted);
+    }
+    _ = sim.settle(steps.len());
+    let to = Plainly { epoch };
+    let recorded = sim.reactor.state.core.trace.take().unwrap_or_default();
+    recorded
+        .into_iter()
+        .map(|(event, effects)| {
+            (
+                event.translate(&to),
+                effects.into_iter().map(|e| e.translate(&to)).collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_core_on_plain_data_decides_what_the_reactor_decided() {
+    // The reactor runs the core on its own types; replayed on plain data (what the Roc core
+    // sees), every step must decide exactly the same effects, and survive the wire.
+    use rift_core::plain::wire;
+    let (cases, len) = (
+        budget("RIFT_FUZZ_CASES", 200) as u64,
+        budget("RIFT_FUZZ_STEPS", 30),
+    );
+    for seed in 0..cases {
+        let mut core = rift_core::RustCore::<rift_core::plain::Plain>::default();
+        for (index, (event, recorded)) in
+            trace(Setup::of(seed), &generate(seed, len)).into_iter().enumerate()
+        {
+            assert_eq!(
+                wire::decode_event(&wire::encode_event(event.clone())).as_ref(),
+                Ok(&event)
+            );
+            assert_eq!(
+                wire::decode_effects(&wire::encode_effects(recorded.clone())).as_ref(),
+                Ok(&recorded)
+            );
+            assert_eq!(
+                core.step(event.clone()),
+                recorded,
+                "seed {seed} step {index}: {event:?}"
+            );
+        }
+    }
+}
+
+/// Writes every seed's trace, in the wire format, to `$RIFT_TRACE_DIR/seed-<n>.trace`, for the
+/// Roc core's differential test (`RIFT_FUZZ_CASES`/`RIFT_FUZZ_STEPS` set the corpus):
+/// `RIFT_TRACE_DIR=… cargo test dump_core_traces -- --ignored`.
+#[test]
+#[ignore]
+fn dump_core_traces() {
+    let dir = std::path::PathBuf::from(std::env::var("RIFT_TRACE_DIR").expect("RIFT_TRACE_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cases, len) = (
+        budget("RIFT_FUZZ_CASES", 200) as u64,
+        budget("RIFT_FUZZ_STEPS", 30),
+    );
+    for seed in 0..cases {
+        let mut words = Vec::new();
+        for (event, effects) in trace(Setup::of(seed), &generate(seed, len)) {
+            rift_core::plain::wire::record_step(&mut words, event, effects);
+        }
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        std::fs::write(dir.join(format!("seed-{seed}.trace")), bytes).unwrap();
     }
 }
 
