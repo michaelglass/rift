@@ -27,16 +27,18 @@ impl<T> Expecting<T> {
 
     pub fn since(value: T, since: Instant) -> Self { Self { value, since } }
 
-    /// The expectation if it is still within the window.
-    pub fn live(&self) -> Option<&T> { (self.since.elapsed() < ECHO_WINDOW).then_some(&self.value) }
+    /// The expectation if it is still within the window at `now`.
+    pub fn live(&self, now: Instant) -> Option<&T> {
+        (now.saturating_duration_since(self.since) < ECHO_WINDOW).then_some(&self.value)
+    }
 
     /// Drops the expectation without an echo (superseded, or its owner is going away); the value
     /// comes back for cleanup only.
     pub fn forget(self) -> T { self.value }
 
-    /// Ends the expectation on its echo.
-    pub fn settle(self) -> Echo<T> {
-        if self.since.elapsed() < ECHO_WINDOW {
+    /// Ends the expectation on its echo, arriving at `now`.
+    pub fn settle(self, now: Instant) -> Echo<T> {
+        if now.saturating_duration_since(self.since) < ECHO_WINDOW {
             Echo::Ours(self.value)
         } else {
             Echo::Late(self.value)
@@ -50,12 +52,11 @@ mod tests {
 
     #[test]
     fn an_expectation_lapses_after_the_window() {
-        let fresh = Expecting::now(7);
-        assert_eq!(fresh.live(), Some(&7));
-        assert!(matches!(fresh.settle(), Echo::Ours(7)));
-
-        let stale = Expecting::since(7, Instant::now() - ECHO_WINDOW);
-        assert_eq!(stale.live(), None);
-        assert!(matches!(stale.settle(), Echo::Late(7)));
+        let start = Instant::now();
+        let fresh = Expecting::since(7, start);
+        assert_eq!(fresh.live(start + ECHO_WINDOW / 2), Some(&7));
+        assert!(matches!(fresh.settle(start + ECHO_WINDOW / 2), Echo::Ours(7)));
+        assert_eq!(fresh.live(start + ECHO_WINDOW), None);
+        assert!(matches!(fresh.settle(start + ECHO_WINDOW), Echo::Late(7)));
     }
 }

@@ -1625,6 +1625,8 @@ impl Reactor {
     }
 
     fn dispatch_workflow(&mut self, mut event: Event) -> anyhow::Result<EventOutcome> {
+        // The one clock read an event's decisions share.
+        let now = Instant::now();
         if let Event::AppActorExited(pid, handle) = &event {
             if !self.app_manager.apps.get(pid).is_some_and(|app| app.handle.same_actor(handle)) {
                 return Ok(EventOutcome::no_change());
@@ -2288,7 +2290,7 @@ impl Reactor {
                         window.map(|window| Expecting::since((space, window), stamp));
                 }
                 let overview_focusing =
-                    self.overview_focus.as_ref().and_then(Expecting::live).is_some();
+                    self.overview_focus.as_ref().and_then(|focus| focus.live(now)).is_some();
                 if transition.is_some() || overview_focusing {
                     self.stop_camera(space);
                 }
@@ -2438,7 +2440,8 @@ impl Reactor {
             Event::MouseMoved(wsid) => {
                 let window = self.state.windows.tracked_window_id(wsid);
                 if window.is_some_and(|window| {
-                    self.pending_mouse_focus.as_ref().and_then(Expecting::live) == Some(&window)
+                    self.pending_mouse_focus.as_ref().and_then(|focus| focus.live(now))
+                        == Some(&window)
                 }) {
                     return Ok(EventOutcome::default());
                 }
@@ -2498,7 +2501,7 @@ impl Reactor {
                     &self.mouse_raise_token,
                 )?;
                 if !outcome.raise_requests.is_empty() {
-                    self.pending_mouse_focus = window.map(Expecting::now);
+                    self.pending_mouse_focus = window.map(|window| Expecting::since(window, now));
                 }
                 return Ok(outcome);
             }
@@ -2514,7 +2517,9 @@ impl Reactor {
                 );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
-                if self.pending_mouse_focus.as_ref().and_then(Expecting::live) == Some(&window_id) {
+                if self.pending_mouse_focus.as_ref().and_then(|focus| focus.live(now))
+                    == Some(&window_id)
+                {
                     self.pending_mouse_focus = None;
                 }
                 let mut outcome = system_workflow::handle_raise_completed(
@@ -2526,7 +2531,7 @@ impl Reactor {
                 // A late completion still finishes the handoff: the echo is what ends it.
                 if let Some((space, selected)) = self
                     .overview_focus
-                    .map(|focus| match focus.settle() {
+                    .map(|focus| match focus.settle(now) {
                         Echo::Ours(focus) | Echo::Late(focus) => focus,
                     })
                     .filter(|(_, selected)| *selected == window_id)
@@ -2965,7 +2970,9 @@ impl Reactor {
         }
         // AX activation and inventory replies can arrive after overview preparation.
         // Until its focus completes, native layout work remains covered and instant.
-        if let Some(&(space, _)) = self.overview_focus.as_ref().and_then(Expecting::live) {
+        if let Some(&(space, _)) =
+            self.overview_focus.as_ref().and_then(|focus| focus.live(Instant::now()))
+        {
             if outcome.arrange.space_scope.is_none_or(|scope| scope == space) {
                 outcome.arrange.instant = true;
             }
