@@ -40,7 +40,7 @@ Node := [
 	Leaf({ slot : Slot, fill : Fill, stacked : Bool }),
 ]
 
-Shape : { screen : Rect, gaps : Gaps, aspect : [Aspect(F64), Free], root : [Root(Node), Nothing] }
+Shape : { screen : Rect, gaps : Gaps, aspect : [Aspect(F64), Free], root : Node }
 
 # Rust's float operations.
 
@@ -144,28 +144,24 @@ Bsp := [].{
 		}
 
 	frames : Shape -> List((WindowId, Rect))
-	frames = |bsp|
-		match bsp.root {
-			Nothing => []
-			Root(root) => {
-				area = tiling_area(bsp.screen, bsp.gaps)
-				out = place(bsp, root, area, [])
-				# A layout's only window, tiled and not stacked, is fitted to the aspect.
-				match (bsp.aspect, root) {
-					(Aspect(ratio), Node.Leaf({ fill: Tiled, stacked: False, .. })) =>
-						match out {
-							[(window, frame)] => {
-								(w, h) = if (frame.w > frame.h * ratio) (frame.h * ratio, frame.h) else (frame.w, frame.w / ratio)
-								[(window, { x: area.x + (area.w - w) / 2.0, y: area.y + (area.h - h) / 2.0, w, h })]
-							}
+	frames = |bsp| {
+		area = tiling_area(bsp.screen, bsp.gaps)
+		out = place(bsp, bsp.root, area, [])
+		# A layout's only window, tiled and not stacked, is fitted to the aspect.
+		match (bsp.aspect, bsp.root) {
+			(Aspect(ratio), Node.Leaf({ fill: Tiled, stacked: False, .. })) =>
+				match out {
+					[(window, frame)] => {
+						(w, h) = if (frame.w > frame.h * ratio) (frame.h * ratio, frame.h) else (frame.w, frame.w / ratio)
+						[(window, { x: area.x + (area.w - w) / 2.0, y: area.y + (area.h - h) / 2.0, w, h })]
+					}
 
-							[] | [_, _, ..] => out
-						}
-
-					(Aspect(_), Node.Leaf(_)) | (Aspect(_), Node.Split(_)) | (Free, _) => out
+					[] | [_, _, ..] => out
 				}
-			}
+
+			(Aspect(_), Node.Leaf(_)) | (Aspect(_), Node.Split(_)) | (Free, _) => out
 		}
+	}
 
 	take_node : Words -> Taken(Node)
 	take_node = |c0| {
@@ -252,13 +248,8 @@ Bsp := [].{
 			} else {
 				(Free, c8)
 			}
-		(has_root, c10) = take_flag(c9)?
-		if has_root {
-			(root, c11) = take_node(c10)?
-			Ok(({ screen, gaps, aspect, root: Root(root) }, c11))
-		} else {
-			Ok(({ screen, gaps, aspect, root: Nothing }, c10))
-		}
+		(root, c10) = take_node(c9)?
+		Ok(({ screen, gaps, aspect, root }, c10))
 	}
 
 	## The frames of the BSP shape `cursor` holds (after its system's tag), all of it.
