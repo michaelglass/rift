@@ -104,10 +104,10 @@ Modes outside the reactor's table, and why:
 
 ## Kept on purpose
 
-- **The 600 ms startup delay** (#13). It is a delay, not a fact; a fact-based end ("every app
-  discovered at registration has attached") needs the app actors to report attachment.
-- **The Mission Control snapshot hold and delta merge** (#1, #2). Not discarded: see the design
-  question below. Geometry and membership in a held snapshot are already latest-wins; only the
+- **The 600 ms startup delay** (#13). It is a delay, not a fact; see "Decided" for why a
+  fact-based end was not built.
+- **The Mission Control snapshot hold and delta merge** (#1, #2). Not discarded: see "Future work"
+  below. Geometry and membership in a held snapshot are already latest-wins; only the
   deltas (Space remaps, resizes, destroyed Spaces, refresh flags) are merged.
 - **The topology quarantine of reports** (#3, other half): window lifecycle and frame reports,
   press reports and every gesture phase. They are reports, not input classes, and the revision
@@ -120,17 +120,41 @@ Modes outside the reactor's table, and why:
   extension for the last focus of a sequence.
 - **#29 parked transfers**: owned by the transfers work (`rust-followups`), not touched.
 
-## Open design questions
+## Decided
 
-1. **#1/#2: can the Mission Control hold re-derive instead of merge?** A remap is the only record
-   that "desktop 2 on display A is now Space 57". A fresh snapshot carries only the delta since the
-   producer's previous sample, and a display UUID does not tell several desktops on one display
-   apart. Dropping a held sample's remaps would orphan the workspaces keyed by the old Space ids.
-   Re-derivation needs an identity for a desktop that survives Mission Control (e.g. the spaces
-   actor publishing an absolute map from a stable desktop identity to the current Space id, or
-   the reactor keying workspaces by that identity rather than by Space id). Until then the merge is
-   the correct behaviour.
-2. **#3: should every steering command be refused while the topology is unsettled?** Today only
-   `Arranging` (layout and move-to-display) is; `FocusWindow`, `SwitchSpace`, `CloseWindow` and
-   the rest still pass, as they did under the quarantine.
-4. **#13: what fact should end startup?** See "Kept on purpose".
+- **#3: only `Arranging` is refused while the topology is unsettled.** Layout commands and moves
+  between displays act on the Space assignment that the next accepted sample is about to change;
+  run now, they would rearrange against a model that is about to be replaced. Other steering
+  (`FocusWindow`, `SwitchSpace`, `CloseWindow`, warps) acts on a window or on macOS directly,
+  does not depend on Rift's Space model, and the user expects it to work at once, so it passes, as
+  it did under the quarantine.
+- **A press or a drag refuses `FollowActivation`.** Nothing moves existing windows until the
+  drop, and a workspace switch moves every window.
+- **#13: startup still ends on the 600 ms delay.** Ending it on "the apps discovered at
+  registration have attached" needs more than a small report. The attachment report goes to the
+  reactor (`ApplicationLaunched`), so the WM controller would need a new report from each app
+  thread and a pending set of the pids it spawned, minus spawns it defers (not finished launching,
+  prohibited, accessory) and threads that exit early. And an app whose Accessibility calls hang
+  would hold every pointer feature off indefinitely, so a fallback deadline is needed anyway: the
+  timer would stay, as the fallback.
+
+## Future work: a stable desktop identity (#1, #2)
+
+The Mission Control hold keeps merging Space deltas (decided). A remap is the only record that
+"desktop 2 on display A is now Space 57": a fresh snapshot carries only the delta since the
+producer's previous sample, and a display UUID does not tell several desktops on one display apart,
+so dropping a held sample's remaps would orphan the workspaces keyed by the old Space ids.
+
+The plan that would let the hold re-derive instead of merge:
+
+1. The spaces actor publishes, in every snapshot, an absolute map from a desktop identity that
+   survives Mission Control rearrangement, display reconnection and sleep (to be found: the
+   managed-display-spaces UUID per desktop is the first candidate) to the current Space id.
+2. Workspaces are keyed by that identity rather than by Space id; the Space id becomes a lookup
+   through the latest map.
+3. With an absolute map in every snapshot, a held snapshot is superseded by the next one whole:
+   remaps, resizes and destroyed-Space deltas are no longer needed, `merge_space_deltas` and
+   `carry_superseded_space_deltas` go, and Mission Control becomes an ordinary table row that
+   refuses committing topology and re-derives from the latest snapshot on exit.
+
+Nothing of this is implemented.
