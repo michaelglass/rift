@@ -14046,3 +14046,67 @@ fn a_modifier_drop_onto_another_display_lands_where_it_previewed() {
         target.preview_area
     );
 }
+
+#[test]
+fn a_native_drag_frame_that_jumps_to_another_display_does_not_move_the_target() {
+    // Seen with WhatsApp (Catalyst): mid-drag, with no write from Rift, its reported frame jumps
+    // to a remembered spot on the other display and back, the same size, while the pointer
+    // never leaves the source display. The pointer is where the user is.
+    let TwoDisplays {
+        mut apps,
+        mut reactor,
+        dragged,
+        space_a,
+        ..
+    } = two_displays_two_tiles_each(2);
+    let other = [WindowId::new(1, 1), WindowId::new(1, 2)]
+        .into_iter()
+        .find(|wid| *wid != dragged)
+        .unwrap();
+    let theirs = slot(&reactor, other);
+    for _ in 0..2 {
+        let dx = (theirs.mid().x - apps.windows[&dragged].frame.mid().x) / 2.;
+        let moved = drag_by(&apps, &mut reactor, dragged, dx, 0.);
+        apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    }
+    let pointer = theirs.mid();
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: pointer,
+    }));
+    let before = drop_target(&reactor).expect("a target on display A");
+    assert_eq!((before.intent.space, before.intent.window), (space_a, other));
+
+    // The frame teleports to the lower right of display B; the pointer stays put and the tap
+    // keeps reporting it.
+    let size = apps.windows[&dragged].frame.size;
+    let teleported = CGRect::new(CGPoint::new(1700., 500.), size);
+    reactor.handle_event(Event::WindowFrameChanged(
+        dragged,
+        teleported,
+        Some(apps.windows[&dragged].last_seen_txid),
+        Requested(false),
+    ));
+    apps.windows.get_mut(&dragged).unwrap().frame = teleported;
+    let after_jump = drop_target(&reactor).expect("the frame's jump took the target away");
+    assert_eq!(
+        (after_jump.intent.space, after_jump.intent.window),
+        (space_a, other)
+    );
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: pointer,
+    }));
+    let after = drop_target(&reactor).expect("the frame's jump took the target away");
+    assert_eq!((after.intent.space, after.intent.window), (space_a, other));
+    assert_eq!(after.intent.action, before.intent.action);
+
+    // Letting go there drops it on display A, where the preview was.
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert_eq!(reactor.assigned_space_for_window_id(dragged), Some(space_a));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(
+        slot(&reactor, dragged).same_as(after.preview_area),
+        "dropped at {:?}, previewed {:?}",
+        slot(&reactor, dragged),
+        after.preview_area
+    );
+}
