@@ -1622,15 +1622,14 @@ fn a_camera_moving_windows_during_a_drag_does_not_unsettle_them_at_the_drop() {
 }
 
 #[test]
-#[ignore = "pre-existing (reproduces on 0a54dd15): a scrolling camera started mid-drag strands a neighbour of a window dropped in from another display"]
 fn a_window_dropped_into_another_displays_scrolling_layout_settles_where_layout_wants_it() {
-    // Found by the fuzzer (seed 134 at 2000x40) once native drags crossed displays with the
-    // pointer. A window is dropped from display 2 into display 1's animated scrolling layout
-    // after a window there was destroyed mid-drag (which starts a camera). The drop's pass
-    // writes the remaining window at the camera's offset of the moment, and the layout then
-    // settles on another offset with nothing writing the difference. The drag here moves the
-    // whole frame onto display 1, so the step list fails the same way before the pointer
-    // decided a drag's display.
+    // Found by the fuzzer (seed 134 at 2000x40); it predates the pointer deciding a drag's
+    // display (the drag here moves the whole frame across). A window destroyed mid-drag moves
+    // display 1's scrolling viewport; the drop's camera then retargets it, but every window
+    // was unknown after the drag, so the core wrote each at the target offset and the camera
+    // was left with nothing to present. It ended at once, and its viewport was committed as a
+    // live animation at the old offset that nothing would advance: layout went on placing the
+    // remaining window there, away from where it had been written.
     let steps = [
         Step::DragStart { w: 7, dx: -500, dy: 81 },
         Step::ForeignMove {
