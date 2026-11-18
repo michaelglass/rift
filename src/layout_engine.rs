@@ -7,7 +7,8 @@ pub mod utils;
 pub(crate) mod workspaces;
 
 pub(crate) use core_geometry::{
-    cg_rect, core_gaps, core_rect, core_stack_line, place_strip, settle, tile_bsp, tile_traditional,
+    cg_rect, core_gaps, core_rect, core_stack_line, first_frames, place_strip, settle, tile_bsp,
+    tile_traditional,
 };
 pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
