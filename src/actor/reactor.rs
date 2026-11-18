@@ -3586,6 +3586,25 @@ impl Reactor {
         }
     }
 
+    /// What every per-workspace broadcast names: the active workspace of `space`, if that
+    /// space is active.
+    pub(crate) fn workspace_header(&self, space: SpaceId) -> Option<WorkspaceHeader> {
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let workspace_id =
+            workspaces.active_workspace(space).filter(|_| self.is_space_active(space))?;
+        Some(WorkspaceHeader {
+            workspace_id: protocol_workspace_id(workspace_id),
+            workspace_index: workspaces.active_workspace_idx(space),
+            workspace_name: self
+                .layout_manager
+                .layout_engine
+                .workspace_name(space, workspace_id)
+                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id)),
+            space_id: space.get(),
+            display_uuid: self.display_uuid_for_space(space),
+        })
+    }
+
     fn broadcast_window_title_changed(
         &mut self,
         window_id: WindowId,
@@ -3594,29 +3613,23 @@ impl Reactor {
     ) {
         if previous_title != new_title
             && let Some(space) = self.best_space_for_window_id(window_id)
-            && self.is_space_active(space)
-            && let Some(workspace_id) =
-                self.layout_manager.layout_engine.workspaces().active_workspace(space)
+            && let Some(header) = self.workspace_header(space)
         {
-            let workspace_index =
-                self.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
-
-            let workspace_name = self
-                .layout_manager
-                .layout_engine
-                .workspace_name(space, workspace_id)
-                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-
-            let display_uuid = self.display_uuid_for_space(space);
-
+            let WorkspaceHeader {
+                workspace_id,
+                workspace_index,
+                workspace_name,
+                space_id,
+                display_uuid,
+            } = header;
             let event = BroadcastEvent::WindowTitleChanged {
                 window_id: protocol_window_id(window_id),
-                workspace_id: protocol_workspace_id(workspace_id),
+                workspace_id,
                 workspace_index,
                 workspace_name,
                 previous_title,
                 new_title,
-                space_id: space.get(),
+                space_id,
                 display_uuid,
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
@@ -3625,25 +3638,21 @@ impl Reactor {
 
     fn broadcast_focused_window_changed(&self, window_id: WindowId) {
         if let Some(space) = self.best_space_for_window_id(window_id)
-            && self.is_space_active(space)
-            && let Some(workspace_id) =
-                self.layout_manager.layout_engine.workspaces().active_workspace(space)
+            && let Some(header) = self.workspace_header(space)
         {
-            let workspace_index =
-                self.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
-            let workspace_name = self
-                .layout_manager
-                .layout_engine
-                .workspace_name(space, workspace_id)
-                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-            let display_uuid = self.display_uuid_for_space(space);
-
-            let event = BroadcastEvent::FocusedWindowChanged {
-                window_id: protocol_window_id(window_id),
-                workspace_id: protocol_workspace_id(workspace_id),
+            let WorkspaceHeader {
+                workspace_id,
                 workspace_index,
                 workspace_name,
-                space_id: space.get(),
+                space_id,
+                display_uuid,
+            } = header;
+            let event = BroadcastEvent::FocusedWindowChanged {
+                window_id: protocol_window_id(window_id),
+                workspace_id,
+                workspace_index,
+                workspace_name,
+                space_id,
                 display_uuid,
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
@@ -3656,21 +3665,16 @@ impl Reactor {
         kind: rift_protocol::EventKind,
     ) {
         if let Some(space) = space
-            && self.is_space_active(space)
-            && let Some(workspace_id) =
-                self.layout_manager.layout_engine.workspaces().active_workspace(space)
+            && let Some(header) = self.workspace_header(space)
             && let Some(layout) = self.query_layout_state(Some(space.get()), None)
         {
-            let workspace_index =
-                self.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
-            let workspace_name = self
-                .layout_manager
-                .layout_engine
-                .workspace_name(space, workspace_id)
-                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-            let workspace_id = protocol_workspace_id(workspace_id);
-            let space_id = space.get();
-            let display_uuid = self.display_uuid_for_space(space);
+            let WorkspaceHeader {
+                workspace_id,
+                workspace_index,
+                workspace_name,
+                space_id,
+                display_uuid,
+            } = header;
             let event = match kind {
                 rift_protocol::EventKind::LayoutChanged => BroadcastEvent::LayoutChanged {
                     workspace_id,
@@ -6810,6 +6814,15 @@ impl Reactor {
                 false
             })
     }
+}
+
+/// The workspace part of a broadcast (`Reactor::workspace_header`).
+pub(crate) struct WorkspaceHeader {
+    pub workspace_id: rift_protocol::WorkspaceId,
+    pub workspace_index: Option<u64>,
+    pub workspace_name: String,
+    pub space_id: u64,
+    pub display_uuid: Option<String>,
 }
 
 /// Whose presentations (animations, cameras) an event ends before it is handled.

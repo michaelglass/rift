@@ -15,7 +15,7 @@ use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
-use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -449,20 +449,7 @@ impl LayoutManager {
 
                 Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
 
-                if let Some(workspace_id) =
-                    reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
-                {
-                    let workspace_index = reactor
-                        .layout_manager
-                        .layout_engine
-                        .workspaces()
-                        .active_workspace_idx(space);
-                    let workspace_name = reactor
-                        .layout_manager
-                        .layout_engine
-                        .workspace_name(space, workspace_id)
-                        .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-
+                if let Some(header) = reactor.workspace_header(space) {
                     let stacks: Vec<StackInfo> = group_infos
                         .iter()
                         .map(|g| {
@@ -499,14 +486,14 @@ impl LayoutManager {
 
                     if stacks.len() > 0 {
                         let event = BroadcastEvent::StacksChanged {
-                            workspace_id: protocol_workspace_id(workspace_id),
-                            workspace_index,
-                            workspace_name,
+                            workspace_id: header.workspace_id,
+                            workspace_index: header.workspace_index,
+                            workspace_name: header.workspace_name,
                             stacks,
                             active_workspace_has_fullscreen:
                                 active_workspace_for_space_has_fullscreen,
-                            space_id: space.get(),
-                            display_uuid,
+                            space_id: header.space_id,
+                            display_uuid: header.display_uuid,
                         };
                         let _ = reactor.communication_manager.event_broadcaster.send(event);
                     }
