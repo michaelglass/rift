@@ -5,13 +5,13 @@ use super::axis::{AxisConstraints, AxisSummary, container_axis_constraints, solv
 use super::{Gaps, WindowConstraints, tiling_area};
 use crate::plain::Rect;
 
-/// A BSP layout as the platform has it, pruned to the nodes that take space.
+/// A BSP layout as the platform has it, pruned to the nodes that take space (a layout where
+/// nothing does has no shape).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bsp<W> {
     pub screen: Rect,
     pub gaps: Gaps,
-    /// Empty when nothing in the layout takes space.
-    pub root: Option<Node<W>>,
+    pub root: Node<W>,
     /// The width/height a layout's only window is fitted to, if set.
     pub aspect: Option<f64>,
 }
@@ -62,9 +62,7 @@ pub enum Fill {
 impl<W: Copy> Bsp<W> {
     /// Each window's frame, in tree order.
     pub fn frames(&self) -> Vec<(W, Rect)> {
-        let Some(root) = &self.root else {
-            return Vec::new();
-        };
+        let root = &self.root;
         let area = tiling_area(self.screen, self.gaps);
         let mut out = Vec::new();
         self.place(root, area, &mut out);
