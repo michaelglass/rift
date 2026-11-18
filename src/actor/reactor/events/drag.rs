@@ -72,46 +72,72 @@ pub fn handle_mouse_up(
         return Ok(outcome);
     };
     let mut needs_layout = commit.source.tiled;
+    // The previewed drop, if it is on the display the window ends up on.
+    let target = commit.target().filter(|target| {
+        payload.final_space == Some(target.intent.space)
+            && state.windows.contains_window(target.intent.window)
+    });
 
-    if let Some(target) = commit.target()
-        && commit.source.current_space == Some(target.intent.space)
-        && state.windows.contains_window(target.intent.window)
-    {
-        trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
-        if layout.layout_engine.apply_window_drop(crate::layout_engine::WindowDropRequest {
-            source: window,
-            target: target.intent.window,
-            space: target.intent.space,
-            action: target.intent.action,
-        }) {
-            needs_layout = true;
-            outcome.drop_haptic = drag.haptics_enabled;
+    if commit.source.origin_space == payload.final_space {
+        if let Some(target) = target {
+            trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
+            if layout.layout_engine.apply_window_drop(crate::layout_engine::WindowDropRequest {
+                source: window,
+                target: target.intent.window,
+                space: target.intent.space,
+                action: target.intent.action,
+            }) {
+                needs_layout = true;
+                outcome.drop_haptic = drag.haptics_enabled;
+            }
         }
-    }
-
-    if commit.source.origin_space != payload.final_space {
-        if commit.source.origin_space.is_some() {
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
-        }
+    } else {
+        needs_layout = true;
         if let Some(space) = payload.final_space
             && state.windows.is_admitted(window)
         {
             if let Some(server_id) = state.windows.server_id(window) {
                 state.windows.observe_native_space(server_id, space, true);
             }
-            if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
-                && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-                    &mut state.windows,
-                    space,
-                    window,
-                    workspace,
+            // Onto the previewed tile of the destination's active workspace, in one step: the
+            // layout the preview was computed against is the one the window joins.
+            let dropped = target.is_some_and(|target| {
+                layout.layout_engine.workspaces().active_workspace(space).is_some_and(
+                    |workspace| {
+                        trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing cross-display window drop");
+                        layout.layout_engine.relocate_window_with_drop(
+                            &mut state.windows,
+                            &crate::layout_engine::WorkspaceDropRequest {
+                                window,
+                                workspace,
+                                target: Some((target.intent.window, target.intent.action)),
+                                frame: None,
+                            },
+                        )
+                    },
                 )
-            {
-                warn!(?window, ?workspace, "failed to assign dragged window");
+            });
+            if dropped {
+                outcome.drop_haptic = drag.haptics_enabled;
+            } else {
+                if commit.source.origin_space.is_some() {
+                    outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
+                }
+                if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
+                    && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
+                        &mut state.windows,
+                        space,
+                        window,
+                        workspace,
+                    )
+                {
+                    warn!(?window, ?workspace, "failed to assign dragged window");
+                }
+                outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
             }
-            outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
+        } else if commit.source.origin_space.is_some() {
+            outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
         }
-        needs_layout = true;
     }
 
     if let Some(space) = payload.final_space

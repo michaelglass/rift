@@ -13931,6 +13931,47 @@ fn a_native_drag_onto_another_display_previews_a_target_there_while_the_frame_la
 }
 
 #[test]
+fn a_native_drop_onto_another_display_lands_where_it_previewed() {
+    let mut fixture = two_displays_two_tiles_each(2);
+    drag_onto_display_b_with_the_frame_lagging(&mut fixture);
+    let TwoDisplays {
+        apps,
+        reactor,
+        dragged,
+        b_left,
+        b_right,
+        space_b,
+        ..
+    } = &mut fixture;
+    let target = drop_target(reactor).expect("a target on display B");
+    let _ = apps.requests();
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert_eq!(reactor.assigned_space_for_window_id(*dragged), Some(*space_b));
+    let written = frames_written(&apps.requests());
+    let mine: Vec<_> = written.iter().filter(|(wid, _)| wid == dragged).collect();
+    assert_eq!(mine.len(), 1, "one write for the dropped window: {written:?}");
+    assert!(
+        mine[0].1.same_as(target.preview_area),
+        "dropped at {:?}, previewed {:?}",
+        mine[0].1,
+        target.preview_area
+    );
+    let order: Vec<_> = {
+        let mut on_b = vec![*dragged, *b_left, *b_right];
+        on_b.sort_by(|a, b| slot(reactor, *a).origin.x.total_cmp(&slot(reactor, *b).origin.x));
+        on_b
+    };
+    apps.simulate_until_quiet(reactor);
+    let mut settled = vec![*dragged, *b_left, *b_right];
+    settled.sort_by(|a, b| slot(reactor, *a).origin.x.total_cmp(&slot(reactor, *b).origin.x));
+    assert_eq!(
+        settled,
+        [*dragged, *b_left, *b_right],
+        "not at the end of B: {order:?}"
+    );
+}
+
+#[test]
 fn with_the_pointer_on_another_display_no_target_is_on_the_source_display() {
     for windows_on_b in [0, 1, 2] {
         let mut fixture = two_displays_two_tiles_each(windows_on_b);
@@ -13955,4 +13996,53 @@ fn with_the_pointer_on_another_display_no_target_is_on_the_source_display() {
             y += 83.;
         }
     }
+}
+
+#[test]
+fn a_modifier_drop_onto_another_display_lands_where_it_previewed() {
+    // Rift moves the window by the pointer's travel, so its frame lags the pointer too.
+    let TwoDisplays {
+        mut apps,
+        mut reactor,
+        dragged,
+        b_left,
+        space_a,
+        space_b,
+        ..
+    } = two_displays_two_tiles_each(2);
+    let start = slot(&reactor, dragged);
+    let grab = CGPoint::new(start.max().x - 10., start.mid().y);
+    reactor.start_modifier_drag(
+        dragged,
+        crate::actor::drag::DragSource {
+            origin_frame: start,
+            last_frame: start,
+            origin_space: Some(space_a),
+            current_space: Some(space_a),
+            tiled: true,
+        },
+        grab,
+    );
+    let pointer = CGPoint::new(1040., 400.);
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: pointer,
+    }));
+    let frame = reactor.state.windows.drag().unwrap().1.source.last_frame;
+    assert!(
+        frame.max().x - 1000. < 1000. - frame.origin.x,
+        "most of the frame is on A"
+    );
+    let target = drop_target(&reactor).expect("a target on display B");
+    assert_eq!((target.intent.space, target.intent.window), (space_b, b_left));
+
+    let _ = apps.requests();
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert_eq!(reactor.assigned_space_for_window_id(dragged), Some(space_b));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(
+        slot(&reactor, dragged).same_as(target.preview_area),
+        "dropped at {:?}, previewed {:?}",
+        slot(&reactor, dragged),
+        target.preview_area
+    );
 }

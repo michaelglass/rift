@@ -4547,19 +4547,13 @@ impl Reactor {
 
     /// The pointer let go: a press ends, a drag drops.
     fn pointer_released(&mut self, released: rift_core::Release) -> anyhow::Result<EventOutcome> {
+        // Where the pointer let go, as macOS sees it.
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
-            let frame_space = || self.best_space_for_frame(&source.last_frame);
-            if session.is_modifier() {
-                frame_space()
-                    .or(source.current_space)
-                    .or_else(|| self.best_space_for_window_id(window))
-            } else {
-                source
-                    .current_space
-                    .or_else(frame_space)
-                    .or_else(|| self.best_space_for_window_id(window))
-            }
+            source
+                .current_space
+                .or_else(|| self.best_space_for_frame(&source.last_frame))
+                .or_else(|| self.best_space_for_window_id(window))
         });
         let focused = self
             .window_id_under_cursor()
