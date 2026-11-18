@@ -2361,18 +2361,17 @@ fn cross_display_drag_clears_source_floating_position() {
         ),
     );
 
-    let dropped = reactor
+    let ungripped = reactor
         .state
         .release(rift_core::Release::Button(rift_core::Button::Left))
-        .and_then(|ungripped| Some((ungripped.window, ungripped.session?)));
+        .unwrap();
     let outcome = crate::actor::reactor::events::drag::handle_mouse_up(
         &mut reactor.state,
         &mut reactor.layout_manager,
         &mut reactor.drag_manager,
-        crate::actor::reactor::events::drag::MouseUpPayload {
-            dropped,
-            final_space: Some(space2),
-        },
+        ungripped.window,
+        ungripped.session.unwrap(),
+        Some(space2),
     )
     .unwrap();
     assert!(outcome.arrange.passes > 0);

@@ -4304,12 +4304,17 @@ impl Reactor {
             }) => (None, Some((window, session))),
         };
         let drag_ended = dropped.is_some();
-        let mut outcome = interaction_workflow::handle_mouse_up(
-            &mut self.state,
-            &mut self.layout_manager,
-            &mut self.drag_manager,
-            interaction_workflow::MouseUpPayload { dropped, final_space },
-        )?;
+        let mut outcome = match dropped {
+            Some((window, commit)) => interaction_workflow::handle_mouse_up(
+                &mut self.state,
+                &mut self.layout_manager,
+                &mut self.drag_manager,
+                window,
+                commit,
+                final_space,
+            )?,
+            None => EventOutcome::layout_changed(false),
+        };
         if let Some((space, window)) = focused {
             outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
         }
