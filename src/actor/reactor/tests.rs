@@ -14284,3 +14284,40 @@ fn a_fullscreen_exit_is_read_off_the_spaces_the_window_is_on() {
         FullscreenExit::Over { landed: None }
     );
 }
+
+#[test]
+fn a_window_missing_from_the_active_spaces_is_kept_suspended_or_absent() {
+    let (active, inactive, full) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(9));
+    let is_fullscreen = |space| space == full;
+    let is_active = |space| space == active;
+    let user = |_| true;
+    let decide = |resolved, live: Vec<SpaceId>, topology| {
+        missing_window(resolved, || live, is_fullscreen, is_active, user, topology)
+    };
+    assert_eq!(decide(Some(full), vec![], false), Missing::Fullscreen(full));
+    // Live on its active Space ahead of the accepted inventory.
+    assert_eq!(decide(Some(active), vec![active], false), Missing::Keep);
+    assert_eq!(decide(Some(active), vec![], false), Missing::Absent {
+        inactive_target: None
+    });
+    assert_eq!(decide(Some(inactive), vec![], false), Missing::Absent {
+        inactive_target: Some(inactive)
+    });
+    // Another window's fullscreen is no evidence this one is gone.
+    assert_eq!(decide(None, vec![], true), Missing::Keep);
+    assert_eq!(decide(Some(inactive), vec![], true), Missing::Absent {
+        inactive_target: Some(inactive)
+    });
+    // A non-user Space is no target.
+    assert_eq!(
+        missing_window(
+            Some(inactive),
+            Vec::new,
+            is_fullscreen,
+            is_active,
+            |_| false,
+            false
+        ),
+        Missing::Absent { inactive_target: None }
+    );
+}
