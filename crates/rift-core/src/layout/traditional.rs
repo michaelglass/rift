@@ -17,8 +17,8 @@ pub struct Traditional<W> {
     /// How far each window of a stack sits from the one before it.
     pub stack_offset: f64,
     pub stack_line: StackLine,
-    /// Empty when nothing in the layout takes space.
-    pub root: Option<Node<W>>,
+    /// The subtree laid out (a layout where nothing takes space has no shape).
+    pub root: Node<W>,
 }
 
 /// The bar a stack reserves room for along one edge (none when `thickness` is 0).
@@ -120,7 +120,7 @@ impl<W> Traditional<W> {
             gaps: self.gaps,
             stack_offset: self.stack_offset,
             stack_line: self.stack_line,
-            root: self.root.map(|root| root.map(window)),
+            root: self.root.map(window),
         }
     }
 }
@@ -186,9 +186,7 @@ impl<W: Copy> Traditional<W> {
     /// Each window's frame, in tree order.
     pub fn frames(&self) -> Vec<(W, Rect)> {
         let mut out = Vec::new();
-        if let Some(root) = &self.root {
-            self.place(root, self.area, &mut out);
-        }
+        self.place(&self.root, self.area, &mut out);
         out
     }
 
