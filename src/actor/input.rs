@@ -1780,6 +1780,13 @@ fn relative_point(cursor: Option<CGPoint>, from: Option<CGRect>, to: CGRect) -> 
 mod tests {
     use super::*;
 
+    /// Test events come from a private source. A sourceless event is stamped with the modifier
+    /// state of the whole login session, so a modifier held (or posted by another process,
+    /// such as a concurrent test binary) at that instant changed which binding matched.
+    fn private_source() -> objc2_core_foundation::CFRetained<CGEventSource> {
+        CGEventSource::new(CGEventSourceStateID::Private).unwrap()
+    }
+
     #[test]
     fn relative_warp_keeps_cursor_spot_or_centers() {
         use objc2_core_foundation::CGSize;
@@ -1804,7 +1811,7 @@ mod tests {
         };
         let event = |phase| {
             let event = CGEvent::new_scroll_wheel_event2(
-                None,
+                Some(&private_source()),
                 objc2_core_graphics::CGScrollEventUnit::Pixel,
                 2,
                 0,
@@ -1934,7 +1941,7 @@ mod tests {
         );
         input.mouse_move_min_interval_ticks.set(interval);
         let event = CGEvent::new_mouse_event(
-            None,
+            Some(&private_source()),
             CGEventType::MouseMoved,
             CGPoint::new(20.0, 30.0),
             objc2_core_graphics::CGMouseButton::Left,
@@ -2060,7 +2067,7 @@ mod tests {
         *input.mission_control_tx.borrow_mut() = Some(tx);
         input.open_test_overview();
         let event = CGEvent::new_mouse_event(
-            None,
+            Some(&private_source()),
             CGEventType::RightMouseDragged,
             CGPoint::new(30.0, 40.0),
             objc2_core_graphics::CGMouseButton::Right,
@@ -2112,7 +2119,7 @@ mod tests {
         *input.mission_control_tx.borrow_mut() = Some(tx);
         input.open_test_overview();
         let event = CGEvent::new_scroll_wheel_event2(
-            None,
+            Some(&private_source()),
             objc2_core_graphics::CGScrollEventUnit::Pixel,
             2,
             -60,
@@ -2143,7 +2150,7 @@ mod tests {
         *input.mission_control_tx.borrow_mut() = Some(tx);
         input.open_test_overview();
         let event = CGEvent::new_scroll_wheel_event2(
-            None,
+            Some(&private_source()),
             objc2_core_graphics::CGScrollEventUnit::Pixel,
             2,
             -60,
@@ -2273,7 +2280,7 @@ mod tests {
 
     fn left_press(flags: CGEventFlags) -> objc2_core_foundation::CFRetained<CGEvent> {
         let event = CGEvent::new_mouse_event(
-            None,
+            Some(&private_source()),
             CGEventType::LeftMouseDown,
             CGPoint::new(20.0, 30.0),
             objc2_core_graphics::CGMouseButton::Left,
@@ -2426,7 +2433,8 @@ mod tests {
                         } else {
                             CGEventFlags::empty()
                         };
-                        let key = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+                        let key =
+                            CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
                         CGEvent::set_flags(Some(&key), flags);
                         assert!(!input.on_event(CGEventType::KeyDown, &key, None));
                         assert!(matches!(
@@ -2445,7 +2453,9 @@ mod tests {
                         }
                         // Caps Lock is not a held modifier and must not prevent activation.
                         let caps = CGEventFlags::MaskAlphaShift;
-                        let modifier = CGEvent::new_keyboard_event(None, 58, false).unwrap();
+                        let modifier =
+                            CGEvent::new_keyboard_event(Some(&private_source()), 58, false)
+                                .unwrap();
                         if modified && modifiers_first {
                             CGEvent::set_flags(Some(&modifier), CGEventFlags::MaskControl | caps);
                             input.on_event(CGEventType::FlagsChanged, &modifier, None);
@@ -2532,7 +2542,7 @@ mod tests {
                     command,
                 ])]),
             ];
-            let key = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+            let key = CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
             CGEvent::set_flags(Some(&key), CGEventFlags::MaskAlternate);
             assert!(!input.on_event(CGEventType::KeyDown, &key, None));
             match (index, rx.try_recv().unwrap().1) {
@@ -2572,11 +2582,11 @@ mod tests {
                 Hotkey::new(Modifiers::ALT_LEFT, KeyCode::KeyA),
                 vec![WmCommand::Wm(wm_controller::WmCmd::ShowMissionControlAll)],
             )])];
-            let key = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+            let key = CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
             CGEvent::set_flags(Some(&key), CGEventFlags::MaskAlternate);
             input.on_event(CGEventType::KeyDown, &key, None);
             input.open_test_overview();
-            let action = CGEvent::new_keyboard_event(None, code, true).unwrap();
+            let action = CGEvent::new_keyboard_event(Some(&private_source()), code, true).unwrap();
             CGEvent::set_flags(Some(&action), CGEventFlags::empty());
             input.on_event(CGEventType::KeyDown, &action, None);
             match rx.try_recv().unwrap().1 {
@@ -2598,7 +2608,7 @@ mod tests {
         let (input, mut wm_rx, mut events_rx) = input();
         assert!(input.hotkeys.borrow().is_empty());
         assert_ne!(input.desired_event_mask() & (1u64 << CGEventType::KeyDown.0), 0);
-        let event = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        let event = CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         assert!(input.on_event(CGEventType::KeyDown, &event, None));
         assert!(matches!(events_rx.try_recv().unwrap().1, Event::KeyboardInput));
@@ -2630,7 +2640,7 @@ mod tests {
             .insert(Hotkey::new(Modifiers::empty(), KeyCode::KeyA), vec![
                 WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
             ]);
-        let event = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        let event = CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         assert!(!input.on_event(CGEventType::KeyDown, &event, None));
         assert!(wm_rx.try_recv().unwrap().0.is_none());
@@ -2684,11 +2694,11 @@ mod tests {
         input.startup.set(Startup::Settling);
         input.rebuild_binding_maps();
 
-        let b = CGEvent::new_keyboard_event(None, 11, true).unwrap();
+        let b = CGEvent::new_keyboard_event(Some(&private_source()), 11, true).unwrap();
         assert!(!input.on_event(CGEventType::KeyDown, &b, None));
         assert_eq!(input.active_mode.get(), 1);
 
-        let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        let a = CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
         assert!(input.on_event(CGEventType::KeyDown, &a, None));
         assert!(wm_rx.try_recv().is_err());
 
@@ -2696,7 +2706,7 @@ mod tests {
         assert!(input.on_event(CGEventType::KeyDown, &b, None));
         assert_eq!(input.active_mode.get(), 1);
 
-        let escape = CGEvent::new_keyboard_event(None, 53, true).unwrap();
+        let escape = CGEvent::new_keyboard_event(Some(&private_source()), 53, true).unwrap();
         assert!(!input.on_event(CGEventType::KeyDown, &escape, None));
         assert_eq!(input.active_mode.get(), 0);
 
@@ -2725,7 +2735,7 @@ mod tests {
             .unwrap()
             .push(WmCommand::Wm(wm_controller::WmCmd::ReloadConfig));
 
-        let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        let a = CGEvent::new_keyboard_event(Some(&private_source()), 0, true).unwrap();
         assert!(!input.on_event(CGEventType::KeyDown, &a, None));
         assert_eq!(input.active_mode.get(), 1);
         assert!(matches!(
@@ -2802,9 +2812,13 @@ mod tests {
                 let (input, _, mut events_rx) = input();
                 input.state.borrow_mut().mouse_features_enabled = enabled;
                 assert_ne!(input.desired_event_mask() & (1u64 << event_type.0), 0);
-                let event =
-                    CGEvent::new_mouse_event(None, event_type, CGPoint::new(20.0, 30.0), cg_button)
-                        .unwrap();
+                let event = CGEvent::new_mouse_event(
+                    Some(&private_source()),
+                    event_type,
+                    CGPoint::new(20.0, 30.0),
+                    cg_button,
+                )
+                .unwrap();
                 assert!(input.on_event(event_type, &event, None));
                 assert!(matches!(
                     events_rx.try_recv().unwrap().1,
@@ -2823,7 +2837,7 @@ mod tests {
             state.captured_button = Some(crate::actor::drag::MouseButton::Left);
         }
         let right_up = CGEvent::new_mouse_event(
-            None,
+            Some(&private_source()),
             CGEventType::RightMouseUp,
             CGPoint::new(20.0, 30.0),
             objc2_core_graphics::CGMouseButton::Right,
@@ -2856,9 +2870,13 @@ mod tests {
         ] {
             let (input, _, _) = input();
             input.state.borrow_mut().captured_button = Some(button);
-            let event =
-                CGEvent::new_mouse_event(None, event_type, CGPoint::new(99.0, 20.0), cg_button)
-                    .unwrap();
+            let event = CGEvent::new_mouse_event(
+                Some(&private_source()),
+                event_type,
+                CGPoint::new(99.0, 20.0),
+                cg_button,
+            )
+            .unwrap();
             let target = CGPoint::new(6.0, 920.0);
             // Horizontal warping rewrites the event before the drag publisher sees it.
             CGEvent::set_location(Some(&event), target);
@@ -2871,7 +2889,7 @@ mod tests {
     fn drag_motion_publishes_for_every_drag_and_swallows_only_captured_ones() {
         let (input, _, mut events_rx) = input();
         let event = CGEvent::new_mouse_event(
-            None,
+            Some(&private_source()),
             CGEventType::LeftMouseDragged,
             CGPoint::new(20.0, 30.0),
             objc2_core_graphics::CGMouseButton::Left,
