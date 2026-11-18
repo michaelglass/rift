@@ -8,12 +8,14 @@
 //!
 //! A layout's shape and its frames cross the same way ([`encode_bsp`], [`encode_traditional`],
 //! [`encode_frames`]): the Roc core's geometry entry takes a shape's words, which start with its
-//! layout system's tag (0 BSP, 1 traditional), and returns the frames' words.
+//! layout system's tag (0 BSP, 1 traditional), and returns the frames' words. A scrolling strip
+//! (tag 2, [`encode_strip`]) returns where it placed everything ([`encode_placed`]); its column
+//! ids are the platform's, one word each.
 
 use crate::core::{Desire, Effect, Event, Plan};
 use crate::layout::bsp::{Bsp, Children, Fill, Node, Slot};
 use crate::layout::traditional::{self, StackLine, Traditional};
-use crate::layout::{Gaps, Size, Sizing, WindowConstraints};
+use crate::layout::{Gaps, Size, Sizing, WindowConstraints, scrolling};
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
 use crate::reconciler::{Answer, Note, Reply, Want, Write};
@@ -199,6 +201,41 @@ impl Words {
                 self.list(after, Self::child);
             }
         }
+    }
+
+    fn column(&mut self, column: scrolling::Column<WindowId, u64>) {
+        self.word(column.id);
+        match column.width {
+            scrolling::Width::Default => self.word(0),
+            scrolling::Width::Proportion(ratio) => {
+                self.word(1);
+                self.float(ratio);
+            }
+            scrolling::Width::Fixed(width) => {
+                self.word(2);
+                self.float(width);
+            }
+        }
+        self.row(column.first);
+        self.list(column.rest, Words::row);
+    }
+
+    fn row(&mut self, row: scrolling::Row<WindowId>) {
+        self.window(row.window);
+        self.constraints(row.constraints);
+        self.float(row.weight);
+    }
+
+    fn spot(&mut self, spot: scrolling::Spot<u64>) {
+        self.word(spot.id);
+        self.float(spot.world_x);
+        self.float(spot.width);
+        self.float(spot.anchor);
+    }
+
+    fn snap(&mut self, snap: scrolling::Snap<u64>) {
+        self.float(snap.offset);
+        self.word(snap.column);
     }
 
     fn event(&mut self, event: Event<Plain>) {
@@ -432,6 +469,50 @@ pub fn encode_traditional(shape: Traditional<WindowId>) -> Vec<u64> {
     words.0
 }
 
+/// A scrolling strip as words.
+pub fn encode_strip(strip: scrolling::Strip<WindowId, u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(2);
+    words.frame(strip.tiling);
+    words.float(strip.column_gap);
+    words.float(strip.row_gap);
+    let widths = strip.widths;
+    words.float(widths.ratio);
+    words.float(widths.min_ratio);
+    words.float(widths.max_ratio);
+    words.flag(widths.preserve_window_sizes);
+    words.flag(widths.expand_single_column);
+    words.word(match strip.alignment {
+        scrolling::Alignment::Left => 0,
+        scrolling::Alignment::Center => 1,
+        scrolling::Alignment::Right => 2,
+    });
+    words.word(match strip.navigation {
+        scrolling::Navigation::Anchored => 0,
+        scrolling::Navigation::Free => 1,
+    });
+    words.column(strip.first);
+    words.list(strip.rest, Words::column);
+    words.0
+}
+
+/// Where a strip placed everything, as words: its first column's spot and the rest, the
+/// frames, the first snap and the rest, the bounds.
+pub fn encode_placed(placed: scrolling::Placed<WindowId, u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.spot(placed.first);
+    words.list(placed.rest, Words::spot);
+    words.list(placed.frames, |words, (window, frame)| {
+        words.window(window);
+        words.frame(frame);
+    });
+    words.snap(placed.snaps.0);
+    words.list(placed.snaps.1, Words::snap);
+    words.float(placed.bounds.0);
+    words.float(placed.bounds.1);
+    words.0
+}
+
 /// A layout's frames (each window's, in order) as words.
 pub fn encode_frames(frames: Vec<(WindowId, Rect)>) -> Vec<u64> {
     let mut words = Words::default();
@@ -651,6 +732,46 @@ impl Reader<'_> {
         }
     }
 
+    fn column(&mut self) -> Read<scrolling::Column<WindowId, u64>> {
+        let id = self.word()?;
+        let width = match self.word()? {
+            0 => scrolling::Width::Default,
+            1 => scrolling::Width::Proportion(self.float()?),
+            2 => scrolling::Width::Fixed(self.float()?),
+            word => return self.unknown(word),
+        };
+        Ok(scrolling::Column {
+            id,
+            width,
+            first: self.row()?,
+            rest: self.list(Reader::row)?,
+        })
+    }
+
+    fn row(&mut self) -> Read<scrolling::Row<WindowId>> {
+        Ok(scrolling::Row {
+            window: self.window()?,
+            constraints: self.constraints()?,
+            weight: self.float()?,
+        })
+    }
+
+    fn spot(&mut self) -> Read<scrolling::Spot<u64>> {
+        Ok(scrolling::Spot {
+            id: self.word()?,
+            world_x: self.float()?,
+            width: self.float()?,
+            anchor: self.float()?,
+        })
+    }
+
+    fn snap(&mut self) -> Read<scrolling::Snap<u64>> {
+        Ok(scrolling::Snap {
+            offset: self.float()?,
+            column: self.word()?,
+        })
+    }
+
     fn button(&mut self) -> Read<Button> {
         match self.word()? {
             0 => Ok(Button::Left),
@@ -860,6 +981,62 @@ pub fn decode_traditional(words: &[u64]) -> Result<Traditional<WindowId>, WireEr
     };
     reader.done()?;
     Ok(shape)
+}
+
+/// The scrolling strip `words` hold.
+pub fn decode_strip(words: &[u64]) -> Result<scrolling::Strip<WindowId, u64>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    match reader.word()? {
+        2 => {}
+        word => return reader.unknown(word),
+    }
+    let tiling = reader.frame()?;
+    let column_gap = reader.float()?;
+    let row_gap = reader.float()?;
+    let widths = scrolling::Widths {
+        ratio: reader.float()?,
+        min_ratio: reader.float()?,
+        max_ratio: reader.float()?,
+        preserve_window_sizes: reader.flag()?,
+        expand_single_column: reader.flag()?,
+    };
+    let alignment = match reader.word()? {
+        0 => scrolling::Alignment::Left,
+        1 => scrolling::Alignment::Center,
+        2 => scrolling::Alignment::Right,
+        word => return reader.unknown(word),
+    };
+    let navigation = match reader.word()? {
+        0 => scrolling::Navigation::Anchored,
+        1 => scrolling::Navigation::Free,
+        word => return reader.unknown(word),
+    };
+    let strip = scrolling::Strip {
+        tiling,
+        column_gap,
+        row_gap,
+        widths,
+        alignment,
+        navigation,
+        first: reader.column()?,
+        rest: reader.list(Reader::column)?,
+    };
+    reader.done()?;
+    Ok(strip)
+}
+
+/// Where a strip placed everything, as `words` hold it.
+pub fn decode_placed(words: &[u64]) -> Result<scrolling::Placed<WindowId, u64>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    let placed = scrolling::Placed {
+        first: reader.spot()?,
+        rest: reader.list(Reader::spot)?,
+        frames: reader.list(|reader| Ok((reader.window()?, reader.frame()?)))?,
+        snaps: (reader.snap()?, reader.list(Reader::snap)?),
+        bounds: (reader.float()?, reader.float()?),
+    };
+    reader.done()?;
+    Ok(placed)
 }
 
 /// The frames `words` hold.
@@ -1216,5 +1393,52 @@ mod tests {
             },
         };
         assert_eq!(decode_traditional(&encode_traditional(shape.clone())), Ok(shape));
+    }
+
+    #[test]
+    fn a_scrolling_strip_and_where_it_placed_everything_survive_the_wire() {
+        let row = |window, weight| scrolling::Row {
+            window,
+            constraints: WindowConstraints {
+                sizing: Sizing::new(true, false, Size::reported(200., 100.)),
+                max_width: 900.,
+                ..Default::default()
+            },
+            weight,
+        };
+        let column = |id, width, first, rest| scrolling::Column { id, width, first, rest };
+        let strip = scrolling::Strip {
+            tiling: Rect {
+                x: 0.,
+                y: 25.,
+                w: 1200.,
+                h: 800.,
+            },
+            column_gap: 8.,
+            row_gap: 6.,
+            widths: scrolling::Widths {
+                ratio: 0.5,
+                min_ratio: 0.2,
+                max_ratio: 0.9,
+                preserve_window_sizes: true,
+                expand_single_column: false,
+            },
+            alignment: scrolling::Alignment::Right,
+            navigation: scrolling::Navigation::Free,
+            first: column(u64::MAX, scrolling::Width::Default, row(W, 1.), vec![row(V, 2.)]),
+            rest: vec![
+                column(3, scrolling::Width::Proportion(0.4), row(V, 1.), vec![]),
+                column(4, scrolling::Width::Fixed(700.), row(W, 1.), vec![]),
+            ],
+        };
+        assert_eq!(decode_strip(&encode_strip(strip.clone())), Ok(strip.clone()));
+        let placed = strip.place();
+        assert_eq!(decode_placed(&encode_placed(placed.clone())), Ok(placed));
+        let mut garbled = encode_strip(strip);
+        garbled[0] = 0;
+        assert_eq!(
+            decode_strip(&garbled),
+            Err(WireError::Unknown { at: 0, word: 0 })
+        );
     }
 }
