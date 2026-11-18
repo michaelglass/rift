@@ -1171,10 +1171,11 @@ impl Reactor {
         use Pointer::*;
         match (initiative, self.state.windows.pointer()) {
             (UserCommand(InputClass::Inert), Idle | Pressing | Dragging) => true,
-            (UserCommand(InputClass::Steering), Idle | Pressing) => true,
-            // A command that would move, focus or reveal windows under the user's drag is
-            // dropped, not deferred to the drop.
-            (UserCommand(InputClass::Steering), Dragging) => false,
+            (UserCommand(InputClass::Steering), Idle) => true,
+            // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
+            // a command's effect on it would wait for the release, splitting it from the rest
+            // of the effect. Dropped instead, not deferred.
+            (UserCommand(InputClass::Steering), Pressing | Dragging) => false,
             // A press alone changes nothing: the window hasn't moved.
             (Arrange, Idle | Pressing) => true,
             (RetireWindows, Idle | Pressing) => true,
@@ -4644,18 +4645,23 @@ impl Reactor {
     }
 
     /// The input tap reports every release. This covers one it missed: before an observation
-    /// of the gripped window is handled, a fresh read finding the button up lets go first. A
-    /// modifier drag's button is captured by the tap, which always reports its real release.
+    /// of the gripped window, or a command (which the mode gate refuses while a hand is on a
+    /// window), is handled, a fresh read finding the button up lets go first. A modifier
+    /// drag's button is captured by the tap, which always reports its real release.
     fn release_if_missed(&mut self, event: &Event) {
-        let Event::WindowFrameChanged(wid, ..) = event else {
-            return;
+        let wid = match event {
+            Event::WindowFrameChanged(wid, ..) if self.state.windows.is_gripped(*wid) => *wid,
+            Event::Command(_) => match self.state.windows.gripped() {
+                Some(wid) => wid,
+                None => return,
+            },
+            _ => return,
         };
-        if !self.state.windows.is_gripped(*wid)
-            || self
-                .state
-                .windows
-                .drag()
-                .is_some_and(|(_, session)| session.kind == DragKind::ModifierMove)
+        if self
+            .state
+            .windows
+            .drag()
+            .is_some_and(|(_, session)| session.kind == DragKind::ModifierMove)
             || (self.read_button)() != Some(MouseState::Up)
         {
             return;

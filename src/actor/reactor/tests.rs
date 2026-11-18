@@ -13012,6 +13012,53 @@ fn a_steering_command_after_the_drop_runs() {
 }
 
 #[test]
+fn a_steering_command_during_a_press_is_discarded_and_not_replayed_at_the_release() {
+    for command in steering_commands() {
+        let (mut apps, mut reactor, pressed, other, _screen, space) = two_tiled_windows();
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, pressed));
+        apps.simulate_until_quiet(&mut reactor);
+        let (home, theirs) = (slot(&reactor, pressed), slot(&reactor, other));
+        reactor.handle_event(Event::PointerPressed { point: home.mid() });
+        assert!(reactor.state.windows.is_pressed(pressed));
+
+        reactor.handle_event(Event::Command(command.clone()));
+        let requests = apps.requests();
+        assert!(requests.is_empty(), "{command:?} acted on a press: {requests:?}");
+
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+        apps.simulate_until_quiet(&mut reactor);
+        let windows = reactor.test_active_workspace_windows(space);
+        assert!(
+            windows.contains(&pressed) && windows.contains(&other),
+            "{command:?}"
+        );
+        assert!(slot(&reactor, pressed).same_as(home), "{command:?}");
+        assert!(slot(&reactor, other).same_as(theirs), "{command:?}");
+    }
+}
+
+#[test]
+fn a_press_whose_release_was_missed_does_not_swallow_commands() {
+    let (mut apps, mut reactor, pressed, other, _screen, space) = two_tiled_windows();
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, other));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_event(Event::PointerPressed {
+        point: slot(&reactor, pressed).mid(),
+    });
+    assert!(reactor.state.windows.is_pressed(pressed));
+    // The tap never reported the release; the button reads up.
+    reactor.read_button = || Some(MouseState::Up);
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleOrientation);
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.state.windows.gripped(), None);
+    assert!(
+        (slot(&reactor, pressed).origin.y - slot(&reactor, other).origin.y).abs() > 1.,
+        "the command was dropped behind a press that had ended"
+    );
+}
+
+#[test]
 fn an_inert_command_runs_during_a_drag() {
     let (mut apps, mut reactor, dragged, _other, _screen, _space) = two_tiled_windows();
     let (input_tx, mut input_rx) = actor::channel();
