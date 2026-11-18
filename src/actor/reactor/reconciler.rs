@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use objc2_core_foundation::CGRect;
 use rift_core::reconciler::Note;
 pub(crate) use rift_core::{Answer, Observation, Owner, Want};
-use rift_core::{Core, Kinds};
+use rift_core::{Core, Kinds, Release};
 use tracing::{debug, warn};
 
 use super::animation::scrolling_bounds;
@@ -23,7 +23,9 @@ use super::managers::ScrollingDisplayBounds;
 use super::{Reactor, TransactionId};
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
-use crate::model::window_store::Pointer;
+use crate::model::RiftState;
+use crate::model::drag::{MouseButton, Session};
+use crate::model::window_store::{Pointer, WindowRecord};
 use crate::sys::geometry::{IsWithin, Round, SameAs};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -122,9 +124,6 @@ pub(crate) type Step = (Event, Vec<Effect>);
 pub(crate) struct Reconciler {
     /// Shared so the mode gate, asked from `&self`, can step it too.
     core: Shared<Engine>,
-    /// The pointer as the core was last told it. The reactor's window store owns the press
-    /// and drag model; the core is told each change before it decides anything.
-    told: Cell<Pointer>,
     /// The deadline the core last asked the run loop's timer to be armed for.
     armed: Cell<Option<Instant>>,
     pub(crate) clock: Clock,
@@ -142,7 +141,6 @@ impl Default for Reconciler {
         let core = Shared::new(Engine::new(clock.now()));
         Reconciler {
             core,
-            told: Cell::new(Pointer::Idle),
             armed: Cell::new(None),
             clock,
             #[cfg(test)]
@@ -181,6 +179,10 @@ impl Reconciler {
                 Effect::Note { window, note: Note::Forgotten } => {
                     debug!(?window, "reconcile: forgotten (gone)")
                 }
+                Effect::Grip { window } => debug!(?window, "drag-evidence: grip"),
+                Effect::DragBegan { window } => debug!(?window, "drag-evidence: drag began"),
+                Effect::Ungrip { window, why } => debug!(?window, ?why, "drag-evidence: ungrip"),
+                Effect::Regrip { from, to } => debug!(?from, ?to, "drag-evidence: regrip"),
                 Effect::Observed { .. } | Effect::Gate { .. } => {}
             }
         }
@@ -189,14 +191,6 @@ impl Reconciler {
             trace.push((event, effects.clone()));
         }
         effects
-    }
-
-    /// Tells the core what the pointer is doing, if that changed since it was last told.
-    fn tell(&self, pointer: Pointer) {
-        if self.told.get() != pointer {
-            self.told.set(pointer);
-            self.step(Event::Pointer(pointer));
-        }
     }
 
     fn writes(effects: Vec<Effect>) -> impl Iterator<Item = Write> {
@@ -216,14 +210,12 @@ impl Reconciler {
     /// under `request`.
     fn want(
         &mut self,
-        pointer: Pointer,
         request: TransactionId,
         window: WindowId,
         desired: CGRect,
         known: CGRect,
         want: Want,
     ) -> Verdict {
-        self.tell(pointer);
         let now = self.clock.now();
         let effects = self.step(Event::Want {
             now,
@@ -261,13 +253,11 @@ impl Reconciler {
     /// named one). What waited behind the write goes out under `request`.
     pub(crate) fn answer(
         &mut self,
-        pointer: Pointer,
         request: TransactionId,
         seen: Option<TransactionId>,
         window: WindowId,
         frame: CGRect,
     ) -> Reply {
-        self.tell(pointer);
         let now = self.clock.now();
         let mut reply = Reply::Late;
         let mut queued = None;
@@ -294,12 +284,10 @@ impl Reconciler {
     /// `window` reported `frame` unprompted; the model last saw it at `known`.
     pub(crate) fn observe(
         &mut self,
-        pointer: Pointer,
         window: WindowId,
         frame: CGRect,
         known: CGRect,
     ) -> Observation {
-        self.tell(pointer);
         self.step(Event::Report { window, frame, known })
             .into_iter()
             .find_map(|effect| match effect {
@@ -313,16 +301,21 @@ impl Reconciler {
     /// window, `None` once it is gone. Returns what waited behind the late writes.
     fn expire(
         &mut self,
-        pointer: Pointer,
         request: TransactionId,
         known: impl Fn(WindowId) -> Option<CGRect>,
     ) -> Vec<Write> {
-        self.tell(pointer);
         let now = self.clock.now();
         let due = self.core.borrow().reconciler().due(now);
         let known = due.into_iter().filter_map(|window| Some((window, known(window)?))).collect();
         Self::writes(self.step(Event::Tick { now, request, known })).collect()
     }
+
+    /// Steps the core with a grip event; the caller applies the effects to the store.
+    fn grip(&self, event: Event) -> Vec<Effect> { self.step(event) }
+
+    /// Rust-only read, not part of the boundary: the core's grip, which the window store's
+    /// slot must agree with (checked after each applied grip step in debug builds).
+    fn pointer(&self) -> Pointer { self.core.borrow().pointer() }
 
     /// When the run loop's timer should fire: the deadline the core last asked for.
     pub(crate) fn next_deadline(&self) -> Option<Instant> { self.armed.get() }
@@ -434,14 +427,10 @@ impl Reactor {
         want: Want,
         request: TransactionId,
     ) -> Verdict {
-        let pointer = self.state.windows.pointer();
         let Some(state) = self.state.windows.window_mut(window) else {
             return Verdict::Nothing;
         };
-        let verdict =
-            self.state
-                .core
-                .want(pointer, request, window, desired, state.frame_monotonic, want);
+        let verdict = self.state.core.want(request, window, desired, state.frame_monotonic, want);
         match verdict {
             Verdict::Send(_) | Verdict::Queued => state.frame_monotonic = desired,
             Verdict::Nothing => {}
@@ -544,9 +533,10 @@ impl Reactor {
     pub(super) fn expire_writes(&mut self) {
         let request = self.transaction_manager.mint();
         let windows = &self.state.windows;
-        let queued = self.state.core.expire(windows.pointer(), request, |window| {
-            Some(windows.window(window)?.frame_monotonic)
-        });
+        let queued = self
+            .state
+            .core
+            .expire(request, |window| Some(windows.window(window)?.frame_monotonic));
         for write in queued {
             self.send_arranged(write);
         }
@@ -642,5 +632,148 @@ impl Reactor {
         }
 
         any_desire_new
+    }
+}
+
+/// What a grip step let go of: the window, and the drag's session if it was a drag.
+pub(crate) struct Ungripped {
+    pub(crate) window: WindowId,
+    pub(crate) session: Option<Session>,
+}
+
+/// The grip: the core decides, the window store's slot is its projection. These are the only
+/// ways the slot changes, each a core step whose effects are applied here.
+impl RiftState {
+    /// Applies one grip step's effects to the store. `session` is what a `DragBegan` attaches.
+    fn project(&mut self, effects: Vec<Effect>, mut session: Option<Session>) -> Option<Ungripped> {
+        let mut ungripped = None;
+        for effect in effects {
+            match effect {
+                Effect::Ungrip { window, why: _ } => {
+                    let session = self.windows.project_ungrip(window);
+                    ungripped = Some(Ungripped { window, session });
+                }
+                Effect::Grip { window } => self.windows.project_grip(window),
+                Effect::DragBegan { window } => self.windows.project_drag(
+                    window,
+                    session.take().expect("a drag is asked for with its session"),
+                ),
+                Effect::Regrip { from, to } => self.windows.project_regrip(from, to),
+                _ => {}
+            }
+        }
+        debug_assert_eq!(
+            self.windows.pointer(),
+            self.core.pointer(),
+            "store and core disagree"
+        );
+        ungripped
+    }
+
+    /// `button` went down on `window` (tracked and managed), or on none.
+    pub(crate) fn press(&mut self, window: Option<WindowId>, button: MouseButton) {
+        let effects = self.core.grip(Event::Press { window, button: button.into() });
+        self.project(effects, None);
+    }
+
+    /// The pressed `window`'s movement is the user's drag, with `session`. Refused (and the
+    /// session dropped) unless `window` is the one pressed.
+    pub(crate) fn begin_drag(&mut self, window: WindowId, session: Session) {
+        let effects = self.core.grip(Event::Drag { window });
+        self.project(effects, Some(session));
+    }
+
+    /// Tests start a drag the only way there is: a press on the window, then its drag.
+    #[cfg(test)]
+    pub(crate) fn press_and_drag(
+        &mut self,
+        window: WindowId,
+        button: MouseButton,
+        session: Session,
+    ) {
+        self.press(Some(window), button);
+        self.begin_drag(window, session);
+    }
+
+    /// The pointer was released: what the release ended, if anything.
+    pub(crate) fn release(&mut self, release: Release) -> Option<Ungripped> {
+        let effects = self.core.grip(Event::Release(release));
+        self.project(effects, None)
+    }
+
+    /// The hand comes off without a drop (a cancel, Mission Control).
+    pub(crate) fn let_go(&mut self) -> Option<Ungripped> {
+        let effects = self.core.grip(Event::LetGo);
+        self.project(effects, None)
+    }
+
+    /// `window` left Rift's control: a grip on it ends.
+    pub(crate) fn gone(&mut self, window: WindowId) {
+        let effects = self.core.grip(Event::Gone { window });
+        self.project(effects, None);
+    }
+
+    /// macOS replaced `from` by `to`: a grip moves with it.
+    pub(crate) fn rekeyed(&mut self, from: WindowId, to: WindowId) {
+        let effects = self.core.grip(Event::Rekeyed { from, to });
+        self.project(effects, None);
+    }
+
+    /// Removes `window`'s record; a grip on it ends first, through the core.
+    pub(crate) fn remove_window(&mut self, window: WindowId) -> Option<WindowRecord> {
+        self.gone(window);
+        self.windows.remove_window(window)
+    }
+
+    /// Removes every window of `pid`; a grip on one ends first, through the core.
+    pub(crate) fn remove_windows_for_app(&mut self, pid: pid_t) {
+        let windows: Vec<_> = self.windows.window_ids_for_pid(pid).collect();
+        for window in windows {
+            self.gone(window);
+        }
+        self.windows.remove_windows_for_app(pid);
+    }
+
+    /// A window left Rift's control: a grip on it ends, and it is no longer a drop target.
+    pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
+        self.gone(window);
+        if let Some((_, session)) = self.windows.drag_mut() {
+            session.forget_target(window);
+        }
+    }
+
+    /// Binds an AX observation to its native identity. When that identity belonged to another
+    /// window id (macOS replaced it), a grip moves to the new id first, through the core.
+    /// Retires the windows of `pid` that an inventory no longer reports (see
+    /// `WindowStore::inventory_retirements`); a grip on one ends first, through the core.
+    pub(crate) fn reconcile_app_inventory(
+        &mut self,
+        pid: pid_t,
+        observed: &[WindowId],
+        inactive: &HashSet<WindowId>,
+        observe: impl FnMut(
+            WindowServerId,
+            Option<crate::sys::window_server::WindowServerInfo>,
+        ) -> crate::model::window_store::InventoryWindowObservation,
+    ) -> Vec<(WindowId, Option<WindowServerId>)> {
+        let retired = self.windows.inventory_retirements(pid, observed, inactive, observe);
+        for &(window, _) in &retired {
+            self.remove_window(window);
+        }
+        retired
+    }
+
+    pub(crate) fn reconcile_ax_identity(
+        &mut self,
+        window: WindowId,
+        server_id: Option<WindowServerId>,
+    ) -> Option<WindowId> {
+        if let Some(previous) = server_id
+            .and_then(|server_id| self.windows.tracked_window_id(server_id))
+            .filter(|previous| *previous != window)
+        {
+            self.rekeyed(previous, window);
+        }
+        self.windows.reconcile_ax_identity(window, server_id)
     }
 }

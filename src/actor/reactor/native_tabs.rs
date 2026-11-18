@@ -71,6 +71,8 @@ impl Reactor {
         let mut replacement = WindowState::from(info.clone());
         replacement.manage_override = manage_override;
         self.state.windows.insert_window(incoming, replacement);
+        // Same window, new identity: a grip on it moves first, through the core.
+        self.state.rekeyed(old, incoming);
         self.state.windows.transfer_persistent_window_metadata(old, incoming);
         self.layout_manager
             .layout_engine

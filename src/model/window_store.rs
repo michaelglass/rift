@@ -3,7 +3,7 @@ use rift_protocol::WindowClaimFlags;
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
-use crate::model::drag::{MouseButton, PointerReleased, Session};
+use crate::model::drag::Session;
 use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -49,36 +49,20 @@ impl Transfer {
     }
 }
 
-/// What the user's hand is doing with the one window it is on.
+/// What the user's hand is doing with the one window it is on: the projection of the core's
+/// grip (`rift_core`), changed only by applying the core's effects (`RiftState`'s grip
+/// methods). The button and the rules (one hand, a drag only from a press, a release only on
+/// the grip's button) are the core's.
 #[derive(Debug)]
 enum Grip {
-    /// `button` is down on the window. A transfer it had was discarded at the press: the
-    /// release re-derives one from where the window is and where it is assigned.
-    Pressed {
-        button: MouseButton,
-    },
+    /// The window is pressed. A transfer it had was discarded at the press: the release
+    /// re-derives one from where the window is and where it is assigned.
+    Pressed,
     Dragging(Box<Session>),
 }
 
 /// What the pointer is doing with windows: the core's type, on Rift's window ids.
 pub(crate) type Pointer = rift_core::Pointer<WindowId>;
-
-/// What the user's hand is doing with a window, for whoever observed that window change.
-pub(crate) enum Hand<'a> {
-    /// The pointer is down on it and it hasn't moved yet: a change Rift didn't make starts
-    /// its drag.
-    Pressed(Pressed<'a>),
-    /// The user is dragging it: a change follows the drag.
-    Dragging(&'a mut Session),
-}
-
-/// The pointer is down on a window that isn't dragged yet: the only thing a drag starts from.
-pub(crate) struct Pressed<'a>(&'a mut Grip);
-
-impl Pressed<'_> {
-    /// The pressed window moved under the pointer, or a modifier press took it: the drag begins.
-    pub(crate) fn start(self, session: Session) { *self.0 = Grip::Dragging(Box::new(session)); }
-}
 
 /// A record Rift places: the window's data and the transfer in flight, if any.
 #[derive(Debug, Default)]
@@ -137,11 +121,14 @@ impl Records {
         }
     }
 
-    /// Removes the record wherever it is; a press or drag on it ends with it.
+    /// Removes a loose record. The gripped one is never removed here: the core ungrips a
+    /// window that goes away (`Gone`) before its record is removed.
     fn remove(&mut self, window: &WindowId) -> Option<WindowRecord> {
-        if self.gripped_window() == Some(*window) {
-            return self.gripped.take().map(|gripped| gripped.record);
-        }
+        debug_assert_ne!(
+            self.gripped_window(),
+            Some(*window),
+            "removing the gripped record"
+        );
         self.loose.remove(window).map(|loose| loose.record)
     }
 
@@ -175,17 +162,16 @@ impl Records {
         self.gripped.as_ref().map(|gripped| gripped.window)
     }
 
-    /// The pointer goes down on `window`: its record moves into the slot. Its transfer is
-    /// discarded, not set aside: the user places this window now, and the release re-derives.
-    fn press(&mut self, window: WindowId, button: MouseButton) {
-        self.let_go();
-        if let Some(Loose { record, .. }) = self.loose.remove(&window) {
-            self.gripped = Some(Gripped {
-                window,
-                record,
-                grip: Grip::Pressed { button },
-            });
-        }
+    /// The core gripped `window`: its record moves into the slot. Its transfer is discarded,
+    /// not set aside: the user places this window now, and the release re-derives.
+    fn grip(&mut self, window: WindowId) {
+        debug_assert!(self.gripped.is_none(), "the core ungrips before it grips");
+        let Loose { record, .. } = self.loose.remove(&window).unwrap_or_default();
+        self.gripped = Some(Gripped {
+            window,
+            record,
+            grip: Grip::Pressed,
+        });
     }
 
     /// The user's hand comes off: the record goes back among the loose ones, with no transfer.
@@ -193,7 +179,7 @@ impl Records {
     fn let_go(&mut self) -> Option<(WindowId, Option<Session>)> {
         let Gripped { window, record, grip } = self.gripped.take()?;
         let session = match grip {
-            Grip::Pressed { .. } => None,
+            Grip::Pressed => None,
             Grip::Dragging(session) => Some(*session),
         };
         self.loose.insert(window, Loose { record, transfer: None });
@@ -815,8 +801,10 @@ impl WindowStore {
         pid
     }
 
-    /// A current successful AX omission is destructive only with native negative evidence.
-    pub(crate) fn reconcile_app_inventory(
+    /// A current successful AX omission is destructive only with native negative evidence:
+    /// the windows to retire. The caller removes them (`RiftState::remove_window`), so a grip
+    /// on one ends through the core.
+    pub(crate) fn inventory_retirements(
         &mut self,
         pid: i32,
         observed: &[WindowId],
@@ -856,9 +844,6 @@ impl WindowStore {
                 .then_some((wid, Some(wsid)))
             })
             .collect();
-        for &(wid, _) in &retired {
-            self.remove_window(wid);
-        }
         retired
     }
 
@@ -1656,15 +1641,16 @@ impl WindowStore {
         target.visibility = visibility;
         target.floating_display_geometry = geom;
         self.app_windows.entry(to.pid).or_default().insert(to);
-        // The user's grip moves with the identity. So does a transfer, unless the replacement
-        // is the window under the user's hand.
-        if self.windows.gripped_window() == Some(from) {
-            self.windows.regrip(from, to);
-        } else {
-            let transfer = self.windows.transfer(&from);
-            if let Some(replacement) = self.windows.loose.get_mut(&to) {
-                replacement.transfer = transfer;
-            }
+        // The user's grip moved with the identity already (the core re-keyed it first). A
+        // transfer moves too, unless the replacement is the window under the user's hand.
+        debug_assert_ne!(
+            self.windows.gripped_window(),
+            Some(from),
+            "re-key the grip first"
+        );
+        let transfer = self.windows.transfer(&from);
+        if let Some(replacement) = self.windows.loose.get_mut(&to) {
+            replacement.transfer = transfer;
         }
 
         if let Some(source) = self.windows.get_mut(&from) {
@@ -1915,9 +1901,7 @@ impl WindowStore {
         match &self.windows.gripped {
             None => Pointer::Idle,
             Some(Gripped {
-                window,
-                grip: Grip::Pressed { .. },
-                ..
+                window, grip: Grip::Pressed, ..
             }) => Pointer::Pressing(*window),
             Some(Gripped {
                 window,
@@ -1935,36 +1919,6 @@ impl WindowStore {
     /// The window the user's hand is on, pressed or dragged.
     pub(crate) fn gripped(&self) -> Option<WindowId> { self.windows.gripped_window() }
 
-    /// `button` went down on `window`, which is tracked. One pointer: whatever it held before
-    /// is let go.
-    pub(crate) fn press(&mut self, window: WindowId, button: MouseButton) {
-        self.end_drag();
-        self.windows.press(window, button);
-    }
-
-    /// Tests start a drag the only way there is: a press on the window, then its drag.
-    #[cfg(test)]
-    pub(crate) fn press_and_drag(
-        &mut self,
-        window: WindowId,
-        button: MouseButton,
-        session: Session,
-    ) {
-        self.press(window, button);
-        if let Some(Hand::Pressed(pressed)) = self.hand_on(window) {
-            pressed.start(session);
-        }
-    }
-
-    /// What the user's hand is doing with `window`; `None` when it isn't on it.
-    pub(crate) fn hand_on(&mut self, window: WindowId) -> Option<Hand<'_>> {
-        let gripped = self.windows.gripped.as_mut().filter(|gripped| gripped.window == window)?;
-        Some(match &mut gripped.grip {
-            Grip::Dragging(session) => Hand::Dragging(session),
-            grip @ Grip::Pressed { .. } => Hand::Pressed(Pressed(grip)),
-        })
-    }
-
     /// The user's drag and the window it holds.
     pub(crate) fn drag(&self) -> Option<(WindowId, &Session)> {
         match &self.windows.gripped {
@@ -1973,7 +1927,7 @@ impl WindowStore {
                 grip: Grip::Dragging(session),
                 ..
             }) => Some((*window, session)),
-            Some(Gripped { grip: Grip::Pressed { .. }, .. }) | None => None,
+            Some(Gripped { grip: Grip::Pressed, .. }) | None => None,
         }
     }
 
@@ -1984,45 +1938,44 @@ impl WindowStore {
                 grip: Grip::Dragging(session),
                 ..
             }) => Some((*window, session)),
-            Some(Gripped { grip: Grip::Pressed { .. }, .. }) | None => None,
+            Some(Gripped { grip: Grip::Pressed, .. }) | None => None,
         }
     }
 
-    /// The user's hand comes off whatever it was on, without a drop (a cancel, Mission
-    /// Control, the window leaving Rift's control). A drag's session is returned.
-    pub(crate) fn end_drag(&mut self) -> Option<(WindowId, Session)> {
-        let (window, session) = self.windows.let_go()?;
+    // The projection of the core's grip. Only `RiftState`'s grip methods call these, each with
+    // the core's effect in hand.
+
+    /// Effect `Grip`: `window`'s record goes into the slot, pressed.
+    pub(crate) fn project_grip(&mut self, window: WindowId) { self.windows.grip(window); }
+
+    /// Effect `DragBegan`: the pressed window's grip becomes the drag `session`.
+    pub(crate) fn project_drag(&mut self, window: WindowId, session: Session) {
+        let gripped = self.windows.gripped.as_mut().expect("the core drags only a press");
+        debug_assert_eq!(gripped.window, window, "the core drags only its own press");
+        debug_assert!(
+            matches!(gripped.grip, Grip::Pressed),
+            "the core drags only a press"
+        );
+        gripped.grip = Grip::Dragging(Box::new(session));
+    }
+
+    /// Effect `Ungrip`: the slot's record goes back among the loose ones. A drag's session is
+    /// returned.
+    pub(crate) fn project_ungrip(&mut self, window: WindowId) -> Option<Session> {
+        let (held, session) = self.windows.let_go().expect("the core ungrips only a grip");
+        debug_assert_eq!(held, window, "the core ungrips the window it gripped");
         self.prune_window_record(window);
-        Some((window, session?))
+        session
     }
 
-    /// The button that is down on the gripped window.
-    pub(crate) fn grip_button(&self) -> Option<MouseButton> {
-        Some(match &self.windows.gripped.as_ref()?.grip {
-            Grip::Pressed { button, .. } => *button,
-            Grip::Dragging(session) => session.button,
-        })
-    }
-
-    /// The pointer was released: the press or drag ends only on the button that made it.
-    pub(crate) fn finish_drag(
-        &mut self,
-        PointerReleased(button): PointerReleased,
-    ) -> Option<(WindowId, Session)> {
-        if self.grip_button()? != button {
-            return None;
-        }
-        self.end_drag()
-    }
-
-    /// A window left Rift's control: a press or drag on it ends, and it is no longer a drop
-    /// target.
-    pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
-        if self.is_gripped(window) {
-            self.end_drag();
-        } else if let Some((_, session)) = self.drag_mut() {
-            session.forget_target(window);
-        }
+    /// Effect `Regrip`: the grip moves with its window's new identity.
+    pub(crate) fn project_regrip(&mut self, from: WindowId, to: WindowId) {
+        debug_assert_eq!(
+            self.windows.gripped_window(),
+            Some(from),
+            "the core re-keys its grip"
+        );
+        self.windows.regrip(from, to);
     }
 
     /// `window` as Rift may place it, tracking it if need be; `None` while the user's hand is
@@ -2650,70 +2603,72 @@ mod tests {
     fn a_gripped_window_is_still_found_everywhere_it_was() {
         // The gripped window's record lives in the slot, not among the loose ones. Lookups,
         // counts, the workspace index and assignment iteration must not notice.
-        let mut store = WindowStore::default();
+        let mut state = crate::model::RiftState::default();
         let (wid, other) = (WindowId::new(4, 1), WindowId::new(4, 2));
         let wsid = WindowServerId::new(55);
         let mut workspaces = WorkspaceStore::new();
         let workspace = workspaces
             .create_workspace(SpaceId::new(9), Some("Slot".to_string()))
             .expect("workspace");
-        store.track_window_server_id(wsid, wid);
-        store.assign_window_to_workspace(wid, workspace);
-        store.assign_window_to_workspace(other, workspace);
+        state.windows.track_window_server_id(wsid, wid);
+        state.windows.assign_window_to_workspace(wid, workspace);
+        state.windows.assign_window_to_workspace(other, workspace);
         let assignments = |store: &WindowStore| {
             let mut all: Vec<_> = store.iter_workspace_assignments().collect();
             all.sort_by_key(|(window, _)| window.idx.get());
             all
         };
         let before = (
-            store.workspace_assignment_count(),
-            assignments(&store),
-            store.workspace_for_window(wid),
-            store.record(wid).unwrap().window_server_id(),
-            store.window_ids_for_pid(4).count(),
+            state.windows.workspace_assignment_count(),
+            assignments(&state.windows),
+            state.windows.workspace_for_window(wid),
+            state.windows.record(wid).unwrap().window_server_id(),
+            state.windows.window_ids_for_pid(4).count(),
         );
 
-        store.press(wid, MouseButton::Left);
-        assert_eq!(store.gripped(), Some(wid));
+        state.press(Some(wid), crate::model::drag::MouseButton::Left);
+        assert_eq!(state.windows.gripped(), Some(wid));
         let pressed = (
-            store.workspace_assignment_count(),
-            assignments(&store),
-            store.workspace_for_window(wid),
-            store.record(wid).unwrap().window_server_id(),
-            store.window_ids_for_pid(4).count(),
+            state.windows.workspace_assignment_count(),
+            assignments(&state.windows),
+            state.windows.workspace_for_window(wid),
+            state.windows.record(wid).unwrap().window_server_id(),
+            state.windows.window_ids_for_pid(4).count(),
         );
         assert_eq!(pressed, before);
-        store.debug_assert_invariants();
+        state.windows.debug_assert_invariants();
 
         // One slot: pressing another window lets go of the first.
-        store.press(other, MouseButton::Left);
-        assert_eq!(store.gripped(), Some(other));
-        assert!(store.unheld(wid).is_some());
-        assert!(store.unheld(other).is_none());
-        store.debug_assert_invariants();
+        state.press(Some(other), crate::model::drag::MouseButton::Left);
+        assert_eq!(state.windows.gripped(), Some(other));
+        assert!(state.windows.unheld(wid).is_some());
+        assert!(state.windows.unheld(other).is_none());
+        state.windows.debug_assert_invariants();
     }
 
     #[test]
     fn the_grip_follows_a_rekeyed_window_and_ends_with_a_removed_one() {
-        let mut store = WindowStore::default();
+        let mut state = crate::model::RiftState::default();
         let (old, new) = (WindowId::new(30, 1), WindowId::new(30, 2));
         let mut workspaces = WorkspaceStore::new();
         let workspace = workspaces
             .create_workspace(SpaceId::new(9), Some("Rekey".to_string()))
             .expect("workspace");
-        store.assign_window_to_workspace(old, workspace);
-        store.press(old, MouseButton::Left);
+        state.windows.assign_window_to_workspace(old, workspace);
+        state.press(Some(old), crate::model::drag::MouseButton::Left);
 
-        store.transfer_persistent_window_metadata(old, new);
-        assert_eq!(store.gripped(), Some(new));
-        assert_eq!(store.workspace_for_window(new), Some(workspace));
-        assert!(store.unheld(new).is_none());
-        store.debug_assert_invariants();
+        // Same window, new identity: the core re-keys the grip, then the store moves the rest.
+        state.rekeyed(old, new);
+        state.windows.transfer_persistent_window_metadata(old, new);
+        assert_eq!(state.windows.gripped(), Some(new));
+        assert_eq!(state.windows.workspace_for_window(new), Some(workspace));
+        assert!(state.windows.unheld(new).is_none());
+        state.windows.debug_assert_invariants();
 
-        store.remove_window(new);
-        assert_eq!(store.gripped(), None);
-        assert!(store.record(new).is_none());
-        store.debug_assert_invariants();
+        state.remove_window(new);
+        assert_eq!(state.windows.gripped(), None);
+        assert!(state.windows.record(new).is_none());
+        state.windows.debug_assert_invariants();
     }
 
     #[test]
@@ -2721,32 +2676,35 @@ mod tests {
         // Not only when the window itself is destroyed: an app that quits mid-press or mid-drag
         // takes its windows' records with it, and the slot is one of the places they live.
         for dragging in [false, true] {
-            let mut store = WindowStore::default();
+            let mut state = crate::model::RiftState::default();
             let wid = WindowId::new(4, 1);
-            store.set_visibility(wid, WindowVisibility::Visible);
-            store.press(wid, MouseButton::Left);
-            if dragging && let Some(Hand::Pressed(pressed)) = store.hand_on(wid) {
+            state.windows.set_visibility(wid, WindowVisibility::Visible);
+            state.press(Some(wid), crate::model::drag::MouseButton::Left);
+            if dragging {
                 let frame = objc2_core_foundation::CGRect::ZERO;
-                pressed.start(Session::native(
-                    crate::model::drag::DragSource {
-                        origin_frame: frame,
-                        last_frame: frame,
-                        origin_space: None,
-                        current_space: None,
-                        tiled: true,
-                    },
-                    Default::default(),
-                ));
+                state.begin_drag(
+                    wid,
+                    Session::native(
+                        crate::model::drag::DragSource {
+                            origin_frame: frame,
+                            last_frame: frame,
+                            origin_space: None,
+                            current_space: None,
+                            tiled: true,
+                        },
+                        Default::default(),
+                    ),
+                );
             }
-            assert_eq!(store.gripped(), Some(wid));
-            assert_eq!(matches!(store.pointer(), Pointer::Dragging(_)), dragging);
+            assert_eq!(state.windows.gripped(), Some(wid));
+            assert_eq!(matches!(state.windows.pointer(), Pointer::Dragging(_)), dragging);
 
-            store.remove_windows_for_app(wid.pid);
+            state.remove_windows_for_app(wid.pid);
 
-            assert_eq!(store.gripped(), None, "dragging: {dragging}");
-            assert_eq!(store.pointer(), Pointer::Idle);
-            assert!(store.record(wid).is_none());
-            store.debug_assert_invariants();
+            assert_eq!(state.windows.gripped(), None, "dragging: {dragging}");
+            assert_eq!(state.windows.pointer(), Pointer::Idle);
+            assert!(state.windows.record(wid).is_none());
+            state.windows.debug_assert_invariants();
         }
     }
 

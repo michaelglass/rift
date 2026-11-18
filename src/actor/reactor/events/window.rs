@@ -8,7 +8,7 @@ use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{Quiet, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
-use crate::model::window_store::{Hand, Pointer};
+use crate::model::window_store::Pointer;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -32,7 +32,7 @@ pub fn handle_window_created(
         window,
         window_server_info: ws_info,
     } = payload;
-    if let Some(previous) = state.windows.reconcile_ax_identity(wid, window.sys_id) {
+    if let Some(previous) = state.reconcile_ax_identity(wid, window.sys_id) {
         layout.layout_engine.transfer_persistent_window_identity(previous, wid);
     }
     if let Some(info) = ws_info {
@@ -79,7 +79,7 @@ pub fn handle_window_destroyed(
     if state.windows.suspend_fullscreen_ax_identity(wid) {
         return EventOutcome::no_change().with_layout_event(LayoutEvent::WindowSuspended(wid));
     }
-    let Some(record) = state.windows.remove_window(wid) else {
+    let Some(record) = state.remove_window(wid) else {
         return EventOutcome::no_change();
     };
     apply_window_retirement(transactions, (wid, record.window_server_id()))
@@ -254,28 +254,33 @@ pub fn handle_window_frame_changed(
                 crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
             });
     let moved_by_user = admitted
-        && match state.windows.hand_on(wid) {
-            Some(Hand::Dragging(session)) => {
-                session.update_native(new_frame, new_space);
+        && match state.windows.pointer() {
+            Pointer::Dragging(held) if held == wid => {
+                if let Some(session) = state.windows.drag_on_mut(wid) {
+                    session.update_native(new_frame, new_space);
+                }
                 true
             }
-            Some(Hand::Pressed(pressed)) => {
+            Pointer::Pressing(held) if held == wid => {
                 tracing::debug!(?wid, "drag-evidence: drag started (pressed window moved)");
-                pressed.start(Session::native(
-                    DragSource {
-                        origin_frame: old_frame,
-                        last_frame: new_frame,
-                        origin_space: old_space,
-                        current_space: new_space,
-                        tiled,
-                    },
-                    scene.unwrap_or_default(),
-                ));
+                state.begin_drag(
+                    wid,
+                    Session::native(
+                        DragSource {
+                            origin_frame: old_frame,
+                            last_frame: new_frame,
+                            origin_space: old_space,
+                            current_space: new_space,
+                            tiled,
+                        },
+                        scene.unwrap_or_default(),
+                    ),
+                );
                 // The start of a user drag is intent, even when no workspace changes.
                 layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
                 true
             }
-            None => false,
+            Pointer::Pressing(_) | Pointer::Dragging(_) | Pointer::Idle => false,
         };
     if moved_by_user {
         if native_resize && active_resize_space.is_some() {

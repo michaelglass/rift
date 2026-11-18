@@ -68,12 +68,20 @@ pub enum MouseButton {
     Right,
 }
 
+impl From<MouseButton> for rift_core::Button {
+    fn from(button: MouseButton) -> Self {
+        match button {
+            MouseButton::Left => rift_core::Button::Left,
+            MouseButton::Right => rift_core::Button::Right,
+        }
+    }
+}
+
 /// A user drag: where the pointer is and where a drop would land. It lives in the held
 /// window's placement in the window store, which is how it knows its window.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub source: DragSource,
-    pub(crate) button: MouseButton,
     pub pointer: CGPoint,
     pub anchor_point: CGPoint,
     pub scene: DragScene,
@@ -106,9 +114,3 @@ impl TargetState {
         }
     }
 }
-
-/// The pointer let go of `.0`. Only this ends a press or a drag by release: it comes from the
-/// input tap, which reports every release, or from a fresh read of the button finding it up
-/// (a release the tap missed). The button a window's frame report carries is never one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PointerReleased(pub MouseButton);

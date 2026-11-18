@@ -16,7 +16,9 @@ use std::hash::Hash;
 use std::time::Duration;
 
 pub use crate::core::{Core, Effect, Event, RustCore};
-pub use crate::pointer::{Holder, Initiative, InputClass, Owner, Pointer, may};
+pub use crate::pointer::{
+    Button, Holder, Initiative, InputClass, Owner, Pointer, Release, Ungrip, may,
+};
 pub use crate::reconciler::{
     Answer, Note, Observation, Reconciler, Reply, Sync, Translate, Verdict, Want, Write,
 };
