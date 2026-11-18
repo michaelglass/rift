@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Initiative, Pointer, Release, Ungrip, may};
 use crate::reconciler::{
-    Answer, Note, Observation, Reconciler, Reply, Translate, Verdict, Want, Write,
+    Answer, Note, Observation, Planned, Reconciler, Reply, Translate, Verdict, Want, Write,
 };
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
@@ -112,9 +112,12 @@ pub enum Event<K: Kinds> {
     /// An animated layout pass over the active workspace's windows (in layout order): which of
     /// them to animate, each from where the model has it to its desire. Each desire names the
     /// request the animation's frames go out under.
-    Animate { desires: Vec<Desire<K>> },
+    Animate {
+        now: K::Time,
+        desires: Vec<Desire<K>>,
+    },
     /// The animation under `request` ended.
-    AnimationEnded { request: K::Request },
+    AnimationEnded { now: K::Time, request: K::Request },
     /// The platform stopped `window`'s animation where the model now sees it.
     AnimationStopped { window: K::Window },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
@@ -236,7 +239,8 @@ impl<K: Kinds> Event<K> {
                 desired: to.frame(desired),
                 want,
             },
-            Event::Animate { desires } => Event::Animate {
+            Event::Animate { now, desires } => Event::Animate {
+                now: to.time(now),
                 desires: desires
                     .into_iter()
                     .map(|desire| Desire {
@@ -246,9 +250,10 @@ impl<K: Kinds> Event<K> {
                     })
                     .collect(),
             },
-            Event::AnimationEnded { request } => {
-                Event::AnimationEnded { request: to.request(request) }
-            }
+            Event::AnimationEnded { now, request } => Event::AnimationEnded {
+                now: to.time(now),
+                request: to.request(request),
+            },
             Event::AnimationStopped { window } => {
                 Event::AnimationStopped { window: to.window(window) }
             }
@@ -530,20 +535,24 @@ impl<K: Kinds> RustCore<K> {
                 }
             }
             Event::Arrange { now, want, desires } => self.arrange(now, want, desires),
-            Event::Animate { desires } => {
+            Event::Animate { now, desires } => {
                 let mut effects = Vec::new();
                 for Desire { window, frame: to, request } in desires {
                     let Some(&from) = self.seen.get(&window) else { continue };
                     let owner = pointer.owner(window);
-                    if self.reconciler.animate(request, window, to, from, owner) {
-                        effects.push(Effect::Animate { window, from, to, request });
-                        effects.push(self.see(window, to));
+                    match self.reconciler.animate(now, request, window, to, from, owner) {
+                        Planned::Animate => {
+                            effects.push(Effect::Animate { window, from, to, request });
+                            effects.push(self.see(window, to));
+                        }
+                        Planned::Write(write) => effects.extend(self.written(write)),
+                        Planned::Nothing => {}
                     }
                 }
                 effects
             }
-            Event::AnimationEnded { request } => {
-                self.reconciler.animation_ended(request);
+            Event::AnimationEnded { now, request } => {
+                self.reconciler.animation_ended(now, request);
                 vec![]
             }
             Event::AnimationStopped { window } => {

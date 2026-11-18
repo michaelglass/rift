@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CGRect;
 use rift_core::reconciler::Note;
-pub(crate) use rift_core::{Observation, Owner, Want};
 use rift_core::{Core, Kinds, Release};
+pub(crate) use rift_core::{Observation, Owner, Want};
 use tracing::{debug, trace, warn};
 
 use super::animation::scrolling_bounds;
@@ -530,6 +530,13 @@ pub(crate) struct Ungripped {
     pub(crate) session: Option<Session>,
 }
 
+/// What an animated layout pass decided: the animations, and the writes in their place.
+#[derive(Default)]
+pub(crate) struct Animated {
+    pub animations: Vec<(WindowId, CGRect, CGRect, TransactionId)>,
+    pub writes: Vec<Write>,
+}
+
 /// The grip: the core decides, the window store's slot is its projection. These are the only
 /// ways the slot changes, each a core step whose effects are applied here.
 impl RiftState {
@@ -730,26 +737,30 @@ impl RiftState {
         suspended
     }
 
-    /// An animated layout pass: which of `desires` (the active workspace's windows) to animate,
-    /// each `(window, from, to, request)`. The model sees each at its target from now on.
-    pub(crate) fn animate(
-        &mut self,
-        desires: Vec<rift_core::Desire<Rift>>,
-    ) -> Vec<(WindowId, CGRect, CGRect, TransactionId)> {
-        let effects = self.core.decide(Event::Animate { desires });
+    /// An animated layout pass over `desires` (the active workspace's windows): which to
+    /// animate, each `(window, from, to, request)`, and which to write instead (where the app
+    /// has them is unknown). The model sees each at its target from now on.
+    pub(crate) fn animate(&mut self, desires: Vec<rift_core::Desire<Rift>>) -> Animated {
+        let now = self.core.clock.now();
+        let effects = self.core.decide(Event::Animate { now, desires });
         self.project(&effects, None);
-        effects
-            .into_iter()
-            .filter_map(|effect| match effect {
-                Effect::Animate { window, from, to, request } => Some((window, from, to, request)),
-                _ => None,
-            })
-            .collect()
+        let mut animated = Animated::default();
+        for effect in effects {
+            match effect {
+                Effect::Animate { window, from, to, request } => {
+                    animated.animations.push((window, from, to, request))
+                }
+                Effect::Write(write) => animated.writes.push(write),
+                _ => {}
+            }
+        }
+        animated
     }
 
     /// The animation under `request` ended.
     pub(crate) fn animation_ended(&mut self, request: TransactionId) {
-        let effects = self.core.decide(Event::AnimationEnded { request });
+        let now = self.core.clock.now();
+        let effects = self.core.decide(Event::AnimationEnded { now, request });
         self.project(&effects, None);
     }
 
