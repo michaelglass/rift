@@ -265,8 +265,9 @@ impl<K: Kinds> Reconciler<K> {
 
     /// `window` is gone, or no longer seen: nothing is tracked for it any more.
     pub fn remove(&mut self, window: K::Window) {
-        self.windows.remove(&window);
-        self.touched.push(window);
+        if self.windows.remove(&window).is_some() {
+            self.touched.push(window);
+        }
     }
 
     /// macOS replaced `from` by `to`: unless `to` is already known, it is where `from` was
