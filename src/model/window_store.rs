@@ -19,7 +19,9 @@ pub enum WindowVisibility {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStatus {
-    Pending,
+    /// The destination is placeable; `attempts` writes have been made on new topology revisions.
+    Pending { attempts: u8 },
+    /// The destination can't be placed now. Becoming available starts a fresh budget.
     Unavailable,
 }
 
@@ -33,14 +35,15 @@ pub struct PendingWindowTransfer {
     pub requested_space: SpaceId,
     pub(crate) last_revision: Option<u64>,
     started_revision: u64,
-    pub(crate) attempts: u8,
     pub status: TransferStatus,
 }
 
 impl PendingWindowTransfer {
     /// macOS did not move the window after every retry: the refusal is recorded by keeping the
     /// transfer (the intent stays) and asking no more. A later topology change re-derives it.
-    pub(crate) fn exhausted(&self) -> bool { self.attempts >= TRANSFER_ATTEMPTS }
+    pub(crate) fn exhausted(&self) -> bool {
+        matches!(self.status, TransferStatus::Pending { attempts } if attempts >= TRANSFER_ATTEMPTS)
+    }
 }
 
 /// What the user's hand is doing with the one window it is on.
@@ -161,6 +164,12 @@ impl Records {
         self.loose.get(window)?.transfer
     }
 
+    fn transfers(&self) -> impl Iterator<Item = (WindowId, &PendingWindowTransfer)> {
+        self.loose
+            .iter()
+            .filter_map(|(window, loose)| Some((*window, loose.transfer.as_ref()?)))
+    }
+
     fn transfers_mut(&mut self) -> impl Iterator<Item = &mut PendingWindowTransfer> {
         self.loose.values_mut().filter_map(|loose| loose.transfer.as_mut())
     }
@@ -259,8 +268,7 @@ impl Unheld<'_> {
             if !available {
                 operation.status = TransferStatus::Unavailable;
             } else if resumed {
-                operation.status = TransferStatus::Pending;
-                operation.attempts = 0;
+                operation.status = TransferStatus::Pending { attempts: 0 };
             }
             let write = available && operation.requested_frame.is_some() && (resumed || new_frame);
             if write {
@@ -276,9 +284,8 @@ impl Unheld<'_> {
             requested_space: target,
             started_revision: self.topology_revision,
             last_revision: write.then_some(self.topology_revision),
-            attempts: 0,
             status: if available {
-                TransferStatus::Pending
+                TransferStatus::Pending { attempts: 0 }
             } else {
                 TransferStatus::Unavailable
             },
@@ -301,11 +308,14 @@ impl Unheld<'_> {
             operation.status = TransferStatus::Unavailable;
             return None;
         }
-        if operation.status == TransferStatus::Unavailable {
-            operation.status = TransferStatus::Pending;
-            operation.attempts = 0;
-            operation.last_revision = None;
-        }
+        let attempts = match operation.status {
+            TransferStatus::Pending { attempts } => attempts,
+            TransferStatus::Unavailable => {
+                operation.last_revision = None;
+                0
+            }
+        };
+        operation.status = TransferStatus::Pending { attempts };
         operation.requested_frame = operation.requested_frame.or(self.frame);
         if operation.requested_frame.is_none()
             || operation.last_revision.is_some_and(|previous| revision <= previous)
@@ -317,7 +327,7 @@ impl Unheld<'_> {
             // Exhaustion changes retry authority, never accepted frame authority.
             return None;
         }
-        operation.attempts += 1;
+        operation.status = TransferStatus::Pending { attempts: attempts + 1 };
         Some(*operation)
     }
 }
@@ -2080,6 +2090,13 @@ impl WindowStore {
             topology_revision: self.topology_revision,
             generation: &mut self.operation_generation,
         })
+    }
+
+    /// Every window with a transfer, and the transfer.
+    pub(crate) fn pending_transfers(
+        &self,
+    ) -> impl Iterator<Item = (WindowId, &PendingWindowTransfer)> {
+        self.windows.transfers()
     }
 
     /// Only an accepted native membership snapshot can complete a transfer.

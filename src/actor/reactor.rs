@@ -544,6 +544,18 @@ enum Initiative {
     WarpFocus,
 }
 
+/// Where a window is against where it belongs (its workspace's Space), as the accepted
+/// membership snapshot shows it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Placement {
+    /// On its workspace's Space.
+    Home,
+    /// Seen on another Space: owed a move to this one.
+    Away(SpaceId),
+    /// Belongs on this Space, but no complete snapshot shows where it is.
+    Unseen(SpaceId),
+}
+
 /// What a report of a window's frame is to Rift.
 #[derive(Debug, Clone, Copy)]
 enum ReportKind {
@@ -4321,18 +4333,15 @@ impl Reactor {
                 .windows
                 .iter_workspace_assignments()
                 .filter_map(|(window, assignment)| {
+                    let target = match self.placement(window)? {
+                        Placement::Home => return None,
+                        Placement::Away(target) | Placement::Unseen(target) => target,
+                    };
                     let record = self.state.windows.record(window)?;
-                    let target = engine.workspaces().workspaces.get(assignment)?.space;
                     if record
                         .pending_transfer()
                         .is_some_and(|operation| operation.requested_space == target)
                     {
-                        return None;
-                    }
-                    let observed = record
-                        .window_server_id()
-                        .and_then(|id| self.space_state.active_window_spaces.get(&id).copied());
-                    if observed == Some(target) && self.space_state.membership_complete {
                         return None;
                     }
                     let frame =
@@ -4358,14 +4367,8 @@ impl Reactor {
         let owed: Vec<_> = self
             .state
             .windows
-            .iter_windows()
-            .filter(|(window, _)| {
-                self.state
-                    .windows
-                    .record(*window)
-                    .and_then(|record| record.pending_transfer())
-                    .is_some_and(|operation| operation.exhausted())
-            })
+            .pending_transfers()
+            .filter(|(_, operation)| operation.exhausted())
             .filter_map(|(window, _)| Some((window, self.owed_transfer(window)?)))
             .collect();
         let mut outcome = EventOutcome::no_change();
@@ -4378,22 +4381,33 @@ impl Reactor {
         outcome
     }
 
-    /// The Space `window` must still be moved to: the one its workspace is on, when an accepted,
-    /// complete membership snapshot shows it on another.
-    fn owed_transfer(&self, window: WindowId) -> Option<SpaceId> {
-        if !self.space_state.membership_complete {
-            return None;
-        }
+    /// The Space the accepted snapshot shows `window` on.
+    fn observed_space(&self, window: WindowId) -> Option<SpaceId> {
+        let id = self.state.windows.record(window)?.window_server_id()?;
+        self.space_state.active_window_spaces.get(&id).copied()
+    }
+
+    /// Where `window` is against where it belongs: the one place that compares the two.
+    /// `None` for a window with no workspace.
+    fn placement(&self, window: WindowId) -> Option<Placement> {
         let assignment = self.state.windows.workspace_for_window(window)?;
         let target =
             self.layout_manager.layout_engine.workspaces().workspaces.get(assignment)?.space;
-        let observed = self
-            .state
-            .windows
-            .record(window)?
-            .window_server_id()
-            .and_then(|id| self.space_state.active_window_spaces.get(&id).copied())?;
-        (observed != target).then_some(target)
+        let observed = self.observed_space(window).filter(|_| self.space_state.membership_complete);
+        Some(match observed {
+            Some(observed) if observed == target => Placement::Home,
+            Some(_) => Placement::Away(target),
+            None => Placement::Unseen(target),
+        })
+    }
+
+    /// The Space `window` must still be moved to: the one its workspace is on, when an accepted,
+    /// complete membership snapshot shows it on another.
+    fn owed_transfer(&self, window: WindowId) -> Option<SpaceId> {
+        match self.placement(window)? {
+            Placement::Away(target) => Some(target),
+            Placement::Home | Placement::Unseen(_) => None,
+        }
     }
 
     /// Prepare physical intent from accepted geometry. An unavailable destination
@@ -4745,24 +4759,17 @@ impl Reactor {
             let pending: Vec<_> = self
                 .state
                 .windows
-                .iter_windows()
-                .filter_map(|(window, _)| {
-                    let record = self.state.windows.record(window)?;
-                    let operation = record.pending_transfer()?;
-                    let target = operation.requested_space;
-                    Some((window, target, operation))
-                })
+                .pending_transfers()
+                .map(|(window, operation)| (window, *operation))
                 .collect();
-            for (window, target, operation) in pending {
+            for (window, operation) in pending {
+                let target = operation.requested_space;
                 let available = self.is_space_active(target);
-                let observed = self
-                    .state
-                    .windows
-                    .record(window)
-                    .and_then(|record| record.window_server_id())
-                    .and_then(|id| self.space_state.active_window_spaces.get(&id).copied());
-                let was_unavailable =
-                    operation.status == crate::model::window_store::TransferStatus::Unavailable;
+                let observed = self.observed_space(window);
+                let was_unavailable = matches!(
+                    operation.status,
+                    crate::model::window_store::TransferStatus::Unavailable
+                );
                 if observed == Some(target) {
                     self.state.windows.confirm_transfer(
                         window,
@@ -4770,6 +4777,17 @@ impl Reactor {
                         self.space_state.revision,
                         observed,
                     );
+                } else if operation.exhausted()
+                    && !matches!(
+                        self.placement(window),
+                        Some(Placement::Away(owed) | Placement::Unseen(owed)) if owed == target
+                    )
+                {
+                    // macOS refused it, and it is no longer owed: the window is home, or now
+                    // belongs elsewhere. Nothing is left to wait for.
+                    if let Some(unheld) = self.state.windows.unheld(window) {
+                        unheld.discard_transfer();
+                    }
                 } else if let Some(operation) =
                     self.state.windows.unheld(window).and_then(|unheld| {
                         unheld.advance_transfer(self.space_state.revision, available)
