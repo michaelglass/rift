@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
+use rift_core::layout::axis::{AxisConstraints, solve_axis_lengths};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -15,7 +16,6 @@ use crate::common::config::{
     GapSettings, ScrollingAlignment, ScrollingFocusNavigationStyle, ScrollingLayoutSettings,
     WindowInsertionPoint,
 };
-use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
 };
