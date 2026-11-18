@@ -13,10 +13,9 @@ use std::cell::{Cell, RefCell as Shared};
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CGRect;
-use rift_core::reconciler::Note;
 use rift_core::{Kinds, Release};
 pub(crate) use rift_core::{Observation, Owner, Want};
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 use super::animation::scrolling_bounds;
 use super::managers::ScrollingDisplayBounds;
@@ -152,44 +151,7 @@ impl Reconciler {
         for effect in &effects {
             match effect {
                 Effect::Timer(at) => self.armed.set(*at),
-                Effect::Animate { window, from, to, request } => {
-                    debug!(?window, ?from, ?to, ?request, "reconcile: animate")
-                }
-                Effect::Pending { window, target } => {
-                    trace!(?window, ?target, "reconcile: pending")
-                }
-                Effect::Unpending { window } => trace!(?window, "reconcile: unpending"),
-                Effect::Plan(plan) => {
-                    debug!(request = ?plan.request, positions = plan.positions.len(), frames = plan.frames.len(), "reconcile: plan")
-                }
-                Effect::Write(write) => {
-                    debug!(window = ?write.window(), frame = ?write.frame(), "reconcile: write")
-                }
-                Effect::Queued { window } => debug!(?window, "reconcile: queued"),
-                Effect::Seen { window, frame } => trace!(?window, ?frame, "reconcile: seen"),
-                Effect::Answered { window, answer } => {
-                    debug!(?window, ?answer, "reconcile: answer")
-                }
-                Effect::Stale { window } => {
-                    debug!(?window, "reconcile: answer to a replaced write, dropped")
-                }
-                Effect::Late { window } => {
-                    debug!(?window, "reconcile: late answer, observed as unprompted")
-                }
-                Effect::Note { window, note: Note::Discarded } => {
-                    debug!(?window, "reconcile: discarded (user's)")
-                }
-                Effect::Note { window, note: Note::TimedOut } => {
-                    debug!(?window, "reconcile: timeout")
-                }
-                Effect::Note { window, note: Note::Forgotten } => {
-                    debug!(?window, "reconcile: forgotten (gone)")
-                }
-                Effect::Grip { window } => debug!(?window, "drag-evidence: grip"),
-                Effect::DragBegan { window } => debug!(?window, "drag-evidence: drag began"),
-                Effect::Ungrip { window, why } => debug!(?window, ?why, "drag-evidence: ungrip"),
-                Effect::Regrip { from, to } => debug!(?from, ?to, "drag-evidence: regrip"),
-                Effect::Observed { .. } => {}
+                effect => debug!(?effect, "reconcile"),
             }
         }
         #[cfg(test)]
