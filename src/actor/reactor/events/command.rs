@@ -157,17 +157,7 @@ pub fn handle_command_layout(
     .with_layout_response(response, workspace_space)
     .with_arrange_space_scope(arrange_space_scope);
     for (window, frame) in placement_writes {
-        if let Some(assignment) = state.windows.workspace_for_window(window) {
-            let target = layout.layout_engine.workspaces()[assignment].space;
-            outcome.absorb(request_window_transfer(
-                state,
-                layout,
-                window,
-                target,
-                Some(frame),
-                true,
-            ));
-        }
+        outcome.absorb(request_window_transfer(state, layout, window, Some(frame), true));
     }
     // Switching within the command's display leaves the cursor alone.
     if let Some(space) = workspace_space
@@ -189,21 +179,21 @@ pub fn handle_command_layout(
     Ok(outcome)
 }
 
-/// One physical placement boundary for commands, rules, and topology recovery.
-/// Logical membership has already been committed by the workspace model.
+/// One physical placement boundary for commands, rules, and topology recovery: the window
+/// is moved to its workspace's Space, which the workspace model has already committed.
+/// `frame` is where it lands there; nothing is written while the destination is unavailable.
 pub(in crate::actor::reactor) fn request_window_transfer(
     state: &mut RiftState,
     layout: &mut LayoutManager,
     window: WindowId,
-    target: SpaceId,
     frame: Option<objc2_core_foundation::CGRect>,
     available: bool,
 ) -> EventOutcome {
-    // A window the user is dragging has no transfer to request: the drop places it.
+    // A window the user is dragging has no transfer to begin: the drop places it.
     if state
         .windows
         .unheld(window)
-        .is_some_and(|window| window.request_transfer(frame, target, available))
+        .is_some_and(|window| window.begin_transfer(available))
         && let Some(frame) = frame
     {
         layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
@@ -545,7 +535,6 @@ pub fn handle_command_reactor_move_workspace_to_display(
                 state,
                 layout,
                 window_move.window,
-                target_space,
                 Some(window_move.target_frame),
                 true,
             ));

@@ -1046,31 +1046,10 @@ impl Reactor {
         if active_windows.is_empty() && !self.space_state.membership_complete {
             return;
         }
-        for &(wsid, observed) in &active_windows {
-            if let Some(window) = self.state.windows.tracked_window_id(wsid)
-                && let Some(operation) =
-                    self.state.windows.record(window).and_then(|record| record.pending_transfer())
-                && self.space_state.membership_complete
-                && Some(operation.requested_space) == observed
-            {
-                self.state.windows.confirm_transfer(
-                    window,
-                    operation.generation,
-                    self.space_state.revision,
-                    observed,
-                );
-            }
-        }
         let native: Vec<_> = active_windows
             .iter()
             .map(|&(wsid, observed)| {
-                let pending = self
-                    .state
-                    .windows
-                    .tracked_window_id(wsid)
-                    .and_then(|wid| self.state.windows.record(wid))
-                    .and_then(|record| record.pending_transfer())
-                    .is_some();
+                let pending = self.transfer_keeps_assignment(wsid, observed);
                 let resolved = self.resolve_native_space(wsid, observed);
                 if let Some(space) = resolved {
                     self.clear_pending_target_if_confirmed_space(wsid, space);
@@ -1084,14 +1063,7 @@ impl Reactor {
             &self.active_spaces,
         );
         for wsid in missing {
-            if self
-                .state
-                .windows
-                .tracked_window_id(wsid)
-                .and_then(|wid| self.state.windows.record(wid))
-                .and_then(|record| record.pending_transfer())
-                .is_some()
-            {
+            if self.transfer_keeps_assignment(wsid, None) {
                 continue;
             }
             let resolved = self.resolve_native_space(wsid, None);
@@ -1154,6 +1126,17 @@ impl Reactor {
             &active_windows,
             invalidated_spaces,
         );
+        // Confirming a transfer is finding nothing owed: the window is on its workspace's
+        // Space, by Rift's move or because the user's placement became its assignment.
+        for &(wsid, observed) in &active_windows {
+            if let Some(window) = self.state.windows.tracked_window_id(wsid)
+                && self.space_state.membership_complete
+                && observed.is_some()
+                && observed == self.assigned_space_for_window_id(window)
+            {
+                self.state.windows.end_transfer(window);
+            }
+        }
     }
 
     fn is_login_window_pid(&self, pid: pid_t) -> bool {
@@ -2481,7 +2464,6 @@ impl Reactor {
                         &mut self.state,
                         &mut self.layout_manager,
                         intent.window,
-                        destination,
                         Some(frame),
                         true,
                     ));
@@ -3954,7 +3936,7 @@ impl Reactor {
             self.space_state.menu_bar_space = menu_bar_space;
             self.space_state.command_space = command_space;
             outcome.arrange.passes = 0;
-            outcome.absorb(self.advance_workspace_transfers());
+            outcome.absorb(self.retry_workspace_transfers());
             self.maybe_send_menu_update();
             return Ok(outcome);
         }
@@ -3998,7 +3980,7 @@ impl Reactor {
             self.clear_pending_hidden_window_targets();
         }
         if display_set_changed || !space_remaps.is_empty() {
-            outcome.absorb(self.rederive_exhausted_transfers());
+            outcome.absorb(self.rederive_refused_transfers());
             debug!("reconcile: re-read everything, displays or Spaces changed");
             self.reread.everything();
         }
@@ -4112,7 +4094,7 @@ impl Reactor {
                 }
             }
         }
-        outcome.absorb(self.advance_workspace_transfers());
+        outcome.absorb(self.retry_workspace_transfers());
         outcome.absorb(self.reconcile_native_fullscreen_exits(true));
 
         for (space, size) in resized_spaces {
@@ -4327,32 +4309,20 @@ impl Reactor {
             }
         }
         if preserve_membership {
-            let engine = &self.layout_manager.layout_engine;
-            let intents: Vec<_> = self
+            let owed: Vec<_> = self
                 .state
                 .windows
                 .iter_workspace_assignments()
-                .filter_map(|(window, assignment)| {
-                    let target = match self.placement(window)? {
-                        Placement::Home => return None,
-                        Placement::Away(target) | Placement::Unseen(target) => target,
-                    };
-                    let record = self.state.windows.record(window)?;
-                    if record
-                        .pending_transfer()
-                        .is_some_and(|operation| operation.requested_space == target)
-                    {
-                        return None;
-                    }
-                    let frame =
-                        engine.get_floating_position(assignment, window).or_else(|| record.frame());
-                    Some((window, target, frame))
+                .filter(|&(window, _)| {
+                    !matches!(self.placement(window), None | Some(Placement::Home))
+                        && self.state.windows.record(window).is_some_and(|r| r.transfer().is_none())
                 })
+                .map(|(window, _)| window)
                 .collect();
-            for (window, target, frame) in intents {
-                // Unknown membership preserves intent without issuing a speculative write.
+            for window in owed {
+                // Unknown membership keeps the assignment without a speculative write.
                 if let Some(unheld) = self.state.windows.unheld(window) {
-                    unheld.request_transfer(frame, target, false);
+                    unheld.begin_transfer(false);
                 }
             }
         }
@@ -4360,25 +4330,31 @@ impl Reactor {
     }
 
     /// A new display set or Space identity is a new chance for a transfer macOS refused; an
-    /// unchanged topology never is. The stored transfer is not resumed (its frame was fitted to
-    /// the topology that refused it): if the window is still owed a move, the transfer is
-    /// requested afresh from where its workspace is now.
-    fn rederive_exhausted_transfers(&mut self) -> EventOutcome {
+    /// unchanged topology never is. A refused window still owed a move is moved afresh, to
+    /// where its workspace is now.
+    fn rederive_refused_transfers(&mut self) -> EventOutcome {
         let owed: Vec<_> = self
             .state
             .windows
-            .pending_transfers()
-            .filter(|(_, operation)| operation.exhausted())
+            .transfers()
+            .filter(|(_, transfer)| matches!(transfer, crate::model::Transfer::Refused { .. }))
             .filter_map(|(window, _)| Some((window, self.owed_transfer(window)?)))
             .collect();
         let mut outcome = EventOutcome::no_change();
         for (window, target) in owed {
-            if let Some(unheld) = self.state.windows.unheld(window) {
-                unheld.discard_transfer();
-            }
             outcome.absorb(self.request_window_transfer(window, target, None));
         }
         outcome
+    }
+
+    /// Whether the window behind `wsid` keeps its assignment though seen on `observed`,
+    /// because of a transfer: see [`Transfer::keeps_assignment`].
+    fn transfer_keeps_assignment(&self, wsid: WindowServerId, observed: Option<SpaceId>) -> bool {
+        self.state
+            .windows
+            .tracked_window_id(wsid)
+            .and_then(|wid| self.state.windows.record(wid)?.transfer())
+            .is_some_and(|transfer| transfer.keeps_assignment(observed))
     }
 
     /// The Space the accepted snapshot shows `window` on.
@@ -4410,58 +4386,69 @@ impl Reactor {
         }
     }
 
-    /// Prepare physical intent from accepted geometry. An unavailable destination
-    /// keeps the original frame until a later accepted topology can place it.
+    /// Rift moves `window` to `target` (its workspace's Space) now. `source_frame` is the
+    /// display it leaves, when the caller knows it. An unavailable destination writes nothing:
+    /// the move waits, and is derived again when a later accepted topology can place it.
     fn request_window_transfer(
         &mut self,
         window: WindowId,
         target: SpaceId,
         source_frame: Option<CGRect>,
     ) -> EventOutcome {
-        let screen = self
-            .space_state
-            .screen_by_space(target)
-            .filter(|_| self.is_space_active(target))
-            .map(|screen| screen.frame);
+        let available =
+            self.space_state.screen_by_space(target).is_some() && self.is_space_active(target);
+        let frame = if available {
+            self.transfer_frame(window, target, source_frame)
+        } else {
+            None
+        };
+        command_workflow::request_window_transfer(
+            &mut self.state,
+            &mut self.layout_manager,
+            window,
+            frame,
+            available,
+        )
+    }
+
+    /// Where `window` goes on `target`, from current facts: its tile there when it is tiled in
+    /// the active workspace, otherwise its floating position or last frame, carried over from
+    /// `source` (by default the display that frame is on).
+    fn transfer_frame(
+        &mut self,
+        window: WindowId,
+        target: SpaceId,
+        source: Option<CGRect>,
+    ) -> Option<CGRect> {
+        let screen = self.space_state.screen_by_space(target)?.frame;
         let engine = &self.layout_manager.layout_engine;
-        let mut frame = self
+        let tiled_there =
+            engine
+                .workspaces()
+                .is_window_in_active_workspace(&self.state.windows, target, window)
+                && !engine.is_window_floating(window)
+                && engine.active_layout_mode_at(target)
+                    != crate::common::config::LayoutMode::Floating;
+        if tiled_there
+            // Move directly into the destination tile. A source-sized placement
+            // followed immediately by a resize can lose one AX size component.
+            && let Some(tile) = LayoutManager::calculate_layout(self, Some(target))
+                .into_iter()
+                .flat_map(|(_, layout)| layout)
+                .find_map(|(wid, frame)| (wid == window).then_some(frame))
+        {
+            return Some(tile);
+        }
+        let engine = &self.layout_manager.layout_engine;
+        let frame = self
             .state
             .windows
             .workspace_for_window(window)
             .filter(|_| engine.is_window_floating(window))
             .and_then(|workspace| engine.get_floating_position(workspace, window))
-            .or_else(|| self.state.windows.record(window)?.frame())
-            .map(|frame| {
-                screen.map_or(frame, |screen| {
-                    self.frame_on_display(window, frame, source_frame, screen)
-                })
-            });
-        if screen.is_some()
-            && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-                &self.state.windows,
-                target,
-                window,
-            )
-            && !self.layout_manager.layout_engine.is_window_floating(window)
-            && self.layout_manager.layout_engine.active_layout_mode_at(target)
-                != crate::common::config::LayoutMode::Floating
-        {
-            // Move directly into the destination tile. A source-sized placement
-            // followed immediately by a resize can lose one AX size component.
-            frame = LayoutManager::calculate_layout(self, Some(target))
-                .into_iter()
-                .flat_map(|(_, layout)| layout)
-                .find_map(|(wid, frame)| (wid == window).then_some(frame))
-                .or(frame);
-        }
-        command_workflow::request_window_transfer(
-            &mut self.state,
-            &mut self.layout_manager,
-            window,
-            target,
-            frame,
-            screen.is_some(),
-        )
+            .or_else(|| self.state.windows.record(window)?.frame())?;
+        let source = source.or_else(|| self.screen_for_point(frame.mid()).map(|s| s.frame));
+        Some(self.frame_on_display(window, frame, source, screen))
     }
 
     /// Whether an answer carrying `last_seen` answers the latest write Rift sent `window`. The
@@ -4750,73 +4737,43 @@ impl Reactor {
         self.state.windows.window_at(point)
     }
 
-    fn advance_workspace_transfers(&mut self) -> EventOutcome {
+    /// On every accepted, complete snapshot, what each transfer still owes is derived again
+    /// from the window's assignment and where the snapshot shows it: nothing (it is home, and
+    /// the transfer ends), or one more write of the frame it should have there now.
+    fn retry_workspace_transfers(&mut self) -> EventOutcome {
         let mut outcome = EventOutcome::no_change();
-        if self.refreshes_blocked() {
+        if self.refreshes_blocked() || !self.space_state.membership_complete {
             return outcome;
         }
-        if self.space_state.membership_complete {
-            let pending: Vec<_> = self
+        let windows: Vec<_> = self.state.windows.transfers().map(|(window, _)| window).collect();
+        for window in windows {
+            let target = match self.placement(window) {
+                None | Some(Placement::Home) => {
+                    self.state.windows.end_transfer(window);
+                    continue;
+                }
+                Some(Placement::Away(target) | Placement::Unseen(target)) => target,
+            };
+            let available = self.is_space_active(target);
+            let observed = self.observed_space(window);
+            let revision = self.space_state.revision;
+            if self
                 .state
                 .windows
-                .pending_transfers()
-                .map(|(window, operation)| (window, *operation))
-                .collect();
-            for (window, operation) in pending {
-                let target = operation.requested_space;
-                let available = self.is_space_active(target);
-                let observed = self.observed_space(window);
-                let was_unavailable = matches!(
-                    operation.status,
-                    crate::model::window_store::TransferStatus::Unavailable
+                .unheld(window)
+                .is_some_and(|unheld| unheld.retry_transfer(revision, available, observed))
+                && let Some(frame) = self.transfer_frame(window, target, None)
+            {
+                self.layout_manager.layout_engine.prepare_window_placement(
+                    &mut self.state.windows,
+                    window,
+                    frame,
                 );
-                if observed == Some(target) {
-                    self.state.windows.confirm_transfer(
-                        window,
-                        operation.generation,
-                        self.space_state.revision,
-                        observed,
-                    );
-                } else if operation.exhausted()
-                    && !matches!(
-                        self.placement(window),
-                        Some(Placement::Away(owed) | Placement::Unseen(owed)) if owed == target
-                    )
-                {
-                    // macOS refused it, and it is no longer owed: the window is home, or now
-                    // belongs elsewhere. Nothing is left to wait for.
-                    if let Some(unheld) = self.state.windows.unheld(window) {
-                        unheld.discard_transfer();
-                    }
-                } else if let Some(operation) =
-                    self.state.windows.unheld(window).and_then(|unheld| {
-                        unheld.advance_transfer(self.space_state.revision, available)
-                    })
-                    && let Some(frame) = operation.requested_frame
-                {
-                    if let Some(screen) = self.space_state.screen_by_space(target) {
-                        // Intent recorded while unavailable may describe another display.
-                        let source = self.screen_for_point(frame.mid()).map(|source| source.frame);
-                        let frame = if was_unavailable {
-                            self.frame_on_display(window, frame, source, screen.frame)
-                        } else {
-                            frame
-                        };
-                        if let Some(unheld) = self.state.windows.unheld(window) {
-                            unheld.request_transfer(Some(frame), target, true);
-                        }
-                        self.layout_manager.layout_engine.prepare_window_placement(
-                            &mut self.state.windows,
-                            window,
-                            frame,
-                        );
-                        outcome.absorb(
-                            EventOutcome::layout_changed(false)
-                                .with_arrange_space_scope(Some(target))
-                                .with_placement(window, frame),
-                        );
-                    }
-                }
+                outcome.absorb(
+                    EventOutcome::layout_changed(false)
+                        .with_arrange_space_scope(Some(target))
+                        .with_placement(window, frame),
+                );
             }
         }
         outcome
@@ -5185,14 +5142,13 @@ impl Reactor {
 
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
         let wid = self.state.windows.tracked_window_id(wsid)?;
-        if let Some(space) = self
-            .state
-            .windows
-            .record(wid)
-            .and_then(|record| record.pending_transfer())
-            .map(|operation| operation.requested_space)
-        {
-            return Some(space);
+        // A transfer decides: a refused one the user has since moved owes nothing, even
+        // though its last frame write is still pending below.
+        if let Some(transfer) = self.state.windows.record(wid)?.transfer() {
+            return transfer
+                .keeps_assignment(self.observed_space(wid))
+                .then(|| self.assigned_space_for_window_id(wid))
+                .flatten();
         }
         let target_frame = self.transaction_manager.get_target_frame(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
@@ -5233,8 +5189,8 @@ impl Reactor {
                 .state
                 .windows
                 .record(wid)
-                .and_then(|record| record.pending_transfer())
-                .is_some()
+                .and_then(|record| record.transfer())
+                .is_some_and(|transfer| transfer.keeps_assignment(Some(space)))
         {
             return;
         }
@@ -5311,18 +5267,13 @@ impl Reactor {
             .iter()
             .filter_map(|&(wsid, observed_space)| {
                 let wid = self.state.windows.tracked_window_id(wsid)?;
+                let authoritative_space =
+                    self.state.windows.window_server_space(wsid).or(observed_space)?;
                 if self.state.windows.native_fullscreen_record_for_window(wid).is_some()
-                    || self
-                        .state
-                        .windows
-                        .record(wid)
-                        .and_then(|record| record.pending_transfer())
-                        .is_some()
+                    || self.transfer_keeps_assignment(wsid, Some(authoritative_space))
                 {
                     return None;
                 }
-                let authoritative_space =
-                    self.state.windows.window_server_space(wsid).or(observed_space)?;
                 Some((wid, authoritative_space))
             })
             .collect();
@@ -5370,14 +5321,7 @@ impl Reactor {
         wsid: WindowServerId,
         observation: Option<SpaceId>,
     ) -> Option<SpaceId> {
-        let transferring = self
-            .state
-            .windows
-            .tracked_window_id(wsid)
-            .and_then(|wid| self.state.windows.record(wid))
-            .and_then(|record| record.pending_transfer())
-            .is_some();
-        if transferring {
+        if self.transfer_keeps_assignment(wsid, observation) {
             return observation.or_else(|| self.state.windows.window_server_space(wsid));
         }
         let pending = self.pending_target_space_for_window_server_id(wsid);
@@ -5566,14 +5510,14 @@ impl Reactor {
             let target =
                 self.layout_manager.layout_engine.workspaces()[resolved.effects.workspace_id].space;
             let record = self.state.windows.record(window);
+            // A transfer already under way is retried by the next snapshot.
             let needs_transfer = record.is_some_and(|record| {
-                self.state
-                    .windows
-                    .native_space(window)
-                    .map_or(*source != target, |space| space != target)
-                    || record
-                        .pending_transfer()
-                        .is_some_and(|operation| operation.requested_space != target)
+                record.transfer().is_none()
+                    && self
+                        .state
+                        .windows
+                        .native_space(window)
+                        .map_or(*source != target, |space| space != target)
             });
             if needs_transfer {
                 let outcome = self.request_window_transfer(window, target, None);
