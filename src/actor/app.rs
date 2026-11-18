@@ -357,6 +357,12 @@ impl Debug for InteractiveFrameQueue {
 }
 
 impl InteractiveFrameQueue {
+    /// The windows with a frame waiting, without taking them.
+    #[cfg(test)]
+    pub(crate) fn windows(&self) -> Vec<WindowId> {
+        self.0.lock().unwrap().latest.keys().copied().collect()
+    }
+
     pub(crate) fn drain_with(
         &self,
         mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority),
