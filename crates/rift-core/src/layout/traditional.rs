@@ -39,11 +39,21 @@ pub enum Node<W> {
         constraints: Option<WindowConstraints>,
         fill: Fill,
     },
-    Container {
-        kind: Kind,
+    /// Children laid out along an axis by weight (a container with nothing that takes space is
+    /// pruned, so there is always a first).
+    Axis {
+        horizontal: bool,
         fill: Fill,
-        /// Never empty: a container with nothing that takes space is pruned.
-        children: Vec<Child<W>>,
+        first: Box<Child<W>>,
+        rest: Vec<Child<W>>,
+    },
+    /// A stack: `focused` is shown on top, the others behind it, each offset.
+    Stack {
+        horizontal: bool,
+        fill: Fill,
+        before: Vec<Child<W>>,
+        focused: Box<Child<W>>,
+        after: Vec<Child<W>>,
     },
 }
 
@@ -52,18 +62,6 @@ pub enum Node<W> {
 pub struct Child<W> {
     pub size: f32,
     pub node: Node<W>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Kind {
-    Axis {
-        horizontal: bool,
-    },
-    /// `focused`: the index of the child shown on top.
-    Stack {
-        horizontal: bool,
-        focused: usize,
-    },
 }
 
 /// How much of the screen a node takes.
@@ -135,17 +133,34 @@ impl<W> Node<W> {
                 constraints,
                 fill,
             },
-            Node::Container { kind, fill, children } => Node::Container {
-                kind,
+            Node::Axis { horizontal, fill, first, rest } => Node::Axis {
+                horizontal,
                 fill,
-                children: children
-                    .into_iter()
-                    .map(|child| Child {
-                        size: child.size,
-                        node: child.node.map(window),
-                    })
-                    .collect(),
+                first: Box::new(first.map(window)),
+                rest: rest.into_iter().map(|child| child.map(window)).collect(),
             },
+            Node::Stack {
+                horizontal,
+                fill,
+                before,
+                focused,
+                after,
+            } => Node::Stack {
+                horizontal,
+                fill,
+                before: before.into_iter().map(|child| child.map(window)).collect(),
+                focused: Box::new(focused.map(window)),
+                after: after.into_iter().map(|child| child.map(window)).collect(),
+            },
+        }
+    }
+}
+
+impl<W> Child<W> {
+    fn map<V>(self, window: &impl Fn(W) -> V) -> Child<V> {
+        Child {
+            size: self.size,
+            node: self.node.map(window),
         }
     }
 }
@@ -181,27 +196,54 @@ impl<W: Copy> Traditional<W> {
         match node {
             Node::Window { constraints: Some(c), .. } => leaf_summary(*c, horizontal),
             Node::Window { constraints: None, .. } => (0.0, None, None, true),
-            Node::Container { kind, children, .. } => {
-                let (orientation, stacked, reserve) = match *kind {
-                    Kind::Axis { horizontal: along } => (along, false, 0.0),
-                    Kind::Stack { horizontal: along, .. } => {
-                        (along, true, self.stack_line.on_axis(along, horizontal))
-                    }
-                };
-                container_axis_constraints(
-                    children.iter().map(|child| self.summary(&child.node, horizontal)),
-                    orientation == horizontal,
-                    stacked,
-                    if horizontal {
-                        self.gaps.horizontal
-                    } else {
-                        self.gaps.vertical
-                    },
-                    self.stack_offset,
-                    reserve,
-                )
-            }
+            Node::Axis {
+                horizontal: along, first, rest, ..
+            } => self.container(
+                std::iter::once(&**first).chain(rest),
+                *along == horizontal,
+                false,
+                horizontal,
+                0.0,
+            ),
+            Node::Stack {
+                horizontal: along,
+                before,
+                focused,
+                after,
+                ..
+            } => self.container(
+                before.iter().chain(std::iter::once(&**focused)).chain(after),
+                *along == horizontal,
+                true,
+                horizontal,
+                self.stack_line.on_axis(*along, horizontal),
+            ),
         }
+    }
+
+    fn container<'a>(
+        &self,
+        children: impl Iterator<Item = &'a Child<W>>,
+        aligned: bool,
+        stacked: bool,
+        horizontal: bool,
+        reserve: f64,
+    ) -> AxisSummary
+    where
+        W: 'a,
+    {
+        container_axis_constraints(
+            children.map(|child| self.summary(&child.node, horizontal)),
+            aligned,
+            stacked,
+            if horizontal {
+                self.gaps.horizontal
+            } else {
+                self.gaps.vertical
+            },
+            self.stack_offset,
+            reserve,
+        )
     }
 
     fn filled(&self, fill: Fill, rect: Rect) -> Rect {
@@ -234,33 +276,41 @@ impl<W: Copy> Traditional<W> {
                 };
                 out.push((*window, frame));
             }
-            Node::Container {
-                kind: Kind::Stack { horizontal, focused },
+            Node::Stack {
+                horizontal,
                 fill,
-                children,
-            } => self.stack(children, *horizontal, *focused, self.filled(*fill, rect), out),
-            Node::Container {
-                kind: Kind::Axis { horizontal },
-                fill,
-                children,
-            } => self.axis(children, *horizontal, self.filled(*fill, rect), out),
+                before,
+                focused,
+                after,
+            } => self.stack(
+                before,
+                focused,
+                after,
+                *horizontal,
+                self.filled(*fill, rect),
+                out,
+            ),
+            Node::Axis { horizontal, fill, first, rest } => {
+                self.axis(first, rest, *horizontal, self.filled(*fill, rect), out)
+            }
         }
     }
 
     fn stack(
         &self,
-        children: &[Child<W>],
+        before: &[Child<W>],
+        focused: &Child<W>,
+        after: &[Child<W>],
         horizontal: bool,
-        focused: usize,
         rect: Rect,
         out: &mut Vec<(W, Rect)>,
     ) {
-        let count = children.len();
+        let count = before.len() + 1 + after.len();
         let axis_len = if horizontal { rect.w } else { rect.h };
         // The offset is capped so the window on top keeps its required length (a maximum is no
         // requirement).
         let offset = if count > 1 {
-            let (min, fixed, _, _) = self.summary(&children[focused].node, horizontal);
+            let (min, fixed, _, _) = self.summary(&focused.node, horizontal);
             let desired = fixed.unwrap_or(min).clamp(0.0, axis_len.max(0.0));
             let max_offset = (axis_len - desired).max(0.0) / (count - 1) as f64;
             self.stack_offset.min(max_offset)
@@ -268,16 +318,25 @@ impl<W: Copy> Traditional<W> {
             self.stack_offset
         };
         let frames = stack_frames(rect, count, offset, horizontal, self.stack_line);
-        for (child, frame) in children.iter().zip(frames) {
+        let children = before.iter().chain(std::iter::once(focused)).chain(after);
+        for (child, frame) in children.zip(frames) {
             self.place(&child.node, frame, out);
         }
     }
 
-    fn axis(&self, children: &[Child<W>], horizontal: bool, rect: Rect, out: &mut Vec<(W, Rect)>) {
+    fn axis(
+        &self,
+        first: &Child<W>,
+        rest: &[Child<W>],
+        horizontal: bool,
+        rect: Rect,
+        out: &mut Vec<(W, Rect)>,
+    ) {
+        let children: Vec<&Child<W>> = std::iter::once(first).chain(rest).collect();
         let min_size = 0.05_f32;
         let mut needs_normalization = false;
         let mut actual_total = 0.0_f32;
-        for child in children {
+        for child in &children {
             actual_total += child.size;
             if !child.size.is_finite() || child.size < min_size - f32::EPSILON {
                 needs_normalization = true;
@@ -291,7 +350,7 @@ impl<W: Copy> Traditional<W> {
             self.gaps.vertical
         };
         let axis_len = if horizontal { rect.w } else { rect.h };
-        let total_gap = (children.len() - 1) as f64 * gap;
+        let total_gap = rest.len() as f64 * gap;
         let usable = if gap == 0.0 {
             axis_len
         } else {
@@ -321,7 +380,7 @@ impl<W: Copy> Traditional<W> {
             });
             self.place(&child.node, frame, out);
             offset += length;
-            if index < children.len() - 1 {
+            if index < rest.len() {
                 offset += gap;
             }
         }
