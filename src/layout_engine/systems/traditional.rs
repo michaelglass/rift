@@ -390,27 +390,42 @@ impl TraditionalLayoutSystem {
                 });
             }
         }
+        // A container with nothing that takes space is pruned.
         if children.is_empty() {
             return None;
         }
-        let kind = match info.kind {
-            LayoutKind::Horizontal => traditional::Kind::Axis { horizontal: true },
-            LayoutKind::Vertical => traditional::Kind::Axis { horizontal: false },
+        match info.kind {
+            LayoutKind::Horizontal | LayoutKind::Vertical => {
+                let mut children = children.into_iter();
+                Some(traditional::Node::Axis {
+                    horizontal: info.kind == LayoutKind::Horizontal,
+                    fill,
+                    first: Box::new(children.next()?),
+                    rest: children.collect(),
+                })
+            }
             LayoutKind::HorizontalStack | LayoutKind::VerticalStack => {
-                let focused = self
+                // The child shown on top: the stack's selection, if it takes space, else the
+                // first.
+                let on_top = self
                     .tree
                     .data
                     .selection
                     .local_selection(map, node)
                     .and_then(|selected| ids.iter().position(|&id| id == selected))
                     .unwrap_or(0);
-                traditional::Kind::Stack {
+                let mut before = children;
+                let after = before.split_off(on_top + 1);
+                let focused = Box::new(before.pop()?);
+                Some(traditional::Node::Stack {
                     horizontal: info.kind == LayoutKind::HorizontalStack,
+                    fill,
+                    before,
                     focused,
-                }
+                    after,
+                })
             }
-        };
-        Some(traditional::Node::Container { kind, fill, children })
+        }
     }
 
     fn find_natural_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
