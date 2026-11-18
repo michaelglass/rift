@@ -279,6 +279,10 @@ pub enum Event {
         successful: bool,
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
+        /// For each window the app had applied a request to, the newest one: its read was
+        /// made after it.
+        #[serde(skip)]
+        as_of: HashMap<WindowId, TransactionId>,
     },
     #[serde(skip)]
     WindowInventoryRefreshRequested(pid_t),
@@ -1888,6 +1892,7 @@ impl Reactor {
                 successful,
                 new,
                 known_visible,
+                as_of,
             } => {
                 if !self.finish_window_inventory(pid, token, successful) {
                     debug!(pid, ?token, successful, "Discarding stale AX window inventory");
@@ -1912,7 +1917,12 @@ impl Reactor {
                     .remove(&pid)
                     .is_some_and(|target| new.iter().any(|(wid, _)| *wid == target));
                 let mut outcome = application_workflow::handle_windows_discovered(
-                    application_workflow::WindowsDiscoveredPayload { pid, new, known_visible },
+                    application_workflow::WindowsDiscoveredPayload {
+                        pid,
+                        new,
+                        known_visible,
+                        as_of,
+                    },
                 )?;
                 if refocus {
                     outcome = outcome.with_arrange_passes(1);
@@ -2991,6 +3001,9 @@ impl Reactor {
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
     fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
+        for write in std::mem::take(&mut outcome.released) {
+            self.send_arranged(write);
+        }
         // AX activation and inventory replies can arrive after overview preparation.
         // Until its focus completes, native layout work remains covered and instant.
         if let Some(&(space, _)) = self.overview_focus.as_ref().and_then(Expecting::live) {
@@ -3033,6 +3046,7 @@ impl Reactor {
                 discovery.new,
                 discovery.known_visible,
                 discovery.app_info,
+                discovery.as_of,
             );
         }
         for window in outcome.reapply_app_rules {
@@ -4668,6 +4682,7 @@ impl Reactor {
         mut new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
         app_info: Option<AppInfo>,
+        as_of: HashMap<WindowId, TransactionId>,
     ) {
         // Rebind the visible tab before inventory retirement removes its old slot.
         for (wid, info) in &mut new {
@@ -4788,7 +4803,11 @@ impl Reactor {
         }
         let observed_windows = new
             .into_iter()
-            .map(|(wid, info)| window_discovery::ObservedWindow { wid, info })
+            .map(|(wid, info)| window_discovery::ObservedWindow {
+                as_of: as_of.get(&wid).copied(),
+                wid,
+                info,
+            })
             .collect();
         let (new_windows, process_outcome) = window_discovery::process_window_list(
             &mut self.state,

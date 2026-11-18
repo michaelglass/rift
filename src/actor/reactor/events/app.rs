@@ -39,6 +39,7 @@ pub fn handle_application_launched(
             new: visible_windows,
             known_visible: Vec::new(),
             app_info: Some(info),
+            as_of: Default::default(),
         }))
 }
 
@@ -84,18 +85,23 @@ pub struct WindowsDiscoveredPayload {
     pub pid: i32,
     pub new: Vec<(WindowId, WindowInfo)>,
     pub known_visible: Vec<WindowId>,
+    pub as_of: crate::common::collections::HashMap<
+        WindowId,
+        crate::actor::reactor::transaction_manager::TransactionId,
+    >,
 }
 
 pub fn handle_windows_discovered(
     payload: WindowsDiscoveredPayload,
 ) -> anyhow::Result<EventOutcome> {
-    let WindowsDiscoveredPayload { pid, new, known_visible } = payload;
+    let WindowsDiscoveredPayload { pid, new, known_visible, as_of } = payload;
     Ok(
         EventOutcome::window_notification_refresh().with_discovery(WindowDiscoveryRequest {
             pid,
             new,
             known_visible,
             app_info: None,
+            as_of,
         }),
     )
 }

@@ -44,13 +44,17 @@ impl<K: Kinds> Write<K> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Sync<K: Kinds> {
     /// The app has the window at `acked`: it answered so, or reported it there. A desire equal
-    /// to `acked` is not written.
-    Settled { acked: K::Frame },
+    /// to `acked` is not written. `last` is the request of the latest frame Rift sent it, if
+    /// any (a read stamped older than it is from before it).
+    Settled {
+        acked: K::Frame,
+        last: Option<K::Request>,
+    },
     /// Rift does not know where the app has the window: the user just dragged it (reports
     /// during a drag acknowledge nothing Rift asked for), or the displays changed (macOS
     /// resizes windows silently). The next desire is written whatever it is; a report or an
-    /// answer settles it.
-    Unknown,
+    /// answer settles it. `last` as for `Settled`.
+    Unknown { last: Option<K::Request> },
     /// One write is with the app, sent under `request`, from `before`. A newer desire waits in
     /// `queued` (one, the latest) until the app answers or `deadline` passes.
     InFlight {
@@ -73,7 +77,12 @@ pub enum Sync<K: Kinds> {
     /// The app answered `wanted` with `got`, or did not answer in time (`got` is then what it
     /// had acknowledged before). Rift does not ask for `wanted` again while the window stays at
     /// `got`.
-    Refused { wanted: K::Frame, got: K::Frame },
+    /// `request` is the refused write's.
+    Refused {
+        wanted: K::Frame,
+        got: K::Frame,
+        request: K::Request,
+    },
 }
 
 /// What the app had acknowledged when a write was sent: where a write it never answers leaves
@@ -161,10 +170,6 @@ fn answers<K: Kinds>(target: K::Frame, frame: K::Frame) -> bool {
 pub struct Reconciler<K: Kinds> {
     /// Every window the model knows, and where it stands.
     syncs: HashMap<K::Window, Sync<K>>,
-    /// The request of the latest frame Rift sent each window (a write, an animation, a drag's
-    /// frame): an answer naming it is the answer to Rift's latest word, one naming an older
-    /// request is stale.
-    last_sent: HashMap<K::Window, K::Request>,
     /// Every write sent, with its deadline, in the order sent. A deadline is the send time
     /// plus [`WRITE_DEADLINE`], so this is also deadline order. An entry whose window has since
     /// been answered or written again no longer matches its sync state and is dropped when it
@@ -180,10 +185,21 @@ impl<K: Kinds> Default for Reconciler<K> {
     fn default() -> Self {
         Reconciler {
             syncs: HashMap::new(),
-            last_sent: HashMap::new(),
             deadlines: VecDeque::new(),
             notes: Vec::new(),
             touched: Vec::new(),
+        }
+    }
+}
+
+impl<K: Kinds> Sync<K> {
+    /// The request of the latest frame Rift sent the window, if any.
+    fn last(self) -> Option<K::Request> {
+        match self {
+            Sync::Settled { last, .. } | Sync::Unknown { last } => last,
+            Sync::InFlight { request, .. }
+            | Sync::Animating { request, .. }
+            | Sync::Refused { request, .. } => Some(request),
         }
     }
 }
@@ -214,31 +230,18 @@ impl<K: Kinds> Reconciler<K> {
         match self.sync(window)? {
             Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
             Sync::Refused { wanted, .. } => Some(wanted),
-            Sync::Settled { .. } | Sync::Unknown => None,
+            Sync::Settled { .. } | Sync::Unknown { .. } => None,
         }
     }
 
     /// A window the model did not know appeared at `frame`: its app has it there.
     pub fn appear(&mut self, window: K::Window, frame: K::Frame) {
-        self.syncs.entry(window).or_insert(Sync::Settled { acked: frame });
-    }
-
-    /// The app's window was read at `frame` (an inventory, the window server): its app has it
-    /// there. A write in flight is still waited for (its answer decides), and a refusal stands
-    /// (the model's frame, which this read moved, decides whether it is asked again).
-    pub fn found(&mut self, window: K::Window, frame: K::Frame) {
-        match self.sync(window) {
-            None | Some(Sync::InFlight { .. } | Sync::Refused { .. } | Sync::Animating { .. }) => {}
-            Some(Sync::Settled { .. } | Sync::Unknown) => {
-                self.set(window, Sync::Settled { acked: frame })
-            }
-        }
+        self.syncs.entry(window).or_insert(Sync::Settled { acked: frame, last: None });
     }
 
     /// `window` is gone: nothing is tracked for it any more.
     pub fn remove(&mut self, window: K::Window) {
         self.syncs.remove(&window);
-        self.last_sent.remove(&window);
         self.touched.push(window);
     }
 
@@ -262,11 +265,11 @@ impl<K: Kinds> Reconciler<K> {
                 before: Before::Unknown,
             },
             Some(
-                Sync::Settled { .. }
+                sync @ (Sync::Settled { .. }
                 | Sync::Refused { .. }
-                | Sync::Unknown
-                | Sync::Animating { .. },
-            ) => Sync::Unknown,
+                | Sync::Unknown { .. }
+                | Sync::Animating { .. }),
+            ) => Sync::Unknown { last: sync.last() },
         };
         self.set(window, unknown);
     }
@@ -274,9 +277,11 @@ impl<K: Kinds> Reconciler<K> {
     /// What a write sent now would fall back to.
     fn before(sync: Sync<K>) -> Before<K> {
         match sync {
-            Sync::Settled { acked } | Sync::Animating { target: acked, .. } => Before::Acked(acked),
+            Sync::Settled { acked, .. } | Sync::Animating { target: acked, .. } => {
+                Before::Acked(acked)
+            }
             Sync::Refused { got, .. } => Before::Acked(got),
-            Sync::Unknown => Before::Unknown,
+            Sync::Unknown { .. } => Before::Unknown,
             Sync::InFlight { before, .. } => before,
         }
     }
@@ -291,7 +296,6 @@ impl<K: Kinds> Reconciler<K> {
     ) -> Write<K> {
         let deadline = K::after(now, WRITE_DEADLINE);
         self.deadlines.push_back((deadline, window));
-        self.last_sent.insert(window, request);
         self.set(window, Sync::InFlight {
             target: frame,
             deadline,
@@ -320,10 +324,16 @@ impl<K: Kinds> Reconciler<K> {
         };
         // A write nobody answered in time no longer holds newer desires back. Whatever was
         // queued behind it is older than `desired`, so it is dropped.
-        if let Sync::InFlight { target, deadline, before, .. } = sync
+        if let Sync::InFlight {
+            target,
+            deadline,
+            before,
+            request: sent,
+            ..
+        } = sync
             && now >= deadline
         {
-            sync = self.time_out(window, target, before);
+            sync = self.time_out(window, target, sent, before);
         }
         match owner {
             Owner::Rift => {}
@@ -368,14 +378,14 @@ impl<K: Kinds> Reconciler<K> {
             }
             // Asking again for what was refused would be a retry loop. A window that has
             // since been seen somewhere else is no longer the one that refused.
-            (Sync::Refused { wanted, got }, Want::Arrange | Want::ArrangePositions)
+            (Sync::Refused { wanted, got, .. }, Want::Arrange | Want::ArrangePositions)
                 if K::same_as(desired, wanted) && K::same_as(known, got) =>
             {
                 Verdict::Nothing
             }
             // The app has the window there already (or an animation is taking it there).
             (
-                Sync::Settled { acked } | Sync::Animating { target: acked, .. },
+                Sync::Settled { acked, .. } | Sync::Animating { target: acked, .. },
                 Want::Arrange | Want::ArrangePositions,
             ) if K::same_as(desired, acked) => Verdict::Nothing,
             // A refused window is where the model has it (a timed-out write's `got` is only what
@@ -388,7 +398,7 @@ impl<K: Kinds> Reconciler<K> {
             (
                 Sync::Settled { .. }
                 | Sync::Refused { .. }
-                | Sync::Unknown
+                | Sync::Unknown { .. }
                 | Sync::Animating { .. },
                 Want::Arrange | Want::ArrangePositions,
             ) => Verdict::Send(self.send(now, request, window, desired, Self::before(sync))),
@@ -400,8 +410,10 @@ impl<K: Kinds> Reconciler<K> {
     /// next one replaces it in the app's queue, and the drop arranges the window afresh.
     pub fn follow(&mut self, request: K::Request, window: K::Window, frame: K::Frame) -> Write<K> {
         if self.syncs.contains_key(&window) {
-            self.set(window, Sync::Settled { acked: frame });
-            self.last_sent.insert(window, request);
+            self.set(window, Sync::Settled {
+                acked: frame,
+                last: Some(request),
+            });
         }
         Write { window, frame, request }
     }
@@ -453,32 +465,36 @@ impl<K: Kinds> Reconciler<K> {
         let Some(sync) = self.sync(window) else {
             return (Reply::Foreign, None);
         };
-        let last = self.last_sent.get(&window).copied();
-        match (as_of, last) {
+        match (as_of, sync.last()) {
             (Some(as_of), Some(last)) if as_of < last => return (Reply::NoNews, None),
             (Some(as_of), Some(last)) if as_of == last => match sync {
                 Sync::InFlight { target, queued, .. } => {
                     let answer = if answers::<K>(target, frame) {
-                        self.set(window, Sync::Settled { acked: frame });
+                        self.set(window, Sync::Settled { acked: frame, last: Some(last) });
                         Answer::Acked
                     } else {
-                        self.set(window, Sync::Refused { wanted: target, got: frame });
+                        let refused = Sync::Refused {
+                            wanted: target,
+                            got: frame,
+                            request: last,
+                        };
+                        self.set(window, refused);
                         Answer::Refused
                     };
                     let released = self.release(now, request, window, queued, owner);
                     return (Reply::Answered(answer), released);
                 }
                 Sync::Animating { target, .. } if answers::<K>(target, frame) => {
-                    self.set(window, Sync::Settled { acked: frame });
+                    self.set(window, Sync::Settled { acked: frame, last: Some(last) });
                     return (Reply::Answered(Answer::Acked), None);
                 }
                 Sync::Animating { .. } => return (Reply::InTransit, None),
                 // The answer to a write Rift stopped waiting for: news like any report.
-                Sync::Settled { .. } | Sync::Unknown | Sync::Refused { .. } => {}
+                Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Refused { .. } => {}
             },
             // A frame Rift sent outside the core (a camera's): where the app has the window.
-            (Some(_), _) if matches!(sync, Sync::Settled { .. } | Sync::Unknown) => {
-                self.set(window, Sync::Settled { acked: frame });
+            (Some(_), last) if matches!(sync, Sync::Settled { .. } | Sync::Unknown { .. }) => {
+                self.set(window, Sync::Settled { acked: frame, last });
                 return (Reply::InTransit, None);
             }
             _ => {}
@@ -506,16 +522,22 @@ impl<K: Kinds> Reconciler<K> {
             (Sync::InFlight { .. }, Holder::Nobody) => Reply::InTransit,
             // The animation is moving the window: a report on its target settles it, any other
             // is a frame on the way.
-            (Sync::Animating { target, .. }, Holder::Nobody) => {
+            (Sync::Animating { target, request }, Holder::Nobody) => {
                 if answers::<K>(target, frame) {
-                    self.set(window, Sync::Settled { acked: frame });
+                    self.set(window, Sync::Settled {
+                        acked: frame,
+                        last: Some(request),
+                    });
                     Reply::NoNews
                 } else {
                     Reply::InTransit
                 }
             }
             (
-                Sync::InFlight { .. } | Sync::Settled { .. } | Sync::Refused { .. } | Sync::Unknown,
+                Sync::InFlight { .. }
+                | Sync::Settled { .. }
+                | Sync::Refused { .. }
+                | Sync::Unknown { .. },
                 Holder::User | Holder::Nobody,
             )
             | (Sync::Animating { .. }, Holder::User) => {
@@ -527,7 +549,10 @@ impl<K: Kinds> Reconciler<K> {
                 match (sync, reply) {
                     // A refusal stands while the window stays where the model has it.
                     (Sync::Refused { .. }, Reply::NoNews) => {}
-                    _ => self.set(window, Sync::Settled { acked: frame }),
+                    _ => self.set(window, Sync::Settled {
+                        acked: frame,
+                        last: sync.last(),
+                    }),
                 }
                 reply
             }
@@ -536,11 +561,17 @@ impl<K: Kinds> Reconciler<K> {
 
     /// The app did not answer the write of `target` in time: a refusal, with the window where
     /// it was acknowledged before the write, or unknown if that was unknown.
-    fn time_out(&mut self, window: K::Window, target: K::Frame, before: Before<K>) -> Sync<K> {
+    fn time_out(
+        &mut self,
+        window: K::Window,
+        target: K::Frame,
+        request: K::Request,
+        before: Before<K>,
+    ) -> Sync<K> {
         self.notes.push((window, Note::TimedOut));
         let late = match before {
-            Before::Acked(got) => Sync::Refused { wanted: target, got },
-            Before::Unknown => Sync::Unknown,
+            Before::Acked(got) => Sync::Refused { wanted: target, got, request },
+            Before::Unknown => Sync::Unknown { last: Some(request) },
         };
         self.set(window, late);
         late
@@ -552,19 +583,19 @@ impl<K: Kinds> Reconciler<K> {
     fn waiting(
         &self,
         (deadline, window): (K::Time, K::Window),
-    ) -> Option<(K::Frame, Option<K::Frame>, Before<K>)> {
+    ) -> Option<(K::Frame, Option<K::Frame>, K::Request, Before<K>)> {
         match self.sync(window)? {
             Sync::InFlight {
                 target,
                 deadline: due,
                 queued,
+                request,
                 before,
-                ..
-            } if due == deadline => Some((target, queued, before)),
+            } if due == deadline => Some((target, queued, request, before)),
             Sync::InFlight { .. }
             | Sync::Settled { .. }
             | Sync::Refused { .. }
-            | Sync::Unknown
+            | Sync::Unknown { .. }
             | Sync::Animating { .. } => None,
         }
     }
@@ -583,12 +614,12 @@ impl<K: Kinds> Reconciler<K> {
             && deadline <= now
         {
             self.deadlines.pop_front();
-            let Some((target, queued, before)) = self.waiting((deadline, window)) else {
+            let Some((target, queued, sent, before)) = self.waiting((deadline, window)) else {
                 continue;
             };
             match owner(window) {
                 Some(owner) => {
-                    self.time_out(window, target, before);
+                    self.time_out(window, target, sent, before);
                     released.extend(self.release(now, request, window, queued, owner));
                 }
                 None => {
@@ -643,7 +674,7 @@ impl<K: Kinds> Reconciler<K> {
             Sync::Settled { .. } => K::same_as(known, desired),
             // Where the app has it is unknown: the desire is written, once, so that what the
             // app makes of it (a refusal, say) is known. (An animation may never land.)
-            Sync::Unknown => {
+            Sync::Unknown { .. } => {
                 return match self.want(now, request, window, desired, known, Want::Arrange, owner) {
                     Verdict::Send(write) => Planned::Write(write),
                     Verdict::Queued | Verdict::Nothing => Planned::Nothing,
@@ -654,7 +685,6 @@ impl<K: Kinds> Reconciler<K> {
             (Owner::User, _) | (Owner::Rift, true) => Planned::Nothing,
             (Owner::Rift, false) => {
                 self.set(window, Sync::Animating { target: desired, request });
-                self.last_sent.insert(window, request);
                 Planned::Animate
             }
         }
@@ -695,17 +725,20 @@ impl<K: Kinds> Reconciler<K> {
     pub fn animation_stopped(&mut self, window: K::Window, request: K::Request, known: K::Frame) {
         match self.sync(window) {
             Some(Sync::Animating { request: sent, .. }) if sent == request => {
-                self.set(window, Sync::Settled { acked: known })
+                self.set(window, Sync::Settled {
+                    acked: known,
+                    last: Some(request),
+                })
             }
             Some(Sync::InFlight { request: sent, .. }) if sent == request => {
-                self.set(window, Sync::Unknown)
+                self.set(window, Sync::Unknown { last: Some(request) })
             }
             Some(
                 Sync::Animating { .. }
                 | Sync::InFlight { .. }
                 | Sync::Settled { .. }
                 | Sync::Refused { .. }
-                | Sync::Unknown,
+                | Sync::Unknown { .. },
             )
             | None => {}
         }
@@ -717,18 +750,18 @@ impl<K: Kinds> Reconciler<K> {
     /// leaves where it has the window unknown, never at a desire that was dropped. Returns the
     /// acknowledged frame, which the model takes the window to be at.
     pub fn forget(&mut self, window: K::Window) -> Option<K::Frame> {
-        let next = match self.sync(window)? {
-            Sync::Settled { acked } => return Some(acked),
-            Sync::Refused { got, .. } => Sync::Settled { acked: got },
-            Sync::InFlight { .. } | Sync::Animating { .. } | Sync::Unknown => Sync::Unknown,
-        };
-        self.set(window, next);
-        match next {
-            Sync::Settled { acked } => Some(acked),
-            Sync::InFlight { .. }
-            | Sync::Refused { .. }
-            | Sync::Animating { .. }
-            | Sync::Unknown => None,
+        let sync = self.sync(window)?;
+        let last = sync.last();
+        match sync {
+            Sync::Settled { acked, .. } => Some(acked),
+            Sync::Refused { got, .. } => {
+                self.set(window, Sync::Settled { acked: got, last });
+                Some(got)
+            }
+            Sync::InFlight { .. } | Sync::Animating { .. } | Sync::Unknown { .. } => {
+                self.set(window, Sync::Unknown { last });
+                None
+            }
         }
     }
 }
@@ -773,6 +806,20 @@ mod tests {
     }
 
     fn sync(reconciler: &Reconciler) -> Sync { reconciler.sync(window()).expect("known window") }
+
+    fn settled(reconciler: &Reconciler) -> Option<Rect> {
+        match sync(reconciler) {
+            Sync::Settled { acked, .. } => Some(acked),
+            _ => None,
+        }
+    }
+
+    fn refused(reconciler: &Reconciler) -> Option<(Rect, Rect)> {
+        match sync(reconciler) {
+            Sync::Refused { wanted, got, .. } => Some((wanted, got)),
+            _ => None,
+        }
+    }
 
     #[test]
     fn a_window_its_app_has_where_layout_wants_it_is_not_written() {
@@ -825,7 +872,7 @@ mod tests {
             ),
             (Reply::Answered(Answer::Acked), None)
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(30.) });
+        assert_eq!(settled(&reconciler), Some(at(30.)));
     }
 
     #[test]
@@ -866,10 +913,7 @@ mod tests {
             ),
             (Reply::Answered(Answer::Refused), None)
         );
-        assert_eq!(sync(&reconciler), Sync::Refused {
-            wanted: at(10.),
-            got: at(14.)
-        });
+        assert_eq!(refused(&reconciler), Some((at(10.), at(14.))));
         for _ in 0..3 {
             assert_eq!(want(&mut reconciler, T0, at(10.), at(14.)), Verdict::Nothing);
         }
@@ -905,7 +949,7 @@ mod tests {
                 .0,
             Reply::Foreign
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(90.) });
+        assert_eq!(settled(&reconciler), Some(at(90.)));
         assert_eq!(sent(want(&mut reconciler, T0, at(10.), at(90.))), at(10.));
     }
 
@@ -926,7 +970,7 @@ mod tests {
         // either write.
         let t2 = t1 + WRITE_DEADLINE;
         assert!(reconciler.expire(t2, R, |_| Some(Owner::Rift)).is_empty());
-        assert_eq!(sync(&reconciler), Sync::Refused { wanted: at(20.), got: at(0.) });
+        assert_eq!(refused(&reconciler), Some((at(20.), at(0.))));
         // Its answer, when it comes, is news (the model had it where the app acknowledged it).
         assert_eq!(
             reconciler.observe(
@@ -956,7 +1000,7 @@ mod tests {
                 .0,
             Reply::Foreign
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(20.) });
+        assert_eq!(settled(&reconciler), Some(at(20.)));
     }
 
     #[test]
@@ -965,7 +1009,7 @@ mod tests {
         reconciler.distrust(window());
         _ = want(&mut reconciler, T0, at(10.), at(0.));
         assert!(reconciler.expire(later(WRITE_DEADLINE), R, |_| Some(Owner::Rift)).is_empty());
-        assert_eq!(sync(&reconciler), Sync::Unknown);
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
     }
 
     #[test]
@@ -1008,7 +1052,7 @@ mod tests {
                 .0,
             Reply::NoNews
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(10.) });
+        assert_eq!(settled(&reconciler), Some(at(10.)));
         assert_eq!(want(&mut reconciler, T0, at(10.), at(10.)), Verdict::Nothing);
     }
 
@@ -1019,7 +1063,7 @@ mod tests {
             reconciler.want(T0, R, window(), at(50.), at(50.), Want::Arrange, Owner::User),
             Verdict::Nothing
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(10.) });
+        assert_eq!(settled(&reconciler), Some(at(10.)));
         assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(50.))), at(50.));
     }
 
@@ -1059,7 +1103,7 @@ mod tests {
                 .0,
             Reply::Foreign
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(70.) });
+        assert_eq!(settled(&reconciler), Some(at(70.)));
         // The answer to the abandoned write is not Rift's to wait for: news, where it says.
         assert_eq!(
             reconciler.observe(
@@ -1074,7 +1118,7 @@ mod tests {
             ),
             (Reply::Foreign, None)
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(10.) });
+        assert_eq!(settled(&reconciler), Some(at(10.)));
     }
 
     #[test]
@@ -1103,10 +1147,7 @@ mod tests {
             ),
             (Reply::Answered(Answer::Refused), None)
         );
-        assert_eq!(sync(&reconciler), Sync::Refused {
-            wanted: at(10.),
-            got: at(13.)
-        });
+        assert_eq!(refused(&reconciler), Some((at(10.), at(13.))));
     }
 
     #[test]
@@ -1256,7 +1297,7 @@ mod tests {
                 .0,
             Reply::Foreign
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(30.) });
+        assert_eq!(settled(&reconciler), Some(at(30.)));
         // A report on the target settles it.
         assert_eq!(
             reconciler.animate(T0, R, window(), at(100.), at(30.), Owner::Rift),
@@ -1277,7 +1318,7 @@ mod tests {
                 .0,
             Reply::NoNews
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(100.) });
+        assert_eq!(settled(&reconciler), Some(at(100.)));
     }
 
     #[test]
@@ -1311,10 +1352,10 @@ mod tests {
             Owner::Rift,
             Holder::Nobody,
         );
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(100.) });
+        assert_eq!(settled(&reconciler), Some(at(100.)));
         // Its end changes nothing any more.
         reconciler.animation_ended(T0, R);
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(100.) });
+        assert_eq!(settled(&reconciler), Some(at(100.)));
     }
 
     #[test]
@@ -1353,10 +1394,7 @@ mod tests {
             Owner::Rift,
             Holder::Nobody,
         );
-        assert_eq!(sync(&reconciler), Sync::Refused {
-            wanted: at(100.),
-            got: at(96.)
-        });
+        assert_eq!(refused(&reconciler), Some((at(100.), at(96.))));
         assert_eq!(want(&mut reconciler, T0, at(100.), at(96.)), Verdict::Nothing);
         assert_eq!(
             reconciler.animate(T0, R, window(), at(100.), at(96.), Owner::Rift),
@@ -1370,7 +1408,7 @@ mod tests {
         _ = reconciler.animate(T0, R, window(), at(100.), at(0.), Owner::Rift);
         reconciler.animation_ended(T0, R);
         assert!(reconciler.expire(later(WRITE_DEADLINE), R, |_| Some(Owner::Rift)).is_empty());
-        assert_eq!(sync(&reconciler), Sync::Unknown);
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
     }
 
     #[test]
@@ -1411,12 +1449,12 @@ mod tests {
         let mut reconciler = with(at(0.));
         _ = reconciler.animate(T0, R, window(), at(100.), at(0.), Owner::Rift);
         reconciler.animation_stopped(window(), R, at(40.));
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(40.) });
+        assert_eq!(settled(&reconciler), Some(at(40.)));
         // Ended short and waiting for its answer, which may never come: unknown.
         _ = reconciler.animate(T0, R, window(), at(100.), at(40.), Owner::Rift);
         reconciler.animation_ended(T0, R);
         reconciler.animation_stopped(window(), R, at(100.));
-        assert_eq!(sync(&reconciler), Sync::Unknown);
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
         // A write sent since is not the stopped presentation's.
         _ = want(&mut reconciler, T0, at(10.), at(100.));
         reconciler.animation_stopped(window(), OLD, at(10.));
@@ -1430,7 +1468,7 @@ mod tests {
         _ = want(&mut reconciler, T0, at(10.), at(0.));
         assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
         assert_eq!(reconciler.forget(window()), None);
-        assert_eq!(sync(&reconciler), Sync::Unknown);
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
         // So the next desire goes out, even for the dropped one's frame.
         assert_eq!(sent(want(&mut reconciler, T0, at(20.), at(20.))), at(20.));
         // A refusal: the app acknowledged `got`.
@@ -1446,7 +1484,7 @@ mod tests {
         );
         assert!(matches!(sync(&reconciler), Sync::Refused { .. }));
         assert_eq!(reconciler.forget(window()), Some(at(15.)));
-        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(15.) });
+        assert_eq!(settled(&reconciler), Some(at(15.)));
         // Settled stays settled.
         assert_eq!(reconciler.forget(window()), Some(at(15.)));
     }
