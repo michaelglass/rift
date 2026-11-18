@@ -11,7 +11,10 @@ build = "build.rs"
 # Roc nightly. rift's `roc-core` feature turns it on; alone: `cargo test -p rift-core-roc
 # --features roc`.
 [features]
-roc = []
+roc = ["dep:libmimalloc-sys"]
+# Counts Roc's allocations (AllocationCount): for the tests' leak checks only. Normal builds call
+# the allocator directly.
+count-allocations = []
 
 [[test]]
 name = "differential"
@@ -31,4 +34,9 @@ required-features = ["roc"]
 
 [dependencies]
 rift-core = { path = "../rift-core" }
+libmimalloc-sys = { version = "0.1.39", optional = true }
 
+# The tests count allocations (and need `roc`, which they require, not turn on: rift's workspace
+# builds every member's tests without the Roc nightly).
+[dev-dependencies]
+rift-core-roc = { path = ".", features = ["count-allocations"] }

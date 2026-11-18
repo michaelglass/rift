@@ -40,7 +40,7 @@ impl Rng {
 }
 
 fn constraints(rng: &mut Rng) -> WindowConstraints {
-    let mut maybe = |rng: &mut Rng, high: f64| {
+    let maybe = |rng: &mut Rng, high: f64| {
         if rng.chance(50) {
             0.
         } else {

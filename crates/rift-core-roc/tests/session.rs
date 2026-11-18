@@ -145,9 +145,10 @@ fn a_long_session_decides_the_same_and_has_no_slow_step() {
         events.len()
     );
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
-    // A busy machine can stall any one step; a cost that grows with the session stalls
-    // thousands.
+    // A busy machine stalls a step now and then (dozens in a long run under load); a cost that
+    // grows with the session stalls most of them.
     if !cfg!(debug_assertions) {
-        assert!(slow <= 10, "{slow} steps over 5 ms (slowest {slowest:?})");
+        let allowed = (events.len() / 10_000).max(10);
+        assert!(slow <= allowed, "{slow} steps over 5 ms (slowest {slowest:?})");
     }
 }
