@@ -218,6 +218,11 @@ impl<K: Kinds> RustCore<K> {
         [Effect::Write(write), seen]
     }
 
+    /// A desire waits behind the write in flight; the model takes the window to be there.
+    fn queued(&mut self, window: K::Window, desired: K::Frame) -> [Effect<K>; 2] {
+        [Effect::Queued { window }, self.see(window, desired)]
+    }
+
     /// The hand comes off whatever it holds, for `why`. A window the user dragged is where
     /// they left it, which no report during the drag acknowledged: unknown; so is any window
     /// whose model frame changed during the drag (its desires were the user's), and those are
@@ -321,12 +326,13 @@ impl<K: Kinds> RustCore<K> {
                             effects.push(Effect::Animate { window, from, to, request });
                             effects.push(self.see(window, to));
                         }
-                        Planned::Write(write) => effects.extend(self.written(write)),
-                        Planned::Queued => {
-                            effects.push(Effect::Queued { window });
-                            effects.push(self.see(window, to));
+                        Planned::Verdict(Verdict::Send(write)) => {
+                            effects.extend(self.written(write))
                         }
-                        Planned::Nothing => {}
+                        Planned::Verdict(Verdict::Queued) => {
+                            effects.extend(self.queued(window, to))
+                        }
+                        Planned::Verdict(Verdict::Nothing) => {}
                     }
                 }
                 effects
@@ -417,10 +423,7 @@ impl<K: Kinds> RustCore<K> {
                         plan.frames.push(write)
                     }
                 }
-                Verdict::Queued => {
-                    effects.push(Effect::Queued { window });
-                    effects.push(self.see(window, desired));
-                }
+                Verdict::Queued => effects.extend(self.queued(window, desired)),
                 Verdict::Nothing => {}
             }
         }

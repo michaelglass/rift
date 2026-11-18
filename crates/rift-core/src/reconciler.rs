@@ -104,16 +104,13 @@ pub enum Want {
 }
 
 /// What an animated layout pass does with one window's desire.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Planned<K: Kinds> {
     /// Animate it there.
     Animate,
-    /// Write it there instead (where the app has it is unknown).
-    Write(Write<K>),
-    /// Write it there after the write in flight (queued behind it).
-    Queued,
-    /// It is there, on its way there, refused to go there, or is the user's.
-    Nothing,
+    /// Treat it as a desire instead: where the app has the window is unknown, or a write is
+    /// with the app (the animation's frames could overtake it and be undone by it).
+    Verdict(Verdict<K>),
 }
 
 /// What the reconciler made of a desire.
@@ -672,33 +669,22 @@ impl<K: Kinds> Reconciler<K> {
         owner: Owner,
     ) -> Planned<K> {
         let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
-            return Planned::Nothing;
+            return Planned::Verdict(Verdict::Nothing);
         };
         // Where the window is taken to be: what is pending for it, else where the model sees it.
         let already = match sync {
-            // A write is with the app: the desire goes after it, as a write. (An animation's
-            // frames could overtake the write and be undone by it.)
-            Sync::InFlight { .. } => {
-                return match self.want(now, request, window, desired, owner) {
-                    Verdict::Queued => Planned::Queued,
-                    Verdict::Send(write) => Planned::Write(write),
-                    Verdict::Nothing => Planned::Nothing,
-                };
+            // A write is with the app: the desire goes after it, as a write. Where the app has
+            // the window is unknown: the desire is written, once, so that what the app makes of
+            // it (a refusal, say) is known (an animation may never land).
+            Sync::InFlight { .. } | Sync::Unknown { .. } => {
+                return Planned::Verdict(self.want(now, request, window, desired, owner));
             }
             Sync::Animating { target, .. } => K::same_as(target, desired),
             Sync::Refused { wanted, .. } => K::same_as(wanted, desired),
             Sync::Settled { .. } => K::same_as(known, desired),
-            // Where the app has it is unknown: the desire is written, once, so that what the
-            // app makes of it (a refusal, say) is known. (An animation may never land.)
-            Sync::Unknown { .. } => {
-                return match self.want(now, request, window, desired, owner) {
-                    Verdict::Send(write) => Planned::Write(write),
-                    Verdict::Queued | Verdict::Nothing => Planned::Nothing,
-                };
-            }
         };
         match (owner, already) {
-            (Owner::User, _) | (Owner::Rift, true) => Planned::Nothing,
+            (Owner::User, _) | (Owner::Rift, true) => Planned::Verdict(Verdict::Nothing),
             (Owner::Rift, false) => {
                 self.set(window, Sync::Animating { target: desired, request });
                 Planned::Animate
@@ -1183,12 +1169,12 @@ mod tests {
         let mut reconciler = with(at(0.));
         assert_eq!(
             seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(0.), Owner::Rift),
-            Planned::Nothing,
+            Planned::Verdict(Verdict::Nothing),
             "already there"
         );
         assert_eq!(
             seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(10.), Owner::User),
-            Planned::Nothing,
+            Planned::Verdict(Verdict::Nothing),
             "the user's"
         );
         assert_eq!(
@@ -1202,14 +1188,14 @@ mod tests {
         // Pending already: the same target again is nothing.
         assert_eq!(
             seen_at(&mut reconciler, at(10.)).animate(T0, OLD, window(), at(10.), Owner::Rift),
-            Planned::Nothing
+            Planned::Verdict(Verdict::Nothing)
         );
         // Unknown: the model's frame says nothing about the app's, so the desire is written,
         // even there.
         reconciler.distrust(window());
         assert!(matches!(
             seen_at(&mut reconciler, at(10.)).animate(T0, R, window(), at(10.), Owner::Rift),
-            Planned::Write(write) if write.frame() == at(10.)
+            Planned::Verdict(Verdict::Send(write)) if write.frame() == at(10.)
         ));
     }
 
@@ -1336,7 +1322,7 @@ mod tests {
         assert_eq!(want(&mut reconciler, T0, at(100.), at(96.)), Verdict::Nothing);
         assert_eq!(
             seen_at(&mut reconciler, at(96.)).animate(T0, R, window(), at(100.), Owner::Rift),
-            Planned::Nothing
+            Planned::Verdict(Verdict::Nothing)
         );
     }
 
@@ -1369,12 +1355,12 @@ mod tests {
         _ = want(&mut reconciler, T0, at(10.), at(0.));
         assert_eq!(
             seen_at(&mut reconciler, at(10.)).animate(T0, R, window(), at(10.), Owner::Rift),
-            Planned::Nothing,
+            Planned::Verdict(Verdict::Nothing),
             "on its way there"
         );
         assert_eq!(
             seen_at(&mut reconciler, at(10.)).animate(T0, R, window(), at(30.), Owner::Rift),
-            Planned::Queued
+            Planned::Verdict(Verdict::Queued)
         );
         assert!(
             matches!(sync(&reconciler), Sync::InFlight { queued: Some(q), .. } if q == at(30.))
