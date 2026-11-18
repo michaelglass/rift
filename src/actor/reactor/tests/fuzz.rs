@@ -20,7 +20,7 @@ use test_log::test;
 
 use super::*;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::actor::reactor::reconciler::{Desired, Rift, Sync, Want};
+use crate::actor::reactor::reconciler::{Desired, Rift, Sync};
 use crate::actor::reactor::testing::TestSizing;
 
 /// Signatures (invariant, step kind) this branch is known to fail. Each has a regression test.
@@ -265,17 +265,17 @@ struct Sim {
     pending: Vec<Request>,
     /// The window whose frame this step reported somewhere new.
     moved: Option<WindowId>,
-    /// Before this step, for each window rift took to be settled: where rift knew it to be,
-    /// and where it really was.
+    /// Before this step, for each window rift took to be settled: where its app had it as far
+    /// as rift knew (acknowledged), and where it really was.
     settled_before: BTreeMap<WindowId, (CGRect, CGRect)>,
     /// The window rift took to be dragged before this step.
     dragged_before: Option<WindowId>,
     /// Windows whose unanswered writes rift has stopped waiting for: someone else moved the
     /// window, a modifier drag took it, or the deadline passed.
     gave_up: BTreeSet<WindowId>,
-    /// Windows this step placed: written whatever rift believed (`Want::Place`), as the core's
-    /// trace shows.
-    placed: BTreeSet<WindowId>,
+    /// Windows whose acknowledged frame rift stopped trusting this step (a display change, or
+    /// the end of the user's drag), as the core's trace shows: written whatever it was.
+    distrusted: BTreeSet<WindowId>,
 }
 
 fn display_count(seed: u64) -> usize { 2 + (seed % 2) as usize }
@@ -344,7 +344,7 @@ impl Sim {
             settled_before: BTreeMap::new(),
             dragged_before: None,
             gave_up: BTreeSet::new(),
-            placed: BTreeSet::new(),
+            distrusted: BTreeSet::new(),
         }
     }
 
@@ -407,16 +407,15 @@ impl Sim {
     /// Runs one step. Returns the requests rift emitted while handling it.
     fn run(&mut self, step: Step) -> Vec<Request> {
         self.moved = None;
-        self.placed.clear();
+        self.distrusted.clear();
         let traced = self.core_steps();
         self.dragged_before = dragged(&self.reactor);
         self.settled_before = self
             .live
             .iter()
-            .filter(|&&wid| self.reactor.state.core.sync(wid) == Sync::Settled)
-            .filter_map(|&wid| {
-                let known = self.reactor.state.windows.window(wid)?.frame_monotonic;
-                Some((wid, (known, self.os_frame(wid))))
+            .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
+                Sync::Settled { acked } => Some((wid, (acked, self.os_frame(wid)))),
+                Sync::Unknown | Sync::InFlight { .. } | Sync::Refused { .. } => None,
             })
             .collect();
         match step {
@@ -621,20 +620,26 @@ impl Sim {
 
     /// What the core decided since step `from` that the invariants need: a modifier drag's
     /// interactive frame, or the core forgetting a window, ends rift's wait for it; and a
-    /// placement is written whatever rift believed.
+    /// window whose acknowledged frame rift stopped trusting (a display change, a drag's end) is
+    /// written whatever it was.
     fn read_core_steps(&mut self, from: usize) {
         let trace = self.reactor.state.core.trace.borrow();
         for (event, effects) in &trace.as_ref().expect("recording")[from..] {
-            let wrote =
-                || effects.iter().any(|effect| matches!(effect, rift_core::Effect::Write(_)));
             match event {
                 // A modifier drag took the window, or something outside the core (a topology
                 // change, an animation) did: either way rift stopped waiting for its write.
                 rift_core::Event::Follow { window, .. } | rift_core::Event::Forget { window } => {
                     _ = self.gave_up.insert(*window)
                 }
-                rift_core::Event::Want { window, want: Want::Place, .. } if wrote() => {
-                    _ = self.placed.insert(*window)
+                rift_core::Event::Distrust { windows } => self.distrusted.extend(windows),
+                _ if effects
+                    .iter()
+                    .any(|effect| matches!(effect, rift_core::Effect::Ungrip { .. })) =>
+                {
+                    self.distrusted.extend(effects.iter().filter_map(|effect| match effect {
+                        rift_core::Effect::Ungrip { window, .. } => Some(*window),
+                        _ => None,
+                    }))
                 }
                 _ => {}
             }
@@ -763,7 +768,7 @@ impl Sim {
             // 6. Only the reconciler writes: what rift sent is what the reconciler has in
             // flight. (A write it stopped waiting for within the same step is the exception.)
             match self.reactor.state.core.sync(wid) {
-                Sync::InFlight { target, .. } => {
+                Some(Sync::InFlight { target, .. }) => {
                     if !frame.same_as(target) {
                         return fail(
                             "only-the-reconciler-writes",
@@ -771,7 +776,7 @@ impl Sim {
                         );
                     }
                 }
-                Sync::Settled | Sync::Refused { .. } | Sync::Adrift => {
+                None | Some(Sync::Settled { .. } | Sync::Refused { .. } | Sync::Unknown) => {
                     if self.moved != Some(wid) && !matches!(step, Step::Tick) {
                         return fail(
                             "only-the-reconciler-writes",
@@ -798,7 +803,7 @@ impl Sim {
                     | Step::Refresh { .. }
             );
             if !placed
-                && !self.placed.contains(&wid)
+                && !self.distrusted.contains(&wid)
                 && self.moved != Some(wid)
                 && let Some((known, real)) = self.settled_before.get(&wid)
                 && known.same_as(frame)
@@ -890,8 +895,10 @@ impl Sim {
                 let sync = self.reactor.state.core.sync(wid);
                 let observed = self.os_frame(wid);
                 let refused = match sync {
-                    Sync::Refused { .. } => true,
-                    Sync::Settled | Sync::InFlight { .. } | Sync::Adrift => false,
+                    Some(Sync::Refused { .. }) => true,
+                    None | Some(Sync::Settled { .. } | Sync::InFlight { .. } | Sync::Unknown) => {
+                        false
+                    }
                 };
                 if !refused && !observed.same_as(frame) {
                     return Err(fail(format!(

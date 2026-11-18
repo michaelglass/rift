@@ -1136,7 +1136,8 @@ impl AnimationManager {
     /// Restore native geometry after a display change invalidated cached frames.
     pub fn reapply_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
         reactor.cancel_window_presentations(desired.windows());
-        reactor.arrange_frames(space, desired.frames(), Want::Place)
+        reactor.state.distrust(desired.windows());
+        reactor.arrange_frames(space, desired.frames(), Want::Arrange)
     }
 }
 

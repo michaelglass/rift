@@ -48,7 +48,7 @@ fn sync_existing_window_state(
         return Ok(crate::actor::reactor::events::EventOutcome::default());
     }
     if let Some(frame) = seen {
-        state.seen(wid, frame);
+        state.found(wid, frame);
     }
 
     let mut admission_changed = false;
