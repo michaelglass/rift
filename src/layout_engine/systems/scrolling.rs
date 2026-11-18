@@ -230,19 +230,21 @@ pub struct ViewportRelease {
 /// A column in world space and its anchor, as the core placed it.
 type ColumnGeometry = scrolling::Spot<ColumnId>;
 
-/// A camera resting position and the column it shows, as the core found it.
-type SnapPoint = scrolling::Snap<ColumnId>;
-
 #[derive(Clone, Debug)]
 struct Geometry {
     screen: CGRect,
     tiling: CGRect,
     gaps: GapSettings,
     constraints: HashMap<WindowId, WindowLayoutConstraints>,
-    columns: Vec<ColumnGeometry>,
-    frames: Vec<(WindowId, CGRect)>,
-    bounds: (f64, f64),
-    snaps: Vec<SnapPoint>,
+    strip: StripGeometry,
+}
+
+/// Where a strip's columns and windows went: nowhere (no active window), or where the core
+/// placed them.
+#[derive(Clone, Debug)]
+enum StripGeometry {
+    Empty,
+    Placed(scrolling::Placed<WindowId, ColumnId>),
 }
 
 /// Prepared world frames and temporary camera motion. Built only at semantic
@@ -379,28 +381,6 @@ fn clamp_ratio(ratio: f64, settings: &ScrollingLayoutSettings) -> f64 {
     widths(settings).clamp(ratio)
 }
 
-// Adapted from niri's compute_new_view_offset, using an absolute camera.
-// Rift's outer gaps already reserve padding, including at both strip boundaries.
-fn fit_offset(current: f64, view: f64, column: ColumnGeometry) -> f64 {
-    let left = column.world_x;
-    if column.width >= view {
-        return left;
-    }
-    current.clamp(left + column.width - view, left)
-}
-
-/// The columns after `id`, in the order `columns` walks them.
-fn columns_past<'a>(
-    columns: impl Iterator<Item = &'a ColumnGeometry>,
-    id: ColumnId,
-) -> impl Iterator<Item = &'a ColumnGeometry> {
-    columns.skip_while(move |column| column.id != id).skip(1)
-}
-
-fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
-    column.world_x - (view - column.width).max(0.0) / 2.0
-}
-
 impl Geometry {
     fn build(
         state: &LayoutState,
@@ -416,10 +396,7 @@ impl Geometry {
             tiling,
             gaps,
             constraints,
-            columns: Vec::new(),
-            frames: Vec::new(),
-            bounds: (0.0, 0.0),
-            snaps: Vec::new(),
+            strip: StripGeometry::Empty,
         };
         // The strip as the core sees it: active windows only, a column with none left out.
         let mut columns = state.columns.iter().filter_map(|column| {
@@ -468,15 +445,56 @@ impl Geometry {
             rest: columns.collect(),
         };
         let placed = place_strip(&strip, |id: ColumnId| id.0);
-        geometry.columns = std::iter::once(placed.first).chain(placed.rest).collect();
-        geometry.frames = placed
-            .frames
-            .into_iter()
-            .map(|(window, frame)| (window, cg_rect(frame)))
-            .collect();
-        geometry.snaps = std::iter::once(placed.snaps.0).chain(placed.snaps.1).collect();
-        geometry.bounds = placed.bounds;
+        geometry.strip = StripGeometry::Placed(placed);
         geometry
+    }
+
+    /// The leftmost and rightmost resting positions (0 for an empty strip).
+    fn bounds(&self) -> (f64, f64) {
+        match &self.strip {
+            StripGeometry::Empty => (0.0, 0.0),
+            StripGeometry::Placed(placed) => placed.bounds,
+        }
+    }
+
+    /// Each window's world frame, in strip order.
+    fn frames(&self) -> impl Iterator<Item = (WindowId, CGRect)> + '_ {
+        let frames = match &self.strip {
+            StripGeometry::Empty => [].as_slice(),
+            StripGeometry::Placed(placed) => placed.frames.as_slice(),
+        };
+        frames.iter().map(|&(window, frame)| (window, cg_rect(frame)))
+    }
+
+    /// The strip's column, if it has exactly one.
+    fn only_column(&self) -> Option<ColumnGeometry> {
+        match &self.strip {
+            StripGeometry::Placed(placed) if placed.rest.is_empty() => Some(placed.first),
+            StripGeometry::Placed(_) | StripGeometry::Empty => None,
+        }
+    }
+
+    /// Where the camera settles after a release (nowhere for an empty strip).
+    fn settle(
+        &self,
+        projected: f64,
+        from: f64,
+        how: scrolling::Settle<ColumnId>,
+    ) -> Option<scrolling::Settled<ColumnId>> {
+        match &self.strip {
+            StripGeometry::Empty => None,
+            StripGeometry::Placed(placed) => {
+                Some(placed.settle(self.tiling.size.width, projected, from, how))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_bounds(&mut self, bounds: (f64, f64)) {
+        match &mut self.strip {
+            StripGeometry::Placed(placed) => placed.bounds = bounds,
+            StripGeometry::Empty => panic!("an empty strip has no bounds to set"),
+        }
     }
 
     fn matches(
@@ -489,7 +507,10 @@ impl Geometry {
     }
 
     fn column(&self, id: ColumnId) -> Option<ColumnGeometry> {
-        self.columns.iter().find(|c| c.id == id).copied()
+        match &self.strip {
+            StripGeometry::Empty => None,
+            StripGeometry::Placed(placed) => placed.spot(id),
+        }
     }
 }
 
@@ -596,7 +617,7 @@ impl Serialize for LayoutState {
         let offset = if matches!(self.viewport, Viewport::Gesture(_) | Viewport::Animation(_)) {
             self.geometry
                 .as_ref()
-                .map_or(current, |g| current.clamp(g.bounds.0, g.bounds.1))
+                .map_or(current, |g| current.clamp(g.bounds().0, g.bounds().1))
         } else {
             current
         };
@@ -797,7 +818,7 @@ impl LayoutState {
         self.reconcile_camera_bounds();
         if initial {
             self.viewport = Viewport::Static(0.0);
-            if let [only] = self.geometry.as_ref().unwrap().columns.as_slice() {
+            if let Some(only) = self.geometry.as_ref().unwrap().only_column() {
                 self.viewport = Viewport::Static(only.anchor);
             } else {
                 self.reveal(settings);
@@ -808,7 +829,7 @@ impl LayoutState {
 
     fn reconcile_camera_bounds(&mut self) {
         if let (Viewport::Animation(spring), Some(g)) = (&mut self.viewport, &self.geometry) {
-            let target = spring.target.clamp(g.bounds.0, g.bounds.1);
+            let target = spring.target.clamp(g.bounds().0, g.bounds().1);
             if target != spring.target {
                 let now = Instant::now().max(spring.sampled);
                 let (_, velocity) = spring.position_velocity(now);
@@ -839,11 +860,8 @@ impl LayoutState {
             && let Some(column) = g.column(bookmark.column)
         {
             let view = g.tiling.size.width;
-            self.viewport.set_target(fit_offset(
-                column.world_x + bookmark.relative_offset,
-                view,
-                column,
-            ));
+            self.viewport
+                .set_target(column.fit(column.world_x + bookmark.relative_offset, view));
         }
         true
     }
@@ -862,7 +880,7 @@ impl LayoutState {
                 Viewport::Animation(s) => s.target,
                 _ => self.viewport.offset(),
             };
-            fit_offset(target, g.tiling.size.width, column)
+            column.fit(target, g.tiling.size.width)
         };
         if matches!(&self.viewport, Viewport::Animation(s) if s.target == offset) {
             return;
@@ -1125,7 +1143,7 @@ impl ScrollingLayoutSystem {
         park: bool,
     ) -> impl Iterator<Item = (WindowId, CGRect)> + 'a {
         let offset = state.viewport.offset();
-        g.frames.iter().map(move |&(wid, mut frame)| {
+        g.frames().map(move |(wid, mut frame)| {
             frame = translate_frame(frame, offset, g.tiling, g.screen, park);
             frame = frame.round();
             if state.fullscreen.contains(&wid) {
@@ -1148,15 +1166,14 @@ impl ScrollingLayoutSystem {
         let camera = ViewportPresentation {
             viewport: state.viewport.clone(),
             motion: Arc::new(Mutex::new(motion)),
-            bounds: g.bounds,
+            bounds: g.bounds(),
             width: g.tiling.size.width,
             tiling: g.tiling,
             screen: g.screen,
         };
         let frames = g
-            .frames
-            .iter()
-            .map(|&(wid, frame)| {
+            .frames()
+            .map(|(wid, frame)| {
                 if state.fullscreen.contains(&wid) {
                     (wid, g.screen, true)
                 } else if state.fullscreen_within_gaps.contains(&wid) {
@@ -1207,11 +1224,11 @@ impl ScrollingLayoutSystem {
         let column = state.columns.get(state.active_column).and_then(|c| g.column(c.id))?;
         let step = column.width + g.gaps.inner.horizontal;
         let raw = state.viewport.offset() + delta * step;
-        state.viewport.set_target(raw.clamp(g.bounds.0, g.bounds.1));
-        if raw < g.bounds.0 {
-            Some((Direction::Left, (g.bounds.0 - raw) / step))
-        } else if raw > g.bounds.1 {
-            Some((Direction::Right, (raw - g.bounds.1) / step))
+        state.viewport.set_target(raw.clamp(g.bounds().0, g.bounds().1));
+        if raw < g.bounds().0 {
+            Some((Direction::Left, (g.bounds().0 - raw) / step))
+        } else if raw > g.bounds().1 {
+            Some((Direction::Right, (raw - g.bounds().1) / step))
         } else {
             None
         }
@@ -1258,7 +1275,7 @@ impl ScrollingLayoutSystem {
             return None;
         };
         let g = state.geometry.as_ref()?;
-        state.motion.update(offset, g.bounds, delta, timestamp)
+        state.motion.update(offset, g.bounds(), delta, timestamp)
     }
 
     /// Normalize only at the layout boundary, using cached working geometry.
@@ -1306,8 +1323,10 @@ impl ScrollingLayoutSystem {
             && matches!(state.viewport, Viewport::Gesture(_) | Viewport::Animation(_))
         {
             let offset = state.viewport.offset();
-            let offset =
-                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
+            let offset = state
+                .geometry
+                .as_ref()
+                .map_or(offset, |g| offset.clamp(g.bounds().0, g.bounds().1));
             state.viewport = Viewport::Static(offset);
             state.motion = MotionHistory::default();
         }
@@ -1334,41 +1353,15 @@ impl ScrollingLayoutSystem {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
         let from_offset = state.viewport.offset();
-        let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
-        let snap = g.snaps.iter().min_by(|a, b| {
-            (a.offset - projected)
-                .abs()
-                .total_cmp(&(b.offset - projected).abs())
-                .then_with(|| {
-                    if niri {
-                        // Niri sorts snaps by position before nearest-point selection.
-                        a.offset.total_cmp(&b.offset)
-                    } else {
-                        let active = state.columns[state.active_column].id;
-                        (gesture_release && a.column != active)
-                            .cmp(&(gesture_release && b.column != active))
-                    }
-                })
-        })?;
-        let mut target = snap.column;
-        if niri {
-            // Choose the furthest fully visible column
-            // in the direction of travel.
-            target = if projected >= from_offset {
-                columns_past(g.columns.iter(), snap.column)
-                    .take_while(|column| {
-                        column.world_x + column.width <= snap.offset + g.tiling.size.width
-                    })
-                    .last()
-                    .map_or(target, |column| column.id)
-            } else {
-                columns_past(g.columns.iter().rev(), snap.column)
-                    .take_while(|column| column.world_x >= snap.offset)
-                    .last()
-                    .map_or(target, |column| column.id)
-            };
-        }
-        let offset = snap.offset;
+        let how = match self.settings.focus_navigation_style {
+            ScrollingFocusNavigationStyle::Niri => scrolling::Settle::Niri,
+            ScrollingFocusNavigationStyle::Anchored if gesture_release => {
+                scrolling::Settle::AnchoredTowards(state.columns[state.active_column].id)
+            }
+            ScrollingFocusNavigationStyle::Anchored => scrolling::Settle::Anchored,
+        };
+        let scrolling::Settled { column: target, offset } =
+            g.settle(projected, from_offset, how)?;
         let canonical_index = state.columns.iter().position(|c| c.id == target)?;
         if canonical_index != state.active_column {
             state.fullscreen_restore = None;
@@ -1397,7 +1390,7 @@ impl ScrollingLayoutSystem {
             && let Some(column) =
                 state.columns.get(state.active_column).and_then(|c| g.column(c.id))
         {
-            state.viewport.set_target(centered_offset(g.tiling.size.width, column));
+            state.viewport.set_target(column.centered(g.tiling.size.width));
         }
     }
 
@@ -1537,7 +1530,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else if matches!(state.viewport, Viewport::Animation(_)) {
             let offset = state.viewport.offset();
             state.viewport = Viewport::Static(
-                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1)),
+                state
+                    .geometry
+                    .as_ref()
+                    .map_or(offset, |g| offset.clamp(g.bounds().0, g.bounds().1)),
             );
         }
         self.layouts.insert(state)
@@ -3246,7 +3242,7 @@ pub(crate) mod tests {
     fn gesture_edges_reverse_while_remaining_bounded() {
         for direction in [-1.0, 1.0] {
             let mut f = Fixture::new(4);
-            let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
+            let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds();
             let edge = if direction < 0.0 { bounds.0 } else { bounds.1 };
             f.system.layouts[f.layout].viewport = Viewport::Static(edge);
             assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
@@ -3565,7 +3561,7 @@ pub(crate) mod tests {
         let position = spring.current;
         let (_, velocity) = spring.position_velocity(sampled);
         state.viewport = Viewport::Animation(spring);
-        state.geometry.as_mut().unwrap().bounds = (0.0, 300.0);
+        state.geometry.as_mut().unwrap().set_bounds((0.0, 300.0));
         state.reconcile_camera_bounds();
         let Viewport::Animation(spring) = &state.viewport else {
             panic!("spring");
@@ -3679,7 +3675,7 @@ pub(crate) mod tests {
             let state = &f.system.layouts[f.layout];
             let g = state.geometry.as_ref().unwrap();
             assert!(
-                matches!(state.viewport, Viewport::Static(x) if (g.bounds.0..=g.bounds.1).contains(&x))
+                matches!(state.viewport, Viewport::Static(x) if (g.bounds().0..=g.bounds().1).contains(&x))
             );
         }
     }

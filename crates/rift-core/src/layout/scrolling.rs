@@ -3,6 +3,8 @@
 //! owns the columns and the camera; for each arrange it describes the strip it has (its active
 //! windows only) and the core computes where everything goes.
 
+use std::cmp::Ordering;
+
 use super::WindowConstraints;
 use super::axis::{AxisConstraints, solve_axis_lengths};
 use crate::plain::Rect;
@@ -106,6 +108,25 @@ pub struct Spot<C> {
 pub struct Snap<C> {
     pub offset: f64,
     pub column: C,
+}
+
+/// How the camera settles on a resting point after a release, and which wins a tie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle<C> {
+    /// Free navigation (niri): a tie goes to the leftmost point, and the column shown is the
+    /// furthest wholly in view in the direction of travel.
+    Niri,
+    /// Anchored: a tie goes to the earlier point.
+    Anchored,
+    /// Anchored, after a gesture: a tie goes to a point showing the active column.
+    AnchoredTowards(C),
+}
+
+/// Where the camera settles, and the column it shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Settled<C> {
+    pub column: C,
+    pub offset: f64,
 }
 
 /// A column's place among the strip's columns, which decides its anchor.
@@ -294,7 +315,7 @@ impl<W: Copy, C: Copy> Strip<W, C> {
             Position::Last => right,
             Position::Only | Position::Middle => match self.alignment {
                 Alignment::Left => left,
-                Alignment::Center => world_x - (view - width).max(0.0) / 2.0,
+                Alignment::Center => centered(world_x, width, view),
                 Alignment::Right => right,
             },
         }
@@ -382,6 +403,84 @@ impl<W, C> Placed<W, C> {
             bounds: self.bounds,
         }
     }
+}
+
+/// The offset that centres a column `width` wide at `world_x` in the view (its left edge if
+/// it is wider).
+fn centered(world_x: f64, width: f64, view: f64) -> f64 { world_x - (view - width).max(0.0) / 2.0 }
+
+impl<C> Spot<C> {
+    /// The offset nearest `current` that shows the whole column (its left edge if it is wider
+    /// than the view). Adapted from niri's compute_new_view_offset, on an absolute camera.
+    pub fn fit(&self, current: f64, view: f64) -> f64 {
+        let left = self.world_x;
+        if self.width >= view {
+            return left;
+        }
+        current.clamp(left + self.width - view, left)
+    }
+
+    /// The offset that centres the column in the view.
+    pub fn centered(&self, view: f64) -> f64 { centered(self.world_x, self.width, view) }
+}
+
+impl<W, C: Copy + PartialEq> Placed<W, C> {
+    /// Every column's spot, in strip order.
+    pub fn spots(&self) -> impl DoubleEndedIterator<Item = &Spot<C>> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    /// The spot of the column `id`, if the strip has it.
+    pub fn spot(&self, id: C) -> Option<Spot<C>> { self.spots().find(|s| s.id == id).copied() }
+
+    /// Where the camera settles when a release would carry it to `projected` from `from`: the
+    /// resting point nearest `projected` (ties as `how` says), showing its column or, for niri,
+    /// the furthest column wholly in view in the direction of travel.
+    pub fn settle(&self, view: f64, projected: f64, from: f64, how: Settle<C>) -> Settled<C> {
+        let compare = |a: &Snap<C>, b: &Snap<C>| {
+            (a.offset - projected)
+                .abs()
+                .total_cmp(&(b.offset - projected).abs())
+                .then_with(|| {
+                    match how {
+                        // Niri sorts its points by position before choosing the nearest.
+                        Settle::Niri => a.offset.total_cmp(&b.offset),
+                        Settle::Anchored => Ordering::Equal,
+                        Settle::AnchoredTowards(active) => {
+                            (a.column != active).cmp(&(b.column != active))
+                        }
+                    }
+                })
+        };
+        // The first nearest point (as Iterator::min_by): a later one wins only if nearer.
+        let snap = self.snaps.1.iter().fold(&self.snaps.0, |best, snap| {
+            if compare(best, snap) == Ordering::Greater {
+                snap
+            } else {
+                best
+            }
+        });
+        let column = match how {
+            Settle::Anchored | Settle::AnchoredTowards(_) => snap.column,
+            Settle::Niri if projected >= from => past(self.spots(), snap.column)
+                .take_while(|spot| spot.world_x + spot.width <= snap.offset + view)
+                .last()
+                .map_or(snap.column, |spot| spot.id),
+            Settle::Niri => past(self.spots().rev(), snap.column)
+                .take_while(|spot| spot.world_x >= snap.offset)
+                .last()
+                .map_or(snap.column, |spot| spot.id),
+        };
+        Settled { column, offset: snap.offset }
+    }
+}
+
+/// The spots after the column `id`, in the order `spots` walks them.
+fn past<'a, C: Copy + PartialEq + 'a>(
+    spots: impl Iterator<Item = &'a Spot<C>>,
+    id: C,
+) -> impl Iterator<Item = &'a Spot<C>> {
+    spots.skip_while(move |spot| spot.id != id).skip(1)
 }
 
 impl Position {
@@ -536,5 +635,73 @@ mod tests {
         let mut s = strip(Navigation::Free, vec![column(1, Width::Fixed(300.), &[1])]);
         s.first.first.constraints.sizing = Sizing::new(true, false, Size::reported(450., 0.));
         assert_eq!(s.place().first.width, 450.);
+    }
+
+    fn narrow(navigation: Navigation) -> Placed<u32, u32> {
+        strip(navigation, vec![
+            column(1, Width::Fixed(300.), &[1]),
+            column(2, Width::Fixed(300.), &[2]),
+            column(3, Width::Fixed(300.), &[3]),
+        ])
+        .place()
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_earlier_point_the_active_column_or_the_leftmost_as_settle_says() {
+        // Anchored points 0 (column 1), -40 (2), -80 (3); -20 is as near 0 as -40.
+        let placed = narrow(Navigation::Anchored);
+        let settle = |how| placed.settle(VIEW.w, -20., 0., how);
+        assert_eq!(settle(Settle::Anchored), Settled { column: 1, offset: 0. });
+        assert_eq!(settle(Settle::AnchoredTowards(2)), Settled {
+            column: 2,
+            offset: -40.
+        });
+        assert_eq!(settle(Settle::AnchoredTowards(3)), Settled {
+            column: 1,
+            offset: 0.
+        });
+        // Niri takes the leftmost, -40, then walks back to the furthest column wholly in view.
+        assert_eq!(settle(Settle::Niri), Settled { column: 1, offset: -40. });
+    }
+
+    #[test]
+    fn niri_shows_the_furthest_column_wholly_in_view_in_the_direction_of_travel() {
+        // Free points: 0 (column 1) and the right end -80 (column 3); all three fit the view.
+        let placed = narrow(Navigation::Free);
+        assert_eq!(placed.settle(VIEW.w, 0., -50., Settle::Niri), Settled {
+            column: 3,
+            offset: 0.
+        });
+        assert_eq!(placed.settle(VIEW.w, -80., 0., Settle::Niri), Settled {
+            column: 1,
+            offset: -80.
+        });
+        // Wide columns: the nearest point's column is the only one wholly in view.
+        let wide = strip(Navigation::Free, vec![
+            column(1, Width::Fixed(600.), &[1]),
+            column(2, Width::Fixed(600.), &[2]),
+            column(3, Width::Fixed(600.), &[3]),
+        ])
+        .place();
+        assert_eq!(wide.settle(VIEW.w, 415., 0., Settle::Niri), Settled {
+            column: 2,
+            offset: 610.
+        });
+        assert_eq!(wide.settle(VIEW.w, 415., 900., Settle::Niri), Settled {
+            column: 2,
+            offset: 610.
+        });
+    }
+
+    #[test]
+    fn fitting_keeps_the_camera_where_the_whole_column_shows() {
+        let placed = narrow(Navigation::Free);
+        let middle = placed.spot(2).unwrap();
+        // Column 2 spans 310..610: offsets -390..310 show it whole.
+        assert_eq!(middle.fit(100., VIEW.w), 100.);
+        assert_eq!(middle.fit(500., VIEW.w), 310.);
+        assert_eq!(middle.fit(-900., VIEW.w), -390.);
+        assert_eq!(middle.centered(VIEW.w), -40.);
+        assert_eq!(placed.spot(9), None);
     }
 }
