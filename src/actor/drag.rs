@@ -10,6 +10,7 @@ use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
 use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
+use crate::layout_engine::engine::DropPreview;
 use crate::layout_engine::{Direction, WindowDropAction};
 use crate::model::drag::TargetState;
 pub use crate::model::drag::{
@@ -138,6 +139,45 @@ impl Session {
     fn invalidate_drop(&mut self) {
         self.target = TargetState::None;
         self.unavailable.clear();
+    }
+
+    /// The space whose tiles the drag drops onto: its display's, while it moves a tiled window.
+    pub fn scene_space(&self) -> Option<SpaceId> {
+        self.source.current_space.filter(|_| self.source.tiled && !self.resizing())
+    }
+
+    /// The pointer is over `space`'s display: when that is another display, the space whose
+    /// tiles the drag then drops onto (`enter_display` takes them).
+    pub fn entering(&self, space: Option<SpaceId>) -> Option<Option<SpaceId>> {
+        (space != self.source.current_space)
+            .then(|| space.filter(|_| self.source.tiled && !self.resizing()))
+    }
+
+    /// Validates the drop the pointer is over, falling back through targets the layout can't
+    /// take. `preview` is what the layout makes of a drop, `None` when it can't take it.
+    pub(crate) fn resolve_preview(
+        &mut self,
+        window: WindowId,
+        settings: &DragDropSettings,
+        preview: impl Fn(&DropIntent) -> Option<DropPreview>,
+    ) {
+        while let Some(mut intent) = self.intent() {
+            // The source's own tile only offers moves; anything else there is no drop.
+            if intent.window == window && !matches!(intent.action, WindowDropAction::Move(_)) {
+                break;
+            }
+            let found = loop {
+                let Some(result) = preview(&intent) else { break None };
+                let action = result.action(intent.action, settings.drop_action);
+                if action == intent.action {
+                    break Some(result);
+                }
+                intent.action = action;
+            };
+            if !self.set_preview(window, settings, intent, found.map(|result| result.frame)) {
+                break;
+            }
+        }
     }
 
     /// The pointer moved onto another display (`space`, `None` off every Space): the drag now
@@ -874,6 +914,33 @@ mod tests {
             motion(&mut actor, 2100.0, 50.0);
             assert!(actor.intent().is_none());
         }
+    }
+
+    #[test]
+    fn a_preview_the_layout_cannot_take_falls_back_and_an_insert_into_its_own_slot_is_the_center_action()
+     {
+        use crate::layout_engine::engine::DropPreview;
+        // An insert that would leave the window in its slot becomes the center action.
+        let mut actor = native(true, frame(400.0, 0.0, 200.0, 100.0), scene(rect()));
+        motion(&mut actor, 1.0, 50.0);
+        assert!(matches!(
+            actor.intent().unwrap().action,
+            WindowDropAction::Insert(_)
+        ));
+        actor.resolve_preview(w(1), &settings(), |intent| {
+            Some(DropPreview {
+                frame: intent.frame,
+                same_slot: matches!(intent.action, WindowDropAction::Insert(_)),
+            })
+        });
+        let center: WindowDropAction = settings().drop_action.into();
+        assert_eq!(actor.target().unwrap().intent.action, center);
+
+        // A layout that takes nothing leaves nothing to drop onto.
+        let mut actor = native(true, frame(400.0, 0.0, 200.0, 100.0), scene(rect()));
+        motion(&mut actor, 1.0, 50.0);
+        actor.resolve_preview(w(1), &settings(), |_| None);
+        assert!(actor.target().is_none());
     }
 
     #[test]
