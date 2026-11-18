@@ -338,6 +338,10 @@ pub(crate) enum FrameSource {
 #[derive(Default)]
 struct InteractiveFrames {
     wake_pending: bool,
+    /// For each wake a write was sent behind, in wake order: the last frame sequence it may
+    /// drain. Frames queued after the write wait for a wake behind it, so they cannot overtake
+    /// the write and be undone by it.
+    fences: std::collections::VecDeque<u64>,
     sequence: u64,
     latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority)>,
 }
@@ -368,8 +372,27 @@ impl InteractiveFrameQueue {
         mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority),
     ) {
         let mut frames = self.0.lock().unwrap();
-        frames.wake_pending = false;
-        for (wid, (frame, set_size, txid, source, sequence, authority)) in frames.latest.drain() {
+        let drained: Vec<_> = match frames.fences.pop_front() {
+            // A wake a write was sent behind: only what was queued before that write.
+            Some(fence) => {
+                let fenced: Vec<_> = frames
+                    .latest
+                    .iter()
+                    .filter(|(_, entry)| entry.4 <= fence)
+                    .map(|(&wid, _)| wid)
+                    .collect();
+                fenced
+                    .into_iter()
+                    .filter_map(|wid| frames.latest.remove(&wid).map(|entry| (wid, entry)))
+                    .collect()
+            }
+            None => {
+                frames.wake_pending = false;
+                frames.latest.drain().collect()
+            }
+        };
+        drop(frames);
+        for (wid, (frame, set_size, txid, source, sequence, authority)) in drained {
             if authority.is_current() {
                 consume(wid, frame, set_size, txid, source, sequence, authority);
             }
@@ -519,6 +542,17 @@ impl AppThreadHandle {
             }
             _ => (),
         }
+        if matches!(req, Request::SetWindowFrames(..)) {
+            // A wake already queued drains only the frames queued before this write; later
+            // frames get a wake behind it. (Under the lock, so no wake slips in between.)
+            let mut frames = self.interactive_frames.0.lock().unwrap();
+            if std::mem::replace(&mut frames.wake_pending, false) {
+                let fence = frames.sequence;
+                frames.fences.push_back(fence);
+            }
+            self.requests_tx.send(req);
+            return Ok(());
+        }
         self.requests_tx.send(req);
         Ok(())
     }
@@ -598,6 +632,7 @@ impl AppThreadHandle {
                 .is_err()
         {
             pending.wake_pending = false;
+            pending.fences.clear();
             pending.latest.clear();
         }
     }
