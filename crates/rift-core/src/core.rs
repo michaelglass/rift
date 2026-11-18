@@ -4,18 +4,23 @@
 //! layout computed, a timer firing). Effects are data the platform carries out (a write, a
 //! timer to arm) or records (what a report turned out to be). The model stays behind
 //! [`Core`]: the platform never reads it, so whatever it needs comes out as an effect.
+//!
+//! Every event that may lead to a write carries the `request` the platform will send its
+//! writes under; each [`Write`] says which, and the app's answer names it back.
 
 use crate::Kinds;
 use crate::pointer::{Initiative, Pointer, may};
-use crate::reconciler::{Answer, Note, Observation, Reconciler, Translate, Verdict, Want, Write};
+use crate::reconciler::{
+    Answer, Note, Observation, Reconciler, Reply, Translate, Verdict, Want, Write,
+};
 
 /// A fact for the core.
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
     serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>"
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
     ))
 )]
 #[derive(Debug, Clone, PartialEq)]
@@ -26,16 +31,24 @@ pub enum Event<K: Kinds> {
     /// Layout wants `window` at `desired`; the model last saw it at `known`.
     Want {
         now: K::Time,
+        request: K::Request,
         window: K::Window,
         desired: K::Frame,
         known: K::Frame,
         want: Want,
     },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
-    Follow { window: K::Window, frame: K::Frame },
-    /// The app answered its latest write to `window`: it is at `frame`.
+    Follow {
+        request: K::Request,
+        window: K::Window,
+        frame: K::Frame,
+    },
+    /// The app answered a write to `window`: it is at `frame`. `seen` is the request the answer
+    /// names, if it names one.
     Answer {
         now: K::Time,
+        request: K::Request,
+        seen: Option<K::Request>,
         window: K::Window,
         frame: K::Frame,
     },
@@ -49,6 +62,7 @@ pub enum Event<K: Kinds> {
     /// (at least those whose writes are due); a window not listed is gone.
     Tick {
         now: K::Time,
+        request: K::Request,
         known: Vec<(K::Window, K::Frame)>,
     },
     /// Something outside the core (an animation, a topology change) took `window`'s frame, or
@@ -63,19 +77,23 @@ pub enum Event<K: Kinds> {
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
     serde(bound(
-        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize",
-        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>"
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
     ))
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect<K: Kinds> {
-    /// Send this frame to the window's app. The model takes the window to be there from now on.
+    /// Send this frame to the window's app under its request. The model takes the window to be
+    /// there from now on.
     Write(Write<K>),
     /// A write is with the app; the desire waits behind it. The model takes the window to be
     /// at the desire from now on.
     Queued { window: K::Window },
     /// What the app's answer was.
     Answered { window: K::Window, answer: Answer },
+    /// The answer names a write Rift has since replaced: dropped, it says nothing about the
+    /// write with the app now.
+    Stale { window: K::Window },
     /// The answer came after Rift stopped waiting: it is news, and comes back as a
     /// [`Event::Report`].
     Late { window: K::Window },
@@ -106,23 +124,34 @@ impl<K: Kinds> Event<K> {
             }),
             Event::Want {
                 now,
+                request,
                 window,
                 desired,
                 known,
                 want,
             } => Event::Want {
                 now: to.time(now),
+                request: to.request(request),
                 window: to.window(window),
                 desired: to.frame(desired),
                 known: to.frame(known),
                 want,
             },
-            Event::Follow { window, frame } => Event::Follow {
+            Event::Follow { request, window, frame } => Event::Follow {
+                request: to.request(request),
                 window: to.window(window),
                 frame: to.frame(frame),
             },
-            Event::Answer { now, window, frame } => Event::Answer {
+            Event::Answer {
+                now,
+                request,
+                seen,
+                window,
+                frame,
+            } => Event::Answer {
                 now: to.time(now),
+                request: to.request(request),
+                seen: seen.map(|seen| to.request(seen)),
                 window: to.window(window),
                 frame: to.frame(frame),
             },
@@ -131,8 +160,9 @@ impl<K: Kinds> Event<K> {
                 frame: to.frame(frame),
                 known: to.frame(known),
             },
-            Event::Tick { now, known } => Event::Tick {
+            Event::Tick { now, request, known } => Event::Tick {
                 now: to.time(now),
+                request: to.request(request),
                 known: known.into_iter().map(|(w, f)| (to.window(w), to.frame(f))).collect(),
             },
             Event::Forget { window } => Event::Forget { window: to.window(window) },
@@ -151,6 +181,7 @@ impl<K: Kinds> Effect<K> {
                 window: to.window(window),
                 answer,
             },
+            Effect::Stale { window } => Effect::Stale { window: to.window(window) },
             Effect::Late { window } => Effect::Late { window: to.window(window) },
             Effect::Observed { window, observation } => Effect::Observed {
                 window: to.window(window),
@@ -193,8 +224,7 @@ impl<K: Kinds> Default for RustCore<K> {
 
 impl<K: Kinds> RustCore<K> {
     /// Read access for Rust callers that have not moved behind the boundary yet (tests, and the
-    /// reactor's transaction-id check). Not part of the boundary: a foreign core has no such
-    /// door.
+    /// reactor's timer coeffect). Not part of the boundary: a foreign core has no such door.
     pub fn reconciler(&self) -> &Reconciler<K> { &self.reconciler }
 
     fn decide(&mut self, event: Event<K>) -> Vec<Effect<K>> {
@@ -206,28 +236,40 @@ impl<K: Kinds> RustCore<K> {
             }
             Event::Want {
                 now,
+                request,
                 window,
                 desired,
                 known,
                 want,
             } => {
                 let owner = pointer.owner(window);
-                match self.reconciler.want(now, window, desired, known, want, owner) {
+                match self.reconciler.want(now, request, window, desired, known, want, owner) {
                     Verdict::Send(write) => vec![Effect::Write(write)],
                     Verdict::Queued => vec![Effect::Queued { window }],
                     Verdict::Nothing => vec![],
                 }
             }
-            Event::Follow { window, frame } => {
-                vec![Effect::Write(self.reconciler.follow(window, frame))]
+            Event::Follow { request, window, frame } => {
+                vec![Effect::Write(
+                    self.reconciler.follow(request, window, frame),
+                )]
             }
-            Event::Answer { now, window, frame } => {
+            Event::Answer {
+                now,
+                request,
+                seen,
+                window,
+                frame,
+            } => {
                 let owner = pointer.owner(window);
-                match self.reconciler.answer(now, window, frame, owner) {
-                    Some((answer, queued)) => std::iter::once(Effect::Answered { window, answer })
-                        .chain(queued.map(Effect::Write))
-                        .collect(),
-                    None => vec![Effect::Late { window }],
+                match self.reconciler.answer(now, request, seen, window, frame, owner) {
+                    Reply::Answered(answer, queued) => {
+                        std::iter::once(Effect::Answered { window, answer })
+                            .chain(queued.map(Effect::Write))
+                            .collect()
+                    }
+                    Reply::Late => vec![Effect::Late { window }],
+                    Reply::Stale => vec![Effect::Stale { window }],
                 }
             }
             Event::Report { window, frame, known } => {
@@ -235,12 +277,16 @@ impl<K: Kinds> RustCore<K> {
                 let observation = self.reconciler.observe(window, frame, known, holder);
                 vec![Effect::Observed { window, observation }]
             }
-            Event::Tick { now, known } => {
+            Event::Tick { now, request, known } => {
                 let lookup = |window: K::Window| {
                     let (_, frame) = known.iter().find(|(w, _)| *w == window)?;
                     Some((*frame, pointer.owner(window)))
                 };
-                self.reconciler.expire(now, lookup).into_iter().map(Effect::Write).collect()
+                self.reconciler
+                    .expire(now, request, lookup)
+                    .into_iter()
+                    .map(Effect::Write)
+                    .collect()
             }
             Event::Forget { window } => {
                 self.reconciler.forget(window);
@@ -279,7 +325,7 @@ impl<K: Kinds> Core<K> for RustCore<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plain::{Nanos, Plain, Rect, WindowId};
+    use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
     use crate::reconciler::WRITE_DEADLINE;
 
     fn at(x: f64) -> Rect { Rect { x, y: 0., w: 400., h: 300. } }
@@ -291,6 +337,7 @@ mod tests {
         let mut core = RustCore::<Plain>::default();
         let effects = core.step(Event::Want {
             now: Nanos(0),
+            request: RequestId(1),
             window: W,
             desired: at(10.),
             known: at(0.),
@@ -303,6 +350,8 @@ mod tests {
         assert_eq!(*timer, Some(Nanos(0) + WRITE_DEADLINE));
         let effects = core.step(Event::Answer {
             now: Nanos(5),
+            request: RequestId(2),
+            seen: Some(RequestId(1)),
             window: W,
             frame: at(10.),
         });
@@ -321,6 +370,7 @@ mod tests {
         assert_eq!(core.step(Event::Pointer(Pointer::Pressing(W))), vec![]);
         let effects = core.step(Event::Want {
             now: Nanos(0),
+            request: RequestId(1),
             window: W,
             desired: at(10.),
             known: at(0.),

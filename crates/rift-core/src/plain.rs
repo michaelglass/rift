@@ -23,6 +23,11 @@ pub struct Rect {
     pub h: f64,
 }
 
+/// The id a write goes out under.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestId(pub u32);
+
 /// Monotonic nanoseconds since the platform started its clock.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,6 +47,7 @@ pub struct Plain;
 
 impl Kinds for Plain {
     type Frame = Rect;
+    type Request = RequestId;
     type Time = Nanos;
     type Window = WindowId;
 

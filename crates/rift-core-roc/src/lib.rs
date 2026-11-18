@@ -16,7 +16,7 @@ use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
-use rift_core::plain::{Nanos, Plain, Rect, WindowId};
+use rift_core::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use rift_core::{
     Answer, Core, Effect, Event, Initiative, InputClass, Note, Observation, Pointer, Want, Write,
 };
@@ -178,6 +178,18 @@ fn rect_out(rect: abi::EffectWriteFrame) -> Rect {
     }
 }
 
+fn seen_in(seen: Option<RequestId>) -> abi::SeenOrUnnamed {
+    let mut out: abi::SeenOrUnnamed = unsafe { std::mem::zeroed() };
+    out.tag = match seen {
+        Some(request) => {
+            out.payload.seen = ManuallyDrop::new(request.0);
+            abi::SeenOrUnnamedTag::Seen
+        }
+        None => abi::SeenOrUnnamedTag::Unnamed,
+    };
+    out
+}
+
 /// The Roc core's platform predates the mode table's `Arranging` and `Hover` input classes and
 /// the `FollowActivation` initiative (the Roc port is paused). On the pointer's row each has
 /// exactly `UserInput(Steering)`'s rule, so it is asked as that; `step` puts the original
@@ -248,6 +260,7 @@ fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
         }
         Event::Want {
             now,
+            request,
             window,
             desired,
             known,
@@ -257,6 +270,7 @@ fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
                 desired: rect_in(desired),
                 known: rect_in(known),
                 now: now.0,
+                request: request.0,
                 window: window_in(window),
                 want: match want {
                     Want::Arrange => abi::ArrangeOrArrangePositionsOrPlace::Arrange,
@@ -268,17 +282,26 @@ fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
             });
             Tag::Want
         }
-        Event::Follow { window, frame } => {
+        Event::Follow { request, window, frame } => {
             out.payload.follow = ManuallyDrop::new(abi::EventFollow {
                 frame: rect_in(frame),
+                request: request.0,
                 window: window_in(window),
             });
             Tag::Follow
         }
-        Event::Answer { now, window, frame } => {
+        Event::Answer {
+            now,
+            request,
+            seen,
+            window,
+            frame,
+        } => {
             out.payload.answer = ManuallyDrop::new(abi::EventAnswer {
                 frame: rect_in(frame),
                 now: now.0,
+                request: request.0,
+                seen: seen_in(seen),
                 window: window_in(window),
             });
             Tag::Answer
@@ -291,7 +314,7 @@ fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
             });
             Tag::Report
         }
-        Event::Tick { now, known } => {
+        Event::Tick { now, request, known } => {
             let known: Vec<abi::EventTickKnown> = known
                 .into_iter()
                 .map(|(window, frame)| abi::EventTickKnown {
@@ -300,7 +323,11 @@ fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
                 })
                 .collect();
             let known = unsafe { abi::RocListWith::<_, false>::from_slice(&known, host) };
-            out.payload.tick = ManuallyDrop::new(abi::EventTick { now: now.0, known });
+            out.payload.tick = ManuallyDrop::new(abi::EventTick {
+                now: now.0,
+                request: request.0,
+                known,
+            });
             Tag::Tick
         }
         Event::Forget { window } => {
@@ -325,6 +352,7 @@ fn effect_out(effect: &abi::Effect) -> Effect<Plain> {
                 Effect::Write(Write::from_foreign_core(
                     window_out(write.window),
                     rect_out(write.frame),
+                    RequestId(write.request),
                 ))
             }
             Tag::Queued => Effect::Queued {
@@ -341,6 +369,9 @@ fn effect_out(effect: &abi::Effect) -> Effect<Plain> {
                     },
                 }
             }
+            Tag::Stale => Effect::Stale {
+                window: window_out(*effect.payload.stale),
+            },
             Tag::Late => Effect::Late {
                 window: window_out(*effect.payload.late),
             },

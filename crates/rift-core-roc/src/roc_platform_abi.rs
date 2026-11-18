@@ -1378,32 +1378,34 @@ const _: () = assert!(core::mem::size_of::<AnonStruct2306ec8e2e9ef7bf>() == 12, 
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::align_of::<AnonStruct2306ec8e2e9ef7bf>() == 4, "AnonStruct2306ec8e2e9ef7bf alignment mismatch");
 
-/// Element type for __AnonStruct_bf065dcb25e0dab6
+/// Element type for __AnonStruct_a5740afd8bb72c45
 #[cfg(target_pointer_width = "32")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStructBf065dcb25e0dab6 {
+pub struct AnonStructA5740afd8bb72c45 {
     pub frame: AnonStructD6b8e6dd43cee4b0,
+    pub request: u32,
     pub window: AnonStructEbad802d0cadccfd,
 }
 
-/// Element type for __AnonStruct_bf065dcb25e0dab6
+/// Element type for __AnonStruct_a5740afd8bb72c45
 #[cfg(not(target_pointer_width = "32"))]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStructBf065dcb25e0dab6 {
+pub struct AnonStructA5740afd8bb72c45 {
     pub frame: AnonStructD6b8e6dd43cee4b0,
+    pub request: u32,
     pub window: AnonStructEbad802d0cadccfd,
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<AnonStructBf065dcb25e0dab6>() == 40, "AnonStructBf065dcb25e0dab6 size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStructA5740afd8bb72c45>() == 48, "AnonStructA5740afd8bb72c45 size mismatch");
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::align_of::<AnonStructBf065dcb25e0dab6>() == 8, "AnonStructBf065dcb25e0dab6 alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStructA5740afd8bb72c45>() == 8, "AnonStructA5740afd8bb72c45 alignment mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<AnonStructBf065dcb25e0dab6>() == 40, "AnonStructBf065dcb25e0dab6 size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStructA5740afd8bb72c45>() == 48, "AnonStructA5740afd8bb72c45 size mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::align_of::<AnonStructBf065dcb25e0dab6>() == 8, "AnonStructBf065dcb25e0dab6 alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStructA5740afd8bb72c45>() == 8, "AnonStructA5740afd8bb72c45 alignment mismatch");
 
 /// Element type for __AnonStruct_d6b8e6dd43cee4b0
 #[cfg(target_pointer_width = "32")]
@@ -1436,34 +1438,38 @@ const _: () = assert!(core::mem::size_of::<AnonStructD6b8e6dd43cee4b0>() == 32, 
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::align_of::<AnonStructD6b8e6dd43cee4b0>() == 8, "AnonStructD6b8e6dd43cee4b0 alignment mismatch");
 
-/// Element type for __AnonStruct_7a727e2de75a9bcd
+/// Element type for __AnonStruct_6dde7113f359c4e9
 #[cfg(target_pointer_width = "32")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStruct7a727e2de75a9bcd {
+pub struct AnonStruct6dde7113f359c4e9 {
     pub frame: AnonStructD6b8e6dd43cee4b0,
     pub now: u64,
+    pub request: u32,
+    pub seen: SeenOrUnnamed,
     pub window: AnonStructEbad802d0cadccfd,
 }
 
-/// Element type for __AnonStruct_7a727e2de75a9bcd
+/// Element type for __AnonStruct_6dde7113f359c4e9
 #[cfg(not(target_pointer_width = "32"))]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStruct7a727e2de75a9bcd {
+pub struct AnonStruct6dde7113f359c4e9 {
     pub frame: AnonStructD6b8e6dd43cee4b0,
     pub now: u64,
+    pub request: u32,
+    pub seen: SeenOrUnnamed,
     pub window: AnonStructEbad802d0cadccfd,
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<AnonStruct7a727e2de75a9bcd>() == 48, "AnonStruct7a727e2de75a9bcd size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStruct6dde7113f359c4e9>() == 64, "AnonStruct6dde7113f359c4e9 size mismatch");
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::align_of::<AnonStruct7a727e2de75a9bcd>() == 8, "AnonStruct7a727e2de75a9bcd alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStruct6dde7113f359c4e9>() == 8, "AnonStruct6dde7113f359c4e9 alignment mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<AnonStruct7a727e2de75a9bcd>() == 48, "AnonStruct7a727e2de75a9bcd size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStruct6dde7113f359c4e9>() == 64, "AnonStruct6dde7113f359c4e9 size mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::align_of::<AnonStruct7a727e2de75a9bcd>() == 8, "AnonStruct7a727e2de75a9bcd alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStruct6dde7113f359c4e9>() == 8, "AnonStruct6dde7113f359c4e9 alignment mismatch");
 
 /// Element type for __AnonStruct_bc929c3932dd072f
 #[cfg(target_pointer_width = "32")]
@@ -1494,65 +1500,96 @@ const _: () = assert!(core::mem::size_of::<AnonStructBc929c3932dd072f>() == 72, 
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::align_of::<AnonStructBc929c3932dd072f>() == 8, "AnonStructBc929c3932dd072f alignment mismatch");
 
-/// Element type for __AnonStruct_558b43c445792e86
+/// Element type for __AnonStruct_494c2e3974c3ffbf
 #[cfg(target_pointer_width = "32")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStruct558b43c445792e86 {
+pub struct AnonStruct494c2e3974c3ffbf {
     pub now: u64,
     pub known: RocListWith<AnonStructBf065dcb25e0dab6, false>,
+    pub request: u32,
 }
 
-/// Element type for __AnonStruct_558b43c445792e86
+/// Element type for __AnonStruct_494c2e3974c3ffbf
 #[cfg(not(target_pointer_width = "32"))]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStruct558b43c445792e86 {
+pub struct AnonStruct494c2e3974c3ffbf {
     pub now: u64,
     pub known: RocListWith<AnonStructBf065dcb25e0dab6, false>,
+    pub request: u32,
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<AnonStruct558b43c445792e86>() == 32, "AnonStruct558b43c445792e86 size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStruct494c2e3974c3ffbf>() == 40, "AnonStruct494c2e3974c3ffbf size mismatch");
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::align_of::<AnonStruct558b43c445792e86>() == 8, "AnonStruct558b43c445792e86 alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStruct494c2e3974c3ffbf>() == 8, "AnonStruct494c2e3974c3ffbf alignment mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<AnonStruct558b43c445792e86>() == 24, "AnonStruct558b43c445792e86 size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStruct494c2e3974c3ffbf>() == 24, "AnonStruct494c2e3974c3ffbf size mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::align_of::<AnonStruct558b43c445792e86>() == 8, "AnonStruct558b43c445792e86 alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStruct494c2e3974c3ffbf>() == 8, "AnonStruct494c2e3974c3ffbf alignment mismatch");
 
-/// Element type for __AnonStruct_262668050069ec36
+/// Element type for __AnonStruct_bf065dcb25e0dab6
 #[cfg(target_pointer_width = "32")]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStruct262668050069ec36 {
+pub struct AnonStructBf065dcb25e0dab6 {
+    pub frame: AnonStructD6b8e6dd43cee4b0,
+    pub window: AnonStructEbad802d0cadccfd,
+}
+
+/// Element type for __AnonStruct_bf065dcb25e0dab6
+#[cfg(not(target_pointer_width = "32"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AnonStructBf065dcb25e0dab6 {
+    pub frame: AnonStructD6b8e6dd43cee4b0,
+    pub window: AnonStructEbad802d0cadccfd,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<AnonStructBf065dcb25e0dab6>() == 40, "AnonStructBf065dcb25e0dab6 size mismatch");
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::align_of::<AnonStructBf065dcb25e0dab6>() == 8, "AnonStructBf065dcb25e0dab6 alignment mismatch");
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<AnonStructBf065dcb25e0dab6>() == 40, "AnonStructBf065dcb25e0dab6 size mismatch");
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::align_of::<AnonStructBf065dcb25e0dab6>() == 8, "AnonStructBf065dcb25e0dab6 alignment mismatch");
+
+/// Element type for __AnonStruct_91b4009878602735
+#[cfg(target_pointer_width = "32")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AnonStruct91b4009878602735 {
     pub desired: AnonStructD6b8e6dd43cee4b0,
     pub known: AnonStructD6b8e6dd43cee4b0,
     pub now: u64,
+    pub request: u32,
     pub window: AnonStructEbad802d0cadccfd,
     pub want: ArrangeOrArrangePositionsOrPlace,
 }
 
-/// Element type for __AnonStruct_262668050069ec36
+/// Element type for __AnonStruct_91b4009878602735
 #[cfg(not(target_pointer_width = "32"))]
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct AnonStruct262668050069ec36 {
+pub struct AnonStruct91b4009878602735 {
     pub desired: AnonStructD6b8e6dd43cee4b0,
     pub known: AnonStructD6b8e6dd43cee4b0,
     pub now: u64,
+    pub request: u32,
     pub window: AnonStructEbad802d0cadccfd,
     pub want: ArrangeOrArrangePositionsOrPlace,
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<AnonStruct262668050069ec36>() == 88, "AnonStruct262668050069ec36 size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStruct91b4009878602735>() == 88, "AnonStruct91b4009878602735 size mismatch");
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::align_of::<AnonStruct262668050069ec36>() == 8, "AnonStruct262668050069ec36 alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStruct91b4009878602735>() == 8, "AnonStruct91b4009878602735 alignment mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<AnonStruct262668050069ec36>() == 88, "AnonStruct262668050069ec36 size mismatch");
+const _: () = assert!(core::mem::size_of::<AnonStruct91b4009878602735>() == 88, "AnonStruct91b4009878602735 size mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::align_of::<AnonStruct262668050069ec36>() == 8, "AnonStruct262668050069ec36 alignment mismatch");
+const _: () = assert!(core::mem::align_of::<AnonStruct91b4009878602735>() == 8, "AnonStruct91b4009878602735 alignment mismatch");
 
 /// Tag discriminant for Effect.
 #[repr(u8)]
@@ -1564,8 +1601,9 @@ pub enum EffectTag {
     Note = 3,
     Observed = 4,
     Queued = 5,
-    Timer = 6,
-    Write = 7,
+    Stale = 6,
+    Timer = 7,
+    Write = 8,
 }
 
 #[repr(C)]
@@ -1577,8 +1615,9 @@ pub union EffectPayload {
     pub note: core::mem::ManuallyDrop<AnonStructDd976d728ae6c32f>,
     pub observed: core::mem::ManuallyDrop<AnonStruct2306ec8e2e9ef7bf>,
     pub queued: core::mem::ManuallyDrop<AnonStructEbad802d0cadccfd>,
+    pub stale: core::mem::ManuallyDrop<AnonStructEbad802d0cadccfd>,
     pub timer: core::mem::ManuallyDrop<ArmOrDisarm>,
-    pub write: core::mem::ManuallyDrop<AnonStructBf065dcb25e0dab6>,
+    pub write: core::mem::ManuallyDrop<AnonStructA5740afd8bb72c45>,
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -1592,7 +1631,7 @@ pub struct EffectPayloadAlignment;
 #[derive(Clone, Copy)]
 pub struct Effect {
     pub _payload_alignment: [EffectPayloadAlignment; 0],
-    pub payload: [u8; 40],
+    pub payload: [u8; 48],
     pub tag: EffectTag,
 }
 
@@ -1822,6 +1861,42 @@ impl Effect {
         unsafe { core::mem::ManuallyDrop::take(&mut self.payload.queued) }
     }
 
+    /// Borrow the `Stale` payload without creating another owner.
+    ///
+    /// # Safety
+    /// `self.tag` must be `EffectTag::Stale` and the payload must still be initialized.
+    #[cfg(target_pointer_width = "32")]
+    pub unsafe fn borrow_payload_stale_unchecked(&self) -> &AnonStructEbad802d0cadccfd {
+        unsafe { &*(self.payload.as_ptr() as *const AnonStructEbad802d0cadccfd) }
+    }
+
+    /// Borrow the `Stale` payload without creating another owner.
+    ///
+    /// # Safety
+    /// `self.tag` must be `EffectTag::Stale` and the payload must still be initialized.
+    #[cfg(not(target_pointer_width = "32"))]
+    pub unsafe fn borrow_payload_stale_unchecked(&self) -> &AnonStructEbad802d0cadccfd {
+        unsafe { &*(&self.payload.stale as *const core::mem::ManuallyDrop<AnonStructEbad802d0cadccfd> as *const AnonStructEbad802d0cadccfd) }
+    }
+
+    /// Move the `Stale` payload out of one owned tag-union shell.
+    ///
+    /// # Safety
+    /// `self.tag` must be `EffectTag::Stale`. After this call, `self` is logically uninitialized and must not be read or destroyed.
+    #[cfg(target_pointer_width = "32")]
+    pub unsafe fn take_payload_stale_unchecked(&mut self) -> AnonStructEbad802d0cadccfd {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStructEbad802d0cadccfd) }
+    }
+
+    /// Move the `Stale` payload out of one owned tag-union shell.
+    ///
+    /// # Safety
+    /// `self.tag` must be `EffectTag::Stale`. After this call, `self` is logically uninitialized and must not be read or destroyed.
+    #[cfg(not(target_pointer_width = "32"))]
+    pub unsafe fn take_payload_stale_unchecked(&mut self) -> AnonStructEbad802d0cadccfd {
+        unsafe { core::mem::ManuallyDrop::take(&mut self.payload.stale) }
+    }
+
     /// Borrow the `Timer` payload without creating another owner.
     ///
     /// # Safety
@@ -1863,8 +1938,8 @@ impl Effect {
     /// # Safety
     /// `self.tag` must be `EffectTag::Write` and the payload must still be initialized.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn borrow_payload_write_unchecked(&self) -> &AnonStructBf065dcb25e0dab6 {
-        unsafe { &*(self.payload.as_ptr() as *const AnonStructBf065dcb25e0dab6) }
+    pub unsafe fn borrow_payload_write_unchecked(&self) -> &AnonStructA5740afd8bb72c45 {
+        unsafe { &*(self.payload.as_ptr() as *const AnonStructA5740afd8bb72c45) }
     }
 
     /// Borrow the `Write` payload without creating another owner.
@@ -1872,8 +1947,8 @@ impl Effect {
     /// # Safety
     /// `self.tag` must be `EffectTag::Write` and the payload must still be initialized.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn borrow_payload_write_unchecked(&self) -> &AnonStructBf065dcb25e0dab6 {
-        unsafe { &*(&self.payload.write as *const core::mem::ManuallyDrop<AnonStructBf065dcb25e0dab6> as *const AnonStructBf065dcb25e0dab6) }
+    pub unsafe fn borrow_payload_write_unchecked(&self) -> &AnonStructA5740afd8bb72c45 {
+        unsafe { &*(&self.payload.write as *const core::mem::ManuallyDrop<AnonStructA5740afd8bb72c45> as *const AnonStructA5740afd8bb72c45) }
     }
 
     /// Move the `Write` payload out of one owned tag-union shell.
@@ -1881,8 +1956,8 @@ impl Effect {
     /// # Safety
     /// `self.tag` must be `EffectTag::Write`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn take_payload_write_unchecked(&mut self) -> AnonStructBf065dcb25e0dab6 {
-        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStructBf065dcb25e0dab6) }
+    pub unsafe fn take_payload_write_unchecked(&mut self) -> AnonStructA5740afd8bb72c45 {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStructA5740afd8bb72c45) }
     }
 
     /// Move the `Write` payload out of one owned tag-union shell.
@@ -1890,24 +1965,24 @@ impl Effect {
     /// # Safety
     /// `self.tag` must be `EffectTag::Write`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn take_payload_write_unchecked(&mut self) -> AnonStructBf065dcb25e0dab6 {
+    pub unsafe fn take_payload_write_unchecked(&mut self) -> AnonStructA5740afd8bb72c45 {
         unsafe { core::mem::ManuallyDrop::take(&mut self.payload.write) }
     }
 
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::size_of::<Effect>() == 48, "Effect size mismatch");
+const _: () = assert!(core::mem::size_of::<Effect>() == 56, "Effect size mismatch");
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::align_of::<Effect>() == 8, "Effect alignment mismatch");
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(core::mem::offset_of!(Effect, tag) == 40, "Effect tag offset mismatch");
+const _: () = assert!(core::mem::offset_of!(Effect, tag) == 48, "Effect tag offset mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::size_of::<Effect>() == 48, "Effect size mismatch");
+const _: () = assert!(core::mem::size_of::<Effect>() == 56, "Effect size mismatch");
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::align_of::<Effect>() == 8, "Effect alignment mismatch");
 #[cfg(target_pointer_width = "32")]
-const _: () = assert!(core::mem::offset_of!(Effect, tag) == 40, "Effect tag offset mismatch");
+const _: () = assert!(core::mem::offset_of!(Effect, tag) == 48, "Effect tag offset mismatch");
 
 /// Tag union: AckedOrRefusedOrUnasked
 #[repr(u8)]
@@ -2185,14 +2260,14 @@ pub enum EventTag {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union EventPayload {
-    pub answer: core::mem::ManuallyDrop<AnonStruct7a727e2de75a9bcd>,
-    pub follow: core::mem::ManuallyDrop<AnonStructBf065dcb25e0dab6>,
+    pub answer: core::mem::ManuallyDrop<AnonStruct6dde7113f359c4e9>,
+    pub follow: core::mem::ManuallyDrop<AnonStructA5740afd8bb72c45>,
     pub forget: core::mem::ManuallyDrop<AnonStructEbad802d0cadccfd>,
     pub gate: core::mem::ManuallyDrop<ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocus>,
     pub pointer: core::mem::ManuallyDrop<DraggingOrIdleOrPressing>,
     pub report: core::mem::ManuallyDrop<AnonStructBc929c3932dd072f>,
-    pub tick: core::mem::ManuallyDrop<AnonStruct558b43c445792e86>,
-    pub want: core::mem::ManuallyDrop<AnonStruct262668050069ec36>,
+    pub tick: core::mem::ManuallyDrop<AnonStruct494c2e3974c3ffbf>,
+    pub want: core::mem::ManuallyDrop<AnonStruct91b4009878602735>,
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -2225,8 +2300,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Answer` and the payload must still be initialized.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn borrow_payload_answer_unchecked(&self) -> &AnonStruct7a727e2de75a9bcd {
-        unsafe { &*(self.payload.as_ptr() as *const AnonStruct7a727e2de75a9bcd) }
+    pub unsafe fn borrow_payload_answer_unchecked(&self) -> &AnonStruct6dde7113f359c4e9 {
+        unsafe { &*(self.payload.as_ptr() as *const AnonStruct6dde7113f359c4e9) }
     }
 
     /// Borrow the `Answer` payload without creating another owner.
@@ -2234,8 +2309,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Answer` and the payload must still be initialized.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn borrow_payload_answer_unchecked(&self) -> &AnonStruct7a727e2de75a9bcd {
-        unsafe { &*(&self.payload.answer as *const core::mem::ManuallyDrop<AnonStruct7a727e2de75a9bcd> as *const AnonStruct7a727e2de75a9bcd) }
+    pub unsafe fn borrow_payload_answer_unchecked(&self) -> &AnonStruct6dde7113f359c4e9 {
+        unsafe { &*(&self.payload.answer as *const core::mem::ManuallyDrop<AnonStruct6dde7113f359c4e9> as *const AnonStruct6dde7113f359c4e9) }
     }
 
     /// Move the `Answer` payload out of one owned tag-union shell.
@@ -2243,8 +2318,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Answer`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn take_payload_answer_unchecked(&mut self) -> AnonStruct7a727e2de75a9bcd {
-        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStruct7a727e2de75a9bcd) }
+    pub unsafe fn take_payload_answer_unchecked(&mut self) -> AnonStruct6dde7113f359c4e9 {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStruct6dde7113f359c4e9) }
     }
 
     /// Move the `Answer` payload out of one owned tag-union shell.
@@ -2252,7 +2327,7 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Answer`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn take_payload_answer_unchecked(&mut self) -> AnonStruct7a727e2de75a9bcd {
+    pub unsafe fn take_payload_answer_unchecked(&mut self) -> AnonStruct6dde7113f359c4e9 {
         unsafe { core::mem::ManuallyDrop::take(&mut self.payload.answer) }
     }
 
@@ -2261,8 +2336,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Follow` and the payload must still be initialized.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn borrow_payload_follow_unchecked(&self) -> &AnonStructBf065dcb25e0dab6 {
-        unsafe { &*(self.payload.as_ptr() as *const AnonStructBf065dcb25e0dab6) }
+    pub unsafe fn borrow_payload_follow_unchecked(&self) -> &AnonStructA5740afd8bb72c45 {
+        unsafe { &*(self.payload.as_ptr() as *const AnonStructA5740afd8bb72c45) }
     }
 
     /// Borrow the `Follow` payload without creating another owner.
@@ -2270,8 +2345,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Follow` and the payload must still be initialized.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn borrow_payload_follow_unchecked(&self) -> &AnonStructBf065dcb25e0dab6 {
-        unsafe { &*(&self.payload.follow as *const core::mem::ManuallyDrop<AnonStructBf065dcb25e0dab6> as *const AnonStructBf065dcb25e0dab6) }
+    pub unsafe fn borrow_payload_follow_unchecked(&self) -> &AnonStructA5740afd8bb72c45 {
+        unsafe { &*(&self.payload.follow as *const core::mem::ManuallyDrop<AnonStructA5740afd8bb72c45> as *const AnonStructA5740afd8bb72c45) }
     }
 
     /// Move the `Follow` payload out of one owned tag-union shell.
@@ -2279,8 +2354,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Follow`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn take_payload_follow_unchecked(&mut self) -> AnonStructBf065dcb25e0dab6 {
-        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStructBf065dcb25e0dab6) }
+    pub unsafe fn take_payload_follow_unchecked(&mut self) -> AnonStructA5740afd8bb72c45 {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStructA5740afd8bb72c45) }
     }
 
     /// Move the `Follow` payload out of one owned tag-union shell.
@@ -2288,7 +2363,7 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Follow`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn take_payload_follow_unchecked(&mut self) -> AnonStructBf065dcb25e0dab6 {
+    pub unsafe fn take_payload_follow_unchecked(&mut self) -> AnonStructA5740afd8bb72c45 {
         unsafe { core::mem::ManuallyDrop::take(&mut self.payload.follow) }
     }
 
@@ -2441,8 +2516,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Tick` and the payload must still be initialized.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn borrow_payload_tick_unchecked(&self) -> &AnonStruct558b43c445792e86 {
-        unsafe { &*(self.payload.as_ptr() as *const AnonStruct558b43c445792e86) }
+    pub unsafe fn borrow_payload_tick_unchecked(&self) -> &AnonStruct494c2e3974c3ffbf {
+        unsafe { &*(self.payload.as_ptr() as *const AnonStruct494c2e3974c3ffbf) }
     }
 
     /// Borrow the `Tick` payload without creating another owner.
@@ -2450,8 +2525,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Tick` and the payload must still be initialized.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn borrow_payload_tick_unchecked(&self) -> &AnonStruct558b43c445792e86 {
-        unsafe { &*(&self.payload.tick as *const core::mem::ManuallyDrop<AnonStruct558b43c445792e86> as *const AnonStruct558b43c445792e86) }
+    pub unsafe fn borrow_payload_tick_unchecked(&self) -> &AnonStruct494c2e3974c3ffbf {
+        unsafe { &*(&self.payload.tick as *const core::mem::ManuallyDrop<AnonStruct494c2e3974c3ffbf> as *const AnonStruct494c2e3974c3ffbf) }
     }
 
     /// Move the `Tick` payload out of one owned tag-union shell.
@@ -2459,8 +2534,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Tick`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn take_payload_tick_unchecked(&mut self) -> AnonStruct558b43c445792e86 {
-        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStruct558b43c445792e86) }
+    pub unsafe fn take_payload_tick_unchecked(&mut self) -> AnonStruct494c2e3974c3ffbf {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStruct494c2e3974c3ffbf) }
     }
 
     /// Move the `Tick` payload out of one owned tag-union shell.
@@ -2468,7 +2543,7 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Tick`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn take_payload_tick_unchecked(&mut self) -> AnonStruct558b43c445792e86 {
+    pub unsafe fn take_payload_tick_unchecked(&mut self) -> AnonStruct494c2e3974c3ffbf {
         unsafe { core::mem::ManuallyDrop::take(&mut self.payload.tick) }
     }
 
@@ -2477,8 +2552,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Want` and the payload must still be initialized.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn borrow_payload_want_unchecked(&self) -> &AnonStruct262668050069ec36 {
-        unsafe { &*(self.payload.as_ptr() as *const AnonStruct262668050069ec36) }
+    pub unsafe fn borrow_payload_want_unchecked(&self) -> &AnonStruct91b4009878602735 {
+        unsafe { &*(self.payload.as_ptr() as *const AnonStruct91b4009878602735) }
     }
 
     /// Borrow the `Want` payload without creating another owner.
@@ -2486,8 +2561,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Want` and the payload must still be initialized.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn borrow_payload_want_unchecked(&self) -> &AnonStruct262668050069ec36 {
-        unsafe { &*(&self.payload.want as *const core::mem::ManuallyDrop<AnonStruct262668050069ec36> as *const AnonStruct262668050069ec36) }
+    pub unsafe fn borrow_payload_want_unchecked(&self) -> &AnonStruct91b4009878602735 {
+        unsafe { &*(&self.payload.want as *const core::mem::ManuallyDrop<AnonStruct91b4009878602735> as *const AnonStruct91b4009878602735) }
     }
 
     /// Move the `Want` payload out of one owned tag-union shell.
@@ -2495,8 +2570,8 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Want`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(target_pointer_width = "32")]
-    pub unsafe fn take_payload_want_unchecked(&mut self) -> AnonStruct262668050069ec36 {
-        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStruct262668050069ec36) }
+    pub unsafe fn take_payload_want_unchecked(&mut self) -> AnonStruct91b4009878602735 {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const AnonStruct91b4009878602735) }
     }
 
     /// Move the `Want` payload out of one owned tag-union shell.
@@ -2504,7 +2579,7 @@ impl Event {
     /// # Safety
     /// `self.tag` must be `EventTag::Want`. After this call, `self` is logically uninitialized and must not be read or destroyed.
     #[cfg(not(target_pointer_width = "32"))]
-    pub unsafe fn take_payload_want_unchecked(&mut self) -> AnonStruct262668050069ec36 {
+    pub unsafe fn take_payload_want_unchecked(&mut self) -> AnonStruct91b4009878602735 {
         unsafe { core::mem::ManuallyDrop::take(&mut self.payload.want) }
     }
 
@@ -2522,6 +2597,97 @@ const _: () = assert!(core::mem::size_of::<Event>() == 96, "Event size mismatch"
 const _: () = assert!(core::mem::align_of::<Event>() == 8, "Event alignment mismatch");
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(core::mem::offset_of!(Event, tag) == 88, "Event tag offset mismatch");
+
+/// Tag discriminant for SeenOrUnnamed.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeenOrUnnamedTag {
+    Seen = 0,
+    Unnamed = 1,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union SeenOrUnnamedPayload {
+    pub seen: core::mem::ManuallyDrop<u32>,
+    pub unnamed: [u8; 0],
+}
+
+#[cfg(target_pointer_width = "32")]
+#[repr(align(4))]
+#[derive(Clone, Copy)]
+pub struct SeenOrUnnamedPayloadAlignment;
+
+/// Tag union: SeenOrUnnamed
+#[cfg(target_pointer_width = "32")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SeenOrUnnamed {
+    pub _payload_alignment: [SeenOrUnnamedPayloadAlignment; 0],
+    pub payload: [u8; 4],
+    pub tag: SeenOrUnnamedTag,
+}
+
+/// Tag union: SeenOrUnnamed
+#[cfg(not(target_pointer_width = "32"))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SeenOrUnnamed {
+    pub payload: SeenOrUnnamedPayload,
+    pub tag: SeenOrUnnamedTag,
+}
+
+impl SeenOrUnnamed {
+    /// Borrow the `Seen` payload without creating another owner.
+    ///
+    /// # Safety
+    /// `self.tag` must be `SeenOrUnnamedTag::Seen` and the payload must still be initialized.
+    #[cfg(target_pointer_width = "32")]
+    pub unsafe fn borrow_payload_seen_unchecked(&self) -> &u32 {
+        unsafe { &*(self.payload.as_ptr() as *const u32) }
+    }
+
+    /// Borrow the `Seen` payload without creating another owner.
+    ///
+    /// # Safety
+    /// `self.tag` must be `SeenOrUnnamedTag::Seen` and the payload must still be initialized.
+    #[cfg(not(target_pointer_width = "32"))]
+    pub unsafe fn borrow_payload_seen_unchecked(&self) -> &u32 {
+        unsafe { &*(&self.payload.seen as *const core::mem::ManuallyDrop<u32> as *const u32) }
+    }
+
+    /// Move the `Seen` payload out of one owned tag-union shell.
+    ///
+    /// # Safety
+    /// `self.tag` must be `SeenOrUnnamedTag::Seen`. After this call, `self` is logically uninitialized and must not be read or destroyed.
+    #[cfg(target_pointer_width = "32")]
+    pub unsafe fn take_payload_seen_unchecked(&mut self) -> u32 {
+        unsafe { core::ptr::read(self.payload.as_ptr() as *const u32) }
+    }
+
+    /// Move the `Seen` payload out of one owned tag-union shell.
+    ///
+    /// # Safety
+    /// `self.tag` must be `SeenOrUnnamedTag::Seen`. After this call, `self` is logically uninitialized and must not be read or destroyed.
+    #[cfg(not(target_pointer_width = "32"))]
+    pub unsafe fn take_payload_seen_unchecked(&mut self) -> u32 {
+        unsafe { core::mem::ManuallyDrop::take(&mut self.payload.seen) }
+    }
+
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<SeenOrUnnamed>() == 8, "SeenOrUnnamed size mismatch");
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::align_of::<SeenOrUnnamed>() == 4, "SeenOrUnnamed alignment mismatch");
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(SeenOrUnnamed, tag) == 4, "SeenOrUnnamed tag offset mismatch");
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::size_of::<SeenOrUnnamed>() == 8, "SeenOrUnnamed size mismatch");
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::align_of::<SeenOrUnnamed>() == 4, "SeenOrUnnamed alignment mismatch");
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(core::mem::offset_of!(SeenOrUnnamed, tag) == 4, "SeenOrUnnamed tag offset mismatch");
 
 /// Tag discriminant for DraggingOrIdleOrPressing.
 #[repr(u8)]
@@ -2672,8 +2838,8 @@ const _: () = assert!(core::mem::align_of::<ArrangeOrArrangePositionsOrPlace>() 
 
 // Platform Type Aliases
 
-pub type EventAnswer = AnonStruct7a727e2de75a9bcd;
-pub type EventFollow = AnonStructBf065dcb25e0dab6;
+pub type EventAnswer = AnonStruct6dde7113f359c4e9;
+pub type EventFollow = AnonStructA5740afd8bb72c45;
 pub type EventForget = AnonStructEbad802d0cadccfd;
 pub type EventGate = ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocus;
 pub type EventGatePayload = ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocusPayload;
@@ -2685,8 +2851,8 @@ pub type EventPointerTag = DraggingOrIdleOrPressingTag;
 pub type EventPointerDragging = AnonStructEbad802d0cadccfd;
 pub type EventPointerPressing = AnonStructEbad802d0cadccfd;
 pub type EventReport = AnonStructBc929c3932dd072f;
-pub type EventTick = AnonStruct558b43c445792e86;
-pub type EventWant = AnonStruct262668050069ec36;
+pub type EventTick = AnonStruct494c2e3974c3ffbf;
+pub type EventWant = AnonStruct91b4009878602735;
 pub type EventAnswerFrame = AnonStructD6b8e6dd43cee4b0;
 pub type EventAnswerWindow = AnonStructEbad802d0cadccfd;
 pub type EventFollowFrame = AnonStructD6b8e6dd43cee4b0;
@@ -2713,20 +2879,22 @@ pub type StepForHostEffectsLate = AnonStructEbad802d0cadccfd;
 pub type StepForHostEffectsNote = AnonStructDd976d728ae6c32f;
 pub type StepForHostEffectsObserved = AnonStruct2306ec8e2e9ef7bf;
 pub type StepForHostEffectsQueued = AnonStructEbad802d0cadccfd;
+pub type StepForHostEffectsStale = AnonStructEbad802d0cadccfd;
 pub type StepForHostEffectsTimer = ArmOrDisarm;
 pub type StepForHostEffectsTimerPayload = ArmOrDisarmPayload;
 pub type StepForHostEffectsTimerTag = ArmOrDisarmTag;
-pub type StepForHostEffectsWrite = AnonStructBf065dcb25e0dab6;
+pub type StepForHostEffectsWrite = AnonStructA5740afd8bb72c45;
 pub type EffectAnswered = AnonStructE4ccd00b3ea3c818;
 pub type EffectGate = AnonStruct650ebdd4e6c32c84;
 pub type EffectLate = AnonStructEbad802d0cadccfd;
 pub type EffectNote = AnonStructDd976d728ae6c32f;
 pub type EffectObserved = AnonStruct2306ec8e2e9ef7bf;
 pub type EffectQueued = AnonStructEbad802d0cadccfd;
+pub type EffectStale = AnonStructEbad802d0cadccfd;
 pub type EffectTimer = ArmOrDisarm;
 pub type EffectTimerPayload = ArmOrDisarmPayload;
 pub type EffectTimerTag = ArmOrDisarmTag;
-pub type EffectWrite = AnonStructBf065dcb25e0dab6;
+pub type EffectWrite = AnonStructA5740afd8bb72c45;
 pub type EffectAnsweredWindow = AnonStructEbad802d0cadccfd;
 pub type EffectNoteWindow = AnonStructEbad802d0cadccfd;
 pub type EffectObservedWindow = AnonStructEbad802d0cadccfd;
@@ -2785,6 +2953,10 @@ impl Effect {
                 let payload = unsafe { value.take_payload_queued_unchecked() };
                 unsafe { payload.decref(roc_host); }
             },
+            EffectTag::Stale => {
+                let payload = unsafe { value.take_payload_stale_unchecked() };
+                unsafe { payload.decref(roc_host); }
+            },
             EffectTag::Timer => {
                 let payload = unsafe { value.take_payload_timer_unchecked() };
                 unsafe { payload.decref(roc_host); }
@@ -2827,6 +2999,10 @@ impl Effect {
             },
             EffectTag::Queued => {
                 let payload = unsafe { core::ptr::read(value.borrow_payload_queued_unchecked()) };
+                unsafe { payload.incref(amount); }
+            },
+            EffectTag::Stale => {
+                let payload = unsafe { core::ptr::read(value.borrow_payload_stale_unchecked()) };
                 unsafe { payload.incref(amount); }
             },
             EffectTag::Timer => {
@@ -3204,7 +3380,7 @@ unsafe impl RocRelease<ArmOrDisarm> for ArmOrDisarmRelease {
     }
 }
 
-impl AnonStructBf065dcb25e0dab6 {
+impl AnonStructA5740afd8bb72c45 {
     /// Recursively decrement Roc-owned fields.
     ///
     /// # Safety
@@ -3227,10 +3403,10 @@ impl AnonStructBf065dcb25e0dab6 {
     }
 }
 
-pub struct AnonStructBf065dcb25e0dab6Release;
+pub struct AnonStructA5740afd8bb72c45Release;
 
-unsafe impl RocRelease<AnonStructBf065dcb25e0dab6> for AnonStructBf065dcb25e0dab6Release {
-    unsafe fn release(value: AnonStructBf065dcb25e0dab6, roc_host: &RocHost) {
+unsafe impl RocRelease<AnonStructA5740afd8bb72c45> for AnonStructA5740afd8bb72c45Release {
+    unsafe fn release(value: AnonStructA5740afd8bb72c45, roc_host: &RocHost) {
         unsafe { value.decref(roc_host); }
     }
 }
@@ -3363,7 +3539,7 @@ unsafe impl RocRelease<Event> for EventRelease {
     }
 }
 
-impl AnonStruct7a727e2de75a9bcd {
+impl AnonStruct6dde7113f359c4e9 {
     /// Recursively decrement Roc-owned fields.
     ///
     /// # Safety
@@ -3371,6 +3547,7 @@ impl AnonStruct7a727e2de75a9bcd {
     pub unsafe fn decref(self, roc_host: &RocHost) {
         let value = self;
         unsafe { value.frame.decref(roc_host); }
+        unsafe { value.seen.decref(roc_host); }
         unsafe { value.window.decref(roc_host); }
     }
 
@@ -3382,14 +3559,52 @@ impl AnonStruct7a727e2de75a9bcd {
     pub unsafe fn incref(self, amount: isize) {
         let value = self;
         unsafe { value.frame.incref(amount); }
+        unsafe { value.seen.incref(amount); }
         unsafe { value.window.incref(amount); }
     }
 }
 
-pub struct AnonStruct7a727e2de75a9bcdRelease;
+pub struct AnonStruct6dde7113f359c4e9Release;
 
-unsafe impl RocRelease<AnonStruct7a727e2de75a9bcd> for AnonStruct7a727e2de75a9bcdRelease {
-    unsafe fn release(value: AnonStruct7a727e2de75a9bcd, roc_host: &RocHost) {
+unsafe impl RocRelease<AnonStruct6dde7113f359c4e9> for AnonStruct6dde7113f359c4e9Release {
+    unsafe fn release(value: AnonStruct6dde7113f359c4e9, roc_host: &RocHost) {
+        unsafe { value.decref(roc_host); }
+    }
+}
+
+impl SeenOrUnnamed {
+    /// Recursively decrement Roc-owned payloads.
+    ///
+    /// # Safety
+    /// `self` must own one live Roc reference for each refcounted payload.
+    pub unsafe fn decref(self, roc_host: &RocHost) {
+        let value = self;
+        let _ = roc_host;
+        match value.tag {
+            SeenOrUnnamedTag::Seen => {},
+            SeenOrUnnamedTag::Unnamed => {},
+        }
+    }
+
+    /// Increment Roc-owned payloads.
+    ///
+    /// # Safety
+    /// `self` must point at live Roc allocations. The retained references must
+    /// be balanced by later decrefs.
+    pub unsafe fn incref(self, amount: isize) {
+        let value = self;
+        let _ = amount;
+        match value.tag {
+            SeenOrUnnamedTag::Seen => {},
+            SeenOrUnnamedTag::Unnamed => {},
+        }
+    }
+}
+
+pub struct SeenOrUnnamedRelease;
+
+unsafe impl RocRelease<SeenOrUnnamed> for SeenOrUnnamedRelease {
+    unsafe fn release(value: SeenOrUnnamed, roc_host: &RocHost) {
         unsafe { value.decref(roc_host); }
     }
 }
@@ -3478,7 +3693,7 @@ unsafe impl RocRelease<AnonStructBc929c3932dd072f> for AnonStructBc929c3932dd072
     }
 }
 
-impl AnonStruct558b43c445792e86 {
+impl AnonStruct494c2e3974c3ffbf {
     /// Recursively decrement Roc-owned fields.
     ///
     /// # Safety
@@ -3499,15 +3714,46 @@ impl AnonStruct558b43c445792e86 {
     }
 }
 
-pub struct AnonStruct558b43c445792e86Release;
+pub struct AnonStruct494c2e3974c3ffbfRelease;
 
-unsafe impl RocRelease<AnonStruct558b43c445792e86> for AnonStruct558b43c445792e86Release {
-    unsafe fn release(value: AnonStruct558b43c445792e86, roc_host: &RocHost) {
+unsafe impl RocRelease<AnonStruct494c2e3974c3ffbf> for AnonStruct494c2e3974c3ffbfRelease {
+    unsafe fn release(value: AnonStruct494c2e3974c3ffbf, roc_host: &RocHost) {
         unsafe { value.decref(roc_host); }
     }
 }
 
-impl AnonStruct262668050069ec36 {
+impl AnonStructBf065dcb25e0dab6 {
+    /// Recursively decrement Roc-owned fields.
+    ///
+    /// # Safety
+    /// `self` must own one live Roc reference for each refcounted field.
+    pub unsafe fn decref(self, roc_host: &RocHost) {
+        let value = self;
+        unsafe { value.frame.decref(roc_host); }
+        unsafe { value.window.decref(roc_host); }
+    }
+
+    /// Increment Roc-owned fields.
+    ///
+    /// # Safety
+    /// `self` must point at live Roc allocations. The retained references must
+    /// be balanced by later decrefs.
+    pub unsafe fn incref(self, amount: isize) {
+        let value = self;
+        unsafe { value.frame.incref(amount); }
+        unsafe { value.window.incref(amount); }
+    }
+}
+
+pub struct AnonStructBf065dcb25e0dab6Release;
+
+unsafe impl RocRelease<AnonStructBf065dcb25e0dab6> for AnonStructBf065dcb25e0dab6Release {
+    unsafe fn release(value: AnonStructBf065dcb25e0dab6, roc_host: &RocHost) {
+        unsafe { value.decref(roc_host); }
+    }
+}
+
+impl AnonStruct91b4009878602735 {
     /// Recursively decrement Roc-owned fields.
     ///
     /// # Safety
@@ -3534,10 +3780,10 @@ impl AnonStruct262668050069ec36 {
     }
 }
 
-pub struct AnonStruct262668050069ec36Release;
+pub struct AnonStruct91b4009878602735Release;
 
-unsafe impl RocRelease<AnonStruct262668050069ec36> for AnonStruct262668050069ec36Release {
-    unsafe fn release(value: AnonStruct262668050069ec36, roc_host: &RocHost) {
+unsafe impl RocRelease<AnonStruct91b4009878602735> for AnonStruct91b4009878602735Release {
+    unsafe fn release(value: AnonStruct91b4009878602735, roc_host: &RocHost) {
         unsafe { value.decref(roc_host); }
     }
 }
