@@ -4,9 +4,15 @@
 ## holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
+import Wire exposing [put_list, put_rect, put_window, take, take_list, take_rect, take_u32, take_window]
+import Bsp
+
 WindowId : { pid : I32, idx : U32 }
 
 Rect : { x : F64, y : F64, w : F64, h : F64 }
+
+## Words being read, and where.
+Words : { words : List(U64), at : U64 }
 
 Desire : { window : WindowId, frame : Rect, request : U32 }
 
@@ -80,17 +86,20 @@ Armed : [Armed(U64), Disarmed]
 
 Model : {
 	windows : Dict(WindowId, Record),
+
 	## Every write sent, with its deadline, in send order (= deadline order).
 	deadlines : List({ deadline : U64, window : WindowId }),
+
 	## Decided along the way, emitted after the step's decisions.
 	notes : List(Effect),
+
 	## Windows whose state changed this step, in order.
 	touched : List(WindowId),
 	grip : Grip,
 	armed : Armed,
 }
 
-core = { init, step }
+core = { init, step, tile: Bsp.tile }
 
 init : {} -> Model
 init = |{}| {
@@ -141,14 +150,14 @@ owner : Grip, WindowId -> [Rift, User]
 owner = |grip, window|
 	match grip {
 		Held({ phase: Dragging(_), .. }) => User
-		Held({ window: held, phase: Pressed, .. }) => if held == window User else Rift
+		Held({ window: held, phase: Pressed, .. }) => if (held == window) User else Rift
 		Idle => Rift
 	}
 
 holder : Grip, WindowId -> [User, Nobody]
 holder = |grip, window|
 	match grip {
-		Held({ window: held, .. }) => if held == window User else Nobody
+		Held({ window: held, .. }) => if (held == window) User else Nobody
 		Idle => Nobody
 	}
 
@@ -213,7 +222,7 @@ rekey : Model, WindowId, WindowId -> Model
 rekey = |model, from, to| {
 	moved =
 		match model.windows.get(from) {
-			Ok(record) => if model.windows.contains(to) model else see(model, to, record.seen)
+			Ok(record) => if (model.windows.contains(to)) model else see(model, to, record.seen)
 			Err(_) => model
 		}
 	remove(moved, from)
@@ -307,8 +316,8 @@ want_from = |model, now, request, window, desired, known, sync| {
 				write({})
 			}
 
-		Settled({ acked, .. }) => if same_as(desired, acked) (model, Nothing) else write({})
-		Animating({ target, .. }) => if same_as(desired, target) (model, Nothing) else write({})
+		Settled({ acked, .. }) => if (same_as(desired, acked)) (model, Nothing) else write({})
+		Animating({ target, .. }) => if (same_as(desired, target)) (model, Nothing) else write({})
 		Unknown(_) => write({})
 	}
 }
@@ -412,7 +421,7 @@ own_frame = |model, window, frame, last, sync, placed|
 place : Model, WindowId, Sync, Rect, Rect, [User, Nobody] -> (Model, Reply)
 place = |model, window, sync, frame, known, hand| {
 	news = |{}| {
-		reply = if same_as(frame, known) NoNews else Foreign
+		reply = if (same_as(frame, known)) NoNews else Foreign
 		match (sync, reply) {
 			# A refusal stands while the window stays where the model has it.
 			(Refused(_), NoNews) => (model, reply)
@@ -539,9 +548,9 @@ animate_one = |model, now, request, window, desired, whose|
 				match sync {
 					# A write is with the app, or where the app has the window is unknown: written.
 					InFlight(_) | Unknown(_) => Written
-					Animating({ target, .. }) => if same_as(target, desired) There else NotThere
-					Refused({ wanted, .. }) => if same_as(wanted, desired) There else NotThere
-					Settled(_) => if same_as(known, desired) There else NotThere
+					Animating({ target, .. }) => if (same_as(target, desired)) There else NotThere
+					Refused({ wanted, .. }) => if (same_as(wanted, desired)) There else NotThere
+					Settled(_) => if (same_as(known, desired)) There else NotThere
 				}
 			match already {
 				Written => {
@@ -607,10 +616,10 @@ animation_stopped = |model, window, request|
 		Ok({ seen, sync }) =>
 			match sync {
 				Animating({ request: sent, .. }) =>
-					if sent == request set(model, window, Settled({ acked: seen, last: Sent(request) })) else model
+					if (sent == request) set(model, window, Settled({ acked: seen, last: Sent(request) })) else model
 
 				InFlight({ request: sent, .. }) =>
-					if sent == request set(model, window, Unknown(Sent(request))) else model
+					if (sent == request) set(model, window, Unknown(Sent(request))) else model
 
 				Settled(_) | Refused(_) | Unknown(_) => model
 			}
@@ -679,7 +688,7 @@ ungrip = |model, why|
 ungrip_window : Model, WindowId -> (Model, List(Effect))
 ungrip_window = |model, window|
 	match model.grip {
-		Held({ window: held, .. }) => if held == window ungrip(model, Gone) else (model, [])
+		Held({ window: held, .. }) => if (held == window) ungrip(model, Gone) else (model, [])
 		Idle => (model, [])
 	}
 
@@ -729,7 +738,7 @@ add_to_plan = |plans, request, write, moves_only| {
 			{ ..plan, frames: plan.frames.append(write) }
 		}
 	if plans.any(|plan| plan.request == request) {
-		plans.map(|plan| if plan.request == request add(plan) else plan)
+		plans.map(|plan| if (plan.request == request) add(plan) else plan)
 	} else {
 		plans.append(add({ request, positions: [], frames: [] }))
 	}
@@ -858,7 +867,7 @@ decide = |model, event| {
 							ButtonUp(released) => released == button
 						}
 				}
-			if ends ungrip(model, Released) else (model, [])
+			if (ends) ungrip(model, Released) else (model, [])
 		}
 
 		LetGo => ungrip(model, LetGo)
@@ -979,7 +988,7 @@ step = |model0, words| {
 			},
 		)
 	(pruned, next) = next_deadline(decided)
-	timer = if next == pruned.armed [] else [Timer(next)]
+	timer = if (next == pruned.armed) [] else [Timer(next)]
 	effects = decisions.concat(pruned.notes).concat(pending).concat(timer)
 	{ model: { ..pruned, armed: next, notes: [], touched: [] }, effects: put_effects(effects) }
 }
@@ -987,73 +996,12 @@ step = |model0, words| {
 # ---------------------------------------------------------------------------------------------
 # The wire: words in, words out (the layout is `rift_core::plain::wire`'s).
 
-Words : { words : List(U64), at : U64 }
-
-take : Words -> (U64, Words)
-take = |cursor|
-	match cursor.words.get(cursor.at) {
-		Ok(word) => (word, { ..cursor, at: cursor.at + 1 })
-		Err(_) => crash "wire: the event ended inside a value"
-	}
-
-take_u32 : Words -> (U32, Words)
-take_u32 = |cursor| {
-	(word, rest) = take(cursor)
-	(word.to_u32_wrap(), rest)
-}
-
-take_window : Words -> (WindowId, Words)
-take_window = |cursor| {
-	(pid, after_pid) = take(cursor)
-	(idx, rest) = take_u32(after_pid)
-	({ pid: pid.to_i32_wrap(), idx }, rest)
-}
-
-take_rect : Words -> (Rect, Words)
-take_rect = |cursor| {
-	(x, c1) = take(cursor)
-	(y, c2) = take(c1)
-	(w, c3) = take(c2)
-	(h, c4) = take(c3)
-	({ x: F64.from_bits(x), y: F64.from_bits(y), w: F64.from_bits(w), h: F64.from_bits(h) }, c4)
-}
-
 take_desire : Words -> (Desire, Words)
 take_desire = |cursor| {
 	(window, c1) = take_window(cursor)
 	(frame, c2) = take_rect(c1)
 	(request, c3) = take_u32(c2)
 	({ window, frame, request }, c3)
-}
-
-take_windows : Words -> (List(WindowId), Words)
-take_windows = |cursor0| {
-	(count, after_count) = take(cursor0)
-	var $cursor = after_count
-	var $items = []
-	var $left = count
-	while $left > 0 {
-		(item, next) = take_window($cursor)
-		$cursor = next
-		$items = $items.append(item)
-		$left = $left - 1
-	}
-	($items, $cursor)
-}
-
-take_desires : Words -> (List(Desire), Words)
-take_desires = |cursor0| {
-	(count, after_count) = take(cursor0)
-	var $cursor = after_count
-	var $items = []
-	var $left = count
-	while $left > 0 {
-		(item, next) = take_desire($cursor)
-		$cursor = next
-		$items = $items.append(item)
-		$left = $left - 1
-	}
-	($items, $cursor)
 }
 
 button_of : U64 -> Button
@@ -1104,11 +1052,11 @@ parse_event = |words| {
 
 		7 => Ceded(take_window(c).0)
 		8 => Unseen(take_window(c).0)
-		9 => Distrust(take_windows(c).0)
+		9 => Distrust(take_list(c, take_window).0)
 		10 => {
 			(now, c1) = take(c)
 			(how, c2) = take(c1)
-			desires = take_desires(c2).0
+			desires = take_list(c2, take_desire).0
 			match how {
 				0 => Arrange({ now, want: Arrange, desires })
 				1 => Arrange({ now, want: ArrangePositions, desires })
@@ -1118,7 +1066,7 @@ parse_event = |words| {
 
 		11 => {
 			(now, c1) = take(c)
-			Animate({ now, desires: take_desires(c1).0 })
+			Animate({ now, desires: take_list(c1, take_desire).0 })
 		}
 
 		12 => {
@@ -1166,35 +1114,11 @@ parse_event = |words| {
 	}
 }
 
-put_window : List(U64), WindowId -> List(U64)
-put_window = |words, window| words.append(window.pid.to_i64().to_u64_wrap()).append(window.idx.to_u64())
-
-put_rect : List(U64), Rect -> List(U64)
-put_rect = |words, rect| words.append(F64.to_bits(rect.x)).append(F64.to_bits(rect.y)).append(F64.to_bits(rect.w)).append(F64.to_bits(rect.h))
-
 put_request : List(U64), U32 -> List(U64)
 put_request = |words, request| words.append(request.to_u64())
 
 put_write : List(U64), WriteFx -> List(U64)
 put_write = |words, write| put_request(put_rect(put_window(words, write.window), write.frame), write.request)
-
-put_writes : List(U64), List(WriteFx) -> List(U64)
-put_writes = |words0, writes| {
-	var $words = words0.append(writes.len())
-	for write in writes {
-		$words = put_write($words, write)
-	}
-	$words
-}
-
-put_windows : List(U64), List(WindowId) -> List(U64)
-put_windows = |words0, windows| {
-	var $words = words0.append(windows.len())
-	for window in windows {
-		$words = put_window($words, window)
-	}
-	$words
-}
 
 reply_code : Reply -> U64
 reply_code = |reply|
@@ -1219,7 +1143,7 @@ put_effect = |words, effect|
 			}
 		}
 
-		Plan({ request, positions, frames }) => put_writes(put_writes(put_request(words.append(3), request), positions), frames)
+		Plan({ request, positions, frames }) => put_list(put_list(put_request(words.append(3), request), positions, put_write), frames, put_write)
 		Queued(window) => put_window(words.append(4), window)
 		Seen({ window, frame }) => put_rect(put_window(words.append(5), window), frame)
 		Replied({ window, reply }) => put_window(words.append(6), window).append(reply_code(reply))
@@ -1244,7 +1168,7 @@ put_effect = |words, effect|
 					LetGo => 1
 					Gone => 2
 				}
-			put_windows(put_window(words.append(11), window).append(code), changed)
+			put_list(put_window(words.append(11), window).append(code), changed, put_window)
 		}
 
 		Regrip({ from, to }) => put_window(put_window(words.append(12), from), to)

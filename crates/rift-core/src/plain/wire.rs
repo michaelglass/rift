@@ -5,8 +5,13 @@
 //! an enum as its variant's index. An `Option` is a flag word (0 none, 1 some) and then the
 //! value; a list is its length and then its items. Each event and effect starts with its tag,
 //! the index in the tables below, which `roc/core` mirrors.
+//!
+//! A layout's shape and its frames cross the same way ([`encode_bsp`], [`encode_frames`]): the
+//! Roc core's geometry entry takes a shape's words and returns the frames' words.
 
 use crate::core::{Desire, Effect, Event, Plan};
+use crate::layout::bsp::{Bsp, Children, Fill, Node, Slot};
+use crate::layout::{Gaps, WindowConstraints};
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
 use crate::reconciler::{Answer, Note, Reply, Want, Write};
@@ -69,6 +74,75 @@ impl Words {
         self.window(desire.window);
         self.frame(desire.frame);
         self.request(desire.request);
+    }
+
+    fn flag(&mut self, flag: bool) { self.word(u64::from(flag)) }
+
+    fn float(&mut self, value: f64) { self.word(value.to_bits()) }
+
+    fn gaps(&mut self, gaps: Gaps) {
+        for gap in [
+            gaps.top,
+            gaps.left,
+            gaps.bottom,
+            gaps.right,
+            gaps.horizontal,
+            gaps.vertical,
+        ] {
+            self.float(gap);
+        }
+    }
+
+    fn constraints(&mut self, c: WindowConstraints) {
+        self.flag(c.is_resizable);
+        for value in [
+            c.locked_width,
+            c.locked_height,
+            c.min_width,
+            c.min_height,
+            c.max_width,
+            c.max_height,
+        ] {
+            self.float(value);
+        }
+    }
+
+    fn node(&mut self, node: Node<WindowId>) {
+        match node {
+            Node::Split { horizontal, ratio, children } => {
+                self.word(0);
+                self.flag(horizontal);
+                self.word(u64::from(ratio.to_bits()));
+                match children {
+                    Children::One(child) => {
+                        self.word(0);
+                        self.node(*child);
+                    }
+                    Children::Two(first, second) => {
+                        self.word(1);
+                        self.node(*first);
+                        self.node(*second);
+                    }
+                }
+            }
+            Node::Leaf { slot, fill, stacked } => {
+                self.word(1);
+                match slot {
+                    Slot::Empty => self.word(0),
+                    Slot::Window { window, constraints } => {
+                        self.word(1);
+                        self.window(window);
+                        self.option(constraints, Self::constraints);
+                    }
+                }
+                self.word(match fill {
+                    Fill::Tiled => 0,
+                    Fill::Screen => 1,
+                    Fill::WithinGaps => 2,
+                });
+                self.flag(stacked);
+            }
+        }
     }
 
     fn event(&mut self, event: Event<Plain>) {
@@ -266,6 +340,26 @@ pub fn encode_effects(effects: Vec<Effect<Plain>>) -> Vec<u64> {
     words.0
 }
 
+/// A BSP layout's shape as words.
+pub fn encode_bsp(bsp: Bsp<WindowId>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.frame(bsp.screen);
+    words.gaps(bsp.gaps);
+    words.option(bsp.aspect, Words::float);
+    words.option(bsp.root, Words::node);
+    words.0
+}
+
+/// A layout's frames (each window's, in order) as words.
+pub fn encode_frames(frames: Vec<(WindowId, Rect)>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.list(frames, |words, (window, frame)| {
+        words.window(window);
+        words.frame(frame);
+    });
+    words.0
+}
+
 /// One step of a trace (its event, then its effects), appended to `trace`.
 pub fn record_step(trace: &mut Vec<u64>, event: Event<Plain>, effects: Vec<Effect<Plain>>) {
     trace.extend(encode_event(event));
@@ -344,6 +438,76 @@ impl Reader<'_> {
             frame: self.frame()?,
             request: self.request()?,
         })
+    }
+
+    fn flag(&mut self) -> Read<bool> {
+        match self.word()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            word => self.unknown(word),
+        }
+    }
+
+    fn float(&mut self) -> Read<f64> { self.word().map(f64::from_bits) }
+
+    fn gaps(&mut self) -> Read<Gaps> {
+        Ok(Gaps {
+            top: self.float()?,
+            left: self.float()?,
+            bottom: self.float()?,
+            right: self.float()?,
+            horizontal: self.float()?,
+            vertical: self.float()?,
+        })
+    }
+
+    fn constraints(&mut self) -> Read<WindowConstraints> {
+        Ok(WindowConstraints {
+            is_resizable: self.flag()?,
+            locked_width: self.float()?,
+            locked_height: self.float()?,
+            min_width: self.float()?,
+            min_height: self.float()?,
+            max_width: self.float()?,
+            max_height: self.float()?,
+        })
+    }
+
+    fn node(&mut self) -> Read<Node<WindowId>> {
+        match self.word()? {
+            0 => {
+                let horizontal = self.flag()?;
+                let ratio = f32::from_bits(self.u32()?);
+                let children = match self.word()? {
+                    0 => Children::One(Box::new(self.node()?)),
+                    1 => Children::Two(Box::new(self.node()?), Box::new(self.node()?)),
+                    word => return self.unknown(word),
+                };
+                Ok(Node::Split { horizontal, ratio, children })
+            }
+            1 => {
+                let slot = match self.word()? {
+                    0 => Slot::Empty,
+                    1 => Slot::Window {
+                        window: self.window()?,
+                        constraints: self.option(Self::constraints)?,
+                    },
+                    word => return self.unknown(word),
+                };
+                let fill = match self.word()? {
+                    0 => Fill::Tiled,
+                    1 => Fill::Screen,
+                    2 => Fill::WithinGaps,
+                    word => return self.unknown(word),
+                };
+                Ok(Node::Leaf {
+                    slot,
+                    fill,
+                    stacked: self.flag()?,
+                })
+            }
+            word => self.unknown(word),
+        }
     }
 
     fn button(&mut self) -> Read<Button> {
@@ -514,6 +678,27 @@ pub fn decode_effects(words: &[u64]) -> Result<Vec<Effect<Plain>>, WireError> {
     let effects = reader.list(Reader::effect)?;
     reader.done()?;
     Ok(effects)
+}
+
+/// The BSP shape `words` hold.
+pub fn decode_bsp(words: &[u64]) -> Result<Bsp<WindowId>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    let bsp = Bsp {
+        screen: reader.frame()?,
+        gaps: reader.gaps()?,
+        aspect: reader.option(Reader::float)?,
+        root: reader.option(Reader::node)?,
+    };
+    reader.done()?;
+    Ok(bsp)
+}
+
+/// The frames `words` hold.
+pub fn decode_frames(words: &[u64]) -> Result<Vec<(WindowId, Rect)>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    let frames = reader.list(|reader| Ok((reader.window()?, reader.frame()?)))?;
+    reader.done()?;
+    Ok(frames)
 }
 
 /// A recorded trace: each step's event and the effects the core decided.
@@ -706,5 +891,71 @@ mod tests {
         assert_eq!(decode_event(&[99]), Err(WireError::Unknown { at: 0, word: 99 }));
         assert_eq!(decode_effects(&[u64::MAX]), Err(WireError::Truncated));
         assert_eq!(decode_event(&[4, 1]), Err(WireError::Truncated));
+    }
+
+    #[test]
+    fn a_bsp_shape_and_its_frames_survive_the_wire() {
+        let leaf = |window, constraints, fill| Node::Leaf {
+            slot: Slot::Window { window, constraints },
+            fill,
+            stacked: false,
+        };
+        let bsp = Bsp {
+            screen: Rect {
+                x: -1.5,
+                y: 2.,
+                w: 1000.,
+                h: 800.,
+            },
+            gaps: Gaps {
+                top: 1.,
+                left: 2.,
+                bottom: 3.,
+                right: 4.,
+                horizontal: 5.,
+                vertical: 6.,
+            },
+            aspect: Some(1.5),
+            root: Some(Node::Split {
+                horizontal: true,
+                ratio: 0.3,
+                children: Children::Two(
+                    Box::new(leaf(W, None, Fill::Screen)),
+                    Box::new(Node::Split {
+                        horizontal: false,
+                        ratio: 0.5,
+                        children: Children::One(Box::new(Node::Leaf {
+                            slot: Slot::Empty,
+                            fill: Fill::WithinGaps,
+                            stacked: true,
+                        })),
+                    }),
+                ),
+            }),
+        };
+        let mut constrained = bsp.clone();
+        constrained.root = Some(leaf(
+            V,
+            Some(WindowConstraints {
+                is_resizable: true,
+                min_width: 300.,
+                ..Default::default()
+            }),
+            Fill::Tiled,
+        ));
+        let empty = Bsp {
+            screen: Rect { x: 0., y: 0., w: 10., h: 10. },
+            gaps: Gaps::default(),
+            root: None,
+            aspect: None,
+        };
+        for shape in [bsp, constrained, empty] {
+            assert_eq!(decode_bsp(&encode_bsp(shape.clone())), Ok(shape));
+        }
+        let frames = vec![
+            (W, Rect { x: 0., y: 1., w: 2., h: 3. }),
+            (V, Rect { x: 4., y: 5., w: 6., h: 7. }),
+        ];
+        assert_eq!(decode_frames(&encode_frames(frames.clone())), Ok(frames));
     }
 }
