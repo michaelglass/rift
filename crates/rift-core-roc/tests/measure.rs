@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use rift_core::plain::{Nanos, Plain, Rect, WindowId};
+use rift_core::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use rift_core::{Core, Effect, Event, Initiative, InputClass, Pointer, RustCore, Want};
 use rift_core_roc::{AllocationCount, RocCore};
 
@@ -70,6 +70,7 @@ fn workload(windows: u32, steps: usize) -> Vec<Event<Plain>> {
             now += 1_000_000;
             events.push(Event::Want {
                 now: Nanos(now),
+                request: RequestId(round as u32),
                 window,
                 desired: rect(x),
                 known: rect(x - 10.),
@@ -85,6 +86,8 @@ fn workload(windows: u32, steps: usize) -> Vec<Event<Plain>> {
             let answered = if i % 2 == 0 { rect(x + 7.) } else { rect(x) };
             events.push(Event::Answer {
                 now: Nanos(now),
+                request: RequestId(round as u32),
+                seen: Some(RequestId(round as u32)),
                 window,
                 frame: answered,
             });
@@ -98,7 +101,11 @@ fn workload(windows: u32, steps: usize) -> Vec<Event<Plain>> {
         }
         now += 400_000_000;
         let known = ids.iter().map(|&window| (window, rect(0.))).collect();
-        events.push(Event::Tick { now: Nanos(now), known });
+        events.push(Event::Tick {
+            now: Nanos(now),
+            request: RequestId(round as u32),
+            known,
+        });
     }
     events.truncate(steps);
     events

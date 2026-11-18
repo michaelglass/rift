@@ -424,6 +424,13 @@ pub struct RocCore {
     host: abi::RocHost,
 }
 
+// SAFETY: the model's box is owned by this `RocCore` alone: Roc keeps no reference to it
+// between steps and nothing else holds one, so moving the core to another thread (rift builds
+// its reactor on one thread and runs it on another) moves the only owner. Roc's refcounts are
+// not atomic, so the core is not `Sync`: one thread steps it at a time, which `&mut self` on
+// `step` already requires.
+unsafe impl Send for RocCore {}
+
 impl Default for RocCore {
     fn default() -> Self {
         RocCore {

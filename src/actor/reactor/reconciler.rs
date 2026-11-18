@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use objc2_core_foundation::CGRect;
 use rift_core::reconciler::Note;
 pub(crate) use rift_core::{Answer, Observation, Owner, Want};
-use rift_core::{Core, Kinds, RustCore};
+use rift_core::{Core, Kinds};
 use tracing::{debug, warn};
 
 use super::animation::scrolling_bounds;
@@ -105,6 +105,13 @@ impl Clock {
     }
 }
 
+/// The core the reactor steps: the Rust core, or with the `roc-core` feature the Roc core
+/// (shadowed by the Rust core, which must agree at every step).
+#[cfg(not(feature = "roc-core"))]
+type Engine = rift_core::RustCore<Rift>;
+#[cfg(feature = "roc-core")]
+type Engine = super::roc_bridge::RocInRift;
+
 /// One step through the core, as the reactor took it: what went in and what came out.
 #[cfg(test)]
 pub(crate) type Step = (Event, Vec<Effect>);
@@ -114,7 +121,7 @@ pub(crate) type Step = (Event, Vec<Effect>);
 #[derive(Debug)]
 pub(crate) struct Reconciler {
     /// Shared so the mode gate, asked from `&self`, can step it too.
-    core: Shared<RustCore<Rift>>,
+    core: Shared<Engine>,
     /// The pointer as the core was last told it. The reactor's window store owns the press
     /// and drag model; the core is told each change before it decides anything.
     told: Cell<Pointer>,
@@ -128,11 +135,16 @@ pub(crate) struct Reconciler {
 
 impl Default for Reconciler {
     fn default() -> Self {
+        let clock = Clock::default();
+        #[cfg(not(feature = "roc-core"))]
+        let core = Shared::new(Engine::default());
+        #[cfg(feature = "roc-core")]
+        let core = Shared::new(Engine::new(clock.now()));
         Reconciler {
-            core: Shared::default(),
+            core,
             told: Cell::new(Pointer::Idle),
             armed: Cell::new(None),
-            clock: Clock::default(),
+            clock,
             #[cfg(test)]
             trace: RefCell::default(),
         }

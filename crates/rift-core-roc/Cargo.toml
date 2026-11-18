@@ -6,8 +6,8 @@ description = "Rift's core written in Roc (roc/core), behind rift-core's Core tr
 license = "Apache-2.0"
 build = "build.rs"
 
-# Its own workspace: building it needs the Roc nightly, which rift's own build must not.
-[workspace]
+# Excluded from rift's workspace (so it builds standalone): building it needs the Roc
+# nightly, which rift's own build must not. rift's `roc-core` feature depends on it.
 
 [dependencies]
 rift-core = { path = "../rift-core" }
@@ -16,5 +16,3 @@ rift-core = { path = "../rift-core" }
 rift-core = { path = "../rift-core", features = ["serde"] }
 serde_json = "1.0.145"
 
-[profile.release]
-debug = "line-tables-only"
