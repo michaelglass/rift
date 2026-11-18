@@ -25,7 +25,17 @@ Gaps : { top : F64, left : F64, bottom : F64, right : F64, horizontal : F64, ver
 ## One subtree's constraints along an axis.
 Summary : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], can_grow : Bool }
 
+## One segment to solve, and what it is the length of.
 AxisItem : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], weight : F64, can_grow : Bool }
+
+## A container's summary being gathered, one child at a time.
+Gathered : { count : U64, low : F64, fixed : [Fixed(F64), Free], high : [Max(F64), NoMax], can_grow : Bool, focused : F64 }
+
+## A segment's bounds, sanitized.
+Segment : { low : F64, high : [Max(F64), NoMax], weight : F64, grows : Bool, fixed : [Fixed(F64), Free] }
+
+## A segment and how far solving it has got.
+Placed : { segment : Segment, state : [Set(F64), Growing] }
 
 Geometry := [].{
 	epsilon : F64
@@ -182,36 +192,43 @@ Geometry := [].{
 
 	## The children's summaries combined into the container's, along one axis.
 	container_summary : List(Summary), Bool, Bool, F64, F64, F64 -> Summary
-	container_summary = |children, aligned, stacked, gap, stack_offset, reserve| {
+	container_summary = |children, aligned, stacked, gap, stack_offset, reserve|
+		gathered(children.fold(gather_start, |acc, child| gather(acc, child, aligned, stacked)), aligned, stacked, gap, stack_offset, reserve)
+
+	## Nothing gathered yet.
+	gather_start : Gathered
+	gather_start = { count: 0, low: 0.0, fixed: Fixed(0.0), high: Max(0.0), can_grow: False, focused: 0.0 }
+
+	## One more child's summary into a container's.
+	gather : Gathered, Summary, Bool, Bool -> Gathered
+	gather = |acc, child, aligned, stacked| {
 		combine = |a, b| if (aligned and !stacked) a + max(b, 0.0) else max(a, max(b, 0.0))
-		var $low = 0.0
-		var $fixed = Fixed(0.0)
-		var $high = Max(0.0)
-		var $can_grow = False
-		var $focused = 0.0
-		for child in children {
-			$low = combine($low, child.min)
-			$fixed =
-				match ($fixed, child.fixed) {
-					(Fixed(a), Fixed(b)) => Fixed(combine(a, b))
-					_ => Free
-				}
-			$high =
-				match ($high, child.max) {
-					(Max(a), Max(b)) => Max(combine(a, b))
-					_ => NoMax
-				}
-			$can_grow = $can_grow or child.can_grow
-			$focused =
-				max(
-					$focused,
-					match child.fixed {
-						Fixed(v) => v
-						Free => child.min
-					},
-				)
+		{
+			count: acc.count + 1,
+			low: combine(acc.low, child.min),
+			fixed: match (acc.fixed, child.fixed) {
+				(Fixed(a), Fixed(b)) => Fixed(combine(a, b))
+				_ => Free
+			},
+			high: match (acc.high, child.max) {
+				(Max(a), Max(b)) => Max(combine(a, b))
+				_ => NoMax
+			},
+			can_grow: acc.can_grow or child.can_grow,
+			focused: max(
+				acc.focused,
+				match child.fixed {
+					Fixed(v) => v
+					Free => child.min
+				},
+			),
 		}
-		count = children.len()
+	}
+
+	## The container's summary from all its children's.
+	gathered : Gathered, Bool, Bool, F64, F64, F64 -> Summary
+	gathered = |acc, aligned, stacked, gap, stack_offset, reserve| {
+		count = acc.count
 		if count == 0 {
 			{ min: 0.0, fixed: Free, max: NoMax, can_grow: True }
 		} else {
@@ -225,60 +242,52 @@ Geometry := [].{
 				} else {
 					gap * (count - 1).to_f64()
 				}
-			(low, fixed) = if (count > 1 and stacked and aligned) ($focused, Free) else ($low, $fixed)
+			(low, fixed) = if (count > 1 and stacked and aligned) (acc.focused, Free) else (acc.low, acc.fixed)
 			{
 				min: low + extra,
 				fixed: match fixed {
 					Fixed(v) => Fixed(v + extra)
 					Free => Free
 				},
-				max: match $high {
+				max: match acc.high {
 					Max(v) => Max(v + extra)
 					NoMax => NoMax
 				},
-				can_grow: $can_grow,
+				can_grow: acc.can_grow,
 			}
 		}
 	}
 
-	## Segment lengths along one axis (see `solve_axis_lengths`).
+	## Segment lengths along one axis (see `solve_axis_lengths`), in order. Every step walks the
+	## segments in order; none indexes them.
 	solve : List(AxisItem), F64 -> List(F64)
-	solve = |items, usable0|
-		if items.is_empty() {
-			[]
-		} else {
-			usable = sanitize(usable0)
-			n = items.len()
-			mins0 = items.map(|i| sanitize(i.min))
-			maxs =
-				items.map(
-					|i|
-						match i.max {
+	solve = |items, usable0| {
+		usable = sanitize(usable0)
+		segments =
+			items.map(
+				|item| {
+					low = sanitize(item.min)
+					high =
+						match item.max {
 							Max(v) => {
-								s = sanitize(v)
-								if (s > 0.0 and F64.is_finite(s)) Max(s) else NoMax
+								sane = sanitize(v)
+								if (sane > 0.0 and F64.is_finite(sane)) Max(sane) else NoMax
 							}
 
 							NoMax => NoMax
-						},
-				)
-			weights = items.map(|i| sanitize(i.weight))
-			fixed =
-				indices_to(n).map(
-					|idx| {
-						item = get(items, idx)
+						}
+					fixed =
 						match item.fixed {
 							Fixed(v0) => {
 								v1 = sanitize(v0)
 								if F64.is_finite(v1) {
-									low = getf(mins0, idx)
 									v2 = if (v1 < low) low else v1
-									v3 =
-										match get(maxs, idx) {
-											Max(high) => if (v2 > high) high else v2
+									Fixed(
+										match high {
+											Max(h) => if (v2 > h) h else v2
 											NoMax => v2
-										}
-									Fixed(v3)
+										},
+									)
 								} else {
 									Free
 								}
@@ -286,146 +295,194 @@ Geometry := [].{
 
 							Free => Free
 						}
+					{ low, high, weight: sanitize(item.weight), grows: item.can_grow, fixed }
+				},
+			)
+		fixed_sum = sum(
+			segments.join_map(
+				|segment|
+					match segment.fixed {
+						Fixed(v) => [v]
+						Free => []
 					},
-				)
-			fixed_value = |f|
-				match f {
-					Fixed(v) => [v]
-					Free => []
+			),
+		)
+		if fixed_sum > usable and fixed_sum > 0.0 {
+			scale = usable / fixed_sum
+			segments.map(
+				|segment|
+					match segment.fixed {
+						Fixed(v) => v * scale
+						Free => 0.0
+					},
+			)
+		} else {
+			min_sum = sum(
+				segments.join_map(
+					|segment|
+						match segment.fixed {
+							Free => [segment.low]
+							Fixed(_) => []
+						},
+				),
+			)
+			remaining_for_mins = max(usable - fixed_sum, 0.0)
+			scaled =
+				if min_sum > remaining_for_mins and min_sum > 0.0 {
+					scale = remaining_for_mins / min_sum
+					segments.map(
+						|segment|
+							match segment.fixed {
+								Free => { ..segment, low: segment.low * scale }
+								Fixed(_) => segment
+							},
+					)
+				} else {
+					segments
 				}
-			fixed_sum = sum(fixed.join_map(fixed_value))
-			if fixed_sum > usable and fixed_sum > 0.0 {
-				scale = usable / fixed_sum
-				fixed.map(
-					|f|
-						match f {
-							Fixed(v) => v * scale
-							Free => 0.0
+			# Fixed lengths first, in order; then the minima of what cannot grow.
+			(with_fixed, after_fixed) =
+				scaled.fold(
+					([], usable),
+					|(out, remaining), segment|
+						match segment.fixed {
+							Fixed(v) => {
+								assigned = min(v, remaining)
+								(out.append({ segment, state: Set(assigned) }), max(remaining - assigned, 0.0))
+							}
+
+							Free => (out.append({ segment, state: Growing }), remaining)
 						},
 				)
-			} else {
-				is_free = |idx|
-					match get(fixed, idx) {
-						Free => True
-						Fixed(_) => False
-					}
-				indices = indices_to(n)
-				min_sum = sum(indices.keep_if(is_free).map(|idx| getf(mins0, idx)))
-				remaining_for_mins = max(usable - fixed_sum, 0.0)
-				mins =
-					if min_sum > remaining_for_mins and min_sum > 0.0 {
-						scale = remaining_for_mins / min_sum
-						indices.map(|idx| if (is_free(idx)) getf(mins0, idx) * scale else getf(mins0, idx))
-					} else {
-						mins0
-					}
-				var $lengths = List.repeat(0.0, n)
-				var $remaining = usable
-				for idx in indices {
-					match get(fixed, idx) {
-						Fixed(v) => {
-							assigned = min(v, $remaining)
-							$lengths = put_at($lengths, idx, assigned)
-							$remaining = max($remaining - assigned, 0.0)
-						}
-
-						Free => {}
-					}
-				}
-				var $growable = []
-				for idx in indices {
-					if is_free(idx) {
-						if get(items, idx).can_grow {
-							$growable = $growable.append(idx)
-						} else {
-							assigned = min(getf(mins, idx), $remaining)
-							$lengths = put_at($lengths, idx, assigned)
-							$remaining = max($remaining - assigned, 0.0)
-						}
-					}
-				}
-				var $going = True
-				while $going and !$growable.is_empty() and $remaining > epsilon {
-					total_weight = sum($growable.map(|idx| getf(weights, idx)))
-					equal_weights = total_weight <= epsilon
-					divisor = if (equal_weights) $growable.len().to_f64() else total_weight
-					weight_of = |idx| if (equal_weights) 1.0 else getf(weights, idx)
-					var $clamped = []
-					for idx in $growable {
-						proposed = $remaining * weight_of(idx) / divisor
-						low = getf(mins, idx)
-						if proposed + epsilon < low {
-							$lengths = put_at($lengths, idx, min(low, $remaining))
-							$clamped = $clamped.append(idx)
-						} else {
-							match get(maxs, idx) {
-								Max(high0) => {
-									high = max(high0, low)
-									if proposed > high + epsilon {
-										$lengths = put_at($lengths, idx, min(high, $remaining))
-										$clamped = $clamped.append(idx)
-									}
-								}
-
-								NoMax => {}
+			(settled, after_minima) =
+				with_fixed.fold(
+					([], after_fixed),
+					|(out, remaining), placed|
+						match (placed.state, placed.segment.fixed, placed.segment.grows) {
+							(Growing, Free, False) => {
+								assigned = min(placed.segment.low, remaining)
+								(out.append({ ..placed, state: Set(assigned) }), max(remaining - assigned, 0.0))
 							}
-						}
-					}
-					if $clamped.is_empty() {
-						for idx in $growable {
-							$lengths = put_at($lengths, idx, $remaining * weight_of(idx) / divisor)
-						}
-						$remaining = 0.0
-						$going = False
-					} else {
-						clamped_sum = sum($clamped.map(|idx| getf($lengths, idx)))
-						$remaining = max($remaining - clamped_sum, 0.0)
-						clamped = $clamped
-						$growable = $growable.keep_if(|idx| !clamped.contains(idx))
-					}
-				}
-				if $remaining <= epsilon {
-					drift = usable - sum($lengths)
-					if drift.abs() > epsilon {
-						lengths = $lengths
-						match indices.keep_if(|idx| getf(lengths, idx) > 0.0).last() {
-							Ok(idx) => put_at($lengths, idx, max(getf(lengths, idx) + drift, 0.0))
-							Err(_) => $lengths
-						}
-					} else {
-						$lengths
-					}
-				} else {
-					$lengths
-				}
+
+							_ => (out.append(placed), remaining)
+						},
+				)
+			grown = grow(settled, after_minima)
+			lengths =
+				grown.placed.map(
+					|placed|
+						match placed.state {
+							Set(length) => length
+							Growing => 0.0
+						},
+				)
+			if grown.remaining <= epsilon {
+				drift = usable - sum(lengths)
+				if (drift.abs() > epsilon) settle_drift(lengths, drift) else lengths
+			} else {
+				lengths
 			}
 		}
-
-	## 0, 1, …, n - 1.
-	indices_to : U64 -> List(U64)
-	indices_to = |n| {
-		var $out = []
-		var $i = 0
-		while $i < n {
-			$out = $out.append($i)
-			$i = $i + 1
-		}
-		$out
 	}
 
-	## `list` with `value` at `idx`, an index within it.
-	put_at : List(F64), U64, F64 -> List(F64)
-	put_at = |list, idx, value| list.set(idx, value) ?? crash "solve: an index within its own list is out of bounds"
+	## The growing segments share what remains by weight, those a bound clamps taking it first,
+	## until nothing remains or every segment is set.
+	grow : List(Placed), F64 -> { placed : List(Placed), remaining : F64 }
+	grow = |placed0, remaining0| {
+		var $placed = placed0
+		var $remaining = remaining0
+		var $going = True
+		while $going and $remaining > epsilon and $placed.any(|p| is_growing(p.state)) {
+			growing = $placed.join_map(|p| if (is_growing(p.state)) [p.segment.weight] else [])
+			total_weight = sum(growing)
+			equal_weights = total_weight <= epsilon
+			divisor = if (equal_weights) growing.len().to_f64() else total_weight
+			remaining = $remaining
+			share = |p| remaining * (if (equal_weights) 1.0 else p.segment.weight) / divisor
+			clamps =
+				$placed.map(
+					|p|
+						match p.state {
+							Growing => {
+								proposed = share(p)
+								low = p.segment.low
+								if proposed + epsilon < low {
+									ClampTo(min(low, remaining))
+								} else {
+									match p.segment.high {
+										Max(high0) => {
+											high = max(high0, low)
+											if (proposed > high + epsilon) ClampTo(min(high, remaining)) else Keep
+										}
 
-	get : List(a), U64 -> a
-	get = |list, idx|
-		match list.get(idx) {
-			Ok(value) => value
-			Err(_) => crash "solve: an index within its own list is out of bounds"
+										NoMax => Keep
+									}
+								}
+							}
+
+							Set(_) => Keep
+						},
+				)
+			clamped = clamps.join_map(
+				|clamp|
+					match clamp {
+						ClampTo(length) => [length]
+						Keep => []
+					},
+			)
+			if clamped.is_empty() {
+				$placed = $placed.map(
+					|p|
+						match p.state {
+							Growing => { ..p, state: Set(share(p)) }
+							Set(_) => p
+						},
+				)
+				$remaining = 0.0
+				$going = False
+			} else {
+				$remaining = max(remaining - sum(clamped), 0.0)
+				$placed = List.map2(
+					$placed,
+					clamps,
+					|p, clamp|
+						match clamp {
+							ClampTo(length) => { ..p, state: Set(length) }
+							Keep => p
+						},
+				)
+			}
+		}
+		{ placed: $placed, remaining: $remaining }
+	}
+
+	is_growing : [Set(F64), Growing] -> Bool
+	is_growing = |state|
+		match state {
+			Growing => True
+			Set(_) => False
 		}
 
-	getf : List(F64), U64 -> F64
-	getf = |list, idx| get(list, idx)
+	## The last segment with a length takes the drift (from the end, in order).
+	settle_drift : List(F64), F64 -> List(F64)
+	settle_drift = |lengths, drift| {
+		(settled, _) =
+			lengths.fold_rev(
+				([], Looking),
+				|length, (out, state)|
+					match state {
+						Looking =>
+							if length > 0.0 {
+								(out.prepend(max(length + drift, 0.0)), Done)
+							} else {
+								(out.prepend(length), Looking)
+							}
+
+						Done => (out.prepend(length), Done)
+					},
+			)
+		settled
+	}
 
 	take_constraints : Words -> (WindowConstraints, Words)
 	take_constraints = |c0| {

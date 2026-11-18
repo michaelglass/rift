@@ -2,7 +2,7 @@
 ## one axis, by a ratio, as far as its windows' constraints allow.
 
 import Wire exposing [take, take_flag, take_float, take_rect, take_u32, take_window]
-import Geometry exposing [container_summary, fixed_for_axis, getf, max, max_for_axis, min, min_for_axis, normalized, resizable_for_axis, solve, take_constraints, tiling_area]
+import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, min_for_axis, normalized, resizable_for_axis, solve, take_constraints, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -120,16 +120,23 @@ Bsp := [].{
 					s = summary(bsp.gaps, child, horizontal)
 					{ min: s.min, fixed: s.fixed, max: s.max, weight: max(weight, 0.0), can_grow: s.can_grow }
 				}
-				solved = solve([axis(first, ratio), axis(second, 1.0 - ratio)], available)
-				first_len = getf(solved, 0)
-				second_len = getf(solved, 1)
-				(r1, r2) =
-					if horizontal {
-						({ ..rect, w: first_len }, { ..rect, x: rect.x + (first_len + gap), w: second_len })
-					} else {
-						({ ..rect, h: first_len }, { ..rect, y: rect.y + (first_len + gap), h: second_len })
-					}
-				place(bsp, second, r2, place(bsp, first, r1, out))
+				# The first child starts where the split does; the second after the first and the
+				# gap (as one sum, the way the Rust adds it).
+				(_, placed) =
+					List.map2([first, second], solve([axis(first, ratio), axis(second, 1.0 - ratio)], available), |child, length| (child, length)).fold(
+						(Start, out),
+						|(at, acc), (child, length)| {
+							frame =
+								match (at, horizontal) {
+									(Start, True) => { ..rect, w: length }
+									(Start, False) => { ..rect, h: length }
+									(After(advance), True) => { ..rect, x: rect.x + advance, w: length }
+									(After(advance), False) => { ..rect, y: rect.y + advance, h: length }
+								}
+							(After(length + gap), place(bsp, child, frame, acc))
+						},
+					)
+				placed
 			}
 		}
 

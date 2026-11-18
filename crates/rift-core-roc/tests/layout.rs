@@ -155,7 +155,7 @@ fn tnode(rng: &mut Rng, depth: u32, next_window: &mut u32) -> traditional::Node<
         };
     }
     let count = 1 + rng.below(4) as usize;
-    let children = (0..count)
+    let mut children: Vec<traditional::Child<WindowId>> = (0..count)
         .map(|_| traditional::Child {
             size: match rng.below(12) {
                 0 => 0.0,
@@ -168,15 +168,22 @@ fn tnode(rng: &mut Rng, depth: u32, next_window: &mut u32) -> traditional::Node<
         })
         .collect();
     let horizontal = rng.chance(50);
-    let kind = if rng.chance(30) {
-        traditional::Kind::Stack {
+    if rng.chance(30) {
+        let on_top = rng.below(count as u64) as usize;
+        let after = children.split_off(on_top + 1);
+        let focused = Box::new(children.pop().expect("count >= 1"));
+        traditional::Node::Stack {
             horizontal,
-            focused: rng.below(count as u64) as usize,
+            fill,
+            before: children,
+            focused,
+            after,
         }
     } else {
-        traditional::Kind::Axis { horizontal }
-    };
-    traditional::Node::Container { kind, fill, children }
+        let rest = children.split_off(1);
+        let first = Box::new(children.pop().expect("count >= 1"));
+        traditional::Node::Axis { horizontal, fill, first, rest }
+    }
 }
 
 fn tshape(rng: &mut Rng) -> Traditional<WindowId> {
@@ -249,4 +256,27 @@ fn the_roc_core_tiles_what_the_rust_core_tiles() {
     let after = AllocationCount::now();
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("layout: {cases} BSP shapes, {windows} frames identical");
+}
+
+#[test]
+#[ignore]
+fn tile_timing() {
+    let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+    let bsp: Vec<Vec<u64>> = (0..200_000).map(|_| wire::encode_bsp(shape(&mut rng))).collect();
+    let trad: Vec<Vec<u64>> =
+        (0..200_000).map(|_| wire::encode_traditional(tshape(&mut rng))).collect();
+    for (name, shapes) in [("bsp", &bsp), ("traditional", &trad)] {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for words in shapes {
+                std::hint::black_box(tile_words(words));
+            }
+            best = best.min(start.elapsed());
+        }
+        eprintln!(
+            "TILE {name}: {:?} per shape (best of 5)",
+            best / shapes.len() as u32
+        );
+    }
 }

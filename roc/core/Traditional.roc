@@ -3,7 +3,7 @@
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
 import Wire exposing [take, take_flag, take_float, take_list, take_rect, take_u32, take_window]
-import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, min_for_axis, normalized, round_rect, solve, take_constraints, tiling_area]
+import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, min_for_axis, normalized, round_rect, solve, take_constraints, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -30,17 +30,25 @@ Summary : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], can_
 Fill : [Tiled, Screen, WithinGaps]
 
 ## Along an axis by weight, or a stack with the child at `focused` on top.
-Kind : [Axis(Bool), Stack({ horizontal : Bool, focused : U64 })]
+## A stack's frames: its container (without the bar), each window's size, and the offset.
+StackLayout : { container : Rect, w : F64, h : F64, offset : F64, horizontal : Bool }
 
 ## The bar a stack reserves room for (none when `thickness` is 0); `top`: a horizontal stack's
 ## bar is above it, `left`: a vertical stack's is left of it.
 StackLine : { thickness : F64, spacing : F64, top : Bool, left : Bool }
 
+## A container's child and its weight (the share of an axis it asks for).
+Child : { size : F32, node : Node }
+
 Node := [
 	Window({ window : WindowId, constraints : [Constrained(WindowConstraints), Unconstrained], fill : Fill }),
 
-	## Never without children: a container with nothing that takes space is pruned.
-	Container({ kind : Kind, fill : Fill, children : List({ size : F32, node : Node }) }),
+	## Along an axis by weight; a container with nothing that takes space is pruned, so there is
+	## always a first.
+	Axis({ horizontal : Bool, fill : Fill, first : Child, rest : List(Child) }),
+
+	## A stack, `focused` shown on top.
+	Stack({ horizontal : Bool, fill : Fill, before : List(Child), focused : Child, after : List(Child) }),
 ]
 
 Shape : { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, root : [Root(Node), Nothing] }
@@ -129,23 +137,23 @@ Traditional := [].{
 		match node {
 			Node.Window({ constraints: Constrained(c), .. }) => leaf_summary(c, horizontal)
 			Node.Window({ constraints: Unconstrained, .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
-			Node.Container({ kind, children, .. }) => {
-				(along, stacked, reserve) =
-					match kind {
-						Axis(along_axis) => (along_axis, False, 0.0)
-						Stack({ horizontal: along_stack, .. }) => (along_stack, True, on_axis(shape.stack_line, along_stack, horizontal))
-					}
-				gap = if (horizontal) shape.gaps.horizontal else shape.gaps.vertical
-				container_summary(
-					children.map(|child| summary(shape, child.node, horizontal)),
-					along == horizontal,
-					stacked,
-					gap,
-					shape.stack_offset,
-					reserve,
-				)
+			Node.Axis({ horizontal: along, first, rest, .. }) => {
+				aligned = along == horizontal
+				add = |acc, child| gather(acc, summary(shape, child.node, horizontal), aligned, False)
+				acc = rest.fold(add(gather_start, first), add)
+				gathered(acc, aligned, False, gap_along(shape, horizontal), shape.stack_offset, 0.0)
+			}
+
+			Node.Stack({ horizontal: along, before, focused, after, .. }) => {
+				aligned = along == horizontal
+				add = |acc, child| gather(acc, summary(shape, child.node, horizontal), aligned, True)
+				acc = after.fold(add(before.fold(gather_start, add), focused), add)
+				gathered(acc, aligned, True, gap_along(shape, horizontal), shape.stack_offset, on_axis(shape.stack_line, along, horizontal))
 			}
 		}
+
+	gap_along : Shape, Bool -> F64
+	gap_along = |shape, horizontal| if (horizontal) shape.gaps.horizontal else shape.gaps.vertical
 
 	filled : Shape, Fill, Rect -> Rect
 	filled = |shape, fill, rect|
@@ -155,10 +163,10 @@ Traditional := [].{
 			WithinGaps => tiling_area(shape.screen, shape.gaps)
 		}
 
-	## The frames of a stack of `count` windows in `rect`, each `offset` further along than the
+	## How a stack of `count` windows in `rect` is laid out, each `offset` further along than the
 	## one before (leaving room for the bar when there is more than one).
-	stack_frames : Rect, U64, F64, Bool, StackLine -> List(Rect)
-	stack_frames = |rect, count, offset, horizontal, line| {
+	stack_layout : Rect, U64, F64, Bool, StackLine -> StackLayout
+	stack_layout = |rect, count, offset, horizontal, line| {
 		container = if (count > 1) inset(line, rect, horizontal) else rect
 		spread = (if (count > 0) count - 1 else 0).to_f64() * offset
 		(window_w, window_h) =
@@ -167,26 +175,23 @@ Traditional := [].{
 			} else {
 				(max(container.w, 100.0), max(container.h - spread, 100.0))
 			}
-		var $frames = []
-		var $index = 0
-		while $index < count {
-			shift = $index.to_f64() * offset
-			(dx, dy) = if (horizontal) (shift, 0.0) else (0.0, shift)
-			w = min(window_w, container.w)
-			h = min(window_h, container.h)
-			max_x = max(container.x + container.w - w, container.x)
-			max_y = max(container.y + container.h - h, container.y)
-			$frames = $frames.append(
-				round_rect({
-					x: clamp(container.x + dx, container.x, max_x),
-					y: clamp(container.y + dy, container.y, max_y),
-					w,
-					h,
-				}),
-			)
-			$index = $index + 1
-		}
-		$frames
+		{ container, w: min(window_w, container.w), h: min(window_h, container.h), offset, horizontal }
+	}
+
+	## The frame of the stack's window at `position` (a formula of the position, not a lookup).
+	stack_frame : StackLayout, U64 -> Rect
+	stack_frame = |layout, position| {
+		container = layout.container
+		shift = position.to_f64() * layout.offset
+		(dx, dy) = if (layout.horizontal) (shift, 0.0) else (0.0, shift)
+		max_x = max(container.x + container.w - layout.w, container.x)
+		max_y = max(container.y + container.h - layout.h, container.y)
+		round_rect({
+			x: clamp(container.x + dx, container.x, max_x),
+			y: clamp(container.y + dy, container.y, max_y),
+			w: layout.w,
+			h: layout.h,
+		})
 	}
 
 	place : Shape, Node, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
@@ -219,26 +224,21 @@ Traditional := [].{
 				out.append((window, frame))
 			}
 
-			Node.Container({ kind: Stack({ horizontal, focused }), fill, children }) =>
-				stack(shape, children, horizontal, focused, filled(shape, fill, rect0), out)
+			Node.Stack({ horizontal, fill, before, focused, after }) =>
+				stack(shape, before, focused, after, horizontal, filled(shape, fill, rect0), out)
 
-			Node.Container({ kind: Axis(horizontal), fill, children }) =>
-				axis(shape, children, horizontal, filled(shape, fill, rect0), out)
+			Node.Axis({ horizontal, fill, first, rest }) =>
+				axis(shape, first, rest, horizontal, filled(shape, fill, rect0), out)
 		}
 
-	stack : Shape, List({ size : F32, node : Node }), Bool, U64, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
-	stack = |shape, children, horizontal, focused, rect, out0| {
-		count = children.len()
+	stack : Shape, List(Child), Child, List(Child), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	stack = |shape, before, focused, after, horizontal, rect, out0| {
+		count = before.len() + 1 + after.len()
 		axis_len = if (horizontal) rect.w else rect.h
 		# The offset is capped so the window on top keeps its required length.
 		offset =
 			if count > 1 {
-				on_top =
-					match children.get(focused) {
-						Ok(child) => child.node
-						Err(_) => crash "traditional: a stack's focused child is one of its children"
-					}
-				s = summary(shape, on_top, horizontal)
+				s = summary(shape, focused.node, horizontal)
 				low =
 					match s.fixed {
 						Fixed(v) => v
@@ -250,23 +250,16 @@ Traditional := [].{
 			} else {
 				shape.stack_offset
 			}
-		placed = stack_frames(rect, count, offset, horizontal, shape.stack_line)
-		var $out = out0
-		var $index = 0
-		for child in children {
-			frame =
-				match placed.get($index) {
-					Ok(f) => f
-					Err(_) => crash "traditional: a stack has a frame per child"
-				}
-			$out = place(shape, child.node, frame, $out)
-			$index = $index + 1
-		}
-		$out
+		layout = stack_layout(rect, count, offset, horizontal, shape.stack_line)
+		# Behind the window on top, then it, then the rest, each at its position.
+		add = |(position, out), child| (position + 1, place(shape, child.node, stack_frame(layout, position), out))
+		(_, placed) = after.fold(add(before.fold((0, out0), add), focused), add)
+		placed
 	}
 
-	axis : Shape, List({ size : F32, node : Node }), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
-	axis = |shape, children, horizontal, rect, out0| {
+	axis : Shape, Child, List(Child), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	axis = |shape, first, rest, horizontal, rect, out0| {
+		children = [first].concat(rest)
 		f32_epsilon = F32.from_bits(872415232)
 		min_size = F32.from_bits(1028443341)
 		var $total = 0.0
@@ -282,7 +275,7 @@ Traditional := [].{
 		normalize = !F32.is_finite(total) or total <= f32_epsilon or $needs_normalization
 		gap = if (horizontal) shape.gaps.horizontal else shape.gaps.vertical
 		axis_len = if (horizontal) rect.w else rect.h
-		total_gap = (children.len() - 1).to_f64() * gap
+		total_gap = rest.len().to_f64() * gap
 		usable = if (gap == 0.0) axis_len else max(axis_len - total_gap, 0.0)
 		items =
 			children.map(
@@ -292,26 +285,22 @@ Traditional := [].{
 					{ min: s.min, fixed: s.fixed, max: s.max, weight, can_grow: s.can_grow }
 				},
 			)
-		lengths = solve(items, usable)
-		var $out = out0
-		var $offset = if (horizontal) rect.x else rect.y
-		var $index = 0
-		last = children.len() - 1
-		for child in children {
-			length =
-				match lengths.get($index) {
-					Ok(l) => l
-					Err(_) => crash "traditional: the solver gives a length per child"
-				}
-			frame = round_rect(if (horizontal) { ..rect, x: $offset, w: length } else { ..rect, y: $offset, h: length })
-			$out = place(shape, child.node, frame, $out)
-			$offset = $offset + length
-			if $index < last {
-				$offset = $offset + gap
-			}
-			$index = $index + 1
-		}
-		$out
+		# Each child starts where the one before ended, after the gap; the first where the
+		# container does.
+		(_, placed) =
+			List.map2(children, solve(items, usable), |child, length| (child.node, length)).fold(
+				(Start, out0),
+				|(at, out), (node, length)| {
+					offset =
+						match at {
+							Start => if (horizontal) rect.x else rect.y
+							After(end) => end + gap
+						}
+					frame = round_rect(if (horizontal) { ..rect, x: offset, w: length } else { ..rect, y: offset, h: length })
+					(After(offset + length), place(shape, node, frame, out))
+				},
+			)
+		placed
 	}
 
 	frames : Shape -> List((WindowId, Rect))
@@ -330,6 +319,13 @@ Traditional := [].{
 			2 => (WithinGaps, rest)
 			_ => crash "wire: unknown fill"
 		}
+	}
+
+	take_child : Words -> (Child, Words)
+	take_child = |cursor| {
+		(bits, after_size) = take_u32(cursor)
+		(node, after) = take_node(after_size)
+		({ size: F32.from_bits(bits), node }, after)
 	}
 
 	take_node : Words -> (Node, Words)
@@ -354,33 +350,20 @@ Traditional := [].{
 			}
 
 			1 => {
-				(kind_tag, c2) = take(c1)
-				(kind, c3) =
-					match kind_tag {
-						0 => {
-							(horizontal, after) = take_flag(c2)
-							(Axis(horizontal), after)
-						}
+				(horizontal, c2) = take_flag(c1)
+				(fill, c3) = take_fill(c2)
+				(first, c4) = take_child(c3)
+				(rest, c5) = take_list(c4, take_child)
+				(Node.Axis({ horizontal, fill, first, rest }), c5)
+			}
 
-						1 => {
-							(horizontal, after_flag) = take_flag(c2)
-							(focused, after) = take(after_flag)
-							(Stack({ horizontal, focused }), after)
-						}
-
-						_ => crash "wire: unknown container kind"
-					}
-				(fill, c4) = take_fill(c3)
-				(children, c5) =
-					take_list(
-						c4,
-						|cursor| {
-							(bits, after_size) = take_u32(cursor)
-							(child, after) = take_node(after_size)
-							({ size: F32.from_bits(bits), node: child }, after)
-						},
-					)
-				(Node.Container({ kind, fill, children }), c5)
+			2 => {
+				(horizontal, c2) = take_flag(c1)
+				(fill, c3) = take_fill(c2)
+				(before, c4) = take_list(c3, take_child)
+				(focused, c5) = take_child(c4)
+				(after, c6) = take_list(c5, take_child)
+				(Node.Stack({ horizontal, fill, before, focused, after }), c6)
 			}
 
 			_ => crash "wire: unknown node"
