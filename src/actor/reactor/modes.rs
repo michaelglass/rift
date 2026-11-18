@@ -125,6 +125,59 @@ pub(super) enum Topology {
 use Initiative::*;
 use InputClass::{Arranging, Hover, Inert, Steering};
 
+// The refusal sets: each says, for every initiative, whether an axis that refuses that set
+// refuses it. No wildcard, so a new initiative does not compile until each set decides.
+
+/// Passing over windows (focus follows mouse, raise on hover).
+fn hover(initiative: Initiative) -> bool {
+    match initiative {
+        UserInput(Hover) => true,
+        UserInput(Steering | Arranging | Inert)
+        | Arrange
+        | RetireWindows
+        | SwitchWorkspaceFocus
+        | WarpFocus
+        | FollowActivation => false,
+    }
+}
+
+/// Retiring windows an inventory no longer reports.
+fn retire(initiative: Initiative) -> bool {
+    match initiative {
+        RetireWindows => true,
+        UserInput(Steering | Arranging | Inert | Hover)
+        | Arrange
+        | SwitchWorkspaceFocus
+        | WarpFocus
+        | FollowActivation => false,
+    }
+}
+
+/// Following an app's activation with focus.
+fn follow_activation(initiative: Initiative) -> bool {
+    match initiative {
+        FollowActivation => true,
+        UserInput(Steering | Arranging | Inert | Hover)
+        | Arrange
+        | RetireWindows
+        | SwitchWorkspaceFocus
+        | WarpFocus => false,
+    }
+}
+
+/// The user's layout commands and hover, which act on Space assignments.
+fn layout_input(initiative: Initiative) -> bool {
+    match initiative {
+        UserInput(Arranging | Hover) => true,
+        UserInput(Steering | Inert)
+        | Arrange
+        | RetireWindows
+        | SwitchWorkspaceFocus
+        | WarpFocus
+        | FollowActivation => false,
+    }
+}
+
 impl Mode for Pointer {
     /// The pointer's row is the core's (`rift_core::may`): the core owns what the hand is doing,
     /// and the rule that follows from it.
@@ -132,171 +185,94 @@ impl Mode for Pointer {
 }
 
 impl Mode for MenuState {
+    /// An open menu has the pointer: passing over windows must not focus or raise them.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // An open menu has the pointer: passing over windows must not focus or raise them.
-            (UserInput(Hover), MenuState::Open(_)) => false,
-            (UserInput(Hover), MenuState::Closed) => true,
-            (
-                UserInput(Steering | Arranging | Inert)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                MenuState::Open(_) | MenuState::Closed,
-            ) => true,
+        match self {
+            MenuState::Open(_) => !hover(initiative),
+            MenuState::Closed => true,
         }
     }
 }
 
 impl Mode for MissionControlState {
+    /// macOS's Mission Control is on screen: the windows under the pointer are its thumbnails,
+    /// not windows to focus, and app inventories omit windows it shows.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // macOS's Mission Control is on screen: the windows under the pointer are its
-            // thumbnails, not windows to focus, and app inventories omit windows it shows.
-            (UserInput(Hover) | RetireWindows, MissionControlState::Active) => false,
-            (UserInput(Hover) | RetireWindows, MissionControlState::Inactive) => true,
-            (
-                UserInput(Steering | Arranging | Inert)
-                | Arrange
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                MissionControlState::Active | MissionControlState::Inactive,
-            ) => true,
+        match self {
+            MissionControlState::Active => !hover(initiative) && !retire(initiative),
+            MissionControlState::Inactive => true,
         }
     }
 }
 
 impl Mode for Modal {
+    /// Focusing another window would hide the sheet the frontmost app is asking about.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // Focusing another window would hide the sheet the frontmost app is asking about.
-            (UserInput(Hover), Modal::Frontmost) => false,
-            (UserInput(Hover), Modal::Clear) => true,
-            (
-                UserInput(Steering | Arranging | Inert)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                Modal::Frontmost | Modal::Clear,
-            ) => true,
+        match self {
+            Modal::Frontmost => !hover(initiative),
+            Modal::Clear => true,
         }
     }
 }
 
 impl Mode for Viewport {
+    /// Windows slide under a resting pointer while the strip scrolls.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // Windows slide under a resting pointer while the strip scrolls.
-            (UserInput(Hover), Viewport::Gesturing) => false,
-            (UserInput(Hover), Viewport::Free) => true,
-            (
-                UserInput(Steering | Arranging | Inert)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                Viewport::Gesturing | Viewport::Free,
-            ) => true,
+        match self {
+            Viewport::Gesturing => !hover(initiative),
+            Viewport::Free => true,
         }
     }
 }
 
 impl Mode for FocusClaim {
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            (UserInput(Hover), FocusClaim::PausesHover) => false,
-            (UserInput(Hover), FocusClaim::Free) => true,
-            (
-                UserInput(Steering | Arranging | Inert)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                FocusClaim::PausesHover | FocusClaim::Free,
-            ) => true,
+        match self {
+            FocusClaim::PausesHover => !hover(initiative),
+            FocusClaim::Free => true,
         }
     }
 }
 
 impl Mode for UserSpaces {
+    /// With no user Space on screen, an inventory that omits a window is no evidence that it
+    /// is gone.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // With no user Space on screen, an inventory that omits a window is no evidence
-            // that it is gone.
-            (RetireWindows, UserSpaces::None) => false,
-            (RetireWindows, UserSpaces::Shown) => true,
-            (
-                UserInput(Steering | Arranging | Inert | Hover)
-                | Arrange
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                UserSpaces::None | UserSpaces::Shown,
-            ) => true,
+        match self {
+            UserSpaces::None => !retire(initiative),
+            UserSpaces::Shown => true,
         }
     }
 }
 
 impl Mode for Wake {
+    /// Until the user gives input, an app activation is loginwindow handing focus back.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            (FollowActivation, Wake::AwaitingInput) => false,
-            (FollowActivation, Wake::UserPresent) => true,
-            (
-                UserInput(Steering | Arranging | Inert | Hover)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus,
-                Wake::AwaitingInput | Wake::UserPresent,
-            ) => true,
+        match self {
+            Wake::AwaitingInput => !follow_activation(initiative),
+            Wake::UserPresent => true,
         }
     }
 }
 
 impl Mode for WorkspaceSwitch {
+    /// The activation is most likely the switch's own focus landing.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // The activation is most likely the switch's own focus landing.
-            (FollowActivation, WorkspaceSwitch::Switching) => false,
-            (FollowActivation, WorkspaceSwitch::Idle) => true,
-            (
-                UserInput(Steering | Arranging | Inert | Hover)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus,
-                WorkspaceSwitch::Switching | WorkspaceSwitch::Idle,
-            ) => true,
+        match self {
+            WorkspaceSwitch::Switching => !follow_activation(initiative),
+            WorkspaceSwitch::Idle => true,
         }
     }
 }
 
 impl Mode for Topology {
+    /// Layout commands and hover act on Space assignments that are about to change (each one
+    /// refused logs). Other commands pass; layout passes and retirement have their own
+    /// topology checks.
     fn admits(&self, initiative: Initiative) -> bool {
-        match (initiative, self) {
-            // Layout commands and hover act on Space assignments that are about to change.
-            // They used to be dropped silently by the quarantine; now each one logs.
-            (UserInput(Arranging | Hover), Topology::Unsettled) => false,
-            (UserInput(Arranging | Hover), Topology::Settled) => true,
-            // Unchanged from the quarantine: other commands pass; layout passes and retirement
-            // have their own topology checks.
-            (
-                UserInput(Steering | Inert)
-                | Arrange
-                | RetireWindows
-                | SwitchWorkspaceFocus
-                | WarpFocus
-                | FollowActivation,
-                Topology::Unsettled | Topology::Settled,
-            ) => true,
+        match self {
+            Topology::Unsettled => !layout_input(initiative),
+            Topology::Settled => true,
         }
     }
 }
