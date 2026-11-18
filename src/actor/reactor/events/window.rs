@@ -243,7 +243,7 @@ pub fn handle_window_frame_changed(
         && match state.windows.pointer() {
             Pointer::Dragging(held) if held == wid => {
                 if let Some(session) = state.windows.drag_on_mut(wid) {
-                    session.update_native(new_frame, new_space);
+                    session.update_native(new_frame);
                 }
                 true
             }

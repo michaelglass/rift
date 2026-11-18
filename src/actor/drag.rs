@@ -140,14 +140,13 @@ impl Session {
         self.unavailable.clear();
     }
 
-    /// Update reactor-resolved space membership and invalidate destination state.
-    pub fn update_current_space(&mut self, current_space: Option<SpaceId>) -> bool {
-        if self.source.current_space == current_space {
-            return false;
-        }
-        self.source.current_space = current_space;
+    /// The pointer moved onto another display (`space`, `None` off every Space): the drag now
+    /// drops into that display's layout, whose tiles are `scene`. What the old scene latched
+    /// means nothing there.
+    pub fn enter_display(&mut self, space: Option<SpaceId>, scene: DragScene) {
+        self.source.current_space = space;
+        self.scene = scene;
         self.invalidate_drop();
-        true
     }
 
     pub fn replace_scene(
@@ -159,10 +158,7 @@ impl Session {
         let previous = self.target.intent();
         self.scene = scene;
         self.invalidate_drop();
-        if self.source.tiled
-            && !self.resizing()
-            && self.source.origin_space == self.source.current_space
-        {
+        if self.source.tiled && !self.resizing() {
             let next = hit_test_available(
                 &self.scene,
                 self.pointer,
@@ -214,16 +210,9 @@ impl Session {
     }
 
     /// Follows a native drag's frame. A modifier drag's frame is Rift's to set, and its echoes
-    /// never get here.
-    pub fn update_native(&mut self, frame: CGRect, current_space: Option<SpaceId>) {
-        self.source.last_frame = frame;
-        if self.source.current_space != current_space {
-            self.source.current_space = current_space;
-            self.invalidate_drop();
-        }
-    }
+    /// never get here. Where the drag drops is the pointer's display, not the frame's.
+    pub fn update_native(&mut self, frame: CGRect) { self.source.last_frame = frame; }
 
-    /// Where a modifier move puts the window when the pointer is at `point`.
     /// Where a modifier move puts the window when the pointer is at `point`; a native drag's
     /// frame is the user's.
     pub fn modifier_frame_at(&self, point: CGPoint) -> Option<CGRect> {
@@ -251,10 +240,7 @@ impl Session {
         if let Some(frame) = self.modifier_frame_at(motion.point) {
             self.source.last_frame = frame;
         }
-        let next = if self.resizing()
-            || !self.source.tiled
-            || self.source.origin_space != self.source.current_space
-        {
+        let next = if self.resizing() || !self.source.tiled {
             None
         } else {
             hit_test_available(
@@ -855,21 +841,39 @@ mod tests {
     }
 
     #[test]
-    fn modifier_space_change_invalidates_origin_drop_state() {
+    fn entering_a_display_drops_into_its_scene_and_forgets_the_old_one() {
         let destination = SpaceId::new(2);
-        let mut actor = modifier(true, scene(rect()));
-        motion(&mut actor, 100.0, 50.0);
-        let intent = actor.intent().unwrap();
-        actor.set_preview(w(1), &settings(), intent, Some(rect()));
-        assert!(actor.target().is_some());
+        for mut actor in [
+            modifier(true, scene(rect())),
+            native(true, rect(), scene(rect())),
+        ] {
+            motion(&mut actor, 100.0, 50.0);
+            let intent = actor.intent().unwrap();
+            actor.set_preview(w(1), &settings(), intent, Some(rect()));
+            assert!(actor.target().is_some());
 
-        assert!(actor.update_current_space(Some(destination)));
-        assert_eq!(actor.source.current_space, Some(destination));
-        assert!(actor.intent().is_none());
-        assert!(actor.target().is_none());
-        motion(&mut actor, 100.0, 50.0);
-        assert!(actor.intent().is_none());
-        assert!(actor.target().is_none());
+            let there = frame(1000.0, 0.0, 200.0, 100.0);
+            actor.enter_display(
+                Some(destination),
+                scene_with(vec![DragSceneTarget {
+                    window: w(3),
+                    space: destination,
+                    frame: there,
+                }]),
+            );
+            assert_eq!(actor.source.current_space, Some(destination));
+            assert!(actor.intent().is_none());
+            assert!(actor.target().is_none());
+            motion(&mut actor, 1100.0, 50.0);
+            let intent = actor.intent().unwrap();
+            assert_eq!((intent.window, intent.space), (w(3), destination));
+
+            // An empty display has nothing to drop onto; the old display's tiles are not a
+            // fallback.
+            actor.enter_display(Some(SpaceId::new(3)), DragScene::default());
+            motion(&mut actor, 2100.0, 50.0);
+            assert!(actor.intent().is_none());
+        }
     }
 
     #[test]

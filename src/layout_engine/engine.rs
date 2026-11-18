@@ -445,7 +445,11 @@ impl LayoutEngine {
         };
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
         let mut system = self.workspaces[workspace].layout_system.preview_clone()?;
-        let before = system.window_slot(layout, source)?;
+        // A window dragged in from another display joins this layout the way the drop adds it.
+        let before = system.window_slot(layout, source);
+        if before.is_none() {
+            system.add_window_after_selection(layout, source);
+        }
         system.apply_window_drop(layout, source, target, action).then_some(())?;
         system.prepare_layout(layout, screen, &self.window_layout_constraints, &gaps);
         let frame = system
@@ -461,7 +465,7 @@ impl LayoutEngine {
             .find_map(|(window, frame)| (window == source).then_some(frame))?;
         Some(DropPreview {
             frame,
-            same_slot: system.window_slot(layout, source)? == before,
+            same_slot: system.window_slot(layout, source) == before,
         })
     }
 
