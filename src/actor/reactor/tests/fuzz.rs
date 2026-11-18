@@ -286,9 +286,9 @@ struct Sim {
     events: Option<crate::actor::Receiver<Event>>,
     /// Events collected from `events`, not yet handled.
     inbox: Vec<Event>,
-    /// The target of each window the core had a write or an animation in flight for before the
-    /// step.
-    in_flight_before: BTreeMap<WindowId, CGRect>,
+    /// The frames Rift had pending for each window before the step: a write's or an
+    /// animation's target, and a desire queued behind the write.
+    in_flight_before: BTreeMap<WindowId, Vec<CGRect>>,
     /// The requests the core planned animations and cameras under.
     animation_requests: Vec<TransactionId>,
 }
@@ -526,8 +526,9 @@ impl Sim {
             .live
             .iter()
             .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
-                Sync::Animating { target, .. } | Sync::InFlight { target, .. } => {
-                    Some((wid, target))
+                Sync::Animating { target, .. } => Some((wid, vec![target])),
+                Sync::InFlight { target, queued, .. } => {
+                    Some((wid, std::iter::once(target).chain(queued).collect()))
                 }
                 Sync::Settled { .. } | Sync::Unknown | Sync::Refused { .. } => None,
             })
@@ -700,9 +701,6 @@ impl Sim {
                 for event in self.apps.simulate_events_for_requests(requests) {
                     self.reactor.handle_event(event);
                 }
-                // The animation thread's frames reach the apps behind what was already queued
-                // for them (one channel per app), so it runs after.
-                self.present();
             }
             Step::Destroy { w } => {
                 let wid = self.pick(w);
@@ -748,6 +746,10 @@ impl Sim {
         }
         // Each step is one batch of the reactor's loop, which flushes when it drains.
         self.reactor.reread_windows();
+        // The animation thread takes what the step queued within a display frame, long before
+        // the next input: run it now (its frames reach the apps on a later Deliver, behind
+        // what was already queued for them).
+        self.present();
         self.read_core_steps(traced);
         self.apps.requests()
     }
@@ -817,9 +819,9 @@ impl Sim {
         // 1. Liveness: a pressed, live window that moved under the pointer is the drag. Without
         // this, a drag that fails to start would quietly skip every invariant below.
         // Exceptions: a step that leaves the frame where it was moves nothing; and a move that
-        // lands on the very frame rift has in flight for the window (a write's or an
-        // animation's target) is, by geometry, its acknowledgement (the next move starts the
-        // drag).
+        // lands on a frame rift has pending for the window (a write's or an animation's target,
+        // a desire queued behind the write) is, by geometry, its acknowledgement (the next move
+        // starts the drag).
         if matches!(
             step,
             Step::DragStart { .. } | Step::DragMove { .. } | Step::CrossDisplay { .. }
@@ -832,7 +834,7 @@ impl Sim {
             && !self
                 .in_flight_before
                 .get(&held.window)
-                .is_some_and(|target| target.same_as(self.os_frame(held.window)))
+                .is_some_and(|frames| frames.iter().any(|f| f.same_as(self.os_frame(held.window))))
             && dragged(&self.reactor) != Some(held.window)
         {
             return fail(
@@ -942,7 +944,7 @@ impl Sim {
             // flight. (A write it stopped waiting for within the same step is the exception.)
             match self.reactor.state.core.sync(wid) {
                 Some(Sync::InFlight { target, .. }) => {
-                    if !frame.same_as(target) {
+                    if !frame.same_as(target) && !self.gave_up.contains(&wid) {
                         return fail(
                             "only-the-reconciler-writes",
                             format!("{wid:?} was sent {frame:?}; in flight is {target:?}"),
@@ -977,7 +979,7 @@ impl Sim {
             }
             // 8. No write to a window that was already there, and that rift knew to be there.
             // (Commands place windows whatever rift believes; a refresh or a move changes what
-            // it believes.)
+            // it believes, and so does an answer showing the app moved it during the step.)
             let placed = matches!(
                 step,
                 Step::MoveFocusedToDisplay { .. }
@@ -991,6 +993,7 @@ impl Sim {
                 && let Some((known, real)) = self.settled_before.get(&wid)
                 && known.same_as(frame)
                 && real.same_as(frame)
+                && self.os_frame(wid).same_as(frame)
             {
                 return fail(
                     "no-write-when-settled",
@@ -1466,4 +1469,29 @@ fn a_wake_that_forgets_a_parked_windows_queued_move_still_parks_it() {
         Step::Wake,
     ];
     assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_press_and_move_after_a_scrolling_camera_starts_the_drag() {
+    // The camera the drop queues reaches the animation thread long before the next input; the
+    // app's own move of the window must not be overwritten by the previous camera's frames, or
+    // the user's move back looks like nothing at all.
+    let steps = [
+        Step::MouseUp,
+        Step::ModifierDrag { w: 6, dx: 24, dy: -46 },
+        Step::ForeignMove {
+            w: 0,
+            to: 1,
+            mouse: Mouse::Truth,
+        },
+        Step::MouseUp,
+        Step::Press { w: 0 },
+        Step::CrossDisplay { to: 0 },
+    ];
+    let setup = Setup {
+        displays: 3,
+        animate: true,
+        scrolling: true,
+    };
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
 }
