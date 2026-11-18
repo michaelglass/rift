@@ -571,6 +571,576 @@ fn view<W: Clone>(node: &Node<W>, weight: Option<f64>, selection: Tag) -> View<W
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Changing the tree. Each change does what rift's BspLayoutSystem does to its tree and its
+// Selection, so the two can be held to each other step by step.
+
+impl Direction {
+    fn orientation(self) -> Orientation {
+        match self {
+            Direction::Left | Direction::Right => Orientation::Horizontal,
+            Direction::Up | Direction::Down => Orientation::Vertical,
+        }
+    }
+}
+
+/// Where a new window goes when its leaf has no preselected direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Insertion {
+    /// At the focus (splitting its leaf, or filling it if empty).
+    AtFocus,
+    /// After the last leaf in tree order.
+    EndOfTree,
+}
+
+impl<W> Split<W> {
+    fn child_mut(&mut self, side: Side) -> &mut Node<W> {
+        match side {
+            Side::First => &mut self.first,
+            Side::Second => &mut self.second,
+        }
+    }
+}
+
+impl<W> Content<W> {
+    /// The same content as a fresh leaf holds it: a window's or stack's fill back to tiled.
+    fn refilled(self) -> Self {
+        match self {
+            Content::Empty => Content::Empty,
+            Content::Window { window, .. } => Content::Window { window, fill: Fill::Tiled },
+            Content::Stack { tabs, .. } => Content::Stack { tabs, fill: Fill::Tiled },
+        }
+    }
+}
+
+impl<W: Copy + Ord + Debug> Node<W> {
+    /// The node at `path`, or where the path runs past a leaf, that leaf.
+    fn at_mut(&mut self, path: &[Side]) -> &mut Node<W> {
+        match path.split_first() {
+            None => self,
+            Some((side, rest)) => match self {
+                Node::Split(split) => split.child_mut(*side).at_mut(rest),
+                Node::Leaf(_) => self,
+            },
+        }
+    }
+
+    /// Selects the node at `path`: every split on the way remembers the side toward it, and a
+    /// split selected itself stops the selection there.
+    fn select(&mut self, path: &[Side]) {
+        match (path.split_first(), self) {
+            (Some((side, rest)), Node::Split(split)) => {
+                split.memory = Memory::Toward(*side);
+                split.child_mut(*side).select(rest);
+            }
+            (None, Node::Split(split)) => split.memory = Memory::Stops,
+            (Some(_) | None, Node::Leaf(_)) => {}
+        }
+    }
+
+    /// The leaf after which leaves come no more, in tree order.
+    fn last_leaf(&self) -> Path {
+        self.preorder()
+            .into_iter()
+            .filter(|(_, node)| matches!(node, Node::Leaf(_)))
+            .map(|(path, _)| path)
+            .last()
+            .unwrap_or_default()
+    }
+
+    /// The node at `from`'s neighbour toward `direction` by the tree's structure: up to the
+    /// nearest split along that axis with something on that side, then down into it to the
+    /// leaf nearest the source's centre (tracked through the splits across the axis).
+    fn structural_neighbor(&self, from: &[Side], direction: Direction) -> Option<Path> {
+        let mut anchor = 0.5;
+        for depth in (0..from.len()).rev() {
+            let parent = &from[..depth];
+            let side = from[depth];
+            let Node::Split(split) = self.at(parent) else { continue };
+            if split.orientation == direction.orientation() {
+                let target = match (direction, side) {
+                    (Direction::Left | Direction::Up, Side::Second) => Some(Side::First),
+                    (Direction::Right | Direction::Down, Side::First) => Some(Side::Second),
+                    (Direction::Left | Direction::Up, Side::First)
+                    | (Direction::Right | Direction::Down, Side::Second) => None,
+                };
+                if let Some(target) = target {
+                    let mut path = parent.to_vec();
+                    path.push(target);
+                    return Some(self.closest_leaf(path, direction, anchor));
+                }
+            } else {
+                let ratio = f64::from(split.ratio.get());
+                anchor = match side {
+                    Side::First => anchor * ratio,
+                    Side::Second => ratio + anchor * (1.0 - ratio),
+                };
+            }
+        }
+        None
+    }
+
+    fn closest_leaf(&self, mut path: Path, direction: Direction, mut anchor: f64) -> Path {
+        while let Node::Split(split) = self.at(&path) {
+            let side = if split.orientation == direction.orientation() {
+                match direction {
+                    Direction::Left | Direction::Up => Side::Second,
+                    Direction::Right | Direction::Down => Side::First,
+                }
+            } else {
+                let ratio = f64::from(split.ratio.get());
+                if anchor <= ratio {
+                    anchor /= ratio;
+                    Side::First
+                } else {
+                    anchor = (anchor - ratio) / (1.0 - ratio);
+                    Side::Second
+                }
+            };
+            path.push(side);
+        }
+        path
+    }
+
+    /// The first window shown toward `direction`: the first leaf in tree order (the last, going
+    /// left or up) that holds a window, and what it shows.
+    fn window_toward(&self, direction: Direction, who: Participation<W>) -> Option<W> {
+        match self {
+            Node::Leaf(_) if self.holds_window() => self.shown(who),
+            Node::Leaf(_) => None,
+            Node::Split(split) => {
+                let (near, far) = match direction {
+                    Direction::Left | Direction::Up => (&split.second, &split.first),
+                    Direction::Right | Direction::Down => (&split.first, &split.second),
+                };
+                near.window_toward(direction, who).or_else(|| far.window_toward(direction, who))
+            }
+        }
+    }
+
+    fn rename(&mut self, from: W, to: W) {
+        match self {
+            Node::Split(split) => {
+                split.first.rename(from, to);
+                split.second.rename(from, to);
+            }
+            Node::Leaf(leaf) => match &mut leaf.content {
+                Content::Empty => {}
+                Content::Window { window, .. } => {
+                    if *window == from {
+                        *window = to;
+                    }
+                }
+                Content::Stack { tabs, .. } => {
+                    for member in
+                        tabs.before.iter_mut().chain([&mut tabs.top]).chain(tabs.after.iter_mut())
+                    {
+                        if *member == from {
+                            *member = to;
+                        }
+                    }
+                }
+            },
+        }
+    }
+}
+
+impl<W: Copy + Ord + Debug> Layout<W> {
+    /// A layout of one empty leaf.
+    pub fn new(tags: &mut Tags) -> Self {
+        Layout {
+            root: Node::Leaf(Leaf {
+                tag: tags.mint(),
+                content: Content::Empty,
+                preselect: Preselect::Unset,
+            }),
+        }
+    }
+
+    pub fn contains(&self, window: W) -> bool { self.leaf_of(window).is_some() }
+
+    /// Where commands act: the focus, or with none the selection.
+    fn acting_at(&self, who: Participation<W>) -> Path {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        self.focus(&nodes, &selection, who).unwrap_or(selection)
+    }
+
+    /// Puts `window` in the layout, unless it is there: into a preselected split of the focused
+    /// leaf, else as `insertion` says.
+    pub fn add(&mut self, window: W, insertion: Insertion, who: Participation<W>, tags: &mut Tags) {
+        if self.contains(window) {
+            return;
+        }
+        match insertion {
+            Insertion::EndOfTree => {
+                let last = self.root.last_leaf();
+                self.root.select(&last);
+                self.insert_at_selection(window, who, tags);
+            }
+            Insertion::AtFocus => {
+                if !self.insert_preselected(window, who, tags) {
+                    self.insert_at_selection(window, who, tags);
+                }
+            }
+        }
+    }
+
+    /// Splits the focused leaf toward its preselected direction, if it has one.
+    fn insert_preselected(&mut self, window: W, who: Participation<W>, tags: &mut Tags) -> bool {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let Some(focus) = self.focus(&nodes, &selection, who) else {
+            return false;
+        };
+        let at = self.root.leaf_under(&focus, who);
+        let Node::Leaf(Leaf {
+            preselect: Preselect::Toward(direction),
+            ..
+        }) = self.root.at(&at)
+        else {
+            return false;
+        };
+        let direction = *direction;
+        let side_of_new = match direction {
+            Direction::Left | Direction::Up => Side::First,
+            Direction::Right | Direction::Down => Side::Second,
+        };
+        self.split_leaf(&at, window, direction.orientation(), side_of_new, tags);
+        true
+    }
+
+    /// Puts `window` at the selection: into its leaf if empty, else splitting it (alternating
+    /// orientation with depth), and selects it.
+    fn insert_at_selection(&mut self, window: W, who: Participation<W>, tags: &mut Tags) {
+        let at = self.acting_at(who);
+        match self.root.at_mut(&at) {
+            Node::Leaf(Leaf {
+                content: content @ Content::Empty,
+                ..
+            }) => {
+                *content = Content::Window { window, fill: Fill::Tiled };
+            }
+            Node::Leaf(Leaf {
+                content: Content::Window { .. } | Content::Stack { .. },
+                ..
+            }) => {
+                let orientation = if at.len() % 2 == 0 {
+                    Orientation::Horizontal
+                } else {
+                    Orientation::Vertical
+                };
+                self.split_leaf(&at, window, orientation, Side::Second, tags);
+            }
+            Node::Split(_) => {
+                let leaf = self.root.leaf_under(&at, who);
+                self.root.select(&leaf);
+                self.insert_at_selection(window, who, tags);
+            }
+        }
+    }
+
+    /// Replaces the leaf at `at` by a split (keeping the leaf's tag) of a fresh leaf with what
+    /// it held and a fresh leaf with `window` on `side_of_new`, and selects the new window.
+    fn split_leaf(
+        &mut self,
+        at: &[Side],
+        window: W,
+        orientation: Orientation,
+        side_of_new: Side,
+        tags: &mut Tags,
+    ) {
+        let node = self.root.at_mut(at);
+        let Node::Leaf(leaf) = node else { return };
+        let tag = leaf.tag;
+        let held = std::mem::replace(&mut leaf.content, Content::Empty).refilled();
+        let existing = Node::Leaf(Leaf {
+            tag: tags.mint(),
+            content: held,
+            preselect: Preselect::Unset,
+        });
+        let new = Node::Leaf(Leaf {
+            tag: tags.mint(),
+            content: Content::Window { window, fill: Fill::Tiled },
+            preselect: Preselect::Unset,
+        });
+        let (first, second) = match side_of_new {
+            Side::First => (new, existing),
+            Side::Second => (existing, new),
+        };
+        *node = Node::Split(Box::new(Split {
+            tag,
+            orientation,
+            ratio: Ratio::HALF,
+            memory: Memory::Stops,
+            first,
+            second,
+        }));
+        let mut path = at.to_vec();
+        path.push(side_of_new);
+        self.root.select(&path);
+    }
+
+    /// Takes one occurrence of `window` out, if there is one: out of its stack (the last left
+    /// shows), or out of the tree (its split collapses into the other side), and reselects.
+    fn remove_one(&mut self, window: W, who: Participation<W>) -> bool {
+        let Some((path, _)) = self.leaf_of(window) else {
+            return false;
+        };
+        let Node::Leaf(leaf) = self.root.at_mut(&path) else {
+            return false;
+        };
+        if let Content::Stack { tabs, fill } = &leaf.content {
+            let mut members: Vec<W> = tabs.members().filter(|w| *w != window).collect();
+            if let Some(top) = members.pop() {
+                leaf.content = Content::Stack {
+                    tabs: Tabs {
+                        before: members,
+                        top,
+                        after: Vec::new(),
+                    },
+                    fill: *fill,
+                };
+                self.root.select(&path);
+                return true;
+            }
+        }
+        leaf.content = Content::Empty;
+        if let Some((_, parent)) = path.split_last() {
+            self.collapse(parent, path[path.len() - 1]);
+        }
+        let selection = self.root.selection();
+        let leaf = self.root.leaf_under(&selection, who);
+        self.root.select(&leaf);
+        true
+    }
+
+    /// The split at `parent` loses its `gone` side: it becomes the other side, keeping its own
+    /// tag; if it was remembering a side, it now remembers its first.
+    fn collapse(&mut self, parent: &[Side], gone: Side) {
+        let node = self.root.at_mut(parent);
+        let Node::Split(split) = node else { return };
+        let remembered = split.memory;
+        let kept = match gone {
+            Side::First => std::mem::replace(
+                &mut split.second,
+                Node::Leaf(Leaf {
+                    tag: split.tag,
+                    content: Content::Empty,
+                    preselect: Preselect::Unset,
+                }),
+            ),
+            Side::Second => std::mem::replace(
+                &mut split.first,
+                Node::Leaf(Leaf {
+                    tag: split.tag,
+                    content: Content::Empty,
+                    preselect: Preselect::Unset,
+                }),
+            ),
+        };
+        let tag = split.tag;
+        *node = match kept {
+            Node::Leaf(leaf) => Node::Leaf(Leaf { tag, ..leaf }),
+            Node::Split(inner) => Node::Split(Box::new(Split {
+                tag,
+                memory: match remembered {
+                    Memory::Stops => Memory::Stops,
+                    Memory::Toward(_) => Memory::Toward(Side::First),
+                },
+                ..*inner
+            })),
+        };
+    }
+
+    /// Selects `window`'s leaf (bringing it to the top of its stack); false if it is left out
+    /// or not here.
+    pub fn select_window(&mut self, window: W, who: Participation<W>) -> bool {
+        if !who.takes_part(&window) {
+            return false;
+        }
+        let Some((path, _)) = self.leaf_of(window) else {
+            return false;
+        };
+        if let Node::Leaf(Leaf {
+            content: Content::Stack { tabs, .. },
+            ..
+        }) = self.root.at_mut(&path)
+        {
+            let before: Vec<W> = tabs.members().filter(|w| *w != window).collect();
+            *tabs = Tabs {
+                before,
+                top: window,
+                after: Vec::new(),
+            };
+        }
+        self.root.select(&path);
+        true
+    }
+
+    /// Selects the first leaf of the focus's parent; false at the root.
+    pub fn ascend(&mut self, who: Participation<W>) -> bool {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let Some(focus) = self.focus(&nodes, &selection, who) else {
+            return false;
+        };
+        let Some((_, parent)) = focus.split_last() else {
+            return false;
+        };
+        let leaf = self.root.leaf_under(parent, who);
+        self.root.select(&leaf);
+        true
+    }
+
+    /// Selects the leaf the focus stands for; false if it is already a leaf.
+    pub fn descend(&mut self, who: Participation<W>) -> bool {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let Some(focus) = self.focus(&nodes, &selection, who) else {
+            return false;
+        };
+        let leaf = self.root.leaf_under(&focus, who);
+        if leaf == focus {
+            return false;
+        }
+        self.root.select(&leaf);
+        true
+    }
+
+    /// Moves the selection to the focused leaf's neighbour toward `direction` (skipping leaves
+    /// that show nothing, while someone is left out) and answers the window it shows.
+    pub fn move_focus(&mut self, direction: Direction, who: Participation<W>) -> Option<W> {
+        let nodes = self.root.preorder();
+        if let Participation::Except(_) = who
+            && !nodes.iter().any(|(_, node)| node.holds_window() && node.shown(who).is_some())
+        {
+            return None;
+        }
+        let selection = self.root.selection();
+        let focus = self.focus(&nodes, &selection, who)?;
+        let mut from = self.root.leaf_under(&focus, who);
+        let next = loop {
+            let next = self.root.structural_neighbor(&from, direction)?;
+            match who {
+                Participation::Everyone => break next,
+                Participation::Except(_) if self.root.at(&next).shown(who).is_some() => break next,
+                Participation::Except(_) => from = next,
+            }
+        };
+        self.root.select(&next);
+        self.root.at(&next).shown(who)
+    }
+
+    /// The first window shown toward `direction`, from the layout's edge.
+    pub fn window_in_direction(&self, direction: Direction, who: Participation<W>) -> Option<W> {
+        self.root.window_toward(direction, who)
+    }
+}
+
+/// A set of BSP layouts (keyed by the platform's layout id), the windows left out of them all,
+/// and where node tags come from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layouts<L, W> {
+    layouts: std::collections::BTreeMap<L, Layout<W>>,
+    left_out: BTreeSet<W>,
+    tags: Tags,
+}
+
+impl<L, W> Default for Layouts<L, W> {
+    fn default() -> Self {
+        Layouts {
+            layouts: std::collections::BTreeMap::new(),
+            left_out: BTreeSet::new(),
+            tags: Tags::default(),
+        }
+    }
+}
+
+impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
+    pub fn layout(&self, layout: L) -> Option<&Layout<W>> { self.layouts.get(&layout) }
+
+    pub fn participation(&self) -> Participation<'_, W> { Participation::of(&self.left_out) }
+
+    pub fn projection(&self, layout: L) -> Option<Projection<W>> {
+        Some(self.layout(layout)?.projection(self.participation()))
+    }
+
+    /// A new layout of one empty leaf, under the platform's id.
+    pub fn create(&mut self, layout: L) {
+        let new = Layout::new(&mut self.tags);
+        self.layouts.insert(layout, new);
+    }
+
+    pub fn remove_layout(&mut self, layout: L) { self.layouts.remove(&layout); }
+
+    /// Whether `window` takes part; answers whether that changed.
+    pub fn set_participation(&mut self, window: W, takes_part: bool) -> bool {
+        if takes_part {
+            self.left_out.remove(&window)
+        } else {
+            self.left_out.insert(window)
+        }
+    }
+
+    /// Changes one layout, with the participation and the tags it needs.
+    fn change<A>(
+        &mut self,
+        layout: L,
+        change: impl FnOnce(&mut Layout<W>, Participation<W>, &mut Tags) -> A,
+    ) -> Option<A> {
+        let tree = self.layouts.get_mut(&layout)?;
+        Some(change(tree, Participation::of(&self.left_out), &mut self.tags))
+    }
+
+    pub fn add(&mut self, layout: L, window: W, insertion: Insertion) {
+        self.change(layout, |tree, who, tags| tree.add(window, insertion, who, tags));
+    }
+
+    pub fn select_window(&mut self, layout: L, window: W) -> bool {
+        self.change(layout, |tree, who, _| tree.select_window(window, who))
+            .unwrap_or(false)
+    }
+
+    pub fn ascend(&mut self, layout: L) -> bool {
+        self.change(layout, |tree, who, _| tree.ascend(who)).unwrap_or(false)
+    }
+
+    pub fn descend(&mut self, layout: L) -> bool {
+        self.change(layout, |tree, who, _| tree.descend(who)).unwrap_or(false)
+    }
+
+    pub fn move_focus(&mut self, layout: L, direction: Direction) -> Option<W> {
+        self.change(layout, |tree, who, _| tree.move_focus(direction, who)).flatten()
+    }
+
+    /// Takes `window` out of every layout (every occurrence) and out of the left-out set.
+    pub fn remove_window(&mut self, window: W) {
+        self.left_out.remove(&window);
+        for tree in self.layouts.values_mut() {
+            while tree.remove_one(window, Participation::of(&self.left_out)) {}
+        }
+    }
+
+    /// `from` is now `to` everywhere: in the left-out set, and in every layout holding `from`
+    /// (where any `to` already there goes first).
+    pub fn rekey(&mut self, from: W, to: W) {
+        if self.left_out.remove(&from) {
+            self.left_out.insert(to);
+        }
+        if from == to {
+            return;
+        }
+        for tree in self.layouts.values_mut() {
+            if !tree.contains(from) {
+                continue;
+            }
+            while tree.remove_one(to, Participation::of(&self.left_out)) {}
+            tree.root.rename(from, to);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +1288,60 @@ mod tests {
         assert_eq!(Ratio::clamped(0.99).map(Ratio::get), Some(0.95));
         assert_eq!(Ratio::clamped(0.01).map(Ratio::get), Some(0.05));
         assert_eq!(Ratio::clamped(f32::NAN), None);
+    }
+
+    #[test]
+    fn removing_a_window_collapses_its_split_and_the_selection_finds_a_leaf() {
+        let mut layouts = Layouts::<u8, u32>::default();
+        layouts.create(0);
+        for window in [1, 2, 3] {
+            layouts.add(0, window, Insertion::AtFocus);
+        }
+        // [1 | [2 / 3]], the selection on 3.
+        assert_eq!(layouts.projection(0).unwrap().selected_window, Some(3));
+        layouts.remove_window(3);
+        let after = layouts.projection(0).unwrap();
+        assert_eq!((after.windows, after.selected_window), (vec![1, 2], Some(2)));
+        assert_eq!(
+            layouts.layout(0).unwrap().draw(),
+            "Split Horizontal 0.50\n  Leaf Some(1)\n  Leaf Some(2)\n"
+        );
+        layouts.remove_window(1);
+        layouts.remove_window(2);
+        assert_eq!(layouts.layout(0).unwrap().draw(), "Leaf None\n");
+    }
+
+    #[test]
+    fn a_stack_losing_a_window_shows_its_last_and_focus_moves_by_structure() {
+        let mut tags = Tags::default();
+        let stack = Node::Leaf(Leaf {
+            tag: tags.mint(),
+            content: Content::Stack {
+                tabs: Tabs {
+                    before: vec![3],
+                    top: 4,
+                    after: vec![5],
+                },
+                fill: Fill::Tiled,
+            },
+            preselect: Preselect::Unset,
+        });
+        let one = leaf(&mut tags, 1);
+        let mut layout = Layout {
+            root: split(&mut tags, Memory::Toward(Side::Second), one, stack),
+        };
+        assert!(layout.remove_one(5, Participation::Everyone));
+        assert_eq!(layout.stack_members(3), vec![3, 4]);
+        assert!(layout.remove_one(4, Participation::Everyone));
+        assert_eq!(layout.stack_members(3), vec![3]);
+        assert_eq!(
+            layout.move_focus(Direction::Left, Participation::Everyone),
+            Some(1)
+        );
+        assert_eq!(layout.move_focus(Direction::Left, Participation::Everyone), None);
+        assert_eq!(
+            layout.move_focus(Direction::Right, Participation::Everyone),
+            Some(3)
+        );
     }
 }

@@ -2340,3 +2340,278 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 }
+
+/// The core's BSP tree (`rift_core::layout::bsp_tree`) held to this system: random small steps
+/// applied to both, and everything a caller can observe compared after each one.
+#[cfg(test)]
+mod core_tree_differential {
+    use objc2_core_foundation::{CGPoint, CGSize};
+    use rift_core::layout::bsp_tree;
+
+    use super::*;
+    use crate::common::config::GapSettings;
+
+    /// xorshift64*: deterministic, no dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 { self.next() % n }
+    }
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1 + (idx % 2) as pid_t, idx) }
+
+    const POOL: u32 = 9;
+
+    fn direction(rng: &mut Rng) -> (Direction, bsp_tree::Direction) {
+        match rng.below(4) {
+            0 => (Direction::Left, bsp_tree::Direction::Left),
+            1 => (Direction::Right, bsp_tree::Direction::Right),
+            2 => (Direction::Up, bsp_tree::Direction::Up),
+            _ => (Direction::Down, bsp_tree::Direction::Down),
+        }
+    }
+
+    /// One small step, applied to both; what each answered must agree.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        Add(u32),
+        Remove(u32),
+        Select(u32),
+        Ascend,
+        Descend,
+        MoveFocus(Direction, bsp_tree::Direction),
+        Rekey(u32, u32),
+        Participate(u32, bool),
+    }
+
+    fn step(rng: &mut Rng) -> Step {
+        let window = |rng: &mut Rng| 1 + rng.below(u64::from(POOL)) as u32;
+        match rng.below(16) {
+            0..=4 => Step::Add(window(rng)),
+            5 | 6 => Step::Remove(window(rng)),
+            7 | 8 => Step::Select(window(rng)),
+            9 => Step::Ascend,
+            10 => Step::Descend,
+            11..=13 => {
+                let (old, core) = direction(rng);
+                Step::MoveFocus(old, core)
+            }
+            14 => Step::Rekey(window(rng), window(rng)),
+            _ => Step::Participate(window(rng), rng.below(3) != 0),
+        }
+    }
+
+    const LAYOUT: u8 = 0;
+
+    fn apply(
+        old: &mut BspLayoutSystem,
+        layout: LayoutId,
+        core: &mut bsp_tree::Layouts<u8, WindowId>,
+        insertion: bsp_tree::Insertion,
+        step: Step,
+    ) -> Result<(), String> {
+        let differ = |what: &str, old: &dyn std::fmt::Debug, core: &dyn std::fmt::Debug| {
+            Err(format!("{what}: old {old:?}, core {core:?}"))
+        };
+        match step {
+            Step::Add(i) => {
+                old.add_window_after_selection(layout, w(i));
+                core.add(LAYOUT, w(i), insertion);
+            }
+            Step::Remove(i) => {
+                old.remove_window(w(i));
+                core.remove_window(w(i));
+            }
+            Step::Select(i) => {
+                let (a, b) = (old.select_window(layout, w(i)), core.select_window(LAYOUT, w(i)));
+                if a != b {
+                    return differ("select_window", &a, &b);
+                }
+            }
+            Step::Ascend => {
+                let (a, b) = (old.ascend_selection(layout), core.ascend(LAYOUT));
+                if a != b {
+                    return differ("ascend", &a, &b);
+                }
+            }
+            Step::Descend => {
+                let (a, b) = (old.descend_selection(layout), core.descend(LAYOUT));
+                if a != b {
+                    return differ("descend", &a, &b);
+                }
+            }
+            Step::MoveFocus(direction, core_direction) => {
+                let (focus, raise) = old.move_focus(layout, direction);
+                let moved = core.move_focus(LAYOUT, core_direction);
+                if (focus, raise.clone()) != (moved, moved.into_iter().collect()) {
+                    return differ("move_focus", &(focus, raise), &moved);
+                }
+            }
+            Step::Rekey(from, to) => {
+                old.replace_window(w(from), w(to));
+                core.rekey(w(from), w(to));
+            }
+            Step::Participate(i, takes_part) => {
+                let (a, b) = (
+                    old.set_window_participation(w(i), takes_part),
+                    core.set_participation(w(i), takes_part),
+                );
+                if a != b {
+                    return differ("set_participation", &a, &b);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Everything a caller can ask both, which must agree.
+    fn compare(
+        old: &BspLayoutSystem,
+        layout: LayoutId,
+        core: &bsp_tree::Layouts<u8, WindowId>,
+    ) -> Result<(), String> {
+        let tree = core.layout(LAYOUT).expect("the core's layout");
+        let who = core.participation();
+        let projection = tree.projection(who);
+        let mut problems = Vec::new();
+        let mut check = |what: &str, a: String, b: String| {
+            if a != b {
+                problems.push(format!("{what}:\n  old  {a}\n  core {b}"));
+            }
+        };
+        check(
+            "windows",
+            format!("{:?}", old.all_windows_in_layout(layout)),
+            format!("{:?}", projection.windows),
+        );
+        check(
+            "visible",
+            format!("{:?}", old.visible_windows_in_layout(layout)),
+            format!("{:?}", projection.visible),
+        );
+        check(
+            "selected",
+            format!("{:?}", old.selected_window(layout)),
+            format!("{:?}", projection.selected_window),
+        );
+        check(
+            "under selection",
+            format!("{:?}", old.visible_windows_under_selection(layout)),
+            format!("{:?}", projection.under_focus),
+        );
+        check(
+            "fullscreen",
+            format!("{:?}", old.has_any_fullscreen_node(layout)),
+            format!("{:?}", projection.fullscreen),
+        );
+        check("draw_tree", old.draw_tree(layout), tree.draw());
+        for (direction, core_direction) in [
+            (Direction::Left, bsp_tree::Direction::Left),
+            (Direction::Right, bsp_tree::Direction::Right),
+            (Direction::Up, bsp_tree::Direction::Up),
+            (Direction::Down, bsp_tree::Direction::Down),
+        ] {
+            check(
+                &format!("window_in_direction {direction:?}"),
+                format!("{:?}", old.window_in_direction(layout, direction)),
+                format!("{:?}", tree.window_in_direction(core_direction, who)),
+            );
+        }
+        for i in 1..=POOL {
+            let window = w(i);
+            let slot = tree.slot(window).map(|slot| {
+                let mut path: Vec<usize> = slot
+                    .path
+                    .iter()
+                    .map(|side| match side {
+                        bsp_tree::Side::First => 0,
+                        bsp_tree::Side::Second => 1,
+                    })
+                    .collect();
+                match slot.tab {
+                    bsp_tree::Tab::Alone => {}
+                    bsp_tree::Tab::Stacked(position) => path.push(position),
+                }
+                path
+            });
+            check(
+                &format!("slot {i}"),
+                format!("{:?}", old.window_slot(layout, window)),
+                format!("{slot:?}"),
+            );
+            check(
+                &format!("stack {i}"),
+                format!("{:?}", old.stack_members(layout, window)),
+                format!("{:?}", tree.stack_members(window)),
+            );
+        }
+        let screen = CGRect::new(CGPoint::new(0., 25.), CGSize::new(1512., 957.));
+        let gaps = GapSettings::default();
+        let frames = old.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &HashMap::default(),
+            &gaps,
+            Default::default(),
+        );
+        let core_frames = tree.shape(who, &|_| None).map_or_else(Vec::new, |root| {
+            bsp::Bsp {
+                screen: crate::layout_engine::core_rect(screen),
+                gaps: crate::layout_engine::core_gaps(&gaps),
+                root,
+                aspect: None,
+            }
+            .frames()
+            .into_iter()
+            .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
+            .collect()
+        });
+        check("frames", format!("{frames:?}"), format!("{core_frames:?}"));
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join("\n"))
+        }
+    }
+
+    #[test]
+    fn the_core_tree_answers_what_the_bsp_layout_system_answers() {
+        let cases: u64 = std::env::var("RIFT_TREE_CASES").map_or(2000, |n| n.parse().unwrap());
+        let steps: usize = std::env::var("RIFT_TREE_STEPS").map_or(60, |n| n.parse().unwrap());
+        for seed in 0..cases {
+            let mut rng =
+                Rng(0x9E37_79B9_7F4A_7C15 ^ (seed + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+            let mut old = BspLayoutSystem::default();
+            let insertion = if rng.below(2) == 0 {
+                bsp_tree::Insertion::AtFocus
+            } else {
+                old.set_window_insertion_point(WindowInsertionPoint::EndOfTree);
+                bsp_tree::Insertion::EndOfTree
+            };
+            let layout = old.create_layout();
+            let mut core = bsp_tree::Layouts::<u8, WindowId>::default();
+            core.create(LAYOUT);
+            let mut history = Vec::new();
+            for _ in 0..steps {
+                let step = step(&mut rng);
+                history.push(step);
+                let outcome = apply(&mut old, layout, &mut core, insertion, step)
+                    .and_then(|()| compare(&old, layout, &core));
+                if let Err(problem) = outcome {
+                    panic!(
+                        "seed {seed} ({insertion:?}), after {history:?}:\n{problem}\nold tree:\n{}",
+                        old.draw_tree(layout)
+                    );
+                }
+            }
+        }
+    }
+}
