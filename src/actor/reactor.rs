@@ -2757,66 +2757,21 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveMouseToDisplay(selector))) => {
-                let screen = self.screen_for_selector(&selector, None).cloned();
-                let focus_window = screen.as_ref().and_then(|screen| {
-                    let space = screen.space?;
-                    self.last_focused_window_in_space(space).or_else(|| {
-                        self.layout_manager
-                            .layout_engine
-                            .workspaces()
-                            .windows_in_active_workspace(&self.state.windows, space)
-                            .into_iter()
-                            .next()
-                    })
-                });
-                let target_is_active = screen
-                    .as_ref()
-                    .and_then(|screen| screen.space)
-                    .is_none_or(|space| self.is_space_active(space));
-                return command_workflow::handle_move_mouse_to_display(
-                    &self.app_manager,
-                    command_workflow::DisplayFocusPayload {
-                        screen,
-                        target_is_active,
-                        focus_window,
-                        focus_window_center: None,
-                    },
-                );
+                let mut payload = self.display_focus_payload(&selector);
+                payload.focus_window_center = None;
+                return command_workflow::handle_move_mouse_to_display(&self.app_manager, payload);
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
-                let screen = self.screen_for_selector(&selector, None).cloned();
-                let focus_window = screen.as_ref().and_then(|screen| {
-                    let space = screen.space?;
-                    self.last_focused_window_in_space(space).or_else(|| {
-                        self.layout_manager
-                            .layout_engine
-                            .workspaces()
-                            .windows_in_active_workspace(&self.state.windows, space)
-                            .into_iter()
-                            .next()
-                    })
-                });
-                let target_is_active = screen
-                    .as_ref()
-                    .and_then(|screen| screen.space)
-                    .is_none_or(|space| self.is_space_active(space));
+                let payload = self.display_focus_payload(&selector);
                 // Honor explicit display selection before the native notification arrives, even
                 // on activation failure. Later spaces-actor updates remain authoritative.
-                let activate_display =
-                    screen.as_ref().and_then(|screen| screen.space).filter(|_| target_is_active);
-                let focus_window_center = focus_window
-                    .and_then(|wid| self.state.windows.window(wid))
-                    .map(|window| window.frame_monotonic().mid());
-                return command_workflow::handle_focus_display(
-                    &self.app_manager,
-                    command_workflow::DisplayFocusPayload {
-                        screen,
-                        target_is_active,
-                        focus_window,
-                        focus_window_center,
-                    },
-                )
-                .map(|outcome| EventOutcome { activate_display, ..outcome });
+                let activate_display = payload
+                    .screen
+                    .as_ref()
+                    .and_then(|screen| screen.space)
+                    .filter(|_| payload.target_is_active);
+                return command_workflow::handle_focus_display(&self.app_manager, payload)
+                    .map(|outcome| EventOutcome { activate_display, ..outcome });
             }
             Event::Command(Command::Layout(command)) => {
                 return self.dispatch_layout_command(command, self.command_context_space());
@@ -6776,6 +6731,34 @@ impl Reactor {
             return;
         };
         self.activate_display(space);
+    }
+
+    /// The display `selector` names, whether it is active, and the window focusing it would
+    /// focus there (its last focused, else the first in its active workspace) and its center.
+    fn display_focus_payload(
+        &self,
+        selector: &DisplaySelector,
+    ) -> command_workflow::DisplayFocusPayload {
+        let screen = self.screen_for_selector(selector, None).cloned();
+        let space = screen.as_ref().and_then(|screen| screen.space);
+        let focus_window = space.and_then(|space| {
+            self.last_focused_window_in_space(space).or_else(|| {
+                let engine = &self.layout_manager.layout_engine;
+                engine
+                    .workspaces()
+                    .windows_in_active_workspace(&self.state.windows, space)
+                    .first()
+                    .copied()
+            })
+        });
+        command_workflow::DisplayFocusPayload {
+            target_is_active: space.is_none_or(|space| self.is_space_active(space)),
+            focus_window_center: focus_window
+                .and_then(|wid| self.state.windows.window(wid))
+                .map(|window| window.frame_monotonic().mid()),
+            screen,
+            focus_window,
+        }
     }
 
     /// Points commands, and the menu bar if macOS takes it, at `space`'s display.
