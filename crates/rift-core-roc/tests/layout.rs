@@ -1,8 +1,10 @@
-//! The Roc core's layout geometry against the Rust core's, on random BSP shapes: the frames must
-//! be identical word for word (so float bits must match). The shapes lean on the edges: maxima
-//! under minima, locked axes, zero and full ratios, one-child splits, fractional screens.
+//! The Roc core's layout geometry against the Rust core's, on random BSP and traditional shapes:
+//! the frames must be identical word for word (so float bits must match). The shapes lean on
+//! the edges: maxima under minima, locked axes, zero and full ratios, one-child splits, tiny and
+//! non-finite weights, stacks with bars, fractional screens.
 
 use rift_core::layout::bsp::{Bsp, Children, Fill, Node, Slot};
+use rift_core::layout::traditional::{self, StackLine, Traditional};
 use rift_core::layout::{Gaps, WindowConstraints};
 use rift_core::plain::{Rect, WindowId, wire};
 use rift_core_roc::{AllocationCount, tile_words};
@@ -133,6 +135,97 @@ fn shape(rng: &mut Rng) -> Bsp<WindowId> {
         root: (!rng.chance(5)).then(|| node(rng, 6, &mut next_window)),
         aspect: rng.chance(20).then(|| rng.float(0.3, 3.)),
     }
+}
+
+fn tnode(rng: &mut Rng, depth: u32, next_window: &mut u32) -> traditional::Node<WindowId> {
+    let fill = match rng.below(12) {
+        0 => traditional::Fill::Screen,
+        1 => traditional::Fill::WithinGaps,
+        _ => traditional::Fill::Tiled,
+    };
+    if depth == 0 || rng.chance(40) {
+        *next_window += 1;
+        return traditional::Node::Window {
+            window: WindowId {
+                pid: 200 + (*next_window % 4) as i32,
+                idx: *next_window,
+            },
+            constraints: rng.chance(50).then(|| constraints(rng)),
+            fill,
+        };
+    }
+    let count = 1 + rng.below(4) as usize;
+    let children = (0..count)
+        .map(|_| traditional::Child {
+            size: match rng.below(12) {
+                0 => 0.0,
+                1 => 0.01,
+                2 => f32::NAN,
+                3 => 1.0,
+                _ => rng.float(0.05, 3.0) as f32,
+            },
+            node: tnode(rng, depth - 1, next_window),
+        })
+        .collect();
+    let horizontal = rng.chance(50);
+    let kind = if rng.chance(30) {
+        traditional::Kind::Stack {
+            horizontal,
+            focused: rng.below(count as u64) as usize,
+        }
+    } else {
+        traditional::Kind::Axis { horizontal }
+    };
+    traditional::Node::Container { kind, fill, children }
+}
+
+fn tshape(rng: &mut Rng) -> Traditional<WindowId> {
+    let bsp = shape(rng);
+    let mut next_window = 0;
+    Traditional {
+        screen: bsp.screen,
+        area: rift_core::layout::tiling_area(bsp.screen, bsp.gaps),
+        gaps: bsp.gaps,
+        stack_offset: if rng.chance(30) {
+            0.
+        } else {
+            rng.length(0., 60.)
+        },
+        stack_line: StackLine {
+            thickness: if rng.chance(50) {
+                0.
+            } else {
+                rng.length(1., 12.)
+            },
+            spacing: rng.length(0., 8.),
+            top: rng.chance(50),
+            left: rng.chance(50),
+        },
+        root: (!rng.chance(5)).then(|| tnode(rng, 5, &mut next_window)),
+    }
+}
+
+#[test]
+fn the_roc_core_tiles_traditional_layouts_as_the_rust_core_does() {
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+    let before = AllocationCount::now();
+    let mut windows = 0;
+    for case in 0..cases {
+        let shape = tshape(&mut rng);
+        let rust = shape.frames();
+        windows += rust.len();
+        let roc = tile_words(&wire::encode_traditional(shape.clone()));
+        if roc != wire::encode_frames(rust.clone()) {
+            panic!(
+                "case {case}: {shape:#?}\n  roc:  {:?}\n  rust: {rust:?}",
+                wire::decode_frames(&roc)
+            );
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} traditional shapes, {windows} frames identical");
 }
 
 #[test]

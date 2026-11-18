@@ -6,11 +6,13 @@
 //! value; a list is its length and then its items. Each event and effect starts with its tag,
 //! the index in the tables below, which `roc/core` mirrors.
 //!
-//! A layout's shape and its frames cross the same way ([`encode_bsp`], [`encode_frames`]): the
-//! Roc core's geometry entry takes a shape's words and returns the frames' words.
+//! A layout's shape and its frames cross the same way ([`encode_bsp`], [`encode_traditional`],
+//! [`encode_frames`]): the Roc core's geometry entry takes a shape's words, which start with its
+//! layout system's tag (0 BSP, 1 traditional), and returns the frames' words.
 
 use crate::core::{Desire, Effect, Event, Plan};
 use crate::layout::bsp::{Bsp, Children, Fill, Node, Slot};
+use crate::layout::traditional::{self, StackLine, Traditional};
 use crate::layout::{Gaps, WindowConstraints};
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
@@ -141,6 +143,44 @@ impl Words {
                     Fill::WithinGaps => 2,
                 });
                 self.flag(stacked);
+            }
+        }
+    }
+
+    fn fill(&mut self, fill: traditional::Fill) {
+        self.word(match fill {
+            traditional::Fill::Tiled => 0,
+            traditional::Fill::Screen => 1,
+            traditional::Fill::WithinGaps => 2,
+        });
+    }
+
+    fn tnode(&mut self, node: traditional::Node<WindowId>) {
+        match node {
+            traditional::Node::Window { window, constraints, fill } => {
+                self.word(0);
+                self.window(window);
+                self.option(constraints, Self::constraints);
+                self.fill(fill);
+            }
+            traditional::Node::Container { kind, fill, children } => {
+                self.word(1);
+                match kind {
+                    traditional::Kind::Axis { horizontal } => {
+                        self.word(0);
+                        self.flag(horizontal);
+                    }
+                    traditional::Kind::Stack { horizontal, focused } => {
+                        self.word(1);
+                        self.flag(horizontal);
+                        self.word(focused as u64);
+                    }
+                }
+                self.fill(fill);
+                self.list(children, |words, child| {
+                    words.word(u64::from(child.size.to_bits()));
+                    words.tnode(child.node);
+                });
             }
         }
     }
@@ -343,10 +383,28 @@ pub fn encode_effects(effects: Vec<Effect<Plain>>) -> Vec<u64> {
 /// A BSP layout's shape as words.
 pub fn encode_bsp(bsp: Bsp<WindowId>) -> Vec<u64> {
     let mut words = Words::default();
+    words.word(0);
     words.frame(bsp.screen);
     words.gaps(bsp.gaps);
     words.option(bsp.aspect, Words::float);
     words.option(bsp.root, Words::node);
+    words.0
+}
+
+/// A traditional layout's shape as words.
+pub fn encode_traditional(shape: Traditional<WindowId>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(1);
+    words.frame(shape.screen);
+    words.frame(shape.area);
+    words.gaps(shape.gaps);
+    words.float(shape.stack_offset);
+    let line = shape.stack_line;
+    words.float(line.thickness);
+    words.float(line.spacing);
+    words.flag(line.top);
+    words.flag(line.left);
+    words.option(shape.root, Words::tnode);
     words.0
 }
 
@@ -505,6 +563,44 @@ impl Reader<'_> {
                     fill,
                     stacked: self.flag()?,
                 })
+            }
+            word => self.unknown(word),
+        }
+    }
+
+    fn fill(&mut self) -> Read<traditional::Fill> {
+        match self.word()? {
+            0 => Ok(traditional::Fill::Tiled),
+            1 => Ok(traditional::Fill::Screen),
+            2 => Ok(traditional::Fill::WithinGaps),
+            word => self.unknown(word),
+        }
+    }
+
+    fn tnode(&mut self) -> Read<traditional::Node<WindowId>> {
+        match self.word()? {
+            0 => Ok(traditional::Node::Window {
+                window: self.window()?,
+                constraints: self.option(Self::constraints)?,
+                fill: self.fill()?,
+            }),
+            1 => {
+                let kind = match self.word()? {
+                    0 => traditional::Kind::Axis { horizontal: self.flag()? },
+                    1 => traditional::Kind::Stack {
+                        horizontal: self.flag()?,
+                        focused: self.word()? as usize,
+                    },
+                    word => return self.unknown(word),
+                };
+                let fill = self.fill()?;
+                let children = self.list(|reader| {
+                    Ok(traditional::Child {
+                        size: f32::from_bits(reader.u32()?),
+                        node: reader.tnode()?,
+                    })
+                })?;
+                Ok(traditional::Node::Container { kind, fill, children })
             }
             word => self.unknown(word),
         }
@@ -683,6 +779,10 @@ pub fn decode_effects(words: &[u64]) -> Result<Vec<Effect<Plain>>, WireError> {
 /// The BSP shape `words` hold.
 pub fn decode_bsp(words: &[u64]) -> Result<Bsp<WindowId>, WireError> {
     let mut reader = Reader { words, at: 0 };
+    match reader.word()? {
+        0 => {}
+        word => return reader.unknown(word),
+    }
     let bsp = Bsp {
         screen: reader.frame()?,
         gaps: reader.gaps()?,
@@ -691,6 +791,30 @@ pub fn decode_bsp(words: &[u64]) -> Result<Bsp<WindowId>, WireError> {
     };
     reader.done()?;
     Ok(bsp)
+}
+
+/// The traditional shape `words` hold.
+pub fn decode_traditional(words: &[u64]) -> Result<Traditional<WindowId>, WireError> {
+    let mut reader = Reader { words, at: 0 };
+    match reader.word()? {
+        1 => {}
+        word => return reader.unknown(word),
+    }
+    let shape = Traditional {
+        screen: reader.frame()?,
+        area: reader.frame()?,
+        gaps: reader.gaps()?,
+        stack_offset: reader.float()?,
+        stack_line: StackLine {
+            thickness: reader.float()?,
+            spacing: reader.float()?,
+            top: reader.flag()?,
+            left: reader.flag()?,
+        },
+        root: reader.option(Reader::tnode)?,
+    };
+    reader.done()?;
+    Ok(shape)
 }
 
 /// The frames `words` hold.
@@ -957,5 +1081,74 @@ mod tests {
             (V, Rect { x: 4., y: 5., w: 6., h: 7. }),
         ];
         assert_eq!(decode_frames(&encode_frames(frames.clone())), Ok(frames));
+    }
+
+    #[test]
+    fn a_traditional_shape_survives_the_wire() {
+        use crate::layout::traditional::{Child, Fill, Kind, Node};
+        let window = |window, fill| Node::Window {
+            window,
+            constraints: None,
+            fill,
+        };
+        let shape = Traditional {
+            screen: Rect {
+                x: 0.,
+                y: 0.,
+                w: 1000.,
+                h: 800.,
+            },
+            area: Rect { x: 5., y: 5., w: 990., h: 790. },
+            gaps: Gaps {
+                top: 5.,
+                left: 5.,
+                bottom: 5.,
+                right: 5.,
+                horizontal: 4.,
+                vertical: 3.,
+            },
+            stack_offset: 30.,
+            stack_line: StackLine {
+                thickness: 4.,
+                spacing: 2.,
+                top: true,
+                left: false,
+            },
+            root: Some(Node::Container {
+                kind: Kind::Axis { horizontal: true },
+                fill: Fill::Tiled,
+                children: vec![
+                    Child {
+                        size: 1.5,
+                        node: window(W, Fill::Screen),
+                    },
+                    Child {
+                        size: 0.5,
+                        node: Node::Container {
+                            kind: Kind::Stack { horizontal: false, focused: 1 },
+                            fill: Fill::WithinGaps,
+                            children: vec![
+                                Child {
+                                    size: 1.,
+                                    node: window(V, Fill::Tiled),
+                                },
+                                Child {
+                                    size: 1.,
+                                    node: Node::Window {
+                                        window: W,
+                                        constraints: Some(WindowConstraints {
+                                            max_height: 300.,
+                                            ..Default::default()
+                                        }),
+                                        fill: Fill::Tiled,
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            }),
+        };
+        assert_eq!(decode_traditional(&encode_traditional(shape.clone())), Ok(shape));
     }
 }
