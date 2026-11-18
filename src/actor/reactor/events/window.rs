@@ -2,7 +2,7 @@ use objc2_core_foundation::CGRect;
 use tracing::debug;
 
 use crate::actor::app::WindowId;
-use crate::actor::drag::{DragKind, DragSource, Session};
+use crate::actor::drag::{DragSource, Session};
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{Quiet, WindowState, utils};
@@ -213,11 +213,7 @@ pub fn handle_window_frame_changed(
         return Ok(EventOutcome::no_change());
     }
     // An adjusted acknowledgement of our own frame write is not a new native drag.
-    if state
-        .windows
-        .drag_on(wid)
-        .is_some_and(|session| session.kind == DragKind::ModifierMove)
-    {
+    if state.windows.drag_on(wid).is_some_and(|session| session.is_modifier()) {
         return Ok(EventOutcome::no_change());
     }
     outcome = EventOutcome::layout_changed(false);

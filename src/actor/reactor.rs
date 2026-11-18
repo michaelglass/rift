@@ -84,7 +84,7 @@ use super::input;
 use crate::actor::app::{
     AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, WindowInventoryToken, pid_t,
 };
-use crate::actor::drag::{DragKind, DragScene, DragSource, MouseButton, Session};
+use crate::actor::drag::{DragScene, DragSource, MouseButton, Session};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -2201,9 +2201,8 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 let mut intent_changed = false;
-                if session.kind == DragKind::ModifierMove {
+                if let Some(frame) = session.modifier_frame_at(motion.point) {
                     // The display under the pointer decides what a modifier move can drop onto.
-                    let frame = session.modifier_frame_at(motion.point);
                     let space = self
                         .space_state
                         .screen_for_point(motion.point)
@@ -4612,7 +4611,7 @@ impl Reactor {
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
             let frame_space = || self.best_space_for_frame(&source.last_frame);
-            if session.kind == DragKind::ModifierMove {
+            if session.is_modifier() {
                 frame_space()
                     .or(source.current_space)
                     .or_else(|| self.best_space_for_window_id(window))
@@ -4667,11 +4666,7 @@ impl Reactor {
         let (Pointer::Pressing(wid) | Pointer::Dragging(wid)) = self.state.windows.pointer() else {
             return;
         };
-        if self
-            .state
-            .windows
-            .drag()
-            .is_some_and(|(_, session)| session.kind == DragKind::ModifierMove)
+        if self.state.windows.drag().is_some_and(|(_, session)| session.is_modifier())
             || (self.read_button)() != Some(MouseState::Up)
         {
             return;
@@ -5016,7 +5011,7 @@ impl Reactor {
             return;
         };
         let source = session.source;
-        if !source.tiled || !matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove) {
+        if !source.tiled || session.resizing() {
             return;
         }
         let Some(space) = source.current_space else { return };

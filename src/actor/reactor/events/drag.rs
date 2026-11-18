@@ -50,11 +50,13 @@ pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
     };
     let source = cancelled.source;
     match (cancelled.kind, source.tiled) {
-        (DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
-        (DragKind::ModifierMove, false) if source.last_frame != source.origin_frame => {
+        (DragKind::Modifier { .. }, true) => EventOutcome::layout_changed(false),
+        (DragKind::Modifier { .. }, false) if source.last_frame != source.origin_frame => {
             EventOutcome::no_change().with_placement(window, source.origin_frame)
         }
-        _ => EventOutcome::no_change(),
+        (DragKind::Modifier { .. }, false) | (DragKind::Native, true | false) => {
+            EventOutcome::no_change()
+        }
     }
 }
 
