@@ -54,7 +54,7 @@ Node := [
 	Stack({ horizontal : Bool, fill : Fill, before : List(Child), focused : Child, after : List(Child) }),
 ]
 
-Shape : { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, root : [Root(Node), Nothing] }
+Shape : { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, root : Node }
 
 Traditional := [].{
 
@@ -308,10 +308,7 @@ Traditional := [].{
 
 	frames : Shape -> List((WindowId, Rect))
 	frames = |shape|
-		match shape.root {
-			Nothing => []
-			Root(root) => place(shape, root, shape.area, [])
-		}
+		place(shape, shape.root, shape.area, [])
 
 	take_fill : Words -> Taken(Fill)
 	take_fill = |cursor| {
@@ -385,14 +382,7 @@ Traditional := [].{
 		(spacing, c11) = take_float(c10)?
 		(line_top, c12) = take_flag(c11)?
 		(line_left, c13) = take_flag(c12)?
-		(has_root, c14) = take_flag(c13)?
-		(root, c15) =
-			if has_root {
-				(node, after) = take_node(c14)?
-				(Root(node), after)
-			} else {
-				(Nothing, c14)
-			}
+		(root, c15) = take_node(c13)?
 		Ok((
 			{
 				screen,

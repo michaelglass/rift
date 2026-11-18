@@ -68,7 +68,7 @@ fn compare(sessions: &[Vec<Event<Plain>>]) {
         let start = AllocationCount::now();
         let mut roc = RocCore::default();
         word_samples.extend(time(&words, |words| {
-            std::hint::black_box(roc.step_words(words));
+            std::hint::black_box(roc.step_words(words).expect("an event"));
         }));
         let during = AllocationCount::now();
         allocated += during.allocated - start.allocated;
@@ -76,7 +76,7 @@ fn compare(sessions: &[Vec<Event<Plain>>]) {
         drop(roc);
         let mut roc = RocCore::default();
         step_samples.extend(time(events, |event| {
-            std::hint::black_box(roc.step(event.clone()));
+            std::hint::black_box(roc.step(event.clone()).expect("an event"));
         }));
     }
     let after = AllocationCount::now();
@@ -204,7 +204,7 @@ fn a_million_steps_leave_nothing_behind() {
     let mut live = Vec::new();
     for chunk in events.chunks(100_000) {
         for event in chunk {
-            std::hint::black_box(roc.step(event.clone()));
+            std::hint::black_box(roc.step(event.clone()).expect("an event"));
         }
         live.push(AllocationCount::now().live() - before.live());
     }

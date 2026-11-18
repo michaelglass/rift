@@ -132,7 +132,7 @@ fn shape(rng: &mut Rng) -> Bsp<WindowId> {
             horizontal: gap(rng),
             vertical: gap(rng),
         },
-        root: (!rng.chance(5)).then(|| node(rng, 6, &mut next_window)),
+        root: node(rng, 6, &mut next_window),
         aspect: rng.chance(20).then(|| rng.float(0.3, 3.)),
     }
 }
@@ -208,7 +208,7 @@ fn tshape(rng: &mut Rng) -> Traditional<WindowId> {
             top: rng.chance(50),
             left: rng.chance(50),
         },
-        root: (!rng.chance(5)).then(|| tnode(rng, 5, &mut next_window)),
+        root: tnode(rng, 5, &mut next_window),
     }
 }
 
@@ -270,7 +270,7 @@ fn tile_timing() {
         for _ in 0..5 {
             let start = std::time::Instant::now();
             for words in shapes {
-                std::hint::black_box(tile_words(words));
+                std::hint::black_box(tile_words(words).expect("a shape"));
             }
             best = best.min(start.elapsed());
         }
