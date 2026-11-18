@@ -197,6 +197,16 @@ impl<K: Kinds> Default for Reconciler<K> {
 }
 
 impl<K: Kinds> Sync<K> {
+    /// The frame Rift has pending: the target of a write in flight or of an animation, or the
+    /// frame its app refused (it still says where Rift means the window to be).
+    fn pending(self) -> Option<K::Frame> {
+        match self {
+            Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
+            Sync::Refused { wanted, .. } => Some(wanted),
+            Sync::Settled { .. } | Sync::Unknown { .. } => None,
+        }
+    }
+
     /// The request of the latest frame Rift sent the window, if any.
     fn last(self) -> Option<K::Request> {
         match self {
@@ -233,7 +243,7 @@ impl<K: Kinds> Reconciler<K> {
     }
 
     /// What was decided since the last call that is not a write.
-    pub fn notes(&mut self) -> Vec<(K::Window, Note)> { std::mem::take(&mut self.notes) }
+    pub fn drain_notes(&mut self) -> std::vec::Drain<'_, (K::Window, Note)> { self.notes.drain(..) }
 
     fn set(&mut self, window: K::Window, sync: Sync<K>) {
         if let Some(record) = self.windows.get_mut(&window) {
@@ -242,23 +252,20 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
-    /// The windows whose state changed since the last call.
-    pub fn touched(&mut self) -> Vec<K::Window> {
-        let mut touched = std::mem::take(&mut self.touched);
-        touched.dedup();
-        touched
+    /// The windows whose state changed since the last call, each with its pending frame.
+    pub fn drain_pending(&mut self) -> impl Iterator<Item = (K::Window, Option<K::Frame>)> + '_ {
+        self.touched.dedup();
+        let windows = &self.windows;
+        self.touched.drain(..).map(move |window| {
+            (
+                window,
+                windows.get(&window).and_then(|record| record.sync.pending()),
+            )
+        })
     }
 
-    /// The frame Rift has pending for `window`, if any: the target of a write in flight or of
-    /// an animation, or the frame its app refused (it still says where Rift means the window to
-    /// be).
-    pub fn pending(&self, window: K::Window) -> Option<K::Frame> {
-        match self.sync(window)? {
-            Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
-            Sync::Refused { wanted, .. } => Some(wanted),
-            Sync::Settled { .. } | Sync::Unknown { .. } => None,
-        }
-    }
+    /// The frame Rift has pending for `window`, if any.
+    pub fn pending(&self, window: K::Window) -> Option<K::Frame> { self.sync(window)?.pending() }
 
     /// `window` is gone, or no longer seen: nothing is tracked for it any more.
     pub fn remove(&mut self, window: K::Window) {

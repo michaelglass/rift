@@ -746,11 +746,13 @@ impl Reactor {
                 })
                 .collect();
             let animated = self.state.animate(desires);
-            windows.retain(|w| !animated.writes.iter().any(|write| write.window() == w.wid));
+            let written: HashSet<_> = animated.writes.iter().map(|write| write.window()).collect();
+            let animating: HashSet<_> = animated.animations.iter().map(|&(wid, ..)| wid).collect();
+            windows.retain(|w| !written.contains(&w.wid));
             // The camera resizes (once, at its start) only what the core animates; any other
             // window it presents starts at its target size.
             for window in &mut windows {
-                if !animated.animations.iter().any(|&(wid, ..)| wid == window.wid) {
+                if !animating.contains(&window.wid) {
                     window.from.size = window.to.size;
                 }
             }
