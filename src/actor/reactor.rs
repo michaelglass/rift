@@ -12,6 +12,7 @@ pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
 mod modes;
+mod native;
 mod native_tabs;
 mod query;
 pub(crate) mod reconciler;
@@ -586,10 +587,8 @@ pub struct Reactor {
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
     layout_update_count: usize,
-    #[cfg(test)]
-    native_focus_for_removal: Option<WindowId>,
-    #[cfg(test)]
-    native_tab_successor: Option<(WindowId, CGRect)>,
+    /// What macOS says about windows and Spaces.
+    native: native::Source,
 }
 
 impl Reactor {
@@ -729,10 +728,7 @@ impl Reactor {
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
             layout_update_count: 0,
-            #[cfg(test)]
-            native_focus_for_removal: None,
-            #[cfg(test)]
-            native_tab_successor: None,
+            native: Default::default(),
         };
         reactor
     }
@@ -1053,21 +1049,14 @@ impl Reactor {
             // Live membership can precede the accepted Space inventory. Stale
             // absence alone must not change layout participation or ownership.
             if let Some(space) = resolved.filter(|space| self.is_space_active(*space))
-                && window_server::window_spaces(wsid).as_slice() == [space]
+                && native::Native::window_spaces(&self.native, wsid).as_slice() == [space]
             {
                 continue;
             }
             let inactive_target =
                 resolved.filter(|space| !self.is_space_active(*space)).filter(|space| {
-                    #[cfg(test)]
-                    {
-                        let _ = space;
-                        true
-                    }
-                    #[cfg(not(test))]
-                    {
-                        window_server::space_is_user(space.get())
-                    }
+                    use native::Native;
+                    self.native.space_is_user(*space)
                 });
             // Fullscreen topology can precede a positive entry observation.
             // Preserve ownership, but another window's fullscreen is not evidence
@@ -2537,7 +2526,7 @@ impl Reactor {
                     .filter(|(_, selected)| *selected == window_id)
                 {
                     self.overview_focus = None;
-                    let selected = window_server::key_focused_window(space)
+                    let selected = native::Native::key_focused_window(&self.native, space)
                         .filter(|window| self.state.windows.contains_window(*window))
                         .unwrap_or(selected);
                     self.stop_camera(space);
@@ -3443,7 +3432,7 @@ impl Reactor {
                     continue;
                 }
                 if let Some(wsid) = record.window_server_id {
-                    let membership = window_server::window_spaces(wsid);
+                    let membership = native::Native::window_spaces(&self.native, wsid);
                     if let Some(space) =
                         membership.iter().copied().find(|space| self.is_fullscreen_space(*space))
                     {
@@ -4582,7 +4571,7 @@ impl Reactor {
                     // Multiple memberships are transitional, even if one is a
                     // user Space. Do not let the generic user-Space preference
                     // turn contradictory evidence into a completed exit.
-                    let spaces = window_server::window_spaces(wsid);
+                    let spaces = native::Native::window_spaces(&self.native, wsid);
                     let live = (spaces.len() == 1).then(|| spaces[0]);
                     if let Some(space) = live.filter(|space| {
                         self.is_fullscreen_space(*space)
@@ -5065,7 +5054,7 @@ impl Reactor {
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live =
             if observation.is_none() || pending.is_some_and(|target| observation != Some(target)) {
-                window_server::window_space(wsid)
+                native::Native::window_space(&self.native, wsid)
             } else {
                 None
             };
@@ -5922,7 +5911,7 @@ impl Reactor {
     }
 
     fn window_server_id_under_cursor(&self) -> Option<WindowServerId> {
-        window_server::window_under_cursor()
+        native::Native::window_under_cursor(&self.native)
     }
 
     fn tracked_window_under_cursor(&self) -> Option<(WindowServerId, WindowId)> {
@@ -6106,12 +6095,9 @@ impl Reactor {
             // A native tab departure can arrive before either AX or the debounced
             // WindowServer focus notification. Sample native focus before raising
             // a fallback, otherwise that raise can steal focus from the new tab.
-            #[cfg(not(test))]
             let native_focus = matches!(event, LayoutEvent::WindowRemoved(_))
-                .then(|| window_server::key_focused_window(space))
+                .then(|| native::Native::key_focused_window(&self.native, space))
                 .flatten();
-            #[cfg(test)]
-            let native_focus = self.native_focus_for_removal;
             if matches!(event, LayoutEvent::WindowRemoved(_))
                 && let Some(native) = native_focus
                 && native.pid == wid.pid
