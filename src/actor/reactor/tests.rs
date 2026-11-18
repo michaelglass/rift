@@ -3197,10 +3197,10 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.handle_event(Event::MissionControlNativeEntered);
 
     assert!(!reactor.user_is_dragging());
-    assert!(reactor.drag_manager.preview_suppressed);
+    assert!(!reactor.may(Initiative::RetireWindows));
 
     reactor.handle_event(Event::MissionControlNativeExited);
-    assert!(!reactor.drag_manager.preview_suppressed);
+    assert!(reactor.may(Initiative::RetireWindows));
 }
 
 #[test]
@@ -6973,6 +6973,36 @@ fn empty_inventory_retires_last_ordered_out_window_without_cached_visibility() {
 
     assert!(reactor.state.windows.record(wid).is_none());
     assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
+}
+
+/// No user Space on screen refuses retirement; the omission is discarded, not remembered, so the
+/// window survives the screens' return and only a later inventory can retire it.
+#[test]
+fn no_user_space_refuses_retirement_and_nothing_replays_when_screens_return() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    reactor.state.windows.mark_window_hidden(wsid);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+
+    reactor.handle_event(space_state_event(vec![], vec![]));
+    assert!(!reactor.may(Initiative::RetireWindows));
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    assert!(reactor.state.windows.record(wid).is_some(), "discarded");
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.may(Initiative::RetireWindows));
+    assert!(reactor.state.windows.record(wid).is_some(), "nothing replays");
+
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    assert!(
+        reactor.state.windows.record(wid).is_none(),
+        "a fresh inventory decides"
+    );
 }
 
 #[test]

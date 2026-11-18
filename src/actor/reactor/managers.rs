@@ -42,7 +42,6 @@ impl AppManager {
 pub struct DragManager {
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
-    pub(super) preview_suppressed: bool,
     pub(super) haptics_enabled: bool,
 }
 
@@ -63,10 +62,7 @@ impl DragManager {
             self.release_preview();
             return;
         };
-        let Some(target) = session
-            .preview_target(window)
-            .filter(|_| self.preview_enabled && !self.preview_suppressed)
-        else {
+        let Some(target) = session.preview_target(window).filter(|_| self.preview_enabled) else {
             self.hide_preview();
             return;
         };
@@ -92,13 +88,6 @@ impl DragManager {
     }
 
     pub fn release_preview(&mut self) { drop(self.preview.take()); }
-
-    pub fn suppress_preview(&mut self, suppressed: bool) {
-        self.preview_suppressed = suppressed;
-        if suppressed {
-            self.hide_preview();
-        }
-    }
 }
 
 /// Manages window notifications
@@ -159,7 +148,6 @@ impl WorkspaceSwitchManager {
 
 /// Manages refocus and cleanup state
 pub struct RefocusManager {
-    pub stale_cleanup_state: super::StaleCleanupState,
     pub refocus_state: super::RefocusState,
 }
 

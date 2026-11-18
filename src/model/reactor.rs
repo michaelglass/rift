@@ -54,12 +54,6 @@ pub enum WorkspaceSwitchOrigin {
     Auto,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleCleanupState {
-    Enabled,
-    Suppressed,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum RefocusState {
     None,
