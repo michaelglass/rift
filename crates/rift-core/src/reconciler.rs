@@ -417,12 +417,12 @@ impl<K: Kinds> Reconciler<K> {
             {
                 Verdict::Nothing
             }
-            // The app has the window there already (or an animation is taking it there).
-            Sync::Settled { acked, .. } | Sync::Animating { target: acked, .. }
-                if K::same_as(desired, acked) =>
-            {
-                Verdict::Nothing
-            }
+            // The app has the window there already, as near as an answer to this very desire
+            // would be (a terminal rounds to whole cells): asking again would be asked on every
+            // arrange.
+            Sync::Settled { acked, .. } if answers::<K>(desired, acked) => Verdict::Nothing,
+            // An animation is taking it there.
+            Sync::Animating { target, .. } if K::same_as(desired, target) => Verdict::Nothing,
             // A refused window is where the model has it (a timed-out write's `got` is only what
             // was acknowledged before it: the write may still have landed).
             Sync::Refused { .. } if K::same_as(desired, known) => Verdict::Nothing,
@@ -688,7 +688,7 @@ impl<K: Kinds> Reconciler<K> {
             }
             Sync::Animating { target, .. } => K::same_as(target, desired),
             Sync::Refused { wanted, .. } => K::same_as(wanted, desired),
-            Sync::Settled { .. } => K::same_as(known, desired),
+            Sync::Settled { .. } => answers::<K>(desired, known),
         };
         match (owner, already) {
             (Owner::User, _) | (Owner::Rift, true) => Planned::Verdict(Verdict::Nothing),
@@ -933,6 +933,32 @@ mod tests {
             assert_eq!(want(&mut reconciler, T0, at(10.), at(14.)), Verdict::Nothing);
         }
         assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(14.))), at(50.));
+    }
+
+    #[test]
+    fn an_answer_within_the_ack_tolerance_is_not_asked_again() {
+        // A terminal rounding to whole cells lands a point short: that answers the write, and
+        // the same desire is not sent again on every arrange.
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(11.)).observe(
+                T0,
+                R,
+                window(),
+                at(11.),
+                Some(R),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
+        );
+        assert_eq!(settled(&reconciler), Some(at(11.)));
+        for _ in 0..3 {
+            assert_eq!(want(&mut reconciler, T0, at(10.), at(11.)), Verdict::Nothing);
+        }
+        // Beyond the tolerance it is a new desire.
+        assert_eq!(sent(want(&mut reconciler, T0, at(13.), at(11.))), at(13.));
     }
 
     #[test]
