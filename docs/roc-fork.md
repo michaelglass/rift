@@ -186,6 +186,18 @@ wire encode and decode.
   deadline queue cannot grow with a forward clock: a due or stale entry is dropped, so it holds
   only the writes of the last 300 ms.
 
+- **No index in the geometry (index audit), a known cost.** The owner chose unrepresentable
+  states over microseconds ("premature bug-fixing rather than premature optimisation"):
+  the solver walks segment records instead of indexing parallel lists, a traditional stack is a
+  zipper and an axis a first and the rest (in the Rust core too), and children are zipped with
+  their lengths and frames. Tile, best of 5 over 200,000 random shapes: BSP 4.04 → 4.9 µs per
+  shape, traditional 5.6–5.9 → 8.1 µs. If a profile ever asks, optimise inside these
+  structures (the measured costs: bigger records than parallel float lists, and one list for
+  each zip). The per-step core is unaffected.
+- **Pure functions.** No Roc function is effectful (`=>`): the platform's entry points are
+  pure too. rift-core reads no clock, randomness or I/O (time and request ids come in as
+  arguments); the Roc host only moves words and memory.
+
 Build:
 
 | | time |
@@ -195,26 +207,68 @@ Build:
 | rift with `roc-core`, after touching `main.roc` (Roc build + relinking rift) | 32 s |
 | rift without it, after touching `rift-core` | 16 s |
 
-## Roc friction found (nightly-2026-11-15-f25da45)
+## Roc: the design we follow, and what is left (nightly-2026-11-15-f25da45)
+
+Sources are the Roc checkout at the pinned commit (`f25da45`): `docs/langref/`, `design.md`,
+`docs/mini-tutorial-new-compiler.md`, `src/build/roc/Builtin.roc`, `src/cli/main.zig`. Earlier
+notes called several of these friction; they are Roc's design, and the core follows them.
+
+### Design we follow
+
+- **No `Option`, no null.** Failures are `Try`, absence is a descriptive tag union (mini
+  tutorial, "`Try`": "Roc does not have `null`, `nil`, `undefined`, or anything similar").
+  The core says what absence means: `Last : [Sent(U32), NeverSent]`, `Waiting : [Waiting(Rect),
+  NoneWaiting]`, `Armed : [Armed(U64), Disarmed]`.
+- **`List.get` / `List.set` return `Try`** (langref `lists.md`: "there's no such thing as an
+  'index out of bounds' crash in Roc"). So an index the code knows is valid means the data
+  structure is wrong: the index audit replaced those with shapes where it cannot happen (a
+  stack is a zipper, an axis a first and the rest, frames and lengths are zipped with the
+  children, a stack's frame is a formula of its position).
+- **Closed and open records.** `{ target }` is a closed record (pattern), `{ target, .. }` an
+  open one (langref `records.md`, "Open Record Types"; `pattern-matching.md`).
+- **Type modules.** A file `Wire.roc` defines `Wire := …` and exposes only that type's
+  associated items; everything else at the top level, type aliases included, is private
+  (langref `modules.md`, "Hiding implementation details"). The old `module [..]` header is
+  deprecated (the compiler's diagnostic at this commit). Structural aliases are
+  interchangeable, so each module declares the `Rect` it uses.
+- **Warnings exit 2.** Every `roc` command that finishes with warnings exits 2, so CI fails
+  (mini tutorial; `src/cli/main.zig`, `exitOnWarnings`: "the one warning exit policy"). The
+  build script treats it as a failure, and the core is kept warning-free.
+- **Shadowing is a warning** (langref `naming.md`, "Shadowing"), which with the exit policy
+  fails a build: a match branch binding `release` next to a `release` function had to be
+  renamed.
+- **Recursive types are nominal** (langref `types.md`, "Recursive Types"; `boxes.md`):
+  `Node := [..]`, built as `Node.Split(..)`.
+- **Ranges are syntax**, `0..<n` (langref `numbers.md`, "Ranges"; `loops.md`), not a
+  `List.range`. (The hand-written `indices_to` this replaced was a misreading, and the audit
+  removed the need for it.)
+- **`where` clauses ask for methods**, not record fields (langref `static-dispatch.md`): a
+  function over records names their alias instead.
+
+### Not yet implemented
+
+- **Alias modules** (exposing a type alias as a module): "planned for after 0.1.0 and have not
+  been implemented yet" (langref `modules.md`, "Alias modules").
+
+### Unknown (behaviour at this commit, not documented)
+
+- **`F64` rounding.** `round_to_*_try` rounds by `floor(x + 0.5)` (`Builtin.roc`,
+  `f64_round_to_whole`), which differs from Rust's `f64::round` at `0.49999999999999994` and
+  loses the sign of a zero; there is no `F64 -> F64` round or floor. The geometry writes Rust's
+  rounding out (`Geometry.round`) to stay bit-identical.
+- **`F64.max` / `F64.min`** are `if a > b then a else b` (`Builtin.roc`): NaN and signed-zero
+  behaviour is not specified; the geometry writes out arm64's `fmaxnm`/`fminnm`.
+- **Glue and packaging** (only the three boundary functions use it now): structural records
+  are named by hash, the generated Rust is not clean under Rust 2024
+  (`unsafe_op_in_unsafe_fn`, allowed on the module), and the nightly tarball has no glue specs
+  (`roc/glue.sh` takes `ROC_SRC`).
+
+### Worked well
 
 - `output: Archive` links into cargo with nothing but `rustc-link-lib=static`.
-- Typed glue names structural records by hash (`AnonStruct4045c5188ea548d`); with words across
-  the boundary only the step's result record is generated, which no longer matters.
-- The generated glue is not clean under Rust 2024 (`unsafe_op_in_unsafe_fn`): allowed on the
-  module. The nightly tarball has no glue specs (`ROC_SRC` points at a checkout).
-- No `F64 -> F64` rounding; the core never rounds.
-- Record patterns are closed: `{ target, .. }` is needed against a bigger record.
-- `module [..]` headers are deprecated in favour of type modules (`Wire := [].{ .. }`), and
-  `roc build` exits 2 on any warning, which fails a cargo build script. Type modules do not
-  expose type aliases; structural aliases are interchangeable, so each module declares its own
-  `Rect`. Recursive types must be nominal (`Node := [..]`, built as `Node.Split(..)`).
-- `List.set` returns a `Try`; there is no `List.range`.
-- Names in a `match` branch shadow top-level definitions as an error (`Release(release)` next to
-  a `release` function).
-- `List.update` returns a `Try` (index out of bounds), so updating a found index needs a second
-  match; `map` over the (short) plan list was simpler.
-- `var` + `while`/`for` make the deadline loops and the wire codec direct ports.
-- Nothing crashed, leaked or miscompiled on 847,945 steps.
+- `var` with `while` / `for` makes the deadline loops and the wire codec direct ports.
+- Nothing crashed, leaked or miscompiled on 829,148 differential steps, 4.2 million session
+  steps and 3.5 million geometry frames.
 
 ## Roadmap: to "the reactor is only an applier"
 
@@ -236,6 +290,17 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
 | The mode table | L | The other ~30 modes as one `Mode x InputClass` table in the core. |
 | Config | S–M | Parsed config as data the core is initialized and updated with. |
+
+**roc-2 ends** when the layout trees are the core's and the slices above them have moved.
+
+**After roc-2, in a new fork: a publishable macOS platform for Roc, and a fat Roc rift on it.**
+The platform is general, not rift's: its API has no rift types. About ten primitives, each an
+effect as data with request ids and opaque handles: accessibility elements and attributes (get,
+set, observe), window-server windows and spaces (queries), apps (launch, terminate, activate),
+the input tap driven by a policy table that the app pushes, timers, and files and IPC. Per-app
+worker threads stay native, inside the platform; every decision moves into the Roc app, whose
+step stays pure. Rift is one app on that platform. Host code extracted from rift for it stays
+Apache-2.0, keeping rift's and glide-wm's attribution.
 
 Out of the core for good: AX calls, event taps, CG/SkyLight, run loops and timers, IPC, the
 animation presenter itself.
