@@ -41,8 +41,9 @@ The model, one record per window: `seen` (where the model takes it to be) and `s
 before }`, `Animating { target, request }`, `Refused { wanted, got, request }`; the hand,
 `Grip::Idle | Held { window, button, phase: Pressed | Dragging { changed } }`; and the armed
 deadline. The one rule for reads: a report stamped older than the window's latest request is no
-news; stamped with it, it is the answer; newer (or stamped with no request sent) on a settled
-window, it is a frame Rift sent outside the core; unstamped, it is placed by geometry.
+news; stamped with it, it is the answer; newer, stamped when nothing was sent, or unstamped, it
+is placed by geometry. A frame Rift sends outside the core (the gesture camera) is announced
+with `SentOutside { window, request }`, so nothing is inferred from a stamp.
 
 ### Plain data and the wire
 
@@ -51,13 +52,19 @@ window, it is a frame Rift sent outside the core; unstamped, it is placed by geo
 move a step between platforms' types. `plain::wire` puts events and effects into u64 words: a
 tag per event and effect, one word per field (a pid sign-extended, a float as its bits), an
 option as a flag word, a list as its length. The words are both the Roc core's boundary and the
-recorded-trace format.
+recorded-trace format. Both sides parse a word list once, whole, into a typed value: words that
+are not one (an unknown tag or flag, a field out of range, a list longer than the words left,
+words left over) are one explicit rejection, never a crash inside a decode. The Roc core
+answers `0` and the effects (or frames), or `1`: rejected, the model untouched; the host
+returns `Result<_, RocError>` (`Rejected`, or `Unreadable` for Roc words it cannot read), and
+rift under `roc-core` stops naming the error.
 
 ### Layout geometry (first layout slice)
 
 `rift_core::layout` holds the geometry the tiling systems share (the axis solver, window
 constraints, the tiling area) and a BSP layout's frames: `Bsp { screen, gaps, root, aspect }`,
-the layout's tree pruned to what takes space (`Split { horizontal, ratio, children: One | Two }`,
+the layout's tree pruned to what takes space (a layout where nothing does has no shape, so
+`root` is a node, never empty; `Split { horizontal, ratio, children: One | Two }`,
 `Leaf { slot: Empty | Window { window, constraints }, fill: Tiled | Screen | WithinGaps,
 stacked }`), and `Bsp::frames`. It is a pure function, not a step: the frames are needed in the
 middle of the engine's layout pass, and geometry needs no model. The engine still owns the BSP
@@ -194,6 +201,46 @@ wire encode and decode.
   shape, traditional 5.6–5.9 → 8.1 µs. If a profile ever asks, optimise inside these
   structures (the measured costs: bigger records than parallel float lists, and one list for
   each zip). The per-step core is unaffected.
+- **Hardening: parse at the boundary, protective types, narrow signatures (the owner's "a, and
+  then some").** What changed, Rust core first and Roc in parity:
+  - *Parse once.* `Wire.roc` reads with `Try` (`Taken(a) : Try((a, Words), [Malformed])`),
+    chained with `?`; `finished` rejects leftover words; `take_u32`/`take_window` check ranges,
+    `take_list` checks the length against the words left. No `crash` remains in Roc's decode.
+    Known cost: Roc words ~418 → ~486 ns per step (+16%); tile unchanged.
+  - *`Sent<R>` and `Stamp<R>`.* A request the core sent (constructible only in the reconciler)
+    and an id the platform handed back (compares only against a `Sent`): the as_of rule is an
+    `Ordering` match with no inference branch. Rules out: treating a platform id as one of ours.
+  - *A plan only the core makes* (`Plan`'s fields private, `Plan::starting(write, ..)`): a plan
+    always has its write, so the empty plan branch is gone.
+  - *Narrowed signatures (the corollary: a check that can move to the caller means the
+    parameter is too loose).* `release` takes the queued desire and the state the window was
+    left in, not an `Option` and a lookup: its "nothing queued" and "window unknown" branches
+    moved to (or vanished from) its callers. `time_out` and `waiting` take and give a `Sent`.
+    `Bsp::frames` / `Traditional::frames` take a shape whose root is a node: the "nothing takes
+    space" branch moved to rift's builders, which already knew it, and off the wire.
+  - *Empty is a state, not an unwrap.* The deadline queue is matched `[] | [entry, .. as
+    later]`; `dedup` folds `[Nothing, Last(window)]`. No `first()`, `last()` or
+    `drop_first(1)` left in Roc.
+  - *No wildcard over state.* Every `_ =>` over core state is spelled out, in rift-core and
+    Roc (gather's `Fixed`/`Free` and `Max`/`NoMax` pairs, the minima pass, BSP aspect fitting,
+    the queue). The only `_ =>` left in Roc map an unknown wire tag to `Err(Malformed)`.
+
+  What is left, and why:
+  - *Ratio newtype (0..1).* Every writer clamps to 0.05..0.95 or uses 0.5; the boundary that
+    could carry a bad ratio is persistence (serde of saved layouts), which is rift's, not the
+    core's. Worth doing there, with the layout trees.
+  - *Seen / acked / desired frame newtypes.* No bug has mixed them (seed 59 was a semantic bug),
+    and `seen` legitimately takes desired values; the states (`Settled { acked }`, `InFlight {
+    target }`) already name them.
+  - *Request ids minted by the core.* The platform mints them from a counter shared with other
+    writers, so the core cannot; `Sent`/`Stamp` give the protection that matters.
+  - *Window id vs window-server id.* Distinct types already, on the platform side; the core
+    sees only window ids.
+  - *`keys[&plan.request()]` in rift's reconciler.* An index into the platform's own map of
+    in-flight batches, keyed by the request it minted; not core state.
+  - *The `roc` feature between a Rust-only commit and its Roc parity.* A Rust-only commit that
+    changes the wire (b71d8cd9) leaves the Roc build's layout test failing until the next
+    commit; the Roc-free workspace, which the play line uses, is green at every commit.
 - **Pure functions.** No Roc function is effectful (`=>`): the platform's entry points are
   pure too. rift-core reads no clock, randomness or I/O (time and request ids come in as
   arguments); the Roc host only moves words and memory.
