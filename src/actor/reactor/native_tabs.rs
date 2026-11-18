@@ -2,6 +2,7 @@ use objc2_core_foundation::CGRect;
 use tracing::debug;
 
 use super::{Reactor, WindowId, WindowInfo, WindowState};
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::sys::window_server;
 #[cfg(not(test))]
 use crate::sys::window_server::WindowServerId;
@@ -72,7 +73,7 @@ impl Reactor {
         replacement.manage_override = manage_override;
         self.state.insert_window(incoming, replacement);
         // Same window, new identity: a grip on it moves first, through the core.
-        self.state.rekeyed(old, incoming);
+        self.state.step(CoreEvent::Rekeyed { from: old, to: incoming });
         self.state.windows.transfer_persistent_window_metadata(old, incoming);
         self.layout_manager
             .layout_engine

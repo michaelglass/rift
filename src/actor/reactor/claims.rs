@@ -6,6 +6,7 @@ use rift_protocol::WindowClaimFlags;
 
 use super::{LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::common::collections::HashSet;
 use crate::layout_engine::systems::LayoutSystem;
 use crate::model::window_store::ClaimOwner;
@@ -37,7 +38,7 @@ impl Reactor {
             let reactor = &mut *self;
             // The owner takes over like a user drag: stop Rift's motion and pending writes.
             reactor.cancel_window_presentations(vec![wid]);
-            reactor.state.forget(wid);
+            reactor.state.step(CoreEvent::Forget { window: wid });
             reactor.state.forget_drag_window(wid);
             reactor.drag_manager.sync_preview(reactor.state.windows.drag());
             // Leave the projection (keeping floating state and the layout slot) before the

@@ -65,14 +65,6 @@ pub enum Event<K: Kinds> {
     /// The displays changed: macOS may have resized these windows without telling anyone, so
     /// where their apps have them is unknown until they say.
     Distrust { windows: Vec<K::Window> },
-    /// Layout wants `window` at `desired`.
-    Want {
-        now: K::Time,
-        request: K::Request,
-        window: K::Window,
-        desired: K::Frame,
-        want: Want,
-    },
     /// Layout's pass over one space: where it wants each window, in layout order.
     /// `ArrangePositions` sends a window that keeps its size as a move only.
     Arrange {
@@ -313,20 +305,6 @@ impl<K: Kinds> RustCore<K> {
                 self.reconciler.rekey(from, to);
                 self.rekey_grip(from, to)
             }
-            Event::Want {
-                now,
-                request,
-                window,
-                desired,
-                want,
-            } => {
-                let owner = pointer.owner(window);
-                match self.reconciler.want(now, request, window, desired, want, owner) {
-                    Verdict::Send(write) => self.written(write).into(),
-                    Verdict::Queued => vec![Effect::Queued { window }, self.see(window, desired)],
-                    Verdict::Nothing => vec![],
-                }
-            }
             Event::Arrange { now, want, desires } => self.arrange(now, want, desires),
             Event::Animate { now, desires } => {
                 let mut effects = Vec::new();
@@ -408,7 +386,7 @@ impl<K: Kinds> RustCore<K> {
                 continue;
             };
             let owner = pointer.owner(window);
-            match self.reconciler.want(now, request, window, desired, want, owner) {
+            match self.reconciler.want(now, request, window, desired, owner) {
                 Verdict::Send(write) => {
                     let moves_only = match want {
                         Want::ArrangePositions => K::same_size(known, desired),
@@ -513,29 +491,39 @@ mod tests {
 
     const W: WindowId = WindowId { pid: 7, idx: 1 };
 
+    /// Layout's pass wanting only `W` at `desired`, its write under request 1.
+    fn want(desired: Rect) -> Event<Plain> {
+        Event::Arrange {
+            now: Nanos(0),
+            want: Want::Arrange,
+            desires: vec![Desire {
+                window: W,
+                frame: desired,
+                request: RequestId(1),
+            }],
+        }
+    }
+
     #[test]
     fn a_write_arms_the_timer_and_its_answer_disarms_it() {
         let mut core = RustCore::<Plain>::default();
         core.step(Event::Seen { window: W, frame: at(0.) });
-        let effects = core.step(Event::Want {
-            now: Nanos(0),
-            request: RequestId(1),
-            window: W,
-            desired: at(10.),
-            want: Want::Arrange,
-        });
+        let effects = core.step(want(at(10.)));
         let [
-            Effect::Write(write),
             Effect::Seen { .. },
+            Effect::Plan(plan),
             Effect::Pending { target, .. },
             Effect::Timer(timer),
         ] = effects.as_slice()
         else {
             panic!(
-                "expected a write, the model's new frame, the pending target and a timer, got {effects:?}"
+                "expected the model's new frame, a plan, the pending target and a timer, got {effects:?}"
             );
         };
         assert_eq!(*target, at(10.));
+        let [write] = plan.frames.as_slice() else {
+            panic!("one write, got {plan:?}")
+        };
         assert_eq!((write.window(), write.frame()), (W, at(10.)));
         assert_eq!(*timer, Some(Nanos(0) + WRITE_DEADLINE));
         let effects = core.step(Event::Observe {
@@ -583,16 +571,13 @@ mod tests {
     #[test]
     fn the_model_sees_what_the_core_writes_and_forgets_a_window_that_goes() {
         let mut core = RustCore::<Plain>::default();
-        let want = |x| Event::Want {
-            now: Nanos(0),
-            request: RequestId(1),
-            window: W,
-            desired: at(x),
-            want: Want::Arrange,
-        };
-        assert_eq!(core.step(want(10.)), vec![], "a window the model does not know");
+        assert_eq!(
+            core.step(want(at(10.))),
+            vec![],
+            "a window the model does not know"
+        );
         core.step(Event::Seen { window: W, frame: at(0.) });
-        core.step(want(10.));
+        core.step(want(at(10.)));
         assert_eq!(core.seen(W), Some(at(10.)));
         let renamed = WindowId { pid: 7, idx: 9 };
         core.step(Event::Rekeyed { from: W, to: renamed });
@@ -666,13 +651,7 @@ mod tests {
             }),
             vec![Effect::Grip { window: W }]
         );
-        let effects = core.step(Event::Want {
-            now: Nanos(0),
-            request: RequestId(1),
-            window: W,
-            desired: at(10.),
-            want: Want::Arrange,
-        });
+        let effects = core.step(want(at(10.)));
         assert_eq!(effects, vec![Effect::Note {
             window: W,
             note: Note::Discarded

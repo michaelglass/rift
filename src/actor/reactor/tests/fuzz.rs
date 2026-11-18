@@ -41,7 +41,10 @@ fn user_dragging(reactor: &Reactor) -> bool { reactor.user_is_dragging() }
 /// The pointer goes down on `wid`. (The simulated windows can overlap, so the press names the
 /// window instead of a point for the reactor's test double to resolve.)
 fn press(reactor: &mut Reactor, wid: WindowId) {
-    reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
+    reactor.state.step(CoreEvent::Press {
+        window: Some(wid),
+        button: crate::actor::drag::MouseButton::Left.into(),
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -335,7 +338,7 @@ impl Sim {
     fn new(setup: Setup) -> Self {
         let displays = setup.displays;
         let (mut apps, mut reactor) = test_context();
-        *reactor.state.core.trace.borrow_mut() = Some(Vec::new());
+        reactor.state.core.trace = Some(Vec::new());
         let screens: Vec<CGRect> = (0..displays)
             .map(|i| {
                 CGRect::new(
@@ -786,16 +789,14 @@ impl Sim {
         self.apps.requests()
     }
 
-    fn core_steps(&self) -> usize {
-        self.reactor.state.core.trace.borrow().as_ref().map_or(0, Vec::len)
-    }
+    fn core_steps(&self) -> usize { self.reactor.state.core.trace.as_ref().map_or(0, Vec::len) }
 
     /// What the core decided since step `from` that the invariants need: a modifier drag's
     /// interactive frame, or the core forgetting a window, ends rift's wait for it; and a
     /// window whose acknowledged frame rift stopped trusting (a display change, a drag's end) is
     /// written whatever it was.
     fn read_core_steps(&mut self, from: usize) {
-        let trace = self.reactor.state.core.trace.borrow();
+        let trace = &self.reactor.state.core.trace;
         for (event, effects) in &trace.as_ref().expect("recording")[from..] {
             match event {
                 // A modifier drag took the window, or something outside the core (a topology

@@ -8,6 +8,7 @@ use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{
     AppManager, DragManager, LayoutManager, WorkspaceSwitchManager,
 };
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
@@ -197,7 +198,7 @@ pub(in crate::actor::reactor) fn request_window_transfer(
         && let Some(frame) = frame
     {
         if state.windows.window(window).is_some() {
-            state.seen(window, frame);
+            state.step(CoreEvent::Seen { window, frame });
         }
         layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
         EventOutcome::no_change().with_placement(window, frame)

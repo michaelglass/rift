@@ -85,6 +85,7 @@ use crate::actor::app::{
 use crate::actor::drag::{DragScene, DragSource, MouseButton, Session};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
@@ -1123,7 +1124,7 @@ impl Reactor {
             .collect();
         for (wid, _) in hidden {
             // Whatever a parked window answered before the topology changed no longer holds.
-            self.state.forget(wid);
+            self.state.step(CoreEvent::Forget { window: wid });
         }
     }
 
@@ -4407,7 +4408,7 @@ impl Reactor {
             return;
         }
         if let Some(seen) = seen {
-            self.state.seen(wid, seen);
+            self.state.step(CoreEvent::Seen { window: wid, frame: seen });
         }
     }
 
@@ -4612,7 +4613,7 @@ impl Reactor {
             // The user places this window now: a transition Rift was presenting stops.
             self.cancel_window_presentations(vec![window]);
         }
-        self.state.press(window, button);
+        self.state.step(CoreEvent::Press { window, button: button.into() });
     }
 
     #[cfg(not(test))]
@@ -4654,7 +4655,7 @@ impl Reactor {
                 && let Some(frame) = self.transfer_frame(window, target, None)
             {
                 if self.state.windows.window(window).is_some() {
-                    self.state.seen(window, frame);
+                    self.state.step(CoreEvent::Seen { window, frame });
                 }
                 self.layout_manager.layout_engine.prepare_window_placement(
                     &mut self.state.windows,

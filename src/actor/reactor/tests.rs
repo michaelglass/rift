@@ -220,7 +220,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         "a passive inventory refresh must not schedule another arrange"
     );
 
-    reactor.state.forget(wid);
+    reactor.state.step(CoreEvent::Forget { window: wid });
     reactor.discover_test_windows(
         wid.pid,
         vec![(wid, make_window_info(parked, Some(wsid), "Window", None))],
@@ -1746,7 +1746,10 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
         .active_workspace(space1)
         .expect("workspace");
     let floating_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
-    reactor.state.seen(wid, floating_frame);
+    reactor.state.step(CoreEvent::Seen {
+        window: wid,
+        frame: floating_frame,
+    });
     reactor
         .layout_manager
         .layout_engine
@@ -1916,7 +1919,10 @@ fn matching_rift_frame_clears_pending_target() {
         reactor.state.core.sync(wid),
         Some(super::reconciler::Sync::InFlight { .. })
     ));
-    reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
+    reactor.state.step(CoreEvent::Press {
+        window: Some(wid),
+        button: crate::actor::drag::MouseButton::Left.into(),
+    });
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
         dragged,
@@ -2012,7 +2018,10 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
             CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
         );
         if mouse == MouseState::Down {
-            reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
+            reactor.state.step(CoreEvent::Press {
+                window: Some(wid),
+                button: crate::actor::drag::MouseButton::Left.into(),
+            });
         }
 
         let outcome = reactor
@@ -2209,7 +2218,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     assert_eq!(destroyed.arrange.passes, 0);
 
     // Geometry on an inactive native space.
-    reactor.state.forget(wid);
+    reactor.state.step(CoreEvent::Forget { window: wid });
     reactor.set_active_spaces(&[]);
     let inactive = reactor.dispatch_workflow(moved(wid, at(70.0), None, false)).unwrap();
     assert_eq!(inactive.arrange.passes, 0);
@@ -2373,7 +2382,10 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         CGPoint::new(floating_frame.origin.x + 10., floating_frame.origin.y + 10.),
         floating_frame.size,
     );
-    reactor.state.press(Some(floating_wid), crate::actor::drag::MouseButton::Left);
+    reactor.state.step(CoreEvent::Press {
+        window: Some(floating_wid),
+        button: crate::actor::drag::MouseButton::Left.into(),
+    });
     reactor.handle_event(Event::WindowFrameChanged(
         floating_wid,
         latched_frame,
@@ -2595,7 +2607,10 @@ fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_wor
         reactor_with_window_moved_to_space2();
     let conflicting_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
 
-    reactor.state.seen(wid, conflicting_frame);
+    reactor.state.step(CoreEvent::Seen {
+        window: wid,
+        frame: conflicting_frame,
+    });
     reactor.track_test_window_server_info(wsid, wid.pid, conflicting_frame);
 
     assert_eq!(
@@ -3536,10 +3551,10 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     assert!(reactor.set_test_active_workspace(space, active_workspace));
     assert!(reactor.assign_test_window_to_workspace(space, wid, hidden_workspace));
 
-    reactor.state.seen(
-        wid,
-        CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
-    );
+    reactor.state.step(CoreEvent::Seen {
+        window: wid,
+        frame: CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
+    });
 
     let gaps = reactor.config.settings.layout.gaps.clone();
     let hidden_target = reactor
@@ -4182,7 +4197,10 @@ fn a_press_or_drag_discards_activation_follow_and_the_drop_replays_nothing() {
             let frame = reactor.state.windows.window(visible).unwrap().frame_monotonic;
             reactor.ensure_active_drag(visible, &frame);
         } else {
-            reactor.state.press(Some(visible), crate::actor::drag::MouseButton::Left);
+            reactor.state.step(CoreEvent::Press {
+                window: Some(visible),
+                button: crate::actor::drag::MouseButton::Left.into(),
+            });
         }
         reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
         assert_eq!(active(&reactor), Some(0), "discarded (drag={drag})");
@@ -4836,16 +4854,19 @@ fn mouse_raise_queries_order_only_when_it_could_cover_a_floating_window() {
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, floating));
     reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating));
-    reactor.state.seen(floating, smaller);
+    reactor.state.step(CoreEvent::Seen {
+        window: floating,
+        frame: smaller,
+    });
     window_server::set_space_window_list_for_connection_override(Some(vec![wsid.as_u32()]));
     assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
     window_server::set_space_window_list_for_connection_override(None);
     assert_eq!(window_server::window_order_query_count(), before + 1);
 
-    reactor.state.seen(
-        floating,
-        CGRect::new(CGPoint::new(frame.max().x + 100.0, 100.0), smaller.size),
-    );
+    reactor.state.step(CoreEvent::Seen {
+        window: floating,
+        frame: CGRect::new(CGPoint::new(frame.max().x + 100.0, 100.0), smaller.size),
+    });
     let before = window_server::window_order_query_count();
     assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
     assert_eq!(window_server::window_order_query_count(), before);
@@ -5904,10 +5925,10 @@ fn non_active_workspace_windows_remain_hidden_even_if_frame_no_longer_matches_co
     assert!(reactor.set_test_active_workspace(space, active_workspace));
     assert!(reactor.assign_test_window_to_workspace(space, wid, inactive_workspace));
 
-    reactor.state.seen(
-        wid,
-        CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
-    );
+    reactor.state.step(CoreEvent::Seen {
+        window: wid,
+        frame: CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
+    });
 
     assert_eq!(
         reactor.hidden_assigned_space_for_window_id(wid),
@@ -7557,7 +7578,7 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
             .active_workspace(space)
             .unwrap();
         let frame = CGRect::new(CGPoint::new(75., 110.), CGSize::new(430., 320.));
-        reactor.state.seen(old, frame);
+        reactor.state.step(CoreEvent::Seen { window: old, frame });
         reactor
             .layout_manager
             .layout_engine
@@ -12030,7 +12051,7 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
     let saved = CGRect::new(CGPoint::new(200., 100.), CGSize::new(300., 200.));
     let state = reactor.state.windows.window_mut(window).unwrap();
     state.info.bundle_id = Some("com.example".into());
-    reactor.state.seen(window, saved);
+    reactor.state.step(CoreEvent::Seen { window, frame: saved });
     let path = std::env::temp_dir().join(format!("rift-floating-{}.ron", std::process::id()));
     let engine = &reactor.layout_manager.layout_engine;
     engine
@@ -13056,7 +13077,10 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
 
     // The user grabs the window and moves it somewhere that is neither where it was nor
     // where Rift's write would put it.
-    reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
+    reactor.state.step(CoreEvent::Press {
+        window: Some(wid),
+        button: crate::actor::drag::MouseButton::Left.into(),
+    });
     let dragged = CGRect::new(
         CGPoint::new(frame.origin.x + 60.0, frame.origin.y + 40.0),
         frame.size,
@@ -13726,8 +13750,8 @@ fn rereads_coalesce_per_drained_queue_and_skip_quitting_apps() {
 fn pend(reactor: &mut Reactor, wid: WindowId, target: CGRect) {
     // Nothing earlier is outstanding, and where the app has it is unknown, so even a target
     // the model already sees is written at once.
-    reactor.state.forget(wid);
-    reactor.state.distrust(vec![wid]);
+    reactor.state.step(CoreEvent::Forget { window: wid });
+    reactor.state.step(CoreEvent::Distrust { windows: vec![wid] });
     reactor.place_window(wid, target);
     let wsid = reactor.state.windows.server_id(wid).unwrap();
     assert_eq!(reactor.state.tx.target(wsid), Some(target), "pending");
