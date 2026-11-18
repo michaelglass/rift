@@ -107,6 +107,19 @@ impl WindowConstraints {
         self.sizing.reported_min().axis(horizontal)
     }
 
+    /// The minimum traditional tiling won't go below on an axis. Some apps report transient or
+    /// overly conservative minimum bounds while still being user-resizable; honouring those at
+    /// split time causes visibly uneven insertion (2:1 right after a 50/50 split), so a
+    /// resizable window's advisory minimum counts only under `respect_min_size`.
+    pub fn tiled_min(self, horizontal: bool) -> f64 {
+        match self.sizing {
+            Sizing::Fixed { .. } | Sizing::ResizableAtLeastMin { .. } => {
+                self.reported_min(horizontal)
+            }
+            Sizing::Resizable { .. } => 0.0,
+        }
+    }
+
     pub fn max_for_axis(self, horizontal: bool) -> f64 {
         if horizontal {
             self.max_width
