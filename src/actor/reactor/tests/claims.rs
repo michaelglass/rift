@@ -440,10 +440,10 @@ fn suppression_and_menu_and_mission_control_are_independent_modes() {
     assert!(hover_admitted(&reactor));
 
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    reactor.set_mission_control_active(true);
+    reactor.handle_event(Event::MissionControlNativeEntered);
     reactor.release_window(window, OWNER).unwrap();
     assert!(!hover_admitted(&reactor));
-    reactor.set_mission_control_active(false);
+    reactor.handle_event(Event::MissionControlNativeExited);
     assert!(hover_admitted(&reactor));
 }
 
