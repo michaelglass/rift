@@ -20,6 +20,9 @@ pub struct RiftState {
     /// The decisions: the core, stepped through its applier. Beside the window store so a
     /// workflow that changes windows can tell the core in the same breath.
     pub(crate) core: crate::actor::reactor::reconciler::Reconciler,
+    /// The pending store the app actors read across threads: its targets are the projection of
+    /// the core's pending frames (`Effect::Pending`), shared with the transaction manager.
+    pub(crate) tx: crate::model::tx_store::WindowTxStore,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

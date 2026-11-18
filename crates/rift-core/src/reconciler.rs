@@ -201,6 +201,8 @@ pub struct Reconciler<K: Kinds> {
     deadlines: VecDeque<(K::Time, K::Window)>,
     /// What was decided along the way, for the caller to drain ([`Reconciler::notes`]).
     notes: Vec<(K::Window, Note)>,
+    /// Windows whose state changed since the last call to [`Reconciler::touched`].
+    touched: Vec<K::Window>,
 }
 
 impl<K: Kinds> Default for Reconciler<K> {
@@ -209,6 +211,7 @@ impl<K: Kinds> Default for Reconciler<K> {
             syncs: HashMap::new(),
             deadlines: VecDeque::new(),
             notes: Vec::new(),
+            touched: Vec::new(),
         }
     }
 }
@@ -220,7 +223,28 @@ impl<K: Kinds> Reconciler<K> {
     /// What was decided since the last call that is not a write.
     pub fn notes(&mut self) -> Vec<(K::Window, Note)> { std::mem::take(&mut self.notes) }
 
-    fn set(&mut self, window: K::Window, sync: Sync<K>) { self.syncs.insert(window, sync); }
+    fn set(&mut self, window: K::Window, sync: Sync<K>) {
+        self.syncs.insert(window, sync);
+        self.touched.push(window);
+    }
+
+    /// The windows whose state changed since the last call.
+    pub fn touched(&mut self) -> Vec<K::Window> {
+        let mut touched = std::mem::take(&mut self.touched);
+        touched.dedup();
+        touched
+    }
+
+    /// The frame Rift has pending for `window`, if any: the target of a write in flight or of
+    /// an animation, or the frame its app refused (it still says where Rift means the window to
+    /// be).
+    pub fn pending(&self, window: K::Window) -> Option<K::Frame> {
+        match self.sync(window)? {
+            Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
+            Sync::Refused { wanted, .. } => Some(wanted),
+            Sync::Settled { .. } | Sync::Unknown => None,
+        }
+    }
 
     /// A window the model did not know appeared at `frame`: its app has it there.
     pub fn appear(&mut self, window: K::Window, frame: K::Frame) {
@@ -240,7 +264,10 @@ impl<K: Kinds> Reconciler<K> {
     }
 
     /// `window` is gone: nothing is tracked for it any more.
-    pub fn remove(&mut self, window: K::Window) { self.syncs.remove(&window); }
+    pub fn remove(&mut self, window: K::Window) {
+        self.syncs.remove(&window);
+        self.touched.push(window);
+    }
 
     /// Rift no longer knows where the app has `window` (a drag ended on it, the displays
     /// changed). A write in flight still has its answer to come; what it falls back to if that

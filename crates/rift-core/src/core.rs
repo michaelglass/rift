@@ -163,6 +163,11 @@ pub enum Effect<K: Kinds> {
         to: K::Frame,
         request: K::Request,
     },
+    /// Rift's pending frame for `window` is `target` now (a write in flight, an animation, a
+    /// refused frame): the platform's pending store is its projection.
+    Pending { window: K::Window, target: K::Frame },
+    /// Nothing is pending for `window` any more.
+    Unpending { window: K::Window },
     /// Send one batch of an arrange pass.
     Plan(Plan<K>),
     /// A write is with the app; the desire waits behind it.
@@ -320,6 +325,11 @@ impl<K: Kinds> Effect<K> {
                 to: to.frame(target),
                 request: to.request(request),
             },
+            Effect::Pending { window, target } => Effect::Pending {
+                window: to.window(window),
+                target: to.frame(target),
+            },
+            Effect::Unpending { window } => Effect::Unpending { window: to.window(window) },
             Effect::Plan(plan) => Effect::Plan(Plan {
                 request: to.request(plan.request),
                 positions: plan.positions.into_iter().map(|w| w.translate(to)).collect(),
@@ -368,6 +378,8 @@ pub trait Core<K: Kinds> {
 pub struct RustCore<K: Kinds> {
     reconciler: Reconciler<K>,
     grip: Grip<K::Window>,
+    /// The pending frames as last told to the platform (`Effect::Pending`).
+    projected: HashMap<K::Window, K::Frame>,
     /// Where the model takes each window it knows to be: its last-seen frame.
     seen: HashMap<K::Window, K::Frame>,
     /// The deadline the platform's timer is armed for.
@@ -379,6 +391,7 @@ impl<K: Kinds> Default for RustCore<K> {
         RustCore {
             reconciler: Reconciler::default(),
             grip: Grip::Idle,
+            projected: HashMap::new(),
             seen: HashMap::new(),
             armed: None,
         }
@@ -671,8 +684,8 @@ impl<K: Kinds> RustCore<K> {
 }
 
 impl<K: Kinds> Core<K> for RustCore<K> {
-    /// Decisions first, then the notes taken while deciding, then the timer if its deadline
-    /// moved.
+    /// Decisions first, then the notes taken while deciding, then the pending frames that
+    /// changed, then the timer if its deadline moved.
     fn step(&mut self, event: Event<K>) -> Vec<Effect<K>> {
         let mut effects = self.decide(event);
         effects.extend(
@@ -681,6 +694,23 @@ impl<K: Kinds> Core<K> for RustCore<K> {
                 .into_iter()
                 .map(|(window, note)| Effect::Note { window, note }),
         );
+        for window in self.reconciler.touched() {
+            match (
+                self.reconciler.pending(window),
+                self.projected.get(&window).copied(),
+            ) {
+                (Some(target), Some(told)) if K::same_as(target, told) => {}
+                (Some(target), Some(_) | None) => {
+                    self.projected.insert(window, target);
+                    effects.push(Effect::Pending { window, target });
+                }
+                (None, Some(_)) => {
+                    self.projected.remove(&window);
+                    effects.push(Effect::Unpending { window });
+                }
+                (None, None) => {}
+            }
+        }
         let next = self.reconciler.next_deadline();
         if next != self.armed {
             self.armed = next;
@@ -715,11 +745,15 @@ mod tests {
         let [
             Effect::Write(write),
             Effect::Seen { .. },
+            Effect::Pending { target, .. },
             Effect::Timer(timer),
         ] = effects.as_slice()
         else {
-            panic!("expected a write, the model's new frame and a timer, got {effects:?}");
+            panic!(
+                "expected a write, the model's new frame, the pending target and a timer, got {effects:?}"
+            );
         };
+        assert_eq!(*target, at(10.));
         assert_eq!((write.window(), write.frame()), (W, at(10.)));
         assert_eq!(*timer, Some(Nanos(0) + WRITE_DEADLINE));
         let effects = core.step(Event::Answer {
@@ -734,6 +768,7 @@ mod tests {
                 window: W,
                 answer: Answer::Acked
             },
+            Effect::Unpending { window: W },
             Effect::Timer(None),
         ]);
     }
