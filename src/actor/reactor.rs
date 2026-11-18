@@ -3029,6 +3029,9 @@ impl Reactor {
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
     fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
+        if outcome.exit {
+            std::process::exit(0);
+        }
         for write in std::mem::take(&mut outcome.released) {
             self.send_arranged(write);
         }
