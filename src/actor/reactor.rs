@@ -66,7 +66,7 @@ use events::{
     system as system_workflow, window as window_workflow,
 };
 use main_window::MainWindowTracker;
-use managers::LayoutManager;
+use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Answer, Holder, Observation};
 pub use replay::{Record, replay};
@@ -707,8 +707,7 @@ impl Reactor {
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
                 pending_workspace_switch_origin: None,
-                pending_focus_mouse_warp: None,
-                pending_display_warp: None,
+                owed_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
@@ -3100,8 +3099,8 @@ impl Reactor {
             || !outcome.finalize_created_windows.is_empty();
         #[cfg(test)]
         self.event_outcome_phase_trace.push("model");
-        if outcome.display_switch_warp.is_some() {
-            self.workspace_switch_manager.pending_display_warp = outcome.display_switch_warp;
+        if let Some(space) = outcome.display_switch_warp {
+            self.workspace_switch_manager.owed_warp = Some(OwedWarp::Display(space));
         }
         if !outcome.window_server_updates.is_empty() {
             self.update_partial_window_server_info(outcome.window_server_updates);
@@ -3376,27 +3375,38 @@ impl Reactor {
             trace!("Workspace switch stabilized with no further frame changes");
         }
 
-        // Resolve focus requests that did not need arrangement, and relative display warps.
-        let focused = self.workspace_switch_manager.pending_focus_mouse_warp.take();
-        if let Some(space) = self.workspace_switch_manager.pending_display_warp.take() {
-            // Land at the same spot within the newly focused window that the cursor
-            // held in the old one, or the display itself when the workspace is empty.
-            let to = focused
-                .or_else(|| self.layout_manager.layout_engine.selected_window(space))
-                .and_then(|wid| self.window_frame_on_known_screen(wid))
-                .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
-            let from = self
-                .main_window()
-                .and_then(|wid| self.state.windows.window(wid))
-                .map(|window| window.frame_monotonic);
-            if let Some(to) = to
-                && let Some(input_tx) = &self.communication_manager.input_tx
-            {
-                _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
+        // Pay an owed warp, its target derived from the focus now.
+        match self.workspace_switch_manager.owed_warp.take() {
+            Some(OwedWarp::Display(space)) => {
+                // Land at the same spot within the newly focused window that the cursor
+                // held in the old one, or the display itself when the workspace is empty.
+                let to = self
+                    .layout_manager
+                    .layout_engine
+                    .selected_window(space)
+                    .and_then(|wid| self.window_frame_on_known_screen(wid))
+                    .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
+                let from = self
+                    .main_window()
+                    .and_then(|wid| self.state.windows.window(wid))
+                    .map(|window| window.frame_monotonic);
+                if let Some(to) = to
+                    && let Some(input_tx) = &self.communication_manager.input_tx
+                {
+                    _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
+                }
             }
-        } else if let Some(center) = focused.and_then(|wid| self.window_center_on_known_screen(wid))
-        {
-            self.warp_mouse(center);
+            Some(OwedWarp::Focus) => {
+                if let Some(center) = self
+                    .layout_manager
+                    .layout_engine
+                    .focused_window()
+                    .and_then(|wid| self.window_center_on_known_screen(wid))
+                {
+                    self.warp_mouse(center);
+                }
+            }
+            None => {}
         }
 
         #[cfg(test)]
@@ -6256,17 +6266,18 @@ impl Reactor {
                 .push(wid);
         }
         let focus_window_with_warp = focus_window.map(|wid| {
-            let warp = if self.workspace_switch_manager.pending_display_warp.is_some()
-                || (self.config.settings.mouse_follows_focus
-                    && (self.workspace_switch_manager.workspace_switch_state
-                        == WorkspaceSwitchState::Active
-                        || self.assigned_space_for_window_id(wid).is_some_and(|space| {
-                            self.layout_manager.layout_engine.active_layout_mode_at(space)
-                                == crate::common::config::LayoutMode::Scrolling
-                        })))
-            {
+            let warp = if matches!(
+                self.workspace_switch_manager.owed_warp,
+                Some(OwedWarp::Display(_))
+            ) || (self.config.settings.mouse_follows_focus
+                && (self.workspace_switch_manager.workspace_switch_state
+                    == WorkspaceSwitchState::Active
+                    || self.assigned_space_for_window_id(wid).is_some_and(|space| {
+                        self.layout_manager.layout_engine.active_layout_mode_at(space)
+                            == crate::common::config::LayoutMode::Scrolling
+                    }))) {
                 // Scrolling resolves against the destination; workspace switches stay deferred.
-                self.workspace_switch_manager.pending_focus_mouse_warp = Some(wid);
+                self.workspace_switch_manager.owe_focus_warp();
                 None
             } else if self.config.settings.mouse_follows_focus {
                 self.window_center_on_known_screen(wid)

@@ -3768,6 +3768,38 @@ fn explicit_focus_discards_a_pending_refocus() {
     );
 }
 
+/// An owed warp is paid to the focus as it is when the warp is paid: a newer focus intent in
+/// between is where the pointer lands, not the window focused when the warp was owed.
+#[test]
+fn an_owed_warp_lands_on_the_focus_when_paid() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+    reactor.workspace_switch_manager.owe_focus_warp();
+    let newer = WindowId::new(1, 2);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, newer));
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+
+    reactor.apply_event_outcome(EventOutcome::default());
+
+    let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+        .filter_map(|(_, request)| match request {
+            crate::actor::input::Request::Warp(point) => Some(point),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warps, vec![
+        reactor.window_center_on_known_screen(newer).unwrap()
+    ]);
+    assert_eq!(reactor.workspace_switch_manager.owed_warp, None, "paid once");
+}
+
 #[test]
 fn empty_layout_response_during_auto_switch_does_not_refocus_cursor() {
     let mut reactor = test_reactor();
