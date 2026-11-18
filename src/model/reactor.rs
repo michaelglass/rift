@@ -34,7 +34,6 @@ pub enum Command {
 pub enum MissionControlState {
     Inactive,
     Active,
-    Transitioning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

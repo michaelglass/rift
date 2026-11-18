@@ -51,7 +51,6 @@ pub enum Request {
     /// The apps found at registration have had time to attach: pointer features start
     /// (`Startup::Running`).
     AppsSettled,
-    SetFocusFollowsMouseEnabled(bool),
     SetBindingMode(String),
     KeyboardLayoutChanged,
     ConfigUpdated(Config),
@@ -168,7 +167,6 @@ struct State {
     focus_follows_mouse_config_enabled: bool,
     converter: CoordinateConverter,
     screens: Vec<CGRect>,
-    focus_follows_mouse_enabled: bool,
     /// The FFM pause key is held.
     ffm_paused: bool,
     low_power_mode: bool,
@@ -190,7 +188,6 @@ impl Default for State {
             focus_follows_mouse_config_enabled: false,
             converter: CoordinateConverter::default(),
             screens: Vec::new(),
-            focus_follows_mouse_enabled: true,
             ffm_paused: false,
             low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::with_capacity_and_hasher(256, Default::default()),
@@ -241,8 +238,7 @@ impl Input {
             (self.startup.get().pointer()
                 && (state.mouse_hides_on_focus
                     || self.horizontal_mouse_warp.get().is_some()
-                    || (state.focus_follows_mouse_config_enabled
-                        && state.focus_follows_mouse_enabled)))
+                    || state.focus_follows_mouse_config_enabled))
                 || self.mission_control_active.get(),
             self.startup.get().pointer() && state.mouse_hides_on_focus,
             keyed_ffm_pause || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
@@ -651,17 +647,6 @@ impl Input {
                 // Nothing is captured yet: modifier presses are not subscribed before this.
                 self.advance_startup(Startup::Running);
                 self.reset_mouse_move_sample_gate();
-                should_rebuild_mask = true;
-            }
-            Request::SetFocusFollowsMouseEnabled(enabled) => {
-                debug!(
-                    "focus_follows_mouse temporarily {}",
-                    if enabled { "enabled" } else { "disabled" }
-                );
-                state.focus_follows_mouse_enabled = enabled;
-                if enabled {
-                    self.reset_mouse_move_sample_gate();
-                }
                 should_rebuild_mask = true;
             }
             Request::AppsRegistered => {
@@ -1181,7 +1166,6 @@ impl Input {
         // Publish positions only. WindowServer hit testing and focus eligibility
         // belong on the reactor, outside the synchronous input callback.
         if state.focus_follows_mouse_config_enabled
-            && state.focus_follows_mouse_enabled
             && !state.ffm_paused
             && state.captured_button.is_none()
             && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)

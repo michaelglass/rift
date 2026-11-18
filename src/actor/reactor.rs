@@ -11,6 +11,7 @@ mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
+mod modes;
 mod native_tabs;
 mod query;
 mod reconciler;
@@ -437,6 +438,8 @@ enum InputClass {
     Steering,
     /// Touches no window and not the pointer: settings, binding modes, diagnostics, saving.
     Inert,
+    /// The pointer resting over a window: focus follows mouse and autoraise.
+    Hover,
 }
 
 impl InputClass {
@@ -451,6 +454,7 @@ impl InputClass {
             // gesture in one event. A reset only ends a session.
             Event::Gesture(G::Begin { .. } | G::Workspace { .. }) => Some(Self::Steering),
             Event::Gesture(G::End { .. } | G::Reset) => None,
+            Event::MouseMoved(_) => Some(Self::Hover),
             _ => None,
         }
     }
@@ -1188,32 +1192,50 @@ impl Reactor {
         }
     }
 
-    /// Whether Rift may do `initiative` right now, given what the pointer is doing. Every
-    /// initiative states its rule for every pointer state: a new initiative, or a new pointer
-    /// state, doesn't compile until its rule is written. A question about one window asks the
-    /// store about that window instead.
-    fn may(&self, initiative: Initiative) -> bool {
-        use Initiative::*;
-        use Pointer::*;
-        match (initiative, self.state.windows.pointer()) {
-            (UserInput(InputClass::Inert), Idle | Pressing(_) | Dragging(_)) => true,
-            (UserInput(InputClass::Steering), Idle) => true,
-            // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
-            // input's effect on it would wait for the release, splitting it from the rest of
-            // the effect. Dropped instead, not deferred.
-            (UserInput(InputClass::Steering), Pressing(_) | Dragging(_)) => false,
-            // A press alone changes nothing: the window hasn't moved.
-            (Arrange, Idle | Pressing(_)) => true,
-            (RetireWindows, Idle | Pressing(_)) => true,
-            (SwitchWorkspaceFocus, Idle | Pressing(_)) => true,
-            (WarpFocus, Idle | Pressing(_)) => true,
-            // While the user drags a window, Rift keeps its hands off the layout and the
-            // pointer until the drop.
-            (Arrange, Dragging(_)) => false,
-            (RetireWindows, Dragging(_)) => false,
-            (SwitchWorkspaceFocus, Dragging(_)) => false,
-            (WarpFocus, Dragging(_)) => false,
+    /// Whether Rift may do `initiative` right now: whether every mode it is in admits it
+    /// (`modes::Mode`). A question about one window asks the store about that window instead.
+    fn may(&self, initiative: Initiative) -> bool { self.modes().refusal(initiative).is_none() }
+
+    /// The modes Rift is in, read from the facts now.
+    fn modes(&self) -> modes::Modes {
+        modes::Modes {
+            pointer: self.state.windows.pointer(),
+            menu: self.menu_manager.menu_state.clone(),
+            native_mission_control: self.mission_control_manager.mission_control_state.clone(),
+            modal: if self.transient_blocks_mouse_focus() {
+                modes::Modal::Frontmost
+            } else {
+                modes::Modal::Clear
+            },
+            viewport: if self.viewport_gesture.as_ref().is_some_and(|s| !s.released) {
+                modes::Viewport::Gesturing
+            } else {
+                modes::Viewport::Free
+            },
+            focus_claim: if self.state.windows.suppresses_focus_follows_mouse(self.main_window()) {
+                modes::FocusClaim::PausesHover
+            } else {
+                modes::FocusClaim::Free
+            },
         }
+    }
+
+    /// Whether the modes admit input of `class`. Refused input is discarded with one log line.
+    fn admit(&self, class: InputClass, input: &dyn std::fmt::Debug) -> bool {
+        let modes = self.modes();
+        let Some(mode) = modes.refusal(Initiative::UserInput(class)) else {
+            return true;
+        };
+        match class {
+            // Sampled pointer positions arrive at mouse rate for as long as the mode lasts.
+            InputClass::Hover => {
+                trace!(?input, "mode-gate: discarded {class:?} input during {mode:?}")
+            }
+            InputClass::Steering | InputClass::Inert => {
+                debug!(?input, "mode-gate: discarded {class:?} input during {mode:?}")
+            }
+        }
+        false
     }
 
     #[cfg(test)]
@@ -1294,15 +1316,13 @@ impl Reactor {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::ReleaseClaims(release) => release.apply(&mut reactor.borrow_mut()),
             Event::MouseFocusPending(publisher) => {
-                if reactor.borrow().transient_blocks_mouse_focus() {
-                    publisher.take_latest();
+                // Asked before the WindowServer hit test; the resulting MouseMoved passes the
+                // same gate. A refused position is dropped: the next sample re-derives.
+                let point = publisher.take_latest();
+                if !reactor.borrow().admit(InputClass::Hover, &point) {
                     return;
                 }
-                if reactor.borrow().viewport_gesture.as_ref().is_some_and(|s| !s.released) {
-                    publisher.take_latest();
-                    return;
-                }
-                if let Some(point) = publisher.take_latest() {
+                if let Some(point) = point {
                     // Resolve against WindowServer when processing the latest position,
                     // rather than preserving an ID from an earlier input callback.
                     if let Some(window) = window_server::get_window_at_point(point) {
@@ -1413,15 +1433,7 @@ impl Reactor {
             return true;
         };
         self.release_if_missed();
-        if self.may(Initiative::UserInput(class)) {
-            return true;
-        }
-        debug!(
-            ?event,
-            "mode-gate: discarded {class:?} input during {:?}",
-            self.state.windows.pointer()
-        );
-        false
+        self.admit(class, event)
     }
 
     pub(crate) fn handle_ipc_command(&mut self, command: Command) {
@@ -1593,18 +1605,11 @@ impl Reactor {
         self.observe_transient_lifecycle(&event);
         let may_make_ready = matches!(&event, Event::SpaceStateChanged(_));
         let previously_focused_window = self.main_window();
-        let claim_suppressed_ffm =
-            self.state.windows.suppresses_focus_follows_mouse(previously_focused_window);
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
                 outcome.refresh_window_notifications |=
                     transient_count != self.transient_focus.windows.len();
                 let focused_window = self.main_window();
-                if claim_suppressed_ffm
-                    != self.state.windows.suppresses_focus_follows_mouse(focused_window)
-                {
-                    outcome = outcome.with_focus_follows_mouse_refresh();
-                }
                 if focused_window != previously_focused_window
                     && let Some(focused_window) = focused_window
                 {
@@ -2499,9 +2504,6 @@ impl Reactor {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
             Event::MouseMoved(wsid) => {
-                if self.transient_blocks_mouse_focus() {
-                    return Ok(EventOutcome::default());
-                }
                 let window = self.state.windows.tracked_window_id(wsid);
                 if window.is_some_and(|window| {
                     self.pending_mouse_focus.is_some_and(|(pending, started)| {
@@ -3407,9 +3409,6 @@ impl Reactor {
                 self.notification_manager.last_sls_notification_ids = ids;
             }
         }
-        if outcome.refresh_focus_follows_mouse {
-            self.update_focus_follows_mouse_state();
-        }
         if outcome.refresh_layout_mode {
             self.update_event_tap_layout_mode();
         }
@@ -3642,11 +3641,8 @@ impl Reactor {
         outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(target, window));
         if available {
             self.refocus_manager.refocus_state = RefocusState::Pending(target);
-            outcome.absorb(
-                EventOutcome::layout_changed(false)
-                    .with_arrange_space_scope(Some(target))
-                    .with_focus_follows_mouse_refresh(),
-            );
+            outcome
+                .absorb(EventOutcome::layout_changed(false).with_arrange_space_scope(Some(target)));
         }
         outcome
     }
@@ -5793,11 +5789,6 @@ impl Reactor {
 
         let candidate_frame = window.frame_monotonic;
 
-        if matches!(self.menu_manager.menu_state, MenuState::Open(_)) {
-            trace!(?wid, "Skipping autoraise while menu open");
-            return false;
-        }
-
         let Some(space) = space else {
             trace!(?wid, "Skipping mouse focus without a resolved space");
             return false;
@@ -6527,7 +6518,6 @@ impl Reactor {
         if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner == pid) {
             debug!(pid, "Clearing menu-open state for deactivated app");
             self.menu_manager.menu_state = MenuState::Closed;
-            self.update_focus_follows_mouse_state();
         }
     }
 
@@ -6535,22 +6525,7 @@ impl Reactor {
         if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner != pid) {
             debug!(pid, "Clearing stale menu-open state after app focus changed");
             self.menu_manager.menu_state = MenuState::Closed;
-            self.update_focus_follows_mouse_state();
         }
-    }
-
-    fn set_focus_follows_mouse_enabled(&self, enabled: bool) {
-        if let Some(input_tx) = self.communication_manager.input_tx.as_ref() {
-            input_tx.send(input::Request::SetFocusFollowsMouseEnabled(enabled));
-        }
-    }
-
-    fn update_focus_follows_mouse_state(&mut self) {
-        let should_enable = self.config.settings.focus_follows_mouse
-            && matches!(self.menu_manager.menu_state, MenuState::Closed)
-            && !self.is_mission_control_active()
-            && !self.state.windows.suppresses_focus_follows_mouse(self.main_window());
-        self.set_focus_follows_mouse_enabled(should_enable);
     }
 
     fn update_event_tap_layout_mode(&mut self) {
@@ -6615,7 +6590,6 @@ impl Reactor {
             return;
         }
         self.mission_control_manager.mission_control_state = new_state;
-        self.update_focus_follows_mouse_state();
     }
 
     fn refresh_windows_after_mission_control(&mut self) {

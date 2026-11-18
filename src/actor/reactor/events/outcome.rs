@@ -88,7 +88,6 @@ pub(crate) struct EventOutcome {
     pub(crate) arrange: ArrangeRequest,
     pub(crate) focused_window: Option<WindowId>,
     pub(crate) refresh_window_notifications: bool,
-    pub(crate) refresh_focus_follows_mouse: bool,
     pub(crate) refresh_layout_mode: bool,
 }
 
@@ -165,7 +164,6 @@ impl EventOutcome {
         }
         self.focused_window = other.focused_window.or(self.focused_window);
         self.refresh_window_notifications |= other.refresh_window_notifications;
-        self.refresh_focus_follows_mouse |= other.refresh_focus_follows_mouse;
         self.refresh_layout_mode |= other.refresh_layout_mode;
     }
 
@@ -207,11 +205,6 @@ impl EventOutcome {
             refresh_window_notifications,
             ..Self::default()
         }
-    }
-
-    pub(crate) fn with_focus_follows_mouse_refresh(mut self) -> Self {
-        self.refresh_focus_follows_mouse = true;
-        self
     }
 
     pub(crate) fn window_notification_refresh() -> Self {
