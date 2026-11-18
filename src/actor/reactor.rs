@@ -13,6 +13,7 @@ mod main_window;
 mod managers;
 mod modes;
 mod native;
+use native::Native;
 mod native_tabs;
 mod query;
 pub(crate) mod reconciler;
@@ -1035,10 +1036,10 @@ impl Reactor {
             let resolved = self.resolve_native_space(wsid, None);
             let inactive_target = match missing_window(
                 resolved,
-                || native::Native::window_spaces(&self.native, wsid),
+                || self.native.window_spaces(wsid),
                 |space| self.is_fullscreen_space(space),
                 |space| self.is_space_active(space),
-                |space| native::Native::space_is_user(&self.native, space),
+                |space| self.native.space_is_user(space),
                 !self.space_state.fullscreen_spaces.is_empty(),
             ) {
                 Missing::Keep => continue,
@@ -2519,7 +2520,9 @@ impl Reactor {
                     .filter(|(_, selected)| *selected == window_id)
                 {
                     self.overview_focus = None;
-                    let selected = native::Native::key_focused_window(&self.native, space)
+                    let selected = self
+                        .native
+                        .key_focused_window(space)
                         .filter(|window| self.state.windows.contains_window(*window))
                         .unwrap_or(selected);
                     self.stop_camera(space);
@@ -3334,7 +3337,7 @@ impl Reactor {
                     continue;
                 }
                 if let Some(wsid) = record.window_server_id {
-                    let membership = native::Native::window_spaces(&self.native, wsid);
+                    let membership = self.native.window_spaces(wsid);
                     let known = |space: SpaceId| {
                         self.space_state
                             .display_space_ids
@@ -4367,7 +4370,7 @@ impl Reactor {
     }
 
     fn tracked_window_at(&self, point: CGPoint) -> Option<WindowId> {
-        native::Native::tracked_window_at(&self.native, point, &self.state.windows)
+        self.native.tracked_window_at(point, &self.state.windows)
     }
 
     /// On every accepted, complete snapshot, what each transfer still owes is derived again
@@ -4469,7 +4472,7 @@ impl Reactor {
                     // Multiple memberships are transitional, even if one is a
                     // user Space. Do not let the generic user-Space preference
                     // turn contradictory evidence into a completed exit.
-                    let spaces = native::Native::window_spaces(&self.native, wsid);
+                    let spaces = self.native.window_spaces(wsid);
                     let live = (spaces.len() == 1).then(|| spaces[0]);
                     if let Some(space) = live.filter(|space| {
                         self.is_fullscreen_space(*space)
@@ -4952,7 +4955,7 @@ impl Reactor {
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live =
             if observation.is_none() || pending.is_some_and(|target| observation != Some(target)) {
-                native::Native::window_space(&self.native, wsid)
+                self.native.window_space(wsid)
             } else {
                 None
             };
@@ -5809,7 +5812,7 @@ impl Reactor {
     }
 
     fn window_server_id_under_cursor(&self) -> Option<WindowServerId> {
-        native::Native::window_under_cursor(&self.native)
+        self.native.window_under_cursor()
     }
 
     fn tracked_window_under_cursor(&self) -> Option<(WindowServerId, WindowId)> {
@@ -5994,7 +5997,7 @@ impl Reactor {
             // WindowServer focus notification. Sample native focus before raising
             // a fallback, otherwise that raise can steal focus from the new tab.
             let native_focus = matches!(event, LayoutEvent::WindowRemoved(_))
-                .then(|| native::Native::key_focused_window(&self.native, space))
+                .then(|| self.native.key_focused_window(space))
                 .flatten();
             if matches!(event, LayoutEvent::WindowRemoved(_))
                 && let Some(native) = native_focus
