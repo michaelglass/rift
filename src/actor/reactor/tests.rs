@@ -1742,9 +1742,7 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
         .active_workspace(space1)
         .expect("workspace");
     let floating_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
-    if let Some(w) = reactor.state.windows.window_mut(wid) {
-        w.frame_monotonic = floating_frame;
-    }
+    reactor.state.seen(wid, floating_frame);
     reactor
         .layout_manager
         .layout_engine
@@ -2580,12 +2578,7 @@ fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_wor
         reactor_with_window_moved_to_space2();
     let conflicting_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
 
-    reactor
-        .state
-        .windows
-        .window_mut(wid)
-        .expect("window should exist")
-        .frame_monotonic = conflicting_frame;
+    reactor.state.seen(wid, conflicting_frame);
     reactor.track_test_window_server_info(wsid, wid.pid, conflicting_frame);
 
     assert_eq!(
@@ -3514,9 +3507,10 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     assert!(reactor.set_test_active_workspace(space, active_workspace));
     assert!(reactor.assign_test_window_to_workspace(space, wid, hidden_workspace));
 
-    if let Some(window) = reactor.state.windows.window_mut(wid) {
-        window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
-    }
+    reactor.state.seen(
+        wid,
+        CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
+    );
 
     let gaps = reactor.config.settings.layout.gaps.clone();
     let hidden_target = reactor
@@ -4812,14 +4806,16 @@ fn mouse_raise_queries_order_only_when_it_could_cover_a_floating_window() {
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, floating));
     reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating));
-    reactor.state.windows.window_mut(floating).unwrap().frame_monotonic = smaller;
+    reactor.state.seen(floating, smaller);
     window_server::set_space_window_list_for_connection_override(Some(vec![wsid.as_u32()]));
     assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
     window_server::set_space_window_list_for_connection_override(None);
     assert_eq!(window_server::window_order_query_count(), before + 1);
 
-    reactor.state.windows.window_mut(floating).unwrap().frame_monotonic =
-        CGRect::new(CGPoint::new(frame.max().x + 100.0, 100.0), smaller.size);
+    reactor.state.seen(
+        floating,
+        CGRect::new(CGPoint::new(frame.max().x + 100.0, 100.0), smaller.size),
+    );
     let before = window_server::window_order_query_count();
     assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
     assert_eq!(window_server::window_order_query_count(), before);
@@ -5877,9 +5873,10 @@ fn non_active_workspace_windows_remain_hidden_even_if_frame_no_longer_matches_co
     assert!(reactor.set_test_active_workspace(space, active_workspace));
     assert!(reactor.assign_test_window_to_workspace(space, wid, inactive_workspace));
 
-    if let Some(window) = reactor.state.windows.window_mut(wid) {
-        window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
-    }
+    reactor.state.seen(
+        wid,
+        CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
+    );
 
     assert_eq!(
         reactor.hidden_assigned_space_for_window_id(wid),
@@ -7529,7 +7526,7 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
             .active_workspace(space)
             .unwrap();
         let frame = CGRect::new(CGPoint::new(75., 110.), CGSize::new(430., 320.));
-        reactor.state.windows.window_mut(old).unwrap().frame_monotonic = frame;
+        reactor.state.seen(old, frame);
         reactor
             .layout_manager
             .layout_engine
@@ -11996,7 +11993,7 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
     let saved = CGRect::new(CGPoint::new(200., 100.), CGSize::new(300., 200.));
     let state = reactor.state.windows.window_mut(window).unwrap();
     state.info.bundle_id = Some("com.example".into());
-    state.frame_monotonic = saved;
+    reactor.state.seen(window, saved);
     let path = std::env::temp_dir().join(format!("rift-floating-{}.ron", std::process::id()));
     let engine = &reactor.layout_manager.layout_engine;
     engine

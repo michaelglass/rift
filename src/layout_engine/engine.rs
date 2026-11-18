@@ -3846,16 +3846,14 @@ impl LayoutEngine {
             })
     }
 
-    /// Requested geometry is presentation intent, never native membership evidence.
+    /// Requested geometry is presentation intent, never native membership evidence. The
+    /// model's frame for the window is the core's (the caller tells it first).
     pub(crate) fn prepare_window_placement(
         &mut self,
         windows: &mut WindowStore,
         window: WindowId,
         frame: CGRect,
     ) {
-        if let Some(state) = windows.window_mut(window) {
-            state.frame_monotonic = frame;
-        }
         if self.is_window_floating(window)
             && let Some(assignment) = windows.workspace_for_window(window)
         {

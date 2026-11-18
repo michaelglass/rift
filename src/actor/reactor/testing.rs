@@ -243,7 +243,7 @@ impl Reactor {
         sys_id: Option<WindowServerId>,
         is_manageable: bool,
     ) {
-        self.state.windows.insert_window(wid, super::WindowState {
+        self.state.insert_window(wid, super::WindowState {
             native_transient: false,
             info: WindowInfo {
                 has_native_tabs: false,
