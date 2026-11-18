@@ -78,6 +78,10 @@ navigation) `place`s into `Placed` (each column's spot with its anchor, the worl
 non-empty snaps keyed by column id, the bounds), and `Placed::settle` is where the camera comes
 to rest after a release (`Settle::Niri | Anchored | AnchoredTowards(column)` decides ties).
 rift's strip geometry is `Empty | Placed`; the camera spring and viewport stay rift's.
+`layout::floating` places a floating window the first time: `Floating { screen, spread }` and
+the layout's `Newcomer`s (constraints, and `Seen::Live(frame) | Unseen`) give each its first
+frame (the default 70%, a live frame no larger than it, the cascade when spreading); after that
+the platform keeps the frame the user gives it.
 
 Window constraints carry a `Sizing` (`Fixed | Resizable | ResizableAtLeastMin`, each with the
 `Size` the app reported, parsed once): BSP, scrolling and floating hold a window to its
@@ -214,6 +218,8 @@ wire encode and decode.
   shape, traditional 5.6–5.9 → 8.1 µs. If a profile ever asks, optimise inside these
   structures (the measured costs: bigger records than parallel float lists, and one list for
   each zip). The per-step core is unaffected.
+- **Floating, a known cost.** 0.42 µs per layout of one to six newcomers in Roc (best of 5
+  over 200,000); the parity runs 200,000 random layouts bit-identical.
 - **Scrolling, a known cost.** 4.4 µs per strip in Roc (best of 5 over 200,000 random strips;
   the strip parity runs 200,000 strips and 200,000 settle questions bit-identical). A Rust
   float sum and Roc's differ when grouped differently: a row's y advances by `(height + gap)`,
@@ -354,8 +360,8 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Layout geometry: traditional (stack, master-stack) | M | Done, Rust and Roc (`layout::traditional`, `Traditional.roc`); the stack bar's group frames use the core's `stack_frames`. |
 | Sizing (respect_min_size in the core) | S | Done, Rust (the play line) and Roc, with its own wire encoding. |
 | Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
-| Layout geometry: floating | S–M | **Next.** |
-| Layout trees into the core | L+ | Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
+| Layout geometry: floating | S | Done, Rust and Roc: first frames and the cascade (`layout::floating`, `Floating.roc`). |
+| Layout trees into the core | L+ | **Next.** Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
