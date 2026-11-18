@@ -577,6 +577,8 @@ impl Apps {
     /// took. Panics on a write loop.
     pub fn simulate_until_quiet(&mut self, reactor: &mut Reactor) -> usize {
         for round in 0..20 {
+            // The reactor's loop flushes once its queue drains; here, before each look.
+            reactor.reread_windows();
             let requests = self.requests();
             if requests.is_empty() {
                 return round;
