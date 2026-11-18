@@ -2800,16 +2800,10 @@ impl Reactor {
                     .as_ref()
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
-                if target_is_active
-                    && let Some(screen) = screen.as_ref().filter(|screen| screen.space.is_some())
-                {
-                    if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
-                        self.space_state.menu_bar_space = screen.space;
-                    }
-                    // Honor explicit display selection before the native notification arrives,
-                    // even on activation failure. Later spaces-actor updates remain authoritative.
-                    self.space_state.command_space = screen.space;
-                }
+                // Honor explicit display selection before the native notification arrives, even
+                // on activation failure. Later spaces-actor updates remain authoritative.
+                let activate_display =
+                    screen.as_ref().and_then(|screen| screen.space).filter(|_| target_is_active);
                 let focus_window_center = focus_window
                     .and_then(|wid| self.state.windows.window(wid))
                     .map(|window| window.frame_monotonic().mid());
@@ -2821,7 +2815,8 @@ impl Reactor {
                         focus_window,
                         focus_window_center,
                     },
-                );
+                )
+                .map(|outcome| EventOutcome { activate_display, ..outcome });
             }
             Event::Command(Command::Layout(command)) => {
                 return self.dispatch_layout_command(command, self.command_context_space());
@@ -3031,6 +3026,9 @@ impl Reactor {
     fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
         if outcome.exit {
             std::process::exit(0);
+        }
+        if let Some(space) = outcome.activate_display {
+            self.activate_display(space);
         }
         for write in std::mem::take(&mut outcome.released) {
             self.send_arranged(write);
@@ -5895,12 +5893,7 @@ impl Reactor {
     ) {
         let workspace_switch_space = response.workspace_space.or(workspace_switch_space);
         if let Some(space) = response.workspace_space {
-            self.space_state.command_space = Some(space);
-            if let Some(screen) = self.space_state.screen_by_space(space)
-                && crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid)
-            {
-                self.space_state.menu_bar_space = Some(space);
-            }
+            self.activate_display(space);
         }
         if !self.may(Initiative::SwitchWorkspaceFocus) {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
@@ -6778,16 +6771,21 @@ impl Reactor {
             .focused_window()
             .and_then(|window| self.assigned_space_for_window_id(window))
             .filter(|space| Some(*space) != previous_space && self.is_space_active(*space))
+            .filter(|space| self.display_uuid_for_space(*space).is_some())
         else {
             return;
         };
-        let Some(uuid) = self.display_uuid_for_space(space) else {
-            return;
-        };
-        if crate::sys::screen::set_active_menu_bar_display_uuid(&uuid) {
+        self.activate_display(space);
+    }
+
+    /// Points commands, and the menu bar if macOS takes it, at `space`'s display.
+    fn activate_display(&mut self, space: SpaceId) {
+        self.space_state.command_space = Some(space);
+        if let Some(screen) = self.space_state.screen_by_space(space)
+            && crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid)
+        {
             self.space_state.menu_bar_space = Some(space);
         }
-        self.space_state.command_space = Some(space);
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {

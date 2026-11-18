@@ -83,6 +83,8 @@ pub(crate) struct EventOutcome {
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
     pub(crate) stdout_lines: Vec<String>,
+    /// Commands, and the menu bar if macOS takes it, move to this space's display.
+    pub(crate) activate_display: Option<SpaceId>,
     /// Rift quits (the layout is saved).
     pub(crate) exit: bool,
     pub(crate) reapply_app_rules: Vec<WindowId>,
