@@ -4,6 +4,7 @@
 
 pub mod axis;
 pub mod bsp;
+pub mod floating;
 pub mod scrolling;
 pub mod traditional;
 
