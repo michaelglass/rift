@@ -1283,6 +1283,21 @@ impl ScrollingLayoutSystem {
         Some((camera, frames))
     }
 
+    /// A camera ended: nothing presents its viewport any more, so it does not stay animating
+    /// (no one would advance it, and every later layout would place windows at an offset of
+    /// the moment). It ends at its target, where the camera sent the windows it presented and
+    /// where the core wrote the ones it left; a gesture's camera ends where the hand left it.
+    pub(crate) fn commit_ended_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
+        if let Some(state) = self.layouts.get_mut(layout) {
+            state.viewport = if p.gesturing {
+                Viewport::Gesture(p.offset)
+            } else {
+                Viewport::Static(p.target)
+            };
+            state.motion = p.motion.lock().clone();
+        }
+    }
+
     pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
         if let Some(state) = self.layouts.get_mut(layout) {
             state.viewport = if p.gesturing {
@@ -3599,6 +3614,30 @@ pub(crate) mod tests {
         p.finish();
         f.system.commit_presented_viewport(f.layout, &p.snapshot(Instant::now()));
         assert_eq!(f.system.layouts[f.layout].viewport.offset(), 500.0);
+    }
+
+    #[test]
+    fn a_camera_that_ends_before_arriving_leaves_its_viewport_at_the_target() {
+        let mut f = Fixture::new(4);
+        let (mut p, _) = f.system.presentation(f.layout).unwrap();
+        p.viewport = Viewport::Static(0.0);
+        p.viewport.set_target(500.0);
+        p.retarget(0.0, 0.0, Instant::now());
+        let snapshot = p.snapshot(Instant::now());
+        assert_eq!((snapshot.offset, snapshot.target), (0.0, 500.0));
+        // Still presenting: the viewport keeps moving.
+        f.system.commit_presented_viewport(f.layout, &snapshot);
+        assert!(matches!(
+            &f.system.layouts[f.layout].viewport,
+            Viewport::Animation(_)
+        ));
+        // Ended there: nothing will move it, so it is at its target, not stuck animating.
+        f.system.commit_ended_viewport(f.layout, &snapshot);
+        let viewport = &f.system.layouts[f.layout].viewport;
+        assert!(
+            matches!(viewport, Viewport::Static(offset) if *offset == 500.0),
+            "{viewport:?}"
+        );
     }
 
     #[test]
