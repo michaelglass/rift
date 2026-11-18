@@ -990,6 +990,10 @@ impl rift_core::Translate<Rift, rift_core::plain::Plain> for ToPlain {
     fn time(&self, time: std::time::Instant) -> rift_core::plain::Nanos {
         rift_core::plain::Nanos((time - self.epoch).as_nanos() as u64)
     }
+
+    fn request(&self, request: TransactionId) -> rift_core::plain::RequestId {
+        rift_core::plain::RequestId(request.number())
+    }
 }
 
 type PlainStep = (

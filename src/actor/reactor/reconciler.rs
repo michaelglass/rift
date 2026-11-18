@@ -34,6 +34,7 @@ pub(crate) struct Rift;
 
 impl Kinds for Rift {
     type Frame = CGRect;
+    type Request = TransactionId;
     type Time = Instant;
     type Window = WindowId;
 
@@ -46,6 +47,7 @@ impl Kinds for Rift {
 pub(crate) type Sync = rift_core::Sync<Rift>;
 pub(crate) type Write = rift_core::Write<Rift>;
 pub(crate) type Verdict = rift_core::Verdict<Rift>;
+pub(crate) type Reply = rift_core::Reply<Rift>;
 pub(crate) type Event = rift_core::Event<Rift>;
 pub(crate) type Effect = rift_core::Effect<Rift>;
 
@@ -152,6 +154,9 @@ impl Reconciler {
                 Effect::Answered { window, answer } => {
                     debug!(?window, ?answer, "reconcile: answer")
                 }
+                Effect::Stale { window } => {
+                    debug!(?window, "reconcile: answer to a replaced write, dropped")
+                }
                 Effect::Late { window } => {
                     debug!(?window, "reconcile: late answer, observed as unprompted")
                 }
@@ -195,16 +200,12 @@ impl Reconciler {
         self.core.borrow().reconciler().sync(window)
     }
 
-    /// Rust-only read, not part of the boundary: the reactor's transaction-id check, until
-    /// answers carry the core's own request ids.
-    pub(crate) fn in_flight(&self, window: WindowId) -> bool {
-        self.core.borrow().reconciler().in_flight(window)
-    }
-
-    /// Rift wants `window` at `desired`; the model last saw it at `known`.
+    /// Rift wants `window` at `desired`; the model last saw it at `known`. A write goes out
+    /// under `request`.
     fn want(
         &mut self,
         pointer: Pointer,
+        request: TransactionId,
         window: WindowId,
         desired: CGRect,
         known: CGRect,
@@ -214,6 +215,7 @@ impl Reconciler {
         let now = self.clock.now();
         let effects = self.step(Event::Want {
             now,
+            request,
             window,
             desired,
             known,
@@ -231,34 +233,50 @@ impl Reconciler {
     }
 
     /// The modifier drag's interactive frame: the only write a dragged window gets.
-    pub(crate) fn follow(&mut self, window: WindowId, frame: CGRect) -> Write {
-        let effects = self.step(Event::Follow { window, frame });
+    pub(crate) fn follow(
+        &mut self,
+        request: TransactionId,
+        window: WindowId,
+        frame: CGRect,
+    ) -> Write {
+        let effects = self.step(Event::Follow { request, window, frame });
         Self::writes(effects)
             .next()
             .expect("the core writes the interactive frame it is given")
     }
 
-    /// The app answered its latest write to `window` with `frame`: what the answer was and the
-    /// write that waited behind it, or `None` when Rift had stopped waiting (then it is news, to
-    /// be [observed](Self::observe)).
+    /// The app answered a write to `window` with `frame`, naming the request `seen` (if it
+    /// named one). What waited behind the write goes out under `request`.
     pub(crate) fn answer(
         &mut self,
         pointer: Pointer,
+        request: TransactionId,
+        seen: Option<TransactionId>,
         window: WindowId,
         frame: CGRect,
-    ) -> Option<(Answer, Option<Write>)> {
+    ) -> Reply {
         self.tell(pointer);
         let now = self.clock.now();
-        let mut answered = None;
+        let mut reply = Reply::Late;
         let mut queued = None;
-        for effect in self.step(Event::Answer { now, window, frame }) {
+        for effect in self.step(Event::Answer {
+            now,
+            request,
+            seen,
+            window,
+            frame,
+        }) {
             match effect {
-                Effect::Answered { answer, .. } => answered = Some(answer),
+                Effect::Answered { answer, .. } => reply = Reply::Answered(answer, None),
+                Effect::Stale { .. } => reply = Reply::Stale,
                 Effect::Write(write) => queued = Some(write),
                 _ => {}
             }
         }
-        answered.map(|answer| (answer, queued))
+        match reply {
+            Reply::Answered(answer, None) => Reply::Answered(answer, queued),
+            reply => reply,
+        }
     }
 
     /// `window` reported `frame` unprompted; the model last saw it at `known`.
@@ -284,13 +302,14 @@ impl Reconciler {
     fn expire(
         &mut self,
         pointer: Pointer,
+        request: TransactionId,
         known: impl Fn(WindowId) -> Option<CGRect>,
     ) -> Vec<Write> {
         self.tell(pointer);
         let now = self.clock.now();
         let due = self.core.borrow().reconciler().due(now);
         let known = due.into_iter().filter_map(|window| Some((window, known(window)?))).collect();
-        Self::writes(self.step(Event::Tick { now, known })).collect()
+        Self::writes(self.step(Event::Tick { now, request, known })).collect()
     }
 
     /// When the run loop's timer should fire: the deadline the core last asked for.
@@ -301,10 +320,10 @@ impl Reconciler {
     pub(crate) fn forget(&mut self, window: WindowId) { self.step(Event::Forget { window }); }
 }
 
-/// One app's share of an arrange pass: its windows that only move, and those that also resize,
-/// and the targets to record under the batch's transaction id.
-#[derive(Default)]
+/// One app's share of an arrange pass: the request it goes out under, its windows that only
+/// move, and those that also resize, and the targets to record under the request.
 struct Batch {
+    request: TransactionId,
     positions: Vec<Write>,
     frames: Vec<Write>,
     targets: Vec<(WindowServerId, CGRect)>,
@@ -396,12 +415,20 @@ impl Reactor {
     /// Asks the reconciler for `window` at `desired`. A desire it sends or queues is the model's
     /// from then on: the window is taken to be there until a report says otherwise.
     /// A window the model does not know is `Nothing`.
-    fn arrange_one(&mut self, window: WindowId, desired: CGRect, want: Want) -> Verdict {
+    fn arrange_one(
+        &mut self,
+        window: WindowId,
+        desired: CGRect,
+        want: Want,
+        request: TransactionId,
+    ) -> Verdict {
         let pointer = self.state.windows.pointer();
         let Some(state) = self.state.windows.window_mut(window) else {
             return Verdict::Nothing;
         };
-        let verdict = self.reconciler.want(pointer, window, desired, state.frame_monotonic, want);
+        let verdict =
+            self.reconciler
+                .want(pointer, request, window, desired, state.frame_monotonic, want);
         match verdict {
             Verdict::Send(_) | Verdict::Queued => state.frame_monotonic = desired,
             Verdict::Nothing => {}
@@ -409,18 +436,23 @@ impl Reactor {
         verdict
     }
 
-    /// The transaction id the app protocol wants on a write, recorded with its target.
-    fn stamp(&self, window: WindowId, frame: CGRect) -> TransactionId {
-        let server_id = self.state.windows.window(window).and_then(|state| state.info.sys_id);
-        self.transaction_manager.stamp(server_id.map(|server_id| (server_id, frame)))
+    /// Records a write's request, with its target, for the app protocol and the space
+    /// bookkeeping (`TransactionManager`).
+    fn record(&self, write: &Write) {
+        let server_id =
+            self.state.windows.window(write.window()).and_then(|state| state.info.sys_id);
+        self.transaction_manager.record(
+            write.request(),
+            server_id.map(|server_id| (server_id, write.frame())),
+        );
     }
 
     fn send_one(&mut self, write: Write, handle: AppThreadHandle) {
-        let transaction = self.stamp(write.window(), write.frame());
+        self.record(&write);
         if let Err(error) = handle.send(Request::set_window_frame(
             write.window(),
             write.frame(),
-            transaction,
+            write.request(),
             true,
         )) {
             warn!(window = ?write.window(), %error, "failed to write window frame");
@@ -444,7 +476,8 @@ impl Reactor {
             return;
         };
         let handle = app.handle.clone();
-        match self.arrange_one(window, frame, Want::Place) {
+        let request = self.transaction_manager.mint();
+        match self.arrange_one(window, frame, Want::Place, request) {
             Verdict::Send(write) => self.send_one(write, handle),
             Verdict::Queued | Verdict::Nothing => {}
         }
@@ -481,13 +514,13 @@ impl Reactor {
         if !self.may_write(write.window()) {
             return;
         }
-        let transaction = self.stamp(write.window(), write.frame());
+        self.record(&write);
         if let Some(app) = self.app_manager.apps.get(&write.window().pid) {
             app.handle.send_interactive_frame(
                 write.window(),
                 write.frame(),
                 false,
-                transaction,
+                write.request(),
                 FrameSource::Drag,
             );
         }
@@ -496,8 +529,9 @@ impl Reactor {
     /// Stops waiting for writes whose apps did not answer in time, and sends what waited
     /// behind them.
     pub(super) fn expire_writes(&mut self) {
+        let request = self.transaction_manager.mint();
         let windows = &self.state.windows;
-        let queued = self.reconciler.expire(windows.pointer(), |window| {
+        let queued = self.reconciler.expire(windows.pointer(), request, |window| {
             Some(windows.window(window)?.frame_monotonic)
         });
         for write in queued {
@@ -511,7 +545,12 @@ impl Reactor {
         &mut self,
         pid: pid_t,
         bounds: Option<ScrollingDisplayBounds>,
-        Batch { positions, frames, targets }: Batch,
+        Batch {
+            request,
+            positions,
+            frames,
+            targets,
+        }: Batch,
     ) {
         let Some(app) = self.app_manager.apps.get(&pid) else {
             debug!(?pid, "Skipping layout update for app - app no longer exists");
@@ -521,14 +560,13 @@ impl Reactor {
             return;
         };
         let handle = app.handle.with_scrolling_bounds(bounds);
-        let transaction = self.transaction_manager.stamp(targets);
+        self.transaction_manager.record(request, targets);
         let requests = [
             (!positions.is_empty()).then(|| (frames_of(positions), FrameMode::Position)),
             (!frames.is_empty()).then(|| (frames_of(frames), FrameMode::Full)),
         ];
         for (frames, mode) in requests.into_iter().flatten() {
-            let request =
-                Request::SetWindowFrames(frames, transaction, mode, true, Default::default());
+            let request = Request::SetWindowFrames(frames, request, mode, true, Default::default());
             if let Err(error) = handle.send(request) {
                 debug!(?pid, ?error, "Failed to send layout request - app may have quit");
                 break;
@@ -546,6 +584,8 @@ impl Reactor {
     ) -> bool {
         let bounds = scrolling_bounds(self, space);
         let mut per_app: HashMap<(pid_t, bool), Batch> = HashMap::default();
+        // One request per app batch, minted before the core decides (its writes carry it).
+        let mut requests: HashMap<(pid_t, bool), TransactionId> = HashMap::default();
         let mut any_desire_new = false;
 
         for &(wid, target) in frames {
@@ -555,7 +595,9 @@ impl Reactor {
                 continue;
             };
             let (current, server_id) = (window.frame_monotonic, window.info.sys_id);
-            let write = match self.arrange_one(wid, target, want) {
+            let key = (wid.pid, constrained);
+            let request = *requests.entry(key).or_insert_with(|| self.transaction_manager.mint());
+            let write = match self.arrange_one(wid, target, want, request) {
                 Verdict::Send(write) => write,
                 Verdict::Queued => {
                     any_desire_new = true;
@@ -568,7 +610,12 @@ impl Reactor {
                 Want::ArrangePositions => current.size.same_as(target.size),
                 Want::Arrange | Want::Place => false,
             };
-            let batch = per_app.entry((wid.pid, constrained)).or_default();
+            let batch = per_app.entry(key).or_insert_with(|| Batch {
+                request,
+                positions: Vec::new(),
+                frames: Vec::new(),
+                targets: Vec::new(),
+            });
             batch.targets.extend(server_id.map(|server_id| (server_id, target)));
             if moves_only {
                 batch.positions.push(write);

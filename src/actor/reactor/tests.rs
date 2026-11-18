@@ -13012,7 +13012,10 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
     let last_seen_by_app = reactor.transaction_manager.get_last_sent_txid(wsid);
     let in_flight = CGRect::new(CGPoint::new(frame.origin.x + 10.0, frame.origin.y), frame.size);
     reactor.place_window(wid, in_flight);
-    assert!(reactor.reconciler.in_flight(wid));
+    assert!(matches!(
+        reactor.reconciler.sync(wid),
+        super::reconciler::Sync::InFlight { .. }
+    ));
 
     // The user grabs the window and moves it somewhere that is neither where it was nor
     // where Rift's write would put it.
@@ -13480,17 +13483,12 @@ fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
     for event in apps.simulate_events_for_requests(slow) {
         reactor.handle_event(event);
     }
-    assert_eq!(
-        reactor.reconciler.sync(right),
-        super::reconciler::Sync::InFlight {
-            target: new_right,
-            deadline: match reactor.reconciler.sync(right) {
-                super::reconciler::Sync::InFlight { deadline, .. } => deadline,
-                other => panic!("the old answer settled the batched write: {other:?}"),
-            },
-            queued: None,
+    match reactor.reconciler.sync(right) {
+        super::reconciler::Sync::InFlight { target, queued: None, .. } => {
+            assert_eq!(target, new_right)
         }
-    );
+        other => panic!("the old answer settled the batched write: {other:?}"),
+    }
 }
 
 #[test]

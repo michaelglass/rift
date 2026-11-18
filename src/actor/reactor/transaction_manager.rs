@@ -11,6 +11,12 @@ use crate::sys::window_server::WindowServerId;
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
+impl TransactionId {
+    /// The id as a number, for a trace on plain data.
+    #[cfg(test)]
+    pub(crate) fn number(self) -> u32 { self.0 }
+}
+
 /// The one source of transaction ids, shared by every thread that sends frames.
 #[derive(Debug, Default)]
 pub struct TransactionCounter(AtomicU32);
@@ -48,6 +54,18 @@ impl TransactionManager {
 
     /// Clears the pending target for a window while preserving its last txid.
     pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
+
+    /// The id of a new request, recorded nowhere yet.
+    pub fn mint(&self) -> TransactionId { self.store.next_id() }
+
+    /// Records `txid`, with its target, for each window a request sent under it writes.
+    pub fn record(
+        &self,
+        txid: TransactionId,
+        targets: impl IntoIterator<Item = (WindowServerId, CGRect)>,
+    ) {
+        self.update_txid_entries(targets.into_iter().map(|(wsid, target)| (wsid, txid, target)));
+    }
 
     /// Mints the id of one request and records it, with its target, for each window the
     /// request writes.

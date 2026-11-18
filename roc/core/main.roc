@@ -14,7 +14,7 @@ Pointer : [Idle, Pressing(WindowId), Dragging(WindowId)]
 ## Where one window stands between what Rift asked of its app and what the app answered.
 ## A window with nothing outstanding is not in `unsettled` at all (it is settled).
 Sync : [
-	InFlight({ target : Rect, deadline : U64, queued : Queued }),
+	InFlight({ target : Rect, deadline : U64, queued : Queued, request : U32 }),
 	Refused({ wanted : Rect, got : Rect }),
 	Adrift,
 ]
@@ -102,7 +102,7 @@ may = |initiative, pointer|
 	}
 
 ## The window's sync state; `Settled` when nothing is outstanding.
-sync_of : Model, WindowId -> [Settled, InFlight({ target : Rect, deadline : U64, queued : Queued }), Refused({ wanted : Rect, got : Rect }), Adrift]
+sync_of : Model, WindowId -> [Settled, InFlight({ target : Rect, deadline : U64, queued : Queued, request : U32 }), Refused({ wanted : Rect, got : Rect }), Adrift]
 sync_of = |model, window|
 	match model.unsettled.get(window) {
 		Ok(InFlight(flight)) => InFlight(flight)
@@ -120,19 +120,19 @@ settle = |model, window| { ..model, unsettled: model.unsettled.remove(window) }
 note : Model, WindowId, [Discarded, TimedOut, Forgotten] -> Model
 note = |model, window, what| { ..model, notes: model.notes.append(Note({ window, note: what })) }
 
-send : Model, U64, WindowId, Rect -> (Model, Effect)
-send = |model, now, window, frame| {
+send : Model, U64, U32, WindowId, Rect -> (Model, Effect)
+send = |model, now, request, window, frame| {
 	deadline = now + write_deadline_ns
 	queued_up = { ..model, deadlines: model.deadlines.append({ deadline, window }) }
-	(set(queued_up, window, InFlight({ target: frame, deadline, queued: NoneWaiting })), Write({ window, frame }))
+	(set(queued_up, window, InFlight({ target: frame, deadline, queued: NoneWaiting, request })), Write({ window, frame, request }))
 }
 
 time_out : Model, WindowId, Rect, Rect -> Model
 time_out = |model, window, target, known|
 	set(note(model, window, TimedOut), window, Refused({ wanted: target, got: known }))
 
-want : Model, { now : U64, window : WindowId, desired : Rect, known : Rect, want : [Arrange, ArrangePositions, Place] } -> (Model, List(Effect))
-want = |model0, { now, window, desired, known, want: how }| {
+want : Model, { now : U64, request : U32, window : WindowId, desired : Rect, known : Rect, want : [Arrange, ArrangePositions, Place] } -> (Model, List(Effect))
+want = |model0, { now, request, window, desired, known, want: how }| {
 	# A write nobody answered in time no longer holds newer desires back.
 	(model, sync) =
 		match sync_of(model0, window) {
@@ -157,14 +157,14 @@ want = |model0, { now, window, desired, known, want: how }| {
 
 		Rift =>
 			match (sync, how) {
-				(InFlight({ target, deadline, queued }), Arrange) | (InFlight({ target, deadline, queued }), ArrangePositions) | (InFlight({ target, deadline, queued }), Place) =>
+				(InFlight({ target, deadline, queued, request: sent }), Arrange) | (InFlight({ target, deadline, queued, request: sent }), ArrangePositions) | (InFlight({ target, deadline, queued, request: sent }), Place) =>
 					if same_as(desired, target) {
 						match queued {
-							Waiting(_) => (set(model, window, InFlight({ target, deadline, queued: NoneWaiting })), [])
+							Waiting(_) => (set(model, window, InFlight({ target, deadline, queued: NoneWaiting, request: sent })), [])
 							NoneWaiting => (model, [])
 						}
 					} else {
-						(set(model, window, InFlight({ target, deadline, queued: Waiting(desired) })), [Queued(window)])
+						(set(model, window, InFlight({ target, deadline, queued: Waiting(desired), request: sent })), [Queued(window)])
 					}
 
 				(Refused({ wanted, got }), Arrange) | (Refused({ wanted, got }), ArrangePositions) if same_as(desired, wanted) and same_as(known, got) =>
@@ -174,19 +174,19 @@ want = |model0, { now, window, desired, known, want: how }| {
 					(model, [])
 
 				(Settled, Place) | (Refused(_), Place) | (Adrift, Arrange) | (Adrift, ArrangePositions) | (Adrift, Place) | (Settled, Arrange) | (Settled, ArrangePositions) | (Refused(_), Arrange) | (Refused(_), ArrangePositions) => {
-					(sent, write) = send(model, now, window, desired)
-					(sent, [write])
+					(written, write) = send(model, now, request, window, desired)
+					(written, [write])
 				}
 			}
 	}
 }
 
 ## What waited behind a write that has been answered or given up on.
-release : Model, U64, WindowId, Queued, [Rift, User] -> (Model, List(Effect))
-release = |model, now, window, queued, whose|
+release : Model, U64, U32, WindowId, Queued, [Rift, User] -> (Model, List(Effect))
+release = |model, now, request, window, queued, whose|
 	match (whose, queued) {
 		(Rift, Waiting(next)) => {
-			(sent, write) = send(model, now, window, next)
+			(sent, write) = send(model, now, request, window, next)
 			(sent, [write])
 		}
 
@@ -194,10 +194,11 @@ release = |model, now, window, queued, whose|
 		(User, Waiting(_)) => (set(note(model, window, Discarded), window, Adrift), [])
 	}
 
-answer : Model, { now : U64, window : WindowId, frame : Rect } -> (Model, List(Effect))
-answer = |model, { now, window, frame }|
+answer : Model, { now : U64, request : U32, seen : [Seen(U32), Unnamed], window : WindowId, frame : Rect } -> (Model, List(Effect))
+answer = |model, { now, request, seen, window, frame }|
 	match sync_of(model, window) {
 		Settled | Adrift => (model, [Answered({ window, answer: Unasked })])
+		InFlight({ request: sent, .. }) if names_another(seen, sent) => (model, [Stale(window)])
 		InFlight({ target, queued, .. }) => {
 			(answered, verdict) =
 				if answers(target, frame) {
@@ -205,7 +206,7 @@ answer = |model, { now, window, frame }|
 				} else {
 					(set(model, window, Refused({ wanted: target, got: frame })), Refused)
 				}
-			(released, writes) = release(answered, now, window, queued, owner(model.pointer, window))
+			(released, writes) = release(answered, now, request, window, queued, owner(model.pointer, window))
 			(released, List.concat([Answered({ window, answer: verdict })], writes))
 		}
 
@@ -234,16 +235,24 @@ observe = |model, { window, frame, known }| {
 	}
 }
 
-## The write a deadlines entry stands for, if it is still waiting.
-waiting : Model, { deadline : U64, window : WindowId } -> [Waits({ target : Rect, queued : Queued }), Stale]
-waiting = |model, entry|
-	match sync_of(model, entry.window) {
-		InFlight({ target, deadline, queued }) if deadline == entry.deadline => Waits({ target, queued })
-		InFlight(_) | Settled | Refused(_) | Adrift => Stale
+## Whether an answer names a request other than `sent`.
+names_another : [Seen(U32), Unnamed], U32 -> Bool
+names_another = |seen, sent|
+	match seen {
+		Seen(request) => request != sent
+		Unnamed => False
 	}
 
-expire : Model, { now : U64, known : List({ window : WindowId, frame : Rect }) } -> (Model, List(Effect))
-expire = |model0, { now, known }| {
+## The write a deadlines entry stands for, if it is still waiting.
+waiting : Model, { deadline : U64, window : WindowId } -> [Waits({ target : Rect, queued : Queued }), NotWaiting]
+waiting = |model, entry|
+	match sync_of(model, entry.window) {
+		InFlight({ target, deadline, queued, .. }) if deadline == entry.deadline => Waits({ target, queued })
+		InFlight(_) | Settled | Refused(_) | Adrift => NotWaiting
+	}
+
+expire : Model, { now : U64, request : U32, known : List({ window : WindowId, frame : Rect }) } -> (Model, List(Effect))
+expire = |model0, { now, request, known }| {
 	var $model = model0
 	var $released = []
 	var $going = True
@@ -252,7 +261,7 @@ expire = |model0, { now, known }| {
 			Ok(entry) if entry.deadline <= now => {
 				popped = { ..$model, deadlines: $model.deadlines.drop_first(1) }
 				match waiting(popped, entry) {
-					Stale => {
+					NotWaiting => {
 						$model = popped
 					}
 
@@ -260,7 +269,7 @@ expire = |model0, { now, known }| {
 						match known.find_first(|k| k.window == entry.window) {
 							Ok({ frame, .. }) => {
 								timed_out = time_out(popped, entry.window, target, frame)
-								(released, writes) = release(timed_out, now, entry.window, queued, owner(popped.pointer, entry.window))
+								(released, writes) = release(timed_out, now, request, entry.window, queued, owner(popped.pointer, entry.window))
 								$model = released
 								$released = $released.concat(writes)
 							}
@@ -296,7 +305,7 @@ next_deadline = |model0| {
 						$going = False
 					}
 
-					Stale => {
+					NotWaiting => {
 						$model = { ..$model, deadlines: $model.deadlines.drop_first(1) }
 					}
 				}
@@ -314,7 +323,7 @@ decide = |model, event|
 	match event {
 		Pointer(now) => ({ ..model, pointer: now }, [])
 		Want(desire) => want(model, desire)
-		Follow({ window, frame }) => (set(model, window, Adrift), [Write({ window, frame })])
+		Follow({ request, window, frame }) => (set(model, window, Adrift), [Write({ window, frame, request })])
 		Answer(reply) => answer(model, reply)
 		Report(report) => observe(model, report)
 		Tick(tick) => expire(model, tick)

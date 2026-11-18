@@ -18,7 +18,7 @@ use std::time::Duration;
 pub use crate::core::{Core, Effect, Event, RustCore};
 pub use crate::pointer::{Holder, Initiative, InputClass, Owner, Pointer, may};
 pub use crate::reconciler::{
-    Answer, Note, Observation, Reconciler, Sync, Translate, Verdict, Want, Write,
+    Answer, Note, Observation, Reconciler, Reply, Sync, Translate, Verdict, Want, Write,
 };
 
 /// The platform's types, and the little geometry and time the core needs of them.
@@ -26,6 +26,10 @@ pub trait Kinds: Copy + Debug + PartialEq + 'static {
     type Window: Copy + Eq + Hash + Debug;
     type Frame: Copy + PartialEq + Debug;
     type Time: Copy + Ord + Debug;
+    /// The id a write goes out under, which the app echoes in its answer. The platform mints
+    /// it (its id space is shared with writers outside the core) and hands it to the core with
+    /// each event that may write; only equality means anything.
+    type Request: Copy + Eq + Debug;
 
     /// Whether `a` is within `tolerance` of `b` on every edge, origin and size alike.
     fn is_within(a: Self::Frame, tolerance: f64, b: Self::Frame) -> bool;

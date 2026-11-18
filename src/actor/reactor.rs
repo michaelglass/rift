@@ -536,8 +536,9 @@ enum Placement {
 /// What a report of a window's frame is to Rift.
 #[derive(Debug, Clone, Copy)]
 enum ReportKind {
-    /// The app's answer to the latest write Rift sent the window: the frame it read back.
-    Reply,
+    /// The app's answer to a write, naming the request it answers (if it names one): the frame
+    /// it read back. The core decides whether it answers the write it has in flight.
+    Reply(Option<TransactionId>),
     /// The app's change notification, or an inventory refresh that found the window at a frame
     /// Rift didn't know.
     Unprompted,
@@ -2138,8 +2139,8 @@ impl Reactor {
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested) => {
                 let kind = if !requested.0 {
                     ReportKind::Unprompted
-                } else if self.answers_latest_write(wid, last_seen) {
-                    ReportKind::Reply
+                } else if self.answers_latest_outside_write(wid, last_seen) {
+                    ReportKind::Reply(last_seen)
                 } else {
                     // The answer to a write Rift has since replaced: it says nothing about
                     // the one that is with the app now.
@@ -2226,7 +2227,8 @@ impl Reactor {
                 let Some(frame) = session.interactive_frame() else {
                     return Ok(EventOutcome::no_change());
                 };
-                let write = self.reconciler.follow(window, frame);
+                let request = self.transaction_manager.mint();
+                let write = self.reconciler.follow(request, window, frame);
                 self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
             }
@@ -4417,18 +4419,23 @@ impl Reactor {
         Some(self.frame_on_display(window, frame, source, screen))
     }
 
-    /// Whether an answer carrying `last_seen` answers the latest write Rift sent `window`. The
-    /// transaction id is what ties an answer to its write; geometry cannot.
-    fn answers_latest_write(&self, window: WindowId, last_seen: Option<TransactionId>) -> bool {
+    /// Whether an answer carrying `last_seen` may answer the latest write `window` was sent,
+    /// as far as writes the core did not make are concerned (an animation's, whose target is
+    /// still pending). The transaction id is what ties an answer to its write; geometry cannot.
+    /// Whether it answers the core's own write in flight, the core decides.
+    fn answers_latest_outside_write(
+        &self,
+        window: WindowId,
+        last_seen: Option<TransactionId>,
+    ) -> bool {
         let Some(seen) = last_seen else { return true };
         let Some(server_id) =
             self.state.windows.window(window).and_then(|window| window.info.sys_id)
         else {
             return true;
         };
-        let waiting = self.reconciler.in_flight(window)
-            || self.transaction_manager.get_target_frame(server_id).is_some();
-        !waiting || seen == self.transaction_manager.get_last_sent_txid(server_id)
+        self.transaction_manager.get_target_frame(server_id).is_none()
+            || seen == self.transaction_manager.get_last_sent_txid(server_id)
     }
 
     /// Mission Control moves windows itself; nothing it shows is a drag or a placement.
@@ -4485,11 +4492,17 @@ impl Reactor {
         let gripped = self.state.windows.is_gripped(wid);
         let pointer = self.state.windows.pointer();
         let answered = match kind {
-            ReportKind::Reply => self.reconciler.answer(pointer, wid, new_frame),
-            ReportKind::Unprompted => None,
+            ReportKind::Reply(seen) => {
+                let request = self.transaction_manager.mint();
+                self.reconciler.answer(pointer, request, seen, wid, new_frame)
+            }
+            ReportKind::Unprompted => reconciler::Reply::Late,
         };
         let observation = match answered {
-            Some((answer, queued)) => {
+            // The answer to a write Rift has since replaced: it says nothing about the one that
+            // is with the app now.
+            reconciler::Reply::Stale => return Ok(EventOutcome::no_change()),
+            reconciler::Reply::Answered(answer, queued) => {
                 // The desire that waited behind the answered write goes out now.
                 if let Some(write) = queued {
                     self.send_arranged(write);
@@ -4507,7 +4520,7 @@ impl Reactor {
             }
             // Unprompted, or an answer Rift had stopped waiting for, which is news like any
             // other: what follows re-derives where the window belongs and writes the difference.
-            None => self.reconciler.observe(pointer, wid, new_frame, old_frame),
+            reconciler::Reply::Late => self.reconciler.observe(pointer, wid, new_frame, old_frame),
         };
         if self.mission_control_moved_it() {
             return Ok(EventOutcome::no_change());
