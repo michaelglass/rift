@@ -45,7 +45,7 @@ Input classes (`InputClass`, parsed once where input enters `handle_loop_event`)
 | RetireWindows | ✗ Dragging | | ✗ Active | | | | ✗ None | | | |
 | SwitchWorkspaceFocus | ✗ Dragging | | | | | | | | | |
 | WarpFocus | ✗ Dragging | | | | | | | | | |
-| FollowActivation | | | | | | | | ✗ AwaitingInput | ✗ Switching | |
+| FollowActivation | ✗ Pressing, Dragging | | | | | | | ✗ AwaitingInput | ✗ Switching | |
 
 Axes, and where each value comes from:
 
@@ -118,7 +118,6 @@ Modes outside the reactor's table, and why:
   only raised windows). Its target is re-derived when it runs.
 - **`focus_grace`** in the raise manager. Not an ignore window: a one-time 250 ms → 1 s timeout
   extension for the last focus of a sequence.
-- **`FollowActivation` during a drag** is admitted, as before the table.
 - **#29 parked transfers**: owned by the transfers work (`rust-followups`), not touched.
 
 ## Open design questions
@@ -134,6 +133,4 @@ Modes outside the reactor's table, and why:
 2. **#3: should every steering command be refused while the topology is unsettled?** Today only
    `Arranging` (layout and move-to-display) is; `FocusWindow`, `SwitchSpace`, `CloseWindow` and
    the rest still pass, as they did under the quarantine.
-3. **Should a drag refuse `FollowActivation`?** An app activating mid-drag can switch the
-   workspace under the dragged window.
 4. **#13: what fact should end startup?** See "Kept on purpose".
