@@ -1589,14 +1589,6 @@ impl LayoutEngine {
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
             workspace.layout_system.remove_window(wid);
             let space = workspace.space;
-            // The assignment may already name the workspace the window is moving to (a drop or
-            // an app's move reassigns before the queued removal runs), so it leaves every other
-            // tree too: removal is from where the window is, not from where it is going.
-            for (id, workspace) in self.workspaces.workspaces.iter_mut() {
-                if id != assignment {
-                    workspace.layout_system.remove_window_and_rebalance_parent(wid);
-                }
-            }
             return (projected || self.floating.active_flat(space).contains(&wid)).then_some(space);
         }
         let active_space = self.space_with_window(wid);
@@ -4141,20 +4133,15 @@ mod tests {
             engine.update_space_display(origin, Some("external".into()));
             engine.update_space_display(space, Some("builtin".into()));
             let origin_workspace = engine.workspaces.list_workspaces(origin)[2].0;
+            // The window already sits in this workspace's tree, where the eviction landed it.
+            // (Assigning it away and back would take it out of the tree: membership follows
+            // the assignment.)
             let landing = store.workspace_for_window(before[0]).unwrap();
-            assert!(engine.workspaces.assign_window_to_workspace(
-                &mut store,
-                origin,
-                before[0],
-                origin_workspace
-            ));
-            let from = store.workspace_for_window(before[0]).unwrap();
+            engine.note_eviction(&store, before[0], origin_workspace);
             assert!(
-                engine
-                    .workspaces
-                    .assign_window_to_workspace(&mut store, space, before[0], landing)
+                engine.eviction_ordinal(&store, before[0], origin).is_some(),
+                "{mode:?}"
             );
-            engine.note_eviction(&store, before[0], from);
             let response = command(&mut engine, &mut store, LayoutCommand::MoveStackTab {
                 window: before[0].into(),
                 target: before[before.len() - 1].into(),

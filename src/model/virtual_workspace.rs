@@ -1277,9 +1277,13 @@ impl WorkspaceStore {
             if let Some(previous_assignment) = previous_assignment
                 && previous_assignment != workspace_id
                 && let Some(previous_workspace) = self.workspaces.get_mut(previous_assignment)
-                && previous_workspace.last_focused() == Some(window_id)
             {
-                previous_workspace.set_last_focused(None);
+                // Membership is single-valued: the window leaves the old workspace's tree here,
+                // where its assignment changes, not later from wherever removal looks.
+                previous_workspace.layout_system.remove_window_and_rebalance_parent(window_id);
+                if previous_workspace.last_focused() == Some(window_id) {
+                    previous_workspace.set_last_focused(None);
+                }
             }
             true
         })
