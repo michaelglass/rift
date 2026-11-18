@@ -94,6 +94,10 @@ moves into the core, the shape becomes the core's own state and the description 
   `Shadowed`: the Roc core decides (the event translated to plain data, across as words, its
   effects translated back), the Rust core steps the same event beside it, and the two must
   decide identical effects or rift stops. `Plainly` is the one translation both ways.
+- `roc/core/Traditional.roc`: the traditional geometry (stack and master-stack layouts are
+  traditional trees); `roc/core/Geometry.roc`: what the systems share (Rust's float helpers,
+  constraints, the tiling area, the axis solver). A shape's words start with its system's tag
+  (0 BSP, 1 traditional) and `main.roc`'s `tile` dispatches on it.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
   rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
@@ -115,7 +119,9 @@ moves into the core, the shape becomes the core's own state and the description 
   recorded effects (so float bits must match). 16 committed seeds (every fuzzer setup: plain,
   animated, animated with a scrolling camera) = 2,715 steps; 2000 × 40 = 339,772 steps; 4000 ×
   60 = **847,945 steps, identical**, no Roc allocation live afterwards.
-- `crates/rift-core-roc/tests/layout.rs`: random BSP shapes leaning on the edges (maxima under
+- `crates/rift-core-roc/tests/layout.rs`: random traditional shapes (tiny, zero and NaN
+  weights, stacks with bars and focused children, fills): 200,000 shapes, **2,446,623 frames
+  identical word for word**; and random BSP shapes leaning on the edges (maxima under
   minima, locked axes, ratios 0 and 1, one-child splits, fractional screens) through both
   geometries: 200,000 shapes, **1,057,049 frames identical word for word** (20,000 shapes by
   default). Its first failure was a signed zero (`round(-0.3)` is -0 in Rust).
@@ -200,7 +206,8 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | One pending store, plans, animation targets | M–L | Done, Rust and Roc. |
 | `DragKind` union | M | Done on the Rust line (platform side; the drop target is derived there until layout moves). |
 | Layout geometry: BSP | M | Done, Rust and Roc (the engine describes the shape; the core computes the frames). |
-| Layout geometry: traditional (stack, master-stack), scrolling, floating | M each | **Next**: the same for the other systems; the axis solver is already the core's. Scrolling has cached world geometry (`prepare_layout`) to carry. |
+| Layout geometry: traditional (stack, master-stack) | M | Done, Rust and Roc (`layout::traditional`, `Traditional.roc`); the stack bar's group frames use the core's `stack_frames`. |
+| Layout geometry: scrolling, floating | M each | **Next.** Scrolling has cached world geometry (`prepare_layout`) to carry. |
 | Layout trees into the core | L+ | Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
