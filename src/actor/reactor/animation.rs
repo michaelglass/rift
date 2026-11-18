@@ -500,23 +500,6 @@ impl Reactor {
         self.commit_presentations();
     }
 
-    /// The user took `window` (a drag began): nothing presents it any more, and an animation of
-    /// it settles where the model has it. (The presenter's last frame is not news: the user's
-    /// report is.)
-    pub(super) fn yield_to_user(&mut self, window: WindowId) {
-        let stopped = self.stop_window_presentations(vec![window]);
-        // The request of the presentation stopped: the one it published under, or, if it had
-        // published nothing yet, the latest sent to the window (an animated pass records it).
-        let request = stopped.first().map(|&(_, _, txid)| txid).or_else(|| {
-            let server_id = self.state.windows.window(window)?.info.sys_id?;
-            Some(self.transaction_manager.get_last_sent_txid(server_id))
-        });
-        if let Some(request) = request {
-            self.state.animation_stopped(window, request);
-        }
-        self.commit_presentations();
-    }
-
     /// Stops presenting `windows`; returns the last frame each presentation published.
     fn stop_window_presentations(
         &mut self,

@@ -1858,7 +1858,7 @@ fn matching_rift_frame_clears_pending_target() {
         reactor.transaction_manager.get_target_frame(wsid),
         Some(target_frame)
     );
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = last_sent(&reactor, wsid);
 
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
@@ -1887,7 +1887,7 @@ fn matching_rift_frame_clears_pending_target() {
     let adjusted_target = CGRect::new(CGPoint::new(80.0, 40.0), frame.size);
     let accepted = CGRect::new(CGPoint::new(95.0, 40.0), frame.size);
     reactor.place_window(wid, adjusted_target);
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = last_sent(&reactor, wsid);
     let outcome = reactor
         .dispatch_workflow(Event::WindowFrameChanged(
             wid,
@@ -2166,7 +2166,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
         Event::WindowFrameChanged(wid, frame, txid, Requested(requested))
     };
     reactor.place_window(wid, at(40.0));
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = last_sent(&reactor, wsid);
     // Acknowledged, unchanged, and explicitly requested frames.
     for event in [
         moved(wid, at(40.0), Some(txid), true),
@@ -3469,7 +3469,7 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
     let _ = apps.requests();
     assert!(reactor.update_layout_or_warn(false, true, None));
     let hidden_target = reactor.transaction_manager.get_target_frame(wsid).unwrap();
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = last_sent(&reactor, wsid);
     let _ = apps.requests();
     let clamped = CGRect::new(
         CGPoint::new(hidden_target.origin.x, hidden_target.origin.y - 41.),
@@ -3558,7 +3558,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
         parked_elsewhere,
-        Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
+        Some(last_sent(&reactor, wsid)),
         Requested(true),
     ));
 
@@ -5548,7 +5548,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
     let wsid = reactor.state.windows.window(right).unwrap().info.sys_id.unwrap();
-    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let txid = last_sent(&reactor, wsid);
     // An intermediate AX frame can coincide with the next layout's target.
     reactor.handle_event(Event::WindowFrameChanged(
         right,
@@ -12520,7 +12520,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 reactor.handle_event(Event::WindowFrameChanged(
                     window,
                     CGRect::new(CGPoint::new(0., 1.), CGSize::new(1000., 999.)),
-                    Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
+                    Some(last_sent(&reactor, wsid)),
                     Requested(false),
                 ));
                 if early == 7 {
@@ -13028,7 +13028,7 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
     let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
     // Rift has written a frame the app hasn't applied yet: its reports still carry the
     // transaction id it last saw.
-    let last_seen_by_app = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let last_seen_by_app = last_sent(&reactor, wsid);
     let in_flight = CGRect::new(CGPoint::new(frame.origin.x + 10.0, frame.origin.y), frame.size);
     reactor.place_window(wid, in_flight);
     assert!(matches!(
@@ -13717,4 +13717,9 @@ fn pend(reactor: &mut Reactor, wid: WindowId, target: CGRect) {
         Some(target),
         "pending"
     );
+}
+
+/// The request Rift last sent the window (what the app's answers name).
+fn last_sent(reactor: &Reactor, wsid: WindowServerId) -> TransactionId {
+    reactor.state.tx.get(&wsid).map(|record| record.txid).unwrap_or_default()
 }

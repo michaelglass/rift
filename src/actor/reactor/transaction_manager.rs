@@ -44,11 +44,6 @@ impl TransactionManager {
         }
     }
 
-    /// Gets the last sent transaction ID for a window.
-    pub fn get_last_sent_txid(&self, wsid: WindowServerId) -> TransactionId {
-        self.store.last_txid(&wsid)
-    }
-
     /// Gets the target frame for a window's transaction, if it exists.
     pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
         self.store.get(&wsid)?.target
