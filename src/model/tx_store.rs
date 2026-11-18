@@ -23,9 +23,9 @@ pub struct WindowTxStore {
 impl WindowTxStore {
     pub fn new() -> Self { Self::default() }
 
-    /// The core's pending frame for `id` (its projection): the record's id is kept.
-    pub fn project_target(&self, id: WindowServerId, target: CGRect) {
-        self.records.entry(id).or_default().target = Some(target);
+    /// The core's pending frame for `id`, or none (its projection): the record's id is kept.
+    pub fn project_target(&self, id: WindowServerId, target: Option<CGRect>) {
+        self.records.entry(id).or_default().target = target;
     }
 
     /// The id of the latest request sent to `id`: its pending frame (the core's) is kept.
@@ -41,12 +41,6 @@ impl WindowTxStore {
     }
 
     pub fn remove(&self, id: &WindowServerId) { self.records.remove(id); }
-
-    pub fn clear_target(&self, id: &WindowServerId) {
-        if let Some(mut record) = self.records.get_mut(id) {
-            record.target = None;
-        }
-    }
 
     /// The id of a new request.
     pub fn next_id(&self) -> TransactionId { self.ids.next() }
@@ -65,7 +59,7 @@ mod tests {
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
         let txid = store.next_id();
         store.sent(wsid, txid);
-        store.project_target(wsid, target);
+        store.project_target(wsid, Some(target));
         assert_eq!(store.get(&wsid).unwrap().target, Some(target));
 
         let newer = store.next_id();
@@ -75,7 +69,7 @@ mod tests {
             Some(target),
             "a send keeps the target"
         );
-        store.clear_target(&wsid);
+        store.project_target(wsid, None);
         let record = store.get(&wsid).unwrap();
         assert_eq!((record.txid, record.target), (newer, None));
         assert_ne!(txid, newer);

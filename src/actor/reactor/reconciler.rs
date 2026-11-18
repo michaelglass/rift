@@ -457,11 +457,6 @@ impl RiftState {
                         self.tx.project_target(server_id, target);
                     }
                 }
-                Effect::Unpending { window } => {
-                    if let Some(server_id) = self.windows.server_id(window) {
-                        self.tx.clear_target(&server_id);
-                    }
-                }
                 // The latest request sent each window, which the app actors read.
                 Effect::Write(ref write) => self.sent(write),
                 Effect::Plan(ref plan) => {

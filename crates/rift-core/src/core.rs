@@ -8,8 +8,6 @@
 //! Every event that may lead to a write carries the `request` the platform will send its
 //! writes under; each [`Write`] says which, and the app's answer names it back.
 
-use std::collections::HashMap;
-
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Phase, Pointer, Release, Ungrip};
 use crate::reconciler::{Note, Planned, Reconciler, Reply, Verdict, Want, Write};
@@ -123,10 +121,11 @@ pub enum Effect<K: Kinds> {
         request: K::Request,
     },
     /// Rift's pending frame for `window` is `target` now (a write in flight, an animation, a
-    /// refused frame): the platform's pending store is its projection.
-    Pending { window: K::Window, target: K::Frame },
-    /// Nothing is pending for `window` any more.
-    Unpending { window: K::Window },
+    /// refused frame), or nothing: the platform's pending store is its projection.
+    Pending {
+        window: K::Window,
+        target: Option<K::Frame>,
+    },
     /// Send one batch of an arrange pass.
     Plan(Plan<K>),
     /// A write is with the app; the desire waits behind it.
@@ -161,8 +160,6 @@ pub enum Effect<K: Kinds> {
 pub struct RustCore<K: Kinds> {
     reconciler: Reconciler<K>,
     grip: Grip<K::Window>,
-    /// The pending frames as last told to the platform (`Effect::Pending`).
-    projected: HashMap<K::Window, K::Frame>,
     /// The deadline the platform's timer is armed for.
     armed: Option<K::Time>,
 }
@@ -172,7 +169,6 @@ impl<K: Kinds> Default for RustCore<K> {
         RustCore {
             reconciler: Reconciler::default(),
             grip: Grip::Idle,
-            projected: HashMap::new(),
             armed: None,
         }
     }
@@ -454,23 +450,12 @@ impl<K: Kinds> RustCore<K> {
                 .into_iter()
                 .map(|(window, note)| Effect::Note { window, note }),
         );
-        for window in self.reconciler.touched() {
-            match (
-                self.reconciler.pending(window),
-                self.projected.get(&window).copied(),
-            ) {
-                (Some(target), Some(told)) if K::same_as(target, told) => {}
-                (Some(target), Some(_) | None) => {
-                    self.projected.insert(window, target);
-                    effects.push(Effect::Pending { window, target });
-                }
-                (None, Some(_)) => {
-                    self.projected.remove(&window);
-                    effects.push(Effect::Unpending { window });
-                }
-                (None, None) => {}
-            }
-        }
+        effects.extend(
+            self.reconciler.touched().into_iter().map(|window| Effect::Pending {
+                window,
+                target: self.reconciler.pending(window),
+            }),
+        );
         let next = self.reconciler.next_deadline();
         if next != self.armed {
             self.armed = next;
@@ -520,7 +505,7 @@ mod tests {
                 "expected the model's new frame, a plan, the pending target and a timer, got {effects:?}"
             );
         };
-        assert_eq!(*target, at(10.));
+        assert_eq!(*target, Some(at(10.)));
         let [write] = plan.frames.as_slice() else {
             panic!("one write, got {plan:?}")
         };
@@ -538,7 +523,7 @@ mod tests {
                 window: W,
                 reply: crate::Reply::Answered(crate::Answer::Acked)
             },
-            Effect::Unpending { window: W },
+            Effect::Pending { window: W, target: None },
             Effect::Timer(None),
         ]);
     }
