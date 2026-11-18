@@ -20,7 +20,7 @@ use test_log::test;
 
 use super::*;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::actor::reactor::reconciler::{Desired, Rift, Sync};
+use crate::actor::reactor::reconciler::{Desired, Sync};
 use crate::actor::reactor::testing::TestSizing;
 
 /// Signatures (invariant, step kind) this branch is known to fail. Each has a regression test.
@@ -1289,108 +1289,7 @@ fn drag_invariants_hold_across_interleavings() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The core boundary: every seed's run, as the steps the reactor took through the core.
-
-/// Rift's types to plain data, with times counted from `epoch`.
-struct ToPlain {
-    epoch: std::time::Instant,
-}
-
-impl rift_core::Translate<Rift, rift_core::plain::Plain> for ToPlain {
-    fn window(&self, window: WindowId) -> rift_core::plain::WindowId {
-        rift_core::plain::WindowId {
-            pid: window.pid,
-            idx: window.idx.get(),
-        }
-    }
-
-    fn frame(&self, frame: CGRect) -> rift_core::plain::Rect {
-        rift_core::plain::Rect {
-            x: frame.origin.x,
-            y: frame.origin.y,
-            w: frame.size.width,
-            h: frame.size.height,
-        }
-    }
-
-    fn time(&self, time: std::time::Instant) -> rift_core::plain::Nanos {
-        rift_core::plain::Nanos((time - self.epoch).as_nanos() as u64)
-    }
-
-    fn request(&self, request: TransactionId) -> rift_core::plain::RequestId {
-        rift_core::plain::RequestId(request.number())
-    }
-}
-
-type PlainStep = (
-    rift_core::Event<rift_core::plain::Plain>,
-    Vec<rift_core::Effect<rift_core::plain::Plain>>,
-);
-
-/// Runs `steps` (and the settling at the end) and returns every step the reactor took through
-/// the core, on plain data. Invariant violations are not this function's business.
-fn trace(setup: Setup, steps: &[Step]) -> Vec<PlainStep> {
-    let mut sim = Sim::new(setup);
-    let epoch = sim.reactor.state.core.clock.now();
-    for &step in steps {
-        let emitted = sim.run(step);
-        sim.pending.extend(emitted);
-    }
-    _ = sim.settle(steps.len());
-    let to = ToPlain { epoch };
-    let recorded = sim.reactor.state.core.trace.borrow_mut().take().unwrap_or_default();
-    recorded
-        .into_iter()
-        .map(|(event, effects)| {
-            (
-                event.translate(&to),
-                effects.into_iter().map(|effect| effect.translate(&to)).collect(),
-            )
-        })
-        .collect()
-}
-
-#[test]
-fn the_core_on_plain_data_decides_what_the_reactor_decided() {
-    // The reactor runs the core on its own types; replayed on plain data (what a foreign core
-    // sees), every step must decide exactly the same effects.
-    use rift_core::Core;
-    let cases = budget("RIFT_FUZZ_CASES", 200) as u64;
-    let len = budget("RIFT_FUZZ_STEPS", 30);
-    let mut total = 0;
-    for seed in 0..cases {
-        let recorded = trace(Setup::of(seed), &generate(seed, len));
-        let mut core = rift_core::RustCore::<rift_core::plain::Plain>::default();
-        for (index, (event, effects)) in recorded.iter().enumerate() {
-            assert_eq!(
-                &core.step(event.clone()),
-                effects,
-                "seed {seed}, core step {index}: {event:?}"
-            );
-        }
-        total += recorded.len();
-    }
-    assert!(total > 0, "the fuzzer took no steps through the core");
-}
-
-/// Writes every seed's trace to `$RIFT_TRACE_DIR/seed-<n>.json`, for the Roc core's
-/// differential test (`crates/rift-core-roc`). Run explicitly:
-/// `RIFT_TRACE_DIR=… cargo test dump_core_traces -- --ignored`.
-#[test]
-#[ignore]
-fn dump_core_traces() {
-    let dir = std::path::PathBuf::from(std::env::var("RIFT_TRACE_DIR").expect("RIFT_TRACE_DIR"));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cases = budget("RIFT_FUZZ_CASES", 200) as u64;
-    let len = budget("RIFT_FUZZ_STEPS", 30);
-    for seed in 0..cases {
-        let recorded = trace(Setup::of(seed), &generate(seed, len));
-        let json = serde_json::to_string(&recorded).unwrap();
-        std::fs::write(dir.join(format!("seed-{seed}.json")), json).unwrap();
-    }
-}
-
-// The failures the fuzzer found on earlier revisions, shrunk; each now passes.
+// Regressions.
 
 #[test]
 fn another_apps_window_moving_does_not_take_over_the_drag() {

@@ -1,5 +1,4 @@
-//! The core on plain data: what a foreign core (Roc) sees. Every type here is a fixed-width
-//! integer, a float, or a record of them.
+//! Plain types for the core's unit tests.
 
 use std::ops::Add;
 use std::time::Duration;
@@ -7,14 +6,12 @@ use std::time::Duration;
 use crate::Kinds;
 
 /// A window: its app's pid and its index within the app.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WindowId {
     pub pid: i32,
     pub idx: u32,
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,
@@ -24,12 +21,10 @@ pub struct Rect {
 }
 
 /// The id a write goes out under.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RequestId(pub u32);
 
 /// Monotonic nanoseconds since the platform started its clock.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Nanos(pub u64);
 
@@ -41,7 +36,6 @@ impl Add<Duration> for Nanos {
 
 fn within(a: f64, tolerance: f64, b: f64) -> bool { (a - b).abs() < tolerance }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plain;
 

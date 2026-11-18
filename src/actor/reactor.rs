@@ -16,8 +16,6 @@ mod native_tabs;
 mod query;
 pub(crate) mod reconciler;
 mod replay;
-#[cfg(feature = "roc-core")]
-mod roc_bridge;
 pub mod transaction_manager;
 mod transient_focus;
 mod utils;

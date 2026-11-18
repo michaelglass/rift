@@ -7,7 +7,8 @@
 //! and a foreign core (Roc) can run it on [`plain`] data.
 
 pub mod core;
-pub mod plain;
+#[cfg(test)]
+mod plain;
 pub mod pointer;
 pub mod reconciler;
 
@@ -15,12 +16,12 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::time::Duration;
 
-pub use crate::core::{Core, Desire, Effect, Event, Plan, RustCore};
+pub use crate::core::{Desire, Effect, Event, Plan, RustCore};
 pub use crate::pointer::{
     Button, Holder, Initiative, InputClass, Owner, Pointer, Release, Ungrip, may,
 };
 pub use crate::reconciler::{
-    Answer, Note, Observation, Reconciler, Reply, Sync, Translate, Verdict, Want, Write,
+    Answer, Note, Observation, Reconciler, Reply, Sync, Verdict, Want, Write,
 };
 
 /// The platform's types, and the little geometry and time the core needs of them.

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CGRect;
 use rift_core::reconciler::Note;
-use rift_core::{Core, Kinds, Release};
+use rift_core::{Kinds, Release};
 pub(crate) use rift_core::{Observation, Owner, Want};
 use tracing::{debug, trace, warn};
 
@@ -109,12 +109,8 @@ impl Clock {
     }
 }
 
-/// The core the reactor steps: the Rust core, or with the `roc-core` feature the Roc core
-/// (shadowed by the Rust core, which must agree at every step).
-#[cfg(not(feature = "roc-core"))]
+/// The core the reactor steps.
 type Engine = rift_core::RustCore<Rift>;
-#[cfg(feature = "roc-core")]
-type Engine = super::roc_bridge::RocInRift;
 
 /// One step through the core, as the reactor took it: what went in and what came out.
 #[cfg(test)]
@@ -129,7 +125,7 @@ pub(crate) struct Reconciler {
     /// The deadline the core last asked the run loop's timer to be armed for.
     armed: Cell<Option<Instant>>,
     pub(crate) clock: Clock,
-    /// When `Some`, every step is recorded (the differential test replays them).
+    /// When `Some`, every step is recorded (the fuzzer's invariants read why Rift wrote).
     #[cfg(test)]
     pub(crate) trace: RefCell<Option<Vec<Step>>>,
 }
@@ -137,10 +133,7 @@ pub(crate) struct Reconciler {
 impl Default for Reconciler {
     fn default() -> Self {
         let clock = Clock::default();
-        #[cfg(not(feature = "roc-core"))]
         let core = Shared::new(Engine::default());
-        #[cfg(feature = "roc-core")]
-        let core = Shared::new(Engine::new(clock.now()));
         Reconciler {
             core,
             armed: Cell::new(None),

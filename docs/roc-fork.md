@@ -4,11 +4,13 @@
 > The Roc port stopped at bookmark `experiment/roc-paused` (`uslyquzy`), green on both cores:
 > the Roc core implements the reconciler with request ids, the mode gate and the timer, and with
 > `--features roc-core` the reactor ran all 949 tests on it, shadowed by the Rust core. It did
-> not get the grip (press/drag) or the window lifecycle. `roc/`, `crates/rift-core-roc` and the
-> `roc-core` feature stay in the tree, **frozen at `experiment/roc-paused`**: they are outside the
-> cargo workspace, nothing updates them, and they will drift from `rift-core` (they stop building
-> against it). `cargo test --workspace` does not need them. The Rust line continues on
-> `experiment/rust-core`; its replay test (`RustCore` on the reactor's recorded traces) stays green.
+> not get the grip (press/drag) or the window lifecycle. `roc/` and `crates/rift-core-roc` stay in
+> the tree, **frozen at `experiment/roc-paused`**: outside the cargo workspace, updated by nothing,
+> and drifting from `rift-core`. The Rust line (`experiment/rust-core`) has since deleted the
+> translation layer the Roc core needed: `Event`/`Effect`/`Write::translate` and `Translate`, the
+> plain-data types (`plain.rs`, now test-only), the serde derives, `Write::from_foreign_core`, the
+> `Core` trait, `roc_bridge.rs`, the `roc-core` feature and the plain-data replay test. **A Roc
+> resume re-adds that layer** from `experiment/roc-paused`.
 
 Experiment on bookmark `experiment/roc`, on top of `experiment/listen-only-tap`. The Roc code
 may be thrown away; the boundary (`crates/rift-core`) is the part meant to go back to rift.

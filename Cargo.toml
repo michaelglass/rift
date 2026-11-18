@@ -62,12 +62,6 @@ timing = ["dep:tracing-timing"]
 experimental = ["disable-axuielement-destroyed"]
 custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
-# Frozen with the Roc rewrite at experiment/roc-paused: the reactor on the Roc core, shadowed by
-# the Rust core (src/actor/reactor/roc_bridge.rs). To revive it, add back
-# `rift-core-roc = { path = "crates/rift-core-roc", optional = true }` and make this feature
-# `["dep:rift-core-roc"]` (a path dependency of rift-wm becomes a workspace member, `exclude`
-# notwithstanding, which is why it is not here while frozen).
-roc-core = []
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
@@ -207,8 +201,6 @@ rift-protocol = { path = "crates/rift-protocol" }
 multitouch = "0.3.2"
 
 [dev-dependencies]
-# Traces of the reactor's core steps are saved as JSON for the Roc core to replay.
-rift-core = { path = "crates/rift-core", features = ["serde"] }
 pretty_assertions = "1.4.0"
 tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }
