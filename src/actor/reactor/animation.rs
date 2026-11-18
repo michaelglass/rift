@@ -569,7 +569,7 @@ impl Reactor {
                 if let Some(frame) = frame
                     && let Some(window) = self.state.windows.window(wid)
                 {
-                    let frame = CGRect::new(frame.origin, window.frame_monotonic.size);
+                    let frame = CGRect::new(frame.origin, window.frame_monotonic().size);
                     self.state.step(CoreEvent::Seen { window: wid, frame });
                 }
             }
@@ -684,14 +684,14 @@ impl Reactor {
                 }
                 let window = self.state.windows.window(wid)?;
                 let app = self.app_manager.apps.get(&wid.pid)?;
-                let frame = control.as_ref().map_or(window.frame_monotonic, |control| {
-                    control.frame(wid, window.frame_monotonic)
+                let frame = control.as_ref().map_or(window.frame_monotonic(), |control| {
+                    control.frame(wid, window.frame_monotonic())
                 });
                 Some(PresentedWindow {
                     handle: app.handle.with_scrolling_bounds(bound),
                     wid,
                     wsid: window.info.sys_id,
-                    from: window.frame_monotonic,
+                    from: window.frame_monotonic(),
                     to: base_frame,
                     fixed,
                     announced: false,

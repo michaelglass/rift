@@ -32,9 +32,8 @@ fn evidence(window: WindowId) -> WindowFingerprint {
 fn live_state(window: WindowId) -> WindowState {
     let saved = evidence(window);
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(saved.width, saved.height));
-    WindowState {
-        native_transient: false,
-        info: WindowInfo {
+    {
+        let mut state = WindowState::from(WindowInfo {
             has_native_tabs: false,
             is_standard: true,
             is_root: true,
@@ -49,10 +48,9 @@ fn live_state(window: WindowId) -> WindowState {
             path: None,
             ax_role: None,
             ax_subrole: None,
-        },
-        frame_monotonic: frame,
-        is_manageable: true,
-        manage_override: None,
+        });
+        state.is_manageable = true;
+        state
     }
 }
 
@@ -403,7 +401,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     }
     engine.floating_positions.store(hidden, w3, frame);
     engine.floating_positions.store(shown, w1, frame);
-    store.window_mut(w3).unwrap().frame_monotonic.origin.x = 99_999.0;
+    store.window_mut(w3).unwrap().frame_monotonic().origin.x = 99_999.0;
     store.observe_minimized(minimized);
     let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(minimized));
     let path = std::env::temp_dir().join(format!("rift-save-test-{}.ron", std::process::id()));
@@ -418,7 +416,10 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         saved[&w1].frame, None,
         "a tiled window's stale frame stays behind"
     );
-    assert_eq!(saved[&w2].frame, Some(store.window(w2).unwrap().frame_monotonic));
+    assert_eq!(
+        saved[&w2].frame,
+        Some(store.window(w2).unwrap().frame_monotonic())
+    );
     assert_eq!((saved[&w3].frame, saved[&w3].workspace), (Some(frame), hidden));
     assert!(
         saved.contains_key(&minimized),

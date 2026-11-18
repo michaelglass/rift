@@ -701,7 +701,7 @@ mod tests {
 
             apps.simulate_until_quiet(&mut r);
 
-            let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic();
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
@@ -713,7 +713,7 @@ mod tests {
                 r.gesture_tick();
             }
 
-            let moved = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            let moved = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic();
             assert!(
                 moved.origin.x < initial.origin.x,
                 "a display above must not pin horizontal viewport motion: external={external}, initial={initial:?}, moved={moved:?}"
@@ -738,13 +738,14 @@ mod tests {
             queue.drain_with(|wid, frame, set_size, _, source, _, _| {
                 assert_eq!(source, crate::actor::app::FrameSource::Viewport);
                 assert!(!set_size, "scrolling must only move windows");
-                assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic));
+                assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic()));
                 written.insert(wid);
             });
             assert_eq!(written.len(), 4);
             assert!(
-                !initial
-                    .same_as(r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic)
+                !initial.same_as(
+                    r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic()
+                )
             );
 
             // Reconcile the last interactive frame before the release snap (or
@@ -1034,7 +1035,7 @@ mod tests {
                             }
                             assert_eq!(
                                 position.origin,
-                                r.state.windows.window(wid).unwrap().frame_monotonic.origin
+                                r.state.windows.window(wid).unwrap().frame_monotonic().origin
                             );
                             hidden.insert(wid);
                         }
@@ -1075,7 +1076,7 @@ mod tests {
             r.start_gesture_presentation();
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
-            let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic();
             r.gesture_event(Lifecycle::End {
                 sample: sample(1, 300.0, 100),
                 cancelled: false,
@@ -1085,7 +1086,7 @@ mod tests {
                 "gesture override must animate even with global animation disabled"
             );
             assert_eq!(
-                r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic,
+                r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic(),
                 before
             );
             // Duplicate lift and late physical samples cannot retarget the release.
@@ -1128,7 +1129,9 @@ mod tests {
                             assert_eq!(source, FrameSource::Viewport);
                             assert!(!set_size);
                             assert!(
-                                frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic)
+                                frame.same_as(
+                                    r.state.windows.window(wid).unwrap().frame_monotonic()
+                                )
                             );
                             moved += 1;
                         });

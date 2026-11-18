@@ -1905,7 +1905,7 @@ impl Reactor {
                 let moved = new.iter().find_map(|(wid, info)| {
                     let known = self.state.windows.window(*wid)?;
                     (self.state.windows.is_gripped(*wid)
-                        && !known.frame_monotonic.same_as(info.frame))
+                        && !known.frame_monotonic().same_as(info.frame))
                     .then_some((*wid, info.frame))
                 });
                 if let Some((wid, frame)) = moved {
@@ -2220,7 +2220,7 @@ impl Reactor {
                 self.pointer_pressed(point, button);
                 let source = self.state.windows.gripped().and_then(|window| {
                     let state = self.state.windows.window(window)?;
-                    Some((window, state.frame_monotonic, state.info.sys_id))
+                    Some((window, state.frame_monotonic(), state.info.sys_id))
                 });
                 let Some((window, frame, server_id)) = source else {
                     return Ok(EventOutcome::no_change());
@@ -2408,7 +2408,7 @@ impl Reactor {
                             .map(|s| s.frame)
                             .unwrap_or(destination);
                         let mut frame =
-                            self.state.windows.window(intent.window).unwrap().frame_monotonic;
+                            self.state.windows.window(intent.window).unwrap().frame_monotonic();
                         frame.origin.x += destination.origin.x - source.origin.x;
                         frame.origin.y += destination.origin.y - source.origin.y;
                         frame
@@ -2461,7 +2461,7 @@ impl Reactor {
                 self.mouse_inventory_hit = None;
                 let active_space = window.and_then(|window| {
                     self.state.windows.window(window).and_then(|state| {
-                        self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                        self.best_space_for_window(&state.frame_monotonic(), state.info.sys_id)
                             .filter(|space| self.is_space_active(*space))
                             .or_else(|| {
                                 state
@@ -2714,7 +2714,7 @@ impl Reactor {
                 let window_server_id = window_server_id.map(WindowServerId::new);
                 let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
                     self.state.windows.window(window_id).and_then(|window| {
-                        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+                        self.best_space_for_window(&window.frame_monotonic(), window.info.sys_id)
                     })
                 });
                 return command_workflow::handle_command_reactor_focus_window(
@@ -2785,7 +2785,7 @@ impl Reactor {
                 }
                 let focus_window_center = focus_window
                     .and_then(|wid| self.state.windows.window(wid))
-                    .map(|window| window.frame_monotonic.mid());
+                    .map(|window| window.frame_monotonic().mid());
                 return command_workflow::handle_focus_display(
                     &self.app_manager,
                     command_workflow::DisplayFocusPayload {
@@ -2835,7 +2835,7 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 let window_server_id = window_state.info.sys_id;
-                let window_frame = window_state.frame_monotonic;
+                let window_frame = window_state.frame_monotonic();
                 let source_space = self
                     .assigned_space_for_window_id(window)
                     .or_else(|| self.best_space_for_window_id(window))
@@ -2956,7 +2956,7 @@ impl Reactor {
                 let moves = windows
                     .into_iter()
                     .filter_map(|window| {
-                        let frame = self.state.windows.window(window)?.frame_monotonic;
+                        let frame = self.state.windows.window(window)?.frame_monotonic();
                         let source = self
                             .space_state
                             .screen_by_space(source_space)
@@ -3065,7 +3065,7 @@ impl Reactor {
             let assigned_space = self.assigned_space_for_window_id(window);
             let active_space = assigned_space.or_else(|| {
                 self.state.windows.window(window).and_then(|state| {
-                    self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                    self.best_space_for_window(&state.frame_monotonic(), state.info.sys_id)
                         .filter(|space| self.is_space_active(*space))
                         .or_else(|| {
                             state
@@ -3265,7 +3265,7 @@ impl Reactor {
                 .filter_map(|id| {
                     let state = self.state.windows.window(id)?;
                     (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
-                        .then_some((id, state.frame_monotonic))
+                        .then_some((id, state.frame_monotonic()))
                 })
                 .collect();
             if let Some(wm) = &self.communication_manager.wm_sender {
@@ -3304,7 +3304,7 @@ impl Reactor {
                 let from = self
                     .main_window()
                     .and_then(|wid| self.state.windows.window(wid))
-                    .map(|window| window.frame_monotonic);
+                    .map(|window| window.frame_monotonic());
                 if let Some(to) = to
                     && let Some(input_tx) = &self.communication_manager.input_tx
                 {
@@ -3407,7 +3407,7 @@ impl Reactor {
             app_name,
             info: WindowInfo {
                 title: window_state.info.title.clone(),
-                frame: window_state.frame_monotonic,
+                frame: window_state.frame_monotonic(),
                 bundle_id,
                 ..window_state.info.clone()
             },
@@ -4424,7 +4424,7 @@ impl Reactor {
         let Some(window) = self.state.windows.window(wid) else {
             return Ok(EventOutcome::no_change());
         };
-        let (server_id, old_frame) = (window.info.sys_id, window.frame_monotonic);
+        let (server_id, old_frame) = (window.info.sys_id, window.frame_monotonic());
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
@@ -4996,7 +4996,7 @@ impl Reactor {
     }
 
     fn best_space_for_window_state(&self, window: &WindowState) -> Option<SpaceId> {
-        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+        self.best_space_for_window(&window.frame_monotonic(), window.info.sys_id)
     }
 
     fn hidden_assigned_space_for_frame(
@@ -5018,7 +5018,7 @@ impl Reactor {
 
     fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         let window = self.state.windows.window(wid)?;
-        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
+        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic())
     }
 
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
@@ -5250,7 +5250,7 @@ impl Reactor {
         }
         let discovery = self.assigned_space_for_window_id(wid).or(authoritative).or_else(|| {
             let window = self.state.windows.window(wid)?;
-            self.best_space_for_frame(&window.frame_monotonic).filter(|space| {
+            self.best_space_for_frame(&window.frame_monotonic()).filter(|space| {
                 self.is_space_active(*space)
                     || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
             })
@@ -5285,7 +5285,7 @@ impl Reactor {
     }
 
     fn window_frame_on_known_screen(&self, wid: WindowId) -> Option<CGRect> {
-        let frame = self.state.windows.window(wid)?.frame_monotonic;
+        let frame = self.state.windows.window(wid)?.frame_monotonic();
         self.screen_for_point(frame.mid()).map(|_| frame)
     }
 
@@ -5505,9 +5505,9 @@ impl Reactor {
                     );
                     continue;
                 };
-                placement.resolve_frame(window.frame_monotonic, screen.frame)
+                placement.resolve_frame(window.frame_monotonic(), screen.frame)
             } else {
-                placement.resolve_frame(window.frame_monotonic, CGRect::default())
+                placement.resolve_frame(window.frame_monotonic(), CGRect::default())
             };
 
             self.state.windows.clear_floating_display_geometry(placement.window);
@@ -5543,7 +5543,7 @@ impl Reactor {
                 );
                 continue;
             };
-            let old_frame = window.frame_monotonic;
+            let old_frame = window.frame_monotonic();
             let mut new_frame = old_frame;
             if let Some(width) = resize.size.w {
                 new_frame.size.width = width;
@@ -5622,7 +5622,7 @@ impl Reactor {
             return false;
         }
 
-        let candidate_frame = window.frame_monotonic;
+        let candidate_frame = window.frame_monotonic();
 
         let Some(space) = space else {
             trace!(?wid, "Skipping mouse focus without a resolved space");
@@ -5652,7 +5652,7 @@ impl Reactor {
             other != wid
                 && state.info.sys_id.is_some()
                 && self.layout_manager.layout_engine.is_window_floating(other)
-                && candidate_frame.contains_rect(state.frame_monotonic)
+                && candidate_frame.contains_rect(state.frame_monotonic())
         });
         if !could_occlude {
             return true;
@@ -5682,7 +5682,7 @@ impl Reactor {
             let Some(above_state) = self.state.windows.window(above_wid) else {
                 continue;
             };
-            let above_frame = above_state.frame_monotonic;
+            let above_frame = above_state.frame_monotonic();
             if !candidate_frame.contains_rect(above_frame) {
                 continue;
             }
@@ -6793,7 +6793,7 @@ impl Reactor {
                 self.state
                     .windows
                     .window(wid)
-                    .map(|window_state| (wid, window_state.frame_monotonic))
+                    .map(|window_state| (wid, window_state.frame_monotonic()))
             })
             .collect::<Vec<_>>();
 
