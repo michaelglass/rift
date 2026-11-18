@@ -8,7 +8,8 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::{
-    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem, cg_rect, core_rect,
+    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem, cg_rect,
+    core_rect, first_frames,
 };
 use crate::model::tree::NodeId;
 
@@ -235,14 +236,11 @@ impl FloatingLayoutSystem {
                 seen: seen(wid),
             })
             .collect();
-        floating::Floating {
+        let floating = floating::Floating {
             screen: core_rect(screen),
             spread: self.spread_on_initialization,
-        }
-        .first_frames(&newcomers)
-        .into_iter()
-        .map(cg_rect)
-        .collect()
+        };
+        first_frames(floating, &newcomers).into_iter().map(cg_rect).collect()
     }
 
     pub(crate) fn initialize_frames(

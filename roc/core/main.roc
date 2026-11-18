@@ -8,6 +8,7 @@ import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag,
 import Bsp
 import Traditional
 import Scrolling
+import Floating
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -112,9 +113,10 @@ Model : {
 core = { init, step, tile }
 
 ## Layout geometry: a shape's words (its layout system's tag first: 0 BSP, 1 traditional,
-## 2 a scrolling strip, 3 a settle question on a strip's placement) in; out, a 0 and the
-## answer's words (the frames; for a strip, where it placed everything; for a settle question,
-## where the camera settles), or a 1: the words were not a question it answers.
+## 2 a scrolling strip, 3 a settle question on a strip's placement, 4 a floating layout's
+## newcomers) in; out, a 0 and the answer's words (the frames; for a strip, where it placed
+## everything; for a settle question, where the camera settles; for newcomers, their first
+## frames), or a 1: the words were not a question it answers.
 tile : List(U64) -> List(U64)
 tile = |words|
 	match shape_answer(words) {
@@ -131,6 +133,7 @@ shape_answer = |words| {
 		1 => Traditional.frames_of(cursor).map_ok(put_frames)
 		2 => Scrolling.placed_words(cursor)
 		3 => Scrolling.settled_words(cursor)
+		4 => Floating.first_frames_words(cursor)
 		_ => Err(Malformed)
 	}
 }

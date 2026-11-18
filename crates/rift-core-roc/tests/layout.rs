@@ -5,6 +5,7 @@
 //! non-finite weights, stacks with bars, fractional screens.
 
 use rift_core::layout::bsp::{Bsp, Children, Fill, Node, Slot};
+use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{self, Strip};
 use rift_core::layout::traditional::{self, StackLine, Traditional};
 use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
@@ -402,6 +403,57 @@ fn the_roc_core_settles_the_camera_where_the_rust_core_does() {
     let after = AllocationCount::now();
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("layout: {cases} settle questions answered identically");
+}
+
+#[test]
+fn the_roc_core_places_floating_newcomers_as_the_rust_core_does() {
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0xF10A_7E5C_A5CA_DE11);
+    let before = AllocationCount::now();
+    let mut placed = 0;
+    for case in 0..cases {
+        let floating = Floating {
+            screen: Rect {
+                x: rng.length(-2000., 2000.),
+                y: rng.length(-100., 1000.),
+                w: rng.length(0., 3000.),
+                h: rng.length(0., 2000.),
+            },
+            spread: rng.chance(50),
+        };
+        let windows: Vec<Newcomer> = (0..rng.below(7))
+            .map(|_| Newcomer {
+                constraints: constraints(&mut rng),
+                seen: match rng.below(4) {
+                    0 => Seen::Unseen,
+                    1 => Seen::Live(Rect {
+                        x: 0.,
+                        y: 0.,
+                        w: f64::NAN,
+                        h: rng.length(0., 900.),
+                    }),
+                    _ => Seen::Live(Rect {
+                        x: rng.length(-500., 2500.),
+                        y: rng.length(-500., 1500.),
+                        w: rng.length(0., 3000.),
+                        h: rng.length(0., 2000.),
+                    }),
+                },
+            })
+            .collect();
+        let rust = floating.first_frames(&windows);
+        placed += rust.len();
+        let roc = tile_words(&wire::encode_floating(floating, windows.clone()));
+        if roc != Ok(wire::encode_rects(rust.clone())) {
+            panic!(
+                "case {case}: {floating:?} {windows:#?}\n  roc:  {:?}\n  rust: {rust:?}",
+                roc.map(|words| wire::decode_rects(&words))
+            );
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} floating layouts, {placed} first frames identical");
 }
 
 #[test]

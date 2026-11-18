@@ -2,7 +2,7 @@
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_core::layout::traditional::{self, StackLine};
-use rift_core::layout::{Gaps, Size, bsp, scrolling};
+use rift_core::layout::{Gaps, Size, bsp, floating, scrolling};
 use rift_core::plain::Rect;
 
 use crate::actor::app::WindowId;
@@ -136,6 +136,29 @@ pub(crate) fn settle<C: Copy + PartialEq + std::fmt::Debug>(
     #[cfg(not(feature = "roc-core"))]
     let _ = number;
     settled
+}
+
+/// A floating layout's first frames for `windows`, in order.
+pub(crate) fn first_frames(
+    floating: floating::Floating,
+    windows: &[floating::Newcomer],
+) -> Vec<Rect> {
+    let frames = floating.first_frames(windows);
+    #[cfg(feature = "roc-core")]
+    {
+        let roc = rift_core_roc::first_frames(floating, windows.to_vec()).unwrap_or_else(|error| {
+            panic!("the Roc core placed nothing ({error:?}) for {floating:?} {windows:?}")
+        });
+        let bits = |rects: &[Rect]| -> Vec<[u64; 4]> {
+            rects.iter().map(|r| [r.x, r.y, r.w, r.h].map(f64::to_bits)).collect()
+        };
+        assert_eq!(
+            bits(&roc),
+            bits(&frames),
+            "the Roc core and its Rust shadow place {floating:?} {windows:?} differently"
+        );
+    }
+    frames
 }
 
 #[cfg(feature = "roc-core")]

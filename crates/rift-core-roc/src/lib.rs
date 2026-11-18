@@ -23,6 +23,7 @@ use std::ptr::NonNull;
 // Roc's runtime hooks. Roc runs on one thread (the caller's), so the counters are thread-local.
 use libmimalloc_sys::{mi_free as free, mi_malloc as malloc, mi_realloc as realloc};
 use rift_core::layout::bsp::Bsp;
+use rift_core::layout::floating::{Floating, Newcomer};
 use rift_core::layout::scrolling::{Placed, Settle, Settled, Strip};
 use rift_core::layout::traditional::Traditional;
 use rift_core::plain::wire::WireError;
@@ -307,6 +308,13 @@ pub fn settle(
 ) -> Result<Settled<u64>, RocError> {
     let words = tile_words(&wire::encode_settle(placed, view, projected, from, how))?;
     wire::decode_settled(&words).map_err(RocError::Unreadable)
+}
+
+/// A floating layout's first frames, as `Floating::first_frames` places them, placed by the Roc
+/// core.
+pub fn first_frames(floating: Floating, windows: Vec<Newcomer>) -> Result<Vec<Rect>, RocError> {
+    let words = tile_words(&wire::encode_floating(floating, windows))?;
+    wire::decode_rects(&words).map_err(RocError::Unreadable)
 }
 
 impl Drop for RocCore {
