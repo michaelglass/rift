@@ -141,7 +141,9 @@ pub struct Input {
     // Listen-only: reports plain left presses without macOS holding the click for rift.
     press_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     press_tap_generation: Cell<u64>,
-    disable_hotkey: RefCell<Option<Hotkey>>,
+    /// `focus_follows_mouse_disable_hotkey`: held, it pauses focus follows mouse and nothing
+    /// else (it was called the disable hotkey, but no binding is disabled).
+    ffm_pause_key: RefCell<Option<Hotkey>>,
     binding_mode_specs: RefCell<BindingModeSpecs>,
     hotkeys: RefCell<Vec<HashMap<Hotkey, Vec<WmCommand>>>>,
     mode_indices: RefCell<HashMap<String, usize>>,
@@ -167,7 +169,8 @@ struct State {
     converter: CoordinateConverter,
     screens: Vec<CGRect>,
     focus_follows_mouse_enabled: bool,
-    disable_hotkey_active: bool,
+    /// The FFM pause key is held.
+    ffm_paused: bool,
     low_power_mode: bool,
     pressed_keys: HashSet<KeyCode>,
     current_flags: CGEventFlags,
@@ -188,7 +191,7 @@ impl Default for State {
             converter: CoordinateConverter::default(),
             screens: Vec::new(),
             focus_follows_mouse_enabled: true,
-            disable_hotkey_active: false,
+            ffm_paused: false,
             low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::with_capacity_and_hasher(256, Default::default()),
             current_flags: CGEventFlags::empty(),
@@ -226,15 +229,15 @@ unsafe fn drop_input_ctx(ptr: *mut std::ffi::c_void) {
 impl Input {
     fn desired_event_mask(&self) -> CGEventMask {
         let state = self.state.borrow();
-        let disable_hotkey = self.disable_hotkey.borrow();
-        let keyed_disable =
-            disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
+        let ffm_pause_key = self.ffm_pause_key.borrow();
+        let keyed_ffm_pause =
+            ffm_pause_key.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
         let hotkeys_enabled = self.hotkeys.borrow().iter().any(|map| !map.is_empty());
         let mut mask = build_event_mask(
             // Keyboard launchers must end wake/unlock activation suppression
             // even when no Rift keyboard bindings are configured.
             true,
-            hotkeys_enabled || disable_hotkey.is_some(),
+            hotkeys_enabled || ffm_pause_key.is_some(),
             (self.startup.get().pointer()
                 && (state.mouse_hides_on_focus
                     || self.horizontal_mouse_warp.get().is_some()
@@ -242,7 +245,7 @@ impl Input {
                         && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
             self.startup.get().pointer() && state.mouse_hides_on_focus,
-            keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
+            keyed_ffm_pause || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
         if self.mission_control_active.get() {
             mask |= (1u64 << CGEventType::LeftMouseDown.0)
@@ -413,7 +416,7 @@ impl Input {
         wm_sender: wm_controller::Sender,
         mission_control_tx: Option<super::mission_control::Sender>,
     ) -> Self {
-        let disable_hotkey = config
+        let ffm_pause_key = config
             .settings
             .focus_follows_mouse_disable_hotkey
             .clone()
@@ -423,9 +426,9 @@ impl Input {
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
         state.mouse_features_enabled = config.settings.drag_drop.enabled;
         state.mouse_settings = config.settings.drag_drop;
-        state.disable_hotkey_active = disable_hotkey
+        state.ffm_paused = ffm_pause_key
             .as_ref()
-            .map(|target| state.compute_disable_hotkey_active(target))
+            .map(|target| state.ffm_pause_key_down(target))
             .unwrap_or(false);
         state.gesture_settings = super::gesture::Settings::new(&config);
         let gesture_control = super::gesture::Control::new(&config);
@@ -455,7 +458,7 @@ impl Input {
             tap_generation: Cell::new(0),
             press_tap: RefCell::new(None),
             press_tap_generation: Cell::new(0),
-            disable_hotkey: RefCell::new(disable_hotkey),
+            ffm_pause_key: RefCell::new(ffm_pause_key),
             binding_mode_specs: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(Vec::new()),
             mode_indices: RefCell::new(HashMap::default()),
@@ -693,12 +696,12 @@ impl Input {
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
                 let focus_follows_mouse_config_enabled = new_config.settings.focus_follows_mouse;
                 let mouse_features_enabled = new_config.settings.drag_drop.enabled;
-                let disable_hotkey = new_config
+                let ffm_pause_key = new_config
                     .settings
                     .focus_follows_mouse_disable_hotkey
                     .clone()
                     .and_then(|spec| spec.to_hotkey());
-                *self.disable_hotkey.borrow_mut() = disable_hotkey;
+                *self.ffm_pause_key.borrow_mut() = ffm_pause_key;
                 {
                     let prev_mouse_hides_on_focus = state.mouse_hides_on_focus;
                     let prev_focus_follows_mouse_config_enabled =
@@ -711,14 +714,14 @@ impl Input {
                     }
                     state.mouse_features_enabled = mouse_features_enabled;
                     state.mouse_settings = new_config.settings.drag_drop;
-                    let prev_active = state.disable_hotkey_active;
-                    state.disable_hotkey_active = self
-                        .disable_hotkey
+                    let prev_active = state.ffm_paused;
+                    state.ffm_paused = self
+                        .ffm_pause_key
                         .borrow()
                         .as_ref()
-                        .map(|target| state.compute_disable_hotkey_active(target))
+                        .map(|target| state.ffm_pause_key_down(target))
                         .unwrap_or(false);
-                    if prev_active && !state.disable_hotkey_active {
+                    if prev_active && !state.ffm_paused {
                         self.reset_mouse_move_sample_gate();
                     }
                     if prev_focus_follows_mouse_config_enabled
@@ -778,14 +781,14 @@ impl Input {
         }
     }
 
-    fn refresh_disable_hotkey_state(&self, state: &mut State) {
-        let Some(target) = self.disable_hotkey.borrow().as_ref().cloned() else {
+    fn refresh_ffm_paused(&self, state: &mut State) {
+        let Some(target) = self.ffm_pause_key.borrow().as_ref().cloned() else {
             return;
         };
-        let prev_active = state.disable_hotkey_active;
-        state.disable_hotkey_active = state.compute_disable_hotkey_active(&target);
-        if state.disable_hotkey_active != prev_active {
-            if !state.disable_hotkey_active {
+        let prev_active = state.ffm_paused;
+        state.ffm_paused = state.ffm_pause_key_down(&target);
+        if state.ffm_paused != prev_active {
+            if !state.ffm_paused {
                 self.reset_mouse_move_sample_gate();
             }
         }
@@ -808,7 +811,7 @@ impl Input {
         debug!(?flags, "Event tap was re-enabled; reconciling pressed keys");
         state.reconcile_after_event_tap_reenabled(flags);
         drop(state);
-        self.refresh_disable_hotkey_state(&mut self.state.borrow_mut());
+        self.refresh_ffm_paused(&mut self.state.borrow_mut());
     }
 
     fn overview_contains(&self, point: CGPoint) -> bool {
@@ -1166,12 +1169,12 @@ impl Input {
         // mouse event. Normal modifier transitions arrive through
         // FlagsChanged; this is only the defensive reconciliation path for
         // events lost while macOS UI interrupts the tap.
-        if self.disable_hotkey.borrow().is_some() || state.mouse_features_enabled {
+        if self.ffm_pause_key.borrow().is_some() || state.mouse_features_enabled {
             let flags = CGEvent::flags(Some(event));
             if flags != state.current_flags {
                 state.current_flags = flags;
                 state.reconcile_modifier_keys();
-                self.refresh_disable_hotkey_state(&mut state);
+                self.refresh_ffm_paused(&mut state);
             }
         }
 
@@ -1179,7 +1182,7 @@ impl Input {
         // belong on the reactor, outside the synchronous input callback.
         if state.focus_follows_mouse_config_enabled
             && state.focus_follows_mouse_enabled
-            && !state.disable_hotkey_active
+            && !state.ffm_paused
             && state.captured_button.is_none()
             && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
         {
@@ -1252,7 +1255,7 @@ impl Input {
             match event_type {
                 CGEventType::KeyDown => {
                     if self
-                        .disable_hotkey
+                        .ffm_pause_key
                         .borrow()
                         .as_ref()
                         .is_some_and(|key| key.key_code == key_code)
@@ -1265,7 +1268,7 @@ impl Input {
                 _ => {}
             }
         }
-        self.refresh_disable_hotkey_state(state);
+        self.refresh_ffm_paused(state);
 
         if event_type == CGEventType::KeyDown {
             if let Some(key_code) = key_code_opt {
@@ -1584,7 +1587,7 @@ impl State {
         self.current_flags = flags;
     }
 
-    fn compute_disable_hotkey_active(&self, target: &Hotkey) -> bool {
+    fn ffm_pause_key_down(&self, target: &Hotkey) -> bool {
         let active_mods = modifiers_from_flags_with_keys(self.current_flags, &self.pressed_keys);
 
         let check_modifier = |left: Modifiers, right: Modifiers| -> bool {
@@ -2256,9 +2259,9 @@ mod tests {
         assert_ne!(mask & (1u64 << CGEventType::RightMouseDown.0), 0);
         assert_ne!(mask & (1u64 << CGEventType::LeftMouseDragged.0), 0);
         input.mission_control_active.set(false);
-        *input.disable_hotkey.borrow_mut() = Some(Hotkey::new(Modifiers::empty(), KeyCode::KeyA));
+        *input.ffm_pause_key.borrow_mut() = Some(Hotkey::new(Modifiers::empty(), KeyCode::KeyA));
         assert_ne!(input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0), 0);
-        *input.disable_hotkey.borrow_mut() =
+        *input.ffm_pause_key.borrow_mut() =
             Some(Hotkey::new(Modifiers::empty(), KeyCode::ShiftLeft));
         assert_eq!(input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0), 0);
     }
