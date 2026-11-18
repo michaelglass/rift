@@ -155,6 +155,11 @@ impl Words {
         });
     }
 
+    fn child(&mut self, child: traditional::Child<WindowId>) {
+        self.word(u64::from(child.size.to_bits()));
+        self.tnode(child.node);
+    }
+
     fn tnode(&mut self, node: traditional::Node<WindowId>) {
         match node {
             traditional::Node::Window { window, constraints, fill } => {
@@ -163,24 +168,26 @@ impl Words {
                 self.option(constraints, Self::constraints);
                 self.fill(fill);
             }
-            traditional::Node::Container { kind, fill, children } => {
+            traditional::Node::Axis { horizontal, fill, first, rest } => {
                 self.word(1);
-                match kind {
-                    traditional::Kind::Axis { horizontal } => {
-                        self.word(0);
-                        self.flag(horizontal);
-                    }
-                    traditional::Kind::Stack { horizontal, focused } => {
-                        self.word(1);
-                        self.flag(horizontal);
-                        self.word(focused as u64);
-                    }
-                }
+                self.flag(horizontal);
                 self.fill(fill);
-                self.list(children, |words, child| {
-                    words.word(u64::from(child.size.to_bits()));
-                    words.tnode(child.node);
-                });
+                self.child(*first);
+                self.list(rest, Self::child);
+            }
+            traditional::Node::Stack {
+                horizontal,
+                fill,
+                before,
+                focused,
+                after,
+            } => {
+                self.word(2);
+                self.flag(horizontal);
+                self.fill(fill);
+                self.list(before, Self::child);
+                self.child(*focused);
+                self.list(after, Self::child);
             }
         }
     }
@@ -585,6 +592,13 @@ impl Reader<'_> {
         }
     }
 
+    fn child(&mut self) -> Read<traditional::Child<WindowId>> {
+        Ok(traditional::Child {
+            size: f32::from_bits(self.u32()?),
+            node: self.tnode()?,
+        })
+    }
+
     fn tnode(&mut self) -> Read<traditional::Node<WindowId>> {
         match self.word()? {
             0 => Ok(traditional::Node::Window {
@@ -592,24 +606,19 @@ impl Reader<'_> {
                 constraints: self.option(Self::constraints)?,
                 fill: self.fill()?,
             }),
-            1 => {
-                let kind = match self.word()? {
-                    0 => traditional::Kind::Axis { horizontal: self.flag()? },
-                    1 => traditional::Kind::Stack {
-                        horizontal: self.flag()?,
-                        focused: self.word()? as usize,
-                    },
-                    word => return self.unknown(word),
-                };
-                let fill = self.fill()?;
-                let children = self.list(|reader| {
-                    Ok(traditional::Child {
-                        size: f32::from_bits(reader.u32()?),
-                        node: reader.tnode()?,
-                    })
-                })?;
-                Ok(traditional::Node::Container { kind, fill, children })
-            }
+            1 => Ok(traditional::Node::Axis {
+                horizontal: self.flag()?,
+                fill: self.fill()?,
+                first: Box::new(self.child()?),
+                rest: self.list(Self::child)?,
+            }),
+            2 => Ok(traditional::Node::Stack {
+                horizontal: self.flag()?,
+                fill: self.fill()?,
+                before: self.list(Self::child)?,
+                focused: Box::new(self.child()?),
+                after: self.list(Self::child)?,
+            }),
             word => self.unknown(word),
         }
     }
@@ -1093,12 +1102,13 @@ mod tests {
 
     #[test]
     fn a_traditional_shape_survives_the_wire() {
-        use crate::layout::traditional::{Child, Fill, Kind, Node};
+        use crate::layout::traditional::{Child, Fill, Node};
         let window = |window, fill| Node::Window {
             window,
             constraints: None,
             fill,
         };
+        let child = |size, node| Child { size, node };
         let shape = Traditional {
             screen: Rect {
                 x: 0.,
@@ -1122,39 +1132,24 @@ mod tests {
                 top: true,
                 left: false,
             },
-            root: Some(Node::Container {
-                kind: Kind::Axis { horizontal: true },
+            root: Some(Node::Axis {
+                horizontal: true,
                 fill: Fill::Tiled,
-                children: vec![
-                    Child {
-                        size: 1.5,
-                        node: window(W, Fill::Screen),
-                    },
-                    Child {
-                        size: 0.5,
-                        node: Node::Container {
-                            kind: Kind::Stack { horizontal: false, focused: 1 },
-                            fill: Fill::WithinGaps,
-                            children: vec![
-                                Child {
-                                    size: 1.,
-                                    node: window(V, Fill::Tiled),
-                                },
-                                Child {
-                                    size: 1.,
-                                    node: Node::Window {
-                                        window: W,
-                                        constraints: Some(WindowConstraints {
-                                            max_height: 300.,
-                                            ..Default::default()
-                                        }),
-                                        fill: Fill::Tiled,
-                                    },
-                                },
-                            ],
-                        },
-                    },
-                ],
+                first: Box::new(child(1.5, window(W, Fill::Screen))),
+                rest: vec![child(0.5, Node::Stack {
+                    horizontal: false,
+                    fill: Fill::WithinGaps,
+                    before: vec![child(1., window(V, Fill::Tiled))],
+                    focused: Box::new(child(1., Node::Window {
+                        window: W,
+                        constraints: Some(WindowConstraints {
+                            max_height: 300.,
+                            ..Default::default()
+                        }),
+                        fill: Fill::Tiled,
+                    })),
+                    after: vec![],
+                })],
             }),
         };
         assert_eq!(decode_traditional(&encode_traditional(shape.clone())), Ok(shape));
