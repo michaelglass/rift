@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct TransactionId(u32);
 
+impl TransactionId {
+    /// The id as a number, for plain data (a recorded trace, the Roc core).
+    #[cfg(test)]
+    pub(crate) fn number(self) -> u32 { self.0 }
+}
+
 /// The one source of transaction ids, shared by every thread that sends frames.
 #[derive(Debug, Default)]
 pub struct TransactionCounter(AtomicU32);

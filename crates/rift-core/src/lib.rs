@@ -1,14 +1,13 @@
 //! Rift's pure core. No I/O, no clocks, no threads: every fact arrives as an [`Event`], every
-//! decision leaves as an [`Effect`], and [`Core::step`] is the only way in.
+//! decision leaves as an [`Effect`], and [`RustCore::step`] is the only way in.
 //!
 //! The platform (event taps, AX, SkyLight, timers, the app actors) owns the event loop and
 //! the effects; the core owns the decisions. The core is generic over the platform's types
 //! ([`Kinds`]) so rift can run it on its own `WindowId`/`CGRect`/`Instant` with no conversion,
-//! and a foreign core (Roc) can run it on [`plain`] data.
+//! and a foreign core (Roc) runs it on [`plain`] data, which crosses as words ([`plain::wire`]).
 
 pub mod core;
-#[cfg(test)]
-mod plain;
+pub mod plain;
 pub mod pointer;
 pub mod reconciler;
 
