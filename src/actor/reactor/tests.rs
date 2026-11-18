@@ -1131,14 +1131,15 @@ fn focus_display_empty_target_routes_workspace_commands_and_return_direction() {
             Direction::Right,
         )))
         .unwrap();
+    assert_eq!(outcome.activate_display, Some(right));
+    assert_eq!(outcome.mouse_warps, vec![CGPoint::new(1500., 500.)]);
+    assert!(outcome.raise_requests.is_empty() && outcome.make_key_windows.is_empty());
+    reactor.apply_event_outcome(outcome);
     assert_eq!(reactor.raw_command_space(), Some(right));
     assert_eq!(reactor.space_state.menu_bar_space, Some(right));
     crate::sys::screen::TEST_ACTIVE_DISPLAY.with(|display| {
         assert_eq!(display.borrow().as_deref(), Some("test-display-1"));
     });
-    assert_eq!(outcome.mouse_warps, vec![CGPoint::new(1500., 500.)]);
-    assert!(outcome.raise_requests.is_empty() && outcome.make_key_windows.is_empty());
-    reactor.apply_event_outcome(outcome);
     let engine = &reactor.layout_manager.layout_engine;
     assert!(
         engine
@@ -1186,12 +1187,13 @@ fn focus_display_with_window_preserves_selection_raise_and_cursor() {
         let outcome = reactor
             .dispatch_workflow(focus_display_command(DisplaySelector::Direction(Direction::Up)))
             .unwrap();
-        assert_eq!(reactor.raw_command_space(), Some(left));
+        assert_eq!(outcome.activate_display, Some(left));
         assert_eq!(outcome.mouse_warps, vec![center]);
         assert!(matches!(outcome.raise_requests.as_slice(),
             [raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), focus_quiet: Quiet::Yes, .. })]
                 if *wid == window));
         reactor.apply_event_outcome(outcome);
+        assert_eq!(reactor.raw_command_space(), Some(left));
         assert_eq!(
             reactor.layout_manager.layout_engine.focused_window(),
             Some(window)
