@@ -122,7 +122,6 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_state: super::WorkspaceSwitchState,
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
-    pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
     /// A pointer warp owed after the next arrange. Its target is read when it is paid, from
     /// the focus then: a newer focus intent in between is where it lands, nothing stale.
     pub owed_warp: Option<OwedWarp>,
@@ -150,18 +149,15 @@ impl WorkspaceSwitchManager {
     pub fn start_workspace_switch(&mut self, origin: WorkspaceSwitchOrigin) {
         self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
         self.active_workspace_switch = Some(self.workspace_switch_generation);
-        self.workspace_switch_state = WorkspaceSwitchState::Active;
-        self.pending_workspace_switch_origin = Some(origin);
+        self.workspace_switch_state = WorkspaceSwitchState::Active(origin);
     }
 
     pub fn manual_switch_in_progress(&self) -> bool {
-        self.workspace_switch_state == WorkspaceSwitchState::Active
-            && self.pending_workspace_switch_origin == Some(WorkspaceSwitchOrigin::Manual)
+        self.workspace_switch_state == WorkspaceSwitchState::Active(WorkspaceSwitchOrigin::Manual)
     }
 
     pub fn mark_workspace_switch_inactive(&mut self) {
         self.workspace_switch_state = WorkspaceSwitchState::Inactive;
-        self.pending_workspace_switch_origin = None;
     }
 }
 

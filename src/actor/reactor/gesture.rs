@@ -605,7 +605,6 @@ mod tests {
                 r.workspace_switch_manager.workspace_switch_state,
                 super::super::WorkspaceSwitchState::Inactive
             );
-            assert_eq!(r.workspace_switch_manager.pending_workspace_switch_origin, None);
             assert_eq!(r.workspace_switch_manager.active_workspace_switch, None);
             assert!(!r.workspace_switch_manager.manual_switch_in_progress());
         }

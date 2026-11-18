@@ -42,10 +42,11 @@ pub enum MenuState {
     Open(pid_t),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceSwitchState {
     Inactive,
-    Active,
+    /// A switch is in progress; the origin only exists while it is.
+    Active(WorkspaceSwitchOrigin),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
