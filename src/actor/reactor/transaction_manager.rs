@@ -3,8 +3,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use serde::{Deserialize, Serialize};
 
 /// Names one request that changes window frames. Ids come from one counter
-/// ([`TransactionCounter`]), so no two requests share one; only equality means anything.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// ([`TransactionCounter`]), so no two requests share one and they are ordered as issued: a
+/// read stamped with an older id was made before the newer request was applied. (The counter
+/// wraps after 2^32 requests; a session does not get near that.)
+#[derive(
+    Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct TransactionId(u32);
 
 /// The one source of transaction ids, shared by every thread that sends frames.

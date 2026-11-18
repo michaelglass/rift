@@ -21,7 +21,7 @@ pub struct Rect {
 }
 
 /// The id a write goes out under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(pub u32);
 
 /// Monotonic nanoseconds since the platform started its clock.

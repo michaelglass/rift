@@ -20,9 +20,7 @@ pub use crate::core::{Desire, Effect, Event, Plan, RustCore};
 pub use crate::pointer::{
     Button, Holder, Initiative, InputClass, Owner, Pointer, Release, Ungrip, may,
 };
-pub use crate::reconciler::{
-    Answer, Note, Observation, Reconciler, Reply, Sync, Verdict, Want, Write,
-};
+pub use crate::reconciler::{Answer, Note, Reconciler, Reply, Sync, Verdict, Want, Write};
 
 /// The platform's types, and the little geometry and time the core needs of them.
 pub trait Kinds: Copy + Debug + PartialEq + 'static {
@@ -32,9 +30,9 @@ pub trait Kinds: Copy + Debug + PartialEq + 'static {
     type Frame: Copy + PartialEq + Debug;
     type Time: Copy + Ord + Debug;
     /// The id a write goes out under, which the app echoes in its answer. The platform mints
-    /// it (its id space is shared with writers outside the core) and hands it to the core with
-    /// each event that may write; only equality means anything.
-    type Request: Copy + Eq + Debug;
+    /// it from one counter shared with writers outside the core, so ids are ordered as issued:
+    /// a read stamped with an older one was made before the newer request was applied.
+    type Request: Copy + Ord + Debug;
 
     /// Whether `a` is within `tolerance` of `b` on every edge, origin and size alike.
     fn is_within(a: Self::Frame, tolerance: f64, b: Self::Frame) -> bool;

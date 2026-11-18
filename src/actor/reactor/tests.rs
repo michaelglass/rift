@@ -2160,11 +2160,13 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     };
     reactor.place_window(wid, at(40.0));
     let txid = last_sent(&reactor, wsid);
-    // Acknowledged, unchanged, and explicitly requested frames.
+    // A frame Rift sent outside the core (a camera's) goes out under a newer request.
+    let own = reactor.state.tx.next_id();
+    // Acknowledged, unchanged, and Rift's own frames.
     for event in [
         moved(wid, at(40.0), Some(txid), true),
         moved(wid, at(40.0), None, false),
-        moved(wid, at(50.0), None, true),
+        moved(wid, at(50.0), Some(own), true),
     ] {
         let outcome = reactor.dispatch_workflow(event).unwrap();
         assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
