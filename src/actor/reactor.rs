@@ -1755,7 +1755,9 @@ impl Reactor {
                     } else {
                         self.main_window_tracker.app_main_window(pid)
                     };
-                    outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
+                    if let Some(window) = activation_window {
+                        outcome.absorb(self.auto_switch_to_window_workspace(window));
+                    }
                     outcome.focused_window = activation_window;
                 } else {
                     outcome.focused_window = raised_window;
@@ -1804,7 +1806,7 @@ impl Reactor {
                     if previous_native_focus
                         .is_some_and(|previous| previous.pid == window.pid && previous != window)
                     {
-                        let outcome = self.auto_switch_to_window_workspace(Some(window));
+                        let outcome = self.auto_switch_to_window_workspace(window);
                         if !outcome.layout_responses.is_empty() {
                             return Ok(outcome);
                         }
@@ -5506,8 +5508,8 @@ impl Reactor {
         }
     }
 
-    fn auto_switch_to_window_workspace(&mut self, window: Option<WindowId>) -> EventOutcome {
-        let Some((window, space, workspace)) = self.auto_switch_target(window) else {
+    fn auto_switch_to_window_workspace(&mut self, window: WindowId) -> EventOutcome {
+        let Some((space, workspace)) = self.auto_switch_target(window) else {
             return EventOutcome::no_change();
         };
         debug!(
@@ -5531,11 +5533,12 @@ impl Reactor {
     /// workspace, when that is not the active one and nothing says not to.
     fn auto_switch_target(
         &self,
-        window: Option<WindowId>,
-    ) -> Option<(WindowId, SpaceId, crate::model::VirtualWorkspaceId)> {
-        let window = window.filter(|wid| {
-            self.window_is_standard(*wid) && !self.state.windows.is_temporarily_unavailable(*wid)
-        })?;
+        window: WindowId,
+    ) -> Option<(SpaceId, crate::model::VirtualWorkspaceId)> {
+        if !self.window_is_standard(window) || self.state.windows.is_temporarily_unavailable(window)
+        {
+            return None;
+        }
         let pid = window.pid;
         let space = self.best_space_for_window_id(window)?;
         let workspaces = self.layout_manager.layout_engine.workspaces();
@@ -5573,7 +5576,7 @@ impl Reactor {
             );
             return None;
         }
-        Some((window, space, workspace))
+        Some((space, workspace))
     }
 
     fn handle_layout_response(
