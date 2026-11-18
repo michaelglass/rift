@@ -10407,13 +10407,52 @@ fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership()
         store.unheld(window).unwrap().advance_transfer(revision, true);
     }
     assert_eq!(store.record(window).unwrap().frame(), Some(written));
-    assert_eq!(
-        store.record(window).unwrap().pending_transfer().unwrap().status,
-        crate::model::window_store::TransferStatus::Deferred
-    );
+    assert!(store.record(window).unwrap().pending_transfer().unwrap().exhausted());
     assert!(!store.confirm_transfer(window, generation, 14, None));
     assert!(store.confirm_transfer(window, generation, 14, Some(target)));
     assert_eq!(store.record(window).unwrap().frame(), Some(written));
+}
+
+#[test]
+fn a_new_display_set_re_derives_an_exhausted_transfer_instead_of_resuming_it() {
+    let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let elsewhere = reactor.test_workspace(space2, 0);
+    assert!(reactor.assign_test_window_to_workspace(space2, window, elsewhere));
+    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let store = &mut reactor.state.windows;
+    store.unheld(window).unwrap().request_transfer(Some(frame), space2, true);
+    for revision in [101, 102, 103] {
+        store.unheld(window).unwrap().advance_transfer(revision, true);
+    }
+    let refused = store.record(window).unwrap().pending_transfer().unwrap();
+    assert!(refused.exhausted());
+
+    // The displays change and the window is still seen on the first one: it is still owed the
+    // move, so the transfer is requested afresh, fitted to the displays there are now.
+    let snapshot = |display_set_changed| {
+        let mut state = forwarded_space_state(make_screen_snapshots(vec![screen1, screen2], vec![
+            Some(space1),
+            Some(space2),
+        ]));
+        state.display_set_changed = display_set_changed;
+        state.membership_complete = true;
+        state.active_window_spaces.insert(wsid, space1);
+        Event::SpaceStateChanged(state)
+    };
+    reactor.handle_event(snapshot(false));
+    let unchanged = reactor.state.windows.record(window).unwrap().pending_transfer().unwrap();
+    assert_eq!(
+        unchanged.generation, refused.generation,
+        "unchanged topology is no new chance"
+    );
+    assert!(unchanged.exhausted());
+
+    reactor.handle_event(snapshot(true));
+    let fresh = reactor.state.windows.record(window).unwrap().pending_transfer().unwrap();
+    assert_eq!(fresh.requested_space, space2);
+    assert!(fresh.generation > refused.generation, "re-derived, not resumed");
+    assert!(!fresh.exhausted());
 }
 
 #[test]
