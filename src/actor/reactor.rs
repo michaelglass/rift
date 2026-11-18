@@ -2742,76 +2742,17 @@ impl Reactor {
                 selector,
                 window_id,
             })) => {
-                let command_space = self.workspace_command_space();
-                let resolved_window = {
-                    let workspaces = self.layout_manager.layout_engine.workspaces();
-                    match window_id {
-                        Some(index) => command_space
-                            .and_then(|space| {
-                                workspaces.find_window_by_idx(&self.state.windows, space, index)
-                            })
-                            .or_else(|| {
-                                self.iter_active_spaces().find_map(|space| {
-                                    workspaces.find_window_by_idx(&self.state.windows, space, index)
-                                })
-                            }),
-                        None => self
-                            .main_window()
-                            .or_else(|| self.window_id_under_cursor())
-                            .or_else(|| {
-                                command_space.and_then(|space| {
-                                    workspaces.find_window_by_idx(&self.state.windows, space, 0)
-                                })
-                            }),
+                let cursor = || self.window_id_under_cursor();
+                let (window, source_space, target_space) = match self
+                    .resolve_window_display_move(&selector, window_id, cursor)
+                {
+                    Ok(resolved) => resolved,
+                    Err(Refusal::Quiet) => return Ok(EventOutcome::no_change()),
+                    Err(Refusal::Warn(reason)) => {
+                        warn!(?selector, ?window_id, "Move window to display ignored: {reason}");
+                        return Ok(EventOutcome::no_change());
                     }
                 };
-                let Some(window) = resolved_window else {
-                    warn!("Move window to display ignored because no target window was resolved");
-                    return Ok(EventOutcome::no_change());
-                };
-                let Some(window_state) = self.state.windows.window(window) else {
-                    warn!(?window, "Move window to display ignored: unknown window");
-                    return Ok(EventOutcome::no_change());
-                };
-                let window_server_id = window_state.info.sys_id;
-                let window_frame = window_state.frame_monotonic();
-                let source_space = self
-                    .assigned_space_for_window_id(window)
-                    .or_else(|| self.best_space_for_window_id(window))
-                    .or_else(|| self.best_space_for_window(&window_frame, window_server_id));
-                let Some(source_space) = source_space.filter(|space| self.is_space_active(*space))
-                else {
-                    warn!(
-                        ?window,
-                        "Move window to display ignored: source space unavailable"
-                    );
-                    return Ok(EventOutcome::no_change());
-                };
-                let origin = self
-                    .space_state
-                    .screen_by_space(source_space)
-                    .map(|screen| screen.frame.mid())
-                    .or_else(|| self.current_screen_center());
-                let Some(target_screen) = self.screen_for_selector(&selector, origin).cloned()
-                else {
-                    warn!(
-                        ?selector,
-                        "Move window to display ignored: target display not found"
-                    );
-                    return Ok(EventOutcome::no_change());
-                };
-                let Some(target_space) =
-                    target_screen.space.filter(|space| self.is_space_active(*space))
-                else {
-                    warn!(
-                        ?selector,
-                        "Move window to display ignored: target space unavailable"
-                    );
-                    return Ok(EventOutcome::no_change());
-                };
-                if source_space == target_space {
-                    return Ok(EventOutcome::no_change());
-                }
                 // Retained scrolling frames belong to the source Space. Fence queued
                 // presentation work before the transfer installs its destination frame.
                 self.cancel_window_presentations(vec![window]);
@@ -6555,6 +6496,69 @@ impl Reactor {
         self.activate_display(space);
     }
 
+    /// The window a MoveWindowToDisplay moves (`window_id` in the active workspaces, else the
+    /// main window, the one under the `cursor`, or the command display's first), the active
+    /// Space it is on, and the active Space of the display `selector` names from there.
+    fn resolve_window_display_move(
+        &self,
+        selector: &DisplaySelector,
+        window_id: Option<u32>,
+        cursor: impl FnOnce() -> Option<WindowId>,
+    ) -> Result<(WindowId, SpaceId, SpaceId), Refusal> {
+        let command_space = self.workspace_command_space();
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let find = |space, index| workspaces.find_window_by_idx(&self.state.windows, space, index);
+        let window = match window_id {
+            Some(index) => command_space
+                .and_then(|space| find(space, index))
+                .or_else(|| self.iter_active_spaces().find_map(|space| find(space, index))),
+            None => self
+                .main_window()
+                .or_else(cursor)
+                .or_else(|| command_space.and_then(|space| find(space, 0))),
+        }
+        .ok_or(Refusal::Warn("no target window was resolved"))?;
+        let state = self.state.windows.window(window).ok_or(Refusal::Warn("unknown window"))?;
+        let source = self
+            .assigned_space_for_window_id(window)
+            .or_else(|| self.best_space_for_window_id(window))
+            .or_else(|| self.best_space_for_window(&state.frame_monotonic(), state.info.sys_id))
+            .filter(|space| self.is_space_active(*space))
+            .ok_or(Refusal::Warn("source space unavailable"))?;
+        let target = self.target_display(source, selector, false)?.1;
+        if source == target {
+            return Err(Refusal::Quiet);
+        }
+        Ok((window, source, target))
+    }
+
+    /// The display `selector` names from `source`'s display (wrapping at the ends if `wrap`),
+    /// and its active Space.
+    fn target_display(
+        &self,
+        source: SpaceId,
+        selector: &DisplaySelector,
+        wrap: bool,
+    ) -> Result<(ScreenInfo, SpaceId), Refusal> {
+        let origin = self
+            .space_state
+            .screen_by_space(source)
+            .map(|screen| screen.frame.mid())
+            .or_else(|| self.current_screen_center());
+        let screen = if wrap {
+            self.screen_for_selector_wrapping(selector, origin)
+        } else {
+            self.screen_for_selector(selector, origin)
+        }
+        .cloned()
+        .ok_or(Refusal::Warn("target display not found"))?;
+        let space = screen
+            .space
+            .filter(|space| self.is_space_active(*space))
+            .ok_or(Refusal::Warn("target space unavailable"))?;
+        Ok((screen, space))
+    }
+
     /// The display `selector` names, whether it is active, and the window focusing it would
     /// focus there (its last focused, else the first in its active workspace) and its center.
     fn display_focus_payload(
@@ -6812,6 +6816,13 @@ fn raise_buries_a_floater<L: PartialEq + Copy>(
                 .zip(levels(above))
                 .is_some_and(|(candidate, above)| candidate == above)
     })
+}
+
+/// Why a command does nothing: quietly (there is nothing to do), or with a reason worth a warning.
+#[derive(Debug, PartialEq)]
+enum Refusal {
+    Quiet,
+    Warn(&'static str),
 }
 
 /// What a window missing from an authoritative snapshot of the active Spaces comes to, from
