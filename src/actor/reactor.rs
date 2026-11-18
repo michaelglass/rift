@@ -4366,15 +4366,8 @@ impl Reactor {
         self.state.step(CoreEvent::Press { window, button: button.into() });
     }
 
-    #[cfg(not(test))]
     fn tracked_window_at(&self, point: CGPoint) -> Option<WindowId> {
-        self.state.windows.tracked_window_id(window_server::get_window_at_point(point)?)
-    }
-
-    /// Tests have no window server to ask: the window whose known frame contains the point.
-    #[cfg(test)]
-    fn tracked_window_at(&self, point: CGPoint) -> Option<WindowId> {
-        self.state.windows.window_at(point)
+        native::Native::tracked_window_at(&self.native, point, &self.state.windows)
     }
 
     /// On every accepted, complete snapshot, what each transfer still owes is derived again
