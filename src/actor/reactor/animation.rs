@@ -2221,7 +2221,7 @@ mod tests {
                 .unwrap()
                 .display_uuid
                 .clone();
-            reactor.handle_event(Event::Command(Command::Reactor(
+            reactor.handle_loop_event(Event::Command(Command::Reactor(
                 ReactorCommand::MoveWindowToDisplay {
                     selector: if turn % 2 == 0 {
                         DisplaySelector::Uuid(uuid)

@@ -600,7 +600,7 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
     ]));
     assert!(reactor.is_space_active(space));
 
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::ToggleSpaceActivated,
     )));
     assert!(!reactor.is_space_active(space));
@@ -627,7 +627,7 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
     assert!(displays[1].is_active_space);
     assert!(!displays[1].is_active_context);
 
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::ToggleSpaceActivated,
     )));
     assert!(reactor.query_displays()[0].is_active_space);
@@ -656,7 +656,7 @@ fn gesture_routes_exclude_disabled_displays_and_clear_when_all_are_disabled() {
         (left_space, vec![left_space]),
     ] {
         reactor.space_state.command_space = Some(space);
-        reactor.handle_event(Event::Command(Command::Reactor(
+        reactor.handle_loop_event(Event::Command(Command::Reactor(
             ReactorCommand::ToggleSpaceActivated,
         )));
         let modes = std::iter::from_fn(|| input_rx.try_recv().ok())
@@ -1970,7 +1970,7 @@ fn scrolling_display_transfer_ignores_intermediate_native_width() {
     let original_width = apps.windows[&window].frame.size.width;
 
     for index in [1, 0] {
-        reactor.handle_event(Event::Command(Command::Reactor(
+        reactor.handle_loop_event(Event::Command(Command::Reactor(
             ReactorCommand::MoveWindowToDisplay {
                 selector: DisplaySelector::Index(index),
                 window_id: Some(1),
@@ -4918,7 +4918,7 @@ fn per_display_workspace_to_display_moves_contents_to_corresponding_ordinal() {
     reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
     let source = reactor.test_workspace_ids(a)[0];
     let target = reactor.test_workspace_ids(b)[0];
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWorkspaceToDisplay {
             selector: DisplaySelector::Index(1),
             wrap_around: false,
@@ -4952,7 +4952,7 @@ fn moving_workspace_direction_wrap_is_opt_in() {
     apps.make_app_and_settle(&mut reactor, 1, vec![window]);
     let moved = WindowId::new(1, 1);
 
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWorkspaceToDisplay {
             selector: DisplaySelector::Direction(Direction::Right),
             wrap_around: false,
@@ -4960,7 +4960,7 @@ fn moving_workspace_direction_wrap_is_opt_in() {
     )));
     assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
 
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWorkspaceToDisplay {
             selector: DisplaySelector::Direction(Direction::Right),
             wrap_around: true,
@@ -5472,7 +5472,7 @@ fn moving_tiled_window_to_display_writes_destination_tile_directly() {
     apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
 
     let moved = WindowId::new(1, 1);
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWindowToDisplay {
             selector: DisplaySelector::Index(1),
             window_id: Some(1),
@@ -8962,7 +8962,7 @@ fn stack_tabs_publish_in_on_screen_order_and_follow_focus() {
         }
         // A tab click focuses its window.
         let clicked = WindowId::new(1, 3);
-        reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+        reactor.handle_loop_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
             window_id: clicked.into(),
             window_server_id: None,
         })));
@@ -9082,7 +9082,7 @@ fn dragging_a_stack_tab_reorders_the_published_stack() {
         LayoutManager::refresh_stack_tabs(&mut reactor, SpaceId::new(1));
         let before = order(last_groups(&mut tabs));
         assert_eq!(before.len(), 3, "{mode:?}");
-        reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveStackTab {
+        reactor.handle_loop_event(Event::Command(Command::Layout(LayoutCommand::MoveStackTab {
             window: before[0].into(),
             target: before[2].into(),
         })));
@@ -9922,7 +9922,7 @@ fn shared_two_display_fixture() -> (
 ) {
     let (mut apps, mut reactor, _, _) = two_displays(shared_settings());
     make_active_app(&mut apps, &mut reactor, 2, make_windows(1), None);
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWorkspaceToDisplay {
             selector: DisplaySelector::Index(1),
             wrap_around: false,
@@ -10722,7 +10722,7 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
     let (_apps, mut reactor, a, b) = two_displays(settings);
     let pinned = reactor.test_workspace_ids(a)[0];
     for (index, target, overridden) in [(1, b, true), (0, a, false)] {
-        reactor.handle_event(Event::Command(Command::Reactor(
+        reactor.handle_loop_event(Event::Command(Command::Reactor(
             ReactorCommand::MoveWorkspaceToDisplay {
                 selector: DisplaySelector::Index(index),
                 wrap_around: false,
@@ -10789,7 +10789,7 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
     }];
     let (_, mut reactor, a, b) = two_displays(settings);
     let id = reactor.test_workspace_ids(a)[0];
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWorkspaceToDisplay {
             selector: DisplaySelector::Index(1),
             wrap_around: false,
@@ -11641,7 +11641,7 @@ fn master_restore_returns_a_window_to_the_display_it_was_saved_on() {
     engine
         .save_current_layout(path.clone(), &reactor.state.windows, Some(a))
         .unwrap();
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWindowToDisplay {
             selector: DisplaySelector::Index(1),
             window_id: Some(1),
@@ -11650,7 +11650,7 @@ fn master_restore_returns_a_window_to_the_display_it_was_saved_on() {
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(reactor.assigned_space_for_window_id(window), Some(b));
 
-    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
+    reactor.handle_loop_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
         path: path.clone(),
         scope: layout::RestoreScope::Displays,
         source: layout::RestoreSource::CurrentSpace,
@@ -11677,7 +11677,7 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
     engine
         .save_current_layout(path.clone(), &reactor.state.windows, Some(a))
         .unwrap();
-    reactor.handle_event(Event::Command(Command::Reactor(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
         ReactorCommand::MoveWindowToDisplay {
             selector: DisplaySelector::Index(1),
             window_id: Some(1),
@@ -11695,7 +11695,7 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
         shared_right(),
     );
 
-    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
+    reactor.handle_loop_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
         path: path.clone(),
         scope: layout::RestoreScope::Displays,
         source: layout::RestoreSource::CurrentSpace,
@@ -12926,7 +12926,7 @@ fn a_steering_command_during_a_drag_is_discarded_and_not_replayed_at_the_drop() 
         apps.windows.get_mut(&dragged).unwrap().frame = moved;
         assert!(reactor.user_is_dragging());
 
-        reactor.handle_event(Event::Command(command.clone()));
+        reactor.handle_loop_event(Event::Command(command.clone()));
         let requests = apps.requests();
         assert!(requests.is_empty(), "{command:?} acted mid-drag: {requests:?}");
 
@@ -12960,7 +12960,7 @@ fn a_display_move_during_a_drag_is_discarded_and_not_replayed_at_the_drop() {
         apps.windows.get_mut(&wid).unwrap().frame = moved;
         assert!(reactor.user_is_dragging());
 
-        reactor.handle_event(Event::Command(Command::Reactor(command.clone())));
+        reactor.handle_loop_event(Event::Command(Command::Reactor(command.clone())));
         let requests = apps.requests();
         assert!(requests.is_empty(), "{command:?} acted mid-drag: {requests:?}");
         reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
@@ -13008,7 +13008,7 @@ fn a_steering_command_during_a_press_is_discarded_and_not_replayed_at_the_releas
         reactor.handle_event(Event::PointerPressed { point: home.mid() });
         assert!(reactor.state.windows.is_pressed(pressed));
 
-        reactor.handle_event(Event::Command(command.clone()));
+        reactor.handle_loop_event(Event::Command(command.clone()));
         let requests = apps.requests();
         assert!(requests.is_empty(), "{command:?} acted on a press: {requests:?}");
 
@@ -13055,7 +13055,7 @@ fn an_inert_command_runs_during_a_drag() {
     assert!(reactor.user_is_dragging());
     while input_rx.try_recv().is_ok() {}
 
-    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::BindingMode(
+    reactor.handle_loop_event(Event::Command(Command::Reactor(ReactorCommand::BindingMode(
         "resize".into(),
     ))));
     let sent: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok().map(|(_, r)| r)).collect();

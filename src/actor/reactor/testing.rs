@@ -129,7 +129,7 @@ impl Reactor {
     }
 
     pub fn handle_test_layout_command(&mut self, command: LayoutCommand) {
-        self.handle_event(Event::Command(crate::model::reactor::Command::Layout(command)));
+        self.handle_loop_event(Event::Command(crate::model::reactor::Command::Layout(command)));
     }
 
     pub(crate) fn dispatch_test_layout_command(&mut self, command: LayoutCommand) -> EventOutcome {

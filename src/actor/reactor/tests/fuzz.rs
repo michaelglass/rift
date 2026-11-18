@@ -522,7 +522,7 @@ impl Sim {
                 if let Some(held) = &mut self.held {
                     held.command_during_drag = true;
                 }
-                self.reactor.handle_event(Event::Command(Command::Reactor(
+                self.reactor.handle_loop_event(Event::Command(Command::Reactor(
                     ReactorCommand::MoveWindowToDisplay {
                         selector: DisplaySelector::Index(d % self.screens.len()),
                         window_id: None,
