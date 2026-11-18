@@ -3191,25 +3191,12 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.ensure_active_drag(wid, &frame);
 
     assert!(reactor.user_is_dragging());
-    reactor.drag_manager.sync_motion_gate(reactor.state.windows.drag());
-    assert!(
-        reactor
-            .drag_manager
-            .native_motion_active
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
 
     let (input_tx, _input_rx) = actor::channel();
     reactor.communication_manager.input_tx = Some(input_tx);
     reactor.handle_event(Event::MissionControlNativeEntered);
 
     assert!(!reactor.user_is_dragging());
-    assert!(
-        !reactor
-            .drag_manager
-            .native_motion_active
-            .load(std::sync::atomic::Ordering::Acquire)
-    );
     assert!(reactor.drag_manager.preview_suppressed);
 
     reactor.handle_event(Event::MissionControlNativeExited);

@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use objc2_core_foundation::CGRect;
 use rift_protocol::StackInfo;
 use tracing::trace;
@@ -9,7 +6,7 @@ use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
-use crate::actor::drag::{DragKind, Session};
+use crate::actor::drag::Session;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::reactor::reconciler::Desired;
@@ -41,9 +38,8 @@ impl AppManager {
     }
 }
 
-/// The drag preview and motion gate; the drag itself is the held window's placement.
+/// The drag preview; the drag itself is the held window's placement.
 pub struct DragManager {
-    pub native_motion_active: Arc<AtomicBool>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) preview_suppressed: bool,
@@ -51,13 +47,6 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn sync_motion_gate(&self, held: Option<(WindowId, &Session)>) {
-        let active = held.is_some_and(|(_, session)| {
-            matches!(session.kind, DragKind::NativeMove | DragKind::NativeResize)
-        });
-        self.native_motion_active.store(active, Ordering::Release);
-    }
-
     pub fn update_config(&mut self, config: DragDropSettings) {
         self.haptics_enabled = config.haptics_enabled;
         self.preview_enabled = config.enabled && config.preview;
