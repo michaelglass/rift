@@ -5,9 +5,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use parking_lot::Mutex;
-use rift_core::layout::axis::{AxisConstraints, solve_axis_lengths};
+use rift_core::layout::scrolling::{self, proportional_width, width_ratio};
 use rift_core::layout::{Size, Sizing};
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,9 @@ use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
 };
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
+use crate::layout_engine::{
+    Direction, LayoutId, ResizeOrientation, WindowDropAction, cg_rect, core_rect,
+};
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
 
@@ -35,6 +37,16 @@ enum ColumnWidth {
     Default,
     Proportion(f64),
     Fixed(f64),
+}
+
+impl ColumnWidth {
+    fn core(self) -> scrolling::Width {
+        match self {
+            Self::Default => scrolling::Width::Default,
+            Self::Proportion(ratio) => scrolling::Width::Proportion(ratio),
+            Self::Fixed(width) => scrolling::Width::Fixed(width),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -55,19 +67,13 @@ impl Column {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         inactive: &HashSet<WindowId>,
     ) -> f64 {
-        let ratio = match self.width {
-            ColumnWidth::Fixed(width) => return width.max(1.0),
-            ColumnWidth::Proportion(ratio) => ratio,
-            ColumnWidth::Default => self
-                .windows
-                .iter()
-                .find(|wid| !inactive.contains(*wid))
-                .and_then(|wid| constraints.get(wid))
-                .map(|c| c.locked_width)
-                .filter(|w| settings.preserve_window_sizes && w.is_finite() && *w > 0.0)
-                .map_or(settings.column_width_ratio, |w| width_ratio(view, gap, w)),
-        };
-        proportional_width(view, gap, clamp_ratio(ratio, settings))
+        let locked_width = self
+            .windows
+            .iter()
+            .find(|wid| !inactive.contains(*wid))
+            .and_then(|wid| constraints.get(wid))
+            .map_or(0.0, |c| c.locked_width);
+        widths(settings).resolve(self.width.core(), locked_width, view, gap)
     }
 
     fn selected(&self) -> Option<WindowId> { self.windows.get(self.active_window).copied() }
@@ -221,18 +227,11 @@ pub struct ViewportRelease {
     pub velocity: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ColumnGeometry {
-    id: ColumnId,
-    world_x: f64,
-    width: f64,
-}
+/// A column in world space and its anchor, as the core placed it.
+type ColumnGeometry = scrolling::Spot<ColumnId>;
 
-#[derive(Clone, Copy, Debug)]
-struct SnapPoint {
-    offset: f64,
-    column: usize,
-}
+/// A camera resting position and the column it shows, as the core found it.
+type SnapPoint = scrolling::Snap<ColumnId>;
 
 #[derive(Clone, Debug)]
 struct Geometry {
@@ -366,20 +365,18 @@ fn translate_frame(
     frame
 }
 
-fn proportional_width(view: f64, gap: f64, ratio: f64) -> f64 {
-    ((view + gap) * ratio - gap).max(1.0)
+fn widths(settings: &ScrollingLayoutSettings) -> scrolling::Widths {
+    scrolling::Widths {
+        ratio: settings.column_width_ratio,
+        min_ratio: settings.min_column_width_ratio,
+        max_ratio: settings.max_column_width_ratio,
+        preserve_window_sizes: settings.preserve_window_sizes,
+        expand_single_column: settings.expand_single_column,
+    }
 }
 
-fn width_ratio(view: f64, gap: f64, width: f64) -> f64 { (width + gap) / (view + gap).max(1.0) }
-
 fn clamp_ratio(ratio: f64, settings: &ScrollingLayoutSettings) -> f64 {
-    let min = settings.min_column_width_ratio.max(0.05);
-    let max = settings.max_column_width_ratio.max(min);
-    if ratio.is_finite() {
-        ratio.clamp(min, max)
-    } else {
-        min
-    }
+    widths(settings).clamp(ratio)
 }
 
 // Adapted from niri's compute_new_view_offset, using an absolute camera.
@@ -390,6 +387,14 @@ fn fit_offset(current: f64, view: f64, column: ColumnGeometry) -> f64 {
         return left;
     }
     current.clamp(left + column.width - view, left)
+}
+
+/// The columns after `id`, in the order `columns` walks them.
+fn columns_past<'a>(
+    columns: impl Iterator<Item = &'a ColumnGeometry>,
+    id: ColumnId,
+) -> impl Iterator<Item = &'a ColumnGeometry> {
+    columns.skip_while(move |column| column.id != id).skip(1)
 }
 
 fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
@@ -406,136 +411,71 @@ impl Geometry {
         gaps: GapSettings,
     ) -> Self {
         let tiling = compute_tiling_area(screen, &gaps);
-        let mut columns = Vec::with_capacity(state.columns.len());
-        let mut frames = Vec::with_capacity(state.columns.iter().map(|c| c.windows.len()).sum());
-        let constraint = |wid: &WindowId| {
-            constraints
-                .get(wid)
-                .copied()
-                .unwrap_or(WindowLayoutConstraints {
-                    sizing: Sizing::Resizable { advisory_min: Size::ZERO },
-                    ..Default::default()
-                })
-                .normalized()
-        };
-        let mut x = 0.0;
-        let active_columns = if inactive.is_empty() {
-            state.columns.len()
-        } else {
-            state
-                .columns
-                .iter()
-                .filter(|c| c.windows.iter().any(|w| !inactive.contains(w)))
-                .count()
-        };
-        for column in &state.columns {
-            let active_rows =
-                column.windows.iter().enumerate().filter(|(_, w)| !inactive.contains(*w));
-            let row_count = if inactive.is_empty() {
-                column.windows.len()
-            } else {
-                active_rows.clone().count()
-            };
-            if row_count == 0 {
-                continue;
-            }
-            // Expansion is derived geometry; keep the requested width for later.
-            let base = if settings.expand_single_column && active_columns == 1 {
-                tiling.size.width
-            } else {
-                column.resolved_width(
-                    tiling.size.width,
-                    gaps.inner.horizontal,
-                    settings,
-                    &constraints,
-                    inactive,
-                )
-            };
-            let mut min: f64 = 1.0;
-            let mut fixed: f64 = 0.0;
-            let mut max = f64::INFINITY;
-            let mut flexible = false;
-            for (_, wid) in active_rows.clone() {
-                let c = constraint(wid);
-                min = min.max(c.reported_min(true));
-                fixed = fixed.max(c.fixed_for_axis(true).unwrap_or(0.0));
-                flexible |= c.resizable_for_axis(true);
-                if c.max_width > 0.0 {
-                    max = max.min(c.max_width);
-                }
-            }
-            let width = if flexible {
-                base.min(max).max(min).max(fixed)
-            } else {
-                min.max(fixed)
-            };
-            columns.push(ColumnGeometry {
-                id: column.id,
-                world_x: x,
-                width,
-            });
-            let available = (tiling.size.height
-                - gaps.inner.vertical * row_count.saturating_sub(1) as f64)
-                .max(0.0);
-            let rows: Vec<_> = active_rows
-                .clone()
-                .map(|(row, wid)| {
-                    let c = constraint(wid);
-                    AxisConstraints {
-                        min: c.reported_min(false),
-                        fixed: c.fixed_for_axis(false),
-                        max: (c.max_height > 0.0).then_some(c.max_height),
-                        weight: (column.height_weights.get(row).copied().unwrap_or(1.0)
-                            - c.reported_min(false))
-                        .max(0.001),
-                        can_grow: c.resizable_for_axis(false),
-                    }
-                })
-                .collect();
-            let heights = solve_axis_lengths(&rows, available);
-            let mut y = tiling.origin.y;
-            for (geometry_row, (_, &wid)) in active_rows.enumerate() {
-                let height = heights[geometry_row];
-                let mut size = CGSize::new(width, height);
-                let c = constraint(&wid);
-                size.width =
-                    c.fixed_for_axis(true).unwrap_or(width).max(c.reported_min(true)).min(width);
-                size.height = c
-                    .fixed_for_axis(false)
-                    .unwrap_or(height)
-                    .max(c.reported_min(false))
-                    .min(height);
-                if c.max_width > 0.0 {
-                    size.width = size.width.min(c.max_width);
-                }
-                if c.max_height > 0.0 {
-                    size.height = size.height.min(c.max_height);
-                }
-                frames.push((wid, CGRect::new(CGPoint::new(x, y), size)));
-                y += height + gaps.inner.vertical;
-            }
-            x += width + gaps.inner.horizontal;
-        }
         let mut geometry = Self {
             screen,
             tiling,
             gaps,
             constraints,
-            columns,
-            frames,
+            columns: Vec::new(),
+            frames: Vec::new(),
             bounds: (0.0, 0.0),
             snaps: Vec::new(),
         };
-        // The bounds are resting positions, not topology-derived column indices.
-        geometry.snaps = geometry.snap_points(settings);
-        if !geometry.snaps.is_empty() {
-            geometry.bounds = geometry
-                .snaps
+        // The strip as the core sees it: active windows only, a column with none left out.
+        let mut columns = state.columns.iter().filter_map(|column| {
+            let mut rows = column
+                .windows
                 .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), snap| {
-                    (min.min(snap.offset), max.max(snap.offset))
+                .enumerate()
+                .filter(|(_, wid)| !inactive.contains(*wid))
+                .map(|(row, &window)| scrolling::Row {
+                    window,
+                    constraints: geometry.constraints.get(&window).copied().unwrap_or(
+                        WindowLayoutConstraints {
+                            sizing: Sizing::Resizable { advisory_min: Size::ZERO },
+                            ..Default::default()
+                        },
+                    ),
+                    weight: column.height_weights.get(row).copied().unwrap_or(1.0),
                 });
-        }
+            let first = rows.next()?;
+            Some(scrolling::Column {
+                id: column.id,
+                width: column.width.core(),
+                first,
+                rest: rows.collect(),
+            })
+        });
+        // No active window: nothing to place, nowhere for the camera to rest but 0.
+        let Some(first) = columns.next() else {
+            return geometry;
+        };
+        let strip = scrolling::Strip {
+            tiling: core_rect(tiling),
+            column_gap: geometry.gaps.inner.horizontal,
+            row_gap: geometry.gaps.inner.vertical,
+            widths: widths(settings),
+            alignment: match settings.alignment {
+                ScrollingAlignment::Left => scrolling::Alignment::Left,
+                ScrollingAlignment::Center => scrolling::Alignment::Center,
+                ScrollingAlignment::Right => scrolling::Alignment::Right,
+            },
+            navigation: match settings.focus_navigation_style {
+                ScrollingFocusNavigationStyle::Anchored => scrolling::Navigation::Anchored,
+                ScrollingFocusNavigationStyle::Niri => scrolling::Navigation::Free,
+            },
+            first,
+            rest: columns.collect(),
+        };
+        let placed = strip.place();
+        geometry.columns = std::iter::once(placed.first).chain(placed.rest).collect();
+        geometry.frames = placed
+            .frames
+            .into_iter()
+            .map(|(window, frame)| (window, cg_rect(frame)))
+            .collect();
+        geometry.snaps = std::iter::once(placed.snaps.0).chain(placed.snaps.1).collect();
+        geometry.bounds = placed.bounds;
         geometry
     }
 
@@ -550,61 +490,6 @@ impl Geometry {
 
     fn column(&self, id: ColumnId) -> Option<ColumnGeometry> {
         self.columns.iter().find(|c| c.id == id).copied()
-    }
-
-    fn snap_points(&self, settings: &ScrollingLayoutSettings) -> Vec<SnapPoint> {
-        let Some(first) = self.columns.first() else {
-            return Vec::new();
-        };
-        let view = self.tiling.size.width;
-        let anchored = settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored;
-        if anchored {
-            return self
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(index, _)| SnapPoint {
-                    offset: self.anchor_offset(index, settings.alignment),
-                    column: index,
-                })
-                .collect();
-        }
-        let last = self.columns.last().unwrap();
-        let left = first.world_x;
-        let right = last.world_x + last.width - view;
-        let mut points = vec![SnapPoint { offset: left, column: 0 }, SnapPoint {
-            offset: right,
-            column: self.columns.len() - 1,
-        }];
-        for (index, column) in self.columns.iter().enumerate() {
-            for offset in [column.world_x, column.world_x + column.width - view] {
-                if left < offset && offset < right {
-                    points.push(SnapPoint { offset, column: index });
-                }
-            }
-        }
-        points
-    }
-
-    fn anchor_offset(&self, index: usize, alignment: ScrollingAlignment) -> f64 {
-        let column = self.columns[index];
-        if column.width >= self.tiling.size.width {
-            return column.world_x;
-        }
-        // Preserve Rift's anchored first/last-column policy.
-        if self.columns.len() > 1 {
-            if index == 0 {
-                return column.world_x;
-            }
-            if index + 1 == self.columns.len() {
-                return column.world_x + column.width - self.tiling.size.width;
-            }
-        }
-        match alignment {
-            ScrollingAlignment::Left => column.world_x,
-            ScrollingAlignment::Center => centered_offset(self.tiling.size.width, column),
-            ScrollingAlignment::Right => column.world_x + column.width - self.tiling.size.width,
-        }
     }
 }
 
@@ -912,9 +797,8 @@ impl LayoutState {
         self.reconcile_camera_bounds();
         if initial {
             self.viewport = Viewport::Static(0.0);
-            if self.geometry.as_ref().unwrap().columns.len() == 1 {
-                let g = self.geometry.as_ref().unwrap();
-                self.viewport = Viewport::Static(g.anchor_offset(0, settings.alignment));
+            if let [only] = self.geometry.as_ref().unwrap().columns.as_slice() {
+                self.viewport = Viewport::Static(only.anchor);
             } else {
                 self.reveal(settings);
             }
@@ -972,10 +856,7 @@ impl LayoutState {
             return;
         };
         let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
-            g.anchor_offset(
-                g.columns.iter().position(|c| c.id == column.id).unwrap(),
-                settings.alignment,
-            )
+            column.anchor
         } else {
             let target = match &self.viewport {
                 Viewport::Animation(s) => s.target,
@@ -1463,40 +1344,32 @@ impl ScrollingLayoutSystem {
                         // Niri sorts snaps by position before nearest-point selection.
                         a.offset.total_cmp(&b.offset)
                     } else {
-                        (gesture_release
-                            && g.columns[a.column].id != state.columns[state.active_column].id)
-                            .cmp(
-                                &(gesture_release
-                                    && g.columns[b.column].id
-                                        != state.columns[state.active_column].id),
-                            )
+                        let active = state.columns[state.active_column].id;
+                        (gesture_release && a.column != active)
+                            .cmp(&(gesture_release && b.column != active))
                     }
                 })
         })?;
-        let mut index = snap.column;
+        let mut target = snap.column;
         if niri {
             // Choose the furthest fully visible column
             // in the direction of travel.
-            index = if projected >= from_offset {
-                g.columns
-                    .iter()
-                    .enumerate()
-                    .skip(index + 1)
-                    .take_while(|(_, column)| {
+            target = if projected >= from_offset {
+                columns_past(g.columns.iter(), snap.column)
+                    .take_while(|column| {
                         column.world_x + column.width <= snap.offset + g.tiling.size.width
                     })
                     .last()
-                    .map_or(index, |(next, _)| next)
+                    .map_or(target, |column| column.id)
             } else {
-                (0..index)
-                    .rev()
-                    .take_while(|&next| g.columns[next].world_x >= snap.offset)
+                columns_past(g.columns.iter().rev(), snap.column)
+                    .take_while(|column| column.world_x >= snap.offset)
                     .last()
-                    .unwrap_or(index)
+                    .map_or(target, |column| column.id)
             };
         }
         let offset = snap.offset;
-        let canonical_index = state.columns.iter().position(|c| c.id == g.columns[index].id)?;
+        let canonical_index = state.columns.iter().position(|c| c.id == target)?;
         if canonical_index != state.active_column {
             state.fullscreen_restore = None;
         }
@@ -2301,6 +2174,8 @@ pub(crate) mod tests {
             .unwrap_or_default()
             .into_iter()
     }
+    use objc2_core_foundation::{CGPoint, CGSize};
+
     use super::*;
     use crate::common::config::{ScrollingWidthOverride, StackDefaultOrientation};
 
