@@ -402,7 +402,7 @@ pub fn encode_bsp(bsp: Bsp<WindowId>) -> Vec<u64> {
     words.frame(bsp.screen);
     words.gaps(bsp.gaps);
     words.option(bsp.aspect, Words::float);
-    words.option(bsp.root, Words::node);
+    words.node(bsp.root);
     words.0
 }
 
@@ -419,7 +419,7 @@ pub fn encode_traditional(shape: Traditional<WindowId>) -> Vec<u64> {
     words.float(line.spacing);
     words.flag(line.top);
     words.flag(line.left);
-    words.option(shape.root, Words::tnode);
+    words.tnode(shape.root);
     words.0
 }
 
@@ -804,7 +804,7 @@ pub fn decode_bsp(words: &[u64]) -> Result<Bsp<WindowId>, WireError> {
         screen: reader.frame()?,
         gaps: reader.gaps()?,
         aspect: reader.option(Reader::float)?,
-        root: reader.option(Reader::node)?,
+        root: reader.node()?,
     };
     reader.done()?;
     Ok(bsp)
@@ -828,7 +828,7 @@ pub fn decode_traditional(words: &[u64]) -> Result<Traditional<WindowId>, WireEr
             top: reader.flag()?,
             left: reader.flag()?,
         },
-        root: reader.option(Reader::tnode)?,
+        root: reader.tnode()?,
     };
     reader.done()?;
     Ok(shape)
@@ -1057,7 +1057,7 @@ mod tests {
                 vertical: 6.,
             },
             aspect: Some(1.5),
-            root: Some(Node::Split {
+            root: Node::Split {
                 horizontal: true,
                 ratio: 0.3,
                 children: Children::Two(
@@ -1072,10 +1072,10 @@ mod tests {
                         })),
                     }),
                 ),
-            }),
+            },
         };
         let mut constrained = bsp.clone();
-        constrained.root = Some(leaf(
+        constrained.root = leaf(
             V,
             Some(WindowConstraints {
                 is_resizable: true,
@@ -1083,14 +1083,8 @@ mod tests {
                 ..Default::default()
             }),
             Fill::Tiled,
-        ));
-        let empty = Bsp {
-            screen: Rect { x: 0., y: 0., w: 10., h: 10. },
-            gaps: Gaps::default(),
-            root: None,
-            aspect: None,
-        };
-        for shape in [bsp, constrained, empty] {
+        );
+        for shape in [bsp, constrained] {
             assert_eq!(decode_bsp(&encode_bsp(shape.clone())), Ok(shape));
         }
         let frames = vec![
@@ -1132,7 +1126,7 @@ mod tests {
                 top: true,
                 left: false,
             },
-            root: Some(Node::Axis {
+            root: Node::Axis {
                 horizontal: true,
                 fill: Fill::Tiled,
                 first: Box::new(child(1.5, window(W, Fill::Screen))),
@@ -1150,7 +1144,7 @@ mod tests {
                     })),
                     after: vec![],
                 })],
-            }),
+            },
         };
         assert_eq!(decode_traditional(&encode_traditional(shape.clone())), Ok(shape));
     }
