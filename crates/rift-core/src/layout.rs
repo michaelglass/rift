@@ -4,6 +4,7 @@
 
 pub mod axis;
 pub mod bsp;
+pub mod scrolling;
 pub mod traditional;
 
 use crate::plain::Rect;
