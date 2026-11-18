@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::Kinds;
-use crate::pointer::{Button, Grip, Initiative, Pointer, Release, Ungrip, may};
+use crate::pointer::{Button, Grip, Pointer, Release, Ungrip};
 use crate::reconciler::{
     Answer, Note, Observation, Planned, Reconciler, Reply, Verdict, Want, Write,
 };
@@ -122,8 +122,6 @@ pub enum Event<K: Kinds> {
     /// Something outside the core (an animation, a topology change) took `window`'s frame, or
     /// the window is gone: nothing is outstanding.
     Forget { window: K::Window },
-    /// May Rift take `initiative` now?
-    Gate { initiative: Initiative },
 }
 
 /// A decision for the platform.
@@ -165,11 +163,6 @@ pub enum Effect<K: Kinds> {
     },
     /// Something decided along the way, for the log.
     Note { window: K::Window, note: Note },
-    /// Whether Rift may take `initiative`. Refused is discarded, never queued.
-    Gate {
-        initiative: Initiative,
-        allowed: bool,
-    },
     /// Arm the deadline timer for this time, or disarm it (`None`).
     Timer(Option<K::Time>),
     /// The hand is on `window` now (pressed): its record goes into the grip slot.
@@ -414,12 +407,6 @@ impl<K: Kinds> RustCore<K> {
                 }
                 Some(_) | None => vec![],
             },
-            Event::Gate { initiative } => {
-                vec![Effect::Gate {
-                    initiative,
-                    allowed: may(initiative, pointer),
-                }]
-            }
         }
     }
 
@@ -682,12 +669,7 @@ mod tests {
             window: W,
             note: Note::Discarded
         }]);
-        let steering = Initiative::UserInput(crate::pointer::InputClass::Steering);
-        assert_eq!(core.step(Event::Gate { initiative: steering }), vec![
-            Effect::Gate {
-                initiative: steering,
-                allowed: false
-            }
-        ]);
+        let steering = crate::Initiative::UserInput(crate::pointer::InputClass::Steering);
+        assert!(!crate::may(steering, core.pointer()));
     }
 }

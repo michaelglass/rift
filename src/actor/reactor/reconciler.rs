@@ -189,7 +189,7 @@ impl Reconciler {
                 Effect::DragBegan { window } => debug!(?window, "drag-evidence: drag began"),
                 Effect::Ungrip { window, why } => debug!(?window, ?why, "drag-evidence: ungrip"),
                 Effect::Regrip { from, to } => debug!(?from, ?to, "drag-evidence: regrip"),
-                Effect::Observed { .. } | Effect::Gate { .. } => {}
+                Effect::Observed { .. } => {}
             }
         }
         #[cfg(test)]
