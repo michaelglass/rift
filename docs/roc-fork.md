@@ -71,6 +71,19 @@ middle of the engine's layout pass, and geometry needs no model. The engine stil
 trees and describes the shape on every arrange (`BspLayoutSystem::shape`); when tree ownership
 moves into the core, the shape becomes the core's own state and the description goes.
 
+`layout::traditional` does the same for stack and master-stack layouts (an axis is a first and
+the rest, a stack a zipper), and `layout::scrolling` for a scrolling layout's strip: `Strip`
+(columns, a first and the rest, of rows, a first and the rest; the width settings, alignment,
+navigation) `place`s into `Placed` (each column's spot with its anchor, the world frames, the
+non-empty snaps keyed by column id, the bounds), and `Placed::settle` is where the camera comes
+to rest after a release (`Settle::Niri | Anchored | AnchoredTowards(column)` decides ties).
+rift's strip geometry is `Empty | Placed`; the camera spring and viewport stay rift's.
+
+Window constraints carry a `Sizing` (`Fixed | Resizable | ResizableAtLeastMin`, each with the
+`Size` the app reported, parsed once): BSP, scrolling and floating hold a window to its
+`reported_min`; traditional tiling to its `tiled_min` (a resizable window's advisory minimum
+counts only under the `respect_min_size` app rule).
+
 ## What lives where
 
 - **Core (pure):** the reconciler (writes, acks, refusals, deadlines, the queued desire, the
@@ -201,6 +214,12 @@ wire encode and decode.
   shape, traditional 5.6–5.9 → 8.1 µs. If a profile ever asks, optimise inside these
   structures (the measured costs: bigger records than parallel float lists, and one list for
   each zip). The per-step core is unaffected.
+- **Scrolling, a known cost.** 4.4 µs per strip in Roc (best of 5 over 200,000 random strips;
+  the strip parity runs 200,000 strips and 200,000 settle questions bit-identical). A Rust
+  float sum and Roc's differ when grouped differently: a row's y advances by `(height + gap)`,
+  as Rust adds it; the random strips found that. The Roc build script watches `roc/core` and
+  `roc/platform` as directories: a module missing from its old file list (`Scrolling.roc`) left
+  a stale archive under test until the mismatch was traced to it.
 - **Hardening: parse at the boundary, protective types, narrow signatures (the owner's "a, and
   then some").** What changed, Rust core first and Roc in parity:
   - *Parse once.* `Wire.roc` reads with `Try` (`Taken(a) : Try((a, Words), [Malformed])`),
@@ -241,6 +260,9 @@ wire encode and decode.
   - *The `roc` feature between a Rust-only commit and its Roc parity.* A Rust-only commit that
     changes the wire (b71d8cd9) leaves the Roc build's layout test failing until the next
     commit; the Roc-free workspace, which the play line uses, is green at every commit.
+    roc-2 joined `feat/respect-min-size-core` by a merge (2518ba1b), not a rebase: the base
+    already held the final Rust shapes (a required root, the traditional zipper, Sizing), so
+    rebased, every older Roc commit's wire would have failed to compile.
 - **Pure functions.** No Roc function is effectful (`=>`): the platform's entry points are
   pure too. rift-core reads no clock, randomness or I/O (time and request ids come in as
   arguments); the Roc host only moves words and memory.
@@ -330,7 +352,9 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | `DragKind` union | M | Done on the Rust line (platform side; the drop target is derived there until layout moves). |
 | Layout geometry: BSP | M | Done, Rust and Roc (the engine describes the shape; the core computes the frames). |
 | Layout geometry: traditional (stack, master-stack) | M | Done, Rust and Roc (`layout::traditional`, `Traditional.roc`); the stack bar's group frames use the core's `stack_frames`. |
-| Layout geometry: scrolling, floating | M each | **Next.** Scrolling has cached world geometry (`prepare_layout`) to carry. |
+| Sizing (respect_min_size in the core) | S | Done, Rust (the play line) and Roc, with its own wire encoding. |
+| Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
+| Layout geometry: floating | S–M | **Next.** |
 | Layout trees into the core | L+ | Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
