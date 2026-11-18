@@ -20,7 +20,7 @@ use test_log::test;
 
 use super::*;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::actor::reactor::reconciler::{Desired, Rift, Sync};
+use crate::actor::reactor::reconciler::{Desired, Rift, Sync, Want};
 use crate::actor::reactor::testing::TestSizing;
 
 /// Signatures (invariant, step kind) this branch is known to fail. Each has a regression test.
@@ -65,6 +65,11 @@ enum Step {
     DragStart { w: usize, dx: i16, dy: i16 },
     /// The user presses on window `w` and holds still; a later move drags it.
     Press { w: usize },
+    /// The user presses on window `w` with the drag modifier held (rift takes the press and
+    /// moves the window itself, by interactive frames) and moves the pointer.
+    ModifierDrag { w: usize, dx: i16, dy: i16 },
+    /// The pointer of a modifier drag moves.
+    ModifierMove { dx: i16, dy: i16 },
     /// The held window moves under the pointer.
     DragMove { dx: i16, dy: i16 },
     /// The held window crosses onto display `to`; the window server reports it there.
@@ -87,12 +92,16 @@ enum Step {
     Deliver,
     /// Window `w` is destroyed.
     Destroy { w: usize },
-    /// The user asks rift to move the focused window to workspace `k`.
-    MoveFocusedToWorkspace { k: usize },
+    /// The user asks rift to move window `w` to workspace `k` (by its index, as the CLI does;
+    /// the sim has no focus to lean on).
+    MoveToWorkspace { w: usize, k: usize },
     /// The user asks rift to move the focused window to display `d`.
     MoveFocusedToDisplay { d: usize },
     /// Time passes: every unanswered write is past its deadline.
     Tick,
+    /// macOS asks for a full refresh (a wake): the display topology is re-sent as it is, with
+    /// the refresh flag up. Pending targets of parked windows no longer hold.
+    Wake,
     /// Window `w`'s app starts treating the sizes it is asked for this way.
     Sizing { w: usize, sizing: TestSizing },
 }
@@ -102,6 +111,9 @@ impl Step {
         match self {
             Step::DragStart { .. } => "drag-start",
             Step::Press { .. } => "press",
+            Step::ModifierDrag { .. } => "modifier-drag",
+            Step::ModifierMove { .. } => "modifier-move",
+            Step::Wake => "wake",
             Step::DragMove { .. } => "drag-move",
             Step::CrossDisplay { .. } => "cross-display",
             Step::MouseUp => "mouse-up",
@@ -112,7 +124,7 @@ impl Step {
             Step::HeldMovesButtonUp { .. } => "lie-tap-drag",
             Step::Deliver => "deliver-echoes",
             Step::Destroy { .. } => "destroy",
-            Step::MoveFocusedToWorkspace { .. } => "command-move-to-workspace",
+            Step::MoveToWorkspace { .. } => "command-move-to-workspace",
             Step::MoveFocusedToDisplay { .. } => "command-move-to-display",
             Step::Tick => "tick",
             Step::Sizing { .. } => "sizing",
@@ -142,13 +154,22 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng::new(seed);
     (0..len)
         .map(|_| match rng.below(100) {
-            0..12 => Step::DragStart {
+            0..9 => Step::DragStart {
+                w: rng.below(16),
+                dx: rng.delta(),
+                dy: rng.delta(),
+            },
+            9..12 => Step::ModifierDrag {
                 w: rng.below(16),
                 dx: rng.delta(),
                 dy: rng.delta(),
             },
             12..15 => Step::Press { w: rng.below(16) },
-            15..30 => Step::DragMove {
+            15..26 => Step::DragMove {
+                dx: rng.delta(),
+                dy: rng.delta(),
+            },
+            26..30 => Step::ModifierMove {
                 dx: rng.delta(),
                 dy: rng.delta(),
             },
@@ -170,7 +191,8 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
             },
             70..73 => Step::HeldMovesButtonUp { dx: rng.delta() },
             73..89 => Step::Deliver,
-            89..91 => Step::Tick,
+            89..90 => Step::Tick,
+            90..91 => Step::Wake,
             91..94 => Step::Sizing {
                 w: rng.below(16),
                 sizing: match rng.below(3) {
@@ -180,7 +202,10 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
                 },
             },
             94..96 => Step::Destroy { w: rng.below(16) },
-            96..98 => Step::MoveFocusedToWorkspace { k: rng.below(3) },
+            96..98 => Step::MoveToWorkspace {
+                w: rng.below(16),
+                k: rng.below(3),
+            },
             _ => Step::MoveFocusedToDisplay { d: rng.below(3) },
         })
         .collect()
@@ -210,6 +235,8 @@ struct Held {
     assigned_at_start: Option<SpaceId>,
     /// A command ran during the drag: whether a command may move a held window is policy.
     command_during_drag: bool,
+    /// Where the pointer is, for a modifier drag (rift follows the pointer, not the window).
+    modifier_pointer: Option<CGPoint>,
 }
 
 impl Held {
@@ -220,6 +247,7 @@ impl Held {
             rift_saw_it,
             assigned_at_start,
             command_during_drag: false,
+            modifier_pointer: None,
         }
     }
 }
@@ -243,24 +271,22 @@ struct Sim {
     /// The window rift took to be dragged before this step.
     dragged_before: Option<WindowId>,
     /// Windows whose unanswered writes rift has stopped waiting for: someone else moved the
-    /// window, or the deadline passed.
+    /// window, a modifier drag took it, or the deadline passed.
     gave_up: BTreeSet<WindowId>,
+    /// Windows this step placed: written whatever rift believed (`Want::Place`), as the core's
+    /// trace shows.
+    placed: BTreeSet<WindowId>,
 }
 
 fn display_count(seed: u64) -> usize { 2 + (seed % 2) as usize }
 
 impl Sim {
-    fn new(displays: usize) -> Self { Self::build(displays, false) }
-
-    /// As [`Sim::new`], with every step the reactor takes through the core recorded from the
-    /// start (`reactor.reconciler.trace`).
-    fn recording(displays: usize) -> Self { Self::build(displays, true) }
-
-    fn build(displays: usize, record: bool) -> Self {
+    /// Every step the reactor takes through the core is recorded from the start
+    /// (`reactor.reconciler.trace`): the invariants read why rift wrote what it wrote, and the
+    /// differential test replays it.
+    fn new(displays: usize) -> Self {
         let (mut apps, mut reactor) = test_context();
-        if record {
-            *reactor.reconciler.trace.borrow_mut() = Some(Vec::new());
-        }
+        *reactor.reconciler.trace.borrow_mut() = Some(Vec::new());
         let screens: Vec<CGRect> = (0..displays)
             .map(|i| {
                 CGRect::new(
@@ -318,6 +344,7 @@ impl Sim {
             settled_before: BTreeMap::new(),
             dragged_before: None,
             gave_up: BTreeSet::new(),
+            placed: BTreeSet::new(),
         }
     }
 
@@ -380,6 +407,8 @@ impl Sim {
     /// Runs one step. Returns the requests rift emitted while handling it.
     fn run(&mut self, step: Step) -> Vec<Request> {
         self.moved = None;
+        self.placed.clear();
+        let traced = self.core_steps();
         self.dragged_before = dragged(&self.reactor);
         self.settled_before = self
             .live
@@ -410,6 +439,48 @@ impl Sim {
                     let assigned_at_start = self.reactor.assigned_space_for_window_id(wid);
                     self.held = Some(Held::new(wid, false, assigned_at_start));
                 }
+            }
+            Step::ModifierDrag { w, dx, dy } => {
+                let wid = self.pick(w);
+                if self.held.is_none() && self.live.contains(&wid) {
+                    let point = self.os_frame(wid).mid();
+                    self.reactor.handle_event(Event::ModifierMouseDown {
+                        button: crate::actor::drag::MouseButton::Left,
+                        point,
+                        action: crate::common::config::MouseAction::Move,
+                    });
+                    // The windows overlap: the user holds whichever one is on top at the point,
+                    // which is the one rift took (if it manages one there).
+                    if let Some(gripped) = self.reactor.state.windows.gripped() {
+                        let assigned_at_start = self.reactor.assigned_space_for_window_id(gripped);
+                        let rift_saw_it = dragged(&self.reactor) == Some(gripped);
+                        let mut held = Held::new(gripped, rift_saw_it, assigned_at_start);
+                        let point = CGPoint::new(point.x + f64::from(dx), point.y + f64::from(dy));
+                        held.modifier_pointer = Some(point);
+                        self.held = Some(held);
+                        self.reactor.handle_event(Event::DragMotion(
+                            crate::actor::drag::DragMotion { point },
+                        ));
+                    }
+                }
+            }
+            Step::ModifierMove { dx, dy } => {
+                if let Some(held) = &mut self.held
+                    && let Some(point) = &mut held.modifier_pointer
+                {
+                    *point = CGPoint::new(point.x + f64::from(dx), point.y + f64::from(dy));
+                    let point = *point;
+                    self.reactor
+                        .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+                }
+            }
+            Step::Wake => {
+                let spaces = self.spaces.iter().copied().map(Some).collect();
+                self.reactor.handle_event(space_state_event_with(
+                    self.screens.clone(),
+                    spaces,
+                    |state| state.should_force_refresh_layout = true,
+                ));
             }
             Step::DragMove { dx, dy } => {
                 if let Some(wid) = self.held_window() {
@@ -516,14 +587,14 @@ impl Sim {
                     self.reactor.handle_event(Event::WindowDestroyed(wid));
                 }
             }
-            Step::MoveFocusedToWorkspace { k } => {
+            Step::MoveToWorkspace { w, k } => {
                 if let Some(held) = &mut self.held {
                     held.command_during_drag = true;
                 }
                 self.reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
                     workspace: WorkspaceSelector::Index(k),
                     follow: false,
-                    window_id: None,
+                    window_id: Some(self.pick(w).idx.get()),
                 });
             }
             Step::MoveFocusedToDisplay { d } => {
@@ -540,7 +611,34 @@ impl Sim {
         }
         // Each step is one batch of the reactor's loop, which flushes when it drains.
         self.reactor.reread_windows();
+        self.read_core_steps(traced);
         self.apps.requests()
+    }
+
+    fn core_steps(&self) -> usize {
+        self.reactor.reconciler.trace.borrow().as_ref().map_or(0, Vec::len)
+    }
+
+    /// What the core decided since step `from` that the invariants need: a modifier drag's
+    /// interactive frame, or the core forgetting a window, ends rift's wait for it; and a
+    /// placement is written whatever rift believed.
+    fn read_core_steps(&mut self, from: usize) {
+        let trace = self.reactor.reconciler.trace.borrow();
+        for (event, effects) in &trace.as_ref().expect("recording")[from..] {
+            let wrote =
+                || effects.iter().any(|effect| matches!(effect, rift_core::Effect::Write(_)));
+            match event {
+                // A modifier drag took the window, or something outside the core (a topology
+                // change, an animation) did: either way rift stopped waiting for its write.
+                rift_core::Event::Follow { window, .. } | rift_core::Event::Forget { window } => {
+                    _ = self.gave_up.insert(*window)
+                }
+                rift_core::Event::Want { window, want: Want::Place, .. } if wrote() => {
+                    _ = self.placed.insert(*window)
+                }
+                _ => {}
+            }
+        }
     }
 
     fn check(&self, step_index: usize, step: Step, emitted: &[Request]) -> Result<(), Violation> {
@@ -633,10 +731,13 @@ impl Sim {
                     ),
                 );
             }
-            if emitted
-                .iter()
-                .any(|request| matches!(request, Request::InteractiveFramesPending(_)))
-            {
+            // A modifier drag moves its own window by interactive frames, and only that window.
+            let modifier_drag = self.held.as_ref().filter(|held| held.modifier_pointer.is_some());
+            if emitted.iter().any(|request| match request {
+                Request::InteractiveFramesPending(frames) => modifier_drag
+                    .is_none_or(|held| frames.windows().into_iter().any(|w| w != held.window)),
+                _ => false,
+            }) {
                 return fail(
                     "no-writes-during-drag",
                     format!(
@@ -693,10 +794,11 @@ impl Sim {
             let placed = matches!(
                 step,
                 Step::MoveFocusedToDisplay { .. }
-                    | Step::MoveFocusedToWorkspace { .. }
+                    | Step::MoveToWorkspace { .. }
                     | Step::Refresh { .. }
             );
             if !placed
+                && !self.placed.contains(&wid)
                 && self.moved != Some(wid)
                 && let Some((known, real)) = self.settled_before.get(&wid)
                 && known.same_as(frame)
@@ -1004,7 +1106,7 @@ type PlainStep = (
 /// Runs `steps` (and the settling at the end) and returns every step the reactor took through
 /// the core, on plain data. Invariant violations are not this function's business.
 fn trace(displays: usize, steps: &[Step]) -> Vec<PlainStep> {
-    let mut sim = Sim::recording(displays);
+    let mut sim = Sim::new(displays);
     let epoch = sim.reactor.reconciler.clock.now();
     for &step in steps {
         let emitted = sim.run(step);
