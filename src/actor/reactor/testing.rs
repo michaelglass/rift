@@ -254,9 +254,8 @@ impl Reactor {
         sys_id: Option<WindowServerId>,
         is_manageable: bool,
     ) {
-        self.state.insert_window(wid, super::WindowState {
-            native_transient: false,
-            info: WindowInfo {
+        self.state.insert_window(wid, {
+            let mut state = super::WindowState::from(WindowInfo {
                 has_native_tabs: false,
                 is_standard: true,
                 is_root: true,
@@ -271,10 +270,9 @@ impl Reactor {
                 path: None,
                 ax_role: None,
                 ax_subrole: None,
-            },
-            frame_monotonic: frame,
-            is_manageable,
-            manage_override: None,
+            });
+            state.is_manageable = is_manageable;
+            state
         });
     }
 }

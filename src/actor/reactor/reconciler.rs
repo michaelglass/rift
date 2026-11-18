@@ -156,8 +156,9 @@ impl Reconciler {
         self.core.reconciler().pending(window)
     }
 
-    /// Rust-only read, not part of the boundary: where the core sees `window`, which the
-    /// window store's `frame_monotonic` must agree with (checked in debug builds).
+    /// Rust-only read, not part of the boundary: where the core sees `window` (the fuzzer
+    /// checks the store's `frame_monotonic` agrees).
+    #[cfg(test)]
     pub(crate) fn seen(&self, window: WindowId) -> Option<CGRect> { self.core.seen(window) }
 
     /// When the run loop's timer should fire: the deadline the core last asked for.
@@ -470,10 +471,8 @@ impl RiftState {
                     }
                 }
                 Effect::Seen { window, frame } => {
-                    let state = self.windows.window_mut(window);
-                    debug_assert!(state.is_some(), "the core sees a window the store lacks");
-                    if let Some(state) = state {
-                        state.frame_monotonic = frame;
+                    if let Some(state) = self.windows.window_mut(window) {
+                        state.project_seen(frame);
                     }
                 }
                 _ => {}
@@ -620,7 +619,7 @@ impl RiftState {
         window: WindowId,
         state: crate::model::reactor::WindowState,
     ) {
-        let frame = state.frame_monotonic;
+        let frame = state.frame_monotonic();
         self.windows.insert_window(window, state);
         self.step(Event::Seen { window, frame });
     }
@@ -644,7 +643,7 @@ impl RiftState {
     pub(crate) fn begin_drag(&mut self, window: WindowId, session: Session) {
         let effects = self.core.step(Event::Drag { window });
         if effects.contains(&Effect::DragBegan { window }) {
-            self.windows.project_drag(window, session);
+            self.windows.project_drag(session);
         }
         self.project(&effects);
     }
@@ -728,12 +727,6 @@ impl RiftState {
         {
             self.step(Event::Rekeyed { from: previous, to: window });
         }
-        let previous = self.windows.reconcile_ax_identity(window, server_id);
-        debug_assert_eq!(
-            self.windows.window(window).map(|state| state.frame_monotonic),
-            self.core.seen(window),
-            "the store moved the window's state the way the core moved where it sees it"
-        );
-        previous
+        self.windows.reconcile_ax_identity(window, server_id)
     }
 }

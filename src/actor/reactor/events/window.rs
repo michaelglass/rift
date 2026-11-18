@@ -183,7 +183,7 @@ pub fn handle_window_frame_changed(
         return Ok(outcome);
     };
     let server_id = window.info.sys_id;
-    let old_frame = window.frame_monotonic;
+    let old_frame = window.frame_monotonic();
 
     if !old_space_active && !new_space_active {
         return Ok(outcome);

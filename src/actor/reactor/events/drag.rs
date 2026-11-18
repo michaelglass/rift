@@ -27,7 +27,7 @@ pub fn build_drag_scene(
                 Some(DragSceneTarget {
                     window,
                     space,
-                    frame: state.windows.window(window)?.frame_monotonic,
+                    frame: state.windows.window(window)?.frame_monotonic(),
                 })
             })
             .collect(),

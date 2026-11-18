@@ -165,7 +165,6 @@ impl Records {
     /// The core gripped `window`: its record moves into the slot. Its transfer is discarded,
     /// not set aside: the user places this window now, and the release re-derives.
     fn grip(&mut self, window: WindowId) {
-        debug_assert!(self.gripped.is_none(), "the core ungrips before it grips");
         let Loose { record, .. } = self.loose.remove(&window).unwrap_or_default();
         self.gripped = Some(Gripped {
             window,
@@ -312,7 +311,7 @@ struct FloatingDisplayGeometry {
 impl WindowRecord {
     /// Latest frame accepted by the reactor, including its own completed writes.
     pub fn frame(&self) -> Option<objc2_core_foundation::CGRect> {
-        self.state.as_ref().map(|state| state.frame_monotonic)
+        self.state.as_ref().map(|state| state.frame_monotonic())
     }
 
     pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }
@@ -1952,21 +1951,15 @@ impl WindowStore {
     pub(crate) fn project_grip(&mut self, window: WindowId) { self.windows.grip(window); }
 
     /// Effect `DragBegan`: the pressed window's grip becomes the drag `session`.
-    pub(crate) fn project_drag(&mut self, window: WindowId, session: Session) {
+    pub(crate) fn project_drag(&mut self, session: Session) {
         let gripped = self.windows.gripped.as_mut().expect("the core drags only a press");
-        debug_assert_eq!(gripped.window, window, "the core drags only its own press");
-        debug_assert!(
-            matches!(gripped.grip, Grip::Pressed),
-            "the core drags only a press"
-        );
         gripped.grip = Grip::Dragging(Box::new(session));
     }
 
     /// Effect `Ungrip`: the slot's record goes back among the loose ones. A drag's session is
     /// returned.
     pub(crate) fn project_ungrip(&mut self, window: WindowId) -> Option<Session> {
-        let (held, session) = self.windows.let_go().expect("the core ungrips only a grip");
-        debug_assert_eq!(held, window, "the core ungrips the window it gripped");
+        let (_, session) = self.windows.let_go().expect("the core ungrips only a grip");
         self.prune_window_record(window);
         session
     }

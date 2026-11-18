@@ -81,12 +81,21 @@ pub(crate) struct WindowState {
     ///
     /// This value only updates monotonically with respect to writes; in other
     /// words, we only accept reads when we know they come after the last write.
-    pub(crate) frame_monotonic: CGRect,
+    /// It is the core's model frame, projected: written only by [`Self::project_seen`].
+    frame_monotonic: CGRect,
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.
     pub(crate) is_manageable: bool,
     pub(crate) native_transient: bool,
     pub(crate) manage_override: Option<bool>,
+}
+
+impl WindowState {
+    /// Where the model takes the window to be.
+    pub(crate) fn frame_monotonic(&self) -> CGRect { self.frame_monotonic }
+
+    /// The core's `Effect::Seen`, applied by the reactor's projection and nothing else.
+    pub(crate) fn project_seen(&mut self, frame: CGRect) { self.frame_monotonic = frame; }
 }
 
 impl From<WindowInfo> for WindowState {

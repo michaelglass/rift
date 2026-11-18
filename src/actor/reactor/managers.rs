@@ -376,7 +376,7 @@ impl LayoutManager {
                     frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic()),
                     &all_screen_frames,
                 );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
