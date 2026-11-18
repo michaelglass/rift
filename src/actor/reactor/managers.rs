@@ -190,6 +190,34 @@ pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 
+/// The stacks a `StacksChanged` broadcast reports. Clients have always received vertical
+/// stacks bottom to top.
+fn stack_infos(groups: &[crate::layout_engine::engine::GroupContainerInfo]) -> Vec<StackInfo> {
+    use crate::layout_engine::LayoutKind;
+    groups
+        .iter()
+        .map(|g| {
+            let mut windows: Vec<_> = g.window_ids.iter().map(WindowId::to_debug_string).collect();
+            let mut selected_index = g.selected_index;
+            if g.container_kind == LayoutKind::VerticalStack {
+                windows.reverse();
+                selected_index = windows.len().saturating_sub(1).saturating_sub(selected_index);
+            }
+            StackInfo {
+                total_count: g.total_count,
+                container_kind: match g.container_kind {
+                    LayoutKind::Horizontal => rift_protocol::LayoutKind::Horizontal,
+                    LayoutKind::Vertical => rift_protocol::LayoutKind::Vertical,
+                    LayoutKind::HorizontalStack => rift_protocol::LayoutKind::HorizontalStack,
+                    LayoutKind::VerticalStack => rift_protocol::LayoutKind::VerticalStack,
+                },
+                selected_index,
+                windows,
+            }
+        })
+        .collect()
+}
+
 fn bound_scrolling_tiled_frames_to_screen(
     reactor: &Reactor,
     layout: &mut Vec<(WindowId, CGRect)>,
@@ -450,39 +478,7 @@ impl LayoutManager {
                 Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
 
                 if let Some(header) = reactor.workspace_header(space) {
-                    let stacks: Vec<StackInfo> = group_infos
-                        .iter()
-                        .map(|g| {
-                            // Clients have always received vertical stacks bottom to top.
-                            let mut windows: Vec<_> =
-                                g.window_ids.iter().map(WindowId::to_debug_string).collect();
-                            let mut selected_index = g.selected_index;
-                            if g.container_kind == crate::layout_engine::LayoutKind::VerticalStack {
-                                windows.reverse();
-                                selected_index =
-                                    windows.len().saturating_sub(1).saturating_sub(selected_index);
-                            }
-                            StackInfo {
-                                total_count: g.total_count,
-                                container_kind: match g.container_kind {
-                                    crate::layout_engine::LayoutKind::Horizontal => {
-                                        rift_protocol::LayoutKind::Horizontal
-                                    }
-                                    crate::layout_engine::LayoutKind::Vertical => {
-                                        rift_protocol::LayoutKind::Vertical
-                                    }
-                                    crate::layout_engine::LayoutKind::HorizontalStack => {
-                                        rift_protocol::LayoutKind::HorizontalStack
-                                    }
-                                    crate::layout_engine::LayoutKind::VerticalStack => {
-                                        rift_protocol::LayoutKind::VerticalStack
-                                    }
-                                },
-                                selected_index,
-                                windows,
-                            }
-                        })
-                        .collect();
+                    let stacks = stack_infos(&group_infos);
 
                     if stacks.len() > 0 {
                         let event = BroadcastEvent::StacksChanged {
