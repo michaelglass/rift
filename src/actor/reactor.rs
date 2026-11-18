@@ -1033,15 +1033,22 @@ impl Reactor {
             if self.transfer_keeps_assignment(wsid, None) {
                 continue;
             }
-            let resolved = self.resolve_native_space(wsid, None);
-            let inactive_target = match missing_window(
-                resolved,
-                || self.native.window_spaces(wsid),
-                |space| self.is_fullscreen_space(space),
-                |space| self.is_space_active(space),
-                |space| self.native.space_is_user(space),
-                !self.space_state.fullscreen_spaces.is_empty(),
-            ) {
+            // What macOS says about the Space it resolves to, asked only for the kind of Space
+            // that needs it.
+            let resolved = match self.resolve_native_space(wsid, None) {
+                None => Resolved::Unknown,
+                Some(space) if self.is_fullscreen_space(space) => Resolved::Fullscreen(space),
+                Some(space) if self.is_space_active(space) => Resolved::Active {
+                    space,
+                    live: self.native.window_spaces(wsid),
+                },
+                Some(space) => Resolved::Inactive {
+                    space,
+                    user: self.native.space_is_user(space),
+                },
+            };
+            let fullscreen_topology = !self.space_state.fullscreen_spaces.is_empty();
+            let inactive_target = match missing_window(resolved, fullscreen_topology) {
                 Missing::Keep => continue,
                 Missing::Fullscreen(fullscreen) => {
                     let user = self
@@ -6815,8 +6822,25 @@ enum Refusal {
     Warn(&'static str),
 }
 
-/// What a window missing from an authoritative snapshot of the active Spaces comes to, from
-/// the Space it resolves to and, if that is active, the Spaces it is live on.
+/// The Space a window missing from an authoritative snapshot of the active Spaces resolves to,
+/// with what macOS says about it.
+#[derive(Debug, PartialEq)]
+enum Resolved {
+    Unknown,
+    Fullscreen(SpaceId),
+    /// An active Space, and the Spaces the window is live on.
+    Active {
+        space: SpaceId,
+        live: Vec<SpaceId>,
+    },
+    /// An inactive Space, and whether it is a user desktop.
+    Inactive {
+        space: SpaceId,
+        user: bool,
+    },
+}
+
+/// What a window missing from an authoritative snapshot of the active Spaces comes to.
 #[derive(Debug, PartialEq)]
 enum Missing {
     /// Not evidence of anything: live membership can precede the accepted Space inventory, and
@@ -6828,21 +6852,21 @@ enum Missing {
     Absent { inactive_target: Option<SpaceId> },
 }
 
-fn missing_window(
-    resolved: Option<SpaceId>,
-    live: impl FnOnce() -> Vec<SpaceId>,
-    is_fullscreen: impl Fn(SpaceId) -> bool,
-    is_active: impl Fn(SpaceId) -> bool,
-    is_user: impl Fn(SpaceId) -> bool,
-    fullscreen_topology: bool,
-) -> Missing {
+fn missing_window(resolved: Resolved, fullscreen_topology: bool) -> Missing {
     match resolved {
-        Some(space) if is_fullscreen(space) => Missing::Fullscreen(space),
-        Some(space) if is_active(space) && live().as_slice() == [space] => Missing::Keep,
-        resolved => match resolved.filter(|&space| !is_active(space) && is_user(space)) {
-            None if fullscreen_topology => Missing::Keep,
-            inactive_target => Missing::Absent { inactive_target },
-        },
+        Resolved::Fullscreen(space) => Missing::Fullscreen(space),
+        Resolved::Active { space, live } if live == [space] => Missing::Keep,
+        Resolved::Inactive { space, user: true } => {
+            Missing::Absent { inactive_target: Some(space) }
+        }
+        Resolved::Unknown | Resolved::Active { .. } | Resolved::Inactive { user: false, .. }
+            if fullscreen_topology =>
+        {
+            Missing::Keep
+        }
+        Resolved::Unknown | Resolved::Active { .. } | Resolved::Inactive { user: false, .. } => {
+            Missing::Absent { inactive_target: None }
+        }
     }
 }
 
