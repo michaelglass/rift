@@ -13699,7 +13699,7 @@ fn pend(reactor: &mut Reactor, wid: WindowId, target: CGRect) {
     reactor.state.forget(wid);
     reactor.state.distrust(vec![wid]);
     reactor.place_window(wid, target);
-    let wsid = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id).unwrap();
+    let wsid = reactor.state.windows.server_id(wid).unwrap();
     assert_eq!(reactor.state.tx.target(wsid), Some(target), "pending");
 }
 

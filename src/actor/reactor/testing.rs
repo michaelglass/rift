@@ -71,8 +71,7 @@ impl Reactor {
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
         self.state
             .windows
-            .window(wid)
-            .and_then(|window| window.info.sys_id)
+            .server_id(wid)
             .expect("test window should have a WindowServer identity")
     }
 

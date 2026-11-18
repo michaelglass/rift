@@ -2345,11 +2345,7 @@ impl Reactor {
                         &self.app_manager,
                         command_workflow::FocusWindowPayload {
                             window_id: window,
-                            window_server_id: self
-                                .state
-                                .windows
-                                .window(window)
-                                .and_then(|w| w.info.sys_id),
+                            window_server_id: self.state.windows.server_id(window),
                             resolved_space: Some(space),
                             space_is_active: true,
                         },
@@ -4988,7 +4984,7 @@ impl Reactor {
     #[cfg(test)]
     fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
         if self.state.windows.drag_on(wid).is_none() {
-            let server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
+            let server_id = self.state.windows.server_id(wid);
             let origin_space = self.best_space_for_window(frame, server_id);
             self.state.press_and_drag(
                 wid,
@@ -5206,8 +5202,7 @@ impl Reactor {
     fn current_reported_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.state
             .windows
-            .window(wid)
-            .and_then(|window| window.info.sys_id)
+            .server_id(wid)
             .and_then(|wsid| self.resolve_native_space(wsid, None))
     }
 
