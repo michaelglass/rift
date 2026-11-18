@@ -143,6 +143,12 @@ pub(crate) fn process_window_list(
             layout.layout_engine.transfer_persistent_window_identity(previous, wid);
             outcome =
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
+            // Anything pending for the old identity died with it: arrange, so the core writes
+            // the desire again for the new one (an outside owner's window is never arranged).
+            if state.windows.claim(wid).is_none() {
+                let arrange = crate::actor::reactor::events::EventOutcome::layout_changed(false);
+                outcome.absorb(arrange);
+            }
         }
         if state.windows.contains_window(wid) {
             if let Ok(existing_outcome) = sync_existing_window_state(state, wid, info, as_of) {

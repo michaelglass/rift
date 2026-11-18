@@ -744,3 +744,73 @@ fn claimed_floating_window_stays_floating_through_minimize_and_admission_changes
     assert!(reactor.test_active_workspace_windows(space).contains(&window));
     reactor.state.windows.debug_assert_invariants();
 }
+
+/// macOS replaces `old`'s accessibility identity by `new` (same window-server window) while a
+/// write to `old` is in flight: the write went to the dead identity. The app keeps the window
+/// where it really is.
+fn rekey_mid_write(apps: &mut Apps, reactor: &mut Reactor, old: WindowId, new: WindowId) {
+    let mut info = reactor.state.windows.window(old).unwrap().info.clone();
+    info.frame = apps.windows[&old].frame;
+    let state = apps.windows.remove(&old).unwrap();
+    let (frame, last_seen) = (state.frame, state.last_seen_txid);
+    apps.windows.insert(new, state);
+    reactor.handle_event(Event::WindowCreated(new, info, None));
+    // The app thread reports the new identity's frame, stamped with the last request it applied
+    // to the window: older than the write that died.
+    reactor.handle_event(Event::WindowFrameChanged(
+        new,
+        frame,
+        Some(last_seen),
+        Requested(false),
+    ));
+}
+
+/// Where the layout puts `window`, and where its app has it, once everything has settled.
+fn settled_frames(
+    apps: &mut Apps,
+    reactor: &mut Reactor,
+    space: SpaceId,
+    window: WindowId,
+) -> (CGRect, CGRect) {
+    apps.simulate_until_quiet(reactor);
+    reactor.test_expire_all_writes();
+    apps.simulate_until_quiet(reactor);
+    let layout = test_layout(reactor, space, SCREEN);
+    let wanted = layout.iter().find(|(w, _)| *w == window).expect("in the layout").1;
+    (wanted, apps.windows[&window].frame)
+}
+
+#[test]
+fn a_window_rekeyed_mid_write_after_a_claim_still_reaches_its_slot() {
+    let (mut apps, mut reactor, space) = settled(3);
+    assert_eq!(reactor.claim_window(wid(1), OWNER, NONE), Ok(()));
+    assert!(
+        reactor.state.core.pending(wid(3)).is_some(),
+        "the claim reflows the space"
+    );
+    let fresh = WindowId::new(1, 99);
+    rekey_mid_write(&mut apps, &mut reactor, wid(3), fresh);
+    let (wanted, actual) = settled_frames(&mut apps, &mut reactor, space, fresh);
+    assert_eq!(
+        actual, wanted,
+        "the re-keyed window is left where the dead write found it"
+    );
+}
+
+#[test]
+fn a_window_rekeyed_mid_write_after_a_destroy_still_reaches_its_slot() {
+    let (mut apps, mut reactor, space) = settled(3);
+    apps.windows.remove(&wid(1));
+    reactor.handle_event(Event::WindowDestroyed(wid(1)));
+    assert!(
+        reactor.state.core.pending(wid(3)).is_some(),
+        "the destroy reflows the space"
+    );
+    let fresh = WindowId::new(1, 99);
+    rekey_mid_write(&mut apps, &mut reactor, wid(3), fresh);
+    let (wanted, actual) = settled_frames(&mut apps, &mut reactor, space, fresh);
+    assert_eq!(
+        actual, wanted,
+        "the re-keyed window is left where the dead write found it"
+    );
+}

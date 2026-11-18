@@ -274,13 +274,23 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
-    /// macOS replaced `from` by `to`: unless `to` is already known, it is where `from` was
-    /// seen, its app having it there.
+    /// macOS replaced `from` by `to`: unless `to` is already known, `from`'s record moves to it.
+    /// A settled window stays settled where its app acknowledged it. Anything pending for
+    /// `from` (a write in flight or queued, an animation, a refusal) went to an identity that
+    /// no longer exists, so where the app has `to` is unknown. No desire moves across: the next
+    /// arrange re-derives it for `to`.
     pub fn rekey(&mut self, from: K::Window, to: K::Window) {
-        if let Some(record) = self.windows.get(&from).copied()
+        if let Some(Record { seen, sync }) = self.windows.get(&from).copied()
             && !self.windows.contains_key(&to)
         {
-            self.see(to, record.seen);
+            let sync = match sync {
+                Sync::Settled { .. } | Sync::Unknown { .. } => sync,
+                Sync::InFlight { .. } | Sync::Animating { .. } | Sync::Refused { .. } => {
+                    Sync::Unknown { last: sync.last() }
+                }
+            };
+            self.windows.insert(to, Record { seen, sync });
+            self.touched.push(to);
         }
         self.remove(from);
     }
@@ -1443,5 +1453,35 @@ mod tests {
         assert_eq!(settled(&reconciler), Some(at(15.)));
         // Settled stays settled.
         assert_eq!(reconciler.forget(window()), Some(at(15.)));
+    }
+
+    #[test]
+    fn a_rekey_keeps_what_was_acknowledged_and_forgets_what_was_pending() {
+        let id = |idx| WindowId { pid: 1, idx };
+        let (settled, flying, new_settled, new_flying) = (id(1), id(2), id(11), id(12));
+        let mut reconciler = Reconciler::default();
+        reconciler.see(settled, at(0.));
+        reconciler.see(flying, at(0.));
+        let write = reconciler.want(T0, R, flying, at(100.), Owner::Rift);
+        assert!(matches!(write, Verdict::Send(_)));
+
+        reconciler.rekey(settled, new_settled);
+        reconciler.rekey(flying, new_flying);
+
+        assert_eq!(reconciler.sync(settled), None);
+        assert_eq!(reconciler.sync(flying), None);
+        assert_eq!(
+            reconciler.sync(new_settled),
+            Some(Sync::Settled { acked: at(0.), last: None })
+        );
+        // The write went to the dead identity: no target carries across, where the app has the
+        // window is unknown, and the next desire is written.
+        assert_eq!(
+            reconciler.sync(new_flying),
+            Some(Sync::Unknown { last: Some(R) })
+        );
+        assert_eq!(reconciler.pending(new_flying), None);
+        let again = reconciler.want(T0, R, new_flying, at(100.), Owner::Rift);
+        assert!(matches!(again, Verdict::Send(_)));
     }
 }

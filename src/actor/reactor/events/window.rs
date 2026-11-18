@@ -32,7 +32,8 @@ pub fn handle_window_created(
         window,
         window_server_info: ws_info,
     } = payload;
-    if let Some(previous) = state.reconcile_ax_identity(wid, window.sys_id) {
+    let rekeyed = state.reconcile_ax_identity(wid, window.sys_id);
+    if let Some(previous) = rekeyed {
         layout.layout_engine.transfer_persistent_window_identity(previous, wid);
     }
     if let Some(info) = ws_info {
@@ -49,8 +50,13 @@ pub fn handle_window_created(
 
     // Excluded and claimed windows only need lifecycle notifications; app-rule admission
     // arranges itself.
-    let outcome = EventOutcome::window_membership_changed(false, true)
-        .with_arrange_passes(state.windows.is_admitted(wid).into());
+    // A re-keyed window is arranged whatever its admission (unless an outside owner holds it):
+    // anything pending for the old identity died with it, and the core writes the desire again
+    // for the new one.
+    let arrange =
+        state.windows.is_admitted(wid) || (rekeyed.is_some() && state.windows.claim(wid).is_none());
+    let outcome =
+        EventOutcome::window_membership_changed(false, true).with_arrange_passes(arrange.into());
     Ok(if state.windows.can_reconcile_admission(wid) {
         outcome.with_created_window_finalization(wid)
     } else {
