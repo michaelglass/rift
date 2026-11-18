@@ -357,7 +357,6 @@ macro_rules! delegate_traditional_layout_system {
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
-pub(crate) mod constraints;
 pub use bsp::BspLayoutSystem;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;

@@ -1,4 +1,5 @@
 use objc2_core_foundation::CGRect;
+use rift_core::layout::traditional;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use tracing::warn;
@@ -6,9 +7,6 @@ use tracing::warn;
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowInsertionPoint;
-use crate::layout_engine::systems::constraints::{
-    AxisConstraints, ConstraintCache, container_axis_constraints, solve_axis_lengths,
-};
 use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
 };
@@ -16,7 +14,6 @@ use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
-use crate::sys::geometry::Round;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TraditionalLayoutSystem {
@@ -349,45 +346,71 @@ impl TraditionalLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
+        let shape = traditional::Traditional {
+            screen: crate::layout_engine::core_rect(screen),
+            area: crate::layout_engine::core_rect(rect),
+            gaps: crate::layout_engine::core_gaps(gaps),
+            stack_offset,
+            stack_line: crate::layout_engine::core_stack_line(stack_line),
+            root: self.shape(node, constraints),
+        };
+        crate::layout_engine::tile_traditional(&shape)
+    }
+
+    /// The subtree's shape for the core, pruned to what takes space: windows that participate,
+    /// and containers over them.
+    fn shape(
+        &self,
+        node: NodeId,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    ) -> Option<traditional::Node<WindowId>> {
         let map = &self.tree.map;
-        let window = &self.tree.data.window;
-        let mut prepared = ConstraintCache::default();
-        for child in node.traverse_postorder(map) {
-            if window.at(child).is_some_and(|w| !self.inactive.contains(&w))
-                || child.children(map).any(|c| prepared.contains_key(&c))
-            {
-                let axes = [false, true].map(|horizontal| {
-                    self.tree.data.layout.node_axis_constraints(
-                        &prepared,
-                        map,
-                        window,
-                        child,
-                        constraints,
-                        stack_offset,
-                        stack_line,
-                        gaps,
-                        horizontal,
-                    )
+        let layout = &self.tree.data.layout;
+        let info = &layout.info[node];
+        let fill = match (info.is_fullscreen, info.is_fullscreen_within_gaps) {
+            (true, _) => traditional::Fill::Screen,
+            (false, true) => traditional::Fill::WithinGaps,
+            (false, false) => traditional::Fill::Tiled,
+        };
+        if let Some(window) = self.tree.data.window.at(node) {
+            if self.inactive.contains(&window) {
+                return None;
+            }
+            let constraints = constraints.get(&window).copied();
+            return Some(traditional::Node::Window { window, constraints, fill });
+        }
+        let mut ids = Vec::new();
+        let mut children = Vec::new();
+        for child in node.children(map) {
+            if let Some(shape) = self.shape(child, constraints) {
+                ids.push(child);
+                children.push(traditional::Child {
+                    size: layout.info[child].size,
+                    node: shape,
                 });
-                prepared.insert(child, axes);
             }
         }
-        let mut sizes = vec![];
-        self.tree.data.layout.apply_with_gaps(
-            &prepared,
-            &self.tree.map,
-            &self.tree.data.window,
-            &self.tree.data.selection,
-            node,
-            rect,
-            screen,
-            &mut sizes,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-        );
-        sizes
+        if children.is_empty() {
+            return None;
+        }
+        let kind = match info.kind {
+            LayoutKind::Horizontal => traditional::Kind::Axis { horizontal: true },
+            LayoutKind::Vertical => traditional::Kind::Axis { horizontal: false },
+            LayoutKind::HorizontalStack | LayoutKind::VerticalStack => {
+                let focused = self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, node)
+                    .and_then(|selected| ids.iter().position(|&id| id == selected))
+                    .unwrap_or(0);
+                traditional::Kind::Stack {
+                    horizontal: info.kind == LayoutKind::HorizontalStack,
+                    focused,
+                }
+            }
+        };
+        Some(traditional::Node::Container { kind, fill, children })
     }
 
     fn find_natural_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
@@ -1691,13 +1714,15 @@ impl TraditionalLayoutSystem {
                     selected_index,
                 ));
 
-                let layout_res = stack_layout_result(
-                    rect,
+                let frames: Vec<CGRect> = traditional::stack_frames(
+                    crate::layout_engine::core_rect(rect),
                     children.len(),
                     stack_offset,
                     is_horizontal,
-                    stack_line,
-                );
+                    crate::layout_engine::core_stack_line(stack_line),
+                )
+                .map(crate::layout_engine::cg_rect)
+                .collect();
 
                 for (i, &child) in children.iter().enumerate().rev() {
                     if (selection_path_only && Some(child) != selected)
@@ -1705,7 +1730,7 @@ impl TraditionalLayoutSystem {
                     {
                         continue;
                     }
-                    let child_rect = layout_res.get_frame_for_index(i);
+                    let child_rect = frames[i];
                     stack.push((child, child_rect));
                 }
 
@@ -2553,72 +2578,6 @@ impl WindowIndex {
     }
 }
 
-struct StackLayoutResult {
-    container_rect: CGRect,
-    stack_offset: f64,
-    is_horizontal: bool,
-    window_width: f64,
-    window_height: f64,
-}
-
-impl StackLayoutResult {
-    fn new(
-        container_rect: CGRect,
-        window_count: usize,
-        stack_offset: f64,
-        is_horizontal: bool,
-    ) -> Self {
-        let total_offset_space = if window_count > 0 {
-            (window_count - 1) as f64 * stack_offset
-        } else {
-            0.0
-        };
-        let (window_width, window_height) = if is_horizontal {
-            (
-                (container_rect.size.width - total_offset_space).max(100.0),
-                container_rect.size.height.max(100.0),
-            )
-        } else {
-            (
-                container_rect.size.width.max(100.0),
-                (container_rect.size.height - total_offset_space).max(100.0),
-            )
-        };
-        Self {
-            container_rect,
-            stack_offset,
-            is_horizontal,
-            window_width,
-            window_height,
-        }
-    }
-
-    fn get_frame_for_index(&self, index: usize) -> CGRect {
-        use objc2_core_foundation::{CGPoint, CGSize};
-        let offset_amount = index as f64 * self.stack_offset;
-        let (x_offset, y_offset) = if self.is_horizontal {
-            (offset_amount, 0.0)
-        } else {
-            (0.0, offset_amount)
-        };
-        let container = &self.container_rect;
-        let width = self.window_width.min(container.size.width);
-        let height = self.window_height.min(container.size.height);
-        let min_x = container.origin.x;
-        let max_x = (container.origin.x + container.size.width - width).max(min_x);
-        let min_y = container.origin.y;
-        let max_y = (container.origin.y + container.size.height - height).max(min_y);
-        CGRect {
-            origin: CGPoint {
-                x: (container.origin.x + x_offset).clamp(min_x, max_x),
-                y: (container.origin.y + y_offset).clamp(min_y, max_y),
-            },
-            size: CGSize { width, height },
-        }
-        .round()
-    }
-}
-
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Layout {
     pub(crate) info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
@@ -2645,28 +2604,6 @@ impl Layout {
 
     fn recompute_total(&mut self, map: &NodeMap, parent: NodeId) {
         self.info[parent].total = self.children_total(map, parent);
-    }
-
-    fn effective_leaf_axis_constraints(
-        &self,
-        c: WindowLayoutConstraints,
-        horizontal: bool,
-    ) -> (f64, Option<f64>, Option<f64>, bool) {
-        let c = c.normalized();
-        let min = c.min_for_axis(horizontal);
-        let max = (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal));
-        if c.is_resizable {
-            if let Some(fixed) = c.fixed_for_axis(horizontal) {
-                return (min, Some(fixed), Some(fixed), false);
-            }
-            // Some apps report transient or overly conservative min/max bounds while still
-            // being user-resizable. In traditional tiling, honoring those bounds at split
-            // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split).
-            return (0.0, None, max, true);
-        }
-        let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
-        let can_grow = fixed.is_none();
-        (min, fixed, max.or(fixed), can_grow)
     }
 
     fn handle_event(&mut self, map: &NodeMap, event: TreeEvent, windows: &WindowIndex) {
@@ -2810,312 +2747,6 @@ impl Layout {
             format!("[size {}]", info.size)
         }
     }
-
-    fn node_axis_constraints(
-        &self,
-        prepared: &ConstraintCache,
-        map: &NodeMap,
-        window: &WindowIndex,
-        node: NodeId,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        stack_offset: f64,
-        stack_line: crate::common::config::StackLineReserve,
-        gaps: &crate::common::config::GapSettings,
-        horizontal: bool,
-    ) -> (f64, Option<f64>, Option<f64>, bool) {
-        if let Some(wid) = window.at(node) {
-            if let Some(c) = constraints.get(&wid).copied() {
-                return self.effective_leaf_axis_constraints(c, horizontal);
-            }
-            return (0.0, None, None, true);
-        }
-
-        let kind = self.info[node].kind;
-        container_axis_constraints(
-            node.children(map)
-                .filter_map(|child| prepared.get(&child))
-                .map(|axes| axes[horizontal as usize]),
-            kind,
-            horizontal,
-            if horizontal {
-                gaps.inner.horizontal
-            } else {
-                gaps.inner.vertical
-            },
-            stack_offset,
-            stack_line.on_axis(kind, horizontal),
-        )
-    }
-
-    fn apply_with_gaps(
-        &self,
-        prepared: &ConstraintCache,
-        map: &NodeMap,
-        window: &WindowIndex,
-        selection: &Selection,
-        node: NodeId,
-        rect: CGRect,
-        screen: CGRect,
-        sizes: &mut Vec<(WindowId, CGRect)>,
-        stack_offset: f64,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-        stack_line: crate::common::config::StackLineReserve,
-    ) {
-        if !prepared.contains_key(&node) {
-            return;
-        }
-        let info = &self.info[node];
-        let rect = if info.is_fullscreen {
-            screen
-        } else if info.is_fullscreen_within_gaps {
-            compute_tiling_area(screen, gaps)
-        } else {
-            rect
-        };
-        if let Some(wid) = window.at(node) {
-            debug_assert!(
-                node.children(map).next().is_none(),
-                "non-leaf node with window id"
-            );
-            let mut final_rect = rect;
-            if let Some(c) = constraints.get(&wid).copied() {
-                let (min_w, fixed_w, max_w, _) = self.effective_leaf_axis_constraints(c, true);
-                let (min_h, fixed_h, max_h, _) = self.effective_leaf_axis_constraints(c, false);
-                let desired_w = fixed_w.unwrap_or(rect.size.width).max(min_w);
-                let desired_h = fixed_h.unwrap_or(rect.size.height).max(min_h);
-                let desired_w = max_w.map_or(desired_w, |m| desired_w.min(m));
-                let desired_h = max_h.map_or(desired_h, |m| desired_h.min(m));
-                final_rect.size.width = desired_w.min(rect.size.width).max(0.0);
-                final_rect.size.height = desired_h.min(rect.size.height).max(0.0);
-            }
-            sizes.push((wid, final_rect));
-            return;
-        }
-        use LayoutKind::*;
-        match info.kind {
-            HorizontalStack | VerticalStack => {
-                let children: Vec<_> =
-                    node.children(map).filter(|child| prepared.contains_key(child)).collect();
-                if children.is_empty() {
-                    return;
-                }
-                let is_horizontal = matches!(info.kind, HorizontalStack);
-                let focused_child = selection
-                    .local_selection(map, node)
-                    .filter(|child| prepared.contains_key(child))
-                    .unwrap_or_else(|| children[0]);
-                let focused_idx = children.iter().position(|&c| c == focused_child).unwrap_or(0);
-                let effective_stack_offset = if children.len() > 1 {
-                    let focused_child = children[focused_idx];
-                    let (focus_min, focus_fixed, _focus_max, _) =
-                        prepared[&focused_child][is_horizontal as usize];
-                    let axis_len = if is_horizontal {
-                        rect.size.width
-                    } else {
-                        rect.size.height
-                    };
-                    // Stack offset capping exists to preserve required focused size.
-                    // A max-only cap is not a required reservation and should not shrink
-                    // the stack slot or reduce offset budget.
-                    let desired = focus_fixed.unwrap_or(focus_min).clamp(0.0, axis_len.max(0.0));
-                    let max_offset = (axis_len - desired).max(0.0) / (children.len() - 1) as f64;
-                    stack_offset.min(max_offset)
-                } else {
-                    stack_offset
-                };
-                let layout = stack_layout_result(
-                    rect,
-                    children.len(),
-                    effective_stack_offset,
-                    is_horizontal,
-                    stack_line,
-                );
-                for (idx, &child) in children.iter().enumerate() {
-                    let frame = if idx == focused_idx {
-                        layout.get_frame_for_index(idx)
-                    } else {
-                        layout.get_frame_for_index(idx)
-                    };
-                    self.apply_with_gaps(
-                        prepared,
-                        map,
-                        window,
-                        selection,
-                        child,
-                        frame,
-                        screen,
-                        sizes,
-                        stack_offset,
-                        constraints,
-                        gaps,
-                        stack_line,
-                    );
-                }
-            }
-            Horizontal => self.layout_axis(
-                prepared,
-                map,
-                window,
-                selection,
-                node,
-                rect,
-                screen,
-                sizes,
-                stack_offset,
-                constraints,
-                gaps,
-                true,
-                stack_line,
-            ),
-            Vertical => self.layout_axis(
-                prepared,
-                map,
-                window,
-                selection,
-                node,
-                rect,
-                screen,
-                sizes,
-                stack_offset,
-                constraints,
-                gaps,
-                false,
-                stack_line,
-            ),
-        }
-    }
-
-    fn layout_axis(
-        &self,
-        prepared: &ConstraintCache,
-        map: &NodeMap,
-        window: &WindowIndex,
-        selection: &Selection,
-        node: NodeId,
-        rect: CGRect,
-        screen: CGRect,
-        sizes: &mut Vec<(WindowId, CGRect)>,
-        stack_offset: f64,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-        horizontal: bool,
-        stack_line: crate::common::config::StackLineReserve,
-    ) {
-        use objc2_core_foundation::{CGPoint, CGSize};
-        let children: Vec<_> =
-            node.children(map).filter(|child| prepared.contains_key(child)).collect();
-        if children.is_empty() {
-            return;
-        }
-        let min_size = 0.05;
-        let mut needs_normalization = false;
-        let mut actual_total = 0.0;
-        for &child in &children {
-            let sz = self.info[child].size;
-            actual_total += sz;
-            if !sz.is_finite() || sz < min_size - f32::EPSILON {
-                needs_normalization = true;
-            }
-        }
-        let normalize_sizes =
-            !actual_total.is_finite() || actual_total <= f32::EPSILON || needs_normalization;
-        let total = if normalize_sizes {
-            children.len() as f32
-        } else {
-            // The sum need not equal the child count. Structural operations can combine
-            // or promote weights while preserving their ratios (for example 1.8/1.2).
-            // Rendering those as 1/1 silently discards a valid user resize.
-            actual_total
-        };
-        let inner_gap = if horizontal {
-            gaps.inner.horizontal
-        } else {
-            gaps.inner.vertical
-        };
-        let axis_len = if horizontal {
-            rect.size.width
-        } else {
-            rect.size.height
-        };
-        let total_gap = (children.len().saturating_sub(1)) as f64 * inner_gap;
-        let usable_axis = if inner_gap == 0.0 {
-            axis_len
-        } else {
-            (axis_len - total_gap).max(0.0)
-        };
-        let mut offset = if horizontal {
-            rect.origin.x
-        } else {
-            rect.origin.y
-        };
-        let axis_constraints: Vec<AxisConstraints> = children
-            .iter()
-            .map(|&child| {
-                let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
-                AxisConstraints {
-                    min,
-                    fixed,
-                    max,
-                    weight: f64::from(if normalize_sizes {
-                        1.0
-                    } else {
-                        self.info[child].size.max(0.0)
-                    }),
-                    can_grow,
-                }
-            })
-            .collect();
-        let seg_lens = solve_axis_lengths(&axis_constraints, usable_axis);
-        for (i, &child) in children.iter().enumerate() {
-            let fallback = {
-                let child_size = if normalize_sizes {
-                    1.0
-                } else {
-                    self.info[child].size
-                };
-                let ratio = f64::from(child_size) / f64::from(total);
-                usable_axis * ratio
-            };
-            let seg_len = seg_lens.get(i).copied().unwrap_or(fallback.max(0.0));
-            let child_rect = if horizontal {
-                CGRect {
-                    origin: CGPoint { x: offset, y: rect.origin.y },
-                    size: CGSize {
-                        width: seg_len,
-                        height: rect.size.height,
-                    },
-                }
-            } else {
-                CGRect {
-                    origin: CGPoint { x: rect.origin.x, y: offset },
-                    size: CGSize {
-                        width: rect.size.width,
-                        height: seg_len,
-                    },
-                }
-            }
-            .round();
-            self.apply_with_gaps(
-                prepared,
-                map,
-                window,
-                selection,
-                child,
-                child_rect,
-                screen,
-                sizes,
-                stack_offset,
-                constraints,
-                gaps,
-                stack_line,
-            );
-            offset += seg_len;
-            if i < children.len() - 1 {
-                offset += inner_gap;
-            }
-        }
-    }
 }
 
 impl Components {
@@ -3124,25 +2755,6 @@ impl Components {
         self.layout.handle_event(map, event, &self.window);
         self.window.handle_event(map, event);
     }
-}
-
-fn stack_layout_result(
-    rect: CGRect,
-    child_count: usize,
-    stack_offset: f64,
-    is_horizontal: bool,
-    stack_line: crate::common::config::StackLineReserve,
-) -> StackLayoutResult {
-    StackLayoutResult::new(
-        if child_count > 1 {
-            stack_line.inset(rect, is_horizontal)
-        } else {
-            rect
-        },
-        child_count,
-        stack_offset,
-        is_horizontal,
-    )
 }
 
 #[cfg(test)]
