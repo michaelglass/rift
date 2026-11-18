@@ -547,7 +547,7 @@ impl Reactor {
             Reread::All { quitting } => !quitting.contains(pid),
         };
         for (pid, app) in self.app_manager.apps.iter().filter(|(pid, _)| wanted(pid)) {
-            if let Err(error) = app.handle.send(Request::ReadFrames(*pid)) {
+            if let Err(error) = app.handle.send(Request::ReadFrames) {
                 debug!(pid, %error, "reconcile: app gone before its frames were read");
             }
         }

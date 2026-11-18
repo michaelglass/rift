@@ -13337,19 +13337,19 @@ fn rereads_coalesce_per_drained_queue_and_skip_quitting_apps() {
         reactor.add_test_app(pid);
         let (tx, rx) = actor::channel();
         reactor.app_manager.apps.get_mut(&pid).unwrap().handle = AppThreadHandle::new_for_test(tx);
-        receivers.push(rx);
+        receivers.push((pid, rx));
     }
     let mut reads = || -> Vec<pid_t> {
-        let mut pids: Vec<_> = receivers
+        receivers
             .iter_mut()
-            .flat_map(|rx| std::iter::from_fn(move || rx.try_recv().ok()))
-            .filter_map(|(_, request)| match request {
-                Request::ReadFrames(pid) => Some(pid),
-                _ => None,
+            .map(|(pid, rx)| {
+                let read = std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter(|(_, request)| matches!(request, Request::ReadFrames))
+                    .count();
+                (*pid, read)
             })
-            .collect();
-        pids.sort();
-        pids
+            .flat_map(|(pid, read)| std::iter::repeat_n(pid, read))
+            .collect()
     };
 
     // Whatever the setup's snapshot asked for.
