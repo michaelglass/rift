@@ -1019,7 +1019,7 @@ impl Sim {
             else {
                 continue;
             };
-            let stored = self.reactor.transaction_manager.get_target_frame(wsid);
+            let stored = self.reactor.state.tx.target(wsid);
             let pending = self.reactor.state.core.pending(wid);
             if stored != pending {
                 return fail(

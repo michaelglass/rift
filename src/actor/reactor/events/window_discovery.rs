@@ -2,7 +2,6 @@ use tracing::{debug, warn};
 
 use super::window;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
-use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{LayoutEvent, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::layout_engine::ResolvedWindow;
@@ -15,7 +14,6 @@ use crate::sys::screen::SpaceId;
 /// and managing the lifecycle of window state in the reactor.
 fn sync_existing_window_state(
     state: &mut crate::model::RiftState,
-    transactions: &TransactionManager,
     wid: WindowId,
     mut info: WindowInfo,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
@@ -24,8 +22,7 @@ fn sync_existing_window_state(
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
     let is_minimized = info.is_minimized;
-    let rift_owns_geometry =
-        info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
+    let rift_owns_geometry = info.sys_id.is_some_and(|wsid| state.tx.target(wsid).is_some());
     let needs_arrange;
     let seen;
     let claimed = state.windows.is_claimed(wid);
@@ -128,7 +125,6 @@ pub(crate) struct ObservedWindow {
 pub(crate) fn process_window_list(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
-    transactions: &TransactionManager,
     observed: Vec<ObservedWindow>,
 ) -> (
     Vec<(WindowId, WindowInfo)>,
@@ -145,8 +141,7 @@ pub(crate) fn process_window_list(
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
         }
         if state.windows.contains_window(wid) {
-            if let Ok(existing_outcome) = sync_existing_window_state(state, transactions, wid, info)
-            {
+            if let Ok(existing_outcome) = sync_existing_window_state(state, wid, info) {
                 outcome.absorb(existing_outcome);
             }
         } else {

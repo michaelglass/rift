@@ -78,7 +78,7 @@ impl Reactor {
             .layout_engine
             .transfer_persistent_window_identity(old, incoming);
         self.state.windows.remove_window(old);
-        self.transaction_manager.remove_for_window(old_wsid);
+        self.state.tx.remove(&old_wsid);
         debug!(?old, ?incoming, "Replaced native tab in existing layout slot");
     }
 

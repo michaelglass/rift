@@ -4,10 +4,10 @@ use tracing::debug;
 use crate::actor::app::WindowId;
 use crate::actor::drag::{DragSource, Session};
 use crate::actor::reactor::events::EventOutcome;
-use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{Quiet, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
+use crate::model::tx_store::WindowTxStore;
 use crate::model::window_store::Pointer;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::geometry::SameAs;
@@ -64,7 +64,6 @@ pub struct WindowDestroyedPayload {
 
 pub fn handle_window_destroyed(
     state: &mut crate::model::RiftState,
-    transactions: &TransactionManager,
     payload: WindowDestroyedPayload,
 ) -> EventOutcome {
     let wid = payload.window;
@@ -74,15 +73,15 @@ pub fn handle_window_destroyed(
     let Some(record) = state.remove_window(wid) else {
         return EventOutcome::no_change();
     };
-    apply_window_retirement(transactions, (wid, record.window_server_id()))
+    apply_window_retirement(&state.tx, (wid, record.window_server_id()))
 }
 
 pub(crate) fn apply_window_retirement(
-    transactions: &TransactionManager,
+    tx: &WindowTxStore,
     (wid, wsid): (WindowId, Option<crate::sys::window_server::WindowServerId>),
 ) -> EventOutcome {
     if let Some(wsid) = wsid {
-        transactions.remove_for_window(wsid);
+        tx.remove(&wsid);
     }
     EventOutcome::window_membership_changed(true, false)
         .with_arrange_passes(0)
