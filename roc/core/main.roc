@@ -112,8 +112,9 @@ Model : {
 core = { init, step, tile }
 
 ## Layout geometry: a shape's words (its layout system's tag first: 0 BSP, 1 traditional,
-## 2 a scrolling strip) in; out, a 0 and the answer's words (the frames, or for a strip where
-## it placed everything), or a 1: the words were not a shape.
+## 2 a scrolling strip, 3 a settle question on a strip's placement) in; out, a 0 and the
+## answer's words (the frames; for a strip, where it placed everything; for a settle question,
+## where the camera settles), or a 1: the words were not a question it answers.
 tile : List(U64) -> List(U64)
 tile = |words|
 	match shape_answer(words) {
@@ -129,6 +130,7 @@ shape_answer = |words| {
 		0 => Bsp.frames_of(cursor).map_ok(put_frames)
 		1 => Traditional.frames_of(cursor).map_ok(put_frames)
 		2 => Scrolling.placed_words(cursor)
+		3 => Scrolling.settled_words(cursor)
 		_ => Err(Malformed)
 	}
 }

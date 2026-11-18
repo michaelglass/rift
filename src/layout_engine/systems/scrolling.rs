@@ -23,6 +23,7 @@ use crate::layout_engine::systems::{
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
     Direction, LayoutId, ResizeOrientation, WindowDropAction, cg_rect, core_rect, place_strip,
+    settle,
 };
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
@@ -483,9 +484,14 @@ impl Geometry {
     ) -> Option<scrolling::Settled<ColumnId>> {
         match &self.strip {
             StripGeometry::Empty => None,
-            StripGeometry::Placed(placed) => {
-                Some(placed.settle(self.tiling.size.width, projected, from, how))
-            }
+            StripGeometry::Placed(placed) => Some(settle(
+                placed,
+                self.tiling.size.width,
+                projected,
+                from,
+                how,
+                |id: ColumnId| id.0,
+            )),
         }
     }
 

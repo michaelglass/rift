@@ -59,6 +59,13 @@ Snap : { offset : F64, column : U64 }
 
 Placed : { first : Spot, rest : List(Spot), frames : List((WindowId, Rect)), snaps : (Snap, List(Snap)), bounds : (F64, F64) }
 
+## How ties go when the camera settles: niri (the leftmost point, then the furthest column
+## wholly in view in the direction of travel), anchored (the earlier point), or anchored
+## towards the active column (a point showing it).
+Settle : [Niri, Anchored, AnchoredTowards(U64)]
+
+Settled : { column : U64, offset : F64 }
+
 ## A column's place among the strip's, which decides its anchor.
 Position : [Only, First, Middle, Last]
 
@@ -302,6 +309,177 @@ Scrolling := [].{
 				({ offset: left, column: first.id }, between)
 			}
 		}
+
+	## Rust's f64::total_cmp: -0 before +0, NaNs at the ends by sign.
+	total_order : F64 -> U64
+	total_order = |value| {
+		bits = F64.to_bits(value)
+		sign = 9223372036854775808
+		if (bits >= sign) U64.bitwise_not(bits) else U64.bitwise_xor(bits, sign)
+	}
+
+	## The spots after the column `id`, left to right.
+	past : List(Spot), U64 -> List(Spot)
+	past = |spots, id|
+		spots.fold(
+			{ seen: False, after: [] },
+			|acc, spot|
+				if acc.seen {
+					{ ..acc, after: acc.after.append(spot) }
+				} else {
+					{ ..acc, seen: spot.id == id }
+				},
+		).after
+
+	## The spots before the column `id`, right to left.
+	before : List(Spot), U64 -> List(Spot)
+	before = |spots, id|
+		spots.fold_rev(
+			{ seen: False, after: [] },
+			|spot, acc|
+				if acc.seen {
+					{ ..acc, after: acc.after.append(spot) }
+				} else {
+					{ ..acc, seen: spot.id == id }
+				},
+		).after
+
+	## Where the camera settles when a release would carry it to `projected` from `from`.
+	settle : Placed, F64, F64, F64, Settle -> Settled
+	settle = |placed, view, projected, from, how| {
+		(head, tail) = placed.snaps
+		order = |a, b| {
+			da = total_order((a.offset - projected).abs())
+			db = total_order((b.offset - projected).abs())
+			if da != db {
+				if (da < db) Less else Greater
+			} else {
+				match how {
+					Niri => {
+						oa = total_order(a.offset)
+						ob = total_order(b.offset)
+						if oa == ob {
+							Same
+						} else if oa < ob {
+							Less
+						} else {
+							Greater
+						}
+					}
+
+					Anchored => Same
+					AnchoredTowards(active) => {
+						away_a = a.column != active
+						away_b = b.column != active
+						if away_a == away_b {
+							Same
+						} else if away_b {
+							Less
+						} else {
+							Greater
+						}
+					}
+				}
+			}
+		}
+		# The first nearest point (as Rust's min_by): a later one wins only if nearer.
+		snap = tail.fold(
+			head,
+			|best, candidate|
+				match order(best, candidate) {
+					Greater => candidate
+					Less | Same => best
+				},
+		)
+		spots = [placed.first].concat(placed.rest)
+		column =
+			match how {
+				Anchored | AnchoredTowards(_) => snap.column
+				Niri =>
+					if projected >= from {
+						past(spots, snap.column).fold(
+							{ open: True, last: snap.column },
+							|acc, spot|
+								if acc.open and spot.world_x + spot.width <= snap.offset + view {
+									{ ..acc, last: spot.id }
+								} else {
+									{ ..acc, open: False }
+								},
+						).last
+					} else {
+						before(spots, snap.column).fold(
+							{ open: True, last: snap.column },
+							|acc, spot|
+								if acc.open and spot.world_x >= snap.offset {
+									{ ..acc, last: spot.id }
+								} else {
+									{ ..acc, open: False }
+								},
+						).last
+					}
+			}
+		{ column, offset: snap.offset }
+	}
+
+	take_spot : Words -> Taken(Spot)
+	take_spot = |c0| {
+		(id, c1) = take(c0)?
+		(world_x, c2) = take_float(c1)?
+		(width, c3) = take_float(c2)?
+		(anchor_at, c4) = take_float(c3)?
+		Ok(({ id, world_x, width, anchor: anchor_at }, c4))
+	}
+
+	take_snap : Words -> Taken(Snap)
+	take_snap = |c0| {
+		(offset, c1) = take_float(c0)?
+		(column, c2) = take(c1)?
+		Ok(({ offset, column }, c2))
+	}
+
+	take_frame : Words -> Taken((WindowId, Rect))
+	take_frame = |c0| {
+		(window, c1) = take_window(c0)?
+		(frame, c2) = take_rect(c1)?
+		Ok(((window, frame), c2))
+	}
+
+	take_placed : Words -> Taken(Placed)
+	take_placed = |c0| {
+		(first, c1) = take_spot(c0)?
+		(rest, c2) = take_list(c1, take_spot)?
+		(frames, c3) = take_list(c2, take_frame)?
+		(head, c4) = take_snap(c3)?
+		(tail, c5) = take_list(c4, take_snap)?
+		(low, c6) = take_float(c5)?
+		(high, c7) = take_float(c6)?
+		Ok(({ first, rest, frames, snaps: (head, tail), bounds: (low, high) }, c7))
+	}
+
+	## Where the camera settles for the settle question `cursor` holds (after its tag), all of
+	## it, as words: the column, then the offset.
+	settled_words : Words -> Try(List(U64), [Malformed])
+	settled_words = |c0| {
+		(view, c1) = take_float(c0)?
+		(projected, c2) = take_float(c1)?
+		(from, c3) = take_float(c2)?
+		(tag, c4) = take(c3)?
+		(how, c5) =
+			match tag {
+				0 => Ok((Niri, c4))
+				1 => Ok((Anchored, c4))
+				2 => {
+					(column, after) = take(c4)?
+					Ok((AnchoredTowards(column), after))
+				}
+
+				_ => Err(Malformed)
+			}?
+		(placed, c6) = take_placed(c5)?
+		finished(c6)?
+		settled = settle(placed, view, projected, from, how)
+		Ok(put_float([settled.column], settled.offset))
+	}
 
 	take_row : Words -> Taken(Row)
 	take_row = |c0| {
