@@ -195,21 +195,24 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
     );
     let layout_updates = reactor.layout_update_count;
 
+    // The request the app had applied when it read the window (before Rift's next write).
+    let before = reactor.state.tx.next_id();
     let mut target = frame;
     target.origin.x = 200.0;
     pend(&mut reactor, wid, target);
 
     let mut parked = frame;
     parked.origin.x += frame.size.width;
-    reactor.discover_test_windows(
+    reactor.discover_test_windows_as_of(
         wid.pid,
         vec![(wid, make_window_info(parked, Some(wsid), "Window", None))],
         vec![wid],
+        [(wid, before)].into_iter().collect(),
     );
 
     assert!(
         reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(target),
-        "inventory must not feed a transient Rift-owned frame back into model geometry"
+        "a read from before Rift's pending write must not feed back into model geometry"
     );
     assert_eq!(reactor.state.tx.target(wsid), Some(target));
     assert_eq!(
@@ -394,6 +397,7 @@ fn inventory_from_an_older_space_topology_is_discarded_and_retried() {
         successful: true,
         new: vec![(wid, make_window_info(screen, None, "Late Window", None))],
         known_visible: vec![wid],
+        as_of: Default::default(),
     });
 
     assert!(
@@ -419,6 +423,7 @@ fn inventory_from_an_older_space_topology_is_discarded_and_retried() {
             successful: true,
             new: vec![],
             known_visible: vec![],
+            as_of: Default::default(),
         });
         assert_eq!(
             reactor.window_inventory_manager.in_flight.get(&pid),
@@ -1894,13 +1899,11 @@ fn matching_rift_frame_clears_pending_target() {
         .unwrap();
     assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(accepted));
     assert_eq!(reactor.state.tx.target(wsid), Some(adjusted_target));
-    assert_eq!(
+    assert!(matches!(
         reactor.state.core.sync(wid),
-        Some(super::reconciler::Sync::Refused {
-            wanted: adjusted_target,
-            got: accepted
-        })
-    );
+        Some(super::reconciler::Sync::Refused { wanted, got, .. })
+            if wanted == adjusted_target && got == accepted
+    ));
     assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
 
     // A user drag beginning while a write is with the app clears it instead of waiting for
@@ -1922,10 +1925,10 @@ fn matching_rift_frame_clears_pending_target() {
     ));
     assert_eq!(reactor.state.tx.target(wsid), None);
     // Where the user put it is where the app has it, until their drag ends (then unknown).
-    assert_eq!(
+    assert!(matches!(
         reactor.state.core.sync(wid),
-        Some(super::reconciler::Sync::Settled { acked: dragged })
-    );
+        Some(super::reconciler::Sync::Settled { acked, .. }) if acked == dragged
+    ));
     assert!(reactor.state.windows.drag_on(wid).is_some());
 }
 
@@ -2141,6 +2144,7 @@ fn deminiaturize_refreshes_stale_snapshot_without_activation() {
         vec![(wid, restored_info)],
         vec![wid],
         None,
+        Default::default(),
     );
     assert!(has_window_in_layout(&mut reactor, space, frame, wid));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space));
@@ -2622,7 +2626,13 @@ fn inventory_reuses_one_native_resolution_for_existing_and_replacement_ax_identi
         };
         let info = reactor.state.windows.window(wid).unwrap().info.clone();
         let before = crate::sys::window_server::window_space_query_count();
-        reactor.on_windows_discovered_with_app_info(wid.pid, vec![(next, info)], vec![next], None);
+        reactor.on_windows_discovered_with_app_info(
+            wid.pid,
+            vec![(next, info)],
+            vec![next],
+            None,
+            Default::default(),
+        );
         assert_eq!(crate::sys::window_server::window_space_query_count() - before, 1);
         assert_eq!(reactor.state.windows.tracked_window_id(wsid), Some(next));
         assert_eq!(reactor.assigned_space_for_window_id(next), Some(space));
@@ -3022,7 +3032,13 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)]));
     reactor.state.windows.clear_visible_windows();
     reactor.state.windows.mark_window_visible(WindowServerId::new(103));
-    reactor.on_windows_discovered_with_app_info(pid, vec![], vec![WindowId::new(pid, 3)], None);
+    reactor.on_windows_discovered_with_app_info(
+        pid,
+        vec![],
+        vec![WindowId::new(pid, 3)],
+        None,
+        Default::default(),
+    );
 
     let space1_workspaces = reactor.query_workspaces(Some(space1));
     let space2_workspaces = reactor.query_workspaces(Some(space2));
@@ -4573,6 +4589,7 @@ fn native_focus_refreshes_stale_window_admission() {
         successful: true,
         new: vec![(wid, fresh)],
         known_visible: vec![wid],
+        as_of: Default::default(),
     });
 
     assert!(reactor.query_window_info(wid).is_some());
@@ -4753,6 +4770,7 @@ fn mouse_hit_missing_from_inventory_refreshes_its_owner_once() {
         successful: true,
         new: vec![],
         known_visible: vec![],
+        as_of: Default::default(),
     });
     // A modal surface absent from AXWindows must not trigger a new scan on
     // every mouse event after the previous inventory request has completed.
@@ -5289,6 +5307,7 @@ fn rediscovering_an_unchanged_inventory_does_not_raise_or_refocus() {
             (WindowId::new(1, 2), make_window(2)),
         ],
         known_visible: vec![WindowId::new(1, 1), WindowId::new(1, 2)],
+        as_of: Default::default(),
     });
     apps.simulate_until_quiet(&mut reactor);
 
@@ -6595,6 +6614,7 @@ fn post_wake_snapshot_replaces_an_inventory_that_never_replied() {
             make_window_info(screen, None, "Stale Window", None),
         )],
         known_visible: vec![stale_window],
+        as_of: Default::default(),
     });
     assert!(
         !reactor.state.windows.contains_window(stale_window),
@@ -11610,6 +11630,7 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                     vec![(restored, transitional)],
                     vec![WindowId::new(1, 1), WindowId::new(1, 3)],
                     None,
+                    Default::default(),
                 );
                 assert_eq!(
                     reactor.state.windows.workspace_for_window(restored),
@@ -11643,7 +11664,13 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 for &wid in &ids {
                     reactor.state.windows.remove_window_assignment(wid);
                 }
-                reactor.on_windows_discovered_with_app_info(1, discovered, ids, None);
+                reactor.on_windows_discovered_with_app_info(
+                    1,
+                    discovered,
+                    ids,
+                    None,
+                    Default::default(),
+                );
                 apps.simulate_until_quiet(&mut reactor);
                 assert!(reactor.state.windows.workspace_for_window(restored).is_some());
                 assert!(
@@ -11681,6 +11708,7 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 vec![(restored, fresh)],
                 (1..=3).map(|idx| WindowId::new(1, idx)).collect(),
                 None,
+                Default::default(),
             );
             apps.simulate_until_quiet(&mut reactor);
             // Restoring placement and Rift's quiet activations do not select the
@@ -13065,7 +13093,7 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
         reactor.handle_events(apps.make_app(2, make_windows(1)));
         apps.simulate_until_quiet(&mut reactor);
 
-        let Some(Sync::Refused { wanted, got }) = reactor.state.core.sync(stubborn) else {
+        let Some(Sync::Refused { wanted, got, .. }) = reactor.state.core.sync(stubborn) else {
             panic!(
                 "{sizing:?}: expected a refusal, got {:?}",
                 reactor.state.core.sync(stubborn)

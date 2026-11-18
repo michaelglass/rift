@@ -264,7 +264,10 @@ struct Sim {
     pids: Vec<pid_t>,
     windows: Vec<WindowId>,
     live: BTreeSet<WindowId>,
-    previous_frame: BTreeMap<WindowId, CGRect>,
+    /// What a read of each window would say now (its frame, and the request its app had
+    /// applied), and what one said before its last change: a stale read reports that.
+    reads: BTreeMap<WindowId, Read>,
+    stale_reads: BTreeMap<WindowId, Read>,
     held: Option<Held>,
     pending: Vec<Request>,
     /// The window whose frame this step reported somewhere new.
@@ -292,6 +295,9 @@ struct Sim {
     /// The requests the core planned animations and cameras under.
     animation_requests: Vec<TransactionId>,
 }
+
+/// A read of a window: its frame, and the request its app had applied.
+type Read = (CGRect, TransactionId);
 
 /// What a case is set up with: two or three displays; on some seeds animation is on (the
 /// animation thread runs in step with the case, `TestPresenter`), and on some of those the
@@ -390,7 +396,8 @@ impl Sim {
             pids,
             windows,
             live,
-            previous_frame: BTreeMap::new(),
+            reads: BTreeMap::new(),
+            stale_reads: BTreeMap::new(),
             held: None,
             pending: Vec::new(),
             moved: None,
@@ -456,9 +463,27 @@ impl Sim {
     fn os_frame(&self, wid: WindowId) -> CGRect { self.apps.windows[&wid].frame }
 
     fn set_os_frame(&mut self, wid: WindowId, frame: CGRect) {
-        let old = self.os_frame(wid);
-        self.previous_frame.insert(wid, old);
+        self.note_reads();
         self.apps.windows.get_mut(&wid).unwrap().frame = frame;
+    }
+
+    /// What a read of `wid` says now.
+    fn read(&self, wid: WindowId) -> Read {
+        let window = &self.apps.windows[&wid];
+        (window.frame, window.last_seen_txid)
+    }
+
+    /// Remembers what a read of each window said before it changed.
+    fn note_reads(&mut self) {
+        for &wid in &self.live {
+            let now = self.read(wid);
+            if let Some(&before) = self.reads.get(&wid)
+                && !before.0.same_as(now.0)
+            {
+                self.stale_reads.insert(wid, before);
+            }
+            self.reads.insert(wid, now);
+        }
     }
 
     fn report_frame(&mut self, wid: WindowId, frame: CGRect, mouse: MouseState) {
@@ -518,6 +543,7 @@ impl Sim {
 
     /// Runs one step. Returns the requests rift emitted while handling it.
     fn run(&mut self, step: Step) -> Vec<Request> {
+        self.note_reads();
         self.moved = None;
         self.distrusted.clear();
         let traced = self.core_steps();
@@ -530,15 +556,15 @@ impl Sim {
                 Sync::InFlight { target, queued, .. } => {
                     Some((wid, std::iter::once(target).chain(queued).collect()))
                 }
-                Sync::Settled { .. } | Sync::Unknown | Sync::Refused { .. } => None,
+                Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Refused { .. } => None,
             })
             .collect();
         self.settled_before = self
             .live
             .iter()
             .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
-                Sync::Settled { acked } => Some((wid, (acked, self.os_frame(wid)))),
-                Sync::Unknown
+                Sync::Settled { acked, .. } => Some((wid, (acked, self.os_frame(wid)))),
+                Sync::Unknown { .. }
                 | Sync::InFlight { .. }
                 | Sync::Refused { .. }
                 | Sync::Animating { .. } => None,
@@ -646,22 +672,28 @@ impl Sim {
                 let pid = self.pids[app % self.pids.len()];
                 let mine: Vec<WindowId> =
                     self.live.iter().copied().filter(|wid| wid.pid == pid).collect();
+                self.note_reads();
+                // Each read is stamped with the request the app had applied when it was made.
+                let mut as_of = HashMap::default();
                 let new = mine
                     .iter()
                     .filter_map(|&wid| {
                         let mut info = self.reactor.state.windows.window(wid)?.info.clone();
-                        info.frame = if stale {
-                            self.previous_frame.get(&wid).copied().unwrap_or(self.os_frame(wid))
-                        } else {
-                            self.os_frame(wid)
+                        let (frame, applied) = match self.stale_reads.get(&wid) {
+                            Some(&read) if stale => read,
+                            Some(_) | None => self.read(wid),
                         };
+                        info.frame = frame;
+                        if applied != TransactionId::default() {
+                            as_of.insert(wid, applied);
+                        }
                         if zero_min {
                             info.min_size = Some(CGSize::ZERO);
                         }
                         Some((wid, info))
                     })
                     .collect();
-                self.reactor.discover_test_windows(pid, new, mine);
+                self.reactor.discover_test_windows_as_of(pid, new, mine, as_of);
             }
             Step::ForeignMove { w, to, mouse } => {
                 let wid = self.pick(w);
@@ -955,7 +987,7 @@ impl Sim {
                 | Some(
                     Sync::Settled { .. }
                     | Sync::Refused { .. }
-                    | Sync::Unknown
+                    | Sync::Unknown { .. }
                     | Sync::Animating { .. },
                 ) => {
                     if self.moved != Some(wid)
@@ -1100,7 +1132,7 @@ impl Sim {
                     | Some(
                         Sync::Settled { .. }
                         | Sync::InFlight { .. }
-                        | Sync::Unknown
+                        | Sync::Unknown { .. }
                         | Sync::Animating { .. },
                     ) => false,
                 };
@@ -1392,4 +1424,29 @@ fn a_press_and_move_after_a_scrolling_camera_starts_the_drag() {
         scrolling: true,
     };
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_lagging_inventory_read_during_another_drag_is_no_news() {
+    // An inventory read made before the app applied Rift's write reports the old width while
+    // another window is dragged; the model must not take it (nothing would correct it).
+    let steps = [
+        Step::DragStart { w: 14, dx: 128, dy: 134 },
+        Step::ForeignMove {
+            w: 7,
+            to: 2,
+            mouse: Mouse::ReportsUp,
+        },
+        Step::CrossDisplay { to: 0 },
+        Step::MouseUp,
+        Step::DragStart { w: 9, dx: -44, dy: 89 },
+        Step::Deliver,
+        Step::Refresh {
+            app: 1,
+            stale: true,
+            zero_min: true,
+        },
+        Step::CrossDisplay { to: 1 },
+    ];
+    assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
 }

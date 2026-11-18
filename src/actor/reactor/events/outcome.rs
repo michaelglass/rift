@@ -16,6 +16,11 @@ pub(crate) struct WindowDiscoveryRequest {
     pub(crate) new: Vec<(WindowId, WindowInfo)>,
     pub(crate) known_visible: Vec<WindowId>,
     pub(crate) app_info: Option<AppInfo>,
+    /// The newest request the app had applied to each window when it read it.
+    pub(crate) as_of: crate::common::collections::HashMap<
+        WindowId,
+        crate::actor::reactor::transaction_manager::TransactionId,
+    >,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +94,8 @@ pub(crate) struct EventOutcome {
     pub(crate) focused_window: Option<WindowId>,
     pub(crate) refresh_window_notifications: bool,
     pub(crate) refresh_layout_mode: bool,
+    /// Writes the core released (a desire that waited behind a write a read answered).
+    pub(crate) released: Vec<crate::actor::reactor::reconciler::Write>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -113,6 +120,7 @@ impl EventOutcome {
     /// reducer order for every queued operation.
     pub(crate) fn absorb(&mut self, mut other: Self) {
         self.window_server_updates.append(&mut other.window_server_updates);
+        self.released.append(&mut other.released);
         self.discoveries.append(&mut other.discoveries);
         self.recompute_active_spaces |= other.recompute_active_spaces;
         self.recover_after_mission_control |= other.recover_after_mission_control;

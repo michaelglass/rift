@@ -59,9 +59,6 @@ pub enum Event<K: Kinds> {
     Seen { window: K::Window, frame: K::Frame },
     /// An outside owner took `window` (a claim): a grip on it ends; Rift keeps the window.
     Ceded { window: K::Window },
-    /// The app's window was read at `frame` outside any answer (an inventory, the window server):
-    /// the model sees it there, and its app has it there.
-    Found { window: K::Window, frame: K::Frame },
     /// The model no longer sees `window`, though Rift keeps it (its accessibility identity is
     /// suspended during native fullscreen); it is seen again when it comes back.
     Unseen { window: K::Window },
@@ -278,11 +275,6 @@ impl<K: Kinds> RustCore<K> {
             }
             Event::Ceded { window } => self.ungrip_window(window),
             Event::Seen { window, frame } => vec![self.see(window, frame)],
-            Event::Found { window, frame } => {
-                let seen = self.see(window, frame);
-                self.reconciler.found(window, frame);
-                vec![seen]
-            }
             Event::Unseen { window } => {
                 self.seen.remove(&window);
                 vec![]

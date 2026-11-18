@@ -7,7 +7,6 @@ use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
-use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
@@ -16,37 +15,39 @@ fn sync_existing_window_state(
     state: &mut crate::model::RiftState,
     wid: WindowId,
     mut info: WindowInfo,
+    as_of: Option<crate::actor::reactor::transaction_manager::TransactionId>,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let ax_returned = state.windows.validate_ax_identity(wid);
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
     let is_minimized = info.is_minimized;
-    let rift_owns_geometry = info.sys_id.is_some_and(|wsid| state.tx.target(wsid).is_some());
-    let needs_arrange;
-    let seen;
     let claimed = state.windows.is_claimed(wid);
-    if let Some(existing) = state.windows.window_mut(wid) {
-        let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
-        let geometry_changed =
-            !rift_owns_geometry && valid_frame && !existing.frame_monotonic.same_as(info.frame);
-        let constraints_changed = existing.info.is_resizable != info.is_resizable
-            || existing.info.min_size != info.min_size
-            || existing.info.max_size != info.max_size;
-        // A claimed window's owner has geometry authority.
-        needs_arrange = (geometry_changed || constraints_changed) && !claimed;
-        // Where the inventory found it, for the core (below, once the record is let go).
-        seen = (!rift_owns_geometry && valid_frame).then_some(info.frame);
-        // Preserve the observed frame and minimize transition until their handlers run.
-        info.frame = existing.info.frame;
-        info.is_minimized = was_minimized;
-        existing.info = info;
-    } else {
+    let frame = info.frame;
+    let Some(existing) = state.windows.window_mut(wid) else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
-    }
-    if let Some(frame) = seen {
-        state.found(wid, frame);
-    }
+    };
+    let constraints_changed = existing.info.is_resizable != info.is_resizable
+        || existing.info.min_size != info.min_size
+        || existing.info.max_size != info.max_size;
+    // Preserve the observed frame and minimize transition until their handlers run.
+    info.frame = existing.info.frame;
+    info.is_minimized = was_minimized;
+    existing.info = info;
+    // Where the inventory read it: a read like any other, news only if the core says so (a
+    // read from before the app applied Rift's latest word is not).
+    let valid_frame = frame.size.width != 0.0 || frame.size.height != 0.0;
+    let (geometry_changed, released) = if valid_frame {
+        let (reply, released) = state.read(wid, frame, as_of);
+        (
+            reply == crate::actor::reactor::reconciler::Reply::Foreign,
+            released,
+        )
+    } else {
+        (false, None)
+    };
+    // A claimed window's owner has geometry authority.
+    let needs_arrange = (geometry_changed || constraints_changed) && !claimed;
 
     let mut admission_changed = false;
     let mut outcome = match (was_minimized, is_minimized) {
@@ -83,6 +84,7 @@ fn sync_existing_window_state(
             false,
         ));
     }
+    outcome.released.extend(released);
 
     if was_minimized != is_minimized {
         debug!(
@@ -120,6 +122,8 @@ fn should_emit_window_for_space(
 pub(crate) struct ObservedWindow {
     pub(crate) wid: WindowId,
     pub(crate) info: WindowInfo,
+    /// The newest request the app had applied to the window when it read it.
+    pub(crate) as_of: Option<crate::actor::reactor::transaction_manager::TransactionId>,
 }
 
 pub(crate) fn process_window_list(
@@ -134,14 +138,14 @@ pub(crate) fn process_window_list(
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
 
     for window in observed {
-        let ObservedWindow { wid, info } = window;
+        let ObservedWindow { wid, info, as_of } = window;
         if let Some(previous) = state.reconcile_ax_identity(wid, info.sys_id) {
             layout.layout_engine.transfer_persistent_window_identity(previous, wid);
             outcome =
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
         }
         if state.windows.contains_window(wid) {
-            if let Ok(existing_outcome) = sync_existing_window_state(state, wid, info) {
+            if let Ok(existing_outcome) = sync_existing_window_state(state, wid, info, as_of) {
                 outcome.absorb(existing_outcome);
             }
         } else {

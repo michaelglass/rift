@@ -1135,6 +1135,7 @@ impl State {
                     successful: false,
                     new: Default::default(),
                     known_visible: Default::default(),
+                    as_of: Default::default(),
                 });
                 return Err(e);
             }
@@ -1200,12 +1201,21 @@ impl State {
             new.push((wid, info));
         }
 
+        // Each window was read after every request this actor applied to it (in order).
+        let as_of = new
+            .iter()
+            .filter_map(|(wid, _)| {
+                let applied = Self::some_txid(self.windows.get(wid)?.last_seen_txid)?;
+                Some((*wid, applied))
+            })
+            .collect();
         self.send_event(Event::WindowsDiscovered {
             pid: self.pid,
             token,
             successful: true,
             new,
             known_visible,
+            as_of,
         });
         Ok(())
     }

@@ -689,11 +689,21 @@ impl RiftState {
         self.project(&effects, None);
     }
 
-    /// The app's window was read at `frame` (an inventory, the window server): the model sees it
-    /// there and its app has it there.
-    pub(crate) fn found(&mut self, window: WindowId, frame: CGRect) {
-        let effects = self.core.decide(Event::Found { window, frame });
-        self.project(&effects, None);
+    /// The app's window was read at `frame` (an inventory, the window server), as of the
+    /// request the app had applied (`None` unstamped). Unless that is no news, the model takes
+    /// the window to be there.
+    pub(crate) fn read(
+        &mut self,
+        window: WindowId,
+        frame: CGRect,
+        as_of: Option<TransactionId>,
+    ) -> (Reply, Option<Write>) {
+        let request = self.tx.next_id();
+        let (reply, released) = self.observe(request, window, frame, as_of);
+        if reply != Reply::NoNews {
+            self.seen(window, frame);
+        }
+        (reply, released)
     }
 
     /// Tracks a new window's state; the model sees it where its state says it is.
@@ -714,7 +724,9 @@ impl RiftState {
     ) -> Option<WindowId> {
         let window = self.windows.observe_native_window(info)?;
         if info.layer == 0 {
-            self.found(window, info.frame);
+            // Unstamped: the window server's read says nothing of what the app applied.
+            let (_, released) = self.read(window, info.frame, None);
+            debug_assert!(released.is_none(), "an unstamped read answers nothing");
         }
         Some(window)
     }

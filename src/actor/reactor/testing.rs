@@ -147,6 +147,17 @@ impl Reactor {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     ) {
+        self.discover_test_windows_as_of(pid, new, known_visible, Default::default());
+    }
+
+    /// An inventory whose reads are stamped with the request the app had applied to each window.
+    pub fn discover_test_windows_as_of(
+        &mut self,
+        pid: pid_t,
+        new: Vec<(WindowId, WindowInfo)>,
+        known_visible: Vec<WindowId>,
+        as_of: crate::common::collections::HashMap<WindowId, TransactionId>,
+    ) {
         let token = if let Some(token) = self.window_inventory_manager.in_flight.get(&pid).copied()
         {
             token
@@ -165,6 +176,7 @@ impl Reactor {
             successful: true,
             new,
             known_visible,
+            as_of,
         });
     }
 
@@ -662,6 +674,7 @@ impl Apps {
                             successful: true,
                             new: vec![],
                             known_visible: windows,
+                            as_of: Default::default(),
                         });
                     }
                 }
