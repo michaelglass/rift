@@ -269,7 +269,11 @@ pub fn handle_window_frame_changed(
             Pointer::Pressing(_) | Pointer::Dragging(_) | Pointer::Idle => false,
         };
     if moved_by_user {
-        if native_resize && active_resize_space.is_some() {
+        // The drag's start decided whether the user is resizing: an app changing its own size
+        // mid-move resizes no tile.
+        if state.windows.drag_on(wid).is_some_and(Session::resizing)
+            && active_resize_space.is_some()
+        {
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
                 wid,
                 old_frame,

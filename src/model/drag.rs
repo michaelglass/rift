@@ -7,12 +7,22 @@ use crate::sys::screen::SpaceId;
 /// Who moves the window during a drag.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DragKind {
-    /// The user moves or resizes it (title bar, edges); Rift follows its frame. Whether it is a
-    /// resize is read off the frames (`Session::resizing`), not stored.
-    Native,
+    /// The user moves or resizes it (title bar, edges); Rift follows its frame.
+    Native(NativeOp),
     /// Rift moves it by interactive frames, the pointer `anchor` away from where it was
     /// pressed.
     Modifier { anchor: CGPoint },
+}
+
+/// What a native drag does to the window, decided once by the frame change that started it.
+/// An app that changes its own size mid-move (WhatsApp does) does not turn the move into a
+/// resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeOp {
+    /// The title bar: the window keeps its size and goes somewhere to drop.
+    Move,
+    /// An edge or corner: the window changes size in place, and there is nowhere to drop.
+    Resize,
 }
 
 #[derive(Debug, Clone, Copy)]

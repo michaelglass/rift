@@ -14,7 +14,7 @@ use crate::layout_engine::{Direction, WindowDropAction};
 use crate::model::drag::TargetState;
 pub use crate::model::drag::{
     DragKind, DragScene, DragSceneTarget, DragSource, DropIntent, DropTarget, DropZone,
-    MouseButton, Session,
+    MouseButton, NativeOp, Session,
 };
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -67,20 +67,23 @@ impl Session {
         }
     }
 
-    /// The user started moving or resizing the window themselves.
+    /// The user started moving or resizing the window themselves: the frame change that started
+    /// the drag (`origin_frame` to `last_frame`) says which, once.
     pub fn native(source: DragSource, scene: DragScene) -> Self {
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        Self::new(source, pointer, scene, DragKind::Native)
+        let op = if source.origin_frame.size.same_as(source.last_frame.size) {
+            NativeOp::Move
+        } else {
+            NativeOp::Resize
+        };
+        Self::new(source, pointer, scene, DragKind::Native(op))
     }
 
-    /// Whether a native drag is resizing the window (its size changed), not moving it.
-    pub fn resizing(&self) -> bool {
-        matches!(self.kind, DragKind::Native)
-            && !self.source.origin_frame.size.same_as(self.source.last_frame.size)
-    }
+    /// Whether this is a native resize, which has nowhere to drop.
+    pub fn resizing(&self) -> bool { matches!(self.kind, DragKind::Native(NativeOp::Resize)) }
 
     /// Whether Rift moves the window (a modifier drag).
     pub fn is_modifier(&self) -> bool { matches!(self.kind, DragKind::Modifier { .. }) }
@@ -883,7 +886,7 @@ mod tests {
     fn sessions_know_whether_the_user_or_rift_moves_the_window() {
         let moved = frame(20.0, 20.0, 200.0, 100.0);
         let moved = native(false, moved, DragScene::default());
-        assert!(moved.kind == DragKind::Native && !moved.resizing());
+        assert!(moved.kind == DragKind::Native(NativeOp::Move) && !moved.resizing());
         let resized = frame(0.0, 0.0, 300.0, 100.0);
         assert!(native(false, resized, DragScene::default()).resizing());
         assert!(modifier(false, DragScene::default()).is_modifier());

@@ -1,7 +1,7 @@
 use tracing::{trace, warn};
 
 use crate::actor::app::WindowId;
-use crate::actor::drag::{DragKind, DragScene, DragSceneTarget};
+use crate::actor::drag::{DragKind, DragScene, DragSceneTarget, NativeOp};
 use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
@@ -54,7 +54,8 @@ pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
         (DragKind::Modifier { .. }, false) if source.last_frame != source.origin_frame => {
             EventOutcome::no_change().with_placement(window, source.origin_frame)
         }
-        (DragKind::Modifier { .. }, false) | (DragKind::Native, true | false) => {
+        (DragKind::Modifier { .. }, false)
+        | (DragKind::Native(NativeOp::Move | NativeOp::Resize), true | false) => {
             EventOutcome::no_change()
         }
     }
