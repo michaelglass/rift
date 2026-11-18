@@ -1486,7 +1486,6 @@ impl State {
                 // Every read is reported, even one equal to `last_known_frame`: the reactor
                 // drops reports while the topology is unstable, after this actor recorded
                 // them, so what this actor last saw is not what the reactor knows.
-                let mouse_state = event::get_mouse_state();
                 let windows: Vec<_> = self
                     .windows
                     .iter()
@@ -1496,9 +1495,7 @@ impl State {
                     .collect();
                 for (wid, elem, txid) in windows {
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame())) {
-                        Ok(Some(frame)) => {
-                            self.report_unrequested_frame(wid, frame, txid, mouse_state)
-                        }
+                        Ok(Some(frame)) => self.report_unrequested_frame(wid, frame, txid),
                         Ok(None) => {}
                         Err(error) => debug!(?wid, ?error, "reconcile: frame unreadable"),
                     }
@@ -1585,7 +1582,6 @@ impl State {
                         frame,
                         Some(txid),
                         Requested(true),
-                        None,
                     ));
                 }
             }
@@ -1712,13 +1708,7 @@ impl State {
                     };
                 }
                 self.window_mut(wid)?.last_known_frame = frame;
-                self.send_event(Event::WindowFrameChanged(
-                    wid,
-                    frame,
-                    txid,
-                    Requested(true),
-                    None,
-                ));
+                self.send_event(Event::WindowFrameChanged(wid, frame, txid, Requested(true)));
             }
             Request::Raise(wids, token, sequence_id, quiet) => {
                 self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));
@@ -1762,12 +1752,7 @@ impl State {
                 };
                 let window_server_info = window_server_info
                     .or_else(|| window.sys_id.and_then(window_server::get_window));
-                self.send_event(Event::WindowCreated(
-                    wid,
-                    window,
-                    window_server_info,
-                    event::get_mouse_state(),
-                ));
+                self.send_event(Event::WindowCreated(wid, window, window_server_info));
             }
             AxNotificationKind::MenuOpened => self.send_event(Event::MenuOpened(self.pid)),
             AxNotificationKind::MenuClosed => self.send_event(Event::MenuClosed(self.pid)),
@@ -1827,8 +1812,9 @@ impl State {
                         return;
                     }
                 };
-                let mouse_state = event::get_mouse_state();
-                if source == FrameSource::Drag && mouse_state == Some(event::MouseState::Down) {
+                if source == FrameSource::Drag
+                    && event::get_mouse_state() == Some(event::MouseState::Down)
+                {
                     trace!(?wid, ?notif, "Ignoring interactive drag notification");
                     return;
                 }
@@ -1857,7 +1843,7 @@ impl State {
                         return;
                     }
                 };
-                self.report_unrequested_frame(wid, frame, txid, mouse_state);
+                self.report_unrequested_frame(wid, frame, txid);
             }
             AxNotificationKind::WindowMiniaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
@@ -2113,12 +2099,7 @@ impl State {
                 };
                 let window_server_info =
                     window_server_info.or_else(|| info.sys_id.and_then(window_server::get_window));
-                self.send_event(Event::WindowCreated(
-                    wid,
-                    info,
-                    window_server_info,
-                    event::get_mouse_state(),
-                ));
+                self.send_event(Event::WindowCreated(wid, info, window_server_info));
                 wid
             }
         };
@@ -2592,18 +2573,11 @@ impl State {
         wid: WindowId,
         frame: CGRect,
         txid: Option<TransactionId>,
-        mouse_state: Option<event::MouseState>,
     ) {
         if let Some(window) = self.windows.get_mut(&wid) {
             window.last_known_frame = frame;
         }
-        self.send_event(Event::WindowFrameChanged(
-            wid,
-            frame,
-            txid,
-            Requested(false),
-            mouse_state,
-        ));
+        self.send_event(Event::WindowFrameChanged(wid, frame, txid, Requested(false)));
     }
 
     fn handle_ax_result<T>(

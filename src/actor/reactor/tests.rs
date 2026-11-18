@@ -1829,7 +1829,6 @@ fn geometry_cross_display_frame_change_waits_for_authoritative_membership() {
         moved_frame,
         None,
         Requested(false),
-        Some(MouseState::Up),
     ));
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(_space1));
@@ -1863,7 +1862,6 @@ fn matching_rift_frame_clears_pending_target() {
         target_frame,
         Some(txid),
         Requested(true),
-        Some(MouseState::Up),
     ));
 
     assert_eq!(
@@ -1893,7 +1891,6 @@ fn matching_rift_frame_clears_pending_target() {
             accepted,
             Some(txid),
             Requested(true),
-            Some(MouseState::Up),
         ))
         .unwrap();
     assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(accepted));
@@ -1917,7 +1914,6 @@ fn matching_rift_frame_clears_pending_target() {
         dragged,
         Some(txid),
         Requested(false),
-        Some(MouseState::Down),
     ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
     assert_eq!(reactor.reconciler.sync(wid), super::reconciler::Sync::Adrift);
@@ -1938,7 +1934,6 @@ fn genuine_external_frame_changes_invalidate_layout() {
             moved_frame,
             None,
             Requested(false),
-            Some(MouseState::Up),
         ))
         .unwrap();
 
@@ -1989,7 +1984,6 @@ fn scrolling_display_transfer_ignores_intermediate_native_width() {
             intermediate,
             None,
             Requested(false),
-            Some(MouseState::Up),
         ));
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(apps.windows[&window].frame.size.width, expected.size.width);
@@ -2010,13 +2004,7 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
         }
 
         let outcome = reactor
-            .dispatch_workflow(Event::WindowFrameChanged(
-                wid,
-                resized,
-                None,
-                Requested(false),
-                Some(mouse),
-            ))
+            .dispatch_workflow(Event::WindowFrameChanged(wid, resized, None, Requested(false)))
             .unwrap();
 
         assert!(outcome.arrange.passes > 0);
@@ -2047,13 +2035,7 @@ fn crossing_native_spaces_reconciles_membership_with_one_arrange_pass() {
     );
 
     let outcome = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            moved,
-            None,
-            Requested(false),
-            Some(MouseState::Up),
-        ))
+        .dispatch_workflow(Event::WindowFrameChanged(wid, moved, None, Requested(false)))
         .unwrap();
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(_space1));
@@ -2090,7 +2072,6 @@ fn unmanageable_window_crossing_spaces_is_not_reinserted_into_layout() {
         moved_frame,
         None,
         Requested(false),
-        Some(crate::sys::event::MouseState::Up),
     ));
 
     assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
@@ -2166,7 +2147,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
         )
     };
     let moved = |wid, frame, txid, requested| {
-        Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
+        Event::WindowFrameChanged(wid, frame, txid, Requested(requested))
     };
     reactor.place_window(wid, at(40.0));
     let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
@@ -2207,9 +2188,7 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     let popup = WindowId::new(wid.pid, 2);
     let mut info = make_window(2);
     (info.is_standard, info.is_root) = (false, false);
-    let created = reactor
-        .dispatch_workflow(Event::WindowCreated(popup, info, None, None))
-        .unwrap();
+    let created = reactor.dispatch_workflow(Event::WindowCreated(popup, info, None)).unwrap();
     assert!(created.arrange.passes == 0 && created.refresh_window_notifications);
     let destroyed = reactor.dispatch_workflow(Event::WindowDestroyed(popup)).unwrap();
     assert_eq!(destroyed.arrange.passes, 0);
@@ -2381,7 +2360,6 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         latched_frame,
         None,
         Requested(false),
-        Some(MouseState::Down),
     ));
     assert!(reactor.user_is_dragging());
     assert!(drop_target(&reactor).is_none());
@@ -2396,7 +2374,6 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         released_frame,
         None,
         Requested(false),
-        Some(MouseState::Down),
     ));
     assert!(reactor.user_is_dragging());
     assert!(drop_target(&reactor).is_none());
@@ -2468,13 +2445,7 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
         frame.mid(),
     );
     let moved = CGRect::new(CGPoint::new(frame.origin.x + 30.0, frame.origin.y), frame.size);
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        moved,
-        None,
-        Requested(false),
-        Some(MouseState::Up),
-    ));
+    reactor.handle_event(Event::WindowFrameChanged(wid, moved, None, Requested(false)));
     assert!(reactor.user_is_dragging());
 
     reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
@@ -2659,7 +2630,6 @@ fn recent_cross_display_move_ignores_conflicting_geometry_space_change() {
         conflicting_frame,
         None,
         Requested(false),
-        Some(MouseState::Up),
     ));
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
@@ -2861,7 +2831,6 @@ fn fullscreen_does_not_suppress_other_same_pid_windows() {
             min_frame: frame.size,
             max_frame: frame.size,
         }),
-        None,
     ));
 
     assert_eq!(
@@ -3217,12 +3186,7 @@ fn it_ignores_windows_on_disabled_spaces() {
 
     // Make sure it doesn't choke on destroyed events for ignored windows.
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 1)));
-    reactor.handle_event(Event::WindowCreated(
-        WindowId::new(1, 2),
-        make_window(2),
-        None,
-        Some(MouseState::Up),
-    ));
+    reactor.handle_event(Event::WindowCreated(WindowId::new(1, 2), make_window(2), None));
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
 }
 
@@ -3265,12 +3229,7 @@ fn it_ignores_windows_on_nonzero_layers() {
 
     // Make sure it doesn't choke on destroyed events for ignored windows.
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 1)));
-    reactor.handle_event(Event::WindowCreated(
-        WindowId::new(1, 2),
-        make_window(2),
-        None,
-        Some(MouseState::Up),
-    ));
+    reactor.handle_event(Event::WindowCreated(WindowId::new(1, 2), make_window(2), None));
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
 }
 
@@ -3493,7 +3452,6 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
             clamped,
             Some(txid),
             Requested(true),
-            Some(MouseState::Up),
         ))
         .unwrap();
     assert_eq!(outcome.arrange.passes, 0, "clamping must not cause a retry loop");
@@ -3505,7 +3463,6 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
         CGRect::new(CGPoint::new(10., 48.), hidden_target.size),
         Some(txid),
         Requested(false),
-        Some(MouseState::Up),
     ));
     let requests = apps.requests();
     assert!(
@@ -3573,7 +3530,6 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         parked_elsewhere,
         Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
         Requested(true),
-        None,
     ));
 
     assert!(!reactor.update_layout_or_warn(false, true, None));
@@ -4128,7 +4084,6 @@ fn native_focus_race_waits_for_new_window_activation() {
         new,
         make_window_info(frame, Some(new_wsid), "New window", None),
         Some(new_info),
-        None,
     ));
     assert!(!reactor.state.windows.has_pending_window_for_pid(pid));
     reactor.handle_event(Event::ApplicationMainWindowChanged(pid, Some(new), Quiet::No));
@@ -5359,7 +5314,6 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         frame(228.),
         Some(txid),
         Requested(true),
-        Some(MouseState::Up),
     ));
     assert!(
         reactor
@@ -7235,7 +7189,6 @@ fn native_tab_creation_and_close_preserve_layout_slot_and_other_windows() {
                     min_frame: CGSize::ZERO,
                     max_frame: CGSize::ZERO,
                 }),
-                None,
             ));
             window_server::set_window_ordered_in_override(old_wsid, Some(false));
             reactor.handle_event(Event::WindowServerDestroyed(
@@ -7292,7 +7245,7 @@ fn native_tab_switches_in_two_groups_preserve_each_groups_slot() {
         info.sys_id = Some(WindowServerId::new(20_000 + incoming.idx.get()));
         info.has_native_tabs = true;
         window_server::set_window_ordered_in_override(old_wsid, Some(false));
-        reactor.handle_event(Event::WindowCreated(incoming, info, None, None));
+        reactor.handle_event(Event::WindowCreated(incoming, info, None));
         reactor.handle_event(Event::WindowClosed(old_wsid));
         window_server::set_window_ordered_in_override(old_wsid, None);
         for (wid, _) in &mut expected {
@@ -7339,7 +7292,7 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
             reactor.handle_event(Event::WindowClosed(old_wsid));
             reactor.discover_test_windows(2, vec![(new, info)], vec![new, separate]);
         } else {
-            reactor.handle_event(Event::WindowCreated(new, info, None, None));
+            reactor.handle_event(Event::WindowCreated(new, info, None));
             reactor.handle_event(Event::WindowClosed(old_wsid));
         }
         window_server::set_window_ordered_in_override(old_wsid, None);
@@ -7850,7 +7803,7 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
         if created_event {
             let mut info = make_window(99);
             info.sys_id = Some(wsid);
-            reactor.handle_event(Event::WindowCreated(new_wid, info, None, None));
+            reactor.handle_event(Event::WindowCreated(new_wid, info, None));
         } else {
             rekey_window(&mut reactor, old_wid, new_wid);
         }
@@ -8796,7 +8749,6 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
                         CGRect::new(CGPoint::new(x, 100.), CGSize::new(800., 600.)),
                         None,
                         Requested(false),
-                        Some(MouseState::Up),
                     ));
                 }
             }
@@ -9126,7 +9078,6 @@ fn topology_revocation_protects_windows_before_queued_invalidation_is_delivered(
             CGRect::new(CGPoint::new(4000., 4000.), frame.size),
             None,
             Requested(false),
-            None,
         ),
         Event::Command(Command::Layout(LayoutCommand::ToggleWindowFloating)),
     ] {
@@ -9510,7 +9461,6 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
                     new,
                     None,
                     Requested(false),
-                    Some(MouseState::Up),
                 ));
                 assert!(!reactor.user_is_dragging());
             }
@@ -10789,7 +10739,6 @@ fn shared_mode_opens_new_windows_on_the_pointer_display() {
             window,
             make_window_info(frame, None, "New Window", None),
             None,
-            None,
         ));
         apps.simulate_until_quiet(&mut reactor);
         crate::sys::window_server::set_cursor_location_override(None);
@@ -11141,15 +11090,8 @@ fn floating_display_transfer_round_trip_preserves_user_geometry() {
     ] {
         let (mut apps, mut reactor, _, _) = two_displays(shared_settings());
         let window = WindowId::new(1, 1);
-        let frame_changed = |frame, requested| {
-            Event::WindowFrameChanged(
-                window,
-                frame,
-                None,
-                Requested(requested),
-                Some(MouseState::Up),
-            )
-        };
+        let frame_changed =
+            |frame, requested| Event::WindowFrameChanged(window, frame, None, Requested(requested));
         reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
             workspace: None,
             mode,
@@ -11263,7 +11205,6 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
         reactor.handle_event(Event::WindowCreated(
             opened,
             make_window_info(shared_left(), None, "New Window", None),
-            None,
             None,
         ));
         apps.simulate_until_quiet(&mut reactor);
@@ -11849,7 +11790,7 @@ fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
     dialog.ax_subrole = Some("AXDialog".into());
     dialog.sys_id = Some(WindowServerId::new(20002));
     let created = WindowId::new(2, 2);
-    reactor.handle_event(Event::WindowCreated(created, dialog, None, None));
+    reactor.handle_event(Event::WindowCreated(created, dialog, None));
     assert!(reactor.transient_blocks_mouse_focus());
     reactor.handle_event(Event::WindowDestroyed(created));
     assert!(!reactor.transient_blocks_mouse_focus());
@@ -12104,7 +12045,7 @@ fn native_admission_veto_survives_manage_rule() {
     info.sys_id = Some(id);
     info.ax_role = Some("AXWindow".into());
     info.ax_subrole = Some("AXStandardWindow".into());
-    reactor.handle_event(Event::WindowCreated(wid, info, None, None));
+    reactor.handle_event(Event::WindowCreated(wid, info, None));
     let window = reactor.state.windows.window_mut(wid).unwrap();
     window.manage_override = Some(true);
     assert!(!window.is_admitted());
@@ -12142,7 +12083,6 @@ fn rule_owned_window_survives_late_cross_display_notifications() {
     reactor.handle_event(Event::WindowCreated(
         window,
         make_window_info(frame, Some(wsid), "Ghostty", None),
-        None,
         None,
     ));
     assert_eq!(
@@ -12275,11 +12215,6 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     CGRect::new(CGPoint::new(0., 1.), CGSize::new(1000., 999.)),
                     Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
                     Requested(false),
-                    Some(if early == 7 {
-                        MouseState::Down
-                    } else {
-                        MouseState::Up
-                    }),
                 ));
                 if early == 7 {
                     reactor.handle_event(Event::PointerReleased(
@@ -12483,7 +12418,6 @@ fn a_tiled_window_dragged_onto_another_display_is_not_snapped_back_mid_drag() {
         dragged,
         last_seen,
         Requested(false),
-        Some(MouseState::Down),
     ));
     assert!(reactor.user_is_dragging());
     let _ = apps.requests();
@@ -12542,7 +12476,6 @@ fn other_window_moves_during_a_modifier_drag(
         on_display2,
         Some(apps.windows[&other].last_seen_txid),
         Requested(false),
-        Some(button),
     ));
     (reactor, held, other, space1)
 }
@@ -12672,7 +12605,6 @@ fn a_window_moving_with_no_press_on_it_is_never_a_drag() {
                     CGRect::new(CGPoint::new(x, frame.origin.y), frame.size),
                     Some(apps.windows[&wid].last_seen_txid),
                     Requested(false),
-                    Some(button),
                 ));
             }
             let context = format!("{pointer:?}, button {button:?}");
@@ -12767,7 +12699,6 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
             CGRect::new(CGPoint::new(frame.origin.x + 5., frame.origin.y), frame.size),
             Some(apps.windows[&wid].last_seen_txid),
             Requested(false),
-            None,
         ));
         assert_eq!(reactor.user_is_dragging(), modifier, "modifier drag: {modifier}");
     }
@@ -12781,7 +12712,6 @@ fn a_release_the_tap_missed_ends_a_native_drag_but_not_a_modifier_drag() {
         CGRect::new(CGPoint::new(frame.origin.x + 5., frame.origin.y), frame.size),
         Some(apps.windows[&wid].last_seen_txid),
         Requested(false),
-        None,
     ));
     assert_eq!(reactor.state.windows.gripped(), None, "{wid:?} stayed pressed");
 }
@@ -12808,7 +12738,6 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
         dragged,
         Some(last_seen_by_app),
         Requested(false),
-        Some(MouseState::Down),
     ));
 
     assert!(
@@ -12906,7 +12835,6 @@ fn drag_by(apps: &Apps, reactor: &mut Reactor, wid: WindowId, dx: f64, dy: f64) 
         moved,
         Some(apps.windows[&wid].last_seen_txid),
         Requested(false),
-        Some(MouseState::Down),
     ));
     moved
 }
@@ -13367,7 +13295,6 @@ fn a_tiled_window_dropped_on_another_display_is_in_only_that_displays_layout() {
             frame,
             last_seen,
             Requested(false),
-            Some(MouseState::Down),
         ));
     };
 

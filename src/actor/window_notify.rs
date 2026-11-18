@@ -12,9 +12,9 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
+use crate::sys::window_notify;
 use crate::sys::window_notify::EventData;
 use crate::sys::window_server::{self, WindowIterator, WindowServerId};
-use crate::sys::{event, window_notify};
 
 #[derive(Default)]
 pub struct Ignored {
@@ -328,7 +328,6 @@ impl Dispatcher {
             CGSEventType::Known(KnownCGSEvent::WindowMoved)
             | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
                 // TODO: suppress move/resize while Mission Control is active
-                let mouse_state = event::get_mouse_state();
                 let Some(window_id) = evt.window_id else {
                     return;
                 };
@@ -349,7 +348,6 @@ impl Dispatcher {
                             bounds,
                             last_seen,
                             Requested(false),
-                            mouse_state,
                         ));
                     }
                 };

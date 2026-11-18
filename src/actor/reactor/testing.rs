@@ -641,7 +641,6 @@ impl Apps {
                                 window.frame,
                                 Some(window.last_seen_txid),
                                 Requested(false),
-                                None,
                             ));
                         }
                     }
@@ -685,7 +684,6 @@ impl Apps {
                                 window.frame,
                                 Some(txid),
                                 Requested(true),
-                                None,
                             ));
                         }
                     }
@@ -706,7 +704,6 @@ impl Apps {
                                 window.frame,
                                 Some(txid),
                                 Requested(true),
-                                None,
                             ));
                         }
                     });
@@ -725,7 +722,6 @@ impl Apps {
                         window.frame,
                         Some(window.last_seen_txid),
                         Requested(true),
-                        None,
                     ));
                 }
                 Request::Raise(..) => todo!(),
