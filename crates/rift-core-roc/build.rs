@@ -13,12 +13,7 @@ fn main() {
         let home = std::env::var("HOME").unwrap();
         format!("{home}/.local/share/roc-nightly/current/roc")
     });
-    for file in [
-        "core/main.roc",
-        "platform/main.roc",
-        "platform/Event.roc",
-        "platform/Effect.roc",
-    ] {
+    for file in ["core/main.roc", "platform/main.roc"] {
         println!("cargo:rerun-if-changed={}", roc_dir.join(file).display());
     }
     println!("cargo:rerun-if-env-changed=ROC");

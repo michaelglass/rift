@@ -1,8 +1,9 @@
 //! The Roc core against the Rust core, on the steps the reactor really took.
 //!
 //! Each trace is one fuzzer seed's run through rift's reactor, recorded as the events the
-//! reactor stepped the core with and the effects the (Rust) core decided, on plain data. Both
-//! cores replay every event from a fresh model and must decide exactly the recorded effects.
+//! reactor stepped the core with and the effects the (Rust) core decided, in the wire format
+//! (`rift_core::plain::wire`, little-endian words). Both cores replay every event from a fresh
+//! model and must decide exactly the recorded effects: the Roc core word for word.
 //!
 //! Traces come from `$RIFT_TRACE_DIR` when set (write them with
 //! `RIFT_TRACE_DIR=… cargo test dump_core_traces -- --ignored` in rift), else from the small
@@ -10,28 +11,30 @@
 
 use std::path::PathBuf;
 
-use rift_core::plain::Plain;
-use rift_core::{Core, Effect, Event, RustCore};
+use rift_core::RustCore;
+use rift_core::plain::{Plain, wire};
 use rift_core_roc::{AllocationCount, RocCore};
 
-type Trace = Vec<(Event<Plain>, Vec<Effect<Plain>>)>;
-
-fn traces() -> Vec<(String, Trace)> {
+fn traces() -> Vec<(String, Vec<u64>)> {
     let dir = std::env::var("RIFT_TRACE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("traces"));
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "trace"))
         .collect();
     files.sort();
     assert!(!files.is_empty(), "no traces in {}", dir.display());
     files
         .into_iter()
         .map(|path| {
-            let trace = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            (path.file_name().unwrap().to_string_lossy().into_owned(), trace)
+            let bytes = std::fs::read(&path).unwrap();
+            let words = bytes
+                .chunks_exact(8)
+                .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+                .collect();
+            (path.file_name().unwrap().to_string_lossy().into_owned(), words)
         })
         .collect()
 }
@@ -40,17 +43,23 @@ fn traces() -> Vec<(String, Trace)> {
 fn the_roc_core_decides_what_the_rust_core_decided() {
     let before = AllocationCount::now();
     let mut steps = 0;
-    for (name, trace) in traces() {
+    for (name, words) in traces() {
+        let trace = wire::decode_trace(&words).unwrap_or_else(|error| panic!("{name}: {error:?}"));
         let mut rust = RustCore::<Plain>::default();
         let mut roc = RocCore::default();
         for (index, (event, recorded)) in trace.into_iter().enumerate() {
             let from_rust = rust.step(event.clone());
-            let from_roc = roc.step(event.clone());
             assert_eq!(
                 &from_rust, &recorded,
                 "{name} step {index}: Rust core, {event:?}"
             );
-            assert_eq!(&from_roc, &recorded, "{name} step {index}: Roc core, {event:?}");
+            let from_roc = roc.step_words(&wire::encode_event(event.clone()));
+            if from_roc != wire::encode_effects(recorded.clone()) {
+                let decoded = wire::decode_effects(&from_roc);
+                panic!(
+                    "{name} step {index}: Roc core, {event:?}\n  roc:      {decoded:?}\n  recorded: {recorded:?}"
+                );
+            }
             steps += 1;
         }
     }
