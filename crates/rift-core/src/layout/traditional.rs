@@ -165,19 +165,18 @@ impl<W> Child<W> {
     }
 }
 
-/// A leaf's constraints along one axis. A resizable window's minimum and maximum bounds are
-/// not honoured when splitting (apps report transient or conservative bounds), only a fixed
-/// length is.
+/// A leaf's constraints along one axis. A resizable window's minimum is honoured when splitting
+/// only under `respect_min_size` (`tiled_min`); a fixed length always is.
 fn leaf_summary(c: WindowConstraints, horizontal: bool) -> AxisSummary {
     let c = c.normalized();
-    let min = c.reported_min(horizontal);
+    let min = c.tiled_min(horizontal);
     let max = (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal));
     match c.sizing {
         Sizing::Resizable { .. } | Sizing::ResizableAtLeastMin { .. } => {
-            if let Some(fixed) = c.fixed_for_axis(horizontal) {
-                return (min, Some(fixed), Some(fixed), false);
+            match c.fixed_for_axis(horizontal) {
+                Some(fixed) => (fixed, Some(fixed), Some(fixed), false),
+                None => (min, None, max, true),
             }
-            (0.0, None, max, true)
         }
         Sizing::Fixed { .. } => {
             let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
@@ -427,4 +426,39 @@ pub fn stack_frames(
             h,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::Size;
+
+    fn constraints(sizing: Sizing) -> WindowConstraints {
+        WindowConstraints { sizing, ..Default::default() }
+    }
+
+    #[test]
+    fn a_resizable_windows_reported_minimum_holds_a_split_only_under_respect_min_size() {
+        let min = Size::reported(400.0, 600.0);
+        // Advisory: traditional tiling may shrink it below its reported minimum.
+        let advisory = leaf_summary(constraints(Sizing::new(true, false, min)), false);
+        assert_eq!(advisory, (0.0, None, None, true));
+        // Respected: its minimum holds, and it can still grow.
+        let respected = leaf_summary(constraints(Sizing::new(true, true, min)), false);
+        assert_eq!(respected, (600.0, None, None, true));
+        // Not resizable: its minimum holds too.
+        let fixed = leaf_summary(constraints(Sizing::new(false, false, min)), false);
+        assert_eq!(fixed.0, 600.0);
+    }
+
+    #[test]
+    fn an_axis_locked_by_equal_bounds_is_fixed_whatever_the_rule() {
+        for respect in [false, true] {
+            let c = WindowConstraints {
+                max_width: 500.0,
+                ..constraints(Sizing::new(true, respect, Size::reported(500.0, 0.0)))
+            };
+            assert_eq!(leaf_summary(c, true), (500.0, Some(500.0), Some(500.0), false));
+        }
+    }
 }
