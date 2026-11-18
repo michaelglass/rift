@@ -6,9 +6,16 @@ description = "Rift's core written in Roc (roc/core), stepped like rift-core's R
 license = "Apache-2.0"
 build = "build.rs"
 
-# Its own workspace, outside rift's: building it needs the Roc nightly, which rift's own
-# build must not.
-[workspace]
+# A member of rift's workspace (cargo makes every path dependency inside it one), but empty
+# unless `roc` is on: only that feature builds the Roc app, so rift's own build never needs the
+# Roc nightly. rift's `roc-core` feature turns it on; alone: `cargo test -p rift-core-roc
+# --features roc`.
+[features]
+roc = []
+
+[[test]]
+name = "differential"
+required-features = ["roc"]
 
 [dependencies]
 rift-core = { path = "../rift-core" }

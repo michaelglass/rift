@@ -1,11 +1,15 @@
 //! Builds the Roc core (`roc/core/main.roc` on `roc/platform`) into a static archive with the
 //! pinned Roc nightly and links it. `ROC` names the compiler; the default is the pinned nightly
-//! under `~/.local/share/roc-nightly/current`.
+//! under `~/.local/share/roc-nightly/current`. Only with the `roc` feature.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // Without `roc` the crate is empty (see Cargo.toml): nothing to build or link.
+    if std::env::var_os("CARGO_FEATURE_ROC").is_none() {
+        return;
+    }
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let roc_dir = manifest.join("../../roc");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());

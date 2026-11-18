@@ -20,7 +20,7 @@ use test_log::test;
 
 use super::*;
 use crate::actor::reactor::managers::LayoutManager;
-use crate::actor::reactor::reconciler::{Desired, Rift, Sync};
+use crate::actor::reactor::reconciler::{Desired, Plainly, Sync};
 use crate::actor::reactor::testing::TestSizing;
 use crate::sys::geometry::IsWithin;
 
@@ -1665,37 +1665,6 @@ fn drag_invariants_hold_across_interleavings() {
 // ---------------------------------------------------------------------------------------------
 // The core boundary: every seed's run, as the steps the reactor took through the core.
 
-/// Rift's types to plain data, with times counted from `epoch`.
-struct ToPlain {
-    epoch: std::time::Instant,
-}
-
-impl rift_core::plain::Translate<Rift, rift_core::plain::Plain> for ToPlain {
-    fn window(&self, window: WindowId) -> rift_core::plain::WindowId {
-        rift_core::plain::WindowId {
-            pid: window.pid,
-            idx: window.idx.get(),
-        }
-    }
-
-    fn frame(&self, frame: CGRect) -> rift_core::plain::Rect {
-        rift_core::plain::Rect {
-            x: frame.origin.x,
-            y: frame.origin.y,
-            w: frame.size.width,
-            h: frame.size.height,
-        }
-    }
-
-    fn time(&self, time: std::time::Instant) -> rift_core::plain::Nanos {
-        rift_core::plain::Nanos(time.saturating_duration_since(self.epoch).as_nanos() as u64)
-    }
-
-    fn request(&self, request: TransactionId) -> rift_core::plain::RequestId {
-        rift_core::plain::RequestId(request.number())
-    }
-}
-
 type PlainStep = (
     rift_core::Event<rift_core::plain::Plain>,
     Vec<rift_core::Effect<rift_core::plain::Plain>>,
@@ -1710,7 +1679,7 @@ fn trace(setup: Setup, steps: &[Step]) -> Vec<PlainStep> {
         sim.pending.extend(emitted);
     }
     _ = sim.settle(steps.len());
-    let to = ToPlain { epoch };
+    let to = Plainly { epoch };
     let recorded = sim.reactor.state.core.trace.take().unwrap_or_default();
     recorded
         .into_iter()

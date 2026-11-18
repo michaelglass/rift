@@ -6,6 +6,9 @@
 //! (`roc_platform_abi.rs`, regenerated with `roc/glue.sh` on every nightly bump) is three
 //! functions on word lists whatever the core grows. The effect words are copied out of Roc
 //! memory and released at once, so the platform never holds a Roc allocation.
+//!
+//! Empty without the `roc` feature, so rift's workspace builds without the Roc nightly.
+#![cfg(feature = "roc")]
 
 #[allow(clippy::all, non_camel_case_types, unused, unsafe_op_in_unsafe_fn)]
 #[path = "roc_platform_abi.rs"]
