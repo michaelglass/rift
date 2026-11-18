@@ -60,15 +60,8 @@ enum Grip {
     Dragging(Box<Session>),
 }
 
-/// What the pointer is doing with windows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Pointer {
-    Idle,
-    /// Down on this window, which hasn't moved.
-    Pressing(WindowId),
-    /// Dragging this window.
-    Dragging(WindowId),
-}
+/// What the pointer is doing with windows: the core's type, on Rift's window ids.
+pub(crate) type Pointer = rift_core::Pointer<WindowId>;
 
 /// What the user's hand is doing with a window, for whoever observed that window change.
 pub(crate) enum Hand<'a> {

@@ -68,8 +68,9 @@ use events::{
 use main_window::MainWindowTracker;
 use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
-use reconciler::{Answer, Holder, Observation};
+use reconciler::{Answer, Observation};
 pub use replay::{Record, replay};
+use rift_core::{Initiative, InputClass};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -423,23 +424,14 @@ pub enum WindowInvalidationSource {
     StaleAxElement,
 }
 
-/// What user input (a command or a gesture) can disturb: the one fact about it the pointer
-/// rule in `Reactor::may` needs. Parsed once, where input enters `handle_loop_event`.
-#[derive(Debug, Clone, Copy)]
-enum InputClass {
-    /// Changes which windows are where, shown, focused or raised, or where the pointer is.
-    Steering,
-    /// Steering that rearranges by Space assignment: layout commands and moves between
-    /// displays. Refused while the topology is unsettled as well as by everything that refuses
-    /// steering.
-    Arranging,
-    /// Touches no window and not the pointer: settings, binding modes, diagnostics, saving.
-    Inert,
-    /// The pointer resting over a window: focus follows mouse and autoraise.
-    Hover,
+/// What user input (a command or a gesture) can disturb, parsed once where input enters
+/// `handle_loop_event`: the one fact about it the pointer rule (`rift_core::may`) needs.
+trait Classify: Sized {
+    fn of_event(event: &Event) -> Option<Self>;
+    fn of(command: &Command) -> Self;
 }
 
-impl InputClass {
+impl Classify for InputClass {
     /// The class of `event` if it is user input, `None` if it is anything else (a report, a
     /// lifecycle event, a later phase of a gesture).
     fn of_event(event: &Event) -> Option<Self> {
@@ -527,25 +519,6 @@ impl InputClass {
             Command::Metrics(M::ShowTiming) => Inert,
         }
     }
-}
-
-/// Things Rift would do that have a rule about the pointer: its own initiatives, and the
-/// user's commands by class; see `Reactor::may`.
-#[derive(Debug, Clone, Copy)]
-enum Initiative {
-    /// User input: a command (hotkey, CLI, menu) or a gesture. Input the pointer rule refuses
-    /// is discarded, never queued: after the drag nothing is replayed.
-    UserInput(InputClass),
-    /// Arrangement and geometry layout passes.
-    Arrange,
-    /// Retiring windows an inventory refresh no longer reports.
-    RetireWindows,
-    /// Following a workspace switch with focus.
-    SwitchWorkspaceFocus,
-    /// Warping the pointer or focus to a window.
-    WarpFocus,
-    /// Following an app's activation to the workspace holding its window.
-    FollowActivation,
 }
 
 /// Where a window is against where it belongs (its workspace's Space), as the accepted
@@ -2250,9 +2223,10 @@ impl Reactor {
                 }
                 // The session is in hand, so this is the dragged window's own frame: the one
                 // write a dragged window gets.
-                let Some(write) = self.reconciler.follow(window, session) else {
+                let Some(frame) = session.interactive_frame() else {
                     return Ok(EventOutcome::no_change());
                 };
+                let write = self.reconciler.follow(window, frame);
                 self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
             }
@@ -4509,16 +4483,9 @@ impl Reactor {
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
         let gripped = self.state.windows.is_gripped(wid);
-        let holder = if gripped {
-            Holder::User
-        } else {
-            Holder::Nobody
-        };
+        let pointer = self.state.windows.pointer();
         let answered = match kind {
-            ReportKind::Reply => {
-                let owner = self.owner(wid);
-                self.reconciler.answer(wid, new_frame, owner)
-            }
+            ReportKind::Reply => self.reconciler.answer(pointer, wid, new_frame),
             ReportKind::Unprompted => None,
         };
         let observation = match answered {
@@ -4540,7 +4507,7 @@ impl Reactor {
             }
             // Unprompted, or an answer Rift had stopped waiting for, which is news like any
             // other: what follows re-derives where the window belongs and writes the difference.
-            None => self.reconciler.observe(wid, new_frame, old_frame, holder),
+            None => self.reconciler.observe(pointer, wid, new_frame, old_frame),
         };
         if self.mission_control_moved_it() {
             return Ok(EventOutcome::no_change());

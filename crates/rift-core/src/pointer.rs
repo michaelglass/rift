@@ -56,8 +56,14 @@ impl<W: PartialEq + Copy> Pointer<W> {
 pub enum InputClass {
     /// Changes which windows are where, shown, focused or raised, or where the pointer is.
     Steering,
+    /// Steering that rearranges by Space assignment: layout commands and moves between
+    /// displays. Refused while the topology is unsettled as well as by everything that refuses
+    /// steering.
+    Arranging,
     /// Touches no window and not the pointer: settings, binding modes, diagnostics, saving.
     Inert,
+    /// The pointer resting over a window: focus follows mouse and autoraise.
+    Hover,
 }
 
 /// Things Rift would do that have a rule about the pointer: its own initiatives, and the
@@ -75,30 +81,33 @@ pub enum Initiative {
     SwitchWorkspaceFocus,
     /// Warping the pointer or focus to a window.
     WarpFocus,
+    /// Following an app's activation to the workspace holding its window.
+    FollowActivation,
 }
 
-/// Whether Rift may take `initiative` with the pointer doing what it does. Stated per pointer
-/// state for every initiative, with no wildcard.
+/// Whether Rift may take `initiative` with the pointer doing what it does: the pointer's row of
+/// the mode table (rift's `Mode` for the pointer axis delegates here). Stated per pointer state
+/// for every initiative, with no wildcard.
 pub fn may<W>(initiative: Initiative, pointer: Pointer<W>) -> bool {
     use Initiative::*;
+    use InputClass::{Arranging, Hover, Inert, Steering};
     use Pointer::*;
     match (initiative, pointer) {
-        (UserInput(InputClass::Inert), Idle | Pressing(_) | Dragging(_)) => true,
-        (UserInput(InputClass::Steering), Idle) => true,
+        (UserInput(Inert), Idle | Pressing(_) | Dragging(_)) => true,
+        (UserInput(Steering | Arranging | Hover), Idle) => true,
         // The window under the user's hand is theirs (`Owner::User`), pressed or dragged:
-        // input's effect on it would wait for the release, splitting it from the rest of
-        // the effect. Dropped instead, not deferred.
-        (UserInput(InputClass::Steering), Pressing(_) | Dragging(_)) => false,
+        // input's effect on it would wait for the release, splitting it from the rest of the
+        // effect. A hover sample from before the press would focus another window under the
+        // held one.
+        (UserInput(Steering | Arranging | Hover), Pressing(_) | Dragging(_)) => false,
         // A press alone changes nothing: the window hasn't moved.
-        (Arrange, Idle | Pressing(_)) => true,
-        (RetireWindows, Idle | Pressing(_)) => true,
-        (SwitchWorkspaceFocus, Idle | Pressing(_)) => true,
-        (WarpFocus, Idle | Pressing(_)) => true,
-        // While the user drags a window, Rift keeps its hands off the layout and the
-        // pointer until the drop.
-        (Arrange, Dragging(_)) => false,
-        (RetireWindows, Dragging(_)) => false,
-        (SwitchWorkspaceFocus, Dragging(_)) => false,
-        (WarpFocus, Dragging(_)) => false,
+        (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Idle | Pressing(_)) => true,
+        // While the user drags a window, Rift keeps its hands off the layout and the pointer
+        // until the drop.
+        (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Dragging(_)) => false,
+        // Following an activation switches workspace, which moves every window; nothing moves
+        // existing windows until the drop, and a press may become a drag.
+        (FollowActivation, Idle) => true,
+        (FollowActivation, Pressing(_) | Dragging(_)) => false,
     }
 }
