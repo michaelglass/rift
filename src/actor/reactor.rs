@@ -2750,9 +2750,16 @@ impl Reactor {
                 selector,
                 window_id,
             })) => {
-                let cursor = || self.window_id_under_cursor();
+                // Which window the command means: the cursor is asked only without a main window.
+                let which = match (window_id, self.main_window()) {
+                    (Some(index), _) => WindowToMove::Index(index),
+                    (None, Some(window)) => WindowToMove::Main(window),
+                    (None, None) => self
+                        .window_id_under_cursor()
+                        .map_or(WindowToMove::FirstOnCommandDisplay, WindowToMove::UnderCursor),
+                };
                 let (window, source_space, target_space) = match self
-                    .resolve_window_display_move(&selector, window_id, cursor)
+                    .resolve_window_display_move(&selector, which)
                 {
                     Ok(resolved) => resolved,
                     Err(Refusal::Quiet) => return Ok(EventOutcome::no_change()),
@@ -6471,26 +6478,22 @@ impl Reactor {
         self.activate_display(space);
     }
 
-    /// The window a MoveWindowToDisplay moves (`window_id` in the active workspaces, else the
-    /// main window, the one under the `cursor`, or the command display's first), the active
-    /// Space it is on, and the active Space of the display `selector` names from there.
+    /// The window a MoveWindowToDisplay moves, the active Space it is on, and the active Space
+    /// of the display `selector` names from there.
     fn resolve_window_display_move(
         &self,
         selector: &DisplaySelector,
-        window_id: Option<u32>,
-        cursor: impl FnOnce() -> Option<WindowId>,
+        which: WindowToMove,
     ) -> Result<(WindowId, SpaceId, SpaceId), Refusal> {
         let command_space = self.workspace_command_space();
         let workspaces = self.layout_manager.layout_engine.workspaces();
         let find = |space, index| workspaces.find_window_by_idx(&self.state.windows, space, index);
-        let window = match window_id {
-            Some(index) => command_space
+        let window = match which {
+            WindowToMove::Index(index) => command_space
                 .and_then(|space| find(space, index))
                 .or_else(|| self.iter_active_spaces().find_map(|space| find(space, index))),
-            None => self
-                .main_window()
-                .or_else(cursor)
-                .or_else(|| command_space.and_then(|space| find(space, 0))),
+            WindowToMove::Main(window) | WindowToMove::UnderCursor(window) => Some(window),
+            WindowToMove::FirstOnCommandDisplay => command_space.and_then(|space| find(space, 0)),
         }
         .ok_or(Refusal::Warn("no target window was resolved"))?;
         let state = self.state.windows.window(window).ok_or(Refusal::Warn("unknown window"))?;
@@ -6813,6 +6816,16 @@ fn raise_buries_a_floater<L: PartialEq + Copy>(
                 .zip(levels(above))
                 .is_some_and(|(candidate, above)| candidate == above)
     })
+}
+
+/// The window a MoveWindowToDisplay means: the one at an index in the active workspaces, else
+/// the main window, else the one under the cursor, else the command display's first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WindowToMove {
+    Index(u32),
+    Main(WindowId),
+    UnderCursor(WindowId),
+    FirstOnCommandDisplay,
 }
 
 /// Why a command does nothing: quietly (there is nothing to do), or with a reason worth a warning.
