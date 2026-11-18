@@ -172,9 +172,12 @@ pub(crate) enum Answer {
     Acked,
     /// The app put the window somewhere else ([`Sync::Refused`] says where).
     Refused,
-    /// Nothing tracked was waiting for it: the answer to a write Rift had stopped waiting for,
-    /// or to one sent outside the reconciler (an animation frame, a drag's interactive frame).
+    /// Nothing tracked was waiting for it: the answer to one sent outside the reconciler (an
+    /// animation frame, a drag's interactive frame), or to a write the user's hand overtook.
     Unasked,
+    /// The answer to a write Rift had stopped waiting for. The window moved after Rift last
+    /// decided where it belongs, so where it belongs is decided again.
+    Late,
 }
 
 fn answers(target: CGRect, frame: CGRect) -> bool { frame.is_within(ACK_TOLERANCE, target) }
@@ -277,13 +280,11 @@ impl Reconciler {
             {
                 Verdict::Nothing
             }
-            (Sync::Settled, Want::Arrange | Want::ArrangePositions) if desired.same_as(known) => {
-                Verdict::Nothing
-            }
-            (Sync::Refused { .. }, Want::Arrange | Want::ArrangePositions)
+            // Nothing to write. A refusal is kept: its answer may still come, late, and then
+            // where the window belongs is decided again (`Answer::Late`).
+            (Sync::Settled | Sync::Refused { .. }, Want::Arrange | Want::ArrangePositions)
                 if desired.same_as(known) =>
             {
-                self.set(window, Sync::Settled);
                 Verdict::Nothing
             }
             (
@@ -347,7 +348,7 @@ impl Reconciler {
                 } else {
                     self.set(window, Sync::Refused { wanted, got: frame });
                 }
-                (Answer::Unasked, None)
+                (Answer::Late, None)
             }
         }
     }
@@ -864,9 +865,33 @@ mod tests {
         });
         assert_eq!(
             reconciler.answer(window(), at(20.), Owner::Rift),
-            (Answer::Unasked, None)
+            (Answer::Late, None)
         );
         assert_eq!(reconciler.sync(window()), Sync::Settled);
+    }
+
+    #[test]
+    fn a_late_answer_after_layout_moved_on_is_news() {
+        let mut reconciler = Reconciler::default();
+        _ = reconciler.want(window(), at(20.), at(0.), Want::Arrange, Owner::Rift);
+        reconciler.clock.advance(WRITE_DEADLINE);
+        // The app is busy. Layout moves the window back to where it is: nothing to write, and
+        // the refusal stays on record, since its answer can still come.
+        assert_eq!(
+            reconciler.want(window(), at(0.), at(0.), Want::Arrange, Owner::Rift),
+            Verdict::Nothing
+        );
+        assert!(matches!(reconciler.sync(window()), Sync::Refused { .. }));
+        // It comes: the window is at the old target, which layout no longer wants.
+        assert_eq!(
+            reconciler.answer(window(), at(20.), Owner::Rift),
+            (Answer::Late, None)
+        );
+        // Re-derived, the old desire is written.
+        assert_eq!(
+            sent(reconciler.want(window(), at(0.), at(20.), Want::Arrange, Owner::Rift)),
+            at(0.)
+        );
     }
 
     #[test]
