@@ -47,10 +47,6 @@ impl WindowTxStore {
 
     /// The id of a new request.
     pub fn next_id(&self) -> TransactionId { self.ids.next() }
-
-    pub fn last_txid(&self, id: &WindowServerId) -> TransactionId {
-        self.get(id).map(|record| record.txid).unwrap_or_default()
-    }
 }
 
 #[cfg(test)]
