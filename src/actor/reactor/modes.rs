@@ -143,9 +143,10 @@ impl Mode for Pointer {
             // While the user drags a window, Rift keeps its hands off the layout and the
             // pointer until the drop.
             (Arrange | RetireWindows | SwitchWorkspaceFocus | WarpFocus, Dragging(_)) => false,
-            // Unchanged from before the table: following an app's activation ignores the
-            // pointer. (Open question for the owner: should a drag refuse it?)
-            (FollowActivation, Idle | Pressing(_) | Dragging(_)) => true,
+            // Following an activation switches workspace, which moves every window; nothing moves
+            // existing windows until the drop, and a press may become a drag.
+            (FollowActivation, Idle) => true,
+            (FollowActivation, Pressing(_) | Dragging(_)) => false,
         }
     }
 }

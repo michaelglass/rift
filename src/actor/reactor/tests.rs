@@ -4175,6 +4175,53 @@ fn activation_refused_after_wake_is_not_replayed_by_the_first_input() {
     assert_eq!(active(&reactor), Some(1), "a fresh activation is followed");
 }
 
+/// Nothing moves existing windows until the drop, and following an activation to another
+/// workspace moves all of them: a press or a drag refuses it. Discarded, not replayed at the
+/// release; only a fresh activation is followed.
+#[test]
+fn a_press_or_drag_discards_activation_follow_and_the_drop_replays_nothing() {
+    for drag in [false, true] {
+        let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let visible = WindowId::new(2, 1);
+        let hidden = WindowId::new(2, 2);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+        reactor.handle_event(Event::ApplicationGloballyActivated(2));
+        reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+        apps.simulate_until_quiet(&mut reactor);
+        let workspace = reactor.test_workspace(space, 1);
+        assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+        let active = |reactor: &Reactor| {
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+        };
+
+        if drag {
+            let frame = reactor.state.windows.window(visible).unwrap().frame_monotonic;
+            reactor.ensure_active_drag(visible, &frame);
+        } else {
+            reactor.state.windows.press(visible, crate::actor::drag::MouseButton::Left);
+        }
+        reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+        assert_eq!(active(&reactor), Some(0), "discarded (drag={drag})");
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            active(&reactor),
+            Some(0),
+            "the drop replays nothing (drag={drag})"
+        );
+
+        reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+        reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+        assert_eq!(
+            active(&reactor),
+            Some(1),
+            "a fresh activation is followed (drag={drag})"
+        );
+    }
+}
+
 #[test]
 fn native_focus_race_waits_for_new_window_activation() {
     let (mut apps, mut reactor) = test_context();
