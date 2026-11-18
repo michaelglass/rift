@@ -16,7 +16,7 @@ use objc2_core_foundation::CGRect;
 use rift_core::reconciler::Note;
 pub(crate) use rift_core::{Answer, Observation, Owner, Want};
 use rift_core::{Core, Kinds, Release};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use super::animation::scrolling_bounds;
 use super::managers::ScrollingDisplayBounds;
@@ -161,6 +161,7 @@ impl Reconciler {
                     debug!(window = ?write.window(), frame = ?write.frame(), "reconcile: write")
                 }
                 Effect::Queued { window } => debug!(?window, "reconcile: queued"),
+                Effect::Seen { window, frame } => trace!(?window, ?frame, "reconcile: seen"),
                 Effect::Answered { window, answer } => {
                     debug!(?window, ?answer, "reconcile: answer")
                 }
@@ -206,112 +207,14 @@ impl Reconciler {
         self.core.borrow().reconciler().sync(window)
     }
 
-    /// Rift wants `window` at `desired`; the model last saw it at `known`. A write goes out
-    /// under `request`.
-    fn want(
-        &mut self,
-        request: TransactionId,
-        window: WindowId,
-        desired: CGRect,
-        known: CGRect,
-        want: Want,
-    ) -> Verdict {
-        let now = self.clock.now();
-        let effects = self.step(Event::Want {
-            now,
-            request,
-            window,
-            desired,
-            known,
-            want,
-        });
-        let mut verdict = Verdict::Nothing;
-        for effect in effects {
-            match effect {
-                Effect::Write(write) => verdict = Verdict::Send(write),
-                Effect::Queued { .. } => verdict = Verdict::Queued,
-                _ => {}
-            }
-        }
-        verdict
-    }
+    /// Steps the core; the caller (`RiftState`) applies what it projects onto the store.
+    fn decide(&self, event: Event) -> Vec<Effect> { self.step(event) }
 
-    /// The modifier drag's interactive frame: the only write a dragged window gets.
-    pub(crate) fn follow(
-        &mut self,
-        request: TransactionId,
-        window: WindowId,
-        frame: CGRect,
-    ) -> Write {
-        let effects = self.step(Event::Follow { request, window, frame });
-        Self::writes(effects)
-            .next()
-            .expect("the core writes the interactive frame it is given")
+    /// Rust-only read, not part of the boundary: where the core sees `window`, which the
+    /// window store's `frame_monotonic` must agree with (checked in debug builds).
+    pub(crate) fn seen(&self, window: WindowId) -> Option<CGRect> {
+        self.core.borrow().seen(window)
     }
-
-    /// The app answered a write to `window` with `frame`, naming the request `seen` (if it
-    /// named one). What waited behind the write goes out under `request`.
-    pub(crate) fn answer(
-        &mut self,
-        request: TransactionId,
-        seen: Option<TransactionId>,
-        window: WindowId,
-        frame: CGRect,
-    ) -> Reply {
-        let now = self.clock.now();
-        let mut reply = Reply::Late;
-        let mut queued = None;
-        for effect in self.step(Event::Answer {
-            now,
-            request,
-            seen,
-            window,
-            frame,
-        }) {
-            match effect {
-                Effect::Answered { answer, .. } => reply = Reply::Answered(answer, None),
-                Effect::Stale { .. } => reply = Reply::Stale,
-                Effect::Write(write) => queued = Some(write),
-                _ => {}
-            }
-        }
-        match reply {
-            Reply::Answered(answer, None) => Reply::Answered(answer, queued),
-            reply => reply,
-        }
-    }
-
-    /// `window` reported `frame` unprompted; the model last saw it at `known`.
-    pub(crate) fn observe(
-        &mut self,
-        window: WindowId,
-        frame: CGRect,
-        known: CGRect,
-    ) -> Observation {
-        self.step(Event::Report { window, frame, known })
-            .into_iter()
-            .find_map(|effect| match effect {
-                Effect::Observed { observation, .. } => Some(observation),
-                _ => None,
-            })
-            .expect("the core classifies every report")
-    }
-
-    /// Stops waiting for writes past their deadline. `known` is where the model last saw a
-    /// window, `None` once it is gone. Returns what waited behind the late writes.
-    fn expire(
-        &mut self,
-        request: TransactionId,
-        known: impl Fn(WindowId) -> Option<CGRect>,
-    ) -> Vec<Write> {
-        let now = self.clock.now();
-        let due = self.core.borrow().reconciler().due(now);
-        let known = due.into_iter().filter_map(|window| Some((window, known(window)?))).collect();
-        Self::writes(self.step(Event::Tick { now, request, known })).collect()
-    }
-
-    /// Steps the core with a grip event; the caller applies the effects to the store.
-    fn grip(&self, event: Event) -> Vec<Effect> { self.step(event) }
 
     /// Rust-only read, not part of the boundary: the core's grip, which the window store's
     /// slot must agree with (checked after each applied grip step in debug builds).
@@ -319,10 +222,6 @@ impl Reconciler {
 
     /// When the run loop's timer should fire: the deadline the core last asked for.
     pub(crate) fn next_deadline(&self) -> Option<Instant> { self.armed.get() }
-
-    /// `window` is gone, or something outside the reconciler (an animation) now owns its
-    /// frame: nothing is outstanding.
-    pub(crate) fn forget(&mut self, window: WindowId) { self.step(Event::Forget { window }); }
 }
 
 /// One app's share of an arrange pass: the request it goes out under, its windows that only
@@ -427,15 +326,7 @@ impl Reactor {
         want: Want,
         request: TransactionId,
     ) -> Verdict {
-        let Some(state) = self.state.windows.window_mut(window) else {
-            return Verdict::Nothing;
-        };
-        let verdict = self.state.core.want(request, window, desired, state.frame_monotonic, want);
-        match verdict {
-            Verdict::Send(_) | Verdict::Queued => state.frame_monotonic = desired,
-            Verdict::Nothing => {}
-        }
-        verdict
+        self.state.want(request, window, desired, want)
     }
 
     /// Records a write's request, with its target, for the app protocol and the space
@@ -458,7 +349,7 @@ impl Reactor {
             true,
         )) {
             warn!(window = ?write.window(), %error, "failed to write window frame");
-            self.state.core.forget(write.window());
+            self.state.forget(write.window());
         }
     }
 
@@ -497,7 +388,7 @@ impl Reactor {
     pub(super) fn send_arranged(&mut self, write: Write) {
         let window = write.window();
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
-            self.state.core.forget(window);
+            self.state.forget(window);
             return;
         };
         let bounds = self
@@ -505,9 +396,6 @@ impl Reactor {
             .filter(|&space| self.in_scrolling_bounds(window, space))
             .and_then(|space| scrolling_bounds(self, space));
         let handle = app.handle.with_scrolling_bounds(bounds);
-        if let Some(state) = self.state.windows.window_mut(window) {
-            state.frame_monotonic = write.frame();
-        }
         self.send_one(write, handle);
     }
 
@@ -532,11 +420,7 @@ impl Reactor {
     /// behind them.
     pub(super) fn expire_writes(&mut self) {
         let request = self.transaction_manager.mint();
-        let windows = &self.state.windows;
-        let queued = self
-            .state
-            .core
-            .expire(request, |window| Some(windows.window(window)?.frame_monotonic));
+        let queued = self.state.expire(request);
         for write in queued {
             self.send_arranged(write);
         }
@@ -558,7 +442,7 @@ impl Reactor {
         let Some(app) = self.app_manager.apps.get(&pid) else {
             debug!(?pid, "Skipping layout update for app - app no longer exists");
             for write in positions.iter().chain(&frames) {
-                self.state.core.forget(write.window());
+                self.state.forget(write.window());
             }
             return;
         };
@@ -645,9 +529,9 @@ pub(crate) struct Ungripped {
 /// ways the slot changes, each a core step whose effects are applied here.
 impl RiftState {
     /// Applies one grip step's effects to the store. `session` is what a `DragBegan` attaches.
-    fn project(&mut self, effects: Vec<Effect>, mut session: Option<Session>) -> Option<Ungripped> {
+    fn project(&mut self, effects: &[Effect], mut session: Option<Session>) -> Option<Ungripped> {
         let mut ungripped = None;
-        for effect in effects {
+        for effect in effects.iter().copied() {
             match effect {
                 Effect::Ungrip { window, why: _ } => {
                     let session = self.windows.project_ungrip(window);
@@ -659,6 +543,13 @@ impl RiftState {
                     session.take().expect("a drag is asked for with its session"),
                 ),
                 Effect::Regrip { from, to } => self.windows.project_regrip(from, to),
+                Effect::Seen { window, frame } => {
+                    let state = self.windows.window_mut(window);
+                    debug_assert!(state.is_some(), "the core sees a window the store lacks");
+                    if let Some(state) = state {
+                        state.frame_monotonic = frame;
+                    }
+                }
                 _ => {}
             }
         }
@@ -670,17 +561,160 @@ impl RiftState {
         ungripped
     }
 
+    /// Rift wants `window` at `desired`; a write goes out under `request`. A desire the core
+    /// sends or queues is where the model takes the window to be from then on.
+    pub(crate) fn want(
+        &mut self,
+        request: TransactionId,
+        window: WindowId,
+        desired: CGRect,
+        want: Want,
+    ) -> Verdict {
+        let now = self.core.clock.now();
+        let effects = self.core.decide(Event::Want {
+            now,
+            request,
+            window,
+            desired,
+            want,
+        });
+        self.project(&effects, None);
+        let mut verdict = Verdict::Nothing;
+        for effect in effects {
+            match effect {
+                Effect::Write(write) => verdict = Verdict::Send(write),
+                Effect::Queued { .. } => verdict = Verdict::Queued,
+                _ => {}
+            }
+        }
+        verdict
+    }
+
+    /// The modifier drag's interactive frame: the only write a dragged window gets.
+    pub(crate) fn follow(
+        &mut self,
+        request: TransactionId,
+        window: WindowId,
+        frame: CGRect,
+    ) -> Write {
+        let effects = self.core.decide(Event::Follow { request, window, frame });
+        Reconciler::writes(effects)
+            .next()
+            .expect("the core writes the interactive frame it is given")
+    }
+
+    /// The app answered a write to `window` with `frame`, naming the request `seen` (if it
+    /// named one). What waited behind the write goes out under `request`.
+    pub(crate) fn answer(
+        &mut self,
+        request: TransactionId,
+        seen: Option<TransactionId>,
+        window: WindowId,
+        frame: CGRect,
+    ) -> Reply {
+        let now = self.core.clock.now();
+        let effects = self.core.decide(Event::Answer {
+            now,
+            request,
+            seen,
+            window,
+            frame,
+        });
+        self.project(&effects, None);
+        let mut reply = Reply::Late;
+        let mut queued = None;
+        for effect in effects {
+            match effect {
+                Effect::Answered { answer, .. } => reply = Reply::Answered(answer, None),
+                Effect::Stale { .. } => reply = Reply::Stale,
+                Effect::Write(write) => queued = Some(write),
+                _ => {}
+            }
+        }
+        match reply {
+            Reply::Answered(answer, None) => Reply::Answered(answer, queued),
+            reply => reply,
+        }
+    }
+
+    /// `window` reported `frame` unprompted.
+    pub(crate) fn observe(&mut self, window: WindowId, frame: CGRect) -> Observation {
+        self.core
+            .decide(Event::Report { window, frame })
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Observed { observation, .. } => Some(observation),
+                _ => None,
+            })
+            .expect("the core classifies every report on a window it sees")
+    }
+
+    /// Stops waiting for writes past their deadline; returns what waited behind them, which
+    /// goes out under `request`.
+    pub(crate) fn expire(&mut self, request: TransactionId) -> Vec<Write> {
+        let now = self.core.clock.now();
+        let effects = self.core.decide(Event::Tick { now, request });
+        self.project(&effects, None);
+        Reconciler::writes(effects).collect()
+    }
+
+    /// `window` is gone, or something outside the reconciler (an animation) now owns its
+    /// frame: nothing is outstanding.
+    pub(crate) fn forget(&mut self, window: WindowId) {
+        self.core.decide(Event::Forget { window });
+    }
+
+    /// The model takes `window` to be at `frame`: Rift accepted a report of it there, or put it
+    /// there outside the reconciler.
+    pub(crate) fn seen(&mut self, window: WindowId, frame: CGRect) {
+        let effects = self.core.decide(Event::Seen { window, frame });
+        self.project(&effects, None);
+    }
+
+    /// An accessibility destruction during native fullscreen may be an identity replacement:
+    /// the window's state is suspended (the model no longer sees it), its record kept.
+    pub(crate) fn suspend_fullscreen_ax_identity(&mut self, window: WindowId) -> bool {
+        let suspended = self.windows.suspend_fullscreen_ax_identity(window);
+        if suspended {
+            self.core.decide(Event::Unseen { window });
+        }
+        suspended
+    }
+
+    /// Tracks a new window's state; the model sees it where its state says it is.
+    pub(crate) fn insert_window(
+        &mut self,
+        window: WindowId,
+        state: crate::model::reactor::WindowState,
+    ) {
+        let frame = state.frame_monotonic;
+        self.windows.insert_window(window, state);
+        self.seen(window, frame);
+    }
+
+    /// The window server reports a window; a normal-layer one is seen where it reports it.
+    pub(crate) fn observe_native_window(
+        &mut self,
+        info: crate::sys::window_server::WindowServerInfo,
+    ) -> Option<WindowId> {
+        let window = self.windows.observe_native_window(info)?;
+        if info.layer == 0 {
+            self.seen(window, info.frame);
+        }
+        Some(window)
+    }
+
     /// `button` went down on `window` (tracked and managed), or on none.
     pub(crate) fn press(&mut self, window: Option<WindowId>, button: MouseButton) {
-        let effects = self.core.grip(Event::Press { window, button: button.into() });
-        self.project(effects, None);
+        let effects = self.core.decide(Event::Press { window, button: button.into() });
+        self.project(&effects, None);
     }
 
     /// The pressed `window`'s movement is the user's drag, with `session`. Refused (and the
     /// session dropped) unless `window` is the one pressed.
     pub(crate) fn begin_drag(&mut self, window: WindowId, session: Session) {
-        let effects = self.core.grip(Event::Drag { window });
-        self.project(effects, Some(session));
+        let effects = self.core.decide(Event::Drag { window });
+        self.project(&effects, Some(session));
     }
 
     /// Tests start a drag the only way there is: a press on the window, then its drag.
@@ -697,26 +731,26 @@ impl RiftState {
 
     /// The pointer was released: what the release ended, if anything.
     pub(crate) fn release(&mut self, release: Release) -> Option<Ungripped> {
-        let effects = self.core.grip(Event::Release(release));
-        self.project(effects, None)
+        let effects = self.core.decide(Event::Release(release));
+        self.project(&effects, None)
     }
 
     /// The hand comes off without a drop (a cancel, Mission Control).
     pub(crate) fn let_go(&mut self) -> Option<Ungripped> {
-        let effects = self.core.grip(Event::LetGo);
-        self.project(effects, None)
+        let effects = self.core.decide(Event::LetGo);
+        self.project(&effects, None)
     }
 
     /// `window` left Rift's control: a grip on it ends.
     pub(crate) fn gone(&mut self, window: WindowId) {
-        let effects = self.core.grip(Event::Gone { window });
-        self.project(effects, None);
+        let effects = self.core.decide(Event::Gone { window });
+        self.project(&effects, None);
     }
 
     /// macOS replaced `from` by `to`: a grip moves with it.
     pub(crate) fn rekeyed(&mut self, from: WindowId, to: WindowId) {
-        let effects = self.core.grip(Event::Rekeyed { from, to });
-        self.project(effects, None);
+        let effects = self.core.decide(Event::Rekeyed { from, to });
+        self.project(&effects, None);
     }
 
     /// Removes `window`'s record; a grip on it ends first, through the core.
@@ -734,9 +768,11 @@ impl RiftState {
         self.windows.remove_windows_for_app(pid);
     }
 
-    /// A window left Rift's control: a grip on it ends, and it is no longer a drop target.
+    /// An outside owner took a window (a claim): a grip on it ends, and it is no longer a drop
+    /// target.
     pub(crate) fn forget_drag_window(&mut self, window: WindowId) {
-        self.gone(window);
+        let effects = self.core.decide(Event::Ceded { window });
+        self.project(&effects, None);
         if let Some((_, session)) = self.windows.drag_mut() {
             session.forget_target(window);
         }
@@ -774,6 +810,12 @@ impl RiftState {
         {
             self.rekeyed(previous, window);
         }
-        self.windows.reconcile_ax_identity(window, server_id)
+        let previous = self.windows.reconcile_ax_identity(window, server_id);
+        debug_assert_eq!(
+            self.windows.window(window).map(|state| state.frame_monotonic),
+            self.core.seen(window),
+            "the store moved the window's state the way the core moved where it sees it"
+        );
+        previous
     }
 }

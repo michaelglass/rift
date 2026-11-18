@@ -516,12 +516,13 @@ impl Reactor {
             frames.extend(tx.cancel(windows));
         }
         for (wid, frame) in frames {
-            if let Some(window) = self.state.windows.window_mut(wid) {
-                window.frame_monotonic = frame;
-                if let Some(wsid) = window.info.sys_id {
-                    self.transaction_manager.clear_target_for_window(wsid);
-                }
+            let Some(window) = self.state.windows.window(wid) else {
+                continue;
+            };
+            if let Some(wsid) = window.info.sys_id {
+                self.transaction_manager.clear_target_for_window(wsid);
             }
+            self.state.seen(wid, frame);
         }
         self.commit_presentations();
     }
@@ -557,9 +558,9 @@ impl Reactor {
                         .map(|w| w.frame)
                 };
                 if let Some(frame) = frame
-                    && let Some(model) = self.state.windows.window_mut(wid)
+                    && self.state.windows.window(wid).is_some()
                 {
-                    model.frame_monotonic = frame;
+                    self.state.seen(wid, frame);
                 }
             }
             if let Some(session) = &mut self.viewport_gesture
@@ -599,8 +600,8 @@ impl Reactor {
                 Vec::new()
             };
             for (wid, frame) in frames {
-                if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.frame_monotonic = frame;
+                if self.state.windows.window(wid).is_some() {
+                    self.state.seen(wid, frame);
                 }
             }
             if let Some(tx) = &self.animation_tx {
@@ -1086,10 +1087,10 @@ impl AnimationManager {
                 bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
             );
             anim.add_window(&handle, wid, current_frame, target_frame, txid);
-            reactor.state.core.forget(wid);
+            reactor.state.forget(wid);
 
-            if let Some(window) = reactor.state.windows.window_mut(wid) {
-                window.frame_monotonic = target_frame;
+            if reactor.state.windows.window(wid).is_some() {
+                reactor.state.seen(wid, target_frame);
             }
         }
         any_frame_changed |= reactor.arrange_frames(space, &hidden, Want::Arrange);

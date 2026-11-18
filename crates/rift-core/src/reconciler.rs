@@ -440,17 +440,6 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
-    /// The windows whose writes are past their deadline at `now` and still waited for: the
-    /// ones [`expire`](Self::expire) will ask about.
-    pub fn due(&self, now: K::Time) -> Vec<K::Window> {
-        self.deadlines
-            .iter()
-            .take_while(|(deadline, _)| *deadline <= now)
-            .filter(|&&entry| self.waiting(entry).is_some())
-            .map(|&(_, window)| window)
-            .collect()
-    }
-
     /// Stops waiting for every write whose deadline has passed at `now`. `known` is where the
     /// model last saw a window, and whose it is; a window it no longer knows is forgotten.
     /// Returns the writes that were queued behind the late ones.

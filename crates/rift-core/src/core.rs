@@ -8,6 +8,8 @@
 //! Every event that may lead to a write carries the `request` the platform will send its
 //! writes under; each [`Write`] says which, and the app's answer names it back.
 
+use std::collections::HashMap;
+
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Initiative, Pointer, Release, Ungrip, may};
 use crate::reconciler::{
@@ -38,17 +40,26 @@ pub enum Event<K: Kinds> {
     Release(Release),
     /// The hand comes off without a drop: a cancel, Mission Control.
     LetGo,
-    /// `window` left Rift's control: a grip on it ends.
+    /// `window` left Rift's control: a grip on it ends, and the model no longer sees it.
     Gone { window: K::Window },
-    /// macOS replaced window `from` by `to` (same window, new identity): a grip moves with it.
+    /// macOS replaced window `from` by `to` (same window, new identity): a grip moves with it,
+    /// and so does where the model sees it, unless `to` is already seen.
     Rekeyed { from: K::Window, to: K::Window },
-    /// Layout wants `window` at `desired`; the model last saw it at `known`.
+    /// The model takes `window` to be at `frame`: a window appeared there, an inventory or a
+    /// notification Rift accepted found it there, an app answered with it, or Rift put it there
+    /// outside the reconciler (an animation, a placement it prepares).
+    Seen { window: K::Window, frame: K::Frame },
+    /// An outside owner took `window` (a claim): a grip on it ends; Rift keeps the window.
+    Ceded { window: K::Window },
+    /// The model no longer sees `window`, though Rift keeps it (its accessibility identity is
+    /// suspended during native fullscreen); it is seen again when it comes back.
+    Unseen { window: K::Window },
+    /// Layout wants `window` at `desired`.
     Want {
         now: K::Time,
         request: K::Request,
         window: K::Window,
         desired: K::Frame,
-        known: K::Frame,
         want: Want,
     },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
@@ -66,19 +77,10 @@ pub enum Event<K: Kinds> {
         window: K::Window,
         frame: K::Frame,
     },
-    /// `window` reported `frame` unprompted; the model last saw it at `known`.
-    Report {
-        window: K::Window,
-        frame: K::Frame,
-        known: K::Frame,
-    },
-    /// The deadline timer fired. `known` is where the model last saw each window it knows
-    /// (at least those whose writes are due); a window not listed is gone.
-    Tick {
-        now: K::Time,
-        request: K::Request,
-        known: Vec<(K::Window, K::Frame)>,
-    },
+    /// `window` reported `frame` unprompted.
+    Report { window: K::Window, frame: K::Frame },
+    /// The deadline timer fired.
+    Tick { now: K::Time, request: K::Request },
     /// Something outside the core (an animation, a topology change) took `window`'s frame, or
     /// the window is gone: nothing is outstanding.
     Forget { window: K::Window },
@@ -95,14 +97,15 @@ pub enum Event<K: Kinds> {
         deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
     ))
 )]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effect<K: Kinds> {
-    /// Send this frame to the window's app under its request. The model takes the window to be
-    /// there from now on.
+    /// Send this frame to the window's app under its request.
     Write(Write<K>),
-    /// A write is with the app; the desire waits behind it. The model takes the window to be
-    /// at the desire from now on.
+    /// A write is with the app; the desire waits behind it.
     Queued { window: K::Window },
+    /// The model takes `window` to be at `frame` from now on (its projection, `frame_monotonic`
+    /// in rift's window store).
+    Seen { window: K::Window, frame: K::Frame },
     /// What the app's answer was.
     Answered { window: K::Window, answer: Answer },
     /// The answer names a write Rift has since replaced: dropped, it says nothing about the
@@ -156,14 +159,12 @@ impl<K: Kinds> Event<K> {
                 request,
                 window,
                 desired,
-                known,
                 want,
             } => Event::Want {
                 now: to.time(now),
                 request: to.request(request),
                 window: to.window(window),
                 desired: to.frame(desired),
-                known: to.frame(known),
                 want,
             },
             Event::Follow { request, window, frame } => Event::Follow {
@@ -184,15 +185,19 @@ impl<K: Kinds> Event<K> {
                 window: to.window(window),
                 frame: to.frame(frame),
             },
-            Event::Report { window, frame, known } => Event::Report {
+            Event::Report { window, frame } => Event::Report {
                 window: to.window(window),
                 frame: to.frame(frame),
-                known: to.frame(known),
             },
-            Event::Tick { now, request, known } => Event::Tick {
+            Event::Seen { window, frame } => Event::Seen {
+                window: to.window(window),
+                frame: to.frame(frame),
+            },
+            Event::Unseen { window } => Event::Unseen { window: to.window(window) },
+            Event::Ceded { window } => Event::Ceded { window: to.window(window) },
+            Event::Tick { now, request } => Event::Tick {
                 now: to.time(now),
                 request: to.request(request),
-                known: known.into_iter().map(|(w, f)| (to.window(w), to.frame(f))).collect(),
             },
             Event::Forget { window } => Event::Forget { window: to.window(window) },
             Event::Gate { initiative } => Event::Gate { initiative },
@@ -206,6 +211,10 @@ impl<K: Kinds> Effect<K> {
         match self {
             Effect::Write(write) => Effect::Write(write.translate(to)),
             Effect::Queued { window } => Effect::Queued { window: to.window(window) },
+            Effect::Seen { window, frame } => Effect::Seen {
+                window: to.window(window),
+                frame: to.frame(frame),
+            },
             Effect::Answered { window, answer } => Effect::Answered {
                 window: to.window(window),
                 answer,
@@ -244,6 +253,8 @@ pub trait Core<K: Kinds> {
 pub struct RustCore<K: Kinds> {
     reconciler: Reconciler<K>,
     grip: Grip<K::Window>,
+    /// Where the model takes each window it knows to be: its last-seen frame.
+    seen: HashMap<K::Window, K::Frame>,
     /// The deadline the platform's timer is armed for.
     armed: Option<K::Time>,
 }
@@ -253,19 +264,36 @@ impl<K: Kinds> Default for RustCore<K> {
         RustCore {
             reconciler: Reconciler::default(),
             grip: Grip::Idle,
+            seen: HashMap::new(),
             armed: None,
         }
     }
 }
 
 impl<K: Kinds> RustCore<K> {
-    /// Read access for Rust callers that have not moved behind the boundary yet (tests, and the
-    /// reactor's timer coeffect). Not part of the boundary: a foreign core has no such door.
+    /// Read access for Rust callers that have not moved behind the boundary yet (tests). Not
+    /// part of the boundary: a foreign core has no such door.
     pub fn reconciler(&self) -> &Reconciler<K> { &self.reconciler }
 
     /// Read access to what the hand is doing, for the platform's check (in debug builds) that
     /// its projection of the grip agrees. Not part of the boundary.
     pub fn pointer(&self) -> Pointer<K::Window> { self.grip.pointer() }
+
+    /// Where the model sees `window`, for the platform's check (in debug builds) that its
+    /// projection agrees. Not part of the boundary.
+    pub fn seen(&self, window: K::Window) -> Option<K::Frame> { self.seen.get(&window).copied() }
+
+    /// The model takes `window` to be at `frame` from now on.
+    fn see(&mut self, window: K::Window, frame: K::Frame) -> Effect<K> {
+        self.seen.insert(window, frame);
+        Effect::Seen { window, frame }
+    }
+
+    /// A write the reconciler released goes out, and the model takes the window to be at it.
+    fn written(&mut self, write: Write<K>) -> [Effect<K>; 2] {
+        let seen = self.see(write.window(), write.frame());
+        [Effect::Write(write), seen]
+    }
 
     /// The hand comes off whatever it holds, for `why`.
     fn ungrip(&mut self, why: Ungrip) -> Option<Effect<K>> {
@@ -311,37 +339,39 @@ impl<K: Kinds> RustCore<K> {
                 }
             }
             Event::LetGo => self.ungrip(Ungrip::LetGo).into_iter().collect(),
-            Event::Gone { window } => match self.grip {
-                Grip::Pressed { window: held, .. } | Grip::Dragging { window: held, .. }
-                    if held == window =>
-                {
-                    self.ungrip(Ungrip::Gone).into_iter().collect()
+            Event::Gone { window } => {
+                self.seen.remove(&window);
+                self.ungrip_window(window)
+            }
+            Event::Ceded { window } => self.ungrip_window(window),
+            Event::Seen { window, frame } => vec![self.see(window, frame)],
+            Event::Unseen { window } => {
+                self.seen.remove(&window);
+                vec![]
+            }
+            Event::Rekeyed { from, to } => {
+                // The new identity inherits where the old one was seen unless it is seen itself
+                // (the platform moves the window's state the same way).
+                if let Some(frame) = self.seen.remove(&from) {
+                    self.seen.entry(to).or_insert(frame);
                 }
-                Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
-            },
-            Event::Rekeyed { from, to } => match self.grip {
-                Grip::Pressed { window, button } if window == from => {
-                    self.grip = Grip::Pressed { window: to, button };
-                    vec![Effect::Regrip { from, to }]
-                }
-                Grip::Dragging { window, button } if window == from => {
-                    self.grip = Grip::Dragging { window: to, button };
-                    vec![Effect::Regrip { from, to }]
-                }
-                Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
-            },
+                self.rekey_grip(from, to)
+            }
             Event::Want {
                 now,
                 request,
                 window,
                 desired,
-                known,
                 want,
             } => {
+                // A window the model does not know is not written.
+                let Some(&known) = self.seen.get(&window) else {
+                    return vec![];
+                };
                 let owner = pointer.owner(window);
                 match self.reconciler.want(now, request, window, desired, known, want, owner) {
-                    Verdict::Send(write) => vec![Effect::Write(write)],
-                    Verdict::Queued => vec![Effect::Queued { window }],
+                    Verdict::Send(write) => self.written(write).into(),
+                    Verdict::Queued => vec![Effect::Queued { window }, self.see(window, desired)],
                     Verdict::Nothing => vec![],
                 }
             }
@@ -360,29 +390,27 @@ impl<K: Kinds> RustCore<K> {
                 let owner = pointer.owner(window);
                 match self.reconciler.answer(now, request, seen, window, frame, owner) {
                     Reply::Answered(answer, queued) => {
-                        std::iter::once(Effect::Answered { window, answer })
-                            .chain(queued.map(Effect::Write))
-                            .collect()
+                        let mut effects = vec![Effect::Answered { window, answer }];
+                        effects.extend(queued.into_iter().flat_map(|write| self.written(write)));
+                        effects
                     }
                     Reply::Late => vec![Effect::Late { window }],
                     Reply::Stale => vec![Effect::Stale { window }],
                 }
             }
-            Event::Report { window, frame, known } => {
+            Event::Report { window, frame } => {
+                let Some(&known) = self.seen.get(&window) else {
+                    return vec![];
+                };
                 let holder = pointer.holder(window);
                 let observation = self.reconciler.observe(window, frame, known, holder);
                 vec![Effect::Observed { window, observation }]
             }
-            Event::Tick { now, request, known } => {
-                let lookup = |window: K::Window| {
-                    let (_, frame) = known.iter().find(|(w, _)| *w == window)?;
-                    Some((*frame, pointer.owner(window)))
-                };
-                self.reconciler
-                    .expire(now, request, lookup)
-                    .into_iter()
-                    .map(Effect::Write)
-                    .collect()
+            Event::Tick { now, request } => {
+                let seen = &self.seen;
+                let lookup = |window: K::Window| Some((*seen.get(&window)?, pointer.owner(window)));
+                let released = self.reconciler.expire(now, request, lookup);
+                released.into_iter().flat_map(|write| self.written(write)).collect()
             }
             Event::Forget { window } => {
                 self.reconciler.forget(window);
@@ -394,6 +422,32 @@ impl<K: Kinds> RustCore<K> {
                     allowed: may(initiative, pointer),
                 }]
             }
+        }
+    }
+
+    /// A grip on `window` ends: it left Rift's hands.
+    fn ungrip_window(&mut self, window: K::Window) -> Vec<Effect<K>> {
+        match self.grip {
+            Grip::Pressed { window: held, .. } | Grip::Dragging { window: held, .. }
+                if held == window =>
+            {
+                self.ungrip(Ungrip::Gone).into_iter().collect()
+            }
+            Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+        }
+    }
+
+    fn rekey_grip(&mut self, from: K::Window, to: K::Window) -> Vec<Effect<K>> {
+        match self.grip {
+            Grip::Pressed { window, button } if window == from => {
+                self.grip = Grip::Pressed { window: to, button };
+                vec![Effect::Regrip { from, to }]
+            }
+            Grip::Dragging { window, button } if window == from => {
+                self.grip = Grip::Dragging { window: to, button };
+                vec![Effect::Regrip { from, to }]
+            }
+            Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
         }
     }
 }
@@ -432,16 +486,21 @@ mod tests {
     #[test]
     fn a_write_arms_the_timer_and_its_answer_disarms_it() {
         let mut core = RustCore::<Plain>::default();
+        core.step(Event::Seen { window: W, frame: at(0.) });
         let effects = core.step(Event::Want {
             now: Nanos(0),
             request: RequestId(1),
             window: W,
             desired: at(10.),
-            known: at(0.),
             want: Want::Arrange,
         });
-        let [Effect::Write(write), Effect::Timer(timer)] = effects.as_slice() else {
-            panic!("expected a write and a timer, got {effects:?}");
+        let [
+            Effect::Write(write),
+            Effect::Seen { .. },
+            Effect::Timer(timer),
+        ] = effects.as_slice()
+        else {
+            panic!("expected a write, the model's new frame and a timer, got {effects:?}");
         };
         assert_eq!((write.window(), write.frame()), (W, at(10.)));
         assert_eq!(*timer, Some(Nanos(0) + WRITE_DEADLINE));
@@ -459,6 +518,27 @@ mod tests {
             },
             Effect::Timer(None),
         ]);
+    }
+
+    #[test]
+    fn the_model_sees_what_the_core_writes_and_forgets_a_window_that_goes() {
+        let mut core = RustCore::<Plain>::default();
+        let want = |x| Event::Want {
+            now: Nanos(0),
+            request: RequestId(1),
+            window: W,
+            desired: at(x),
+            want: Want::Arrange,
+        };
+        assert_eq!(core.step(want(10.)), vec![], "a window the model does not know");
+        core.step(Event::Seen { window: W, frame: at(0.) });
+        core.step(want(10.));
+        assert_eq!(core.seen(W), Some(at(10.)));
+        let renamed = WindowId { pid: 7, idx: 9 };
+        core.step(Event::Rekeyed { from: W, to: renamed });
+        assert_eq!((core.seen(W), core.seen(renamed)), (None, Some(at(10.))));
+        core.step(Event::Gone { window: renamed });
+        assert_eq!(core.seen(renamed), None);
     }
 
     #[test]
@@ -512,6 +592,7 @@ mod tests {
     #[test]
     fn a_desire_for_a_pressed_window_is_discarded_and_steering_input_refused() {
         let mut core = RustCore::<Plain>::default();
+        core.step(Event::Seen { window: W, frame: at(0.) });
         assert_eq!(
             core.step(Event::Press {
                 window: Some(W),
@@ -524,7 +605,6 @@ mod tests {
             request: RequestId(1),
             window: W,
             desired: at(10.),
-            known: at(0.),
             want: Want::Arrange,
         });
         assert_eq!(effects, vec![Effect::Note {

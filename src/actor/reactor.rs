@@ -1130,7 +1130,7 @@ impl Reactor {
             .collect();
         for (wid, server_id) in hidden {
             // Whatever a parked window answered before the topology changed no longer holds.
-            self.state.core.forget(wid);
+            self.state.forget(wid);
             if let Some(server_id) = server_id {
                 self.transaction_manager.clear_target_for_window(server_id);
             }
@@ -2227,7 +2227,7 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 let request = self.transaction_manager.mint();
-                let write = self.state.core.follow(request, window, frame);
+                let write = self.state.follow(request, window, frame);
                 self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
             }
@@ -3444,7 +3444,7 @@ impl Reactor {
 
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
         for info in ws_info {
-            if let Some(wid) = self.state.windows.observe_native_window(info)
+            if let Some(wid) = self.state.observe_native_window(info)
                 && utils::refresh_heuristic(&mut self.state, wid)
                     .is_some_and(|transition| transition.was_admitted && !transition.is_admitted)
             {
@@ -4455,13 +4455,14 @@ impl Reactor {
         seen: Option<CGRect>,
         reached: impl FnOnce(bool) -> bool,
     ) {
-        let Some(window) = self.state.windows.window_mut(wid) else {
+        let Some(window) = self.state.windows.window(wid) else {
             return;
         };
+        let server_id = window.info.sys_id;
         if let Some(seen) = seen {
-            window.frame_monotonic = seen;
+            self.state.seen(wid, seen);
         }
-        let Some(server_id) = window.info.sys_id else { return };
+        let Some(server_id) = server_id else { return };
         let Some(target) = self.transaction_manager.get_target_frame(server_id) else {
             return;
         };
@@ -4489,7 +4490,7 @@ impl Reactor {
         let answered = match kind {
             ReportKind::Reply(seen) => {
                 let request = self.transaction_manager.mint();
-                self.state.core.answer(request, seen, wid, new_frame)
+                self.state.answer(request, seen, wid, new_frame)
             }
             ReportKind::Unprompted => reconciler::Reply::Late,
         };
@@ -4515,7 +4516,7 @@ impl Reactor {
             }
             // Unprompted, or an answer Rift had stopped waiting for, which is news like any
             // other: what follows re-derives where the window belongs and writes the difference.
-            reconciler::Reply::Late => self.state.core.observe(wid, new_frame, old_frame),
+            reconciler::Reply::Late => self.state.observe(wid, new_frame),
         };
         if self.mission_control_moved_it() {
             return Ok(EventOutcome::no_change());
@@ -4734,6 +4735,9 @@ impl Reactor {
                 .is_some_and(|unheld| unheld.retry_transfer(revision, available, observed))
                 && let Some(frame) = self.transfer_frame(window, target, None)
             {
+                if self.state.windows.window(window).is_some() {
+                    self.state.seen(window, frame);
+                }
                 self.layout_manager.layout_engine.prepare_window_placement(
                     &mut self.state.windows,
                     window,

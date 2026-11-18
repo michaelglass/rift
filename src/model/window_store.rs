@@ -1261,10 +1261,8 @@ impl WindowStore {
         self.mark_window_visible(info.id);
         let wid = self.tracked_window_id(info.id)?;
         self.clear_window_server_observed(info.id);
-        let window = self.window_mut(wid)?;
-        if info.layer == 0 {
-            window.frame_monotonic = info.frame;
-        }
+        // The model's frame for it is the core's: the caller tells it (`RiftState`).
+        self.window(wid)?;
         Some(wid)
     }
 

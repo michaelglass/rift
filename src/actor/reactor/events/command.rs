@@ -196,6 +196,9 @@ pub(in crate::actor::reactor) fn request_window_transfer(
         .is_some_and(|window| window.begin_transfer(available))
         && let Some(frame) = frame
     {
+        if state.windows.window(window).is_some() {
+            state.seen(window, frame);
+        }
         layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
         EventOutcome::no_change().with_placement(window, frame)
     } else {

@@ -51,7 +51,7 @@ pub fn handle_window_created(
         );
     }
 
-    state.windows.insert_window(wid, window_state);
+    state.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
 
     // Excluded and claimed windows only need lifecycle notifications; app-rule admission
@@ -76,7 +76,7 @@ pub fn handle_window_destroyed(
     payload: WindowDestroyedPayload,
 ) -> EventOutcome {
     let wid = payload.window;
-    if state.windows.suspend_fullscreen_ax_identity(wid) {
+    if state.suspend_fullscreen_ax_identity(wid) {
         return EventOutcome::no_change().with_layout_event(LayoutEvent::WindowSuspended(wid));
     }
     let Some(record) = state.remove_window(wid) else {
@@ -199,9 +199,7 @@ pub fn handle_window_frame_changed(
     if old_frame.same_as(new_frame) {
         return Ok(outcome);
     }
-    if let Some(window) = state.windows.window_mut(wid) {
-        window.frame_monotonic = new_frame;
-    }
+    state.seen(wid, new_frame);
     // The external owner has geometry authority; keep only native facts current.
     if state.windows.is_claimed(wid) {
         if old_space != new_space

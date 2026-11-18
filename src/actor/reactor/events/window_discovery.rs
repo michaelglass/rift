@@ -27,6 +27,7 @@ fn sync_existing_window_state(
     let rift_owns_geometry =
         info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
     let needs_arrange;
+    let seen;
     let claimed = state.windows.is_claimed(wid);
     if let Some(existing) = state.windows.window_mut(wid) {
         let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
@@ -37,15 +38,17 @@ fn sync_existing_window_state(
             || existing.info.max_size != info.max_size;
         // A claimed window's owner has geometry authority.
         needs_arrange = (geometry_changed || constraints_changed) && !claimed;
-        if !rift_owns_geometry && valid_frame {
-            existing.frame_monotonic = info.frame;
-        }
+        // Where the inventory found it, for the core (below, once the record is let go).
+        seen = (!rift_owns_geometry && valid_frame).then_some(info.frame);
         // Preserve the observed frame and minimize transition until their handlers run.
         info.frame = existing.info.frame;
         info.is_minimized = was_minimized;
         existing.info = info;
     } else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
+    }
+    if let Some(frame) = seen {
+        state.seen(wid, frame);
     }
 
     let mut admission_changed = false;
@@ -162,7 +165,7 @@ pub(crate) fn update_window_states(
     // Update or insert window states
     for (wid, info) in new_windows {
         let state: WindowState = info.into();
-        rift_state.windows.insert_window(wid, state);
+        rift_state.insert_window(wid, state);
         let _ = utils::refresh_heuristic(rift_state, wid);
     }
 }

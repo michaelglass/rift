@@ -810,6 +810,18 @@ impl Sim {
                 );
             }
         }
+        // 10. The window store's frames are the core's projection: every window the store has
+        // a frame for is seen there by the core.
+        for &wid in &self.live {
+            let projected = self.reactor.state.windows.window(wid).map(|w| w.frame_monotonic);
+            let seen = self.reactor.state.core.seen(wid);
+            if projected != seen {
+                return fail(
+                    "frames-are-the-cores",
+                    format!("{wid:?}: the store has {projected:?}, the core sees {seen:?}"),
+                );
+            }
+        }
         // 9. Every live window stays assigned to some space.
         for &wid in &self.live {
             if self.reactor.assigned_space_for_window_id(wid).is_none() {
