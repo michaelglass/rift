@@ -3856,7 +3856,7 @@ impl Reactor {
             self.clear_pending_hidden_window_targets();
         }
         if display_set_changed || !space_remaps.is_empty() {
-            self.state.windows.resume_deferred_transfers();
+            outcome.absorb(self.rederive_exhausted_transfers());
             self.reconcile_all(reconciler::Lifecycle::SpacesChanged);
         }
         // Without structural change only a display whose Space changed is arranged,
@@ -4215,6 +4215,34 @@ impl Reactor {
                     unheld.request_transfer(frame, target, false);
                 }
             }
+        }
+        outcome
+    }
+
+    /// A new display set or Space identity is a new chance for a transfer macOS refused; an
+    /// unchanged topology never is. The stored transfer is not resumed (its frame was fitted to
+    /// the topology that refused it): if the window is still owed a move, the transfer is
+    /// requested afresh from where its workspace is now.
+    fn rederive_exhausted_transfers(&mut self) -> EventOutcome {
+        let owed: Vec<_> = self
+            .state
+            .windows
+            .iter_windows()
+            .filter(|(window, _)| {
+                self.state
+                    .windows
+                    .record(*window)
+                    .and_then(|record| record.pending_transfer())
+                    .is_some_and(|operation| operation.exhausted())
+            })
+            .filter_map(|(window, _)| Some((window, self.owed_transfer(window)?)))
+            .collect();
+        let mut outcome = EventOutcome::no_change();
+        for (window, target) in owed {
+            if let Some(unheld) = self.state.windows.unheld(window) {
+                unheld.discard_transfer();
+            }
+            outcome.absorb(self.request_window_transfer(window, target, None));
         }
         outcome
     }

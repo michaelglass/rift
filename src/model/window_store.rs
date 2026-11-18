@@ -20,9 +20,11 @@ pub enum WindowVisibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferStatus {
     Pending,
-    Deferred,
     Unavailable,
 }
+
+/// How many times a transfer is retried on new topology revisions before Rift stops asking.
+const TRANSFER_ATTEMPTS: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PendingWindowTransfer {
@@ -33,6 +35,12 @@ pub struct PendingWindowTransfer {
     started_revision: u64,
     pub(crate) attempts: u8,
     pub status: TransferStatus,
+}
+
+impl PendingWindowTransfer {
+    /// macOS did not move the window after every retry: the refusal is recorded by keeping the
+    /// transfer (the intent stays) and asking no more. A later topology change re-derives it.
+    pub(crate) fn exhausted(&self) -> bool { self.attempts >= TRANSFER_ATTEMPTS }
 }
 
 /// What the user's hand is doing with the one window it is on.
@@ -278,6 +286,9 @@ impl Unheld<'_> {
         write
     }
 
+    /// Forgets the transfer, to request a new one from current facts.
+    pub(crate) fn discard_transfer(self) { *self.transfer = None; }
+
     /// Retry only on accepted, complete topology revisions, with a fixed budget.
     /// Exhaustion keeps the logical intent; a frame acknowledgement never confirms Space membership.
     pub(crate) fn advance_transfer(
@@ -296,16 +307,14 @@ impl Unheld<'_> {
             operation.last_revision = None;
         }
         operation.requested_frame = operation.requested_frame.or(self.frame);
-        if operation.status != TransferStatus::Pending
-            || operation.requested_frame.is_none()
+        if operation.requested_frame.is_none()
             || operation.last_revision.is_some_and(|previous| revision <= previous)
         {
             return None;
         }
         operation.last_revision = Some(revision);
-        if operation.attempts >= 2 {
+        if operation.exhausted() {
             // Exhaustion changes retry authority, never accepted frame authority.
-            operation.status = TransferStatus::Deferred;
             return None;
         }
         operation.attempts += 1;
@@ -2068,16 +2077,6 @@ impl WindowStore {
         })
     }
 
-    /// A new display set or Space identity is a new chance; unchanged topology never is.
-    pub(crate) fn resume_deferred_transfers(&mut self) {
-        for operation in self.windows.transfers_mut() {
-            if operation.status == TransferStatus::Deferred {
-                operation.status = TransferStatus::Pending;
-                operation.attempts = 0;
-            }
-        }
-    }
-
     /// Only an accepted native membership snapshot can complete a transfer.
     pub(crate) fn confirm_transfer(
         &mut self,
@@ -2147,7 +2146,7 @@ mod tests {
     use crate::model::virtual_workspace::WorkspaceStore;
 
     #[test]
-    fn transfer_budget_deferral_supersession_and_authoritative_confirmation() {
+    fn transfer_budget_exhaustion_supersession_and_authoritative_confirmation() {
         let mut store = WindowStore::default();
         let window = WindowId::new(42, 1);
         let (a, b) = (SpaceId::new(1), SpaceId::new(2));
@@ -2171,10 +2170,7 @@ mod tests {
                 writes
             );
         }
-        assert_eq!(
-            store.record(window).unwrap().pending_transfer().unwrap().status,
-            TransferStatus::Deferred
-        );
+        assert!(store.record(window).unwrap().pending_transfer().unwrap().exhausted());
         assert!(!store.unheld(window).unwrap().request_transfer(frame, a, true));
         assert!(!store.unheld(window).unwrap().request_transfer(frame, b, false));
         let second = store.record(window).unwrap().pending_transfer().unwrap();
