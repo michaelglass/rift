@@ -77,6 +77,10 @@ enum Step {
     DragMove { dx: i16, dy: i16 },
     /// The held window crosses onto display `to`; the window server reports it there.
     CrossDisplay { to: usize },
+    /// The pointer of a native drag crosses onto display `to` while most of the window's frame
+    /// is still on the display it left (the user holds it near the leading end of its title
+    /// bar); the window server puts the window on the pointer's display.
+    CrossDisplayLagging { to: usize },
     /// The user releases the button.
     MouseUp,
     /// An inventory refresh re-observes app `app`'s windows. `stale` reports each window's
@@ -121,6 +125,7 @@ impl Step {
             Step::Wake => "wake",
             Step::DragMove { .. } => "drag-move",
             Step::CrossDisplay { .. } => "cross-display",
+            Step::CrossDisplayLagging { .. } => "cross-display-lagging",
             Step::MouseUp => "mouse-up",
             Step::Refresh { .. } => "refresh",
             Step::ForeignMove { mouse: Mouse::Truth, .. } => "foreign-move",
@@ -179,7 +184,8 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
                 dx: rng.delta(),
                 dy: rng.delta(),
             },
-            30..40 => Step::CrossDisplay { to: rng.below(3) },
+            30..35 => Step::CrossDisplay { to: rng.below(3) },
+            35..40 => Step::CrossDisplayLagging { to: rng.below(3) },
             40..48 => Step::MouseUp,
             48..60 => Step::Refresh {
                 app: rng.below(3),
@@ -242,21 +248,41 @@ struct Held {
     assigned_at_start: Option<SpaceId>,
     /// A command ran during the drag: whether a command may move a held window is policy.
     command_during_drag: bool,
-    /// Where the pointer is, for a modifier drag (rift follows the pointer, not the window).
-    modifier_pointer: Option<CGPoint>,
+    hand: Hand,
+}
+
+/// How the user holds the window, and so where the pointer is.
+#[derive(Debug, Clone, Copy)]
+enum Hand {
+    /// By its title bar, `grab` from the frame's origin. The user's moves carry the pointer
+    /// with the frame, and the tap reports it; anyone else moving the window leaves it at
+    /// `pointer`.
+    Native { grab: CGPoint, pointer: CGPoint },
+    /// With the modifier, the pointer at `pointer`: rift follows the pointer, not the window.
+    Modifier { pointer: CGPoint },
 }
 
 impl Held {
     /// The user's hand goes down on `window`, assigned to `assigned_at_start`.
-    fn new(window: WindowId, rift_saw_it: bool, assigned_at_start: Option<SpaceId>) -> Self {
+    fn new(
+        window: WindowId,
+        rift_saw_it: bool,
+        assigned_at_start: Option<SpaceId>,
+        hand: Hand,
+    ) -> Self {
         Held {
             window,
             rift_saw_it,
             assigned_at_start,
             command_during_drag: false,
-            modifier_pointer: None,
+            hand,
         }
     }
+}
+
+/// Where along the title bar of `frame` the user grabs it, `along` from its left end (0 to 1).
+fn title_bar(frame: CGRect, along: f64) -> CGPoint {
+    CGPoint::new(frame.size.width * along.clamp(0.05, 0.95), 10.)
 }
 
 struct Sim {
@@ -536,6 +562,27 @@ impl Sim {
 
     fn held_window(&self) -> Option<WindowId> { self.held.as_ref().map(|held| held.window) }
 
+    /// Where the user's pointer is, while they hold a window.
+    fn pointer(&self) -> Option<CGPoint> {
+        self.held.as_ref().map(|held| match held.hand {
+            Hand::Native { pointer, .. } | Hand::Modifier { pointer } => pointer,
+        })
+    }
+
+    /// The user moved the window they hold natively: the pointer goes with its title bar, and
+    /// the tap reports it.
+    fn follow_pointer(&mut self) {
+        let Some(held) = &mut self.held else { return };
+        let Hand::Native { grab, pointer } = &mut held.hand else {
+            return;
+        };
+        let frame = self.apps.windows[&held.window].frame;
+        *pointer = CGPoint::new(frame.origin.x + grab.x, frame.origin.y + grab.y);
+        let point = *pointer;
+        self.reactor
+            .handle_event(Event::DragMotion(crate::actor::drag::DragMotion { point }));
+    }
+
     fn true_mouse(&self) -> MouseState {
         if self.held.is_some() {
             MouseState::Down
@@ -579,10 +626,18 @@ impl Sim {
                 if self.held.is_none() && self.pressable(wid) {
                     let assigned_at_start = self.reactor.assigned_space_for_window_id(wid);
                     let frame = offset(self.os_frame(wid), dx, dy);
+                    let grab = title_bar(frame, (f64::from(dx) + 150.) / 300.);
                     press(&mut self.reactor, wid);
+                    let pointer = frame.origin;
+                    self.held = Some(Held::new(wid, false, assigned_at_start, Hand::Native {
+                        grab,
+                        pointer,
+                    }));
                     self.report_frame(wid, frame, MouseState::Down);
-                    let rift_saw_it = dragged(&self.reactor) == Some(wid);
-                    self.held = Some(Held::new(wid, rift_saw_it, assigned_at_start));
+                    self.follow_pointer();
+                    if let Some(held) = &mut self.held {
+                        held.rift_saw_it = dragged(&self.reactor) == Some(wid);
+                    }
                 }
             }
             Step::Press { w } => {
@@ -591,7 +646,13 @@ impl Sim {
                     press(&mut self.reactor, wid);
                     // Nothing has moved yet, so there is no drag for rift to have seen.
                     let assigned_at_start = self.reactor.assigned_space_for_window_id(wid);
-                    self.held = Some(Held::new(wid, false, assigned_at_start));
+                    let frame = self.os_frame(wid);
+                    let grab = title_bar(frame, 0.5);
+                    let pointer = CGPoint::new(frame.origin.x + grab.x, frame.origin.y + grab.y);
+                    self.held = Some(Held::new(wid, false, assigned_at_start, Hand::Native {
+                        grab,
+                        pointer,
+                    }));
                 }
             }
             Step::ModifierDrag { w, dx, dy } => {
@@ -608,10 +669,13 @@ impl Sim {
                     if let Some(gripped) = self.reactor.state.windows.gripped() {
                         let assigned_at_start = self.reactor.assigned_space_for_window_id(gripped);
                         let rift_saw_it = dragged(&self.reactor) == Some(gripped);
-                        let mut held = Held::new(gripped, rift_saw_it, assigned_at_start);
                         let point = CGPoint::new(point.x + f64::from(dx), point.y + f64::from(dy));
-                        held.modifier_pointer = Some(point);
-                        self.held = Some(held);
+                        self.held = Some(Held::new(
+                            gripped,
+                            rift_saw_it,
+                            assigned_at_start,
+                            Hand::Modifier { pointer: point },
+                        ));
                         self.reactor.handle_event(Event::DragMotion(
                             crate::actor::drag::DragMotion { point },
                         ));
@@ -620,7 +684,7 @@ impl Sim {
             }
             Step::ModifierMove { dx, dy } => {
                 if let Some(held) = &mut self.held
-                    && let Some(point) = &mut held.modifier_pointer
+                    && let Hand::Modifier { pointer: point } = &mut held.hand
                 {
                     *point = CGPoint::new(point.x + f64::from(dx), point.y + f64::from(dy));
                     let point = *point;
@@ -640,6 +704,7 @@ impl Sim {
                 if let Some(wid) = self.held_window() {
                     let frame = offset(self.os_frame(wid), dx, dy);
                     self.report_frame(wid, frame, MouseState::Down);
+                    self.follow_pointer();
                     // A pressed window's first move is where its drag starts.
                     if let Some(held) = &mut self.held
                         && !held.rift_saw_it
@@ -653,6 +718,35 @@ impl Sim {
             Step::CrossDisplay { to } => {
                 if let Some(wid) = self.held_window() {
                     self.move_to_display(wid, to, MouseState::Down);
+                    self.follow_pointer();
+                }
+            }
+            Step::CrossDisplayLagging { to } => {
+                if let Some(Held {
+                    window,
+                    hand: Hand::Native { grab, pointer: now },
+                    ..
+                }) = self.held
+                {
+                    let screen = self.screens[to % self.screens.len()];
+                    let frame = self.os_frame(window);
+                    // Just across the edge of `to` nearest the pointer.
+                    let pointer = CGPoint::new(
+                        now.x.clamp(screen.origin.x + 5., screen.max().x - 5.),
+                        now.y.clamp(screen.origin.y + 5., screen.max().y - 5.),
+                    );
+                    let frame = CGRect::new(
+                        CGPoint::new(pointer.x - grab.x, pointer.y - grab.y),
+                        frame.size,
+                    );
+                    self.report_frame(window, frame, MouseState::Down);
+                    self.follow_pointer();
+                    let wsid = self.reactor.test_window_server_id(window);
+                    self.reactor.handle_event(Event::WindowServerAppeared(
+                        wsid,
+                        self.spaces[to % self.spaces.len()],
+                        SpaceEventKind::User,
+                    ));
                 }
             }
             Step::MouseUp => {
@@ -713,6 +807,7 @@ impl Sim {
                 if let Some(wid) = self.held_window() {
                     let frame = offset(self.os_frame(wid), dx, 0);
                     self.report_frame(wid, frame, MouseState::Up);
+                    self.follow_pointer();
                     // rift was told the button is up, so letting go is the best it can do.
                     // The user still holds the window; rift just can't know that any more.
                     if dragged(&self.reactor) != Some(wid)
@@ -859,7 +954,10 @@ impl Sim {
         // starts the drag).
         if matches!(
             step,
-            Step::DragStart { .. } | Step::DragMove { .. } | Step::CrossDisplay { .. }
+            Step::DragStart { .. }
+                | Step::DragMove { .. }
+                | Step::CrossDisplay { .. }
+                | Step::CrossDisplayLagging { .. }
         ) && let Some(held) = &self.held
             && self.live.contains(&held.window)
             && self.moved == Some(held.window)
@@ -909,6 +1007,30 @@ impl Sim {
                 );
             }
         }
+        // 3b. A drag drops onto the display under the pointer: whatever it would drop onto is
+        // there, and off every display there is nothing to drop onto.
+        if let Some(held) = self.held.as_ref().filter(|held| held.rift_saw_it)
+            && let Some(session) = self.reactor.state.windows.drag_on(held.window)
+            && let Some(intent) = session.intent()
+        {
+            let under = self.pointer().and_then(|pointer| {
+                self.screens
+                    .iter()
+                    .position(|screen| screen.contains(pointer))
+                    .map(|display| self.spaces[display])
+            });
+            if under != Some(intent.space) {
+                return fail(
+                    "drop-target-on-pointer-display",
+                    format!(
+                        "the pointer is at {:?}, on {under:?}, but the drag of {:?} would drop \
+                         onto {intent:?}",
+                        self.pointer(),
+                        held.window
+                    ),
+                );
+            }
+        }
         // 4. A drag does not change the layout: from press to release rift writes nothing to
         // the window the user holds, and while it takes a window to be dragged it writes no
         // frame at all, not even for a window going away or a command, and sends no
@@ -943,7 +1065,7 @@ impl Sim {
             let modifier = self
                 .held
                 .as_ref()
-                .filter(|held| held.modifier_pointer.is_some())
+                .filter(|held| matches!(held.hand, Hand::Modifier { .. }))
                 .map(|held| held.window);
             let animated = self.presenter.is_some();
             let presentable = |w: WindowId| Some(w) == modifier || (animated && Some(w) != held);
@@ -1493,6 +1615,38 @@ fn a_camera_moving_windows_during_a_drag_does_not_unsettle_them_at_the_drop() {
     ];
     let setup = Setup {
         displays: 3,
+        animate: true,
+        scrolling: true,
+    };
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}
+
+#[test]
+#[ignore = "pre-existing (reproduces on 0a54dd15): a scrolling camera started mid-drag strands a neighbour of a window dropped in from another display"]
+fn a_window_dropped_into_another_displays_scrolling_layout_settles_where_layout_wants_it() {
+    // Found by the fuzzer (seed 134 at 2000x40) once native drags crossed displays with the
+    // pointer. A window is dropped from display 2 into display 1's animated scrolling layout
+    // after a window there was destroyed mid-drag (which starts a camera). The drop's pass
+    // writes the remaining window at the camera's offset of the moment, and the layout then
+    // settles on another offset with nothing writing the difference. The drag here moves the
+    // whole frame onto display 1, so the step list fails the same way before the pointer
+    // decided a drag's display.
+    let steps = [
+        Step::DragStart { w: 7, dx: -500, dy: 81 },
+        Step::ForeignMove {
+            w: 0,
+            to: 1,
+            mouse: Mouse::Truth,
+        },
+        Step::ForeignMove {
+            w: 0,
+            to: 2,
+            mouse: Mouse::Truth,
+        },
+        Step::Destroy { w: 1 },
+    ];
+    let setup = Setup {
+        displays: 2,
         animate: true,
         scrolling: true,
     };
