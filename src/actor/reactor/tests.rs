@@ -12914,6 +12914,94 @@ fn a_drop_on_no_target_puts_the_window_back_in_its_slot_with_one_write() {
     assert!(written[0].1.same_as(home), "{written:?}, slot {home:?}");
 }
 
+/// Commands that rearrange, switch workspaces or move windows between workspaces.
+fn steering_commands() -> [Command; 4] {
+    [
+        Command::Layout(LayoutCommand::ToggleOrientation),
+        Command::Layout(LayoutCommand::NextWorkspace(None)),
+        Command::Layout(LayoutCommand::MoveWindowToWorkspace {
+            workspace: WorkspaceSelector::Index(1),
+            follow: false,
+            window_id: None,
+        }),
+        Command::Reactor(ReactorCommand::CloseWindow { window_server_id: None }),
+    ]
+}
+
+#[test]
+fn a_steering_command_during_a_drag_is_discarded_and_not_replayed_at_the_drop() {
+    for command in steering_commands() {
+        let (mut apps, mut reactor, dragged, other, _screen, space) = two_tiled_windows();
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, other));
+        apps.simulate_until_quiet(&mut reactor);
+        let (home, theirs) = (slot(&reactor, dragged), slot(&reactor, other));
+        let moved = drag_by(&apps, &mut reactor, dragged, 0., 40.);
+        apps.windows.get_mut(&dragged).unwrap().frame = moved;
+        assert!(reactor.user_is_dragging());
+
+        reactor.handle_event(Event::Command(command.clone()));
+        let requests = apps.requests();
+        assert!(requests.is_empty(), "{command:?} acted mid-drag: {requests:?}");
+
+        // The drop puts the dragged window back in its slot and nothing else: the command
+        // left no trace to replay.
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+        let written = frames_written(&apps.requests());
+        assert_eq!(written.len(), 1, "{command:?}: {written:?}");
+        assert_eq!(written[0].0, dragged);
+        assert!(written[0].1.same_as(home), "{command:?}: {written:?}");
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(slot(&reactor, other).same_as(theirs), "{command:?}");
+    }
+}
+
+#[test]
+fn a_steering_command_after_the_drop_runs() {
+    let (mut apps, mut reactor, dragged, other, _screen, space) = two_tiled_windows();
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, other));
+    apps.simulate_until_quiet(&mut reactor);
+    let moved = drag_by(&apps, &mut reactor, dragged, 0., 40.);
+    apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    reactor.handle_test_layout_command(LayoutCommand::ToggleOrientation);
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    apps.simulate_until_quiet(&mut reactor);
+    let side_by_side = |reactor: &Reactor| {
+        (slot(reactor, dragged).origin.y - slot(reactor, other).origin.y).abs() < 1.
+    };
+    assert!(side_by_side(&reactor));
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleOrientation);
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(
+        !side_by_side(&reactor),
+        "the same command after the drop stacked them"
+    );
+}
+
+#[test]
+fn an_inert_command_runs_during_a_drag() {
+    let (mut apps, mut reactor, dragged, _other, _screen, _space) = two_tiled_windows();
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let moved = drag_by(&apps, &mut reactor, dragged, 0., 40.);
+    apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    assert!(reactor.user_is_dragging());
+    while input_rx.try_recv().is_ok() {}
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::BindingMode(
+        "resize".into(),
+    ))));
+    let sent: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok().map(|(_, r)| r)).collect();
+    assert!(
+        sent.iter().any(
+            |request| matches!(request, input::Request::SetBindingMode(mode) if mode == "resize")
+        ),
+        "{sent:?}"
+    );
+    assert!(reactor.user_is_dragging());
+    assert_eq!(frames_written(&apps.requests()), []);
+}
+
 #[test]
 fn a_drop_on_a_swap_target_writes_exactly_the_swapped_windows() {
     let (mut apps, mut reactor, dragged, other, _screen, _space) = two_tiled_windows();
