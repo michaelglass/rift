@@ -10401,6 +10401,37 @@ fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership()
 }
 
 #[test]
+fn an_exhausted_transfer_no_longer_owed_is_discarded() {
+    let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let home = reactor.test_workspace(space1, 0);
+    let elsewhere = reactor.test_workspace(space2, 0);
+    assert!(reactor.assign_test_window_to_workspace(space2, window, elsewhere));
+    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let store = &mut reactor.state.windows;
+    store.unheld(window).unwrap().request_transfer(Some(frame), space2, true);
+    for revision in [101, 102, 103] {
+        store.unheld(window).unwrap().advance_transfer(revision, true);
+    }
+    assert!(store.record(window).unwrap().pending_transfer().unwrap().exhausted());
+
+    // The user puts the window's workspace assignment back where macOS left the window: the
+    // refused move is no longer owed, so nothing waits on it.
+    assert!(reactor.assign_test_window_to_workspace(space1, window, home));
+    let mut state = forwarded_space_state(make_screen_snapshots(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    state.membership_complete = true;
+    state.active_window_spaces.insert(wsid, space1);
+    reactor.handle_event(Event::SpaceStateChanged(state));
+    assert_eq!(
+        reactor.state.windows.record(window).unwrap().pending_transfer(),
+        None
+    );
+}
+
+#[test]
 fn a_new_display_set_re_derives_an_exhausted_transfer_instead_of_resuming_it() {
     let (mut reactor, window, wsid, space1, space2, screen1, screen2) =
         reactor_with_window_on_space1_two_displays();
