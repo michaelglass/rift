@@ -23,7 +23,7 @@ use std::ptr::NonNull;
 // Roc's runtime hooks. Roc runs on one thread (the caller's), so the counters are thread-local.
 use libmimalloc_sys::{mi_free as free, mi_malloc as malloc, mi_realloc as realloc};
 use rift_core::layout::bsp::Bsp;
-use rift_core::layout::scrolling::{Placed, Strip};
+use rift_core::layout::scrolling::{Placed, Settle, Settled, Strip};
 use rift_core::layout::traditional::Traditional;
 use rift_core::plain::wire::WireError;
 use rift_core::plain::{Plain, Rect, WindowId, wire};
@@ -294,6 +294,19 @@ pub fn tile_traditional(shape: Traditional<WindowId>) -> Result<Vec<(WindowId, R
 pub fn place_strip(strip: Strip<WindowId, u64>) -> Result<Placed<WindowId, u64>, RocError> {
     let words = tile_words(&wire::encode_strip(strip))?;
     wire::decode_placed(&words).map_err(RocError::Unreadable)
+}
+
+/// Where the camera settles on a strip's placement, as `Placed::settle` decides, decided by
+/// the Roc core.
+pub fn settle(
+    placed: Placed<WindowId, u64>,
+    view: f64,
+    projected: f64,
+    from: f64,
+    how: Settle<u64>,
+) -> Result<Settled<u64>, RocError> {
+    let words = tile_words(&wire::encode_settle(placed, view, projected, from, how))?;
+    wire::decode_settled(&words).map_err(RocError::Unreadable)
 }
 
 impl Drop for RocCore {

@@ -355,6 +355,56 @@ fn the_roc_core_places_scrolling_strips_as_the_rust_core_does() {
 }
 
 #[test]
+fn the_roc_core_settles_the_camera_where_the_rust_core_does() {
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0x0FF5_E7C4_11B8_A7E5);
+    let before = AllocationCount::now();
+    for case in 0..cases {
+        let strip = strip(&mut rng);
+        let placed = strip.place();
+        let spots: Vec<u64> =
+            std::iter::once(&placed.first).chain(&placed.rest).map(|s| s.id).collect();
+        let snaps: Vec<f64> = std::iter::once(&placed.snaps.0)
+            .chain(&placed.snaps.1)
+            .map(|s| s.offset)
+            .collect();
+        // Often exactly on a resting point (ties), or halfway between two, or anywhere.
+        let offset = |rng: &mut Rng| match rng.below(4) {
+            0 => snaps[rng.below(snaps.len() as u64) as usize],
+            1 => {
+                let (a, b) = (rng.below(snaps.len() as u64), rng.below(snaps.len() as u64));
+                (snaps[a as usize] + snaps[b as usize]) / 2.
+            }
+            2 => -0.0,
+            _ => rng.length(-3000., 6000.),
+        };
+        let projected = offset(&mut rng);
+        let from = offset(&mut rng);
+        let how = match rng.below(3) {
+            0 => scrolling::Settle::Niri,
+            1 => scrolling::Settle::Anchored,
+            _ => scrolling::Settle::AnchoredTowards(if rng.chance(90) {
+                spots[rng.below(spots.len() as u64) as usize]
+            } else {
+                rng.next()
+            }),
+        };
+        let view = strip.tiling.w;
+        let rust = placed.settle(view, projected, from, how);
+        let roc = tile_words(&wire::encode_settle(placed.clone(), view, projected, from, how));
+        if roc != Ok(wire::encode_settled(rust)) {
+            panic!(
+                "case {case}: {how:?} from {from} to {projected}, view {view}, {placed:#?}\n  roc:  {:?}\n  rust: {rust:?}",
+                roc.map(|words| wire::decode_settled(&words))
+            );
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} settle questions answered identically");
+}
+
+#[test]
 #[ignore]
 fn tile_timing() {
     let mut rng = Rng(0x1234_5678_9ABC_DEF1);

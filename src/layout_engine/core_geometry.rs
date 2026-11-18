@@ -101,6 +101,43 @@ pub(crate) fn place_strip<C: Copy + PartialEq + std::fmt::Debug>(
     placed
 }
 
+/// Where the camera settles on a placement (column ids `C`, numbered for the Roc core by
+/// `number`).
+pub(crate) fn settle<C: Copy + PartialEq + std::fmt::Debug>(
+    placed: &scrolling::Placed<WindowId, C>,
+    view: f64,
+    projected: f64,
+    from: f64,
+    how: scrolling::Settle<C>,
+    number: impl Fn(C) -> u64,
+) -> scrolling::Settled<C> {
+    let settled = placed.settle(view, projected, from, how);
+    #[cfg(feature = "roc-core")]
+    {
+        let plain_how = match how {
+            scrolling::Settle::Niri => scrolling::Settle::Niri,
+            scrolling::Settle::Anchored => scrolling::Settle::Anchored,
+            scrolling::Settle::AnchoredTowards(c) => scrolling::Settle::AnchoredTowards(number(c)),
+        };
+        let roc = rift_core_roc::settle(
+            placed.clone().map(&to_plain, &number),
+            view,
+            projected,
+            from,
+            plain_how,
+        )
+        .unwrap_or_else(|error| panic!("the Roc core settled nowhere ({error:?}) on {placed:?}"));
+        assert_eq!(
+            (roc.column, roc.offset.to_bits()),
+            (number(settled.column), settled.offset.to_bits()),
+            "the Roc core and its Rust shadow settle {how:?} from {from} to {projected} on {placed:?} differently"
+        );
+    }
+    #[cfg(not(feature = "roc-core"))]
+    let _ = number;
+    settled
+}
+
 #[cfg(feature = "roc-core")]
 fn to_plain(window: WindowId) -> rift_core::plain::WindowId {
     rift_core::plain::WindowId {
