@@ -83,6 +83,10 @@ pub enum Sync<K: Kinds> {
         got: K::Frame,
         request: K::Request,
     },
+    /// Rift moves the window outside the core (a gesture's camera), its frames going out under
+    /// `request`, which the platform reported: a read stamped with it is Rift's own. `at` is
+    /// where the app last reported the window (where the model had it, until a report).
+    Outside { request: K::Request, at: K::Frame },
 }
 
 /// What the app had acknowledged when a write was sent: where a write it never answers leaves
@@ -203,7 +207,7 @@ impl<K: Kinds> Sync<K> {
         match self {
             Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
             Sync::Refused { wanted, .. } => Some(wanted),
-            Sync::Settled { .. } | Sync::Unknown { .. } => None,
+            Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Outside { .. } => None,
         }
     }
 
@@ -213,7 +217,8 @@ impl<K: Kinds> Sync<K> {
             Sync::Settled { last, .. } | Sync::Unknown { last } => last,
             Sync::InFlight { request, .. }
             | Sync::Animating { request, .. }
-            | Sync::Refused { request, .. } => Some(request),
+            | Sync::Refused { request, .. }
+            | Sync::Outside { request, .. } => Some(request),
         }
     }
 }
@@ -285,9 +290,10 @@ impl<K: Kinds> Reconciler<K> {
         {
             let sync = match sync {
                 Sync::Settled { .. } | Sync::Unknown { .. } => sync,
-                Sync::InFlight { .. } | Sync::Animating { .. } | Sync::Refused { .. } => {
-                    Sync::Unknown { last: sync.last() }
-                }
+                Sync::InFlight { .. }
+                | Sync::Animating { .. }
+                | Sync::Refused { .. }
+                | Sync::Outside { .. } => Sync::Unknown { last: sync.last() },
             };
             self.windows.insert(to, Record { seen, sync });
             self.touched.push(to);
@@ -318,7 +324,8 @@ impl<K: Kinds> Reconciler<K> {
                 sync @ (Sync::Settled { .. }
                 | Sync::Refused { .. }
                 | Sync::Unknown { .. }
-                | Sync::Animating { .. }),
+                | Sync::Animating { .. }
+                | Sync::Outside { .. }),
             ) => Sync::Unknown { last: sync.last() },
         };
         self.set(window, unknown);
@@ -327,9 +334,9 @@ impl<K: Kinds> Reconciler<K> {
     /// What a write sent now would fall back to.
     fn before(sync: Sync<K>) -> Before<K> {
         match sync {
-            Sync::Settled { acked, .. } | Sync::Animating { target: acked, .. } => {
-                Before::Acked(acked)
-            }
+            Sync::Settled { acked, .. }
+            | Sync::Animating { target: acked, .. }
+            | Sync::Outside { at: acked, .. } => Before::Acked(acked),
             Sync::Refused { got, .. } => Before::Acked(got),
             Sync::Unknown { .. } => Before::Unknown,
             Sync::InFlight { before, .. } => before,
@@ -429,8 +436,12 @@ impl<K: Kinds> Reconciler<K> {
             }
             // The app has the window there already, as near as an answer to this very desire
             // would be (a terminal rounds to whole cells): asking again would be asked on every
-            // arrange.
-            Sync::Settled { acked, .. } if answers::<K>(desired, acked) => Verdict::Nothing,
+            // arrange. Rift's frames sent outside the core left it where the app last reported.
+            Sync::Settled { acked, .. } | Sync::Outside { at: acked, .. }
+                if answers::<K>(desired, acked) =>
+            {
+                Verdict::Nothing
+            }
             // An animation is taking it there.
             Sync::Animating { target, .. } if K::same_as(desired, target) => Verdict::Nothing,
             // A refused window is where the model has it (a timed-out write's `got` is only what
@@ -439,9 +450,19 @@ impl<K: Kinds> Reconciler<K> {
             Sync::Settled { .. }
             | Sync::Refused { .. }
             | Sync::Unknown { .. }
-            | Sync::Animating { .. } => {
+            | Sync::Animating { .. }
+            | Sync::Outside { .. } => {
                 Verdict::Send(self.send(now, request, window, desired, Self::before(sync)))
             }
+        }
+    }
+
+    /// Rift sends `window` frames outside the core under `request` (a gesture's camera), and
+    /// the platform says so: a read stamped with it is Rift's own. Whatever was pending for the
+    /// window is superseded by those frames.
+    pub fn sent_outside(&mut self, window: K::Window, request: K::Request) {
+        if let Some(Record { seen, .. }) = self.windows.get(&window).copied() {
+            self.set(window, Sync::Outside { request, at: seen });
         }
     }
 
@@ -528,14 +549,17 @@ impl<K: Kinds> Reconciler<K> {
                     return (Reply::Answered(Answer::Acked), None);
                 }
                 Sync::Animating { .. } => return (Reply::InTransit, None),
+                // One of Rift's frames sent outside the core: where the app has the window, the
+                // frames still coming.
+                Sync::Outside { request: sent, .. } => {
+                    self.set(window, Sync::Outside { request: sent, at: frame });
+                    return (Reply::InTransit, None);
+                }
                 // The answer to a write Rift stopped waiting for: news like any report.
                 Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Refused { .. } => {}
             },
-            // A frame Rift sent outside the core (a camera's): where the app has the window.
-            (Some(_), last) if matches!(sync, Sync::Settled { .. } | Sync::Unknown { .. }) => {
-                self.set(window, Sync::Settled { acked: frame, last });
-                return (Reply::InTransit, None);
-            }
+            // A stamp the core never heard of (newer than anything sent this window, or with
+            // nothing sent): not Rift's, so placed by its geometry like any report.
             _ => {}
         }
         (self.place(window, sync, frame, known, holder), None)
@@ -576,7 +600,8 @@ impl<K: Kinds> Reconciler<K> {
                 Sync::InFlight { .. }
                 | Sync::Settled { .. }
                 | Sync::Refused { .. }
-                | Sync::Unknown { .. },
+                | Sync::Unknown { .. }
+                | Sync::Outside { .. },
                 Holder::User | Holder::Nobody,
             )
             | (Sync::Animating { .. }, Holder::User) => {
@@ -586,8 +611,9 @@ impl<K: Kinds> Reconciler<K> {
                     Reply::Foreign
                 };
                 match (sync, reply) {
-                    // A refusal stands while the window stays where the model has it.
-                    (Sync::Refused { .. }, Reply::NoNews) => {}
+                    // A refusal stands while the window stays where the model has it, and so do
+                    // Rift's frames sent outside the core.
+                    (Sync::Refused { .. } | Sync::Outside { .. }, Reply::NoNews) => {}
                     _ => self.set(window, Sync::Settled {
                         acked: frame,
                         last: sync.last(),
@@ -635,7 +661,8 @@ impl<K: Kinds> Reconciler<K> {
             | Sync::Settled { .. }
             | Sync::Refused { .. }
             | Sync::Unknown { .. }
-            | Sync::Animating { .. } => None,
+            | Sync::Animating { .. }
+            | Sync::Outside { .. } => None,
         }
     }
 
@@ -699,6 +726,7 @@ impl<K: Kinds> Reconciler<K> {
             Sync::Animating { target, .. } => K::same_as(target, desired),
             Sync::Refused { wanted, .. } => K::same_as(wanted, desired),
             Sync::Settled { .. } => answers::<K>(desired, known),
+            Sync::Outside { at, .. } => answers::<K>(desired, at),
         };
         match (owner, already) {
             (Owner::User, _) | (Owner::Rift, true) => Planned::Verdict(Verdict::Nothing),
@@ -760,7 +788,8 @@ impl<K: Kinds> Reconciler<K> {
                 | Sync::InFlight { .. }
                 | Sync::Settled { .. }
                 | Sync::Refused { .. }
-                | Sync::Unknown { .. },
+                | Sync::Unknown { .. }
+                | Sync::Outside { .. },
             )
             | None => {}
         }
@@ -780,7 +809,10 @@ impl<K: Kinds> Reconciler<K> {
                 self.set(window, Sync::Settled { acked: got, last });
                 Some(got)
             }
-            Sync::InFlight { .. } | Sync::Animating { .. } | Sync::Unknown { .. } => {
+            Sync::InFlight { .. }
+            | Sync::Animating { .. }
+            | Sync::Unknown { .. }
+            | Sync::Outside { .. } => {
                 self.set(window, Sync::Unknown { last });
                 None
             }
@@ -1483,5 +1515,71 @@ mod tests {
         assert_eq!(reconciler.pending(new_flying), None);
         let again = reconciler.want(T0, R, new_flying, at(100.), Owner::Rift);
         assert!(matches!(again, Verdict::Send(_)));
+    }
+
+    /// A report of `window()` at `frame`, stamped `as_of`, with nobody's hand on it.
+    fn report(reconciler: &mut Reconciler, frame: Rect, as_of: Option<RequestId>) -> Reply {
+        reconciler.observe(T0, R, window(), frame, as_of, Owner::Rift, Holder::Nobody).0
+    }
+
+    #[test]
+    fn a_stamp_the_core_never_heard_of_is_placed_by_geometry() {
+        // Nothing was ever sent to the window: a stamped report (a new identity carrying the
+        // old one's stamps, a stale read) is the app's, not Rift's.
+        let mut reconciler = with(at(0.));
+        assert_eq!(report(&mut reconciler, at(50.), Some(OLD)), Reply::Foreign);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Settled { acked: at(50.), last: None })
+        );
+        // Back where the model has it: no news, by geometry, and that is where it is.
+        assert_eq!(report(&mut reconciler, at(0.), Some(OLD)), Reply::NoNews);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Settled { acked: at(0.), last: None })
+        );
+
+        // A stamp newer than the last request the core sent: unknown too.
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        _ = report(&mut reconciler, at(10.), Some(OLD.max(R)));
+        assert_eq!(
+            report(&mut reconciler, at(70.), Some(RequestId(R.0 + 5))),
+            Reply::Foreign
+        );
+    }
+
+    #[test]
+    fn frames_rift_sent_outside_the_core_are_its_own() {
+        let mut reconciler = with(at(0.));
+        let camera = RequestId(R.0 + 1);
+        reconciler.sent_outside(window(), camera);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Outside { request: camera, at: at(0.) })
+        );
+        // Each stamped report is one of the camera's frames on the way.
+        assert_eq!(report(&mut reconciler, at(5.), Some(camera)), Reply::InTransit);
+        assert_eq!(report(&mut reconciler, at(9.), Some(camera)), Reply::InTransit);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Outside { request: camera, at: at(9.) })
+        );
+        // An older stamp is no news; an unstamped report where the model has it neither.
+        assert_eq!(report(&mut reconciler, at(40.), Some(R)), Reply::NoNews);
+        assert_eq!(report(&mut reconciler, at(0.), None), Reply::NoNews);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Outside { request: camera, at: at(9.) })
+        );
+        // A desire where the camera left the window is no write; anywhere else is.
+        assert_eq!(
+            reconciler.want(T0, R, window(), at(9.), Owner::Rift),
+            Verdict::Nothing
+        );
+        assert!(matches!(
+            reconciler.want(T0, RequestId(R.0 + 2), window(), at(20.), Owner::Rift),
+            Verdict::Send(_)
+        ));
     }
 }

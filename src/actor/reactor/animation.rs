@@ -768,9 +768,10 @@ impl Reactor {
             }
         } else {
             // A gesture's camera has no target: nothing is pending, but its frames go out
-            // under the request.
+            // under the request, outside the core, which is told so (reads stamped with it are
+            // Rift's own).
             for window in &windows {
-                self.state.step(CoreEvent::Forget { window: window.wid });
+                self.state.step(CoreEvent::SentOutside { window: window.wid, request });
                 if let Some(wsid) = window.wsid {
                     self.state.tx.sent(wsid, request);
                 }

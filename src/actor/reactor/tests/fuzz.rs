@@ -607,7 +607,10 @@ impl Sim {
                 Sync::InFlight { target, queued, .. } => {
                     Some((wid, std::iter::once(target).chain(queued).collect()))
                 }
-                Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Refused { .. } => None,
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::Refused { .. }
+                | Sync::Outside { .. } => None,
             })
             .collect();
         self.settled_before = self
@@ -618,7 +621,8 @@ impl Sim {
                 Sync::Unknown { .. }
                 | Sync::InFlight { .. }
                 | Sync::Refused { .. }
-                | Sync::Animating { .. } => None,
+                | Sync::Animating { .. }
+                | Sync::Outside { .. } => None,
             })
             .collect();
         match step {
@@ -1114,7 +1118,8 @@ impl Sim {
                     Sync::Settled { .. }
                     | Sync::Refused { .. }
                     | Sync::Unknown { .. }
-                    | Sync::Animating { .. },
+                    | Sync::Animating { .. }
+                    | Sync::Outside { .. },
                 ) => {
                     if self.moved != Some(wid)
                         && !self.gave_up.contains(&wid)
@@ -1259,7 +1264,8 @@ impl Sim {
                         Sync::Settled { .. }
                         | Sync::InFlight { .. }
                         | Sync::Unknown { .. }
-                        | Sync::Animating { .. },
+                        | Sync::Animating { .. }
+                        | Sync::Outside { .. },
                     ) => false,
                 };
                 // Where layout wants it as near as the core takes an answer to be (an app

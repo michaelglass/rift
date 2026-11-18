@@ -109,6 +109,12 @@ pub enum Event<K: Kinds> {
     /// Something outside the core (an animation, a topology change) took `window`'s frame, or
     /// the window is gone: nothing is outstanding.
     Forget { window: K::Window },
+    /// The platform sends `window` frames outside the core under `request` (a gesture's
+    /// camera): reads stamped with it are Rift's own.
+    SentOutside {
+        window: K::Window,
+        request: K::Request,
+    },
 }
 
 /// A decision for the platform.
@@ -368,6 +374,10 @@ impl<K: Kinds> RustCore<K> {
                 released.into_iter().flat_map(|write| self.written(write)).collect()
             }
             Event::Forget { window } => self.forget(window).into_iter().collect(),
+            Event::SentOutside { window, request } => {
+                self.reconciler.sent_outside(window, request);
+                vec![]
+            }
         }
     }
 

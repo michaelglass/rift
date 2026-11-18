@@ -2204,7 +2204,8 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
     };
     reactor.place_window(wid, at(40.0));
     let txid = last_sent(&reactor, wsid);
-    // A frame Rift sent outside the core (a camera's) goes out under a newer request.
+    // A frame Rift sends outside the core (a gesture's camera) goes out under a newer request,
+    // and the core is told so.
     let own = reactor.state.tx.next_id();
     // Acknowledged, unchanged, and Rift's own frames.
     for event in [
@@ -2212,6 +2213,9 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
         moved(wid, at(40.0), None, false),
         moved(wid, at(50.0), Some(own), true),
     ] {
+        if matches!(event, Event::WindowFrameChanged(_, _, Some(txid), _) if txid == own) {
+            reactor.state.step(CoreEvent::SentOutside { window: wid, request: own });
+        }
         let outcome = reactor.dispatch_workflow(event).unwrap();
         assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
     }
