@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::Kinds;
-use crate::pointer::{Button, Grip, Pointer, Release, Ungrip};
+use crate::pointer::{Button, Grip, Phase, Pointer, Release, Ungrip};
 use crate::reconciler::{Note, Planned, Reconciler, Reply, Verdict, Want, Write};
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
@@ -153,7 +153,13 @@ pub enum Effect<K: Kinds> {
     /// The press on `window` became a drag: the platform attaches the drag's session.
     DragBegan { window: K::Window },
     /// The hand came off `window`, for `why`: its record leaves the slot.
-    Ungrip { window: K::Window, why: Ungrip },
+    /// `changed`: the windows whose model frame changed during a drag that ended, now
+    /// unknown, to re-derive.
+    Ungrip {
+        window: K::Window,
+        why: Ungrip,
+        changed: Vec<K::Window>,
+    },
     /// The grip moved with its window's new identity.
     Regrip { from: K::Window, to: K::Window },
 }
@@ -199,8 +205,21 @@ impl<K: Kinds> RustCore<K> {
     /// The model takes `window` to be at `frame` from now on. A window it did not know has
     /// just appeared, and its app has it there.
     fn see(&mut self, window: K::Window, frame: K::Frame) -> Effect<K> {
-        if self.seen.insert(window, frame).is_none() {
-            self.reconciler.appear(window, frame);
+        match self.seen.insert(window, frame) {
+            None => self.reconciler.appear(window, frame),
+            Some(before) => {
+                if let Grip::Held {
+                    window: held,
+                    phase: Phase::Dragging { changed },
+                    ..
+                } = &mut self.grip
+                    && *held != window
+                    && before != frame
+                    && !changed.contains(&window)
+                {
+                    changed.push(window);
+                }
+            }
         }
         Effect::Seen { window, frame }
     }
@@ -212,19 +231,27 @@ impl<K: Kinds> RustCore<K> {
     }
 
     /// The hand comes off whatever it holds, for `why`. A window the user dragged is where
-    /// they left it, which no report during the drag acknowledged: unknown. (A press that never
-    /// moved the window leaves it as it was.)
+    /// they left it, which no report during the drag acknowledged: unknown; so is any window
+    /// whose model frame changed during the drag (its desires were the user's), and those are
+    /// handed back for re-derivation. (A press that never moved the window leaves it as it was.)
     fn ungrip(&mut self, why: Ungrip) -> Option<Effect<K>> {
-        let window = match self.grip {
+        let (window, changed) = match std::mem::replace(&mut self.grip, Grip::Idle) {
             Grip::Idle => return None,
-            Grip::Pressed { window, .. } => window,
-            Grip::Dragging { window, .. } => {
-                self.reconciler.distrust(window);
-                window
+            Grip::Held {
+                window, phase: Phase::Pressed, ..
+            } => (window, vec![]),
+            Grip::Held {
+                window,
+                phase: Phase::Dragging { changed },
+                ..
+            } => {
+                for &window in std::iter::once(&window).chain(&changed) {
+                    self.reconciler.distrust(window);
+                }
+                (window, changed)
             }
         };
-        self.grip = Grip::Idle;
-        Some(Effect::Ungrip { window, why })
+        Some(Effect::Ungrip { window, why, changed })
     }
 
     fn decide(&mut self, event: Event<K>) -> Vec<Effect<K>> {
@@ -233,25 +260,30 @@ impl<K: Kinds> RustCore<K> {
             Event::Press { window, button } => {
                 let let_go = self.ungrip(Ungrip::LetGo);
                 let pressed = window.map(|window| {
-                    self.grip = Grip::Pressed { window, button };
+                    self.grip = Grip::Held {
+                        window,
+                        button,
+                        phase: Phase::Pressed,
+                    };
                     Effect::Grip { window }
                 });
                 let_go.into_iter().chain(pressed).collect()
             }
-            Event::Drag { window } => match self.grip {
-                Grip::Pressed { window: pressed, button } if pressed == window => {
-                    self.grip = Grip::Dragging { window, button };
+            Event::Drag { window } => match &mut self.grip {
+                Grip::Held {
+                    window: pressed,
+                    phase: phase @ Phase::Pressed,
+                    ..
+                } if *pressed == window => {
+                    *phase = Phase::Dragging { changed: vec![] };
                     vec![Effect::DragBegan { window }]
                 }
-                Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+                Grip::Held { .. } | Grip::Idle => vec![],
             },
             Event::Release(release) => {
-                let ends = match (release, self.grip) {
-                    (Release::Missed, Grip::Pressed { .. } | Grip::Dragging { .. }) => true,
-                    (
-                        Release::Button(released),
-                        Grip::Pressed { button, .. } | Grip::Dragging { button, .. },
-                    ) => released == button,
+                let ends = match (release, &self.grip) {
+                    (Release::Missed, Grip::Held { .. }) => true,
+                    (Release::Button(released), Grip::Held { button, .. }) => released == *button,
                     (Release::Missed | Release::Button(_), Grip::Idle) => false,
                 };
                 if ends {
@@ -434,26 +466,20 @@ impl<K: Kinds> RustCore<K> {
     /// A grip on `window` ends: it left Rift's hands.
     fn ungrip_window(&mut self, window: K::Window) -> Vec<Effect<K>> {
         match self.grip {
-            Grip::Pressed { window: held, .. } | Grip::Dragging { window: held, .. }
-                if held == window =>
-            {
+            Grip::Held { window: held, .. } if held == window => {
                 self.ungrip(Ungrip::Gone).into_iter().collect()
             }
-            Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+            Grip::Held { .. } | Grip::Idle => vec![],
         }
     }
 
     fn rekey_grip(&mut self, from: K::Window, to: K::Window) -> Vec<Effect<K>> {
-        match self.grip {
-            Grip::Pressed { window, button } if window == from => {
-                self.grip = Grip::Pressed { window: to, button };
+        match &mut self.grip {
+            Grip::Held { window, .. } if *window == from => {
+                *window = to;
                 vec![Effect::Regrip { from, to }]
             }
-            Grip::Dragging { window, button } if window == from => {
-                self.grip = Grip::Dragging { window: to, button };
-                vec![Effect::Regrip { from, to }]
-            }
-            Grip::Pressed { .. } | Grip::Dragging { .. } | Grip::Idle => vec![],
+            Grip::Held { .. } | Grip::Idle => vec![],
         }
     }
 }
@@ -549,6 +575,31 @@ mod tests {
     }
 
     #[test]
+    fn a_window_whose_model_frame_changed_during_a_drag_is_handed_back_unknown() {
+        let mut core = RustCore::<Plain>::default();
+        let other = WindowId { pid: 8, idx: 1 };
+        core.step(Event::Seen { window: W, frame: at(0.) });
+        core.step(Event::Seen { window: other, frame: at(500.) });
+        core.step(Event::Press {
+            window: Some(W),
+            button: Button::Left,
+        });
+        core.step(Event::Drag { window: W });
+        // A read moves the other window's model frame; its desires are the user's now.
+        core.step(Event::Seen { window: other, frame: at(520.) });
+        let effects = core.step(Event::Release(Release::Button(Button::Left)));
+        assert!(effects.contains(&Effect::Ungrip {
+            window: W,
+            why: Ungrip::Released,
+            changed: vec![other]
+        }));
+        assert!(matches!(
+            core.reconciler.sync(other),
+            Some(crate::Sync::Unknown { .. })
+        ));
+    }
+
+    #[test]
     fn the_model_sees_what_the_core_writes_and_forgets_a_window_that_goes() {
         let mut core = RustCore::<Plain>::default();
         let want = |x| Event::Want {
@@ -586,7 +637,8 @@ mod tests {
         assert_eq!(core.step(Event::Release(Release::Button(Button::Left))), vec![
             Effect::Ungrip {
                 window: W,
-                why: Ungrip::Released
+                why: Ungrip::Released,
+                changed: vec![]
             }
         ]);
         // One hand: a press elsewhere lets go of what it held.
@@ -600,7 +652,11 @@ mod tests {
                 button: Button::Left
             }),
             vec![
-                Effect::Ungrip { window: W, why: Ungrip::LetGo },
+                Effect::Ungrip {
+                    window: W,
+                    why: Ungrip::LetGo,
+                    changed: vec![]
+                },
                 Effect::Grip { window: other },
             ]
         );
@@ -612,7 +668,8 @@ mod tests {
         assert_eq!(core.step(Event::Gone { window: renamed }), vec![
             Effect::Ungrip {
                 window: renamed,
-                why: Ungrip::Gone
+                why: Ungrip::Gone,
+                changed: vec![]
             }
         ]);
     }

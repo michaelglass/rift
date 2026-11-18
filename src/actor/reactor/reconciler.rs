@@ -442,6 +442,8 @@ impl Reactor {
 pub(crate) struct Ungripped {
     pub(crate) window: WindowId,
     pub(crate) session: Option<Session>,
+    /// Windows whose model frame changed during the drag, to re-derive.
+    pub(crate) changed: Vec<WindowId>,
 }
 
 /// What an animated layout pass decided: the animations, and the writes in their place.
@@ -465,9 +467,13 @@ impl RiftState {
         let mut ungripped = None;
         for effect in effects {
             match *effect {
-                Effect::Ungrip { window, why: _ } => {
+                Effect::Ungrip { window, ref changed, .. } => {
                     let session = self.windows.project_ungrip(window);
-                    ungripped = Some(Ungripped { window, session });
+                    ungripped = Some(Ungripped {
+                        window,
+                        session,
+                        changed: changed.clone(),
+                    });
                 }
                 Effect::Grip { window } => self.windows.project_grip(window),
                 Effect::DragBegan { window } => self.windows.project_drag(

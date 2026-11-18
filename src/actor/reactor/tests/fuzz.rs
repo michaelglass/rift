@@ -816,9 +816,11 @@ impl Sim {
                     .iter()
                     .any(|effect| matches!(effect, rift_core::Effect::Ungrip { .. })) =>
                 {
-                    self.distrusted.extend(effects.iter().filter_map(|effect| match effect {
-                        rift_core::Effect::Ungrip { window, .. } => Some(*window),
-                        _ => None,
+                    self.distrusted.extend(effects.iter().flat_map(|effect| match effect {
+                        rift_core::Effect::Ungrip { window, changed, .. } => {
+                            std::iter::once(*window).chain(changed.iter().copied()).collect()
+                        }
+                        _ => vec![],
                     }))
                 }
                 _ => {}
