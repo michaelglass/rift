@@ -1,47 +1,49 @@
-//! Rift's core written in Roc, behind `rift_core::Core`.
+//! Rift's core written in Roc, stepped like `rift_core::RustCore`.
 //!
 //! The Roc app (`roc/core`) is linked in as a static archive built by `build.rs`. This crate is
-//! its host: it supplies Roc's allocator and crash hooks, and [`RocCore`] adapts the generated
-//! glue (`roc_platform_abi.rs`, regenerated with `roc/glue.sh` on every nightly bump) to the
-//! core's public types. The glue ABI never leaves this crate: events go in as `rift_core` plain
-//! data and effects come out as `rift_core` plain data, copied out of Roc memory and released
-//! at once, so the platform never holds a Roc allocation.
+//! its host: it supplies Roc's allocator and crash hooks, and [`RocCore`] steps it. Events go in
+//! and effects come out as words (`rift_core::plain::wire`), so the glue
+//! (`roc_platform_abi.rs`, regenerated with `roc/glue.sh` on every nightly bump) is three
+//! functions on word lists whatever the core grows. The effect words are copied out of Roc
+//! memory and released at once, so the platform never holds a Roc allocation.
+//!
+//! Empty without the `roc` feature, so rift's workspace builds without the Roc nightly.
+#![cfg(feature = "roc")]
 
 #[allow(clippy::all, non_camel_case_types, unused, unsafe_op_in_unsafe_fn)]
 #[path = "roc_platform_abi.rs"]
 mod abi;
 
+#[cfg(feature = "count-allocations")]
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
-
-use rift_core::plain::{Nanos, Plain, Rect, RequestId, WindowId};
-use rift_core::{
-    Answer, Core, Effect, Event, Initiative, InputClass, Note, Observation, Pointer, Want, Write,
-};
 
 // ---------------------------------------------------------------------------------------------
 // Roc's runtime hooks. Roc runs on one thread (the caller's), so the counters are thread-local.
+use libmimalloc_sys::{mi_free as free, mi_malloc as malloc, mi_realloc as realloc};
+use rift_core::layout::bsp::Bsp;
+use rift_core::layout::traditional::Traditional;
+use rift_core::plain::wire::WireError;
+use rift_core::plain::{Plain, Rect, WindowId, wire};
+use rift_core::{Effect, Event};
 
-unsafe extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-    fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
-    fn free(ptr: *mut c_void);
-}
-
+#[cfg(feature = "count-allocations")]
 thread_local! {
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
     static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Allocations Roc made and freed on this thread so far.
+/// Allocations Roc made and freed on this thread so far (with `count-allocations`, which the
+/// tests turn on).
+#[cfg(feature = "count-allocations")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocationCount {
     pub allocated: u64,
     pub freed: u64,
 }
 
+#[cfg(feature = "count-allocations")]
 impl AllocationCount {
     pub fn now() -> Self {
         AllocationCount {
@@ -58,10 +60,11 @@ fn out_of_memory() -> ! {
     std::process::abort()
 }
 
-// macOS malloc aligns to 16 bytes, Roc's largest alignment on arm64.
+// mimalloc aligns to 16 bytes (MI_MAX_ALIGN_SIZE), Roc's largest alignment on arm64.
 #[unsafe(no_mangle)]
 pub extern "C" fn roc_alloc(length: usize, alignment: usize) -> NonNull<c_void> {
     debug_assert!(alignment <= 16);
+    #[cfg(feature = "count-allocations")]
     ALLOCATIONS.with(|count| count.set(count.get() + 1));
     NonNull::new(unsafe { malloc(length) }).unwrap_or_else(|| out_of_memory())
 }
@@ -78,6 +81,7 @@ pub extern "C" fn roc_realloc(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn roc_dealloc(ptr: *mut c_void, _alignment: usize) {
+    #[cfg(feature = "count-allocations")]
     DEALLOCATIONS.with(|count| count.set(count.get() + 1));
     unsafe { free(ptr) }
 }
@@ -144,291 +148,60 @@ fn host() -> abi::RocHost {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Plain data to the glue's types and back.
-
-fn window_in(window: WindowId) -> abi::EventWantWindow {
-    abi::EventWantWindow {
-        idx: window.idx,
-        pid: window.pid,
-    }
-}
-
-fn window_out(window: abi::EffectWriteWindow) -> WindowId {
-    WindowId {
-        pid: window.pid,
-        idx: window.idx,
-    }
-}
-
-fn rect_in(rect: Rect) -> abi::EventWantDesired {
-    abi::EventWantDesired {
-        h: rect.h,
-        w: rect.w,
-        x: rect.x,
-        y: rect.y,
-    }
-}
-
-fn rect_out(rect: abi::EffectWriteFrame) -> Rect {
-    Rect {
-        x: rect.x,
-        y: rect.y,
-        w: rect.w,
-        h: rect.h,
-    }
-}
-
-fn seen_in(seen: Option<RequestId>) -> abi::SeenOrUnnamed {
-    let mut out: abi::SeenOrUnnamed = unsafe { std::mem::zeroed() };
-    out.tag = match seen {
-        Some(request) => {
-            out.payload.seen = ManuallyDrop::new(request.0);
-            abi::SeenOrUnnamedTag::Seen
-        }
-        None => abi::SeenOrUnnamedTag::Unnamed,
-    };
-    out
-}
-
-/// The Roc core's platform predates the mode table's `Arranging` and `Hover` input classes and
-/// the `FollowActivation` initiative (the Roc port is paused). On the pointer's row each has
-/// exactly `UserInput(Steering)`'s rule, so it is asked as that; `step` puts the original
-/// initiative back on the answer.
-fn initiative_in(initiative: Initiative) -> abi::EventGate {
-    use abi::ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocusTag as Tag;
-    let mut gate: abi::EventGate = unsafe { std::mem::zeroed() };
-    gate.tag = match initiative {
-        Initiative::UserInput(class) => {
-            gate.payload.user_input = ManuallyDrop::new(match class {
-                InputClass::Steering | InputClass::Arranging | InputClass::Hover => {
-                    abi::InertOrSteering::Steering
-                }
-                InputClass::Inert => abi::InertOrSteering::Inert,
-            });
-            Tag::UserInput
-        }
-        Initiative::FollowActivation => {
-            gate.payload.user_input = ManuallyDrop::new(abi::InertOrSteering::Steering);
-            Tag::UserInput
-        }
-        Initiative::Arrange => Tag::Arrange,
-        Initiative::RetireWindows => Tag::RetireWindows,
-        Initiative::SwitchWorkspaceFocus => Tag::SwitchWorkspaceFocus,
-        Initiative::WarpFocus => Tag::WarpFocus,
-    };
-    gate
-}
-
-fn initiative_out(gate: &abi::EventGate) -> Initiative {
-    use abi::ArrangeOrRetireWindowsOrSwitchWorkspaceFocusOrUserInputOrWarpFocusTag as Tag;
-    match gate.tag {
-        Tag::UserInput => {
-            Initiative::UserInput(match *unsafe { &gate.payload.user_input }.clone() {
-                abi::InertOrSteering::Steering => InputClass::Steering,
-                abi::InertOrSteering::Inert => InputClass::Inert,
-            })
-        }
-        Tag::Arrange => Initiative::Arrange,
-        Tag::RetireWindows => Initiative::RetireWindows,
-        Tag::SwitchWorkspaceFocus => Initiative::SwitchWorkspaceFocus,
-        Tag::WarpFocus => Initiative::WarpFocus,
-    }
-}
-
-/// The event in the glue's layout. A `Tick`'s list is allocated with Roc's allocator; Roc owns
-/// it once the event is passed in.
-fn event_in(event: Event<Plain>, host: &abi::RocHost) -> abi::Event {
-    use abi::EventTag as Tag;
-    let mut out: abi::Event = unsafe { std::mem::zeroed() };
-    out.tag = match event {
-        Event::Pointer(pointer) => {
-            use abi::DraggingOrIdleOrPressingTag as P;
-            let mut slot: abi::EventPointer = unsafe { std::mem::zeroed() };
-            slot.tag = match pointer {
-                Pointer::Idle => P::Idle,
-                Pointer::Pressing(window) => {
-                    slot.payload.pressing = ManuallyDrop::new(window_in(window));
-                    P::Pressing
-                }
-                Pointer::Dragging(window) => {
-                    slot.payload.dragging = ManuallyDrop::new(window_in(window));
-                    P::Dragging
-                }
-            };
-            out.payload.pointer = ManuallyDrop::new(slot);
-            Tag::Pointer
-        }
-        Event::Want {
-            now,
-            request,
-            window,
-            desired,
-            known,
-            want,
-        } => {
-            out.payload.want = ManuallyDrop::new(abi::EventWant {
-                desired: rect_in(desired),
-                known: rect_in(known),
-                now: now.0,
-                request: request.0,
-                window: window_in(window),
-                want: match want {
-                    Want::Arrange => abi::ArrangeOrArrangePositionsOrPlace::Arrange,
-                    Want::ArrangePositions => {
-                        abi::ArrangeOrArrangePositionsOrPlace::ArrangePositions
-                    }
-                    Want::Place => abi::ArrangeOrArrangePositionsOrPlace::Place,
-                },
-            });
-            Tag::Want
-        }
-        Event::Follow { request, window, frame } => {
-            out.payload.follow = ManuallyDrop::new(abi::EventFollow {
-                frame: rect_in(frame),
-                request: request.0,
-                window: window_in(window),
-            });
-            Tag::Follow
-        }
-        Event::Answer {
-            now,
-            request,
-            seen,
-            window,
-            frame,
-        } => {
-            out.payload.answer = ManuallyDrop::new(abi::EventAnswer {
-                frame: rect_in(frame),
-                now: now.0,
-                request: request.0,
-                seen: seen_in(seen),
-                window: window_in(window),
-            });
-            Tag::Answer
-        }
-        Event::Report { window, frame, known } => {
-            out.payload.report = ManuallyDrop::new(abi::EventReport {
-                frame: rect_in(frame),
-                known: rect_in(known),
-                window: window_in(window),
-            });
-            Tag::Report
-        }
-        Event::Tick { now, request, known } => {
-            let known: Vec<abi::EventTickKnown> = known
-                .into_iter()
-                .map(|(window, frame)| abi::EventTickKnown {
-                    frame: rect_in(frame),
-                    window: window_in(window),
-                })
-                .collect();
-            let known = unsafe { abi::RocListWith::<_, false>::from_slice(&known, host) };
-            out.payload.tick = ManuallyDrop::new(abi::EventTick {
-                now: now.0,
-                request: request.0,
-                known,
-            });
-            Tag::Tick
-        }
-        Event::Forget { window } => {
-            out.payload.forget = ManuallyDrop::new(window_in(window));
-            Tag::Forget
-        }
-        Event::Gate { initiative } => {
-            out.payload.gate = ManuallyDrop::new(initiative_in(initiative));
-            Tag::Gate
-        }
-    };
-    out
-}
-
-fn effect_out(effect: &abi::Effect) -> Effect<Plain> {
-    use abi::EffectTag as Tag;
-    // SAFETY (each arm): the tag says which payload is initialised.
-    unsafe {
-        match effect.tag {
-            Tag::Write => {
-                let write = &*effect.payload.write;
-                Effect::Write(Write::from_foreign_core(
-                    window_out(write.window),
-                    rect_out(write.frame),
-                    RequestId(write.request),
-                ))
-            }
-            Tag::Queued => Effect::Queued {
-                window: window_out(*effect.payload.queued),
-            },
-            Tag::Answered => {
-                let answered = &*effect.payload.answered;
-                Effect::Answered {
-                    window: window_out(answered.window),
-                    answer: match answered.answer {
-                        abi::AckedOrRefusedOrUnasked::Acked => Answer::Acked,
-                        abi::AckedOrRefusedOrUnasked::Refused => Answer::Refused,
-                        abi::AckedOrRefusedOrUnasked::Unasked => Answer::Unasked,
-                    },
-                }
-            }
-            Tag::Stale => Effect::Stale {
-                window: window_out(*effect.payload.stale),
-            },
-            Tag::Late => Effect::Late {
-                window: window_out(*effect.payload.late),
-            },
-            Tag::Observed => {
-                let observed = &*effect.payload.observed;
-                Effect::Observed {
-                    window: window_out(observed.window),
-                    observation: match observed.observation {
-                        abi::AckOrForeignOrInTransit::Ack => Observation::Ack,
-                        abi::AckOrForeignOrInTransit::InTransit => Observation::InTransit,
-                        abi::AckOrForeignOrInTransit::Foreign => Observation::Foreign,
-                    },
-                }
-            }
-            Tag::Note => {
-                let note = &*effect.payload.note;
-                Effect::Note {
-                    window: window_out(note.window),
-                    note: match note.note {
-                        abi::DiscardedOrForgottenOrTimedOut::Discarded => Note::Discarded,
-                        abi::DiscardedOrForgottenOrTimedOut::TimedOut => Note::TimedOut,
-                        abi::DiscardedOrForgottenOrTimedOut::Forgotten => Note::Forgotten,
-                    },
-                }
-            }
-            Tag::Gate => {
-                let gate = &*effect.payload.gate;
-                Effect::Gate {
-                    initiative: initiative_out(&gate.initiative),
-                    allowed: gate.allowed,
-                }
-            }
-            Tag::Timer => {
-                let timer = &*effect.payload.timer;
-                Effect::Timer(match timer.tag {
-                    abi::ArmOrDisarmTag::Arm => Some(Nanos(*timer.payload.arm)),
-                    abi::ArmOrDisarmTag::Disarm => None,
-                })
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
+// The core.
 
 /// The Roc core. Holds the model's box, which only Roc can read or free; it is moved through
-/// every step and never shared, so Roc can update it in place.
+/// every step and never shared, so Roc can update it in place. The boundary's word buffers are
+/// the host's and kept across steps: the event list Roc reads, the event's encoding and the
+/// effects' copy are allocated once and grow as needed, never per step.
 pub struct RocCore {
     model: abi::RocBox,
     host: abi::RocHost,
+    input: Input,
+    words: Vec<u64>,
+    effects: Vec<u64>,
 }
 
-// SAFETY: the model's box is owned by this `RocCore` alone: Roc keeps no reference to it
-// between steps and nothing else holds one, so moving the core to another thread (rift builds
-// its reactor on one thread and runs it on another) moves the only owner. Roc's refcounts are
-// not atomic, so the core is not `Sync`: one thread steps it at a time, which `&mut self` on
-// `step` already requires.
+/// The event list handed to Roc, reused across steps. The host keeps its own reference, so
+/// when Roc releases the list after a step it is still the host's, never freed or written in
+/// place by Roc.
+struct Input {
+    list: abi::RocListWith<u64, false>,
+    /// Elements the list's allocation holds (0: no allocation yet).
+    capacity: usize,
+}
+
+impl Input {
+    /// The list, holding `event`, with a reference for Roc to release.
+    fn holding(&mut self, event: &[u64], host: &abi::RocHost) -> abi::RocListWith<u64, false> {
+        if event.len() > self.capacity {
+            self.release(host);
+            let capacity = event.len().max(64);
+            self.list = unsafe { abi::RocListWith::allocate(capacity, host) };
+            self.capacity = capacity;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(event.as_ptr(), self.list.elements, event.len());
+        }
+        self.list.length = event.len();
+        unsafe { self.list.incref(1) };
+        self.list
+    }
+
+    fn release(&mut self, host: &abi::RocHost) {
+        if self.capacity > 0 {
+            unsafe { self.list.decref(host) };
+            self.list = abi::RocListWith::empty();
+            self.capacity = 0;
+        }
+    }
+}
+
+// SAFETY: the model's box and the input list are owned by this `RocCore` alone: Roc keeps no
+// reference to them between steps and nothing else holds one, so moving the core to another
+// thread (rift builds its reactor on one thread and runs it on another) moves the only owner.
+// Roc's refcounts are not atomic, so the core is not `Sync`: one thread steps it at a time,
+// which `&mut self` on `step` already requires.
 unsafe impl Send for RocCore {}
 
 impl Default for RocCore {
@@ -436,37 +209,88 @@ impl Default for RocCore {
         RocCore {
             model: unsafe { abi::roc_init() },
             host: host(),
+            input: Input {
+                list: abi::RocListWith::empty(),
+                capacity: 0,
+            },
+            words: Vec::new(),
+            effects: Vec::new(),
         }
     }
 }
 
-impl Core<Plain> for RocCore {
-    fn step(&mut self, event: Event<Plain>) -> Vec<Effect<Plain>> {
-        let asked = match &event {
-            Event::Gate { initiative } => Some(*initiative),
-            _ => None,
-        };
-        let event = event_in(event, &self.host);
-        let stepped = unsafe { abi::roc_step(self.model, event) };
+/// Why the Roc core gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RocError {
+    /// The Roc core rejected the words it was handed: they were not an event (or a shape).
+    Rejected,
+    /// The Roc core answered with words this side cannot read.
+    Unreadable(WireError),
+}
+
+/// The words after Roc's verdict word: 0 and an answer, or 1, a rejection.
+fn answer(words: &[u64]) -> Result<&[u64], RocError> {
+    match words.split_first() {
+        Some((0, answer)) => Ok(answer),
+        Some((1, [])) => Err(RocError::Rejected),
+        Some((&word, _)) => Err(RocError::Unreadable(WireError::Unknown { at: 0, word })),
+        None => Err(RocError::Unreadable(WireError::Truncated)),
+    }
+}
+
+impl RocCore {
+    /// One step on words: an event's words in, the effect list's words out (valid until the
+    /// next step), or why there are none.
+    pub fn step_words(&mut self, event: &[u64]) -> Result<&[u64], RocError> {
+        let list = self.input.holding(event, &self.host);
+        let stepped = unsafe { abi::roc_step(self.model, list) };
         self.model = stepped.model;
-        let effects = stepped
-            .effects
-            .as_slice()
-            .iter()
-            .map(effect_out)
-            .map(|effect| match (effect, asked) {
-                (Effect::Gate { allowed, .. }, Some(initiative)) => {
-                    Effect::Gate { initiative, allowed }
-                }
-                (effect, _) => effect,
-            })
-            .collect();
-        // The effects hold nothing refcounted: releasing the list frees its spine.
+        self.effects.clear();
+        self.effects.extend_from_slice(stepped.effects.as_slice());
         unsafe { stepped.effects.decref(&self.host) };
+        answer(&self.effects)
+    }
+
+    /// One step, as `RustCore::step`.
+    pub fn step(&mut self, event: Event<Plain>) -> Result<Vec<Effect<Plain>>, RocError> {
+        let mut words = std::mem::take(&mut self.words);
+        wire::encode_event_into(&mut words, event);
+        let effects = self
+            .step_words(&words)
+            .and_then(|words| wire::decode_effects(words).map_err(RocError::Unreadable));
+        self.words = words;
         effects
     }
 }
 
+/// Layout geometry on words: a shape's words (its layout system's tag first) in, its frames'
+/// words out, or why there are none. Pure: no model.
+pub fn tile_words(shape: &[u64]) -> Result<Vec<u64>, RocError> {
+    let host = host();
+    // Roc takes ownership of the shape's list and releases it.
+    let shape = unsafe { abi::RocListWith::from_slice(shape, &host) };
+    let frames = unsafe { abi::roc_tile(shape) };
+    let words = answer(frames.as_slice()).map(<[u64]>::to_vec);
+    unsafe { frames.decref(&host) };
+    words
+}
+
+/// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core.
+pub fn tile_bsp(shape: Bsp<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
+    let words = tile_words(&wire::encode_bsp(shape))?;
+    wire::decode_frames(&words).map_err(RocError::Unreadable)
+}
+
+/// A traditional layout's frames, as `Traditional::frames` computes them, computed by the Roc
+/// core.
+pub fn tile_traditional(shape: Traditional<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
+    let words = tile_words(&wire::encode_traditional(shape))?;
+    wire::decode_frames(&words).map_err(RocError::Unreadable)
+}
+
 impl Drop for RocCore {
-    fn drop(&mut self) { unsafe { abi::roc_release_model(self.model) } }
+    fn drop(&mut self) {
+        self.input.release(&self.host);
+        unsafe { abi::roc_release_model(self.model) }
+    }
 }

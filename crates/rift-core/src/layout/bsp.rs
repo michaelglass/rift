@@ -59,6 +59,45 @@ pub enum Fill {
     WithinGaps,
 }
 
+impl<W> Bsp<W> {
+    /// The same shape on other window ids (another platform's types).
+    pub fn map<V>(self, window: &impl Fn(W) -> V) -> Bsp<V> {
+        Bsp {
+            screen: self.screen,
+            gaps: self.gaps,
+            root: self.root.map(window),
+            aspect: self.aspect,
+        }
+    }
+}
+
+impl<W> Node<W> {
+    fn map<V>(self, window: &impl Fn(W) -> V) -> Node<V> {
+        let child = |node: Box<Node<W>>| Box::new(node.map(window));
+        match self {
+            Node::Split { horizontal, ratio, children } => Node::Split {
+                horizontal,
+                ratio,
+                children: match children {
+                    Children::One(only) => Children::One(child(only)),
+                    Children::Two(first, second) => Children::Two(child(first), child(second)),
+                },
+            },
+            Node::Leaf { slot, fill, stacked } => Node::Leaf {
+                slot: match slot {
+                    Slot::Empty => Slot::Empty,
+                    Slot::Window { window: id, constraints } => Slot::Window {
+                        window: window(id),
+                        constraints,
+                    },
+                },
+                fill,
+                stacked,
+            },
+        }
+    }
+}
+
 impl<W: Copy> Bsp<W> {
     /// Each window's frame, in tree order.
     pub fn frames(&self) -> Vec<(W, Rect)> {

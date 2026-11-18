@@ -107,7 +107,126 @@ impl Clock {
 }
 
 /// The core the reactor steps.
+#[cfg(not(feature = "roc-core"))]
 type Engine = rift_core::RustCore<Rift>;
+#[cfg(feature = "roc-core")]
+type Engine = Shadowed;
+
+/// Rift's types as plain data and back (the Roc core's, and a recorded trace's): times are
+/// nanoseconds since `epoch`.
+#[cfg(any(test, feature = "roc-core"))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Plainly {
+    pub(crate) epoch: Instant,
+}
+
+#[cfg(any(test, feature = "roc-core"))]
+impl rift_core::plain::Translate<Rift, rift_core::plain::Plain> for Plainly {
+    fn window(&self, window: WindowId) -> rift_core::plain::WindowId {
+        rift_core::plain::WindowId {
+            pid: window.pid,
+            idx: window.idx.get(),
+        }
+    }
+
+    fn frame(&self, frame: CGRect) -> rift_core::plain::Rect {
+        rift_core::plain::Rect {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            w: frame.size.width,
+            h: frame.size.height,
+        }
+    }
+
+    fn time(&self, time: Instant) -> rift_core::plain::Nanos {
+        rift_core::plain::Nanos(time.saturating_duration_since(self.epoch).as_nanos() as u64)
+    }
+
+    fn request(&self, request: TransactionId) -> rift_core::plain::RequestId {
+        rift_core::plain::RequestId(request.number())
+    }
+}
+
+#[cfg(feature = "roc-core")]
+impl rift_core::plain::Translate<rift_core::plain::Plain, Rift> for Plainly {
+    fn window(&self, window: rift_core::plain::WindowId) -> WindowId {
+        let idx = std::num::NonZeroU32::new(window.idx).expect("the core names only real windows");
+        WindowId { pid: window.pid, idx }
+    }
+
+    fn frame(&self, frame: rift_core::plain::Rect) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        CGRect::new(CGPoint::new(frame.x, frame.y), CGSize::new(frame.w, frame.h))
+    }
+
+    fn time(&self, time: rift_core::plain::Nanos) -> Instant {
+        self.epoch + Duration::from_nanos(time.0)
+    }
+
+    fn request(&self, request: rift_core::plain::RequestId) -> TransactionId {
+        TransactionId::from_number(request.0)
+    }
+}
+
+/// The Roc core deciding, with the Rust core stepped beside it on the same events: every step,
+/// the two must decide the same effects, or Rift stops (a disagreement is a bug in one of them,
+/// and acting on either would hide it).
+#[cfg(feature = "roc-core")]
+pub(crate) struct Shadowed {
+    roc: rift_core_roc::RocCore,
+    rust: rift_core::RustCore<Rift>,
+    plain: Plainly,
+}
+
+#[cfg(feature = "roc-core")]
+impl Default for Shadowed {
+    fn default() -> Self {
+        // Before any time the reactor will hand the core (a test clock starts at `now`).
+        let now = Instant::now();
+        let epoch = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
+        Shadowed {
+            roc: rift_core_roc::RocCore::default(),
+            rust: rift_core::RustCore::default(),
+            plain: Plainly { epoch },
+        }
+    }
+}
+
+#[cfg(feature = "roc-core")]
+impl std::fmt::Debug for Shadowed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shadowed").field("rust", &self.rust).finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "roc-core")]
+impl Shadowed {
+    fn step(&mut self, event: Event) -> Vec<Effect> {
+        // The Roc core rejecting an event rift encoded, or answering in words rift cannot read,
+        // is a bug in one of the two codecs: rift stops and says which.
+        let decided: Vec<Effect> = match self.roc.step(event.clone().translate(&self.plain)) {
+            Ok(effects) => {
+                effects.into_iter().map(|effect| effect.translate(&self.plain)).collect()
+            }
+            Err(error) => panic!("the Roc core gave no answer ({error:?}) to {event:?}"),
+        };
+        let shadow = self.rust.step(event.clone());
+        assert_eq!(
+            decided, shadow,
+            "the Roc core and its Rust shadow disagree on {event:?}"
+        );
+        decided
+    }
+
+    /// The shadow's pointer: the Roc core's, which decides the same effects.
+    fn pointer(&self) -> rift_core::Pointer<WindowId> { self.rust.pointer() }
+
+    #[cfg(test)]
+    fn reconciler(&self) -> &rift_core::Reconciler<Rift> { self.rust.reconciler() }
+
+    #[cfg(test)]
+    fn seen(&self, window: WindowId) -> Option<CGRect> { self.rust.seen(window) }
+}
 
 /// One step through the core, as the reactor took it: what went in and what came out.
 #[cfg(test)]

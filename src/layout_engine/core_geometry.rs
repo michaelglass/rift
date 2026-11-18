@@ -52,18 +52,59 @@ pub(crate) fn core_stack_line(line: crate::common::config::StackLineReserve) -> 
 pub(crate) fn tile_traditional(
     shape: &traditional::Traditional<WindowId>,
 ) -> Vec<(WindowId, CGRect)> {
-    shape
-        .frames()
-        .into_iter()
-        .map(|(window, frame)| (window, cg_rect(frame)))
-        .collect()
+    let frames = shape.frames();
+    #[cfg(feature = "roc-core")]
+    let frames = shadowed(
+        shape,
+        frames,
+        rift_core_roc::tile_traditional(shape.clone().map(&to_plain)).unwrap_or_else(|error| {
+            panic!("the Roc core gave no frames ({error:?}) for {shape:?}")
+        }),
+    );
+    frames.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
 }
 
 /// A BSP layout's frames, as the core computes them.
 pub(crate) fn tile_bsp(shape: &bsp::Bsp<WindowId>) -> Vec<(WindowId, CGRect)> {
-    shape
-        .frames()
+    let frames = shape.frames();
+    #[cfg(feature = "roc-core")]
+    let frames = shadowed(
+        shape,
+        frames,
+        rift_core_roc::tile_bsp(shape.clone().map(&to_plain)).unwrap_or_else(|error| {
+            panic!("the Roc core gave no frames ({error:?}) for {shape:?}")
+        }),
+    );
+    frames.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
+}
+
+#[cfg(feature = "roc-core")]
+fn to_plain(window: WindowId) -> rift_core::plain::WindowId {
+    rift_core::plain::WindowId {
+        pid: window.pid,
+        idx: window.idx.get(),
+    }
+}
+
+/// The Roc core's frames for `shape` (`roc`, on plain window ids), which must be the Rust
+/// core's (`shadow`): a difference is a bug in one of them, so Rift stops.
+#[cfg(feature = "roc-core")]
+fn shadowed(
+    shape: &impl std::fmt::Debug,
+    shadow: Vec<(WindowId, Rect)>,
+    roc: Vec<(rift_core::plain::WindowId, Rect)>,
+) -> Vec<(WindowId, Rect)> {
+    let frames: Vec<(WindowId, Rect)> = roc
         .into_iter()
-        .map(|(window, frame)| (window, cg_rect(frame)))
-        .collect()
+        .map(|(window, frame)| {
+            let idx =
+                std::num::NonZeroU32::new(window.idx).expect("the core names only real windows");
+            (WindowId { pid: window.pid, idx }, frame)
+        })
+        .collect();
+    assert_eq!(
+        frames, shadow,
+        "the Roc core and its Rust shadow tile {shape:?} differently"
+    );
+    frames
 }

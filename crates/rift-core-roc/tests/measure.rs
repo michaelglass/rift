@@ -1,15 +1,16 @@
 //! Rough measurements of the Roc core against the Rust core. Run in release, explicitly:
-//! `cargo test --release --test measure -- --ignored --nocapture`.
+//! `cargo test --release --features roc --test measure -- --ignored --nocapture`.
 //!
-//! Latency is per `step`, adapter included (the Roc side converts the event into the glue's
-//! layout and copies the effects out). The scaling run grows the number of windows the model
-//! tracks: if Roc lost the model's uniqueness it would copy the whole model on every step and
-//! the per-step time would grow with the window count.
+//! Latency is per step. For Roc it is shown twice: on words (what crosses the boundary: the Roc
+//! app parses the event and writes the effects) and as `RocCore::step` (the Rust side's wire
+//! encode and decode added). The scaling run grows the number of windows the model tracks: if
+//! Roc lost the model's uniqueness it would copy the whole model every step, and the per-step
+//! time would grow with the window count.
 
 use std::time::{Duration, Instant};
 
-use rift_core::plain::{Nanos, Plain, Rect, RequestId, WindowId};
-use rift_core::{Core, Effect, Event, Initiative, InputClass, Pointer, RustCore, Want};
+use rift_core::plain::{Nanos, Plain, Rect, RequestId, WindowId, wire};
+use rift_core::{Button, Desire, Event, Release, RustCore, Want};
 use rift_core_roc::{AllocationCount, RocCore};
 
 struct Stats {
@@ -33,125 +34,164 @@ fn stats(mut samples: Vec<Duration>) -> Stats {
 
 fn show(label: &str, s: &Stats) {
     eprintln!(
-        "  {label:<5} mean {:>7.0?}  p50 {:>7.0?}  p99 {:>7.0?}  max {:>8.0?}",
+        "  {label:<9} mean {:>7.0?}  p50 {:>7.0?}  p99 {:>7.0?}  max {:>8.0?}",
         s.mean, s.p50, s.p99, s.max
     );
 }
 
-fn timed(core: &mut impl Core<Plain>, events: &[Event<Plain>]) -> Vec<Duration> {
-    events
+fn time<T>(items: &[T], mut step: impl FnMut(&T)) -> Vec<Duration> {
+    items
         .iter()
-        .map(|event| {
-            let event = event.clone();
+        .map(|item| {
             let start = Instant::now();
-            let effects = core.step(event);
-            let took = start.elapsed();
-            std::hint::black_box(effects);
-            took
+            step(item);
+            start.elapsed()
         })
         .collect()
 }
 
+/// Every side over the same sessions, each session on a fresh core (its clock starts at 0).
+fn compare(sessions: &[Vec<Event<Plain>>]) {
+    let steps: usize = sessions.iter().map(Vec::len).sum();
+    let mut rust_samples = Vec::with_capacity(steps);
+    let mut word_samples = Vec::with_capacity(steps);
+    let mut step_samples = Vec::with_capacity(steps);
+    let (mut allocated, mut live_during) = (0, 0);
+    let before = AllocationCount::now();
+    for events in sessions {
+        let mut rust = RustCore::<Plain>::default();
+        rust_samples.extend(time(events, |event| {
+            std::hint::black_box(rust.step(event.clone()));
+        }));
+        let words: Vec<Vec<u64>> =
+            events.iter().map(|event| wire::encode_event(event.clone())).collect();
+        let start = AllocationCount::now();
+        let mut roc = RocCore::default();
+        word_samples.extend(time(&words, |words| {
+            std::hint::black_box(roc.step_words(words).expect("an event"));
+        }));
+        let during = AllocationCount::now();
+        allocated += during.allocated - start.allocated;
+        live_during = live_during.max(during.live() - start.live());
+        drop(roc);
+        let mut roc = RocCore::default();
+        step_samples.extend(time(events, |event| {
+            std::hint::black_box(roc.step(event.clone()).expect("an event"));
+        }));
+    }
+    let after = AllocationCount::now();
+    show("rust", &stats(rust_samples));
+    show("roc words", &stats(word_samples));
+    show("roc step", &stats(step_samples));
+    eprintln!(
+        "  roc allocations: {:.2} per step, at most {live_during} live in a session, {} after \
+         every core was dropped",
+        allocated as f64 / steps as f64,
+        after.live() - before.live()
+    );
+}
+
 fn rect(x: f64) -> Rect { Rect { x, y: 0., w: 400., h: 300. } }
 
-/// A steady workload over `windows` windows: each round asks every window somewhere new, its
-/// app reports a step on the way and answers (half of them refusing), and the mode gate is asked; a press and release
-/// and a timer tick (with every window's known frame) come round now and then.
+/// A steady workload over `windows` windows: each round arranges every window somewhere new
+/// (one plan), each app reports a frame on the way and then answers (every other one
+/// refusing), a press and release come round now and then, and a tick ends the round after the
+/// write deadline.
 fn workload(windows: u32, steps: usize) -> Vec<Event<Plain>> {
     let ids: Vec<WindowId> =
         (1..=windows).map(|idx| WindowId { pid: 7 + (idx % 5) as i32, idx }).collect();
-    let mut events = Vec::with_capacity(steps);
+    let mut events: Vec<Event<Plain>> =
+        ids.iter().map(|&window| Event::Seen { window, frame: rect(0.) }).collect();
     let mut now = 0u64;
-    let mut round = 0u64;
+    let mut round = 0u32;
     while events.len() < steps {
         round += 1;
+        now += 1_000_000;
+        let request = RequestId(round);
+        let x = |i: usize| f64::from(round) * 10. + i as f64;
+        events.push(Event::Arrange {
+            now: Nanos(now),
+            want: Want::Arrange,
+            desires: ids
+                .iter()
+                .enumerate()
+                .map(|(i, &window)| Desire {
+                    window,
+                    frame: rect(x(i)),
+                    request,
+                })
+                .collect(),
+        });
         for (i, &window) in ids.iter().enumerate() {
-            let x = (round * 10 + i as u64) as f64;
             now += 1_000_000;
-            events.push(Event::Want {
+            events.push(Event::Observe {
                 now: Nanos(now),
-                request: RequestId(round as u32),
+                request,
                 window,
-                desired: rect(x),
-                known: rect(x - 10.),
-                want: Want::Arrange,
+                frame: rect(x(i) - 5.),
+                as_of: None,
             });
-            events.push(Event::Report {
-                window,
-                frame: rect(x - 5.),
-                known: rect(x),
-            });
-            // Every other app adjusts the frame: a refusal, which the model keeps until the
-            // next desire, so it tracks about half the windows all the time.
-            let answered = if i % 2 == 0 { rect(x + 7.) } else { rect(x) };
-            events.push(Event::Answer {
+            let answered = if i % 2 == 0 {
+                rect(x(i) + 7.)
+            } else {
+                rect(x(i))
+            };
+            events.push(Event::Observe {
                 now: Nanos(now),
-                request: RequestId(round as u32),
-                seen: Some(RequestId(round as u32)),
+                request,
                 window,
                 frame: answered,
-            });
-            events.push(Event::Gate {
-                initiative: Initiative::UserInput(InputClass::Steering),
+                as_of: Some(request),
             });
             if i % 50 == 0 {
-                events.push(Event::Pointer(Pointer::Pressing(window)));
-                events.push(Event::Pointer(Pointer::Idle));
+                events.push(Event::Press {
+                    window: Some(window),
+                    button: Button::Left,
+                });
+                events.push(Event::Release(Release::Button(Button::Left)));
             }
         }
         now += 400_000_000;
-        let known = ids.iter().map(|&window| (window, rect(0.))).collect();
-        events.push(Event::Tick {
-            now: Nanos(now),
-            request: RequestId(round as u32),
-            known,
-        });
+        events.push(Event::Tick { now: Nanos(now), request });
     }
     events.truncate(steps);
     events
 }
 
+fn traces(dir: &str) -> Vec<Vec<Event<Plain>>> {
+    let mut sessions = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let words: Vec<u64> = bytes
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            .collect();
+        sessions.push(
+            wire::decode_trace(&words)
+                .unwrap()
+                .into_iter()
+                .map(|(event, _)| event)
+                .collect(),
+        );
+    }
+    sessions
+}
+
 #[test]
 #[ignore]
 fn measure() {
-    let dir = std::env::var("RIFT_TRACE_DIR").ok();
-    if let Some(dir) = dir {
-        let mut events = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let trace: Vec<(Event<Plain>, Vec<Effect<Plain>>)> =
-                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
-            events.extend(trace.into_iter().map(|(event, _)| event));
-        }
-        // One long-lived core per side over the whole corpus, as in a long rift session.
-        eprintln!("fuzzer corpus: {} steps", events.len());
-        show("rust", &stats(timed(&mut RustCore::<Plain>::default(), &events)));
-        let before = AllocationCount::now();
-        show("roc", &stats(timed(&mut RocCore::default(), &events)));
-        let after = AllocationCount::now();
-        eprintln!(
-            "  roc allocations: {:.2} per step, live after drop {}",
-            (after.allocated - before.allocated) as f64 / events.len() as f64,
-            after.live() - before.live()
-        );
+    if let Ok(dir) = std::env::var("RIFT_TRACE_DIR") {
+        // A fresh core per seed: each seed's clock starts at 0, and a core carried across seeds
+        // would see time run backwards (a write's deadline then never comes).
+        let sessions = traces(&dir);
+        let steps: usize = sessions.iter().map(Vec::len).sum();
+        eprintln!("fuzzer corpus: {} seeds, {steps} steps", sessions.len());
+        compare(&sessions);
     }
-
     for windows in [10, 100, 500, 2000] {
         let events = workload(windows, 400_000);
         eprintln!("synthetic, {windows} windows, {} steps:", events.len());
-        show("rust", &stats(timed(&mut RustCore::<Plain>::default(), &events)));
-        let before = AllocationCount::now();
-        let mut roc = RocCore::default();
-        let samples = timed(&mut roc, &events);
-        let during = AllocationCount::now();
-        drop(roc);
-        let after = AllocationCount::now();
-        show("roc", &stats(samples));
-        eprintln!(
-            "  roc allocations: {:.2} per step, live before drop {}, after drop {}",
-            (during.allocated - before.allocated) as f64 / events.len() as f64,
-            during.live() - before.live(),
-            after.live() - before.live()
-        );
+        compare(&[events]);
     }
 }
 
@@ -164,7 +204,7 @@ fn a_million_steps_leave_nothing_behind() {
     let mut live = Vec::new();
     for chunk in events.chunks(100_000) {
         for event in chunk {
-            std::hint::black_box(roc.step(event.clone()));
+            std::hint::black_box(roc.step(event.clone()).expect("an event"));
         }
         live.push(AllocationCount::now().live() - before.live());
     }
