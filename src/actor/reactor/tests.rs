@@ -12559,18 +12559,23 @@ fn a_window_moving_with_no_press_on_it_is_never_a_drag() {
 }
 
 #[test]
-fn a_click_holds_the_windows_transfer_only_until_release() {
+fn a_click_discards_the_windows_transfer_and_the_release_re_derives_it() {
     // A press names the window before anything moves, so nothing can transfer it meanwhile.
-    // Releasing without a drag puts things back as they were, a waiting transfer included.
+    // The press discards the transfer rather than setting it aside; the release asks again
+    // where the window is and where it belongs, and requests the transfer that is still owed.
+    // (Before R5 the release put the stored transfer back unchanged.)
     let (_apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
-    let waiting = reactor.state.windows.unheld(wid).unwrap().request_transfer(
+    let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+    let elsewhere = reactor.test_workspace(SpaceId::new(2), 0);
+    assert!(reactor.assign_test_window_to_workspace(SpaceId::new(2), wid, elsewhere));
+    reactor.space_state.membership_complete = true;
+    reactor.space_state.active_window_spaces.insert(wsid, SpaceId::new(1));
+    reactor.state.windows.unheld(wid).unwrap().request_transfer(
         Some(frame),
         SpaceId::new(2),
         false,
     );
-    assert!(!waiting);
-    let before = reactor.state.windows.record(wid).unwrap().pending_transfer();
-    assert!(before.is_some());
+    let before = reactor.state.windows.record(wid).unwrap().pending_transfer().unwrap();
 
     reactor.handle_event(Event::PointerPressed { point: frame.mid() });
     assert!(
@@ -12581,11 +12586,23 @@ fn a_click_holds_the_windows_transfer_only_until_release() {
 
     reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
     assert_eq!(reactor.state.windows.gripped(), None);
-    assert!(reactor.state.windows.unheld(wid).is_some());
-    assert_eq!(
-        reactor.state.windows.record(wid).unwrap().pending_transfer(),
-        before
+    let after = reactor.state.windows.record(wid).unwrap().pending_transfer().unwrap();
+    assert_eq!(after.requested_space, SpaceId::new(2));
+    assert!(after.generation > before.generation, "re-derived, not restored");
+
+    // A window already where it belongs owes nothing: the release requests no transfer.
+    let (_apps, mut reactor, wid, frame) = tiled_window_beside_a_second_display();
+    let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+    reactor.space_state.membership_complete = true;
+    reactor.space_state.active_window_spaces.insert(wsid, SpaceId::new(1));
+    reactor.state.windows.unheld(wid).unwrap().request_transfer(
+        Some(frame),
+        SpaceId::new(2),
+        false,
     );
+    reactor.handle_event(Event::PointerPressed { point: frame.mid() });
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert!(reactor.state.windows.record(wid).unwrap().pending_transfer().is_none());
 }
 
 #[test]

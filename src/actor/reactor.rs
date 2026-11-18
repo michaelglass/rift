@@ -4219,6 +4219,24 @@ impl Reactor {
         outcome
     }
 
+    /// The Space `window` must still be moved to: the one its workspace is on, when an accepted,
+    /// complete membership snapshot shows it on another.
+    fn owed_transfer(&self, window: WindowId) -> Option<SpaceId> {
+        if !self.space_state.membership_complete {
+            return None;
+        }
+        let assignment = self.state.windows.workspace_for_window(window)?;
+        let target =
+            self.layout_manager.layout_engine.workspaces().workspaces.get(assignment)?.space;
+        let observed = self
+            .state
+            .windows
+            .record(window)?
+            .window_server_id()
+            .and_then(|id| self.space_state.active_window_spaces.get(&id).copied())?;
+        (observed != target).then_some(target)
+    }
+
     /// Prepare physical intent from accepted geometry. An unavailable destination
     /// keeps the original frame until a later accepted topology can place it.
     fn request_window_transfer(
@@ -4457,6 +4475,7 @@ impl Reactor {
     /// The pointer let go: a press ends, a drag drops.
     fn pointer_released(&mut self, released: PointerReleased) -> anyhow::Result<EventOutcome> {
         let pointer = self.state.windows.pointer();
+        let held = self.state.windows.gripped();
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
             let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -4486,8 +4505,15 @@ impl Reactor {
         // What the hand held back is re-derived from what is true now, not replayed.
         match pointer {
             Pointer::Idle => {}
-            // A press moved nothing, but layout may have wanted the pressed window elsewhere.
-            Pointer::Pressing => outcome = outcome.with_arrange_passes(1),
+            // A press moved nothing, but layout may have wanted the pressed window elsewhere,
+            // and the press discarded its transfer: whether it still owes one is read now.
+            Pointer::Pressing => {
+                outcome = outcome.with_arrange_passes(1);
+                if let Some((window, target)) = held.and_then(|w| Some((w, self.owed_transfer(w)?)))
+                {
+                    outcome.absorb(self.request_window_transfer(window, target, None));
+                }
+            }
             Pointer::Dragging => self.reconcile_all(reconciler::Lifecycle::DragEnded),
         }
         Ok(outcome)
