@@ -59,4 +59,6 @@ impl Kinds for Plain {
     }
 
     fn after(time: Nanos, duration: Duration) -> Nanos { time + duration }
+
+    fn same_size(a: Rect, b: Rect) -> bool { within(a.w, 0.1, b.w) && within(a.h, 0.1, b.h) }
 }

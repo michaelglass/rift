@@ -8,7 +8,7 @@ use crate::sys::window_server::WindowServerId;
 
 /// Names one request that changes window frames. Ids come from one counter
 /// ([`TransactionCounter`]), so no two requests share one; only equality means anything.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
 impl TransactionId {

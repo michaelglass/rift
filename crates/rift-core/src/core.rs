@@ -16,6 +16,40 @@ use crate::reconciler::{
     Answer, Note, Observation, Reconciler, Reply, Translate, Verdict, Want, Write,
 };
 
+/// One window's place in an arrange pass, and the request its write would go out under (one
+/// per batch the platform sends: an app, and whether its writes are held to scrolling bounds).
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound(
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
+    ))
+)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Desire<K: Kinds> {
+    pub window: K::Window,
+    pub frame: K::Frame,
+    pub request: K::Request,
+}
+
+/// What one batch of an arrange pass sends: the windows that only move, and those that also
+/// resize, all under `request`.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(bound(
+        serialize = "K::Window: serde::Serialize, K::Frame: serde::Serialize, K::Time: serde::Serialize, K::Request: serde::Serialize",
+        deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
+    ))
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan<K: Kinds> {
+    pub request: K::Request,
+    pub positions: Vec<Write<K>>,
+    pub frames: Vec<Write<K>>,
+}
+
 /// A fact for the core.
 #[cfg_attr(
     feature = "serde",
@@ -62,6 +96,13 @@ pub enum Event<K: Kinds> {
         desired: K::Frame,
         want: Want,
     },
+    /// Layout's pass over one space: where it wants each window, in layout order.
+    /// `ArrangePositions` sends a window that keeps its size as a move only.
+    Arrange {
+        now: K::Time,
+        want: Want,
+        desires: Vec<Desire<K>>,
+    },
     /// A modifier drag moved the dragged window's interactive frame to `frame`.
     Follow {
         request: K::Request,
@@ -97,10 +138,12 @@ pub enum Event<K: Kinds> {
         deserialize = "K::Window: serde::Deserialize<'de>, K::Frame: serde::Deserialize<'de>, K::Time: serde::Deserialize<'de>, K::Request: serde::Deserialize<'de>"
     ))
 )]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect<K: Kinds> {
     /// Send this frame to the window's app under its request.
     Write(Write<K>),
+    /// Send one batch of an arrange pass.
+    Plan(Plan<K>),
     /// A write is with the app; the desire waits behind it.
     Queued { window: K::Window },
     /// The model takes `window` to be at `frame` from now on (its projection, `frame_monotonic`
@@ -167,6 +210,18 @@ impl<K: Kinds> Event<K> {
                 desired: to.frame(desired),
                 want,
             },
+            Event::Arrange { now, want, desires } => Event::Arrange {
+                now: to.time(now),
+                want,
+                desires: desires
+                    .into_iter()
+                    .map(|desire| Desire {
+                        window: to.window(desire.window),
+                        frame: to.frame(desire.frame),
+                        request: to.request(desire.request),
+                    })
+                    .collect(),
+            },
             Event::Follow { request, window, frame } => Event::Follow {
                 request: to.request(request),
                 window: to.window(window),
@@ -210,6 +265,11 @@ impl<K: Kinds> Effect<K> {
     pub fn translate<J: Kinds>(self, to: &impl Translate<K, J>) -> Effect<J> {
         match self {
             Effect::Write(write) => Effect::Write(write.translate(to)),
+            Effect::Plan(plan) => Effect::Plan(Plan {
+                request: to.request(plan.request),
+                positions: plan.positions.into_iter().map(|w| w.translate(to)).collect(),
+                frames: plan.frames.into_iter().map(|w| w.translate(to)).collect(),
+            }),
             Effect::Queued { window } => Effect::Queued { window: to.window(window) },
             Effect::Seen { window, frame } => Effect::Seen {
                 window: to.window(window),
@@ -375,6 +435,7 @@ impl<K: Kinds> RustCore<K> {
                     Verdict::Nothing => vec![],
                 }
             }
+            Event::Arrange { now, want, desires } => self.arrange(now, want, desires),
             Event::Follow { request, window, frame } => {
                 vec![Effect::Write(
                     self.reconciler.follow(request, window, frame),
@@ -423,6 +484,57 @@ impl<K: Kinds> RustCore<K> {
                 }]
             }
         }
+    }
+
+    /// One arrange pass: each desire asked of the reconciler in layout order; the writes it
+    /// decides, gathered per request into plans (in the order their batches first wrote).
+    fn arrange(&mut self, now: K::Time, want: Want, desires: Vec<Desire<K>>) -> Vec<Effect<K>> {
+        let pointer = self.grip.pointer();
+        let mut effects = Vec::new();
+        let mut plans: Vec<Plan<K>> = Vec::new();
+        for Desire {
+            window,
+            frame: desired,
+            request,
+        } in desires
+        {
+            // A window the model does not know is not written.
+            let Some(&known) = self.seen.get(&window) else { continue };
+            let owner = pointer.owner(window);
+            match self.reconciler.want(now, request, window, desired, known, want, owner) {
+                Verdict::Send(write) => {
+                    let moves_only = match want {
+                        Want::ArrangePositions => K::same_size(known, desired),
+                        Want::Arrange | Want::Place => false,
+                    };
+                    effects.push(self.see(window, desired));
+                    let index = match plans.iter().position(|plan| plan.request == request) {
+                        Some(index) => index,
+                        None => {
+                            plans.push(Plan {
+                                request,
+                                positions: Vec::new(),
+                                frames: Vec::new(),
+                            });
+                            plans.len() - 1
+                        }
+                    };
+                    let plan = &mut plans[index];
+                    if moves_only {
+                        plan.positions.push(write)
+                    } else {
+                        plan.frames.push(write)
+                    }
+                }
+                Verdict::Queued => {
+                    effects.push(Effect::Queued { window });
+                    effects.push(self.see(window, desired));
+                }
+                Verdict::Nothing => {}
+            }
+        }
+        effects.extend(plans.into_iter().map(Effect::Plan));
+        effects
     }
 
     /// A grip on `window` ends: it left Rift's hands.

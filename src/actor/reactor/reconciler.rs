@@ -43,6 +43,8 @@ impl Kinds for Rift {
     fn is_within(a: CGRect, tolerance: f64, b: CGRect) -> bool { a.is_within(tolerance, b) }
 
     fn after(time: Instant, duration: Duration) -> Instant { time + duration }
+
+    fn same_size(a: CGRect, b: CGRect) -> bool { a.size.same_as(b.size) }
 }
 
 #[cfg(test)]
@@ -157,6 +159,9 @@ impl Reconciler {
         for effect in &effects {
             match effect {
                 Effect::Timer(at) => self.armed.set(*at),
+                Effect::Plan(plan) => {
+                    debug!(request = ?plan.request, positions = plan.positions.len(), frames = plan.frames.len(), "reconcile: plan")
+                }
                 Effect::Write(write) => {
                     debug!(window = ?write.window(), frame = ?write.frame(), "reconcile: write")
                 }
@@ -470,51 +475,41 @@ impl Reactor {
         want: Want,
     ) -> bool {
         let bounds = scrolling_bounds(self, space);
-        let mut per_app: HashMap<(pid_t, bool), Batch> = HashMap::default();
-        // One request per app batch, minted before the core decides (its writes carry it).
-        let mut requests: HashMap<(pid_t, bool), TransactionId> = HashMap::default();
-        let mut any_desire_new = false;
-
-        for &(wid, target) in frames {
-            let constrained = bounds.is_some() && self.in_scrolling_bounds(wid, space);
-            let Some(window) = self.state.windows.window(wid) else {
-                debug!(?wid, "Skipping layout - window no longer exists");
-                continue;
+        // One request per batch (an app, and whether its writes are held to the scrolling
+        // bounds), minted before the core decides: its writes carry it.
+        let mut batches: HashMap<(pid_t, bool), TransactionId> = HashMap::default();
+        let mut keys: HashMap<TransactionId, (pid_t, bool)> = HashMap::default();
+        let desires = frames
+            .iter()
+            .map(|&(window, frame)| {
+                let constrained = bounds.is_some() && self.in_scrolling_bounds(window, space);
+                let key = (window.pid, constrained);
+                let request =
+                    *batches.entry(key).or_insert_with(|| self.transaction_manager.mint());
+                keys.insert(request, key);
+                rift_core::Desire { window, frame, request }
+            })
+            .collect();
+        let (plans, any_desire_new) = self.state.arrange(want, desires);
+        for plan in plans {
+            let (pid, constrained) = keys[&plan.request];
+            let targets = plan
+                .positions
+                .iter()
+                .chain(&plan.frames)
+                .filter_map(|write| {
+                    let server_id = self.state.windows.window(write.window())?.info.sys_id?;
+                    Some((server_id, write.frame()))
+                })
+                .collect();
+            let batch = Batch {
+                request: plan.request,
+                positions: plan.positions,
+                frames: plan.frames,
+                targets,
             };
-            let (current, server_id) = (window.frame_monotonic, window.info.sys_id);
-            let key = (wid.pid, constrained);
-            let request = *requests.entry(key).or_insert_with(|| self.transaction_manager.mint());
-            let write = match self.arrange_one(wid, target, want, request) {
-                Verdict::Send(write) => write,
-                Verdict::Queued => {
-                    any_desire_new = true;
-                    continue;
-                }
-                Verdict::Nothing => continue,
-            };
-            any_desire_new = true;
-            let moves_only = match want {
-                Want::ArrangePositions => current.size.same_as(target.size),
-                Want::Arrange | Want::Place => false,
-            };
-            let batch = per_app.entry(key).or_insert_with(|| Batch {
-                request,
-                positions: Vec::new(),
-                frames: Vec::new(),
-                targets: Vec::new(),
-            });
-            batch.targets.extend(server_id.map(|server_id| (server_id, target)));
-            if moves_only {
-                batch.positions.push(write);
-            } else {
-                batch.frames.push(write);
-            }
-        }
-
-        for ((pid, constrained), batch) in per_app {
             self.send_batch(pid, bounds.filter(|_| constrained), batch);
         }
-
         any_desire_new
     }
 }
@@ -531,8 +526,8 @@ impl RiftState {
     /// Applies one grip step's effects to the store. `session` is what a `DragBegan` attaches.
     fn project(&mut self, effects: &[Effect], mut session: Option<Session>) -> Option<Ungripped> {
         let mut ungripped = None;
-        for effect in effects.iter().copied() {
-            match effect {
+        for effect in effects {
+            match *effect {
                 Effect::Ungrip { window, why: _ } => {
                     let session = self.windows.project_ungrip(window);
                     ungripped = Some(Ungripped { window, session });
@@ -588,6 +583,31 @@ impl RiftState {
             }
         }
         verdict
+    }
+
+    /// One arrange pass (`desires` in layout order): the core's plans, one per batch that writes,
+    /// and whether any desire was new (written or queued).
+    pub(crate) fn arrange(
+        &mut self,
+        want: Want,
+        desires: Vec<rift_core::Desire<Rift>>,
+    ) -> (Vec<rift_core::Plan<Rift>>, bool) {
+        let now = self.core.clock.now();
+        let effects = self.core.decide(Event::Arrange { now, want, desires });
+        self.project(&effects, None);
+        let mut plans = Vec::new();
+        let mut any_new = false;
+        for effect in effects {
+            match effect {
+                Effect::Plan(plan) => {
+                    any_new = true;
+                    plans.push(plan);
+                }
+                Effect::Queued { .. } => any_new = true,
+                _ => {}
+            }
+        }
+        (plans, any_new)
     }
 
     /// The modifier drag's interactive frame: the only write a dragged window gets.
