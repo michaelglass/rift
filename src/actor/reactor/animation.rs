@@ -491,14 +491,19 @@ impl Reactor {
         if windows.is_empty() {
             return;
         }
-        for (wid, frame, request) in self.stop_window_presentations(windows) {
-            if self.state.windows.window(wid).is_none() {
-                continue;
-            }
-            self.state.step(CoreEvent::Seen { window: wid, frame });
-            self.state.step(CoreEvent::AnimationStopped { window: wid, request });
-        }
+        let stopped = self.stop_window_presentations(windows);
+        self.settle_stopped(stopped);
         self.commit_presentations();
+    }
+
+    /// Presentations stopped where they last published: each window is where the model now
+    /// takes it to be, and its animation settles there.
+    fn settle_stopped(&mut self, stopped: Vec<(WindowId, CGRect, TransactionId)>) {
+        for (window, at, request) in stopped {
+            if self.state.windows.window(window).is_some() {
+                self.state.step(CoreEvent::AnimationStopped { window, request, at: Some(at) });
+            }
+        }
     }
 
     /// Stops presenting `windows`; returns the last frame each presentation published.
@@ -606,12 +611,7 @@ impl Reactor {
             } else {
                 Vec::new()
             };
-            for (wid, frame, request) in frames {
-                if self.state.windows.window(wid).is_some() {
-                    self.state.step(CoreEvent::Seen { window: wid, frame });
-                    self.state.step(CoreEvent::AnimationStopped { window: wid, request });
-                }
-            }
+            self.settle_stopped(frames);
             self.state.animation_ended(camera.request);
             if let Some(tx) = &self.animation_tx {
                 let _ = tx.send(Message::StopCamera(space));
