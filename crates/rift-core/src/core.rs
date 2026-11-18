@@ -184,6 +184,27 @@ impl<K: Kinds> Default for RustCore<K> {
     }
 }
 
+impl<K: Kinds> Plan<K> {
+    /// A plan begun by its first write (a plan is never empty).
+    fn starting(write: Write<K>, moves_only: bool) -> Self {
+        let mut plan = Plan {
+            request: write.request(),
+            positions: Vec::new(),
+            frames: Vec::new(),
+        };
+        plan.add(write, moves_only);
+        plan
+    }
+
+    fn add(&mut self, write: Write<K>, moves_only: bool) {
+        if moves_only {
+            self.positions.push(write)
+        } else {
+            self.frames.push(write)
+        }
+    }
+}
+
 impl<K: Kinds> RustCore<K> {
     /// Read access for Rust callers that have not moved behind the boundary yet (tests). Not
     /// part of the boundary: a foreign core has no such door.
@@ -424,22 +445,10 @@ impl<K: Kinds> RustCore<K> {
                         Want::Arrange => false,
                     };
                     effects.push(self.see(window, desired));
-                    let index = match plans.iter().position(|plan| plan.request == request) {
-                        Some(index) => index,
-                        None => {
-                            plans.push(Plan {
-                                request,
-                                positions: Vec::new(),
-                                frames: Vec::new(),
-                            });
-                            plans.len() - 1
-                        }
-                    };
-                    let plan = &mut plans[index];
-                    if moves_only {
-                        plan.positions.push(write)
-                    } else {
-                        plan.frames.push(write)
+                    // The write joins its request's plan, or starts one.
+                    match plans.iter_mut().find(|plan| plan.request == request) {
+                        Some(plan) => plan.add(write, moves_only),
+                        None => plans.push(Plan::starting(write, moves_only)),
                     }
                 }
                 Verdict::Queued => effects.extend(self.queued(window, desired)),
