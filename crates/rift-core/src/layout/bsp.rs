@@ -163,7 +163,7 @@ impl<W: Copy> Bsp<W> {
             } => {
                 let c = constraints.normalized();
                 (
-                    c.min_for_axis(horizontal),
+                    c.reported_min(horizontal),
                     c.fixed_for_axis(horizontal),
                     (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal)),
                     c.resizable_for_axis(horizontal),
@@ -210,8 +210,8 @@ impl<W: Copy> Bsp<W> {
 
 /// A tiled window's frame inside its area: as large as the area, within its constraints.
 fn fit(mut target: Rect, c: WindowConstraints) -> Rect {
-    let desired_w = c.fixed_for_axis(true).unwrap_or(target.w).max(c.min_for_axis(true));
-    let desired_h = c.fixed_for_axis(false).unwrap_or(target.h).max(c.min_for_axis(false));
+    let desired_w = c.fixed_for_axis(true).unwrap_or(target.w).max(c.reported_min(true));
+    let desired_h = c.fixed_for_axis(false).unwrap_or(target.h).max(c.reported_min(false));
     let desired_w = if c.max_for_axis(true) > 0.0 {
         desired_w.min(c.max_for_axis(true))
     } else {

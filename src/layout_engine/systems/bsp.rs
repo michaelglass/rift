@@ -646,6 +646,7 @@ impl crate::model::tree::Observer for Components {
 #[cfg(test)]
 mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
+    use rift_core::layout::{Size, Sizing};
 
     use super::*;
 
@@ -1281,7 +1282,7 @@ mod tests {
         constraints.insert(
             w(101),
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
                 max_width: 600.0,
                 ..Default::default()
             }
@@ -1297,8 +1298,7 @@ mod tests {
         constraints.insert(
             w(107),
             WindowLayoutConstraints {
-                is_resizable: true,
-                min_width: 400.0,
+                sizing: Sizing::new(true, false, Size::reported(400.0, 0.0)),
                 ..Default::default()
             }
             .normalized(),
@@ -1318,7 +1318,7 @@ mod tests {
         constraints.insert(
             w(103),
             WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
                 max_height: 200.0,
                 ..Default::default()
             }

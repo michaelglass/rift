@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
 use rift_core::layout::axis::{AxisConstraints, solve_axis_lengths};
+use rift_core::layout::{Size, Sizing};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -412,7 +413,7 @@ impl Geometry {
                 .get(wid)
                 .copied()
                 .unwrap_or(WindowLayoutConstraints {
-                    is_resizable: true,
+                    sizing: Sizing::Resizable { advisory_min: Size::ZERO },
                     ..Default::default()
                 })
                 .normalized()
@@ -456,7 +457,7 @@ impl Geometry {
             let mut flexible = false;
             for (_, wid) in active_rows.clone() {
                 let c = constraint(wid);
-                min = min.max(c.min_width);
+                min = min.max(c.reported_min(true));
                 fixed = fixed.max(c.fixed_for_axis(true).unwrap_or(0.0));
                 flexible |= c.resizable_for_axis(true);
                 if c.max_width > 0.0 {
@@ -481,12 +482,12 @@ impl Geometry {
                 .map(|(row, wid)| {
                     let c = constraint(wid);
                     AxisConstraints {
-                        min: c.min_height,
+                        min: c.reported_min(false),
                         fixed: c.fixed_for_axis(false),
                         max: (c.max_height > 0.0).then_some(c.max_height),
                         weight: (column.height_weights.get(row).copied().unwrap_or(1.0)
-                            - c.min_height)
-                            .max(0.001),
+                            - c.reported_min(false))
+                        .max(0.001),
                         can_grow: c.resizable_for_axis(false),
                     }
                 })
@@ -497,9 +498,13 @@ impl Geometry {
                 let height = heights[geometry_row];
                 let mut size = CGSize::new(width, height);
                 let c = constraint(&wid);
-                size.width = c.fixed_for_axis(true).unwrap_or(width).max(c.min_width).min(width);
-                size.height =
-                    c.fixed_for_axis(false).unwrap_or(height).max(c.min_height).min(height);
+                size.width =
+                    c.fixed_for_axis(true).unwrap_or(width).max(c.reported_min(true)).min(width);
+                size.height = c
+                    .fixed_for_axis(false)
+                    .unwrap_or(height)
+                    .max(c.reported_min(false))
+                    .min(height);
                 if c.max_width > 0.0 {
                     size.width = size.width.min(c.max_width);
                 }
@@ -2492,7 +2497,7 @@ pub(crate) mod tests {
     fn semantic_presets_advance_despite_constrained_geometry() {
         let mut f = Fixture::new(1);
         f.constraints.insert(wid(1), WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
             max_width: 450.0,
             ..Default::default()
         });
@@ -2584,7 +2589,7 @@ pub(crate) mod tests {
         for (constraints, width) in [
             (
                 WindowLayoutConstraints {
-                    is_resizable: true,
+                    sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
                     max_width: 600.0,
                     ..Default::default()
                 },
@@ -2874,13 +2879,11 @@ pub(crate) mod tests {
         // Primary owner for the previous separate min/max/fixed-axis regressions.
         for (width, height, constraints) in [
             (500.0, 800.0, WindowLayoutConstraints {
-                is_resizable: true,
-                min_width: 500.0,
-                min_height: 350.0,
+                sizing: Sizing::new(true, false, Size::reported(500.0, 350.0)),
                 ..Default::default()
             }),
             (300.0, 800.0, WindowLayoutConstraints {
-                is_resizable: true,
+                sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
                 max_width: 300.0,
                 ..Default::default()
             }),
@@ -2890,8 +2893,7 @@ pub(crate) mod tests {
                 ..Default::default()
             }),
             (1400.0, 800.0, WindowLayoutConstraints {
-                is_resizable: true,
-                min_width: 1400.0,
+                sizing: Sizing::new(true, false, Size::reported(1400.0, 0.0)),
                 ..Default::default()
             }),
         ] {
@@ -2904,14 +2906,13 @@ pub(crate) mod tests {
         f.constraints.insert(wid(1), WindowLayoutConstraints {
             locked_width: 700.0,
             locked_height: 400.0,
-            min_width: 700.0,
+            sizing: Sizing::new(false, false, Size::reported(700.0, 0.0)),
             max_width: 700.0,
             ..Default::default()
         });
         f.constraints.insert(wid(2), WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::new(true, false, Size::reported(0.0, 350.0)),
             max_width: 500.0,
-            min_height: 350.0,
             ..Default::default()
         });
         assert_eq!(f.frame(1).size, CGSize::new(700.0, 400.0));
@@ -2920,7 +2921,7 @@ pub(crate) mod tests {
         let mut f = Fixture::new(2);
         f.constraints.insert(wid(1), WindowLayoutConstraints {
             locked_width: 350.0,
-            is_resizable: false,
+            sizing: Sizing::new(false, false, Size::reported(0.0, 0.0)),
             ..Default::default()
         });
         let before = f.frames();
@@ -2941,7 +2942,7 @@ pub(crate) mod tests {
         });
         f.system.update_settings(&settings);
         f.constraints.insert(wid(1), WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::new(true, false, Size::reported(0.0, 0.0)),
             locked_width: 400.0,
             ..Default::default()
         });

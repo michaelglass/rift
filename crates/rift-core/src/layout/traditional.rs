@@ -3,7 +3,7 @@
 //! constraints allow. The stack and master-stack systems are traditional trees too.
 
 use super::axis::{AxisConstraints, AxisSummary, container_axis_constraints, solve_axis_lengths};
-use super::{Gaps, WindowConstraints, round, tiling_area};
+use super::{Gaps, Sizing, WindowConstraints, round, tiling_area};
 use crate::plain::Rect;
 
 /// A traditional layout (or one subtree of it) as the platform has it, pruned to the nodes
@@ -170,16 +170,20 @@ impl<W> Child<W> {
 /// length is.
 fn leaf_summary(c: WindowConstraints, horizontal: bool) -> AxisSummary {
     let c = c.normalized();
-    let min = c.min_for_axis(horizontal);
+    let min = c.reported_min(horizontal);
     let max = (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal));
-    if c.is_resizable {
-        if let Some(fixed) = c.fixed_for_axis(horizontal) {
-            return (min, Some(fixed), Some(fixed), false);
+    match c.sizing {
+        Sizing::Resizable { .. } | Sizing::ResizableAtLeastMin { .. } => {
+            if let Some(fixed) = c.fixed_for_axis(horizontal) {
+                return (min, Some(fixed), Some(fixed), false);
+            }
+            (0.0, None, max, true)
         }
-        return (0.0, None, max, true);
+        Sizing::Fixed { .. } => {
+            let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
+            (min, fixed, max.or(fixed), fixed.is_none())
+        }
     }
-    let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
-    (min, fixed, max.or(fixed), fixed.is_none())
 }
 
 impl<W: Copy> Traditional<W> {
