@@ -1452,3 +1452,18 @@ fn a_window_dropped_on_another_display_leaves_the_old_displays_layout() {
     let layouts = LayoutManager::calculate_layout(&mut sim.reactor, None);
     assert_eq!(claims(&layouts, wid), 1);
 }
+
+#[test]
+fn a_wake_that_forgets_a_parked_windows_queued_move_still_parks_it() {
+    // The drop's write is in flight when the window is sent to another workspace, so its
+    // parking desire queues behind it; the wake then forgets both. The model must not stay at
+    // the dropped parking frame (nothing would write it again once the old answer came back):
+    // where the app has the window is unknown, so the next desire parks it.
+    let steps = [
+        Step::DragStart { w: 8, dx: -13, dy: 150 },
+        Step::MouseUp,
+        Step::MoveToWorkspace { w: 3, k: 1 },
+        Step::Wake,
+    ];
+    assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
+}
