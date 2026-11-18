@@ -4,6 +4,7 @@ use tracing::debug;
 use crate::actor::app::WindowId;
 use crate::actor::drag::{DragSource, Session};
 use crate::actor::reactor::events::EventOutcome;
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::actor::reactor::{Quiet, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
@@ -190,7 +191,7 @@ pub fn handle_window_frame_changed(
     if old_frame.same_as(new_frame) {
         return Ok(outcome);
     }
-    state.seen(wid, new_frame);
+    state.step(CoreEvent::Seen { window: wid, frame: new_frame });
     // The external owner has geometry authority; keep only native facts current.
     if state.windows.is_claimed(wid) {
         if old_space != new_space

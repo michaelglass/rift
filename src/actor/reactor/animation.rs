@@ -11,6 +11,7 @@ use super::reconciler::{Desired, Owner, Want};
 use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
@@ -494,8 +495,8 @@ impl Reactor {
             if self.state.windows.window(wid).is_none() {
                 continue;
             }
-            self.state.seen(wid, frame);
-            self.state.animation_stopped(wid, request);
+            self.state.step(CoreEvent::Seen { window: wid, frame });
+            self.state.step(CoreEvent::AnimationStopped { window: wid, request });
         }
         self.commit_presentations();
     }
@@ -564,7 +565,7 @@ impl Reactor {
                     && let Some(window) = self.state.windows.window(wid)
                 {
                     let frame = CGRect::new(frame.origin, window.frame_monotonic.size);
-                    self.state.seen(wid, frame);
+                    self.state.step(CoreEvent::Seen { window: wid, frame });
                 }
             }
             if let Some(session) = &mut self.viewport_gesture
@@ -607,8 +608,8 @@ impl Reactor {
             };
             for (wid, frame, request) in frames {
                 if self.state.windows.window(wid).is_some() {
-                    self.state.seen(wid, frame);
-                    self.state.animation_stopped(wid, request);
+                    self.state.step(CoreEvent::Seen { window: wid, frame });
+                    self.state.step(CoreEvent::AnimationStopped { window: wid, request });
                 }
             }
             self.state.animation_ended(camera.request);
@@ -733,7 +734,7 @@ impl Reactor {
             // A gesture's camera has no target: nothing is pending, but its frames go out
             // under the request.
             for window in &windows {
-                self.state.forget(window.wid);
+                self.state.step(CoreEvent::Forget { window: window.wid });
                 if let Some(wsid) = window.wsid {
                     self.state.tx.sent(wsid, request);
                 }
@@ -1200,7 +1201,7 @@ impl AnimationManager {
     /// Restore native geometry after a display change invalidated cached frames.
     pub fn reapply_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
         reactor.cancel_window_presentations(desired.windows());
-        reactor.state.distrust(desired.windows());
+        reactor.state.step(CoreEvent::Distrust { windows: desired.windows() });
         reactor.arrange_frames(space, desired.frames(), Want::Arrange)
     }
 }

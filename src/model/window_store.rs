@@ -2629,7 +2629,10 @@ mod tests {
             state.windows.window_ids_for_pid(4).count(),
         );
 
-        state.press(Some(wid), crate::model::drag::MouseButton::Left);
+        state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
+            window: Some(wid),
+            button: crate::model::drag::MouseButton::Left.into(),
+        });
         assert_eq!(state.windows.gripped(), Some(wid));
         let pressed = (
             state.windows.workspace_assignment_count(),
@@ -2642,7 +2645,10 @@ mod tests {
         state.windows.debug_assert_invariants();
 
         // One slot: pressing another window lets go of the first.
-        state.press(Some(other), crate::model::drag::MouseButton::Left);
+        state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
+            window: Some(other),
+            button: crate::model::drag::MouseButton::Left.into(),
+        });
         assert_eq!(state.windows.gripped(), Some(other));
         assert!(state.windows.unheld(wid).is_some());
         assert!(state.windows.unheld(other).is_none());
@@ -2658,10 +2664,13 @@ mod tests {
             .create_workspace(SpaceId::new(9), Some("Rekey".to_string()))
             .expect("workspace");
         state.windows.assign_window_to_workspace(old, workspace);
-        state.press(Some(old), crate::model::drag::MouseButton::Left);
+        state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
+            window: Some(old),
+            button: crate::model::drag::MouseButton::Left.into(),
+        });
 
         // Same window, new identity: the core re-keys the grip, then the store moves the rest.
-        state.rekeyed(old, new);
+        state.step(crate::actor::reactor::reconciler::CoreEvent::Rekeyed { from: old, to: new });
         state.windows.transfer_persistent_window_metadata(old, new);
         assert_eq!(state.windows.gripped(), Some(new));
         assert_eq!(state.windows.workspace_for_window(new), Some(workspace));
@@ -2682,7 +2691,10 @@ mod tests {
             let mut state = crate::model::RiftState::default();
             let wid = WindowId::new(4, 1);
             state.windows.set_visibility(wid, WindowVisibility::Visible);
-            state.press(Some(wid), crate::model::drag::MouseButton::Left);
+            state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
+                window: Some(wid),
+                button: crate::model::drag::MouseButton::Left.into(),
+            });
             if dragging {
                 let frame = objc2_core_foundation::CGRect::ZERO;
                 state.begin_drag(
