@@ -144,7 +144,56 @@ Build: `roc build` of the archive ~2 s; clean `cargo build --release` of the Roc
 - `var` + `while` made the deadline-queue loops direct ports of the Rust.
 - Nothing crashed, leaked or miscompiled on 413k steps.
 
-## Next slice
+## The Rust line since the pause (`experiment/rust-core`)
+
+The sections above describe the boundary as it was at `experiment/roc-paused`. On the Rust
+line it has since grown; the reactor keeps applying, the core keeps deciding.
+
+- **Request ids.** The platform mints the app protocol's transaction id per step and hands it
+  in (`Want`, `Follow`, `Answer`, `Tick`); every `Write` carries it; an `Answer` names the
+  request it answers (`seen`) and the core drops one naming a replaced write (`Stale`). The
+  reactor only guards writes the core did not make (`answers_latest_outside_write`).
+- **The grip.** The core owns what the hand is doing (`Press`, `Drag`, `Release`, `LetGo`,
+  `Gone`, `Ceded`, `Rekeyed`; effects `Grip`, `DragBegan`, `Ungrip`, `Regrip`) and its rules
+  (one hand, a drag only from a press of its window, a release only on the grip's button). The
+  window store's gripped slot keeps its record-in-slot type and is changed only by
+  `RiftState`'s grip methods, each applying a core step.
+- **The model's frame.** The core keeps where the model sees each window (`Seen`, `Unseen`,
+  `Gone`, `Rekeyed`); `WindowState::frame_monotonic` is its projection, set only from
+  `Effect::Seen`. `known` is gone from `Want`/`Report`/`Tick`, and with it the last Rust-only
+  read on a production path (`due`).
+- **Where the applier lives.** `RiftState` (window store + core) has every core call; each
+  applies the step's projected effects in one place (`RiftState::project`), with debug
+  assertions that store and core agree. The fuzzer has an invariant for it too.
+- **Fuzzer.** Modifier drags, wakes and named workspace moves; the invariants read the core's
+  own trace for why rift wrote what it wrote.
+
+Remaining Rust-only read: `sync` (tests and the fuzzer's invariants).
+
+## Roadmap: to "the reactor is only an applier"
+
+Sizes are rough (S: a day, M: a few days, L: a week or more of careful slicing); each slice
+moves state into the core, deletes reactor code, and keeps the fuzzer and the replay test green.
+
+| Slice | Size | What moves | Risks |
+|---|---|---|---|
+| (a) acknowledged frame in the reconciler | M | `Sync::Settled { acked }`; `Sync::Adrift` and `Want::Place` go | Behaviour: after a drag and after a display change the reconciler trusts reports/re-reads instead of forcing writes; leans on the R5 re-read. Needs the owner's call on the details (below). |
+| (b) one pending store | M | `TransactionManager`/`WindowTxStore` keep only ids; pending targets live in the core | The space bookkeeping (`pending_target_space_for_window_server_id`, `rift_owns_geometry`) and the app actor read targets from the shared store across threads. |
+| (c) reconcile as a pure Plan | M | `arrange_frames`' batching (per app, position-only vs full) becomes a core-built `Plan`; the reactor sends it | Scrolling bounds and app handles are platform data; the plan must name them by key, not hold them. |
+| (d) animation behind the applier | L | The core plans targets; the animation thread only presents | The presenter's display-link timing and the viewport/gesture camera (site 8) carry their own state; cancellation and frame flushes must become effects. |
+| (e) `DragKind` union, derived drop target | M | Native vs modifier drag with state inside the variants; the drop target computed from pointer and layout, not stored | The drop scene is built from layout data the core does not have yet; derive it on the platform side until layout moves. |
+| Window lifecycle complete | M | Admission, visibility, minimize, claims as core events | Overlaps the `rust-followups` agent (store indexes, transfers). |
+| Layout engine | L+ | Trees, systems (bsp, stack, scrolling, floating), floating positions, persistence | The largest piece; `calculate_layout` is already a function of state, but the engine mutates the window store and has its own caches. Slice per layout system. |
+| Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and pending snapshot merge | The spaces actor's revision/guard protocol and the Mission Control snapshot hold-and-replay (modes #1-#3). Owned now by the `mode-table` agent. |
+| Focus and raise | M | Focus follows mouse, raise sequencing, the ~1 s "ignore until" windows | Raise FIFO replay (mode #25) conflicts with discard-never-queue; app-actor latency. |
+| The mode table | L | The other ~30 modes of MODES-inventory as one `Mode x InputClass` table in the core | Modes overlap (needs a set of active modes); several are queue/replay today (#1, #2, #23-#25, #29). Coordinate with `mode-table`. |
+| Config | S-M | Parsed config as data the core is initialized and updated with | Hot reload changes rules mid-flight; config types derive macros live in `rift-config-derive`. |
+
+Out of the core for good: AX calls, event taps, CG/SkyLight, run loops and timers, IPC,
+the animation presenter itself.
+
+## Next slice (as written at `experiment/roc-paused`)
+
 
 1. Request ids on `Write`, answers carrying them: `answers_latest_write` and `in_flight` move into
    the core (removes a Rust-only read; the transaction ids become platform detail).
