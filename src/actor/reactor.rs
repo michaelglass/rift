@@ -1600,6 +1600,7 @@ impl Reactor {
             }
             Event::SystemWoke => {
                 self.suppress_auto_workspace_switch_until_input = true;
+                self.reconcile_all(reconciler::Lifecycle::Woke);
                 return Ok(system_workflow::handle_system_woke()?);
             }
             Event::SessionDidBecomeActive => {
@@ -1660,10 +1661,12 @@ impl Reactor {
                 if self.main_window_tracker.is_globally_frontmost(pid) {
                     outcome.app_requests.push((pid, Request::ApplicationGloballyActivated(pid)));
                 }
+                self.reconcile_all(reconciler::Lifecycle::AppLaunched);
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
             Event::ApplicationTerminated(pid) => {
+                self.reconcile_all(reconciler::Lifecycle::AppTerminated);
                 return application_workflow::handle_application_terminated(pid);
             }
             Event::ApplicationThreadTerminated(pid) => {
@@ -2074,6 +2077,7 @@ impl Reactor {
                 let mut outcome = self.handle_authoritative_space_snapshot(space_state)?;
                 if recovering {
                     self.flush_deferred_window_inventory_refresh();
+                    self.reconcile_all(reconciler::Lifecycle::Recovered);
                     outcome.refresh_window_inventories = false;
                 }
                 return Ok(outcome);
@@ -3853,6 +3857,7 @@ impl Reactor {
         }
         if display_set_changed || !space_remaps.is_empty() {
             self.state.windows.resume_deferred_transfers();
+            self.reconcile_all(reconciler::Lifecycle::SpacesChanged);
         }
         // Without structural change only a display whose Space changed is arranged,
         // and nothing for one now showing a fullscreen Space.
@@ -4451,6 +4456,7 @@ impl Reactor {
 
     /// The pointer let go: a press ends, a drag drops.
     fn pointer_released(&mut self, released: PointerReleased) -> anyhow::Result<EventOutcome> {
+        let pointer = self.state.windows.pointer();
         let final_space = self.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
             let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -4476,6 +4482,13 @@ impl Reactor {
         )?;
         if let Some((space, window)) = focused {
             outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
+        }
+        // What the hand held back is re-derived from what is true now, not replayed.
+        match pointer {
+            Pointer::Idle => {}
+            // A press moved nothing, but layout may have wanted the pressed window elsewhere.
+            Pointer::Pressing => outcome = outcome.with_arrange_passes(1),
+            Pointer::Dragging => self.reconcile_all(reconciler::Lifecycle::DragEnded),
         }
         Ok(outcome)
     }

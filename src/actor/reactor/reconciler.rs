@@ -479,6 +479,44 @@ fn owner(windows: &WindowStore, window: WindowId) -> Owner {
     }
 }
 
+/// The events after which what Rift believes about windows may be wrong in ways no report will
+/// tell it, so it re-reads them all (R5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Lifecycle {
+    /// The user let go of a dragged window: reports lag a drag.
+    DragEnded,
+    /// The displays or spaces changed: macOS moves and resizes windows without telling.
+    SpacesChanged,
+    AppLaunched,
+    AppTerminated,
+    /// The machine woke: anything may have moved while it slept.
+    Woke,
+    /// Topology settled after a quarantine (sleep, lock, display teardown).
+    Recovered,
+}
+
+/// The full reconcile.
+impl Reactor {
+    /// Re-reads the frame of every window of every app. Each read comes back as an unprompted
+    /// report and is classified like any other: no news, or someone else's move, which
+    /// re-derives where the window belongs and writes the difference. A write that timed out
+    /// (the app was busy) is asked again once its window is seen where it really is. Reading
+    /// is idempotent, so overlapping reconciles cost reads, not wrong writes.
+    pub(super) fn reconcile_all(&mut self, why: Lifecycle) {
+        if self.refreshes_blocked() {
+            // The topology is in flux; the snapshot that ends the quarantine reconciles.
+            debug!(?why, "reconcile: full, skipped while topology is unstable");
+            return;
+        }
+        debug!(?why, "reconcile: full");
+        for (&pid, app) in &self.app_manager.apps {
+            if let Err(error) = app.handle.send(Request::ReadFrames(pid)) {
+                debug!(pid, %error, "reconcile: app gone before its frames were read");
+            }
+        }
+    }
+}
+
 /// The senders. Each takes a [`Write`], so each sends only what the reconciler decided.
 impl Reactor {
     pub(super) fn owner(&self, window: WindowId) -> Owner { owner(&self.state.windows, window) }
