@@ -104,8 +104,9 @@ same).
   2000 seeds × 40 steps = **413,825 core steps, identical effect streams**, no Roc allocation
   live afterwards. The same on the `-safe` nightly. A planted bug (ack tolerance 1.5 → 2.5) fails
   it at seed 1 step 230.
-- Coverage gap: the fuzzer has no modifier drags or animations, so `Follow` and `Forget` never
-  occur in the traces (counts: Gate 158,926, Want 136,164, Report 67,135, Answer 33,699,
+- Coverage gap (at `experiment/roc-paused`; the Rust line's fuzzer now drives modifier drags,
+  animated layouts and a scrolling camera, see `Setup` in fuzz.rs): `Follow` and `Forget` never
+  occurred in these traces (counts: Gate 158,926, Want 136,164, Report 67,135, Answer 33,699,
   Pointer 14,299, Tick 3,602).
 
 Measured (`tests/measure.rs`, release, M-series laptop, adapter conversions included):
@@ -178,9 +179,9 @@ moves state into the core, deletes reactor code, and keeps the fuzzer and the re
 | Slice | Size | What moves | Risks |
 |---|---|---|---|
 | (a) acknowledged frame in the reconciler | M | `Sync::Settled { acked }`; `Sync::Adrift` and `Want::Place` go | Behaviour: after a drag and after a display change the reconciler trusts reports/re-reads instead of forcing writes; leans on the R5 re-read. Needs the owner's call on the details (below). |
-| (b) one pending store | M | `TransactionManager`/`WindowTxStore` keep only ids; pending targets live in the core | The space bookkeeping (`pending_target_space_for_window_server_id`, `rift_owns_geometry`) and the app actor read targets from the shared store across threads. |
+| (b) one pending store | M | **Done.** `TransactionManager`/`WindowTxStore` keep only ids; pending targets live in the core (`Reconciler::pending`), the store's targets are their projection (`Effect::Pending`/`Unpending`), the camera's included | The space bookkeeping (`pending_target_space_for_window_server_id`, `rift_owns_geometry`) and the app actor still read the projection across threads. |
 | (c) reconcile as a pure Plan | M | `arrange_frames`' batching (per app, position-only vs full) becomes a core-built `Plan`; the reactor sends it | Scrolling bounds and app handles are platform data; the plan must name them by key, not hold them. |
-| (d) animation behind the applier | L | The core plans targets; the animation thread only presents | The presenter's display-link timing and the viewport/gesture camera (site 8) carry their own state; cancellation and frame flushes must become effects. |
+| (d) animation behind the applier | L | **Done** for targets: layout transitions and the scrolling camera are planned by the core (`Event::Animate`, `Sync::Animating`); the animation thread only presents and reports the end | The presenter's display-link timing and the gesture camera keep their own state; cancellation is still platform-side (`cancel_window_presentations`, `yield_to_user`), not an effect. |
 | (e) `DragKind` union, derived drop target | M | Native vs modifier drag with state inside the variants; the drop target computed from pointer and layout, not stored | The drop scene is built from layout data the core does not have yet; derive it on the platform side until layout moves. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events | Overlaps the `rust-followups` agent (store indexes, transfers). |
 | Layout engine | L+ | Trees, systems (bsp, stack, scrolling, floating), floating positions, persistence | The largest piece; `calculate_layout` is already a function of state, but the engine mutates the window store and has its own caches. Slice per layout system. |
