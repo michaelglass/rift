@@ -790,7 +790,7 @@ impl PendingActivation {
     ) -> Option<(Quiet, Option<WindowId>)> {
         let pending = std::mem::take(self);
         let context = initiated.unwrap_or_else(|| match pending {
-            Self::Ax(quiet) => match quiet.settle() {
+            Self::Ax(quiet) => match quiet.settle(Instant::now()) {
                 Echo::Ours(quiet) => (quiet, None),
                 Echo::Late(_) => (Quiet::No, None),
             },
@@ -2170,7 +2170,7 @@ impl State {
     }
 
     fn take_activation_context(&mut self) -> (Quiet, Option<WindowId>) {
-        match self.last_activated.take().map(Expecting::settle) {
+        match self.last_activated.take().map(|activated| activated.settle(Instant::now())) {
             Some(Echo::Ours((quiet_activation, quiet_window_change, tx))) => {
                 _ = tx.send(());
                 trace!("by us");
