@@ -7,8 +7,8 @@
 //! and a foreign core (Roc) can run it on [`plain`] data.
 
 pub mod core;
-#[cfg(test)]
-mod plain;
+pub mod layout;
+pub mod plain;
 pub mod pointer;
 pub mod reconciler;
 
