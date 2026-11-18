@@ -1531,10 +1531,14 @@ impl LayoutSystem for BspLayoutSystem {
         let Some(state) = self.layouts.get(layout).copied() else {
             return Vec::new();
         };
+        // Nothing in the layout takes space: no shape, no frames.
+        let Some(root) = self.shape(state.root, constraints) else {
+            return Vec::new();
+        };
         let shape = bsp::Bsp {
             screen: crate::layout_engine::core_rect(screen),
             gaps: crate::layout_engine::core_gaps(gaps),
-            root: self.shape(state.root, constraints),
+            root,
             aspect: self.single_window_aspect_ratio,
         };
         crate::layout_engine::tile_bsp(&shape)

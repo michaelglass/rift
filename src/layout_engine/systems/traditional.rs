@@ -346,13 +346,17 @@ impl TraditionalLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
+        // Nothing in the subtree takes space: no shape, no frames.
+        let Some(root) = self.shape(node, constraints) else {
+            return Vec::new();
+        };
         let shape = traditional::Traditional {
             screen: crate::layout_engine::core_rect(screen),
             area: crate::layout_engine::core_rect(rect),
             gaps: crate::layout_engine::core_gaps(gaps),
             stack_offset,
             stack_line: crate::layout_engine::core_stack_line(stack_line),
-            root: self.shape(node, constraints),
+            root,
         };
         crate::layout_engine::tile_traditional(&shape)
     }
