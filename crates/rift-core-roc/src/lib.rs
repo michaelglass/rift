@@ -18,7 +18,8 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
-use rift_core::plain::{Plain, wire};
+use rift_core::layout::bsp::Bsp;
+use rift_core::plain::{Plain, Rect, WindowId, wire};
 use rift_core::{Effect, Event};
 
 // ---------------------------------------------------------------------------------------------
@@ -187,6 +188,23 @@ impl RocCore {
         let words = self.step_words(&wire::encode_event(event));
         wire::decode_effects(&words).unwrap_or_else(|error| panic!("roc core effects: {error:?}"))
     }
+}
+
+/// Layout geometry on words: a BSP shape's words in, its frames' words out. Pure: no model.
+pub fn tile_words(shape: &[u64]) -> Vec<u64> {
+    let host = host();
+    // Roc takes ownership of the shape's list and releases it.
+    let shape = unsafe { abi::RocListWith::from_slice(shape, &host) };
+    let frames = unsafe { abi::roc_tile(shape) };
+    let words = frames.as_slice().to_vec();
+    unsafe { frames.decref(&host) };
+    words
+}
+
+/// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core.
+pub fn tile_bsp(shape: Bsp<WindowId>) -> Vec<(WindowId, Rect)> {
+    let words = tile_words(&wire::encode_bsp(shape));
+    wire::decode_frames(&words).unwrap_or_else(|error| panic!("roc core frames: {error:?}"))
 }
 
 impl Drop for RocCore {

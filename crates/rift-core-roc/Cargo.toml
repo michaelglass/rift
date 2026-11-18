@@ -18,6 +18,10 @@ name = "differential"
 required-features = ["roc"]
 
 [[test]]
+name = "layout"
+required-features = ["roc"]
+
+[[test]]
 name = "measure"
 required-features = ["roc"]
 

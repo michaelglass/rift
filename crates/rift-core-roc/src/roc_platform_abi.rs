@@ -1465,5 +1465,21 @@ unsafe extern "C" {
     /// Entrypoint: step_for_host
     pub fn roc_step(arg0: RocBox, arg1: RocListWith<u64, false>) -> AnonStruct4045c5188ea548d;
 
+    /// Entrypoint: tile_for_host
+    pub fn roc_tile(arg0: RocListWith<u64, false>) -> RocListWith<u64, false>;
+
+}
+
+const _: () = assert!(core::mem::size_of::<RocOwned<RocListWith<u64, false>, RocListSpineRelease>>() == core::mem::size_of::<RocListWith<u64, false>>(), "roc_tile owned result size mismatch");
+const _: () = assert!(core::mem::align_of::<RocOwned<RocListWith<u64, false>, RocListSpineRelease>>() == core::mem::align_of::<RocListWith<u64, false>>(), "roc_tile owned result alignment mismatch");
+
+/// Owning wrapper for `roc_tile`. The returned value is recursively
+/// released on Drop with no runtime descriptor or extra storage.
+///
+/// # Safety
+/// The raw entrypoint and its arguments must satisfy the generated host ABI.
+pub unsafe fn roc_tile_owned(arg0: RocListWith<u64, false>) -> RocOwned<RocListWith<u64, false>, RocListSpineRelease> {
+    let value = unsafe { roc_tile(arg0) };
+    unsafe { RocOwned::from_raw(value) }
 }
 
