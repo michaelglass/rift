@@ -13762,3 +13762,37 @@ fn pend(reactor: &mut Reactor, wid: WindowId, target: CGRect) {
 fn last_sent(reactor: &Reactor, wsid: WindowServerId) -> TransactionId {
     reactor.state.tx.get(&wsid).map(|record| record.txid).unwrap_or_default()
 }
+
+#[test]
+fn a_native_move_whose_size_the_app_changes_keeps_its_target() {
+    let (mut apps, mut reactor, dragged, other, _screen, _space) = two_tiled_windows();
+    let theirs = slot(&reactor, other);
+    for _ in 0..2 {
+        let dx = (theirs.mid().x - apps.windows[&dragged].frame.mid().x) / 2.;
+        let moved = drag_by(&apps, &mut reactor, dragged, dx, 0.);
+        apps.windows.get_mut(&dragged).unwrap().frame = moved;
+    }
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: theirs.mid(),
+    }));
+    let before = drop_target(&reactor).expect("a target before the app resizes");
+    // Mid-move, the app changes its own size (WhatsApp does).
+    let start = apps.windows[&dragged].frame;
+    let resized = CGRect::new(
+        start.origin,
+        CGSize::new(start.size.width - 40., start.size.height - 30.),
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        dragged,
+        resized,
+        Some(apps.windows[&dragged].last_seen_txid),
+        Requested(false),
+    ));
+    apps.windows.get_mut(&dragged).unwrap().frame = resized;
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(theirs.mid().x + 5., theirs.mid().y),
+    }));
+    let after = drop_target(&reactor).expect("the move lost its target when the app resized");
+    assert_eq!(after.intent.window, before.intent.window);
+    assert_eq!(after.intent.action, before.intent.action);
+}
