@@ -330,17 +330,8 @@ pub fn handle_mission_control_native_entered(
 ) -> anyhow::Result<EventOutcome> {
     drag.suppress_preview(true);
     windows.end_drag();
-    let changed = !matches!(
-        mission_control.mission_control_state,
-        MissionControlState::Active
-    );
     mission_control.mission_control_state = MissionControlState::Active;
-    let outcome = EventOutcome::focus_changed(None, false);
-    Ok(if changed {
-        outcome.with_focus_follows_mouse_refresh()
-    } else {
-        outcome
-    })
+    Ok(EventOutcome::focus_changed(None, false))
 }
 
 pub fn handle_mission_control_native_exited(
@@ -348,16 +339,8 @@ pub fn handle_mission_control_native_exited(
     drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
     drag.suppress_preview(false);
-    let changed = matches!(
-        mission_control.mission_control_state,
-        MissionControlState::Active
-    );
     mission_control.mission_control_state = MissionControlState::Inactive;
     let mut outcome = EventOutcome::layout_changed(false);
     outcome.recover_after_mission_control = true;
-    Ok(if changed {
-        outcome.with_focus_follows_mouse_refresh()
-    } else {
-        outcome
-    })
+    Ok(outcome)
 }

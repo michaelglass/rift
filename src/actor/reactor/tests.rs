@@ -5183,49 +5183,73 @@ fn rediscovering_an_unchanged_inventory_does_not_raise_or_refocus() {
 #[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = test_reactor();
-    let (input_tx, mut input_rx) = actor::channel();
-    reactor.communication_manager.input_tx = Some(input_tx);
-
+    let hover = Initiative::UserInput(InputClass::Hover);
     reactor.handle_event(Event::MenuOpened(1));
-    let disable = input_rx.try_recv().expect("menu-open should update event tap").1;
-    assert!(matches!(
-        disable,
-        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
-    ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
+    assert!(!reactor.may(hover));
 
     reactor.handle_event(Event::ApplicationDeactivated(1));
-    let enable = input_rx
-        .try_recv()
-        .expect("app deactivation should re-enable focus-follows-mouse")
-        .1;
-    assert!(matches!(
-        enable,
-        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
-    ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
+    assert!(reactor.may(hover));
 }
 
 #[test]
 fn stale_menu_open_state_is_cleared_when_other_app_activates() {
     let mut reactor = test_reactor();
-    let (input_tx, mut input_rx) = actor::channel();
-    reactor.communication_manager.input_tx = Some(input_tx);
-
     reactor.handle_event(Event::MenuOpened(1));
-    let _ = input_rx.try_recv().expect("menu-open should update event tap");
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
 
     reactor.handle_event(Event::ApplicationGloballyActivated(2));
-    let enable = input_rx
-        .try_recv()
-        .expect("activation of another app should clear stale menu state")
-        .1;
-    assert!(matches!(
-        enable,
-        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
-    ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
+    assert!(reactor.may(Initiative::UserInput(InputClass::Hover)));
+}
+
+/// A hover is discarded while a mode refuses it, and nothing replays when the mode ends: only
+/// the next sample acts. The probe is a hit on a window missing from the inventory, which asks
+/// its owner for an inventory.
+#[test]
+fn hover_refused_by_a_mode_is_discarded_and_not_replayed() {
+    let mut reactor = test_reactor();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    let pid = 91;
+    let wsid = WindowServerId::new(910);
+    let (app_tx, mut app_rx) = actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.mouse-discovery".into()),
+            localized_name: Some("Mouse Discovery".into()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+    reactor.state.windows.track_window_server_info(WindowServerInfo {
+        id: wsid,
+        pid,
+        layer: 0,
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    });
+    let asked = |rx: &mut actor::Receiver<Request>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|(_, request)| matches!(request, Request::RefreshWindowInventory(_)))
+    };
+
+    reactor.handle_event(Event::MenuOpened(7));
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    assert!(!asked(&mut app_rx), "discarded during the mode");
+    reactor.handle_event(Event::MenuClosed(7));
+    assert!(!asked(&mut app_rx), "nothing replays when the mode ends");
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    assert!(asked(&mut app_rx), "the next sample acts");
+
+    // Mission Control's exit re-reads inventories itself, so only the discard is probed here.
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    reactor.handle_loop_event(Event::MouseMoved(WindowServerId::new(911)));
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    assert!(!asked(&mut app_rx), "discarded during Mission Control");
 }
 
 #[test]
@@ -11765,7 +11789,7 @@ fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
     assert!(reactor.transient_blocks_mouse_focus());
     let (raise_tx, mut raise_rx) = actor::channel();
     reactor.communication_manager.raise_manager_tx = raise_tx;
-    reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+    reactor.handle_loop_event(Event::MouseMoved(reactor.test_window_server_id(target)));
     assert!(raise_rx.try_recv().is_err());
     let wsid = reactor.test_window_server_id(about);
     reactor.handle_event(Event::WindowServerHidden(wsid));
