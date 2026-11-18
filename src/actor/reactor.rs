@@ -1270,21 +1270,7 @@ impl Reactor {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::ReleaseClaims(release) => release.apply(&mut reactor.borrow_mut()),
             Event::MouseFocusPending(publisher) => {
-                // Asked before the WindowServer hit test; the resulting MouseMoved passes the
-                // same gate. A refused position is dropped: the next sample re-derives.
-                let point = publisher.take_latest();
-                if !reactor.borrow().admit(InputClass::Hover, &point) {
-                    return;
-                }
-                if let Some(point) = point {
-                    // Resolve against WindowServer when processing the latest position,
-                    // rather than preserving an ID from an earlier input callback.
-                    if let Some(window) = window_server::get_window_at_point(point) {
-                        reactor.borrow_mut().handle_loop_event(Event::MouseMoved(window));
-                    } else {
-                        trace!(?point, "No window at mouse position");
-                    }
-                }
+                reactor.borrow_mut().handle_hover_sample(publisher.take_latest());
             }
             Event::DragMotionPending(publisher) => {
                 let motion = publisher.take_latest();
@@ -1313,6 +1299,34 @@ impl Reactor {
         if !self.admit_input(&event) {
             return;
         }
+        self.handle_admitted(event);
+    }
+
+    /// A pointer sample from the input thread: gated once, before the WindowServer hit test,
+    /// and the window under it handled as admitted input. A refused sample is dropped (the next
+    /// one re-derives).
+    fn handle_hover_sample(&mut self, point: Option<CGPoint>) {
+        self.release_if_missed();
+        if !self.admit(InputClass::Hover, &point) {
+            return;
+        }
+        let Some(point) = point else { return };
+        // Resolve against WindowServer when processing the latest position, rather than
+        // preserving an ID from an earlier input callback.
+        let Some(window) = window_server::get_window_at_point(point) else {
+            trace!(?point, "No window at mouse position");
+            return;
+        };
+        let event = Event::MouseMoved(window);
+        if self.should_quarantine_unstable_topology(&event) {
+            trace!(?event, "quarantined while native topology is unstable");
+            return;
+        }
+        self.handle_admitted(event);
+    }
+
+    /// Handles an event the gate admitted.
+    fn handle_admitted(&mut self, event: Event) {
         let event = match event {
             Event::Gesture(event) => {
                 self.gesture_event(event);

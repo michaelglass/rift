@@ -459,15 +459,13 @@ impl<K: Kinds> RustCore<K> {
         let mut effects = self.decide(event);
         effects.extend(
             self.reconciler
-                .notes()
-                .into_iter()
+                .drain_notes()
                 .map(|(window, note)| Effect::Note { window, note }),
         );
         effects.extend(
-            self.reconciler.touched().into_iter().map(|window| Effect::Pending {
-                window,
-                target: self.reconciler.pending(window),
-            }),
+            self.reconciler
+                .drain_pending()
+                .map(|(window, target)| Effect::Pending { window, target }),
         );
         let next = self.reconciler.next_deadline();
         if next != self.armed {
