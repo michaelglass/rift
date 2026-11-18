@@ -15,7 +15,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::time::Duration;
 
-pub use crate::core::{Core, Effect, Event, RustCore};
+pub use crate::core::{Core, Desire, Effect, Event, Plan, RustCore};
 pub use crate::pointer::{
     Button, Holder, Initiative, InputClass, Owner, Pointer, Release, Ungrip, may,
 };
@@ -37,6 +37,9 @@ pub trait Kinds: Copy + Debug + PartialEq + 'static {
     fn is_within(a: Self::Frame, tolerance: f64, b: Self::Frame) -> bool;
     /// `duration` after `time`.
     fn after(time: Self::Time, duration: Duration) -> Self::Time;
+
+    /// Whether `a` and `b` have the same size, give or take a tenth of a point.
+    fn same_size(a: Self::Frame, b: Self::Frame) -> bool;
 
     /// The same frame, give or take a tenth of a point.
     fn same_as(a: Self::Frame, b: Self::Frame) -> bool { Self::is_within(a, 0.1, b) }
