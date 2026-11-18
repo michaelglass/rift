@@ -6204,8 +6204,15 @@ impl Reactor {
         }
 
         if let Some(space) = pending_refocus_space {
-            // Preserve a removal refocus that an explicit focus request superseded.
-            if matches!(self.refocus_manager.refocus_state, RefocusState::None) {
+            if focus_window.is_some() {
+                // A newer focus intent supersedes the refocus: discarded, not replayed later.
+                debug!(
+                    ?space,
+                    ?focus_window,
+                    "refocus: superseded by an explicit focus; discarded"
+                );
+            } else if matches!(self.refocus_manager.refocus_state, RefocusState::None) {
+                // Not superseded, only not handled by this response (it raised windows).
                 self.refocus_manager.refocus_state = RefocusState::Pending(space);
             }
         }

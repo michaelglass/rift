@@ -3732,6 +3732,42 @@ fn pending_removal_refocus_during_auto_switch_uses_workspace_selection() {
     );
 }
 
+/// An explicit focus supersedes a pending refocus: the refocus is discarded, so a later layout
+/// response does not take focus back to the refocus target.
+#[test]
+fn explicit_focus_discards_a_pending_refocus() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let chosen = WindowId::new(1, 2);
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.refocus_manager.refocus_state = RefocusState::Pending(space);
+
+    reactor.handle_layout_response(
+        layout::EventResponse {
+            focus_window: Some(chosen),
+            ..Default::default()
+        },
+        None,
+    );
+    let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
+        panic!("expected the explicit focus")
+    };
+    assert_eq!(request.focus_window.map(|(wid, _)| wid), Some(chosen));
+    assert_eq!(reactor.refocus_manager.refocus_state, RefocusState::None);
+
+    reactor.handle_layout_response(layout::EventResponse::default(), None);
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "nothing replays the superseded refocus"
+    );
+}
+
 #[test]
 fn empty_layout_response_during_auto_switch_does_not_refocus_cursor() {
     let mut reactor = test_reactor();
