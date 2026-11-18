@@ -44,14 +44,16 @@ impl AnimationSender {
         self.tx.send(message)
     }
 
-    pub fn cancel(&self, windows: Vec<WindowId>) -> Vec<(WindowId, CGRect)> {
+    /// Stops presenting `windows`; returns each one's last published frame and the request it
+    /// went out under.
+    pub fn cancel(&self, windows: Vec<WindowId>) -> Vec<(WindowId, CGRect, TransactionId)> {
         let mut control = self.control.lock();
         let frames = windows
             .iter()
             .filter_map(|wid| {
-                let (handle, frame) = control.frames.remove(wid)?;
+                let (handle, frame, txid) = control.frames.remove(wid)?;
                 handle.cancel_window_animation(*wid);
-                Some((*wid, frame))
+                Some((*wid, frame, txid))
             })
             .collect();
         control.cancelled.extend(windows.iter().copied());
@@ -62,12 +64,13 @@ impl AnimationSender {
 
 #[derive(Debug, Default)]
 struct PresenterControl {
-    frames: HashMap<WindowId, (AppThreadHandle, CGRect)>,
+    /// Each window's last published frame, and the request it went out under.
+    frames: HashMap<WindowId, (AppThreadHandle, CGRect, TransactionId)>,
     cancelled: HashSet<WindowId>,
 }
 impl PresenterControl {
     fn frame(&self, wid: WindowId, fallback: CGRect) -> CGRect {
-        self.frames.get(&wid).map_or(fallback, |(_, frame)| *frame)
+        self.frames.get(&wid).map_or(fallback, |(_, frame, _)| *frame)
     }
 }
 
@@ -487,12 +490,12 @@ impl Reactor {
         if windows.is_empty() {
             return;
         }
-        for (wid, frame) in self.stop_window_presentations(windows) {
+        for (wid, frame, request) in self.stop_window_presentations(windows) {
             if self.state.windows.window(wid).is_none() {
                 continue;
             }
             self.state.seen(wid, frame);
-            self.state.animation_stopped(wid);
+            self.state.animation_stopped(wid, request);
         }
         self.commit_presentations();
     }
@@ -501,13 +504,27 @@ impl Reactor {
     /// it settles where the model has it. (The presenter's last frame is not news: the user's
     /// report is.)
     pub(super) fn yield_to_user(&mut self, window: WindowId) {
-        self.stop_window_presentations(vec![window]);
-        self.state.animation_stopped(window);
+        let stopped = self.stop_window_presentations(vec![window]);
+        // The request of the presentation stopped: the one it published under, or, if it had
+        // published nothing yet, the latest sent to the window (an animated pass records it).
+        let request = stopped.first().map(|&(_, _, txid)| txid).or_else(|| {
+            let server_id = self.state.windows.window(window)?.info.sys_id?;
+            Some(self.transaction_manager.get_last_sent_txid(server_id))
+        });
+        if let Some(request) = request {
+            self.state.animation_stopped(window, request);
+        }
         self.commit_presentations();
     }
 
     /// Stops presenting `windows`; returns the last frame each presentation published.
-    fn stop_window_presentations(&mut self, mut windows: Vec<WindowId>) -> Vec<(WindowId, CGRect)> {
+    fn stop_window_presentations(
+        &mut self,
+        mut windows: Vec<WindowId>,
+    ) -> Vec<(WindowId, CGRect, TransactionId)> {
+        if windows.is_empty() {
+            return Vec::new();
+        }
         windows.sort_unstable();
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
@@ -517,7 +534,7 @@ impl Reactor {
                         .windows
                         .iter()
                         .filter(|w| windows.binary_search(&w.wid).is_ok())
-                        .map(|w| (w.wid, w.frame)),
+                        .map(|w| (w.wid, w.frame, w.txid)),
                 );
                 state.cancel_windows(&windows);
                 state.publish_state(Instant::now());
@@ -551,7 +568,7 @@ impl Reactor {
             }
             for &wid in &camera.windows {
                 let frame = if let Some(control) = &control {
-                    control.frames.get(&wid).map(|(_, frame)| *frame)
+                    control.frames.get(&wid).map(|(_, frame, _)| *frame)
                 } else {
                     camera
                         .headless
@@ -597,7 +614,7 @@ impl Reactor {
         if let Some(mut camera) = self.presentations.remove(&space) {
             camera.state.lock().stopped = true;
             let frames = if let Some(headless) = &mut camera.headless {
-                let frames = headless.windows.iter().map(|w| (w.wid, w.frame)).collect();
+                let frames = headless.windows.iter().map(|w| (w.wid, w.frame, w.txid)).collect();
                 headless.stop();
                 frames
             } else if let Some(tx) = &self.animation_tx {
@@ -605,10 +622,10 @@ impl Reactor {
             } else {
                 Vec::new()
             };
-            for (wid, frame) in frames {
+            for (wid, frame, request) in frames {
                 if self.state.windows.window(wid).is_some() {
                     self.state.seen(wid, frame);
-                    self.state.animation_stopped(wid);
+                    self.state.animation_stopped(wid, request);
                 }
             }
             self.state.animation_ended(camera.request);
@@ -726,6 +743,7 @@ impl Reactor {
                     window.from.size = window.to.size;
                 }
             }
+            self.stop_window_presentations(animated.writes.iter().map(|w| w.window()).collect());
             for write in animated.writes {
                 self.send_arranged(write);
             }
@@ -956,9 +974,12 @@ impl AnimationManager {
 
     fn publish_frames(&self, shared: &mut PresenterControl, initialize: bool) {
         for w in self.motions.iter().flat_map(Motion::windows) {
-            let (handle, frame) =
-                shared.frames.entry(w.wid).or_insert_with(|| (w.handle.clone(), w.frame));
+            let (handle, frame, txid) = shared
+                .frames
+                .entry(w.wid)
+                .or_insert_with(|| (w.handle.clone(), w.frame, w.txid));
             *frame = w.frame;
+            *txid = w.txid;
             if initialize {
                 *handle = w.handle.clone();
             }
@@ -1117,6 +1138,8 @@ impl AnimationManager {
             });
         }
         let animated = reactor.state.animate(desires);
+        // A window the core writes instead is no longer presented by an older animation.
+        reactor.stop_window_presentations(animated.writes.iter().map(|w| w.window()).collect());
         for write in animated.writes {
             any_frame_changed = true;
             reactor.send_arranged(write);
@@ -2010,7 +2033,7 @@ mod tests {
         manager.retire();
         assert!(manager.motions.is_empty());
         let before: Vec<_> =
-            control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
+            control.frames.iter().map(|(wid, (_, frame, _))| (*wid, *frame)).collect();
         assert!(system.move_selection(layout, Direction::Left));
         let started = Instant::now();
         let mut next = make_camera(&system, &before, &control);
@@ -2335,7 +2358,7 @@ mod tests {
                 .control
                 .lock()
                 .frames
-                .insert(wid, (handle.clone(), retained));
+                .insert(wid, (handle.clone(), retained, TransactionId::default()));
             // Within a Space, a new camera must preserve the last publication.
             reactor.present_camera(spaces[source], true, None).unwrap();
             let Message::Camera(source_camera) = receiver.commands.try_recv().unwrap() else {
@@ -2444,11 +2467,14 @@ mod tests {
         let wid = WindowId::new(1, 1);
         let (sender, receiver) = AnimationSender::channel();
         let frame = rect(10., 10., 500., 400.);
-        sender
-            .control
-            .lock()
-            .frames
-            .insert(wid, (reactor.app_manager.apps[&1].handle.clone(), frame));
+        sender.control.lock().frames.insert(
+            wid,
+            (
+                reactor.app_manager.apps[&1].handle.clone(),
+                frame,
+                TransactionId::default(),
+            ),
+        );
         let control = Arc::clone(&sender.control);
         reactor.animation_tx = Some(sender);
         for revision in [snapshot.revision, snapshot.revision.saturating_sub(1)] {
@@ -2493,7 +2519,7 @@ mod tests {
             .lock()
             .frames
             .get(&wid)
-            .is_some_and(|(_, frame)| frame.origin.x > 0.0)
+            .is_some_and(|(_, frame, _)| frame.origin.x > 0.0)
             && Instant::now() < deadline
         {
             std::thread::yield_now();

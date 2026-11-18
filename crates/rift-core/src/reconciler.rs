@@ -133,6 +133,8 @@ pub enum Planned<K: Kinds> {
     Animate,
     /// Write it there instead (where the app has it is unknown).
     Write(Write<K>),
+    /// Write it there after the write in flight (queued behind it).
+    Queued,
     /// It is there, on its way there, refused to go there, or is the user's.
     Nothing,
 }
@@ -208,6 +210,10 @@ fn answers<K: Kinds>(target: K::Frame, frame: K::Frame) -> bool {
 pub struct Reconciler<K: Kinds> {
     /// Every window the model knows, and where it stands.
     syncs: HashMap<K::Window, Sync<K>>,
+    /// The request of the latest frame Rift sent each window (a write, an animation, a drag's
+    /// frame): an answer naming it is the answer to Rift's latest word, one naming an older
+    /// request is stale.
+    last_sent: HashMap<K::Window, K::Request>,
     /// Every write sent, with its deadline, in the order sent. A deadline is the send time
     /// plus [`WRITE_DEADLINE`], so this is also deadline order. An entry whose window has since
     /// been answered or written again no longer matches its sync state and is dropped when it
@@ -223,6 +229,7 @@ impl<K: Kinds> Default for Reconciler<K> {
     fn default() -> Self {
         Reconciler {
             syncs: HashMap::new(),
+            last_sent: HashMap::new(),
             deadlines: VecDeque::new(),
             notes: Vec::new(),
             touched: Vec::new(),
@@ -280,6 +287,7 @@ impl<K: Kinds> Reconciler<K> {
     /// `window` is gone: nothing is tracked for it any more.
     pub fn remove(&mut self, window: K::Window) {
         self.syncs.remove(&window);
+        self.last_sent.remove(&window);
         self.touched.push(window);
     }
 
@@ -332,6 +340,7 @@ impl<K: Kinds> Reconciler<K> {
     ) -> Write<K> {
         let deadline = K::after(now, WRITE_DEADLINE);
         self.deadlines.push_back((deadline, window));
+        self.last_sent.insert(window, request);
         self.set(window, Sync::InFlight {
             target: frame,
             deadline,
@@ -441,6 +450,7 @@ impl<K: Kinds> Reconciler<K> {
     pub fn follow(&mut self, request: K::Request, window: K::Window, frame: K::Frame) -> Write<K> {
         if self.syncs.contains_key(&window) {
             self.set(window, Sync::Settled { acked: frame });
+            self.last_sent.insert(window, request);
         }
         Write { window, frame, request }
     }
@@ -482,6 +492,17 @@ impl<K: Kinds> Reconciler<K> {
     ) -> Reply<K> {
         match self.sync(window) {
             None => Reply::Answered(Answer::Unasked, None),
+            // The answer to Rift's latest word, which it stopped waiting for (a timeout, a
+            // forget): news like any report. An answer to anything older is stale.
+            Some(Sync::Settled { .. } | Sync::Unknown)
+                if let (Some(seen), Some(&last)) = (seen, self.last_sent.get(&window)) =>
+            {
+                if seen == last {
+                    Reply::Late
+                } else {
+                    Reply::Stale
+                }
+            }
             // Not an answer to anything Rift tracks, but where the app has the window.
             Some(Sync::Settled { .. } | Sync::Unknown) => {
                 self.set(window, Sync::Settled { acked: frame });
@@ -662,9 +683,16 @@ impl<K: Kinds> Reconciler<K> {
         };
         // Where the window is taken to be: what is pending for it, else where the model sees it.
         let already = match sync {
-            Sync::InFlight { target, .. } | Sync::Animating { target, .. } => {
-                K::same_as(target, desired)
+            // A write is with the app: the desire goes after it, as a write. (An animation's
+            // frames could overtake the write and be undone by it.)
+            Sync::InFlight { .. } => {
+                return match self.want(now, request, window, desired, known, Want::Arrange, owner) {
+                    Verdict::Queued => Planned::Queued,
+                    Verdict::Send(write) => Planned::Write(write),
+                    Verdict::Nothing => Planned::Nothing,
+                };
             }
+            Sync::Animating { target, .. } => K::same_as(target, desired),
             Sync::Refused { wanted, .. } => K::same_as(wanted, desired),
             Sync::Settled { .. } => K::same_as(known, desired),
             // Where the app has it is unknown: the desire is written, once, so that what the
@@ -680,6 +708,7 @@ impl<K: Kinds> Reconciler<K> {
             (Owner::User, _) | (Owner::Rift, true) => Planned::Nothing,
             (Owner::Rift, false) => {
                 self.set(window, Sync::Animating { target: desired, request });
+                self.last_sent.insert(window, request);
                 Planned::Animate
             }
         }
@@ -713,11 +742,26 @@ impl<K: Kinds> Reconciler<K> {
         }
     }
 
-    /// `window`'s animation was stopped where the model has it (`known`): the app has it there.
-    /// Only an animating window is touched.
-    pub fn animation_stopped(&mut self, window: K::Window, known: K::Frame) {
-        if let Some(Sync::Animating { .. }) = self.sync(window) {
-            self.set(window, Sync::Settled { acked: known });
+    /// The platform stopped presenting `window` under `request`; the model has it at `known`.
+    /// Still animating, it is where it stopped. Waiting for the answer to the animation that
+    /// ended, it may never get one (frames the app had not applied are dropped): where the app
+    /// has it is unknown. Anything since (a newer animation or write) is untouched.
+    pub fn animation_stopped(&mut self, window: K::Window, request: K::Request, known: K::Frame) {
+        match self.sync(window) {
+            Some(Sync::Animating { request: sent, .. }) if sent == request => {
+                self.set(window, Sync::Settled { acked: known })
+            }
+            Some(Sync::InFlight { request: sent, .. }) if sent == request => {
+                self.set(window, Sync::Unknown)
+            }
+            Some(
+                Sync::Animating { .. }
+                | Sync::InFlight { .. }
+                | Sync::Settled { .. }
+                | Sync::Refused { .. }
+                | Sync::Unknown,
+            )
+            | None => {}
         }
     }
 
@@ -1163,6 +1207,42 @@ mod tests {
         assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(100.))), at(50.));
         // The superseded animation's end does not touch the write in flight.
         reconciler.animation_ended(T0, OLD);
+        assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+    }
+
+    #[test]
+    fn an_animation_over_a_write_in_flight_waits_behind_it_as_a_write() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(
+            reconciler.animate(T0, R, window(), at(10.), at(10.), Owner::Rift),
+            Planned::Nothing,
+            "on its way there"
+        );
+        assert_eq!(
+            reconciler.animate(T0, R, window(), at(30.), at(10.), Owner::Rift),
+            Planned::Queued
+        );
+        assert!(
+            matches!(sync(&reconciler), Sync::InFlight { queued: Some(q), .. } if q == at(30.))
+        );
+    }
+
+    #[test]
+    fn a_stopped_presentation_touches_only_what_its_request_left() {
+        // Still animating: where it stopped.
+        let mut reconciler = with(at(0.));
+        _ = reconciler.animate(T0, R, window(), at(100.), at(0.), Owner::Rift);
+        reconciler.animation_stopped(window(), R, at(40.));
+        assert_eq!(sync(&reconciler), Sync::Settled { acked: at(40.) });
+        // Ended short and waiting for its answer, which may never come: unknown.
+        _ = reconciler.animate(T0, R, window(), at(100.), at(40.), Owner::Rift);
+        reconciler.animation_ended(T0, R);
+        reconciler.animation_stopped(window(), R, at(100.));
+        assert_eq!(sync(&reconciler), Sync::Unknown);
+        // A write sent since is not the stopped presentation's.
+        _ = want(&mut reconciler, T0, at(10.), at(100.));
+        reconciler.animation_stopped(window(), OLD, at(10.));
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
     }
 
