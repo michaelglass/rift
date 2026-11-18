@@ -534,6 +534,7 @@ impl Reactor {
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
             if let Some(state) = &mut camera.headless {
+                let before = frames.len();
                 frames.extend(
                     state
                         .windows
@@ -541,8 +542,11 @@ impl Reactor {
                         .filter(|w| windows.binary_search(&w.wid).is_ok())
                         .map(|w| (w.wid, w.frame, w.txid)),
                 );
-                state.cancel_windows(&windows);
-                state.publish_state(Instant::now());
+                // Only a camera that presented one of them changes.
+                if frames.len() > before {
+                    state.cancel_windows(&windows);
+                    state.publish_state(Instant::now());
+                }
             }
         }
         if let Some(tx) = &self.animation_tx {
@@ -552,12 +556,13 @@ impl Reactor {
     }
 
     pub(super) fn commit_presentations(&mut self) {
-        if self.refreshes_blocked() {
+        if self.presentations.is_empty() || self.refreshes_blocked() {
             return;
         }
         let control = self.animation_tx.as_ref().map(|tx| tx.control.clone());
         let control = control.as_ref().map(|c| c.lock());
         let mut completed = Vec::new();
+        let mut moved = Vec::new();
         for (space, camera) in &self.presentations {
             let state = camera.state.lock();
             let identity = &camera.identity;
@@ -585,8 +590,11 @@ impl Reactor {
                 if let Some(frame) = frame
                     && let Some(window) = self.state.windows.window(wid)
                 {
-                    let frame = CGRect::new(frame.origin, window.frame_monotonic().size);
-                    self.state.step(CoreEvent::Seen { window: wid, frame });
+                    let known = window.frame_monotonic();
+                    let frame = CGRect::new(frame.origin, known.size);
+                    if frame != known {
+                        moved.push((wid, frame));
+                    }
                 }
             }
             if let Some(session) = &mut self.viewport_gesture
@@ -600,6 +608,10 @@ impl Reactor {
             if !state.active {
                 completed.push(*space);
             }
+        }
+        drop(control);
+        for (window, frame) in moved {
+            self.state.step(CoreEvent::Seen { window, frame });
         }
         for space in completed {
             if let Some(camera) = self.presentations.remove(&space) {
