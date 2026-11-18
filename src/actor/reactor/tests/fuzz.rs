@@ -28,6 +28,10 @@ use crate::sys::geometry::IsWithin;
 const KNOWN: &[(&str, &str)] = &[];
 
 const SCREEN_W: f64 = 1000.;
+
+/// The outside owner the fuzzer claims windows for.
+const FUZZ_OWNER: crate::model::window_store::ClaimOwner =
+    crate::model::window_store::ClaimOwner(303);
 const SCREEN_H: f64 = 800.;
 
 // ---------------------------------------------------------------------------------------------
@@ -114,6 +118,25 @@ enum Step {
     Wake,
     /// Window `w`'s app starts treating the sizes it is asked for this way.
     Sizing { w: usize, sizing: TestSizing },
+    /// The user cancels a drag (escape) and lets go: rift lets go of the window.
+    Cancel,
+    /// An outside owner claims window `w`: rift stops managing it.
+    Claim { w: usize },
+    /// The outside owner gives window `w` back.
+    Unclaim { w: usize },
+    /// The displays are reported again in the other order: a display change, after which no
+    /// cached frame is trusted.
+    ReorderDisplays,
+    /// macOS announces a new accessibility identity for window `w`: the same window-server
+    /// window under a new window id (its old identity may already be dead, in fullscreen).
+    Rekey { w: usize },
+    /// Window `w` goes native fullscreen: the window server shows it in its fullscreen space.
+    EnterFullscreen { w: usize },
+    /// Window `w`'s accessibility identity is destroyed while it is in native fullscreen (macOS
+    /// replaces it; a new identity is announced later, by `Rekey`).
+    DestroyIdentity { w: usize },
+    /// Window `w` leaves native fullscreen: the window server shows it on its space again.
+    LeaveFullscreen { w: usize },
 }
 
 impl Step {
@@ -139,6 +162,14 @@ impl Step {
             Step::MoveFocusedToDisplay { .. } => "command-move-to-display",
             Step::Focus { .. } => "command-focus",
             Step::Tick => "tick",
+            Step::Cancel => "cancel",
+            Step::Claim { .. } => "claim",
+            Step::Unclaim { .. } => "unclaim",
+            Step::ReorderDisplays => "reorder-displays",
+            Step::Rekey { .. } => "rekey",
+            Step::EnterFullscreen { .. } => "enter-fullscreen",
+            Step::DestroyIdentity { .. } => "destroy-identity",
+            Step::LeaveFullscreen { .. } => "leave-fullscreen",
             Step::Sizing { .. } => "sizing",
         }
     }
@@ -165,7 +196,7 @@ impl Rng {
 fn generate(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng::new(seed);
     (0..len)
-        .map(|_| match rng.below(100) {
+        .map(|_| match rng.below(108) {
             0..9 => Step::DragStart {
                 w: rng.below(16),
                 dx: rng.delta(),
@@ -220,7 +251,15 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
                 k: rng.below(3),
             },
             98 => Step::Focus { right: rng.below(2) == 1 },
-            _ => Step::MoveFocusedToDisplay { d: rng.below(3) },
+            99 => Step::MoveFocusedToDisplay { d: rng.below(3) },
+            100 => Step::Cancel,
+            101 => Step::Claim { w: rng.below(16) },
+            102 => Step::Unclaim { w: rng.below(16) },
+            103 => Step::ReorderDisplays,
+            104 => Step::Rekey { w: rng.below(16) },
+            105 => Step::EnterFullscreen { w: rng.below(16) },
+            106 => Step::DestroyIdentity { w: rng.below(16) },
+            _ => Step::LeaveFullscreen { w: rng.below(16) },
         })
         .collect()
 }
@@ -241,6 +280,16 @@ impl Violation {
 }
 
 /// What the user is really doing, independent of what rift believes.
+/// A window in native fullscreen.
+#[derive(Debug, Clone)]
+struct Fullscreen {
+    wsid: WindowServerId,
+    /// The space it came from and returns to.
+    home: SpaceId,
+    /// Its accessibility identity was destroyed there: what the next identity reports.
+    dead: Option<WindowInfo>,
+}
+
 struct Held {
     window: WindowId,
     /// rift registered the drag when it started. Invariants about the drag apply only then;
@@ -322,6 +371,10 @@ struct Sim {
     /// The frames Rift had pending for each window before the step: a write's or an
     /// animation's target, and a desire queued behind the write.
     in_flight_before: BTreeMap<WindowId, Vec<CGRect>>,
+    /// The index the next replaced identity gets (past every window the sim starts with).
+    next_idx: u32,
+    /// Windows in native fullscreen, by the id they have now.
+    fullscreen: BTreeMap<WindowId, Fullscreen>,
     /// The requests the core planned animations and cameras under.
     animation_requests: Vec<TransactionId>,
 }
@@ -440,6 +493,8 @@ impl Sim {
             inbox: Vec::new(),
             animation_requests: Vec::new(),
             in_flight_before: BTreeMap::new(),
+            next_idx: 100,
+            fullscreen: BTreeMap::new(),
         };
         if setup.scrolling {
             sim.reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
@@ -489,6 +544,56 @@ impl Sim {
     }
 
     fn pick(&self, w: usize) -> WindowId { self.windows[w % self.windows.len()] }
+
+    /// What an inventory reports of window `wid`: rift's record of it, at the frame the window
+    /// really has. None when rift has no record (it retired or never admitted the window).
+    fn reported_info(&self, wid: WindowId) -> Option<WindowInfo> {
+        let mut info = self.reactor.state.windows.window(wid)?.info.clone();
+        info.frame = self.os_frame(wid);
+        Some(info)
+    }
+
+    /// A window id no window has had, for `wid`'s app.
+    fn fresh_id(&mut self, wid: WindowId) -> WindowId {
+        self.next_idx += 1;
+        WindowId::new(wid.pid, self.next_idx)
+    }
+
+    /// macOS gave window `old` the id `new`: the sim follows it everywhere.
+    fn rekeyed(&mut self, old: WindowId, new: WindowId) {
+        for window in &mut self.windows {
+            if *window == old {
+                *window = new;
+            }
+        }
+        if self.live.remove(&old) {
+            self.live.insert(new);
+        }
+        if let Some(state) = self.apps.windows.remove(&old) {
+            self.apps.windows.insert(new, state);
+        }
+        fn rename<V>(map: &mut BTreeMap<WindowId, V>, old: WindowId, new: WindowId) {
+            if let Some(value) = map.remove(&old) {
+                map.insert(new, value);
+            }
+        }
+        rename(&mut self.reads, old, new);
+        rename(&mut self.stale_reads, old, new);
+        rename(&mut self.settled_before, old, new);
+        rename(&mut self.in_flight_before, old, new);
+        for set in [&mut self.gave_up, &mut self.distrusted] {
+            if set.remove(&old) {
+                set.insert(new);
+            }
+        }
+        if self.moved == Some(old) {
+            self.moved = Some(new);
+        }
+        if let Some(mut fullscreen) = self.fullscreen.remove(&old) {
+            fullscreen.dead = None;
+            self.fullscreen.insert(new, fullscreen);
+        }
+    }
 
     fn os_frame(&self, wid: WindowId) -> CGRect { self.apps.windows[&wid].frame }
 
@@ -555,7 +660,8 @@ impl Sim {
     /// Whether the user can press `wid`: it is live and its middle is on a screen. (Before an
     /// animation's frames reach it, a window can still be where a drag left it, off them all.)
     fn pressable(&self, wid: WindowId) -> bool {
-        self.live.contains(&wid) && {
+        // A native fullscreen window is not dragged around the desktop.
+        self.live.contains(&wid) && !self.fullscreen.contains_key(&wid) && {
             let mid = self.os_frame(wid).mid();
             self.screens.iter().any(|screen| screen.contains(mid))
         }
@@ -772,8 +878,12 @@ impl Sim {
             Step::Refresh { app, stale, zero_min } => {
                 self.gave_up.extend(self.held_window());
                 let pid = self.pids[app % self.pids.len()];
+                // A destroyed identity is not in the app's inventory.
+                let dead = |wid: &WindowId| {
+                    self.fullscreen.get(wid).is_some_and(|fullscreen| fullscreen.dead.is_some())
+                };
                 let mine: Vec<WindowId> =
-                    self.live.iter().copied().filter(|wid| wid.pid == pid).collect();
+                    self.live.iter().copied().filter(|wid| wid.pid == pid && !dead(wid)).collect();
                 self.note_reads();
                 // Each read is stamped with the request the app had applied when it was made.
                 let mut as_of = HashMap::default();
@@ -799,7 +909,10 @@ impl Sim {
             }
             Step::ForeignMove { w, to, mouse } => {
                 let wid = self.pick(w);
-                if self.live.contains(&wid) && self.held_window() != Some(wid) {
+                if self.live.contains(&wid)
+                    && self.held_window() != Some(wid)
+                    && !self.fullscreen.contains_key(&wid)
+                {
                     let reported = match mouse {
                         Mouse::Truth => self.true_mouse(),
                         Mouse::ReportsUp => MouseState::Up,
@@ -837,9 +950,99 @@ impl Sim {
                     self.reactor.handle_event(event);
                 }
             }
+            Step::Cancel => {
+                // Escape while holding, then the user lets go (no new press with the button
+                // still down).
+                self.reactor.handle_event(Event::DragCancel);
+                if self.held.take().is_some() {
+                    self.reactor.handle_event(Event::PointerReleased(
+                        crate::actor::drag::MouseButton::Left,
+                    ));
+                }
+            }
+            Step::Claim { w } => {
+                let wid = self.pick(w);
+                if self.live.contains(&wid) && self.held_window() != Some(wid) {
+                    _ = self.reactor.claim_window(
+                        wid,
+                        FUZZ_OWNER,
+                        rift_protocol::WindowClaimFlags::empty(),
+                    );
+                }
+            }
+            Step::Unclaim { w } => {
+                let wid = self.pick(w);
+                if self.live.contains(&wid) {
+                    _ = self.reactor.release_window(wid, FUZZ_OWNER);
+                }
+            }
+            Step::ReorderDisplays => {
+                if self.screens.len() > 1 {
+                    self.screens.rotate_left(1);
+                    self.spaces.rotate_left(1);
+                    let spaces = self.spaces.iter().copied().map(Some).collect();
+                    self.reactor.handle_event(space_state_event(self.screens.clone(), spaces));
+                }
+            }
+            Step::Rekey { w } => {
+                let wid = self.pick(w);
+                let dead = self.fullscreen.get(&wid).and_then(|fullscreen| fullscreen.dead.clone());
+                if self.live.contains(&wid)
+                    && self.held_window() != Some(wid)
+                    && let Some(info) = dead.or_else(|| self.reported_info(wid))
+                {
+                    // macOS announces the new identity as a new window (same server window).
+                    let fresh = self.fresh_id(wid);
+                    self.reactor.handle_event(Event::WindowCreated(fresh, info, None));
+                    self.rekeyed(wid, fresh);
+                }
+            }
+            Step::EnterFullscreen { w } => {
+                let wid = self.pick(w);
+                if self.live.contains(&wid)
+                    && self.held_window() != Some(wid)
+                    && !self.fullscreen.contains_key(&wid)
+                    && let Some(home) = self.reactor.assigned_space_for_window_id(wid)
+                    && self.spaces.contains(&home)
+                {
+                    let wsid = self.reactor.test_window_server_id(wid);
+                    let space = SpaceId::new(0x400000000 + home.get());
+                    super::window_server_appeared(
+                        &mut self.reactor,
+                        wsid,
+                        space,
+                        SpaceEventKind::Fullscreen,
+                    );
+                    self.reactor.state.windows.set_window_server_space(wsid, Some(space));
+                    self.fullscreen.insert(wid, Fullscreen { wsid, home, dead: None });
+                }
+            }
+            Step::DestroyIdentity { w } => {
+                let wid = self.pick(w);
+                if let Some(fullscreen) = self.fullscreen.get(&wid)
+                    && fullscreen.dead.is_none()
+                    && let Some(info) = self.reported_info(wid)
+                {
+                    self.reactor.handle_event(Event::WindowDestroyed(wid));
+                    if let Some(fullscreen) = self.fullscreen.get_mut(&wid) {
+                        fullscreen.dead = Some(info);
+                    }
+                }
+            }
+            Step::LeaveFullscreen { w } => {
+                let wid = self.pick(w);
+                if let Some(Fullscreen { wsid, home, .. }) = self.fullscreen.remove(&wid) {
+                    super::window_server_appeared(
+                        &mut self.reactor,
+                        wsid,
+                        home,
+                        SpaceEventKind::User,
+                    );
+                }
+            }
             Step::Destroy { w } => {
                 let wid = self.pick(w);
-                if self.live.remove(&wid) {
+                if !self.fullscreen.contains_key(&wid) && self.live.remove(&wid) {
                     if self.held_window() == Some(wid) {
                         self.held = None;
                     }
@@ -965,6 +1168,8 @@ impl Sim {
                 | Step::CrossDisplayLagging { .. }
         ) && let Some(held) = &self.held
             && self.live.contains(&held.window)
+            // A claimed window is its owner's: rift does not drag it.
+            && self.reactor.state.windows.claim(held.window).is_none()
             && self.moved == Some(held.window)
             && !frames_written(&self.pending).iter().any(|(wid, frame)| {
                 *wid == held.window && frame.same_as(self.os_frame(held.window))
@@ -1190,9 +1395,13 @@ impl Sim {
                 );
             }
         }
-        // 9. Every live window stays assigned to some space.
+        // 9. Every live window stays assigned to some space (a claimed one is its owner's, a
+        // native fullscreen one is in its fullscreen space).
         for &wid in &self.live {
-            if self.reactor.assigned_space_for_window_id(wid).is_none() {
+            if self.reactor.state.windows.claim(wid).is_none()
+                && !self.fullscreen.contains_key(&wid)
+                && self.reactor.assigned_space_for_window_id(wid).is_none()
+            {
                 return fail(
                     "live-window-has-a-space",
                     format!("{wid:?} has no assigned space"),
@@ -1455,6 +1664,84 @@ fn drag_invariants_hold_across_interleavings() {
 
 // ---------------------------------------------------------------------------------------------
 // Regressions.
+
+#[test]
+fn a_fullscreen_identity_replaced_mid_write_leaves_no_stale_pending_target() {
+    // A modifier drop writes the window; it goes native fullscreen and its identity is destroyed
+    // there. The pending store kept the write's target under the window-server id, which the new
+    // identity inherited.
+    let steps = [
+        Step::ModifierDrag { w: 0, dx: 140, dy: -111 },
+        Step::MouseUp,
+        Step::EnterFullscreen { w: 15 },
+        Step::DestroyIdentity { w: 15 },
+        Step::Rekey { w: 15 },
+        Step::LeaveFullscreen { w: 15 },
+        Step::Deliver,
+    ];
+    assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_window_rekeyed_mid_write_after_a_claim_reflow_reaches_its_slot() {
+    // The claim reflows the display, a write goes to another window, and macOS replaces that
+    // window's identity before the write lands. rift left it outside its slot.
+    let steps = [Step::Claim { w: 4 }, Step::Rekey { w: 10 }];
+    assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_window_rekeyed_mid_write_after_a_drop_reflow_reaches_its_slot() {
+    let steps = [
+        Step::DragStart { w: 3, dx: -26, dy: -121 },
+        Step::CrossDisplay { to: 0 },
+        Step::MouseUp,
+        Step::Rekey { w: 4 },
+    ];
+    assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_new_identitys_stamped_reads_are_never_taken_for_rifts_own() {
+    // During another window's drag, a window's identity dies in fullscreen and comes back under
+    // a new id; its reads carry the old identity's stamps. rift took them for its own frames, a
+    // stale one became the acknowledged frame, and the window stayed outside its slot.
+    let steps = [
+        Step::ForeignMove {
+            w: 3,
+            to: 2,
+            mouse: Mouse::Truth,
+        },
+        Step::DragStart { w: 13, dx: 33, dy: -27 },
+        Step::EnterFullscreen { w: 10 },
+        Step::DestroyIdentity { w: 10 },
+        Step::Rekey { w: 10 },
+        Step::LeaveFullscreen { w: 10 },
+        Step::Refresh {
+            app: 1,
+            stale: true,
+            zero_min: false,
+        },
+    ];
+    assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
+}
+
+#[test]
+fn a_window_claimed_mid_write_gets_no_write_over_it_when_given_back() {
+    // A drop writes the window, which is claimed before the app answers and released during
+    // another drag. rift sent a second write over the unanswered one.
+    let steps = [
+        Step::Press { w: 10 },
+        Step::DragMove { dx: 149, dy: 110 },
+        Step::DragMove { dx: 139, dy: -57 },
+        Step::MouseUp,
+        Step::Claim { w: 11 },
+        Step::DragStart { w: 15, dx: -89, dy: -132 },
+        Step::Unclaim { w: 11 },
+        Step::MouseUp,
+    ];
+    assert_eq!(execute(Setup::plain(3), &steps, &[]), Ok(()));
+}
 
 #[test]
 fn another_apps_window_moving_does_not_take_over_the_drag() {
