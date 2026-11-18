@@ -8411,6 +8411,41 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
     );
 }
 
+/// The overview's focus handoff expires with the echo window even if its raise never completes:
+/// it used to be read without its age in two places, so one lost completion made every later
+/// overview selection on that Space instant.
+#[test]
+fn a_lapsed_overview_focus_no_longer_makes_selections_instant() {
+    let mut reactor = test_reactor();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    let workspaces = reactor.query_workspaces(Some(space));
+    let select = |reactor: &mut Reactor, index: usize| {
+        reactor
+            .dispatch_workflow(Event::OverviewSelectWorkspace {
+                display: "test-display-1".into(),
+                workspace: workspaces[index].workspace_id,
+                window: None,
+                transition: None,
+            })
+            .unwrap()
+    };
+    let window = WindowId::new(1, 1);
+    reactor.overview_focus = Some(Expecting::now((space, window)));
+    assert!(
+        select(&mut reactor, 1).arrange.instant,
+        "a live handoff keeps arranges instant"
+    );
+    reactor.overview_focus = Some(Expecting::since(
+        (space, window),
+        Instant::now() - crate::common::expecting::ECHO_WINDOW,
+    ));
+    assert!(!select(&mut reactor, 0).arrange.instant, "a lapsed one does not");
+}
+
 #[test]
 fn mission_control_keeps_display_remaps_when_a_newer_membership_sample_arrives() {
     for transition in 0..3 {
