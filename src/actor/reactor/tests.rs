@@ -1896,16 +1896,25 @@ fn matching_rift_frame_clears_pending_target() {
         reactor.transaction_manager.get_target_frame(wsid),
         Some(adjusted_target)
     );
-    assert_eq!(reactor.state.core.sync(wid), super::reconciler::Sync::Refused {
-        wanted: adjusted_target,
-        got: accepted
-    });
+    assert_eq!(
+        reactor.state.core.sync(wid),
+        Some(super::reconciler::Sync::Refused {
+            wanted: adjusted_target,
+            got: accepted
+        })
+    );
     assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
 
     // A user drag beginning while a write is with the app clears it instead of waiting for
-    // the app's answer.
+    // the app's answer. (Placing the refused frame again would not be asked: a placement is a
+    // desire like any other, so this one goes somewhere new.)
     let dragged = CGRect::new(CGPoint::new(140.0, 90.0), frame.size);
-    reactor.place_window(wid, adjusted_target);
+    let placed = CGRect::new(CGPoint::new(120.0, 90.0), frame.size);
+    reactor.place_window(wid, placed);
+    assert!(matches!(
+        reactor.state.core.sync(wid),
+        Some(super::reconciler::Sync::InFlight { .. })
+    ));
     reactor.state.press(Some(wid), crate::actor::drag::MouseButton::Left);
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
@@ -1914,7 +1923,11 @@ fn matching_rift_frame_clears_pending_target() {
         Requested(false),
     ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
-    assert_eq!(reactor.state.core.sync(wid), super::reconciler::Sync::Adrift);
+    // Where the user put it is where the app has it, until their drag ends (then unknown).
+    assert_eq!(
+        reactor.state.core.sync(wid),
+        Some(super::reconciler::Sync::Settled { acked: dragged })
+    );
     assert!(reactor.state.windows.drag_on(wid).is_some());
 }
 
@@ -13015,7 +13028,7 @@ fn a_drag_starting_while_a_rift_write_is_in_flight_is_noticed() {
     reactor.place_window(wid, in_flight);
     assert!(matches!(
         reactor.state.core.sync(wid),
-        super::reconciler::Sync::InFlight { .. }
+        Some(super::reconciler::Sync::InFlight { .. })
     ));
 
     // The user grabs the window and moves it somewhere that is neither where it was nor
@@ -13057,7 +13070,7 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
         reactor.handle_events(apps.make_app(2, make_windows(1)));
         apps.simulate_until_quiet(&mut reactor);
 
-        let Sync::Refused { wanted, got } = reactor.state.core.sync(stubborn) else {
+        let Some(Sync::Refused { wanted, got }) = reactor.state.core.sync(stubborn) else {
             panic!(
                 "{sizing:?}: expected a refusal, got {:?}",
                 reactor.state.core.sync(stubborn)
@@ -13485,7 +13498,7 @@ fn an_answer_to_an_older_write_does_not_pass_for_a_batched_one() {
         reactor.handle_event(event);
     }
     match reactor.state.core.sync(right) {
-        super::reconciler::Sync::InFlight { target, queued: None, .. } => {
+        Some(super::reconciler::Sync::InFlight { target, queued: None, .. }) => {
             assert_eq!(target, new_right)
         }
         other => panic!("the old answer settled the batched write: {other:?}"),

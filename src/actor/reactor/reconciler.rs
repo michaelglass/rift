@@ -208,7 +208,7 @@ impl Reconciler {
 
     /// Rust-only read, not part of the boundary: tests, and the fuzzer's invariants.
     #[cfg(test)]
-    pub(crate) fn sync(&self, window: WindowId) -> Sync {
+    pub(crate) fn sync(&self, window: WindowId) -> Option<Sync> {
         self.core.borrow().reconciler().sync(window)
     }
 
@@ -375,7 +375,7 @@ impl Reactor {
         };
         let handle = app.handle.clone();
         let request = self.transaction_manager.mint();
-        match self.arrange_one(window, frame, Want::Place, request) {
+        match self.arrange_one(window, frame, Want::Arrange, request) {
             Verdict::Send(write) => self.send_one(write, handle),
             Verdict::Queued | Verdict::Nothing => {}
         }
@@ -701,6 +701,19 @@ impl RiftState {
         suspended
     }
 
+    /// The displays changed: where the apps have these windows is unknown until they say
+    /// (macOS resizes windows silently on a display change).
+    pub(crate) fn distrust(&mut self, windows: Vec<WindowId>) {
+        self.core.decide(Event::Distrust { windows });
+    }
+
+    /// The app's window was read at `frame` (an inventory, the window server): the model sees it
+    /// there and its app has it there.
+    pub(crate) fn found(&mut self, window: WindowId, frame: CGRect) {
+        let effects = self.core.decide(Event::Found { window, frame });
+        self.project(&effects, None);
+    }
+
     /// Tracks a new window's state; the model sees it where its state says it is.
     pub(crate) fn insert_window(
         &mut self,
@@ -719,7 +732,7 @@ impl RiftState {
     ) -> Option<WindowId> {
         let window = self.windows.observe_native_window(info)?;
         if info.layer == 0 {
-            self.seen(window, info.frame);
+            self.found(window, info.frame);
         }
         Some(window)
     }

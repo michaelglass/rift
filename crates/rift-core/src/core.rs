@@ -85,9 +85,15 @@ pub enum Event<K: Kinds> {
     Seen { window: K::Window, frame: K::Frame },
     /// An outside owner took `window` (a claim): a grip on it ends; Rift keeps the window.
     Ceded { window: K::Window },
+    /// The app's window was read at `frame` outside any answer (an inventory, the window server):
+    /// the model sees it there, and its app has it there.
+    Found { window: K::Window, frame: K::Frame },
     /// The model no longer sees `window`, though Rift keeps it (its accessibility identity is
     /// suspended during native fullscreen); it is seen again when it comes back.
     Unseen { window: K::Window },
+    /// The displays changed: macOS may have resized these windows without telling anyone, so
+    /// where their apps have them is unknown until they say.
+    Distrust { windows: Vec<K::Window> },
     /// Layout wants `window` at `desired`.
     Want {
         now: K::Time,
@@ -249,7 +255,14 @@ impl<K: Kinds> Event<K> {
                 frame: to.frame(frame),
             },
             Event::Unseen { window } => Event::Unseen { window: to.window(window) },
+            Event::Found { window, frame } => Event::Found {
+                window: to.window(window),
+                frame: to.frame(frame),
+            },
             Event::Ceded { window } => Event::Ceded { window: to.window(window) },
+            Event::Distrust { windows } => Event::Distrust {
+                windows: windows.into_iter().map(|window| to.window(window)).collect(),
+            },
             Event::Tick { now, request } => Event::Tick {
                 now: to.time(now),
                 request: to.request(request),
@@ -343,9 +356,12 @@ impl<K: Kinds> RustCore<K> {
     /// projection agrees. Not part of the boundary.
     pub fn seen(&self, window: K::Window) -> Option<K::Frame> { self.seen.get(&window).copied() }
 
-    /// The model takes `window` to be at `frame` from now on.
+    /// The model takes `window` to be at `frame` from now on. A window it did not know has
+    /// just appeared, and its app has it there.
     fn see(&mut self, window: K::Window, frame: K::Frame) -> Effect<K> {
-        self.seen.insert(window, frame);
+        if self.seen.insert(window, frame).is_none() {
+            self.reconciler.appear(window, frame);
+        }
         Effect::Seen { window, frame }
     }
 
@@ -355,11 +371,17 @@ impl<K: Kinds> RustCore<K> {
         [Effect::Write(write), seen]
     }
 
-    /// The hand comes off whatever it holds, for `why`.
+    /// The hand comes off whatever it holds, for `why`. A window the user dragged is where
+    /// they left it, which no report during the drag acknowledged: unknown. (A press that never
+    /// moved the window leaves it as it was.)
     fn ungrip(&mut self, why: Ungrip) -> Option<Effect<K>> {
         let window = match self.grip {
             Grip::Idle => return None,
-            Grip::Pressed { window, .. } | Grip::Dragging { window, .. } => window,
+            Grip::Pressed { window, .. } => window,
+            Grip::Dragging { window, .. } => {
+                self.reconciler.distrust(window);
+                window
+            }
         };
         self.grip = Grip::Idle;
         Some(Effect::Ungrip { window, why })
@@ -401,10 +423,23 @@ impl<K: Kinds> RustCore<K> {
             Event::LetGo => self.ungrip(Ungrip::LetGo).into_iter().collect(),
             Event::Gone { window } => {
                 self.seen.remove(&window);
-                self.ungrip_window(window)
+                let effects = self.ungrip_window(window);
+                self.reconciler.remove(window);
+                effects
+            }
+            Event::Distrust { windows } => {
+                for window in windows {
+                    self.reconciler.distrust(window);
+                }
+                vec![]
             }
             Event::Ceded { window } => self.ungrip_window(window),
             Event::Seen { window, frame } => vec![self.see(window, frame)],
+            Event::Found { window, frame } => {
+                let seen = self.see(window, frame);
+                self.reconciler.found(window, frame);
+                vec![seen]
+            }
             Event::Unseen { window } => {
                 self.seen.remove(&window);
                 vec![]
@@ -412,9 +447,13 @@ impl<K: Kinds> RustCore<K> {
             Event::Rekeyed { from, to } => {
                 // The new identity inherits where the old one was seen unless it is seen itself
                 // (the platform moves the window's state the same way).
-                if let Some(frame) = self.seen.remove(&from) {
-                    self.seen.entry(to).or_insert(frame);
+                if let Some(frame) = self.seen.remove(&from)
+                    && !self.seen.contains_key(&to)
+                {
+                    self.seen.insert(to, frame);
+                    self.reconciler.appear(to, frame);
                 }
+                self.reconciler.remove(from);
                 self.rekey_grip(from, to)
             }
             Event::Want {
@@ -469,12 +508,15 @@ impl<K: Kinds> RustCore<K> {
             }
             Event::Tick { now, request } => {
                 let seen = &self.seen;
-                let lookup = |window: K::Window| Some((*seen.get(&window)?, pointer.owner(window)));
+                let lookup =
+                    |window: K::Window| seen.contains_key(&window).then(|| pointer.owner(window));
                 let released = self.reconciler.expire(now, request, lookup);
                 released.into_iter().flat_map(|write| self.written(write)).collect()
             }
             Event::Forget { window } => {
-                self.reconciler.forget(window);
+                if let Some(&known) = self.seen.get(&window) {
+                    self.reconciler.forget(window, known);
+                }
                 vec![]
             }
             Event::Gate { initiative } => {
@@ -505,7 +547,7 @@ impl<K: Kinds> RustCore<K> {
                 Verdict::Send(write) => {
                     let moves_only = match want {
                         Want::ArrangePositions => K::same_size(known, desired),
-                        Want::Arrange | Want::Place => false,
+                        Want::Arrange => false,
                     };
                     effects.push(self.see(window, desired));
                     let index = match plans.iter().position(|plan| plan.request == request) {
