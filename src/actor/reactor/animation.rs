@@ -157,6 +157,9 @@ pub struct Animation {
     display: u32,
     windows: Vec<PresentedWindow>,
     handled_windows: Vec<WindowId>,
+    /// Where the end of each window's animation is reported (`Event::AnimationEnded`, by the
+    /// request its frames went out under), so the core stops holding it as animating.
+    events: Option<super::Sender>,
 }
 
 #[derive(Clone, Debug)]
@@ -523,6 +526,7 @@ impl Reactor {
                 self.transaction_manager.clear_target_for_window(wsid);
             }
             self.state.seen(wid, frame);
+            self.state.animation_stopped(wid);
         }
         self.commit_presentations();
     }
@@ -1038,16 +1042,19 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
-        // From here on is the animated path. Its transition frames (`PresentedWindow::begin`,
-        // `FrameBatch::flush`, `skip_to_end`) are sent by the animation thread and are not
-        // reconciled; a window it takes over is forgotten by the reconciler.
+        // From here on is the animated path. The core plans which windows animate and holds
+        // each as animating until an answer lands on its target or the animation ends; the
+        // animation thread only presents (`PresentedWindow::begin`, `FrameBatch::flush`,
+        // `skip_to_end`).
         let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
         if let Some(dragged) = dragged {
             anim.mark_handled(dragged);
         }
 
+        let request = reactor.transaction_manager.mint();
         let mut hidden = Vec::new();
+        let mut desires = Vec::new();
         for &(wid, target_frame) in layout {
             // The window the user holds keeps its slot, but its frame is theirs until the drop.
             if presented.contains(&wid) || reactor.owner(wid) == Owner::User {
@@ -1060,54 +1067,58 @@ impl AnimationManager {
                 hidden.push((wid, target_frame));
                 continue;
             }
-
-            let Some(window) = reactor.state.windows.window(wid) else {
-                continue;
-            };
-            let current_frame = window.frame_monotonic;
-            let window_server_id = window.info.sys_id;
-            let pending = window_server_id
-                .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
-            // Matching the observed frame cannot cancel an older, different target.
-            if pending.is_some_and(|frame| frame.same_as(target_frame))
-                || (pending.is_none() && target_frame.same_as(current_frame))
-            {
-                continue;
-            }
-            any_frame_changed = true;
-            let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
+            if !reactor.app_manager.apps.contains_key(&wid.pid) {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
+            }
+            desires.push(rift_core::Desire {
+                window: wid,
+                frame: target_frame,
+                request,
+            });
+        }
+        for (wid, from, to, request) in reactor.state.animate(desires) {
+            any_frame_changed = true;
+            let server_id = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id);
+            reactor.transaction_manager.record(request, server_id.map(|wsid| (wsid, to)));
+            trace!(?wid, ?from, ?to, "Animating visible window");
+            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
+                continue;
             };
-            let txid = reactor
-                .transaction_manager
-                .stamp(window_server_id.map(|wsid| (wsid, target_frame)));
-            trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
             let handle = app_state.handle.with_scrolling_bounds(
                 bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
             );
-            anim.add_window(&handle, wid, current_frame, target_frame, txid);
-            reactor.state.forget(wid);
-
-            if reactor.state.windows.window(wid).is_some() {
-                reactor.state.seen(wid, target_frame);
-            }
+            anim.add_window(&handle, wid, from, to, request);
         }
         any_frame_changed |= reactor.arrange_frames(space, &hidden, Want::Arrange);
 
         if !anim.is_empty() {
-            if let Some(tx) = &reactor.animation_tx {
-                if let Err(err) = tx.send(Message::Replace(anim)) {
-                    match err.0 {
-                        Message::Replace(animation) => animation.skip_to_end(),
-                        Message::Stop(..)
-                        | Message::Camera(_)
-                        | Message::StopCamera(_)
-                        | Message::Displays(_) => {}
+            let anim = match reactor.communication_manager.events_tx.clone() {
+                Some(events) => anim.reporting_to(events),
+                None => anim,
+            };
+            let presented = match &reactor.animation_tx {
+                Some(tx) => match tx.send(Message::Replace(anim)) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        match err.0 {
+                            Message::Replace(animation) => animation.skip_to_end(),
+                            Message::Stop(..)
+                            | Message::Camera(_)
+                            | Message::StopCamera(_)
+                            | Message::Displays(_) => {}
+                        }
+                        false
                     }
+                },
+                None => {
+                    anim.skip_to_end();
+                    false
                 }
-            } else {
-                anim.skip_to_end();
+            };
+            // Applied at once instead of animated: the animation is over as soon as it began.
+            if !presented {
+                reactor.state.animation_ended(request);
             }
         }
 
@@ -1280,6 +1291,7 @@ impl ActiveAnimation {
                 next.windows.push(old);
             } else if !next.windows.iter().any(|w| w.wid == old.wid) {
                 old.cancel(None);
+                next.report_ended([old.txid]);
             }
         }
         next.windows.sort_unstable_by_key(|w| w.wid.pid);
@@ -1319,6 +1331,23 @@ impl Animation {
             display: 0,
             windows: vec![],
             handled_windows: vec![],
+            events: None,
+        }
+    }
+
+    /// The end of each window's animation is reported to `events`.
+    fn reporting_to(mut self, events: super::Sender) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Reports that the animations under `requests` ended.
+    fn report_ended(&self, requests: impl IntoIterator<Item = TransactionId>) {
+        let Some(events) = &self.events else { return };
+        let mut requests: Vec<_> = requests.into_iter().collect();
+        requests.dedup();
+        for request in requests {
+            events.send(super::Event::AnimationEnded(request));
         }
     }
 
@@ -1394,6 +1423,7 @@ impl Animation {
         for window in &mut self.windows {
             window.end();
         }
+        self.report_ended(self.windows.iter().map(|window| window.txid));
     }
 }
 

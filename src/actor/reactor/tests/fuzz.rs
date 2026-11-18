@@ -415,7 +415,10 @@ impl Sim {
             .iter()
             .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
                 Sync::Settled { acked } => Some((wid, (acked, self.os_frame(wid)))),
-                Sync::Unknown | Sync::InFlight { .. } | Sync::Refused { .. } => None,
+                Sync::Unknown
+                | Sync::InFlight { .. }
+                | Sync::Refused { .. }
+                | Sync::Animating { .. } => None,
             })
             .collect();
         match step {
@@ -776,7 +779,13 @@ impl Sim {
                         );
                     }
                 }
-                None | Some(Sync::Settled { .. } | Sync::Refused { .. } | Sync::Unknown) => {
+                None
+                | Some(
+                    Sync::Settled { .. }
+                    | Sync::Refused { .. }
+                    | Sync::Unknown
+                    | Sync::Animating { .. },
+                ) => {
                     if self.moved != Some(wid) && !matches!(step, Step::Tick) {
                         return fail(
                             "only-the-reconciler-writes",
@@ -896,9 +905,13 @@ impl Sim {
                 let observed = self.os_frame(wid);
                 let refused = match sync {
                     Some(Sync::Refused { .. }) => true,
-                    None | Some(Sync::Settled { .. } | Sync::InFlight { .. } | Sync::Unknown) => {
-                        false
-                    }
+                    None
+                    | Some(
+                        Sync::Settled { .. }
+                        | Sync::InFlight { .. }
+                        | Sync::Unknown
+                        | Sync::Animating { .. },
+                    ) => false,
                 };
                 if !refused && !observed.same_as(frame) {
                     return Err(fail(format!(
