@@ -42,6 +42,31 @@ impl<K: Kinds> Write<K> {
 
 /// Where one window stands between what Rift asked of its app and what the app answered.
 /// Every window the model knows has one.
+/// A request the core sent a window (or recorded as sent outside it): only the reconciler makes
+/// one, so a request id from anywhere else can never pass for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Sent<R>(R);
+
+impl<R: Copy> Sent<R> {
+    /// The id it went out under.
+    pub fn request(self) -> R { self.0 }
+}
+
+/// The request a report or an event says it is about: the platform's word, not yet checked. It
+/// means something only against a request the core sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp<R>(R);
+
+impl<R: Ord> Stamp<R> {
+    pub fn new(request: R) -> Self { Stamp(request) }
+
+    /// Older than, the same as, or newer than what the core sent.
+    fn against(&self, sent: &Sent<R>) -> Ordering { self.0.cmp(&sent.0) }
+
+    /// It names `sent`.
+    fn names(&self, sent: &Sent<R>) -> bool { self.0 == sent.0 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Sync<K: Kinds> {
     /// The app has the window at `acked`: it answered so, or reported it there. A desire equal
@@ -49,20 +74,20 @@ pub enum Sync<K: Kinds> {
     /// any (a read stamped older than it is from before it).
     Settled {
         acked: K::Frame,
-        last: Option<K::Request>,
+        last: Option<Sent<K::Request>>,
     },
     /// Rift does not know where the app has the window: the user just dragged it (reports
     /// during a drag acknowledge nothing Rift asked for), or the displays changed (macOS
     /// resizes windows silently). The next desire is written whatever it is; a report or an
     /// answer settles it. `last` as for `Settled`.
-    Unknown { last: Option<K::Request> },
+    Unknown { last: Option<Sent<K::Request>> },
     /// One write is with the app, sent under `request`, from `before`. A newer desire waits in
     /// `queued` (one, the latest) until the app answers or `deadline` passes.
     InFlight {
         target: K::Frame,
         deadline: K::Time,
         queued: Option<K::Frame>,
-        request: K::Request,
+        request: Sent<K::Request>,
         before: Before<K>,
     },
     /// The platform is animating the window to `target` (a layout transition or a camera), its
@@ -73,7 +98,7 @@ pub enum Sync<K: Kinds> {
     /// recorded and nothing is held forever.
     Animating {
         target: K::Frame,
-        request: K::Request,
+        request: Sent<K::Request>,
     },
     /// The app answered `wanted` with `got`, or did not answer in time (`got` is then what it
     /// had acknowledged before). Rift does not ask for `wanted` again while the window stays at
@@ -82,12 +107,15 @@ pub enum Sync<K: Kinds> {
     Refused {
         wanted: K::Frame,
         got: K::Frame,
-        request: K::Request,
+        request: Sent<K::Request>,
     },
     /// Rift moves the window outside the core (a gesture's camera), its frames going out under
     /// `request`, which the platform reported: a read stamped with it is Rift's own. `at` is
     /// where the app last reported the window (where the model had it, until a report).
-    Outside { request: K::Request, at: K::Frame },
+    Outside {
+        request: Sent<K::Request>,
+        at: K::Frame,
+    },
 }
 
 /// What the app had acknowledged when a write was sent: where a write it never answers leaves
@@ -213,7 +241,7 @@ impl<K: Kinds> Sync<K> {
     }
 
     /// The request of the latest frame Rift sent the window, if any.
-    fn last(self) -> Option<K::Request> {
+    fn last(self) -> Option<Sent<K::Request>> {
         match self {
             Sync::Settled { last, .. } | Sync::Unknown { last } => last,
             Sync::InFlight { request, .. }
@@ -358,7 +386,7 @@ impl<K: Kinds> Reconciler<K> {
             target: frame,
             deadline,
             queued: None,
-            request,
+            request: Sent(request),
             before,
         });
         Write { window, frame, request }
@@ -497,7 +525,10 @@ impl<K: Kinds> Reconciler<K> {
     /// window is superseded by those frames.
     pub fn sent_outside(&mut self, window: K::Window, request: K::Request) {
         if let Some(Record { seen, .. }) = self.windows.get(&window).copied() {
-            self.set(window, Sync::Outside { request, at: seen });
+            self.set(window, Sync::Outside {
+                request: Sent(request),
+                at: seen,
+            });
         }
     }
 
@@ -508,7 +539,7 @@ impl<K: Kinds> Reconciler<K> {
         if self.windows.contains_key(&window) {
             self.set(window, Sync::Settled {
                 acked: frame,
-                last: Some(request),
+                last: Some(Sent(request)),
             });
         }
         Write { window, frame, request }
@@ -553,7 +584,7 @@ impl<K: Kinds> Reconciler<K> {
         request: K::Request,
         window: K::Window,
         frame: K::Frame,
-        as_of: Option<K::Request>,
+        as_of: Option<Stamp<K::Request>>,
         owner: Owner,
         holder: Holder,
     ) -> (Reply, Option<Write<K>>) {
@@ -561,7 +592,7 @@ impl<K: Kinds> Reconciler<K> {
             return (Reply::Foreign, None);
         };
         let stamped = match (as_of, sync.last()) {
-            (Some(as_of), Some(last)) => Some((as_of.cmp(&last), last)),
+            (Some(as_of), Some(last)) => Some((as_of.against(&last), last)),
             // Unstamped, or a stamp with nothing sent this window: placed by geometry.
             (None, _) | (Some(_), None) => None,
         };
@@ -674,7 +705,7 @@ impl<K: Kinds> Reconciler<K> {
         &mut self,
         window: K::Window,
         target: K::Frame,
-        request: K::Request,
+        request: Sent<K::Request>,
         before: Before<K>,
     ) -> Sync<K> {
         self.notes.push((window, Note::TimedOut));
@@ -692,7 +723,7 @@ impl<K: Kinds> Reconciler<K> {
     fn waiting(
         &self,
         (deadline, window): (K::Time, K::Window),
-    ) -> Option<(K::Frame, Option<K::Frame>, K::Request, Before<K>)> {
+    ) -> Option<(K::Frame, Option<K::Frame>, Sent<K::Request>, Before<K>)> {
         match self.sync(window)? {
             Sync::InFlight {
                 target,
@@ -775,7 +806,10 @@ impl<K: Kinds> Reconciler<K> {
         match (owner, already) {
             (Owner::User, _) | (Owner::Rift, true) => Planned::Verdict(Verdict::Nothing),
             (Owner::Rift, false) => {
-                self.set(window, Sync::Animating { target: desired, request });
+                self.set(window, Sync::Animating {
+                    target: desired,
+                    request: Sent(request),
+                });
                 Planned::Animate
             }
         }
@@ -784,13 +818,13 @@ impl<K: Kinds> Reconciler<K> {
     /// The animation under `request` ended. A window it left short of its target waits for
     /// the app's answer to it as a write in flight does, from `now`: the answer settles it or
     /// records a refusal, and no answer is a timeout. (Its frames went out under `request`.)
-    pub fn animation_ended(&mut self, now: K::Time, request: K::Request) {
-        let mut ended: Vec<(K::Window, K::Frame)> = self
+    pub fn animation_ended(&mut self, now: K::Time, request: Stamp<K::Request>) {
+        let mut ended: Vec<(K::Window, K::Frame, Sent<K::Request>)> = self
             .windows
             .iter()
             .filter_map(|(&window, record)| match record.sync {
                 Sync::Animating { target, request: sent } => {
-                    (sent == request).then_some((window, target))
+                    request.names(&sent).then_some((window, target, sent))
                 }
                 Sync::Settled { .. }
                 | Sync::Unknown { .. }
@@ -799,9 +833,9 @@ impl<K: Kinds> Reconciler<K> {
                 | Sync::Outside { .. } => None,
             })
             .collect();
-        ended.sort_unstable_by_key(|&(window, _)| window);
+        ended.sort_unstable_by_key(|&(window, ..)| window);
         let deadline = K::after(now, WRITE_DEADLINE);
-        for (window, target) in ended {
+        for (window, target, request) in ended {
             self.deadlines.push_back((deadline, window));
             self.set(window, Sync::InFlight {
                 target,
@@ -817,19 +851,16 @@ impl<K: Kinds> Reconciler<K> {
     /// Still animating, it is where it stopped. Waiting for the answer to the animation that
     /// ended, it may never get one (frames the app had not applied are dropped): where the app
     /// has it is unknown. Anything since (a newer animation or write) is untouched.
-    pub fn animation_stopped(&mut self, window: K::Window, request: K::Request) {
+    pub fn animation_stopped(&mut self, window: K::Window, request: Stamp<K::Request>) {
         let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
             return;
         };
         match Some(sync) {
-            Some(Sync::Animating { request: sent, .. }) if sent == request => {
-                self.set(window, Sync::Settled {
-                    acked: known,
-                    last: Some(request),
-                })
+            Some(Sync::Animating { request: sent, .. }) if request.names(&sent) => {
+                self.set(window, Sync::Settled { acked: known, last: Some(sent) })
             }
-            Some(Sync::InFlight { request: sent, .. }) if sent == request => {
-                self.set(window, Sync::Unknown { last: Some(request) })
+            Some(Sync::InFlight { request: sent, .. }) if request.names(&sent) => {
+                self.set(window, Sync::Unknown { last: Some(sent) })
             }
             Some(
                 Sync::Animating { .. }
@@ -957,7 +988,7 @@ mod tests {
             R,
             window(),
             at(10.5),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         ) else {
@@ -973,7 +1004,7 @@ mod tests {
                 R,
                 window(),
                 at(30.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -994,7 +1025,7 @@ mod tests {
                 R,
                 window(),
                 at(10.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1012,7 +1043,7 @@ mod tests {
                 R,
                 window(),
                 at(14.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1037,7 +1068,7 @@ mod tests {
                 R,
                 window(),
                 at(11.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1060,7 +1091,7 @@ mod tests {
             R,
             window(),
             at(14.),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         );
@@ -1099,7 +1130,7 @@ mod tests {
                 R,
                 window(),
                 at(20.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1195,7 +1226,7 @@ mod tests {
                 R,
                 window(),
                 at(10.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1223,7 +1254,7 @@ mod tests {
                 R,
                 window(),
                 at(13.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1244,20 +1275,23 @@ mod tests {
                 R,
                 window(),
                 at(10.),
-                Some(OLD),
+                Some(Stamp::new(OLD)),
                 Owner::Rift,
                 Holder::Nobody
             ),
             (Reply::NoNews, None)
         );
-        assert!(matches!(sync(&reconciler), Sync::InFlight { request: R, .. }));
+        assert!(matches!(sync(&reconciler), Sync::InFlight {
+            request: Sent(R),
+            ..
+        }));
         assert_eq!(
             seen_at(&mut reconciler, at(20.)).observe(
                 t1,
                 R,
                 window(),
                 at(20.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1280,7 +1314,7 @@ mod tests {
             R,
             window(),
             at(10.),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         );
@@ -1306,7 +1340,7 @@ mod tests {
         );
         assert_eq!(sync(&reconciler), Sync::Animating {
             target: at(10.),
-            request: R
+            request: Sent(R)
         });
         // Pending already: the same target again is nothing.
         assert_eq!(
@@ -1336,7 +1370,7 @@ mod tests {
                 OLD,
                 window(),
                 at(0.),
-                Some(OLD),
+                Some(Stamp::new(OLD)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1385,7 +1419,7 @@ mod tests {
                 OLD,
                 window(),
                 at(40.),
-                Some(R),
+                Some(Stamp::new(R)),
                 Owner::Rift,
                 Holder::Nobody
             ),
@@ -1397,13 +1431,13 @@ mod tests {
             OLD,
             window(),
             at(100.),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         );
         assert_eq!(settled(&reconciler), Some(at(100.)));
         // Its end changes nothing any more.
-        reconciler.animation_ended(T0, R);
+        reconciler.animation_ended(T0, Stamp::new(R));
         assert_eq!(settled(&reconciler), Some(at(100.)));
     }
 
@@ -1420,15 +1454,15 @@ mod tests {
             OLD,
             window(),
             at(96.),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         );
         assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
         // Its end waits for the app's answer to it, as a write does: not held forever.
-        reconciler.animation_ended(T0, R);
+        reconciler.animation_ended(T0, Stamp::new(R));
         assert!(
-            matches!(sync(&reconciler), Sync::InFlight { target, request: R, .. } if target == at(100.))
+            matches!(sync(&reconciler), Sync::InFlight { target, request: Sent(R), .. } if target == at(100.))
         );
         // The answer, however late, is a refusal; it is not asked again, by a desire or by an
         // animation.
@@ -1437,7 +1471,7 @@ mod tests {
             OLD,
             window(),
             at(96.),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         );
@@ -1453,7 +1487,7 @@ mod tests {
     fn an_unlanded_animation_with_no_answer_times_out_to_unknown() {
         let mut reconciler = with(at(0.));
         _ = seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift);
-        reconciler.animation_ended(T0, R);
+        reconciler.animation_ended(T0, Stamp::new(R));
         assert!(reconciler.expire(later(WRITE_DEADLINE), R, crate::Pointer::Idle).is_empty());
         assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
     }
@@ -1468,7 +1502,7 @@ mod tests {
         assert_eq!(want(&mut reconciler, T0, at(100.), at(100.)), Verdict::Nothing);
         assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(100.))), at(50.));
         // The superseded animation's end does not touch the write in flight.
-        reconciler.animation_ended(T0, OLD);
+        reconciler.animation_ended(T0, Stamp::new(OLD));
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
     }
 
@@ -1495,16 +1529,16 @@ mod tests {
         // Still animating: where it stopped.
         let mut reconciler = with(at(0.));
         _ = seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift);
-        seen_at(&mut reconciler, at(40.)).animation_stopped(window(), R);
+        seen_at(&mut reconciler, at(40.)).animation_stopped(window(), Stamp::new(R));
         assert_eq!(settled(&reconciler), Some(at(40.)));
         // Ended short and waiting for its answer, which may never come: unknown.
         _ = seen_at(&mut reconciler, at(40.)).animate(T0, R, window(), at(100.), Owner::Rift);
-        reconciler.animation_ended(T0, R);
-        seen_at(&mut reconciler, at(100.)).animation_stopped(window(), R);
+        reconciler.animation_ended(T0, Stamp::new(R));
+        seen_at(&mut reconciler, at(100.)).animation_stopped(window(), Stamp::new(R));
         assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
         // A write sent since is not the stopped presentation's.
         _ = want(&mut reconciler, T0, at(10.), at(100.));
-        seen_at(&mut reconciler, at(10.)).animation_stopped(window(), OLD);
+        seen_at(&mut reconciler, at(10.)).animation_stopped(window(), Stamp::new(OLD));
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
     }
 
@@ -1524,7 +1558,7 @@ mod tests {
             OLD,
             window(),
             at(15.),
-            Some(R),
+            Some(Stamp::new(R)),
             Owner::Rift,
             Holder::Nobody,
         );
@@ -1558,7 +1592,7 @@ mod tests {
         // window is unknown, and the next desire is written.
         assert_eq!(
             reconciler.sync(new_flying),
-            Some(Sync::Unknown { last: Some(R) })
+            Some(Sync::Unknown { last: Some(Sent(R)) })
         );
         assert_eq!(reconciler.pending(new_flying), None);
         let again = reconciler.want(T0, R, new_flying, at(100.), Owner::Rift);
@@ -1567,7 +1601,17 @@ mod tests {
 
     /// A report of `window()` at `frame`, stamped `as_of`, with nobody's hand on it.
     fn report(reconciler: &mut Reconciler, frame: Rect, as_of: Option<RequestId>) -> Reply {
-        reconciler.observe(T0, R, window(), frame, as_of, Owner::Rift, Holder::Nobody).0
+        reconciler
+            .observe(
+                T0,
+                R,
+                window(),
+                frame,
+                as_of.map(Stamp::new),
+                Owner::Rift,
+                Holder::Nobody,
+            )
+            .0
     }
 
     #[test]
@@ -1604,21 +1648,30 @@ mod tests {
         reconciler.sent_outside(window(), camera);
         assert_eq!(
             reconciler.sync(window()),
-            Some(Sync::Outside { request: camera, at: at(0.) })
+            Some(Sync::Outside {
+                request: Sent(camera),
+                at: at(0.)
+            })
         );
         // Each stamped report is one of the camera's frames on the way.
         assert_eq!(report(&mut reconciler, at(5.), Some(camera)), Reply::InTransit);
         assert_eq!(report(&mut reconciler, at(9.), Some(camera)), Reply::InTransit);
         assert_eq!(
             reconciler.sync(window()),
-            Some(Sync::Outside { request: camera, at: at(9.) })
+            Some(Sync::Outside {
+                request: Sent(camera),
+                at: at(9.)
+            })
         );
         // An older stamp is no news; an unstamped report where the model has it neither.
         assert_eq!(report(&mut reconciler, at(40.), Some(R)), Reply::NoNews);
         assert_eq!(report(&mut reconciler, at(0.), None), Reply::NoNews);
         assert_eq!(
             reconciler.sync(window()),
-            Some(Sync::Outside { request: camera, at: at(9.) })
+            Some(Sync::Outside {
+                request: Sent(camera),
+                at: at(9.)
+            })
         );
         // A desire where the camera left the window is no write; anywhere else is.
         assert_eq!(
@@ -1642,7 +1695,7 @@ mod tests {
         let Some(Sync::InFlight { target, queued, request, .. }) = reconciler.sync(window()) else {
             panic!("the write is still in flight: {:?}", reconciler.sync(window()));
         };
-        assert_eq!((target, queued, request), (at(10.), None, R));
+        assert_eq!((target, queued, request), (at(10.), None, Sent(R)));
         // Its answer still resolves it.
         assert_eq!(
             report(&mut reconciler, at(10.), Some(R)),
