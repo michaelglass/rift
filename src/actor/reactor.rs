@@ -5043,22 +5043,20 @@ impl Reactor {
         wid: WindowId,
         native: Option<SpaceId>,
     ) -> (Option<SpaceId>, Option<SpaceId>) {
-        let authoritative = native.or_else(|| self.assigned_space_for_window_id(wid));
-        if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
-            return (authoritative, None);
-        }
-        let discovery = self.assigned_space_for_window_id(wid).or(authoritative).or_else(|| {
+        let standing = if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
+            DiscoveryStanding::FullscreenRecorded
+        } else if !self.state.windows.contains_window(wid) {
+            DiscoveryStanding::Placeholder
+        } else {
+            DiscoveryStanding::Admissible
+        };
+        discovery_spaces(standing, native, self.assigned_space_for_window_id(wid), || {
             let window = self.state.windows.window(wid)?;
             self.best_space_for_frame(&window.frame_monotonic()).filter(|space| {
                 self.is_space_active(*space)
                     || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
             })
-        });
-        // A placeholder assignment supplies ownership but cannot admit an AX window.
-        (
-            authoritative,
-            discovery.filter(|_| self.state.windows.contains_window(wid)),
-        )
+        })
     }
 
     pub(crate) fn geometry_space_for_window(
@@ -6982,6 +6980,37 @@ fn discovered_space(
         Standing::Tracked => DiscoveredSpace::Fallback(resolved()),
         Standing::Untracked => one_live().unwrap_or_else(|| DiscoveredSpace::Fallback(recorded())),
         Standing::RecoveringFullscreen => one_live().unwrap_or(DiscoveredSpace::Fallback(None)),
+    }
+}
+
+/// What an app inventory may do with a window it reports, for its discovery Space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DiscoveryStanding {
+    /// It has a native fullscreen record: its fullscreen Space is not one to admit it on.
+    FullscreenRecorded,
+    /// Only an assignment holds it: that supplies ownership but cannot admit an AX window.
+    Placeholder,
+    /// Rift holds its AX window and no fullscreen record.
+    Admissible,
+}
+
+/// A reported window's authoritative Space (native, else assigned) and the Space discovery may
+/// admit it on: only an admissible window's, preferring its assignment, then its native Space,
+/// then where its frame is.
+fn discovery_spaces(
+    standing: DiscoveryStanding,
+    native: Option<SpaceId>,
+    assigned: Option<SpaceId>,
+    by_frame: impl FnOnce() -> Option<SpaceId>,
+) -> (Option<SpaceId>, Option<SpaceId>) {
+    let authoritative = native.or(assigned);
+    match standing {
+        DiscoveryStanding::FullscreenRecorded | DiscoveryStanding::Placeholder => {
+            (authoritative, None)
+        }
+        DiscoveryStanding::Admissible => {
+            (authoritative, assigned.or(authoritative).or_else(by_frame))
+        }
     }
 }
 
