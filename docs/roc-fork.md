@@ -517,6 +517,17 @@ as presence; L5 claims as presence; L6 retirement in the core.
   tests.
 - 7e9e980d (L2, Roc): the step's logic is the pure `read` (facts before + `Reading` → facts
   after + `Change`); tag 25; the differential checks all 6,205 pairs; a planted bug fails it.
+- 5c2b0c50 (L3, the flip; held for the play line until L2 has soaked with no
+  `lifecycle-divergence:` line): the heuristic's verdict, the manage override and the
+  native-transient flag leave `WindowState` and live only in the core's `Lifecycle`. The store
+  answers admission from it (`is_admitted`, `is_admitted_state`, `admitted_with_override`,
+  `rule`, `manage_override`); its setters write the core alone and return the transition;
+  `insert_window` keeps the old defaults and `insert_window_as` carries a known verdict and rule.
+  `sync_native_admission` suspends on the transition `set_native_transient` returns, not on a
+  before/after comparison. Minimize and the AX roles stay in the AX snapshot; the tripwire now
+  checks the snapshot and the core agree on them. Making `set_native_transient` skip the core
+  fails a reactor test. Left for later: `refresh_heuristic`'s callers still compare admission
+  before and after.
 - A placeholder (a record with an assignment and no AX state: a restored layout's window not
   yet seen, a rule's pre-assignment, a fullscreen AX identity being replaced) has no facts in
   the core, so it can never be admitted; L4 names it as presence.
