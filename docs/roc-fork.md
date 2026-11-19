@@ -534,11 +534,24 @@ as presence; L5 claims as presence; L6 retirement in the core.
   comes back on a positive AX observation or a fresh reading; an identity moving on carries
   its invalidation. Invalidating a window with no AX state is nothing (it never had an AX
   element, or its fullscreen identity is already unavailable). Three engine tests gave AX state
-  to windows built from layout events alone. The lifecycle line pauses here until the L2 soak.
+  to windows built from layout events alone.
 - fc3d474e (L4, Roc; not needed for play): presence steps through the pure `present` (presence
   before + `PresenceEvent::Reading | Invalidate | Revalidate` → presence after +
   `PresenceOutcome`; `manages`); tag 26; the differential checks all 12,615 pairs; a planted
   bug fails it. (L3 added no core logic to mirror.)
+- 95606e2e (L5, held): a window's ownership is one value on its record, `Ownership::Unassigned
+  | Assigned(workspace) | Claimed(claim)`, the claim holding its destination outside the index;
+  a claimed window in the index is unrepresentable (the debug_assert goes). The rekey merge is
+  one exhaustive match over the two identities' ownership; a literal test of all ten
+  combinations passes on the code before the change too. This stays in the store, not the
+  core: a claim outlives AX state, so it is not part of the core's per-AX-state presence, and
+  there is no core logic to mirror.
+- 391ac12d (L6, held): whether an inventory retires a window, `rift_core::lifecycle::retirement`
+  on `InventoryFacts` (with `NativeIdentity::Known(id)`, so evidence is asked only with an id)
+  and lazily asked `NativeEvidence` → `Retire | Keep(why)`; held to the old rule over all
+  2,592 combinations.
+- b151281a (L6, Roc): tag 27; the differential checks all 2,592 combinations; a planted bug
+  fails it.
 - A placeholder (a record with an assignment and no AX state: a restored layout's window not
   yet seen, a rule's pre-assignment, a fullscreen AX identity being replaced) has no facts in
   the core, so it can never be admitted; L4 names it as presence.
