@@ -232,6 +232,175 @@ pub fn focuses_desktop(active: bool, workspace_empty: impl FnOnce() -> bool) -> 
     active && workspace_empty()
 }
 
+/// Each decision as a question on plain data: every fact it may ask for is in the question.
+/// Spaces, workspaces, window-server ids, modes and apps are one word each; a window that has
+/// an app is a [`WindowId`](crate::plain::WindowId) (its app is its pid).
+pub mod plain {
+    use super::{ActivationFacts, Follow, Removal, RemovalFocus, UntrackedFocus};
+    use crate::plain::WindowId;
+
+    /// [`super::removal_focus`]: the successor macOS's key window is tracked as (itself when
+    /// not listed), and the successors in a workspace that is not active.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct RemovalQuestion {
+        pub removal: Removal<WindowId, i32>,
+        pub focused: Option<WindowId>,
+        pub removed_space: Option<u64>,
+        pub native_focus: Option<WindowId>,
+        pub successors: Vec<(WindowId, WindowId)>,
+        pub inactive: Vec<WindowId>,
+    }
+
+    impl RemovalQuestion {
+        pub fn answer(&self) -> RemovalFocus<WindowId, u64> {
+            super::removal_focus(
+                self.removal,
+                self.focused,
+                |window| window.pid,
+                |_| self.removed_space,
+                |_| self.native_focus,
+                |native| {
+                    self.successors
+                        .iter()
+                        .find(|(from, _)| *from == native)
+                        .map_or(native, |(_, to)| *to)
+                },
+                |_, successor| self.inactive.contains(&successor),
+            )
+        }
+    }
+
+    /// [`super::focus_candidate`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Candidate {
+        pub preferred: Option<u64>,
+        pub last_focused: Option<u64>,
+        pub in_workspace: Vec<u64>,
+        pub visible: Vec<u64>,
+    }
+
+    impl Candidate {
+        pub fn answer(&self) -> Option<u64> {
+            super::focus_candidate(
+                self.preferred,
+                || self.last_focused,
+                || self.in_workspace.clone(),
+                |window| self.visible.contains(&window),
+            )
+        }
+    }
+
+    /// [`super::hides_focus`].
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Hides {
+        pub window: u64,
+        pub main: Option<u64>,
+        pub focused: Option<u64>,
+        pub in_inactive_workspace: bool,
+    }
+
+    impl Hides {
+        pub fn answer(&self) -> bool {
+            super::hides_focus(self.window, self.main, self.focused, || {
+                self.in_inactive_workspace
+            })
+        }
+    }
+
+    /// [`super::activation_follow`]'s facts, all known.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Activation {
+        pub standard: bool,
+        pub unavailable: bool,
+        pub space: Option<u64>,
+        pub workspace: Option<u64>,
+        pub active_workspace: Option<u64>,
+        pub pending_window: bool,
+        pub mode_refusal: Option<u64>,
+        pub active_space_fullscreen: bool,
+        pub unmanageable_source: Option<u64>,
+        pub blacklisted: Option<bool>,
+    }
+
+    impl ActivationFacts for Activation {
+        type Mode = u64;
+        type Server = u64;
+        type Space = u64;
+        type Workspace = u64;
+
+        fn standard(&self) -> bool { self.standard }
+
+        fn unavailable(&self) -> bool { self.unavailable }
+
+        fn space(&self) -> Option<u64> { self.space }
+
+        fn workspace(&self, _: u64) -> Option<u64> { self.workspace }
+
+        fn active_workspace(&self, _: u64) -> Option<u64> { self.active_workspace }
+
+        fn pending_window(&self) -> bool { self.pending_window }
+
+        fn mode_refusal(&self) -> Option<u64> { self.mode_refusal }
+
+        fn active_space_fullscreen(&self) -> bool { self.active_space_fullscreen }
+
+        fn unmanageable_source(&self) -> Option<u64> { self.unmanageable_source }
+
+        fn blacklisted(&self) -> Option<bool> { self.blacklisted }
+    }
+
+    impl Activation {
+        pub fn answer(&self) -> Follow<u64, u64, u64, u64> { super::activation_follow(self) }
+    }
+
+    /// [`super::display_to_follow`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DisplayFollow {
+        pub focused_space: Option<u64>,
+        pub previous: Option<u64>,
+        pub active: Vec<u64>,
+        pub on_known_display: Vec<u64>,
+    }
+
+    impl DisplayFollow {
+        pub fn answer(&self) -> Option<u64> {
+            super::display_to_follow(
+                self.focused_space,
+                self.previous,
+                |space| self.active.contains(&space),
+                |space| self.on_known_display.contains(&space),
+            )
+        }
+    }
+
+    /// [`super::untracked_focus`]: what is known of the window (its layer and app).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Untracked {
+        pub under_cursor: Option<u64>,
+        pub tracked: bool,
+        pub known: Option<(i32, u64)>,
+    }
+
+    impl Untracked {
+        pub fn answer(&self) -> UntrackedFocus<u64, u64> {
+            super::untracked_focus(self.under_cursor, |_| self.tracked, |_| self.known)
+        }
+    }
+
+    /// [`super::focuses_desktop`].
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Desktop {
+        pub active: bool,
+        pub workspace_empty: bool,
+    }
+
+    impl Desktop {
+        pub fn answer(&self) -> bool {
+            super::focuses_desktop(self.active, || self.workspace_empty)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

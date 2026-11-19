@@ -37,6 +37,10 @@ name = "lifecycle"
 required-features = ["roc"]
 
 [[test]]
+name = "focus"
+required-features = ["roc"]
+
+[[test]]
 name = "measure"
 required-features = ["roc"]
 
