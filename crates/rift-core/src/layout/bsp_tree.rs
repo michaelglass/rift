@@ -1194,7 +1194,10 @@ impl<W: Copy + Ord + Debug> Layout<W> {
                 return false;
             };
             let mut members: Vec<W> = tabs.members().filter(|w| *w != a && *w != b).collect();
-            members.push(b);
+            // Swapping a window with itself brings it to the top, once.
+            if b != a {
+                members.push(b);
+            }
             if let Node::Leaf(Leaf {
                 content: Content::Stack { tabs, .. },
                 ..
