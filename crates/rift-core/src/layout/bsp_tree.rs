@@ -111,8 +111,6 @@ impl<W: Copy + PartialEq> Tabs<W> {
             .chain(std::iter::once(self.top))
             .chain(self.after.iter().copied())
     }
-
-    fn contains(&self, window: W) -> bool { self.members().any(|member| member == window) }
 }
 
 /// What a leaf holds.
@@ -169,6 +167,27 @@ impl<'a, W: Ord> Participation<'a, W> {
         match self {
             Self::Everyone => true,
             Self::Except(left_out) => !left_out.contains(window),
+        }
+    }
+}
+
+/// How a leaf holds a window found in it: alone, or at a position in its stack.
+#[derive(Debug, Clone, Copy)]
+enum Holding<'a, W> {
+    Alone {
+        fill: Fill,
+    },
+    Stacked {
+        tabs: &'a Tabs<W>,
+        fill: Fill,
+        at: usize,
+    },
+}
+
+impl<W> Holding<'_, W> {
+    fn fill(&self) -> Fill {
+        match self {
+            Holding::Alone { fill } | Holding::Stacked { fill, .. } => *fill,
         }
     }
 }
@@ -381,13 +400,18 @@ impl<W: Copy + Ord + Debug> Layout<W> {
         Some(selection.clone())
     }
 
-    /// The leaf holding `window` (the first, in tree order), and its path.
-    fn leaf_of(&self, window: W) -> Option<(Path, &Leaf<W>)> {
+    /// The leaf holding `window` (the first, in tree order): its path, and how it holds it.
+    fn holding(&self, window: W) -> Option<(Path, Holding<'_, W>)> {
         self.root.preorder().into_iter().find_map(|(path, node)| match node {
             Node::Leaf(leaf) => match &leaf.content {
-                Content::Window { window: held, .. } if *held == window => Some((path, leaf)),
-                Content::Stack { tabs, .. } if tabs.contains(window) => Some((path, leaf)),
-                Content::Window { .. } | Content::Stack { .. } | Content::Empty => None,
+                Content::Window { window: held, fill } if *held == window => {
+                    Some((path, Holding::Alone { fill: *fill }))
+                }
+                Content::Stack { tabs, fill } => tabs
+                    .members()
+                    .position(|member| member == window)
+                    .map(|at| (path, Holding::Stacked { tabs, fill: *fill, at })),
+                Content::Window { .. } | Content::Empty => None,
             },
             Node::Split(_) => None,
         })
@@ -395,24 +419,18 @@ impl<W: Copy + Ord + Debug> Layout<W> {
 
     /// The windows stacked with `window`, in stack order (none if it is not stacked).
     pub fn stack_members(&self, window: W) -> Vec<W> {
-        match self.leaf_of(window) {
-            Some((
-                _,
-                Leaf {
-                    content: Content::Stack { tabs, .. },
-                    ..
-                },
-            )) => tabs.members().collect(),
-            Some(_) | None => Vec::new(),
+        match self.holding(window) {
+            Some((_, Holding::Stacked { tabs, .. })) => tabs.members().collect(),
+            Some((_, Holding::Alone { .. })) | None => Vec::new(),
         }
     }
 
     /// Where `window` is.
     pub fn slot(&self, window: W) -> Option<Slot> {
-        let (path, leaf) = self.leaf_of(window)?;
-        let tab = match &leaf.content {
-            Content::Stack { tabs, .. } => Tab::Stacked(tabs.members().position(|w| w == window)?),
-            Content::Window { .. } | Content::Empty => Tab::Alone,
+        let (path, holding) = self.holding(window)?;
+        let tab = match holding {
+            Holding::Stacked { at, .. } => Tab::Stacked(at),
+            Holding::Alone { .. } => Tab::Alone,
         };
         Some(Slot { path, tab })
     }
@@ -772,7 +790,7 @@ impl<W: Copy + Ord + Debug> Layout<W> {
         }
     }
 
-    pub fn contains(&self, window: W) -> bool { self.leaf_of(window).is_some() }
+    pub fn contains(&self, window: W) -> bool { self.holding(window).is_some() }
 
     /// Whether `other` is the same tree, nodes' tags aside.
     pub fn same_as(&self, other: &Layout<W>) -> bool { same_nodes(&self.root, &other.root) }
@@ -904,7 +922,7 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     /// Takes one occurrence of `window` out, if there is one: out of its stack (the last left
     /// shows), or out of the tree (its split collapses into the other side), and reselects.
     fn remove_one(&mut self, window: W, who: Participation<W>) -> bool {
-        let Some((path, _)) = self.leaf_of(window) else {
+        let Some((path, _)) = self.holding(window) else {
             return false;
         };
         let Node::Leaf(leaf) = self.root.at_mut(&path) else {
@@ -979,7 +997,7 @@ impl<W: Copy + Ord + Debug> Layout<W> {
         if !who.takes_part(&window) {
             return false;
         }
-        let Some((path, _)) = self.leaf_of(window) else {
+        let Some((path, _)) = self.holding(window) else {
             return false;
         };
         if let Node::Leaf(Leaf {
@@ -1185,13 +1203,12 @@ impl<W: Copy + Ord + Debug> Layout<W> {
         if !who.takes_part(&a) || !who.takes_part(&b) {
             return false;
         }
-        let (Some((path_a, leaf_a)), Some((path_b, leaf_b))) = (self.leaf_of(a), self.leaf_of(b))
+        let (Some((path_a, held_a)), Some((path_b, held_b))) = (self.holding(a), self.holding(b))
         else {
             return false;
         };
-        let stacked = |leaf: &Leaf<W>| matches!(leaf.content, Content::Stack { .. });
         if path_a == path_b {
-            let Content::Stack { tabs, .. } = &leaf_a.content else {
+            let Holding::Stacked { tabs, .. } = held_a else {
                 return false;
             };
             let mut members: Vec<W> = tabs.members().filter(|w| *w != a && *w != b).collect();
@@ -1213,46 +1230,42 @@ impl<W: Copy + Ord + Debug> Layout<W> {
             self.root.select(&path_a);
             return true;
         }
-        // What each leaf will hold, as (all but the last, the last) of its new windows.
-        let (into_a, into_b) = if stacked(leaf_a) || stacked(leaf_b) {
-            // The groups trade leaves: a leaf's group is its stack, or its one window.
-            let group = |leaf: &Leaf<W>, window: W| match &leaf.content {
-                // A stack's last member is its last after the top, or the top.
-                Content::Stack { tabs, .. } => match tabs.after.split_last() {
-                    Some((last, middle)) => {
-                        let rest = tabs
-                            .before
-                            .iter()
-                            .copied()
-                            .chain([tabs.top])
-                            .chain(middle.iter().copied());
-                        (rest.collect(), *last)
-                    }
-                    None => (tabs.before.clone(), tabs.top),
-                },
-                Content::Window { .. } | Content::Empty => (Vec::new(), window),
-            };
-            (group(leaf_b, b), group(leaf_a, a))
+        // A leaf's group: its stack as (all but the last, the last), or its one window.
+        let group = |held: Holding<'_, W>, window: W| match held {
+            // A stack's last member is its last after the top, or the top.
+            Holding::Stacked { tabs, .. } => match tabs.after.split_last() {
+                Some((last, middle)) => {
+                    let rest =
+                        tabs.before.iter().copied().chain([tabs.top]).chain(middle.iter().copied());
+                    (rest.collect::<Vec<W>>(), *last)
+                }
+                None => (tabs.before.clone(), tabs.top),
+            },
+            Holding::Alone { .. } => (Vec::new(), window),
+        };
+        let either_stacked =
+            matches!(held_a, Holding::Stacked { .. }) || matches!(held_b, Holding::Stacked { .. });
+        // What each leaf will hold: the groups traded, or the two windows.
+        let (into_a, into_b) = if either_stacked {
+            (group(held_b, b), group(held_a, a))
         } else {
             ((Vec::new(), b), (Vec::new(), a))
         };
-        let put = |node: &mut Node<W>, (before, top): (Vec<W>, W)| {
-            let Node::Leaf(leaf) = node else { return };
-            let fill = match &leaf.content {
-                Content::Window { fill, .. } | Content::Stack { fill, .. } => *fill,
-                Content::Empty => Fill::Tiled,
-            };
-            leaf.content = if before.is_empty() {
-                Content::Window { window: top, fill }
-            } else {
-                Content::Stack {
-                    tabs: Tabs { before, top, after: Vec::new() },
-                    fill,
-                }
-            };
+        let (fill_a, fill_b) = (held_a.fill(), held_b.fill());
+        let put = |node: &mut Node<W>, (before, top): (Vec<W>, W), fill: Fill| {
+            if let Node::Leaf(leaf) = node {
+                leaf.content = if before.is_empty() {
+                    Content::Window { window: top, fill }
+                } else {
+                    Content::Stack {
+                        tabs: Tabs { before, top, after: Vec::new() },
+                        fill,
+                    }
+                };
+            }
         };
-        put(self.root.at_mut(&path_a), into_a);
-        put(self.root.at_mut(&path_b), into_b);
+        put(self.root.at_mut(&path_a), into_a, fill_a);
+        put(self.root.at_mut(&path_b), into_b, fill_b);
         true
     }
 
@@ -1519,29 +1532,28 @@ impl<W: Copy + Ord + Debug> Layout<W> {
             Drop::Insert(direction) => Some(direction),
         };
         while self.remove_one(source, who) {}
-        let Some((at, _)) = self.leaf_of(target) else {
+        let Some((at, held)) = self.holding(target) else {
             return false;
+        };
+        let stack_of = match held {
+            Holding::Stacked { tabs, fill, .. } => {
+                (tabs.members().filter(|w| *w != source).collect(), fill)
+            }
+            Holding::Alone { fill } => (vec![target], fill),
         };
         match into {
             None => {
-                let Node::Leaf(leaf) = self.root.at_mut(&at) else {
-                    return false;
-                };
-                let (before, fill) = match &leaf.content {
-                    Content::Stack { tabs, fill } => {
-                        (tabs.members().filter(|w| *w != source).collect(), *fill)
-                    }
-                    Content::Window { window, fill } => (vec![*window], *fill),
-                    Content::Empty => return false,
-                };
-                leaf.content = Content::Stack {
-                    tabs: Tabs {
-                        before,
-                        top: source,
-                        after: Vec::new(),
-                    },
-                    fill,
-                };
+                let (before, fill) = stack_of;
+                if let Node::Leaf(leaf) = self.root.at_mut(&at) {
+                    leaf.content = Content::Stack {
+                        tabs: Tabs {
+                            before,
+                            top: source,
+                            after: Vec::new(),
+                        },
+                        fill,
+                    };
+                }
                 self.root.select(&at);
             }
             Some(direction) => {
@@ -1577,7 +1589,7 @@ impl<W: Copy + Ord + Debug> Layout<W> {
         if !who.takes_part(&window) {
             return;
         }
-        let Some((at, _)) = self.leaf_of(window) else { return };
+        let Some((at, _)) = self.holding(window) else { return };
         if let Node::Leaf(Leaf {
             content: Content::Window { fill, .. } | Content::Stack { fill, .. },
             ..
@@ -1667,10 +1679,7 @@ impl<W: Copy + Ord + Debug> Layout<W> {
 
     /// Whether `window`'s leaf fills the screen or the gaps.
     fn is_fullscreen(&self, window: W) -> bool {
-        matches!(
-            self.leaf_of(window),
-            Some((_, Leaf { content: Content::Window { fill, .. } | Content::Stack { fill, .. }, .. })) if *fill != Fill::Tiled
-        )
+        self.holding(window).is_some_and(|(_, held)| held.fill() != Fill::Tiled)
     }
 }
 
