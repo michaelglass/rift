@@ -217,3 +217,112 @@ fn a_million_steps_leave_nothing_behind() {
         "live allocations grow: {live:?}"
     );
 }
+
+/// Times one model-free question three ways: the Rust answer alone, the Rust answer and its
+/// words (what `roc_path::check` compares), and the Roc core's answer to the question's words
+/// (`tile_words`, the call `roc_path::check` adds on rift's path).
+fn question<Q: Clone>(
+    label: &str,
+    questions: &[Q],
+    rust: impl Fn(&Q) -> Vec<u64>,
+    words: impl Fn(Q) -> Vec<u64>,
+) {
+    let encoded: Vec<Vec<u64>> = questions.iter().cloned().map(&words).collect();
+    for (question, words) in questions.iter().zip(&encoded) {
+        assert_eq!(
+            rift_core_roc::tile_words(words).as_ref(),
+            Ok(&rust(question)),
+            "{label}: the cores disagree"
+        );
+    }
+    let rounds = 200_000 / questions.len();
+    let repeat = |items: &[Q]| -> Vec<Q> {
+        items.iter().cycle().take(rounds * items.len()).cloned().collect()
+    };
+    let all = repeat(questions);
+    let rust_only = time(&all, |question| {
+        std::hint::black_box(rust(question));
+    });
+    let with_words = time(&all, |question| {
+        std::hint::black_box((rust(question), words(question.clone())));
+    });
+    let all_words: Vec<Vec<u64>> =
+        encoded.iter().cycle().take(rounds * encoded.len()).cloned().collect();
+    let roc = time(&all_words, |words| {
+        std::hint::black_box(rift_core_roc::tile_words(words).expect("an answer"));
+    });
+    eprintln!("{label}:");
+    show("rust", &stats(rust_only));
+    show("+ words", &stats(with_words));
+    show("roc", &stats(roc));
+}
+
+/// The hot focus questions S1 puts on rift's path (`focus_candidate` on every focus pass,
+/// `untracked_focus` on layout responses), at the sizes a workspace reaches.
+#[test]
+#[ignore]
+fn measure_focus_questions() {
+    use rift_core::focus::plain::{Candidate, Untracked};
+
+    for windows in [1u64, 10, 50] {
+        let in_workspace: Vec<u64> = (1..=windows).collect();
+        let visible: Vec<u64> = in_workspace.iter().copied().filter(|w| w % 3 != 0).collect();
+        let candidates = vec![
+            // The preferred window is visible: answered at once.
+            Candidate {
+                preferred: Some(1),
+                last_focused: Some(2),
+                in_workspace: in_workspace.clone(),
+                visible: visible.clone(),
+            },
+            // Neither preferred nor last focused is visible: the workspace is scanned.
+            Candidate {
+                preferred: Some(windows + 1),
+                last_focused: None,
+                in_workspace: in_workspace.iter().rev().copied().collect(),
+                visible: visible.clone(),
+            },
+            // Nothing visible: the whole workspace is scanned for nothing.
+            Candidate {
+                preferred: None,
+                last_focused: None,
+                in_workspace: in_workspace.clone(),
+                visible: vec![],
+            },
+        ];
+        question(
+            &format!("focus_candidate, {windows} windows"),
+            &candidates,
+            |q| wire::encode_maybe_space(q.answer()),
+            wire::encode_candidate,
+        );
+    }
+    let untracked = vec![
+        Untracked {
+            under_cursor: None,
+            tracked: false,
+            known: None,
+        },
+        Untracked {
+            under_cursor: Some(40),
+            tracked: true,
+            known: None,
+        },
+        Untracked {
+            under_cursor: Some(41),
+            tracked: false,
+            known: Some((0, 700)),
+        },
+        Untracked {
+            under_cursor: Some(42),
+            tracked: false,
+            known: Some((25, 0)),
+        },
+    ];
+    question(
+        "untracked_focus",
+        &untracked,
+        |q| wire::encode_untracked_focus(q.answer()),
+        wire::encode_untracked,
+    );
+}
