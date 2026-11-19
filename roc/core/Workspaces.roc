@@ -31,6 +31,15 @@ TopologyEvent : [
 ## the order the Spaces first got an activation).
 Topology : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }) }
 
+## Where a claimed window returns to when its claim ends.
+Destination : [Returns(U64), Nowhere]
+
+## Who places a window, when somebody does: a workspace, or an external owner.
+Ownership : [Assigned(U64), Claimed({ owner : U64, destination : Destination })]
+
+## Who places each window, in window order; a window without an entry is unowned.
+Ownerships : List({ window : U64, ownership : Ownership })
+
 Workspaces := [].{
 
 	## Whether a workspace on `on` is reachable: per display, only the acting Space's;
@@ -165,6 +174,54 @@ Workspaces := [].{
 			}
 			Cleared(space) => { ..topology, activations: topology.activations.keep_if(|entry| entry.space != space) }
 		}
+
+	## The ownerships after a window's new owner: replaced in place, or put in window order.
+	own : Ownerships, U64, Ownership -> Ownerships
+	own = |ownerships, window, ownership| {
+		var $out = []
+		var $placing = Placing
+		for entry in ownerships {
+			match $placing {
+				Placing if entry.window == window => {
+					$out = $out.append({ window, ownership })
+					$placing = Placed
+				}
+				Placing if entry.window > window => {
+					$out = $out.append({ window, ownership }).append(entry)
+					$placing = Placed
+				}
+				_ => {
+					$out = $out.append(entry)
+				}
+			}
+		}
+		match $placing {
+			Placing => $out.append({ window, ownership })
+			Placed => $out
+		}
+	}
+
+	## Each owned window naming a workspace the catalog lacks (assigned, or a claim's
+	## destination), with that workspace, in window order.
+	orphans : Ownerships, List(U64) -> List({ window : U64, workspace : U64 })
+	orphans = |ownerships, catalog| {
+		var $out = []
+		for entry in ownerships {
+			named =
+				match entry.ownership {
+					Assigned(workspace) => Names(workspace)
+					Claimed({ destination: Returns(workspace), .. }) => Names(workspace)
+					Claimed({ destination: Nowhere, .. }) => NamesNone
+				}
+			match named {
+				Names(workspace) if !catalog.contains(workspace) => {
+					$out = $out.append({ window: entry.window, workspace })
+				}
+				_ => {}
+			}
+		}
+		$out
+	}
 
 	# The wire.
 
@@ -334,5 +391,64 @@ Workspaces := [].{
 		topology = events.fold({ catalog: [], activations: [] }, topology_step)
 		with_catalog = put_list([], topology.catalog, |words, entry| words.append(entry.workspace).append(entry.space))
 		Ok(put_list(with_catalog, topology.activations, |words, entry| put_activation(words.append(entry.space), entry.activation)))
+	}
+
+	take_ownership : Words -> Taken(Ownership)
+	take_ownership = |c0| {
+		(kind, c1) = take(c0)?
+		match kind {
+			0 => {
+				(workspace, c2) = take(c1)?
+				Ok((Assigned(workspace), c2))
+			}
+			1 => {
+				(owner, c2) = take(c1)?
+				(returns, c3) = take_flag(c2)?
+				if returns {
+					(workspace, c4) = take(c3)?
+					Ok((Claimed({ owner, destination: Returns(workspace) }), c4))
+				} else {
+					Ok((Claimed({ owner, destination: Nowhere }), c3))
+				}
+			}
+			_ => Err(Malformed)
+		}
+	}
+
+	put_ownership : List(U64), Ownership -> List(U64)
+	put_ownership = |words, ownership|
+		match ownership {
+			Assigned(workspace) => words.append(0).append(workspace)
+			Claimed({ owner, destination: Returns(workspace) }) => words.append(1).append(owner).append(1).append(workspace)
+			Claimed({ owner, destination: Nowhere }) => words.append(1).append(owner).append(0)
+		}
+
+	## Tag 33: the ownerships an empty one becomes after the events, and their orphans
+	## against the catalog.
+	ownership_words : Words -> Try(List(U64), [Malformed])
+	ownership_words = |c0| {
+		take_event = |c| {
+			(window, after) = take(c)?
+			(owned, rest) = take_flag(after)?
+			if owned {
+				(ownership, end) = take_ownership(rest)?
+				Ok(({ window, owned: Owner(ownership) }, end))
+			} else {
+				Ok(({ window, owned: Unowned }, rest))
+			}
+		}
+		(events, c1) = take_list(c0, take_event)?
+		(catalog, c2) = take_list(c1, take)?
+		finished(c2)?
+		ownerships = events.fold(
+			[],
+			|acc, event|
+				match event.owned {
+					Unowned => acc.keep_if(|entry| entry.window != event.window)
+					Owner(ownership) => own(acc, event.window, ownership)
+				},
+		)
+		with_owners = put_list([], ownerships, |words, entry| put_ownership(words.append(entry.window), entry.ownership))
+		Ok(put_list(with_owners, orphans(ownerships, catalog), |words, orphan| words.append(orphan.window).append(orphan.workspace)))
 	}
 }

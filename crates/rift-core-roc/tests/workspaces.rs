@@ -3,14 +3,18 @@
 //! Spaces few, the current workspace is usually in them, names repeat, and visible sets overlap,
 //! so steps cross, wrap and stop. Topology event runs reuse a few workspaces and Spaces, so
 //! moves and removals mostly find their workspace, and Spaces are activated again, cleared and
-//! activated anew.
+//! activated anew. Ownership runs reuse a few windows, so ownership is replaced and dropped,
+//! and their catalogs miss some workspaces, so orphans appear.
 
 use rift_core::lifecycle::WorkspaceMode;
 use rift_core::plain::wire;
 use rift_core::workspaces::plain::{
-    PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
+    OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
 };
-use rift_core::workspaces::{Activation, Selector, SkipEmpty, Step, TopologyEvent, Wrapping};
+use rift_core::workspaces::{
+    Activation, Destination, Owned, Ownership, OwnershipEvent, Selector, SkipEmpty, Step,
+    TopologyEvent, Wrapping,
+};
 use rift_core_roc::{AllocationCount, tile_words};
 
 /// xorshift64*: deterministic, no dependency.
@@ -205,5 +209,36 @@ fn the_roc_core_steps_the_topology_as_the_rust_core_does() {
         let question = TopologyQuestion { events };
         let rust = wire::encode_topology(&question.answer());
         (wire::encode_topology_steps(question), rust)
+    });
+}
+
+#[test]
+fn the_roc_core_steps_ownership_and_finds_orphans_as_the_rust_core_does() {
+    differential("ownership", 0x0E4E_0000_0000_0033, |rng| {
+        let events = (0..rng.below(25))
+            .map(|_| {
+                let window = 1 + rng.below(8);
+                let owned = match rng.below(100) {
+                    0..20 => Owned::Unowned,
+                    20..65 => Owned::Owner(Ownership::Assigned(1 + rng.below(5))),
+                    _ => Owned::Owner(Ownership::Claimed {
+                        owner: 100 + rng.below(3),
+                        destination: if rng.chance(70) {
+                            Destination::Returns(1 + rng.below(5))
+                        } else {
+                            Destination::Nowhere
+                        },
+                    }),
+                };
+                OwnershipEvent::Owned { window, owned }
+            })
+            .collect();
+        let question = OwnershipQuestion {
+            events,
+            catalog: (1..=5).filter(|_| rng.chance(70)).collect(),
+        };
+        let (ownerships, orphans) = question.answer();
+        let rust = wire::encode_ownerships(&ownerships, orphans);
+        (wire::encode_ownership_steps(question), rust)
     });
 }

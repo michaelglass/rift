@@ -314,7 +314,10 @@ pub fn orphans<W: Copy + Ord, K: Copy + PartialEq, O: Copy, S>(
 
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
-    use super::{Context, Selector, SkipEmpty, Step, Topology, TopologyEvent, Wrapping};
+    use super::{
+        Context, OwnershipEvent, Ownerships, Selector, SkipEmpty, Step, Topology, TopologyEvent,
+        Wrapping,
+    };
     use crate::lifecycle::WorkspaceMode;
 
     /// [`super::step`]: the workspaces with windows.
@@ -411,6 +414,30 @@ pub mod plain {
                 topology.step(*event);
             }
             topology
+        }
+    }
+
+    /// [`super::Ownerships::step`] and [`super::orphans`]: the ownerships an empty one becomes
+    /// after these events, and the windows they leave owned by a workspace the catalog lacks.
+    /// Windows, workspaces and owners are one word each.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct OwnershipQuestion {
+        pub events: Vec<OwnershipEvent<u64, u64, u64>>,
+        pub catalog: Vec<u64>,
+    }
+
+    impl OwnershipQuestion {
+        pub fn answer(&self) -> (Ownerships<u64, u64, u64>, Vec<(u64, u64)>) {
+            let mut ownerships = Ownerships::default();
+            for event in &self.events {
+                ownerships.step(*event);
+            }
+            let mut topology = Topology::default();
+            for &workspace in &self.catalog {
+                topology.step(TopologyEvent::Created { workspace, space: 0 });
+            }
+            let orphans = super::orphans(&ownerships, &topology);
+            (ownerships, orphans)
         }
     }
 }

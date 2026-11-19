@@ -1549,12 +1549,75 @@ pub fn encode_topology(topology: &workspaces::Topology<u64, u64>) -> Vec<u64> {
     words.0
 }
 
+/// Tag 33, [`workspaces::plain::OwnershipQuestion`]: the events, each a window and who owns
+/// it (0 nobody; 1 and an ownership), then the catalog's workspaces.
+pub fn encode_ownership_steps(question: workspaces::plain::OwnershipQuestion) -> Vec<u64> {
+    use workspaces::{Owned, OwnershipEvent};
+    let mut words = Words::default();
+    words.word(33);
+    words.list(
+        question.events,
+        |words, OwnershipEvent::Owned { window, owned }| {
+            words.word(window);
+            match owned {
+                Owned::Unowned => words.word(0),
+                Owned::Owner(ownership) => {
+                    words.word(1);
+                    words.ownership(ownership);
+                }
+            }
+        },
+    );
+    words.list(question.catalog, Words::word);
+    words.0
+}
+
+/// Ownerships and their orphans as words: each owned window and its ownership, in window
+/// order, then each orphan (window, workspace).
+pub fn encode_ownerships(
+    ownerships: &workspaces::Ownerships<u64, u64, u64>,
+    orphans: Vec<(u64, u64)>,
+) -> Vec<u64> {
+    let mut words = Words::default();
+    words.list(ownerships.owners().collect(), |words, (window, ownership)| {
+        words.word(window);
+        words.ownership(ownership);
+    });
+    words.list(orphans, |words, (window, workspace)| {
+        words.word(window);
+        words.word(workspace);
+    });
+    words.0
+}
+
 impl Words {
     fn mode(&mut self, mode: lifecycle::WorkspaceMode) {
         self.word(match mode {
             lifecycle::WorkspaceMode::PerDisplay => 0,
             lifecycle::WorkspaceMode::Global => 1,
         });
+    }
+
+    /// 0 assigned: the workspace; 1 claimed: the owner, then the destination (0 nowhere; 1
+    /// returns, then the workspace).
+    fn ownership(&mut self, ownership: workspaces::Ownership<u64, u64>) {
+        match ownership {
+            workspaces::Ownership::Assigned(workspace) => {
+                self.word(0);
+                self.word(workspace);
+            }
+            workspaces::Ownership::Claimed { owner, destination } => {
+                self.word(1);
+                self.word(owner);
+                match destination {
+                    workspaces::Destination::Nowhere => self.word(0),
+                    workspaces::Destination::Returns(workspace) => {
+                        self.word(1);
+                        self.word(workspace);
+                    }
+                }
+            }
+        }
     }
 
     /// 0 showing: the current workspace, the previous and remembered ones (options); 1 vacant:
