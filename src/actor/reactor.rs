@@ -72,7 +72,7 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
-use rift_core::lifecycle::RuleRun;
+use rift_core::lifecycle::{NewWindow, RuleRun, WorkspaceMode};
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
@@ -6432,32 +6432,40 @@ impl Reactor {
     /// names its workspace: launchers can activate an app on another display.
     fn place_new_window_on_pointer_display(&mut self, window: WindowId, space: SpaceId) {
         let engine = &self.layout_manager.layout_engine;
-        if engine.workspaces().settings.mode != crate::common::config::WorkspaceMode::Global {
-            return;
-        }
-        let Some(target_screen) = window_server::current_cursor_location()
-            .ok()
-            .and_then(|point| self.screen_for_point(point))
-            .filter(|screen| screen.space.is_some_and(|s| s != space && self.is_space_active(s)))
-            .cloned()
-        else {
+        let new_window = match self.state.windows.window(window) {
+            None => NewWindow::Untracked,
+            Some(state) if !state.info.is_standard => NewWindow::NotStandard,
+            Some(state) => NewWindow::Standard(state),
+        };
+        let Some(target) = rift_core::lifecycle::pointer_display_target(
+            match engine.workspaces().settings.mode {
+                crate::common::config::WorkspaceMode::PerDisplay => WorkspaceMode::PerDisplay,
+                crate::common::config::WorkspaceMode::Global => WorkspaceMode::Global,
+            },
+            space,
+            || {
+                window_server::current_cursor_location()
+                    .ok()
+                    .and_then(|point| self.screen_for_point(point))
+                    .and_then(|screen| screen.space)
+            },
+            |space| self.is_space_active(space),
+            new_window,
+            |state| {
+                let app = self.app_manager.apps.get(&window.pid).map(|app| &app.info);
+                engine.app_rule_names_workspace(crate::model::WindowRuleContext {
+                    app_bundle_id: app.and_then(|info| info.bundle_id.as_deref()),
+                    app_name: app.and_then(|info| info.localized_name.as_deref()),
+                    window_title: Some(&state.info.title),
+                    ax_role: state.info.ax_role.as_deref(),
+                    ax_subrole: state.info.ax_subrole.as_deref(),
+                    window_tags: state.info.sys_id.and_then(crate::sys::window_server::window_tags),
+                })
+            },
+        ) else {
             return;
         };
-        let Some(state) = self.state.windows.window(window).filter(|s| s.info.is_standard) else {
-            return;
-        };
-        let app = self.app_manager.apps.get(&window.pid).map(|app| &app.info);
-        if engine.app_rule_names_workspace(crate::model::WindowRuleContext {
-            app_bundle_id: app.and_then(|info| info.bundle_id.as_deref()),
-            app_name: app.and_then(|info| info.localized_name.as_deref()),
-            window_title: Some(&state.info.title),
-            ax_role: state.info.ax_role.as_deref(),
-            ax_subrole: state.info.ax_subrole.as_deref(),
-            window_tags: state.info.sys_id.and_then(crate::sys::window_server::window_tags),
-        }) {
-            return;
-        }
-        let outcome = self.move_window_to_display(window, space, target_screen.space.unwrap());
+        let outcome = self.move_window_to_display(window, space, target);
         self.apply_event_outcome(outcome);
     }
 

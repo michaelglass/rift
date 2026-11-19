@@ -64,6 +64,50 @@ pub fn rule_refreshes_layout<K: PartialEq>(run: RuleRun, outcome: &RuleOutcome<K
     }
 }
 
+/// How workspaces map onto displays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceMode {
+    /// Each display's desktops have their own workspaces.
+    PerDisplay,
+    /// One set of workspaces across displays.
+    Global,
+}
+
+/// A window that just opened, as placement sees it; a standard one with what the app rules
+/// read of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewWindow<T> {
+    /// The platform has no state for it.
+    Untracked,
+    /// Not a standard window (a panel, a sheet, ...).
+    NotStandard,
+    Standard(T),
+}
+
+/// The Space a new window moves to, opened on `opened_on`: in global mode, the pointer's
+/// display's, if that is another active one, unless an app rule names the window's workspace
+/// (launchers can activate an app on another display). The pointer is asked only in global
+/// mode, the rules only for a standard window that would move.
+pub fn pointer_display_target<S: Copy + PartialEq, T>(
+    mode: WorkspaceMode,
+    opened_on: S,
+    pointer_space: impl FnOnce() -> Option<S>,
+    active: impl Fn(S) -> bool,
+    window: NewWindow<T>,
+    rule_names_workspace: impl FnOnce(T) -> bool,
+) -> Option<S> {
+    match mode {
+        WorkspaceMode::PerDisplay => None,
+        WorkspaceMode::Global => {
+            let target = pointer_space().filter(|&space| space != opened_on && active(space))?;
+            match window {
+                NewWindow::Untracked | NewWindow::NotStandard => None,
+                NewWindow::Standard(window) => (!rule_names_workspace(window)).then_some(target),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +141,62 @@ mod tests {
         };
         rule_targets(&windows, RuleRun::Admission, reconcilable, counted, active);
         assert_eq!(asked.get(), 3);
+    }
+
+    #[test]
+    fn a_new_window_moves_to_the_pointers_other_active_display_in_global_mode() {
+        use NewWindow::{NotStandard, Untracked};
+        let standard = NewWindow::Standard(());
+        use WorkspaceMode::{Global, PerDisplay};
+        let (opened_on, pointer, inactive) = (1_u64, 2, 3);
+        let active = |space| space != inactive;
+        let no_rule = |()| false;
+        let place = |pointer_space: Option<u64>, window: NewWindow<()>| {
+            pointer_display_target(Global, opened_on, || pointer_space, active, window, no_rule)
+        };
+        assert_eq!(place(Some(pointer), standard), Some(pointer));
+        // Already there, an inactive or unknown display, or not a standard window: it stays.
+        assert_eq!(place(Some(opened_on), standard), None);
+        assert_eq!(place(Some(inactive), standard), None);
+        assert_eq!(place(None, standard), None);
+        assert_eq!(place(Some(pointer), NotStandard), None);
+        assert_eq!(place(Some(pointer), Untracked), None);
+        // An app rule naming its workspace keeps it where the rule puts it.
+        assert_eq!(
+            pointer_display_target(
+                Global,
+                opened_on,
+                || Some(pointer),
+                active,
+                standard,
+                |()| true
+            ),
+            None
+        );
+        // Per display: the pointer is not asked.
+        assert_eq!(
+            pointer_display_target(
+                PerDisplay,
+                opened_on,
+                || panic!("the pointer is not asked"),
+                active,
+                standard,
+                |()| panic!("nor the rules"),
+            ),
+            None
+        );
+        // The rules are asked only for a standard window that would move.
+        assert_eq!(
+            pointer_display_target(
+                Global,
+                opened_on,
+                || Some(opened_on),
+                active,
+                standard,
+                |()| panic!("the rules are not asked")
+            ),
+            None
+        );
     }
 
     #[test]
