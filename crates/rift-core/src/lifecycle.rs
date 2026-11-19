@@ -172,6 +172,28 @@ pub fn out_of_inventory_view<S: Copy>(
     native.or_else(assigned).is_some_and(|space| !active(space)) || parked()
 }
 
+/// What a window's title change does to its app rules, as configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnTitleChange {
+    Reapply,
+    Ignore,
+}
+
+/// Whether a title change re-applies a window's app rules: if configured to, for a window on
+/// an active Space (its best-known one, asked only then) whose admission can still be
+/// reconciled (asked last).
+pub fn reapplies_on_title_change<S: Copy>(
+    configured: OnTitleChange,
+    space: impl FnOnce() -> Option<S>,
+    active: impl Fn(S) -> bool,
+    reconcilable: impl FnOnce() -> bool,
+) -> bool {
+    match configured {
+        OnTitleChange::Ignore => false,
+        OnTitleChange::Reapply => space().is_some_and(active) && reconcilable(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +342,32 @@ mod tests {
         // Parked offscreen on a non-active workspace, wherever it is.
         assert!(out_of_inventory_view(Some(1), || None, active, || true));
         assert!(out_of_inventory_view(None, || None, active, || true));
+    }
+
+    #[test]
+    fn a_title_change_reapplies_app_rules_to_a_reconcilable_window_on_an_active_space() {
+        use OnTitleChange::{Ignore, Reapply};
+        let active = |space: u64| space == 1;
+        assert!(reapplies_on_title_change(Reapply, || Some(1), active, || true));
+        assert!(!reapplies_on_title_change(
+            Reapply,
+            || Some(2),
+            active,
+            || panic!("not asked")
+        ));
+        assert!(!reapplies_on_title_change(
+            Reapply,
+            || None,
+            active,
+            || panic!("not asked")
+        ));
+        assert!(!reapplies_on_title_change(Reapply, || Some(1), active, || false));
+        assert!(!reapplies_on_title_change(
+            Ignore,
+            || panic!("the Space is not asked"),
+            active,
+            || panic!("nor the window"),
+        ));
     }
 
     #[test]

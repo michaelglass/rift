@@ -72,7 +72,9 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
-use rift_core::lifecycle::{Departure, NewWindow, RuleRun, TransientOrigin, WorkspaceMode};
+use rift_core::lifecycle::{
+    Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
+};
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
@@ -3611,23 +3613,22 @@ impl Reactor {
     }
 
     fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {
-        if !self.config.virtual_workspaces.reapply_app_rules_on_title_change {
-            return;
-        }
-
-        let Some(space) = self.best_space_for_window_id(window_id) else {
-            return;
+        let configured = if self.config.virtual_workspaces.reapply_app_rules_on_title_change {
+            OnTitleChange::Reapply
+        } else {
+            OnTitleChange::Ignore
         };
-        if !self.is_space_active(space) {
-            return;
-        }
-
-        let is_rule_candidate = match self.state.windows.window(window_id) {
-            Some(window_state) => window_state.can_reconcile_admission(),
-            None => return,
-        };
-
-        if !is_rule_candidate {
+        if !rift_core::lifecycle::reapplies_on_title_change(
+            configured,
+            || self.best_space_for_window_id(window_id),
+            |space| self.is_space_active(space),
+            || {
+                self.state
+                    .windows
+                    .window(window_id)
+                    .is_some_and(WindowState::can_reconcile_admission)
+            },
+        ) {
             return;
         }
 
