@@ -142,8 +142,33 @@ ship.
 ### Next steps
 
 Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34), the W5
-fuzzer gap and its four fixes (open item 3). W4b to W4d wait for #688 (open item 2). Next is the
-lead's call.
+fuzzer gap and its four fixes (open item 3). W4b to W4d wait for #688 (open item 2).
+
+**Now: the Roc mirrors on rift's path under `roc-core` (plan approved).** Model-free decisions:
+each call site asks the Roc core the question it just answered in Rust and compares the words
+(`src/roc_path.rs::check`, S0 = 096c37ae): equal, the Rust answer stands (bit for bit the Roc
+core's decision; decoders come when a Rust side is retired); different or no answer, tests panic
+`roc-divergence:`, a running Rift warns `roc-divergence:` and keeps the Rust answer. Each site
+gets a `#[cfg(feature = "roc-core")]` block building its plain question with the existing
+`rift_core::*::plain` builders (ids to `u64` beside `Plainly`). Slices, each its own commit,
+gated by the roc-core reactor tests and the fuzzer under roc-core; **measure each hot question
+in `crates/rift-core-roc/tests/measure.rs` before wiring it and report the numbers**:
+- S1 focus, 7 sites in reactor.rs: activation_follow, untracked_focus (hot: layout responses),
+  focuses_desktop, focus_candidate (hot), hides_focus, removal_focus, display_to_follow. S1 also
+  removes `roc_path`'s temporary `expect(dead_code)`.
+- S2 topology, 4 in reactor.rs: app_rule_candidates, admit_space_snapshot, discovered_space,
+  discovery_spaces.
+- S3 lifecycle free functions, about 11: reactor.rs reapplies_on_title_change, misplaced,
+  out_of_inventory_view, is_native_transient and keeps_transient (hot: every event),
+  rule_targets, rule_refreshes_layout, pointer_display_target; window_discovery.rs net;
+  window_store.rs retirement (hot: inventory observations), net, admission.
+- S4 workspaces, 4 inside virtual_workspace.rs's VWM methods (engine.rs only calls the
+  wrappers, so #688's ground is untouched): eligible, previous, resolve, step.
+- Then a plan for a **stateful Roc platform entry** (glue regeneration if needed) so
+  Lifecycle, Topology, Ownerships and the joined Workspaces can live in Roc between events;
+  whatever only matters after W4b/c waits for #688.
+No call site is in `layout_engine/`; keep it that way (engine glue, persistence and layout
+systems are #688's).
 
 ### Rulings that bind (the lead's and the owner's)
 
