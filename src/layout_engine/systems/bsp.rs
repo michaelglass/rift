@@ -1371,6 +1371,113 @@ mod tests {
 
 /// The bodies of the operations the core shadows in test builds (see `shadowed`).
 impl BspLayoutSystem {
+    fn join_selection_with_direction_unshadowed(&mut self, layout: LayoutId, direction: Direction) {
+        let Some(sel) = self.selection_of_layout(layout) else {
+            return;
+        };
+        let sel_leaf = self.descend_to_leaf(sel);
+
+        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
+            return;
+        };
+
+        let mut current = sel_leaf;
+        while let Some(parent) = current.parent(&self.tree.map) {
+            let children: Vec<_> = parent.children(&self.tree.map).collect();
+            if children.contains(&neighbor) {
+                if parent.parent(&self.tree.map).is_some() {
+                    let mut windows = Vec::new();
+                    self.collect_windows_under(parent, &mut windows);
+
+                    // The last member is the visible one, so keep the selected window there.
+                    let selected = self.selected_window(layout);
+
+                    if let Some(index) = windows.iter().position(|window| Some(*window) == selected)
+                    {
+                        windows[index..].rotate_left(1);
+                    }
+
+                    if let Some(visible) = windows.last().copied() {
+                        // Take the collapsed split's place so a first child stays first.
+                        let new_leaf = self.make_leaf(Some(visible));
+                        new_leaf.detach(&mut self.tree).insert_after(parent);
+
+                        let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
+
+                        for id in ids {
+                            self.kind.remove(id);
+                            self.stacks.remove(&id);
+                        }
+
+                        parent.detach(&mut self.tree).remove();
+
+                        self.stacks.insert(new_leaf, windows);
+                        self.tree.data.selection.select(&self.tree.map, new_leaf);
+                    }
+                }
+                break;
+            }
+            current = parent;
+        }
+    }
+
+    fn consume_or_expel_selection_unshadowed(&mut self, layout: LayoutId, direction: Direction) {
+        let is_joined = self
+            .selection_of_layout(layout)
+            .map(|selection| self.descend_to_leaf(selection))
+            .and_then(|leaf| self.stacks.get(&leaf))
+            .is_some_and(|members| members.len() > 1);
+
+        if is_joined {
+            self.unjoin_selection(layout);
+        } else {
+            self.join_selection_with_direction(layout, direction);
+        }
+    }
+
+    fn unjoin_selection_unshadowed(&mut self, layout: LayoutId) {
+        let Some(sel) = self.selection_of_layout(layout) else {
+            return;
+        };
+
+        let leaf = self.descend_to_leaf(sel);
+        let Some(NodeKind::Leaf {
+            window,
+            fullscreen,
+            fullscreen_within_gaps,
+            ..
+        }) = self.kind.get_mut(leaf)
+        else {
+            return;
+        };
+
+        let Some(members) = self.stacks.remove(&leaf) else {
+            return;
+        };
+
+        let flags = (*fullscreen, *fullscreen_within_gaps);
+
+        // Retile this stack in place using depth-based splits.
+        // The visible member is last in the stack, so it ends up selected.
+        *window = None;
+        self.tree.data.selection.select(&self.tree.map, leaf);
+
+        for member in members {
+            self.insert_window_at_selection(layout, member);
+        }
+
+        // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
+        if let Some(visible) = self.selection_of_layout(layout)
+            && let Some(NodeKind::Leaf {
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) = self.kind.get_mut(visible)
+        {
+            (*fullscreen, *fullscreen_within_gaps) = flags;
+        }
+    }
+
     fn swap_windows_unshadowed(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         if !self.window_participates(a) || !self.window_participates(b) {
             return false;
@@ -2511,110 +2618,45 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return;
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "join_selection_with_direction",
+                Scope::One(layout),
+                |this| this.join_selection_with_direction_unshadowed(layout, direction),
+                |core| core.join(layout, core_direction(direction)),
+            )
         };
-        let sel_leaf = self.descend_to_leaf(sel);
-
-        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
-            return;
-        };
-
-        let mut current = sel_leaf;
-        while let Some(parent) = current.parent(&self.tree.map) {
-            let children: Vec<_> = parent.children(&self.tree.map).collect();
-            if children.contains(&neighbor) {
-                if parent.parent(&self.tree.map).is_some() {
-                    let mut windows = Vec::new();
-                    self.collect_windows_under(parent, &mut windows);
-
-                    // The last member is the visible one, so keep the selected window there.
-                    let selected = self.selected_window(layout);
-
-                    if let Some(index) = windows.iter().position(|window| Some(*window) == selected)
-                    {
-                        windows[index..].rotate_left(1);
-                    }
-
-                    if let Some(visible) = windows.last().copied() {
-                        // Take the collapsed split's place so a first child stays first.
-                        let new_leaf = self.make_leaf(Some(visible));
-                        new_leaf.detach(&mut self.tree).insert_after(parent);
-
-                        let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
-
-                        for id in ids {
-                            self.kind.remove(id);
-                            self.stacks.remove(&id);
-                        }
-
-                        parent.detach(&mut self.tree).remove();
-
-                        self.stacks.insert(new_leaf, windows);
-                        self.tree.data.selection.select(&self.tree.map, new_leaf);
-                    }
-                }
-                break;
-            }
-            current = parent;
-        }
+        #[cfg(not(test))]
+        self.join_selection_with_direction_unshadowed(layout, direction)
     }
 
     fn consume_or_expel_selection(&mut self, layout: LayoutId, direction: Direction) {
-        let is_joined = self
-            .selection_of_layout(layout)
-            .map(|selection| self.descend_to_leaf(selection))
-            .and_then(|leaf| self.stacks.get(&leaf))
-            .is_some_and(|members| members.len() > 1);
-
-        if is_joined {
-            self.unjoin_selection(layout);
-        } else {
-            self.join_selection_with_direction(layout, direction);
-        }
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "consume_or_expel_selection",
+                Scope::One(layout),
+                |this| this.consume_or_expel_selection_unshadowed(layout, direction),
+                |core| core.consume_or_expel(layout, core_direction(direction)),
+            )
+        };
+        #[cfg(not(test))]
+        self.consume_or_expel_selection_unshadowed(layout, direction)
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return;
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "unjoin_selection",
+                Scope::One(layout),
+                |this| this.unjoin_selection_unshadowed(layout),
+                |core| core.unjoin(layout),
+            )
         };
-
-        let leaf = self.descend_to_leaf(sel);
-        let Some(NodeKind::Leaf {
-            window,
-            fullscreen,
-            fullscreen_within_gaps,
-            ..
-        }) = self.kind.get_mut(leaf)
-        else {
-            return;
-        };
-
-        let Some(members) = self.stacks.remove(&leaf) else {
-            return;
-        };
-
-        let flags = (*fullscreen, *fullscreen_within_gaps);
-
-        // Retile this stack in place using depth-based splits.
-        // The visible member is last in the stack, so it ends up selected.
-        *window = None;
-        self.tree.data.selection.select(&self.tree.map, leaf);
-
-        for member in members {
-            self.insert_window_at_selection(layout, member);
-        }
-
-        // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
-        if let Some(visible) = self.selection_of_layout(layout)
-            && let Some(NodeKind::Leaf {
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            }) = self.kind.get_mut(visible)
-        {
-            (*fullscreen, *fullscreen_within_gaps) = flags;
-        }
+        #[cfg(not(test))]
+        self.unjoin_selection_unshadowed(layout)
     }
 
     fn resize_selection_by(
@@ -3065,11 +3107,14 @@ mod core_tree_differential {
         Swap(u32, u32),
         MoveSelection(Direction, bsp_tree::Direction),
         Split(bool),
+        Join(Direction, bsp_tree::Direction),
+        Unjoin,
+        ConsumeOrExpel(Direction, bsp_tree::Direction),
     }
 
     fn step(rng: &mut Rng) -> Step {
         let window = |rng: &mut Rng| 1 + rng.below(u64::from(POOL)) as u32;
-        match rng.below(25) {
+        match rng.below(30) {
             0..=4 => Step::Add(window(rng)),
             5 | 6 => Step::Remove(window(rng)),
             7 | 8 => Step::Select(window(rng)),
@@ -3090,6 +3135,15 @@ mod core_tree_differential {
                 Step::MoveSelection(old, core)
             }
             24 => Step::Split(rng.below(2) == 0),
+            25 | 26 => {
+                let (old, core) = direction(rng);
+                Step::Join(old, core)
+            }
+            27 => Step::Unjoin,
+            28 => {
+                let (old, core) = direction(rng);
+                Step::ConsumeOrExpel(old, core)
+            }
             _ => Step::Resize((rng.below(41) as f64 - 20.0) / 20.0, match rng.below(3) {
                 0 => ResizeOrientation::Horizontal,
                 1 => ResizeOrientation::Vertical,
@@ -3190,6 +3244,18 @@ mod core_tree_differential {
                     old.split_selection(layout, LayoutKind::Vertical);
                     core.split(LAYOUT, bsp_tree::Orientation::Vertical);
                 }
+            }
+            Step::Join(direction, core_direction) => {
+                old.join_selection_with_direction(layout, direction);
+                core.join(LAYOUT, core_direction);
+            }
+            Step::Unjoin => {
+                old.unjoin_selection(layout);
+                core.unjoin(LAYOUT);
+            }
+            Step::ConsumeOrExpel(direction, core_direction) => {
+                old.consume_or_expel_selection(layout, direction);
+                core.consume_or_expel(LAYOUT, core_direction);
             }
             Step::Rebalance => {
                 old.rebalance(layout);
