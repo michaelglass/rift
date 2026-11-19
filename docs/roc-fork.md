@@ -129,6 +129,9 @@ counts only under the `respect_min_size` app rule).
 - `roc/core/Lifecycle.roc`: the lifecycle decisions (`rift_core::lifecycle`: app-rule targets
   and refreshes, a new window's display, native transients, inventory omissions, title-change
   re-application), tags 9 to 16. Held to the Rust by `tests/lifecycle.rs`; not on rift's path.
+- `roc/core/Focus.roc`: the focus decisions (`rift_core::focus`: a removal's effect on focus,
+  the window to focus, hidden focus, following an activation, the fallbacks), tags 17 to 23.
+  Held to the Rust by `tests/focus.rs`; not on rift's path.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
   rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
@@ -456,7 +459,27 @@ Done (Rust; the Roc mirror follows the Rust side):
   `crates/rift-core-roc/tests/lifecycle.rs`, 200,000 random questions each, identical word for
   word; a planted bug in the Roc Space ordering fails it.
 
-Next: #3 (raise and focus sequencing).
+#3, raise and focus sequencing, in `rift_core::focus`:
+
+- 1f24c75c: what a removal does to focus, `removal_focus` (`Removal` → `RemovalFocus::
+  Unaffected | KeepNative | Refocus`), out of `prepare_refocus_before_removal`.
+- aec2fce0: the window to focus in a workspace and hidden focus, `focus_candidate` /
+  `hides_focus`, out of `visible_focus_candidate_in_active_workspace` and
+  `request_refocus_if_hidden`.
+- fc6f3fc8: whether an activation follows its window, `activation_follow` over an
+  `ActivationFacts` trait (asked in order, no further than needed) → `Follow::To | Stay(why)`
+  with eleven typed reasons, out of `auto_switch_target`; the reactor's `ActivationQuery`
+  answers and logs as before.
+- f887a6d4: the fallbacks, `display_to_follow`, `untracked_focus`
+  (`UntrackedFocus::Nothing | SystemSurface | MakeKey`) and `focuses_desktop`.
+- ac7017a4: the Roc mirror, `roc/core/Focus.roc`, tags 17 to 23;
+  `crates/rift-core-roc/tests/focus.rs`, 200,000 random questions each, identical word for
+  word. Its first generator missed a planted bug (a removed window that macOS still reports as
+  key, with a successor listed): uniform random ids rarely line up the facts that decide. The
+  removal questions now lean on those cases, and the bug fails it. A planted bug must also
+  compile: an unused variable is a warning, and warnings fail the Roc build.
+
+Step 3 is done (the input mode table was already pure). Next: the lead's call.
 
 ## Roadmap: to "the reactor is only an applier"
 
