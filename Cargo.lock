@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "rift-wm"
-version = "0.8.2"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "ascii_tree",

@@ -1751,12 +1751,16 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
-                    // Use only the app thread's resolved main window; pending
+                    // Prefer the app thread's resolved main window; pending
                     // AX admission can leave the previous main window cached.
+                    // Some apps leave AXMainWindow unset, so a sole admitted
+                    // window is the only target Rift can follow.
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
                         None
                     } else {
-                        self.main_window_tracker.app_main_window(pid)
+                        self.main_window_tracker
+                            .app_main_window(pid)
+                            .or_else(|| self.sole_admitted_window(pid))
                     };
                     if let Some(window) = activation_window {
                         outcome.absorb(self.auto_switch_to_window_workspace(window));
@@ -2317,12 +2321,9 @@ impl Reactor {
                 {
                     outcome.display_switch_warp = Some(space);
                 }
-                if transition.is_some() {
-                    if let Some(window) = response.focus_window {
-                        outcome.layout_events.push(LayoutEvent::WindowFocused(space, window));
-                    }
-                    return Ok(outcome);
-                }
+                // Covered activation follows the same native focus path as an
+                // explicit pick. apply_event_outcome arranges the scrolling
+                // viewport and stack first, then dispatches this raise request.
                 if let Some(window) = window.filter(|&window| response.focus_window == Some(window))
                 {
                     // Explicit overview picks use the same focus path as the CLI.
@@ -2525,11 +2526,9 @@ impl Reactor {
                     .filter(|(_, selected)| *selected == window_id)
                 {
                     self.overview_focus = None;
-                    let selected = self
-                        .native
-                        .key_focused_window(space)
-                        .filter(|window| self.state.windows.contains_window(*window))
-                        .unwrap_or(selected);
+                    // The native key-focus query can still report the outgoing
+                    // app at raise completion. Keep the explicit overview pick
+                    // authoritative; the cover separately verifies native focus.
                     self.stop_camera(space);
                     outcome.absorb(
                         EventOutcome::layout_changed(false)
@@ -2581,6 +2580,7 @@ impl Reactor {
                         &self.space_state.screens.clone(),
                         false,
                         Some(&activated),
+                        &[],
                         &[],
                     ));
                 }
@@ -3667,24 +3667,36 @@ impl Reactor {
         );
         // Compare all native Spaces, including inactive ones. A current-Space
         // switch alone does not invalidate ownership.
-        let invalidated_spaces: Vec<_> = self
-            .space_state
-            .display_space_ids
-            .iter()
-            .filter(|_| space_state.display_set_changed || space_state.should_force_refresh_layout)
-            .flat_map(|(display, spaces)| {
-                spaces
-                    .iter()
-                    .filter(|space| {
-                        !space_state
-                            .display_space_ids
-                            .get(display)
-                            .is_some_and(|current| current.contains(space))
-                    })
-                    .copied()
-            })
-            .filter(|space| !space_state.space_remaps.iter().any(|(previous, _)| previous == space))
-            .collect();
+        let sole_display = match (
+            self.space_state.screens.as_slice(),
+            space_state.screens.as_slice(),
+        ) {
+            ([previous], [current]) if previous.display_uuid == current.display_uuid => {
+                current.display_uuid_opt()
+            }
+            _ => None,
+        };
+        let mut invalidated_spaces = Vec::new();
+        let mut lost_local_desktops = Vec::new();
+        if space_state.display_set_changed || space_state.should_force_refresh_layout {
+            for (display, spaces) in &self.space_state.display_space_ids {
+                let current = space_state.display_space_ids.get(display);
+                for &space in spaces {
+                    if current.is_some_and(|ids| ids.contains(&space))
+                        || space_state.space_remaps.iter().any(|(old, _)| *old == space)
+                    {
+                        continue;
+                    }
+                    invalidated_spaces.push(space);
+                    // The native inventory also knows the owners of unvisited desktops.
+                    if sole_display == Some(display.as_str())
+                        && !space_state.display_space_ids.values().any(|ids| ids.contains(&space))
+                    {
+                        lost_local_desktops.push(space);
+                    }
+                }
+            }
+        }
         if !space_state.membership_complete && !invalidated_spaces.is_empty() {
             // Retry exhaustion is not evidence of ownership. SpacesActor owns paced
             // resampling; retain the logical model until membership is observable.
@@ -3816,6 +3828,15 @@ impl Reactor {
                 outcome.arrange.space_scope = screen.space;
             }
         }
+        let display_count = self.space_state.screens.len();
+        // Preserve the shared catalog through remaps on either side of a display change.
+        // A remap can replace a destination catalog only if both topologies are local.
+        if display_count > 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
+        }
         for (previous_space, space) in space_remaps {
             if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
                 self.last_screen_frames.insert(space, frame);
@@ -3826,6 +3847,12 @@ impl Reactor {
                 previous_space,
                 space,
             );
+        }
+        if display_count == 1 {
+            self.layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .update_display_count(display_count);
         }
         for screen in &self.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -3839,10 +3866,6 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
-        self.layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .update_display_count(self.space_state.screens.len());
         let engine = &self.layout_manager.layout_engine;
         let mut refits = Vec::new();
         for screen in &self.space_state.screens {
@@ -3878,6 +3901,7 @@ impl Reactor {
                 invalidates_pending_targets,
                 None,
                 &invalidated_spaces,
+                &lost_local_desktops,
             ));
         }
         // Transfers already fitted their frames; refit only workspaces whose native
@@ -3952,6 +3976,7 @@ impl Reactor {
         preserve_membership: bool,
         pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
         invalidated_spaces: &[SpaceId],
+        lost_local_desktops: &[SpaceId],
     ) -> EventOutcome {
         let mut outcome = EventOutcome::no_change();
         if self.refreshes_blocked() {
@@ -3971,6 +3996,7 @@ impl Reactor {
             preserve_membership,
             pins_only,
             invalidated_spaces,
+            lost_local_desktops,
         );
         // Commit ownership and remembered presentation together, then dispatch
         // native effects through the same boundary as commands and app rules.
@@ -4020,13 +4046,27 @@ impl Reactor {
                 outcome.arrange.passes = 1;
             }
         }
+        // Topology changes expose displays in finalize_space_change, after restoration.
+        // A config-only pin change has no topology finalization, so expose it here.
+        if pins_only.is_some() {
+            self.expose_all_spaces();
+        }
         if preserve_membership {
             let owed: Vec<_> = self
                 .state
                 .windows
                 .iter_workspace_assignments()
-                .filter(|&(window, _)| {
-                    !matches!(self.placement(window), None | Some(Placement::Home))
+                .filter(|&(window, assignment)| {
+                    // Native membership will reassign windows from a lost local desktop.
+                    let lost = self
+                        .layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .workspaces
+                        .get(assignment)
+                        .is_some_and(|workspace| lost_local_desktops.contains(&workspace.space));
+                    !lost
+                        && !matches!(self.placement(window), None | Some(Placement::Home))
                         && self.state.windows.record(window).is_some_and(|r| r.transfer().is_none())
                 })
                 .map(|(window, _)| window)
@@ -5356,10 +5396,19 @@ impl Reactor {
     }
 
     fn transient_blocks_mouse_focus(&self) -> bool {
-        self.transient_focus.windows.values().any(|t| {
+        self.transient_focus.windows.iter().any(|(id, t)| {
             t.visible
                 && self.main_window_tracker.is_globally_frontmost(t.pid)
                 && self.active_spaces.contains(&t.space)
+                // A rule-admitted AXDialog window is managed content. Its guard
+                // entry comes from the heuristic the rule overrode, so it must
+                // not disable focus-follows-mouse. Native transients always block.
+                && (t.native
+                    || self
+                        .state
+                        .windows
+                        .tracked_window_id(*id)
+                        .is_none_or(|wid| !self.state.windows.is_admitted(wid)))
         })
     }
 
@@ -5516,6 +5565,16 @@ impl Reactor {
                 }));
             }
         }
+    }
+
+    fn sole_admitted_window(&self, pid: pid_t) -> Option<WindowId> {
+        let mut windows = self
+            .state
+            .windows
+            .window_ids_for_pid(pid)
+            .filter(|wid| self.state.windows.is_admitted(*wid));
+        let window = windows.next()?;
+        windows.next().is_none().then_some(window)
     }
 
     fn auto_switch_to_window_workspace(&mut self, window: WindowId) -> EventOutcome {
@@ -6251,6 +6310,7 @@ impl Reactor {
         &self,
         origin: CGPoint,
         direction: Direction,
+        excluded_origin: Option<CGPoint>,
     ) -> Option<&ScreenInfo> {
         fn interval_gap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
             if a_max < b_min {
@@ -6267,7 +6327,8 @@ impl Reactor {
         for screen in &self.space_state.screens {
             let frame = screen.frame;
 
-            if frame.contains(origin) {
+            if frame.contains(origin) || excluded_origin.is_some_and(|point| frame.contains(point))
+            {
                 continue;
             }
 
@@ -6319,7 +6380,7 @@ impl Reactor {
         match selector {
             DisplaySelector::Direction(direction) => {
                 let origin = origin_override.or_else(|| self.current_screen_center())?;
-                self.screen_for_direction_from_point(origin, *direction)
+                self.screen_for_direction_from_point(origin, *direction, None)
             }
             DisplaySelector::Index(index) => self.screens_in_physical_order().get(*index).copied(),
             DisplaySelector::Uuid(uuid) => {
@@ -6375,7 +6436,10 @@ impl Reactor {
                     + 1.0,
             ),
         };
-        self.screen_for_direction_from_point(wrapped_origin, *direction)
+        // The source can be the outermost display on both edges when displays
+        // overlap along this axis (for example, vertically stacked displays).
+        // Wrapping must still choose another display.
+        self.screen_for_direction_from_point(wrapped_origin, *direction, Some(origin))
     }
 
     fn frame_on_display(
@@ -6417,6 +6481,7 @@ impl Reactor {
             window_title: Some(&state.info.title),
             ax_role: state.info.ax_role.as_deref(),
             ax_subrole: state.info.ax_subrole.as_deref(),
+            window_tags: state.info.sys_id.and_then(crate::sys::window_server::window_tags),
         }) {
             return;
         }
@@ -6424,8 +6489,8 @@ impl Reactor {
         self.apply_event_outcome(outcome);
     }
 
-    /// Moves one window into the destination's active workspace; a destination
-    /// without one rejects the move, which never relocates a workspace.
+    /// Moves one window into the destination's active workspace. Accepted visible
+    /// topology seeds empty displays without relocating an existing workspace.
     fn move_window_to_display(
         &mut self,
         window: WindowId,
@@ -6676,6 +6741,7 @@ fn plan_workspace_placements(
     preserve_membership: bool,
     pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
     invalidated_spaces: &[SpaceId],
+    lost_local_desktops: &[SpaceId],
 ) -> Vec<(
     crate::model::VirtualWorkspaceId,
     Option<usize>,
@@ -6712,6 +6778,9 @@ fn plan_workspace_placements(
             .filter(|(_, id)| pins_only.is_none_or(|ids| ids.contains(id)))
             .filter_map(|(index, id)| {
                 let workspace = &engine.workspaces()[id];
+                if lost_local_desktops.contains(&workspace.space) {
+                    return None;
+                }
                 let owner = engine.display_uuid_for_space(workspace.space);
                 let home = workspace
                     .home_space
@@ -6742,7 +6811,7 @@ fn plan_workspace_placements(
                     .workspaces()
                     .matching_rules(index, &workspace.name)
                     .find_map(|rule| rule.display.as_deref())
-                    .filter(|_| !workspace.rule_overridden)
+                    .filter(|_| !workspace.rule_overridden && screens.len() > 1)
                     .and_then(|rule_display| {
                         *rule_targets.entry(rule_display).or_insert_with(|| {
                             crate::sys::screen::resolve_display_preference(

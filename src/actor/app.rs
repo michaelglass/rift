@@ -843,6 +843,7 @@ struct AppWindowState {
     window_server_id: Option<WindowServerId>,
     title: String,
     is_animating: bool,
+    animation_eui_held: bool,
     animation_authority: FrameAuthority,
     last_animation_frame: Option<(CGRect, FrameAuthority)>,
     // Latest observed or intended geometry; only a hint for choosing AX setters.
@@ -984,8 +985,8 @@ fn write_frame(
 /// `hint` is the last observed or intended frame. It only selects setters: AX
 /// notifications are asynchronous, so it may be stale, and the returned frame is
 /// always read back, unless the app did not answer a setter: the readback would
-/// queue behind it and wait out the same timeout. `before_write` runs before any
-/// setter.
+/// queue behind it and wait out the same timeout. `before_write` runs before
+/// each group of setters, including position-only writes.
 fn reconcile_frame(
     elem: &impl FrameTarget,
     hint: CGRect,
@@ -1068,7 +1069,7 @@ fn write_interactive_frame(
     }
 }
 
-/// Batch-scoped Enhanced UI suppression, acquired before the batch's first write.
+/// Batch-scoped Enhanced UI suppression, acquired before the batch's first frame write.
 #[derive(Debug, PartialEq, Eq)]
 enum BatchEui {
     NotRequested,
@@ -1321,9 +1322,8 @@ impl State {
 
         if !should_terminate && !pending_frames.is_empty() {
             let mut state = this.borrow_mut();
-            state.hold_batch_eui(&mut eui);
             for (wid, frame) in pending_frames {
-                if let Err(err) = state.apply_interactive_frame(wid, frame) {
+                if let Err(err) = state.apply_interactive_frame(wid, frame, &mut eui) {
                     warn!(?wid, ?err, "Failed to apply animation frame");
                 }
             }
@@ -1345,10 +1345,18 @@ impl State {
         }
     }
 
+    fn require_batch_eui(&mut self, eui: &mut BatchEui) {
+        if *eui == BatchEui::NotRequested {
+            *eui = BatchEui::Deferred;
+        }
+        self.hold_batch_eui(eui);
+    }
+
     fn apply_interactive_frame(
         &mut self,
         wid: WindowId,
         pending: PendingFrame,
+        eui: &mut BatchEui,
     ) -> Result<(), AxError> {
         if !pending.authority.is_current() {
             return Ok(());
@@ -1363,6 +1371,18 @@ impl State {
             ..
         } = pending;
         let _guard = span.enter();
+        // AX can animate position-only samples too. Keep suppression across
+        // an animation, or just across this batch for unbracketed drag samples.
+        let window = self.window_mut(wid)?;
+        if window.is_animating {
+            if !window.animation_eui_held {
+                let app = self.app.clone();
+                self.enhanced_ui.acquire(&app);
+                self.window_mut(wid)?.animation_eui_held = true;
+            }
+        } else {
+            self.require_batch_eui(eui);
+        }
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
         window.frame_source = source;
@@ -1649,8 +1669,6 @@ impl State {
                     (window.elem.clone(), started_animation)
                 };
                 if started_animation {
-                    let app = self.app.clone();
-                    self.enhanced_ui.acquire(&app);
                     self.stop_notifications_for_animation(&elem);
                 }
             }
@@ -1688,7 +1706,7 @@ impl State {
                         .get(&wid)
                         .is_some_and(|frame| !authority.is_older_than(&frame.authority))
                     && let Some(frame) = pending_frames.remove(&wid)
-                    && let Err(err) = self.apply_interactive_frame(wid, frame)
+                    && let Err(err) = self.apply_interactive_frame(wid, frame, eui)
                 {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
@@ -1726,9 +1744,11 @@ impl State {
                 // A newer target may already be in the shared store. Report the
                 // transaction actually written by this actor, including on normal end.
                 let txid = Self::some_txid(last_seen_txid);
-                if ended_animation {
+                if std::mem::take(&mut self.window_mut(wid)?.animation_eui_held) {
                     let app = self.app.clone();
                     self.enhanced_ui.release(&app);
+                }
+                if ended_animation {
                     self.restart_notifications_after_animation(&elem);
                 }
                 let mut frame =
@@ -1752,7 +1772,7 @@ impl State {
                             frame,
                             target,
                             FrameMode::Full,
-                            || {},
+                            || self.require_batch_eui(eui),
                         )
                     });
                     frame = match self.handle_ax_result(wid, result)? {
@@ -2406,6 +2426,7 @@ impl State {
             window_server_id: Some(window_server_id),
             title: info.title.clone(),
             is_animating: false,
+            animation_eui_held: false,
             animation_authority: Default::default(),
             last_animation_frame: None,
             last_known_frame: info.frame,
@@ -2782,7 +2803,7 @@ impl State {
     fn remove_window(&mut self, wid: WindowId) -> Option<AppWindowState> {
         let window = self.windows.remove(&wid)?;
         self.elem_to_wid.remove(&window.elem);
-        if window.is_animating {
+        if window.animation_eui_held {
             let app = self.app.clone();
             self.enhanced_ui.release(&app);
         }
@@ -3180,6 +3201,28 @@ mod frame_tests {
         let target = rect(10.0, 20.0, 300.0, 200.0);
         assert_eq!(reconcile(&window, target).unwrap(), target);
         assert_eq!(*window.calls.borrow(), ["position", "size", "frame"]);
+    }
+
+    #[test]
+    fn position_only_reconciliation_suppresses_animation_before_writing() {
+        let initial = rect(0., 0., 300., 200.);
+        let target = rect(50., 50., 300., 200.);
+        for hint in [initial, target] {
+            let window = FakeWindow {
+                frame: Cell::new(initial),
+                ..Default::default()
+            };
+            let frame = reconcile_frame(&window, hint, target, FrameMode::Position, || {
+                window.calls.borrow_mut().push("suppress animation");
+            })
+            .unwrap();
+            let mut expected = vec!["suppress animation", "position", "frame"];
+            if hint == target {
+                expected.insert(0, "frame");
+            }
+            assert_eq!(*window.calls.borrow(), expected);
+            assert_eq!(frame, target);
+        }
     }
 
     #[test]
