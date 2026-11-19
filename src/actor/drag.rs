@@ -167,6 +167,19 @@ impl DragActor {
 
     pub fn is_active(&self) -> bool { !matches!(self.state, State::Idle) }
 
+    /// Whether a frame change reported for `window` belongs to a user drag. A drag under way
+    /// belongs to the window it moves: another window's frame change, button down or not, is
+    /// that app's own move. With no drag, a window moving with the button down starts one.
+    /// A start awaiting its source is resolved within the event that began it, so no frame
+    /// change claims it.
+    pub fn frame_change_is_drag(&self, window: WindowId, button_down: bool) -> bool {
+        match &self.state {
+            State::Idle => button_down,
+            State::AwaitingSource(_) => false,
+            State::Dragging(session) => session.source.window == window,
+        }
+    }
+
     fn session(&self) -> Option<&Session> {
         match &self.state {
             State::Dragging(session) => Some(session),

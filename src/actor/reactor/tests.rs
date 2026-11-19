@@ -12441,3 +12441,130 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+/// Two tiled windows on the first of two displays; returns the reactor, the first window
+/// (`held`), the second (`other`), the first display's space and the second's.
+fn two_tiled_windows_beside_a_second_display()
+-> (Apps, Reactor, WindowId, WindowId, SpaceId, SpaceId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    (
+        apps,
+        reactor,
+        WindowId::new(7, 1),
+        WindowId::new(7, 2),
+        space1,
+        space2,
+    )
+}
+
+/// `other` changes its own frame onto the second display, reported with `button`.
+fn other_window_reports_a_frame_on_display2(
+    apps: &Apps,
+    reactor: &mut Reactor,
+    other: WindowId,
+    button: MouseState,
+) {
+    let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic;
+    let on_display2 = CGRect::new(CGPoint::new(1100., other_frame.origin.y), other_frame.size);
+    reactor.handle_event(Event::WindowFrameChanged(
+        other,
+        on_display2,
+        Some(apps.windows[&other].last_seen_txid),
+        Requested(false),
+        Some(button),
+    ));
+}
+
+/// The user is modifier-dragging the first window when the second, which nobody is dragging,
+/// reports a frame on the other display. The tap captured the drag's button, so a frame
+/// change normally carries it as up; `button` says how this one carries it.
+fn other_window_moves_during_a_modifier_drag(
+    button: MouseState,
+) -> (Reactor, WindowId, WindowId, SpaceId) {
+    let (apps, mut reactor, held, other, space1, _) = two_tiled_windows_beside_a_second_display();
+    let held_frame = reactor.state.windows.window(held).unwrap().frame_monotonic;
+    reactor.drag_manager.actor.begin_modifier(
+        crate::actor::drag::DragSource {
+            window: held,
+            origin_frame: held_frame,
+            last_frame: held_frame,
+            origin_space: Some(space1),
+            current_space: Some(space1),
+            tiled: true,
+        },
+        held_frame.mid(),
+        crate::common::config::MouseAction::Move,
+        crate::actor::drag::DragScene::default(),
+    );
+    reactor.drag_manager.externally_controlled_window = Some(held);
+    other_window_reports_a_frame_on_display2(&apps, &mut reactor, other, button);
+    (reactor, held, other, space1)
+}
+
+#[test]
+fn another_window_moving_does_not_take_over_the_drag() {
+    let (reactor, held, _, _) = other_window_moves_during_a_modifier_drag(MouseState::Up);
+    let dragged = reactor.drag_manager.actor.source().map(|source| source.window);
+    assert_eq!(dragged, Some(held), "the user's drag was replaced");
+}
+
+#[test]
+fn another_window_seen_off_its_space_during_a_drag_keeps_its_assignment() {
+    let (reactor, _, other, space1) = other_window_moves_during_a_modifier_drag(MouseState::Up);
+    assert_eq!(reactor.assigned_space_for_window_id(other), Some(space1));
+}
+
+#[test]
+fn another_window_moving_with_the_button_down_does_not_take_a_modifier_drag() {
+    // The button really is down, but it is moving the held window: one pointer, one drag.
+    let (reactor, held, other, space1) =
+        other_window_moves_during_a_modifier_drag(MouseState::Down);
+    let dragged = reactor.drag_manager.actor.source().map(|source| source.window);
+    assert_eq!(dragged, Some(held), "the user's drag was replaced");
+    assert_eq!(reactor.assigned_space_for_window_id(other), Some(space1));
+}
+
+#[test]
+fn another_window_moving_does_not_take_over_a_native_drag() {
+    // The user title-bar drags the first window, so the button is down for every frame change
+    // reported meanwhile, including the second window's own move onto the other display.
+    let (mut apps, mut reactor, held, other, space1, _) =
+        two_tiled_windows_beside_a_second_display();
+    let held_frame = reactor.state.windows.window(held).unwrap().frame_monotonic;
+    let dragged = CGRect::new(
+        CGPoint::new(held_frame.origin.x + 40., held_frame.origin.y + 20.),
+        held_frame.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        held,
+        dragged,
+        Some(apps.windows[&held].last_seen_txid),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    let source = |reactor: &Reactor| reactor.drag_manager.actor.source().map(|s| s.window);
+    assert_eq!(source(&reactor), Some(held));
+    let _ = apps.requests();
+
+    other_window_reports_a_frame_on_display2(&apps, &mut reactor, other, MouseState::Down);
+    assert_eq!(
+        source(&reactor),
+        Some(held),
+        "the user's native drag was replaced"
+    );
+
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(other),
+        Some(space1),
+        "the undragged window was dropped as if the user had dragged it"
+    );
+}

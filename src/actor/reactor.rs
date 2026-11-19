@@ -1980,10 +1980,13 @@ impl Reactor {
                 let pending_target_space = server_id
                     .and_then(|server| self.pending_target_space_for_window_server_id(server));
                 let assigned_space = self.assigned_space_for_window_id(wid);
+                // Another window's move during a drag is that app's own move, not the drag's.
                 let (old_space, new_space) = if assigned_space.is_some()
                     && new_space != assigned_space
-                    && effective_mouse_state != Some(MouseState::Down)
-                    && !self.is_in_drag()
+                    && !self
+                        .drag_manager
+                        .actor
+                        .frame_change_is_drag(wid, effective_mouse_state == Some(MouseState::Down))
                 {
                     self.request_space_snapshot();
                     (assigned_space, assigned_space)
