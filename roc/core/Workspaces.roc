@@ -40,6 +40,30 @@ Ownership : [Assigned(U64), Claimed({ owner : U64, destination : Destination })]
 ## Who places each window, in window order; a window without an entry is unowned.
 Ownerships : List({ window : U64, ownership : Ownership })
 
+## The workspaces joined: the catalog, what each Space shows, and who places each window.
+## Every workspace an activation or an ownership names is in the catalog.
+Joined : {
+	catalog : List({ workspace : U64, space : U64 }),
+	activations : List({ space : U64, activation : Activation }),
+	owners : Ownerships,
+}
+
+## Who takes a removed workspace's windows and claims.
+Successor : [Into(U64), Unassign]
+
+## A change to the joined workspaces.
+JoinedEvent : [
+	Created({ workspace : U64, space : U64 }),
+	Removed({ workspace : U64, successor : Successor }),
+	Moved({ workspace : U64, space : U64 }),
+	Activated({ space : U64, activation : Activation }),
+	Cleared(U64),
+	Owned({ window : U64, owned : [Unowned, Owner(Ownership)] }),
+]
+
+## What an event met: accepted, or why it was refused (a refusal changes nothing).
+Outcome : [Accepted, Exists(U64), Unknown(U64), OwnSuccessor(U64), Shown({ workspace : U64, space : U64 })]
+
 Workspaces := [].{
 
 	## Whether a workspace on `on` is reachable: per display, only the acting Space's;
@@ -221,6 +245,144 @@ Workspaces := [].{
 			}
 		}
 		$out
+	}
+
+	known : Joined, U64 -> Bool
+	known = |joined, workspace| joined.catalog.any(|entry| entry.workspace == workspace)
+
+	## The first of `workspaces` the catalog lacks, as a refusal, or accepted.
+	first_unknown : Joined, List(U64) -> Outcome
+	first_unknown = |joined, workspaces| {
+		var $outcome = Accepted
+		for workspace in workspaces {
+			match $outcome {
+				Accepted if !known(joined, workspace) => {
+					$outcome = Unknown(workspace)
+				}
+				_ => {}
+			}
+		}
+		$outcome
+	}
+
+	maybe_list : Maybe -> List(U64)
+	maybe_list = |maybe|
+		match maybe {
+			Some(workspace) => [workspace]
+			Nothing => []
+		}
+
+	## Whether the joined workspaces take the event, or why not.
+	admit : Joined, JoinedEvent -> Outcome
+	admit = |joined, event|
+		match event {
+			Created(created) => if (known(joined, created.workspace)) Exists(created.workspace) else Accepted
+			Removed(removed) =>
+				if !known(joined, removed.workspace) {
+					Unknown(removed.workspace)
+				} else {
+					match removed.successor {
+						Into(heir) if heir == removed.workspace => OwnSuccessor(heir)
+						Into(heir) if !known(joined, heir) => Unknown(heir)
+						_ => {
+							var $shown = Accepted
+							for entry in joined.activations {
+								match ($shown, entry.activation) {
+									(Accepted, Showing(shown)) if shown.current == removed.workspace => {
+										$shown = Shown({ workspace: removed.workspace, space: entry.space })
+									}
+									_ => {}
+								}
+							}
+							$shown
+						}
+					}
+				}
+			Moved(moved) => first_unknown(joined, [moved.workspace])
+			Activated(activated) =>
+				match activated.activation {
+					Showing(shown) => first_unknown(joined, [shown.current].concat(maybe_list(shown.previous)).concat(maybe_list(shown.remembered)))
+					Vacant(remembered) => first_unknown(joined, maybe_list(remembered))
+				}
+			Cleared(_) => Accepted
+			Owned(owned) =>
+				match owned.owned {
+					Unowned => Accepted
+					Owner(Assigned(workspace)) => first_unknown(joined, [workspace])
+					Owner(Claimed({ destination: Returns(workspace), .. })) => first_unknown(joined, [workspace])
+					Owner(Claimed({ destination: Nowhere, .. })) => Accepted
+				}
+		}
+
+	## The joined workspaces after an event they take.
+	apply : Joined, JoinedEvent -> Joined
+	apply = |joined, event| {
+		topology = |topology_event| {
+			stepped = topology_step({ catalog: joined.catalog, activations: joined.activations }, topology_event)
+			{ ..joined, catalog: stepped.catalog, activations: stepped.activations }
+		}
+		match event {
+			Created(created) => topology(Created(created))
+			Moved(moved) => topology(Moved(moved))
+			Activated(activated) => topology(Activated(activated))
+			Cleared(space) => topology(Cleared(space))
+			Owned(owned) =>
+				match owned.owned {
+					Unowned => { ..joined, owners: joined.owners.keep_if(|entry| entry.window != owned.window) }
+					Owner(ownership) => { ..joined, owners: own(joined.owners, owned.window, ownership) }
+				}
+			Removed(removed) => {
+				gone = removed.workspace
+				var $owners = []
+				for entry in joined.owners {
+					match (entry.ownership, removed.successor) {
+						(Assigned(id), Into(heir)) if id == gone => {
+							$owners = $owners.append({ window: entry.window, ownership: Assigned(heir) })
+						}
+						(Assigned(id), Unassign) if id == gone => {}
+						(Claimed({ owner, destination: Returns(id) }), Into(heir)) if id == gone => {
+							$owners = $owners.append({ window: entry.window, ownership: Claimed({ owner, destination: Returns(heir) }) })
+						}
+						(Claimed({ owner, destination: Returns(id) }), Unassign) if id == gone => {
+							$owners = $owners.append({ window: entry.window, ownership: Claimed({ owner, destination: Nowhere }) })
+						}
+						_ => {
+							$owners = $owners.append(entry)
+						}
+					}
+				}
+				forget = |maybe|
+					match maybe {
+						Some(id) if id == gone => Nothing
+						_ => maybe
+					}
+				activations = joined.activations.map(
+					|entry| {
+						space: entry.space,
+						activation: match entry.activation {
+							Showing(shown) => Showing({ current: shown.current, previous: forget(shown.previous), remembered: forget(shown.remembered) })
+							Vacant(remembered) => Vacant(forget(remembered))
+						},
+					},
+				)
+				{ catalog: joined.catalog.keep_if(|entry| entry.workspace != gone), activations, owners: $owners }
+			}
+		}
+	}
+
+	## The windows assigned to a workspace, in window order.
+	windows_on : Joined, U64 -> List(U64)
+	windows_on = |joined, workspace| {
+		var $windows = []
+		for entry in joined.owners {
+			match entry.ownership {
+				Assigned(id) if id == workspace => {
+					$windows = $windows.append(entry.window)
+				}
+				_ => {}
+			}
+		}
+		$windows
 	}
 
 	# The wire.
@@ -450,5 +612,85 @@ Workspaces := [].{
 		)
 		with_owners = put_list([], ownerships, |words, entry| put_ownership(words.append(entry.window), entry.ownership))
 		Ok(put_list(with_owners, orphans(ownerships, catalog), |words, orphan| words.append(orphan.window).append(orphan.workspace)))
+	}
+
+	take_joined_event : Words -> Taken(JoinedEvent)
+	take_joined_event = |c0| {
+		(kind, c1) = take(c0)?
+		match kind {
+			0 => {
+				(workspace, c2) = take(c1)?
+				(space, c3) = take(c2)?
+				Ok((Created({ workspace, space }), c3))
+			}
+			1 => {
+				(workspace, c2) = take(c1)?
+				(into, c3) = take_flag(c2)?
+				if into {
+					(heir, c4) = take(c3)?
+					Ok((Removed({ workspace, successor: Into(heir) }), c4))
+				} else {
+					Ok((Removed({ workspace, successor: Unassign }), c3))
+				}
+			}
+			2 => {
+				(workspace, c2) = take(c1)?
+				(space, c3) = take(c2)?
+				Ok((Moved({ workspace, space }), c3))
+			}
+			3 => {
+				(space, c2) = take(c1)?
+				(activation, c3) = take_activation(c2)?
+				Ok((Activated({ space, activation }), c3))
+			}
+			4 => {
+				(space, c2) = take(c1)?
+				Ok((Cleared(space), c2))
+			}
+			5 => {
+				(window, c2) = take(c1)?
+				(owned, c3) = take_flag(c2)?
+				if owned {
+					(ownership, c4) = take_ownership(c3)?
+					Ok((Owned({ window, owned: Owner(ownership) }), c4))
+				} else {
+					Ok((Owned({ window, owned: Unowned }), c3))
+				}
+			}
+			_ => Err(Malformed)
+		}
+	}
+
+	put_outcome : List(U64), Outcome -> List(U64)
+	put_outcome = |words, outcome|
+		match outcome {
+			Accepted => words.append(0)
+			Exists(workspace) => words.append(1).append(workspace)
+			Unknown(workspace) => words.append(2).append(workspace)
+			OwnSuccessor(workspace) => words.append(3).append(workspace)
+			Shown(shown) => words.append(4).append(shown.workspace).append(shown.space)
+		}
+
+	## Tag 34: what each event of a run met from empty joined workspaces, and the workspaces
+	## they leave, with each catalogued workspace's assigned windows.
+	joined_words : Words -> Try(List(U64), [Malformed])
+	joined_words = |c0| {
+		(events, c1) = take_list(c0, take_joined_event)?
+		finished(c1)?
+		(joined, outcomes) = events.fold(
+			({ catalog: [], activations: [], owners: [] }, []),
+			|(state, met), event| {
+				outcome = admit(state, event)
+				match outcome {
+					Accepted => (apply(state, event), met.append(outcome))
+					_ => (state, met.append(outcome))
+				}
+			},
+		)
+		w1 = put_list([], outcomes, put_outcome)
+		w2 = put_list(w1, joined.catalog, |words, entry| words.append(entry.workspace).append(entry.space))
+		w3 = put_list(w2, joined.activations, |words, entry| put_activation(words.append(entry.space), entry.activation))
+		w4 = put_list(w3, joined.owners, |words, entry| put_ownership(words.append(entry.window), entry.ownership))
+		Ok(put_list(w4, joined.catalog, |words, entry| put_list(words, windows_on(joined, entry.workspace), |ws, window| ws.append(window))))
 	}
 }

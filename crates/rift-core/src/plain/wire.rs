@@ -1590,6 +1590,110 @@ pub fn encode_ownerships(
     words.0
 }
 
+/// Tag 34, [`workspaces::plain::WorkspacesQuestion`]: the events, each a kind and its fields
+/// (0 created: the workspace, its Space; 1 removed: the workspace, the successor (0 unassign;
+/// 1 into, then the workspace); 2 moved: the workspace, its new Space; 3 activated: the Space,
+/// the activation; 4 cleared: the Space; 5 owned: the window, then 0 nobody or 1 and an
+/// ownership).
+pub fn encode_workspaces_steps(question: workspaces::plain::WorkspacesQuestion) -> Vec<u64> {
+    use workspaces::{Owned, Successor, WorkspacesEvent};
+    let mut words = Words::default();
+    words.word(34);
+    words.list(question.events, |words, event| match event {
+        WorkspacesEvent::Created { workspace, space } => {
+            words.word(0);
+            words.word(workspace);
+            words.word(space);
+        }
+        WorkspacesEvent::Removed { workspace, successor } => {
+            words.word(1);
+            words.word(workspace);
+            match successor {
+                Successor::Unassign => words.word(0),
+                Successor::Into(heir) => {
+                    words.word(1);
+                    words.word(heir);
+                }
+            }
+        }
+        WorkspacesEvent::Moved { workspace, space } => {
+            words.word(2);
+            words.word(workspace);
+            words.word(space);
+        }
+        WorkspacesEvent::Activated { space, activation } => {
+            words.word(3);
+            words.word(space);
+            words.activation(activation);
+        }
+        WorkspacesEvent::Cleared(space) => {
+            words.word(4);
+            words.word(space);
+        }
+        WorkspacesEvent::Owned { window, owned } => {
+            words.word(5);
+            words.word(window);
+            match owned {
+                Owned::Unowned => words.word(0),
+                Owned::Owner(ownership) => {
+                    words.word(1);
+                    words.ownership(ownership);
+                }
+            }
+        }
+    });
+    words.0
+}
+
+/// A run's answer as words: each event's outcome (0 accepted; 1 exists, 2 unknown, 3 own
+/// successor: the workspace; 4 shown: the workspace, the Space), then the catalog (workspace,
+/// Space), each Space with an activation and the activation, each owned window and its
+/// ownership, and each catalogued workspace's assigned windows, in catalog order.
+pub fn encode_workspaces(answer: workspaces::plain::WorkspacesAnswer) -> Vec<u64> {
+    use workspaces::Refused;
+    let (outcomes, workspaces) = answer;
+    let mut words = Words::default();
+    words.list(outcomes, |words, outcome| match outcome {
+        Ok(()) => words.word(0),
+        Err(Refused::Exists(workspace)) => {
+            words.word(1);
+            words.word(workspace);
+        }
+        Err(Refused::Unknown(workspace)) => {
+            words.word(2);
+            words.word(workspace);
+        }
+        Err(Refused::OwnSuccessor(workspace)) => {
+            words.word(3);
+            words.word(workspace);
+        }
+        Err(Refused::Shown { workspace, space }) => {
+            words.word(4);
+            words.word(workspace);
+            words.word(space);
+        }
+    });
+    words.list(workspaces.catalog().to_vec(), |words, (workspace, space)| {
+        words.word(workspace);
+        words.word(space);
+    });
+    words.list(
+        workspaces.activations().to_vec(),
+        |words, (space, activation)| {
+            words.word(space);
+            words.activation(activation);
+        },
+    );
+    words.list(workspaces.owners().collect(), |words, (window, ownership)| {
+        words.word(window);
+        words.ownership(ownership);
+    });
+    words.list(workspaces.catalog().to_vec(), |words, (workspace, _)| {
+        words.list(workspaces.windows_on(workspace).collect(), Words::word);
+    });
+    words.0
+}
+
 impl Words {
     fn mode(&mut self, mode: lifecycle::WorkspaceMode) {
         self.word(match mode {

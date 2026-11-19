@@ -4,16 +4,19 @@
 //! so steps cross, wrap and stop. Topology event runs reuse a few workspaces and Spaces, so
 //! moves and removals mostly find their workspace, and Spaces are activated again, cleared and
 //! activated anew. Ownership runs reuse a few windows, so ownership is replaced and dropped,
-//! and their catalogs miss some workspaces, so orphans appear.
+//! and their catalogs miss some workspaces, so orphans appear. Joined workspace runs name
+//! unknown workspaces, succeed workspaces into themselves and remove shown ones often enough
+//! that every refusal is met.
 
 use rift_core::lifecycle::WorkspaceMode;
 use rift_core::plain::wire;
 use rift_core::workspaces::plain::{
     OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
+    WorkspacesQuestion,
 };
 use rift_core::workspaces::{
     Activation, Destination, Owned, Ownership, OwnershipEvent, Selector, SkipEmpty, Step,
-    TopologyEvent, Wrapping,
+    Successor, TopologyEvent, WorkspacesEvent, Wrapping,
 };
 use rift_core_roc::{AllocationCount, tile_words};
 
@@ -240,5 +243,75 @@ fn the_roc_core_steps_ownership_and_finds_orphans_as_the_rust_core_does() {
         let (ownerships, orphans) = question.answer();
         let rust = wire::encode_ownerships(&ownerships, orphans);
         (wire::encode_ownership_steps(question), rust)
+    });
+}
+
+#[test]
+fn the_roc_core_steps_the_joined_workspaces_as_the_rust_core_does() {
+    differential("joined", 0x7015_0000_0000_0034, |rng| {
+        // Workspaces 1 to 5, usually ones created already; Spaces 10, 20, 30; windows 1 to 8.
+        let mut created: Vec<u64> = Vec::new();
+        let mut events = Vec::new();
+        for _ in 0..rng.below(30) {
+            let known = |rng: &mut Rng, created: &[u64]| match created.len() {
+                n if n > 0 && rng.chance(85) => created[rng.below(n as u64) as usize],
+                _ => 1 + rng.below(5),
+            };
+            let maybe =
+                |rng: &mut Rng, created: &[u64]| rng.chance(60).then(|| known(rng, created));
+            let event = match rng.below(100) {
+                0..20 => {
+                    let workspace = 1 + rng.below(5);
+                    created.push(workspace);
+                    WorkspacesEvent::Created { workspace, space: rng.space() }
+                }
+                20..30 => WorkspacesEvent::Removed {
+                    workspace: known(rng, &created),
+                    successor: if rng.chance(70) {
+                        Successor::Into(known(rng, &created))
+                    } else {
+                        Successor::Unassign
+                    },
+                },
+                30..40 => WorkspacesEvent::Moved {
+                    workspace: known(rng, &created),
+                    space: rng.space(),
+                },
+                40..60 => WorkspacesEvent::Activated {
+                    space: rng.space(),
+                    activation: if rng.chance(70) {
+                        Activation::Showing {
+                            current: known(rng, &created),
+                            previous: maybe(rng, &created),
+                            remembered: maybe(rng, &created),
+                        }
+                    } else {
+                        Activation::Vacant {
+                            remembered: maybe(rng, &created),
+                        }
+                    },
+                },
+                60..68 => WorkspacesEvent::Cleared(rng.space()),
+                _ => WorkspacesEvent::Owned {
+                    window: 1 + rng.below(8),
+                    owned: match rng.below(100) {
+                        0..15 => Owned::Unowned,
+                        15..65 => Owned::Owner(Ownership::Assigned(known(rng, &created))),
+                        _ => Owned::Owner(Ownership::Claimed {
+                            owner: 100 + rng.below(3),
+                            destination: if rng.chance(70) {
+                                Destination::Returns(known(rng, &created))
+                            } else {
+                                Destination::Nowhere
+                            },
+                        }),
+                    },
+                },
+            };
+            events.push(event);
+        }
+        let question = WorkspacesQuestion { events };
+        let rust = wire::encode_workspaces(question.answer());
+        (wire::encode_workspaces_steps(question), rust)
     });
 }

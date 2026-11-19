@@ -123,7 +123,8 @@ core = { init, step, tile }
 ## 24 a window's admission, 25 a lifecycle reading, 26 a presence event, 27 an inventory's
 ## retirement question, 28 two admission changes in a row, `Lifecycle`; 29 to
 ## 31 the workspace decisions, 32 the workspaces' topology after its events, 33 window
-## ownership after its events and its orphans, `Workspaces`) in;
+## ownership after its events and its orphans, 34 the joined workspaces after a run of events,
+## `Workspaces`) in;
 ## out, a 0 and the answer's words (the frames; for a strip, where it placed everything; for a
 ## settle question, where the camera settles; for newcomers, their first frames; for a topology
 ## question, its answer), or a 1: the words were not a question it answers.
@@ -173,6 +174,7 @@ shape_answer = |words| {
 		31 => Workspaces.previous_words(cursor)
 		32 => Workspaces.topology_words(cursor)
 		33 => Workspaces.ownership_words(cursor)
+		34 => Workspaces.joined_words(cursor)
 		_ => Err(Malformed)
 	}
 }

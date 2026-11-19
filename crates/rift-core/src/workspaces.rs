@@ -564,8 +564,8 @@ impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
     use super::{
-        Context, OwnershipEvent, Ownerships, Selector, SkipEmpty, Step, Topology, TopologyEvent,
-        Wrapping,
+        Context, OwnershipEvent, Ownerships, Refused, Selector, SkipEmpty, Step, Topology,
+        TopologyEvent, Workspaces, WorkspacesEvent, Wrapping,
     };
     use crate::lifecycle::WorkspaceMode;
 
@@ -687,6 +687,28 @@ pub mod plain {
             }
             let orphans = super::orphans(&ownerships, &topology);
             (ownerships, orphans)
+        }
+    }
+
+    /// [`super::Workspaces::step`]: what each event of a run met (accepted, or refused) from
+    /// empty workspaces, and the workspaces they leave. Windows, workspaces, Spaces and owners
+    /// are one word each.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct WorkspacesQuestion {
+        pub events: Vec<WorkspacesEvent<u64, u64, u64, u64>>,
+    }
+
+    /// Each event's outcome, and the workspaces after the run.
+    pub type WorkspacesAnswer = (
+        Vec<Result<(), Refused<u64, u64>>>,
+        Workspaces<u64, u64, u64, u64>,
+    );
+
+    impl WorkspacesQuestion {
+        pub fn answer(&self) -> WorkspacesAnswer {
+            let mut workspaces = Workspaces::default();
+            let outcomes = self.events.iter().map(|event| workspaces.step(*event)).collect();
+            (outcomes, workspaces)
         }
     }
 }
