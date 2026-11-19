@@ -40,7 +40,6 @@ impl Selection {
     }
 
     /// What `node` remembers: its selected child and whether the selection stops at it.
-    #[cfg(test)]
     pub(crate) fn memory_of(&self, node: NodeId) -> Option<(NodeId, bool)> {
         self.nodes.get(node).map(|info| (info.selected_child, info.stop_here))
     }
