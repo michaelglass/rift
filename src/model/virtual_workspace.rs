@@ -30,6 +30,14 @@ pub(crate) struct WorkspaceContext<'a> {
     pub visible: &'a [SpaceId],
 }
 
+/// A workspace context as the core reads it.
+fn core_context(context: WorkspaceContext<'_>) -> rift_core::workspaces::Context<'_, SpaceId> {
+    rift_core::workspaces::Context {
+        space: context.space,
+        visible: context.visible,
+    }
+}
+
 impl From<SpaceId> for WorkspaceContext<'_> {
     fn from(space: SpaceId) -> Self { Self { space, visible: &[] } }
 }
@@ -958,21 +966,27 @@ impl WorkspaceStore {
             .filter(move |id| self.namespace(self.settings.mode, self[*id].space) == namespace)
     }
 
-    fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
-        let space = self[id].space;
-        if self.effective_mode() == WorkspaceMode::PerDisplay {
-            space == context.space
-        } else {
-            context.visible.contains(&space)
-                || (context.visible.is_empty() && space == context.space)
+    /// The workspace mode, as the core decides by it.
+    fn core_mode(&self) -> rift_core::lifecycle::WorkspaceMode {
+        match self.effective_mode() {
+            WorkspaceMode::PerDisplay => rift_core::lifecycle::WorkspaceMode::PerDisplay,
+            WorkspaceMode::Global => rift_core::lifecycle::WorkspaceMode::Global,
         }
+    }
+
+    fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
+        rift_core::workspaces::eligible(self.core_mode(), core_context(context), self[id].space)
     }
 
     /// Navigation history, validated like any target. Unreachable history is kept.
     pub(crate) fn previous_target(&self, context: WorkspaceContext<'_>) -> Option<WorkspaceTarget> {
-        let id = self.last_workspace(context.space)?;
-        let space = self.workspaces.get(id)?.space;
-        self.eligible(context, id).then_some(WorkspaceTarget { id, space })
+        rift_core::workspaces::previous(
+            self.core_mode(),
+            core_context(context),
+            self.last_workspace(context.space),
+            |id| self.workspaces.get(id).map(|workspace| workspace.space),
+        )
+        .map(|(id, space)| WorkspaceTarget { id, space })
     }
 
     pub(crate) fn resolve_workspace<'a>(
@@ -981,13 +995,16 @@ impl WorkspaceStore {
         selector: &WorkspaceSelector,
     ) -> Option<WorkspaceTarget> {
         let context = context.into();
-        let mut ids = self.scope_ids(context.space);
-        let id = match selector {
-            WorkspaceSelector::Index(index) => ids.nth(*index)?,
-            WorkspaceSelector::Name(name) => ids.find(|id| self[*id].name == *name)?,
+        let scope: Vec<_> = self
+            .scope_ids(context.space)
+            .map(|id| (id, self[id].space, self[id].name.as_str()))
+            .collect();
+        let selector = match selector {
+            WorkspaceSelector::Index(index) => rift_core::workspaces::Selector::Index(*index),
+            WorkspaceSelector::Name(name) => rift_core::workspaces::Selector::Name(name.as_str()),
         };
-        self.eligible(context, id)
-            .then_some(WorkspaceTarget { id, space: self[id].space })
+        rift_core::workspaces::resolve(self.core_mode(), &scope, core_context(context), &selector)
+            .map(|(id, space)| WorkspaceTarget { id, space })
     }
 
     pub(crate) fn workspace_index(&self, space: SpaceId, id: VirtualWorkspaceId) -> Option<usize> {
@@ -1757,43 +1774,33 @@ impl WorkspaceStore {
         skip_empty: Option<bool>,
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
-        let context = context.into();
-        let eligible = |id| {
-            self.eligible(context, id)
-                && (self.effective_mode() == WorkspaceMode::Global
-                    || self[id].space == context.space)
+        use rift_core::workspaces::{SkipEmpty, Step, Wrapping};
+        let way = match dir {
+            Direction::Right => Step::Next,
+            Direction::Left => Step::Previous,
+            // Workspaces are a line: up and down go nowhere.
+            Direction::Up | Direction::Down => return None,
         };
-        if !self.workspaces.contains_key(current) || !eligible(current) {
-            return None;
-        }
-        let non_empty =
-            |id| skip_empty != Some(true) || window_store.workspace_window_count(id) != 0;
-        let mut crossed = false;
-        let mut wrapped = None;
-        let mut remaining = self.workspaces.order().iter();
-        loop {
-            let id = match dir {
-                Direction::Right => remaining.next(),
-                Direction::Left => remaining.next_back(),
-                _ => return None,
-            };
-            let Some(&id) = id else { break };
-            if !eligible(id) {
-                continue;
-            }
-            if id == current {
-                crossed = true;
-                if wrapped.is_none() && non_empty(id) {
-                    wrapped = Some(id);
-                }
-            } else if non_empty(id) {
-                if crossed {
-                    return Some(id);
-                }
-                wrapped.get_or_insert(id);
-            }
-        }
-        (!self.settings.prevent_wrapping).then_some(wrapped).flatten()
+        let catalog: Vec<_> =
+            self.workspaces.order().iter().map(|&id| (id, self[id].space)).collect();
+        rift_core::workspaces::step(
+            self.core_mode(),
+            &catalog,
+            core_context(context.into()),
+            current,
+            way,
+            if skip_empty == Some(true) {
+                SkipEmpty::Skip
+            } else {
+                SkipEmpty::Keep
+            },
+            if self.settings.prevent_wrapping {
+                Wrapping::Stop
+            } else {
+                Wrapping::Wrap
+            },
+            |id| window_store.workspace_window_count(id) != 0,
+        )
     }
 
     pub fn assign_window_to_workspace(
