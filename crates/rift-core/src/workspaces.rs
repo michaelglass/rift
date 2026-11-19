@@ -214,6 +214,104 @@ impl<K: Copy + PartialEq, S: Copy + PartialEq> Topology<K, S> {
     pub fn activations(&self) -> &[(S, Activation<K>)] { &self.activations }
 }
 
+/// Who places a window, when somebody does: a workspace, or an external owner holding where
+/// the window returns to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ownership<K, O> {
+    Assigned(K),
+    Claimed {
+        owner: O,
+        destination: Destination<K>,
+    },
+}
+
+/// Where a claimed window returns to when its claim ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destination<K> {
+    Returns(K),
+    Nowhere,
+}
+
+/// A window's ownership, or that nobody places it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owned<K, O> {
+    Unowned,
+    Owner(Ownership<K, O>),
+}
+
+/// A change to who places a window, as the platform makes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipEvent<W, K, O> {
+    /// Who places the window now.
+    Owned { window: W, owned: Owned<K, O> },
+}
+
+/// Who places each window, as the core keeps it. A window without an entry is unowned.
+#[derive(Debug, Clone)]
+pub struct Ownerships<W, K, O> {
+    windows: std::collections::BTreeMap<W, Ownership<K, O>>,
+}
+
+impl<W, K, O> Default for Ownerships<W, K, O> {
+    fn default() -> Self {
+        Ownerships {
+            windows: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl<W: Copy + Ord, K: Copy, O: Copy> Ownerships<W, K, O> {
+    pub fn step(&mut self, event: OwnershipEvent<W, K, O>) {
+        match event {
+            OwnershipEvent::Owned { window, owned: Owned::Unowned } => {
+                self.windows.remove(&window);
+            }
+            OwnershipEvent::Owned {
+                window,
+                owned: Owned::Owner(ownership),
+            } => {
+                self.windows.insert(window, ownership);
+            }
+        }
+    }
+
+    pub fn owned(&self, window: W) -> Owned<K, O> {
+        match self.windows.get(&window) {
+            Some(ownership) => Owned::Owner(*ownership),
+            None => Owned::Unowned,
+        }
+    }
+
+    /// Every owned window and its ownership, in window order.
+    pub fn owners(&self) -> impl Iterator<Item = (W, Ownership<K, O>)> + '_ {
+        self.windows.iter().map(|(window, ownership)| (*window, *ownership))
+    }
+}
+
+/// Each owned window naming a workspace the topology's catalog lacks (as assigned to it, or as
+/// a claim's destination), with that workspace, in window order. While ownership and the
+/// catalog are separate values nothing rules this out; it is a disagreement to report.
+pub fn orphans<W: Copy + Ord, K: Copy + PartialEq, O: Copy, S>(
+    ownerships: &Ownerships<W, K, O>,
+    topology: &Topology<K, S>,
+) -> Vec<(W, K)> {
+    ownerships
+        .owners()
+        .filter_map(|(window, ownership)| match ownership {
+            Ownership::Assigned(workspace)
+            | Ownership::Claimed {
+                destination: Destination::Returns(workspace),
+                ..
+            } => Some((window, workspace)),
+            Ownership::Claimed {
+                destination: Destination::Nowhere,
+                ..
+            } => None,
+        })
+        .filter(|(_, workspace)| !topology.catalog.iter().any(|(id, _)| id == workspace))
+        .collect()
+}
+
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
     use super::{Context, Selector, SkipEmpty, Step, Topology, TopologyEvent, Wrapping};
@@ -357,6 +455,75 @@ mod tests {
         topology.step(TopologyEvent::Moved { workspace: 9, space: 10 });
         topology.step(TopologyEvent::Removed(9));
         assert_eq!(topology.catalog(), &[(2, 20), (3, 20)]);
+    }
+
+    #[test]
+    fn ownerships_follow_who_places_each_window() {
+        let mut ownerships = Ownerships::<u32, u32, u32>::default();
+        let claimed = Ownership::Claimed {
+            owner: 7,
+            destination: Destination::Returns(2),
+        };
+        ownerships.step(OwnershipEvent::Owned {
+            window: 5,
+            owned: Owned::Owner(Ownership::Assigned(1)),
+        });
+        ownerships.step(OwnershipEvent::Owned {
+            window: 3,
+            owned: Owned::Owner(claimed),
+        });
+        ownerships.step(OwnershipEvent::Owned {
+            window: 5,
+            owned: Owned::Owner(Ownership::Assigned(2)),
+        });
+        assert_eq!(ownerships.owned(5), Owned::Owner(Ownership::Assigned(2)));
+        assert_eq!(ownerships.owners().collect::<Vec<_>>(), vec![
+            (3, claimed),
+            (5, Ownership::Assigned(2))
+        ]);
+        ownerships.step(OwnershipEvent::Owned {
+            window: 3,
+            owned: Owned::Unowned,
+        });
+        assert_eq!(ownerships.owned(3), Owned::Unowned);
+        // Disowning a window nobody owns changes nothing.
+        ownerships.step(OwnershipEvent::Owned {
+            window: 9,
+            owned: Owned::Unowned,
+        });
+        assert_eq!(ownerships.owners().collect::<Vec<_>>(), vec![(
+            5,
+            Ownership::Assigned(2)
+        )]);
+    }
+
+    #[test]
+    fn an_ownership_naming_a_workspace_the_catalog_lacks_is_an_orphan() {
+        let mut topology = Topology::<u32, u32>::default();
+        topology.step(TopologyEvent::Created { workspace: 1, space: 10 });
+        let mut ownerships = Ownerships::<u32, u32, u32>::default();
+        for (window, ownership) in [
+            (1, Ownership::Assigned(1)),
+            (2, Ownership::Assigned(2)),
+            (3, Ownership::Claimed {
+                owner: 7,
+                destination: Destination::Returns(1),
+            }),
+            (4, Ownership::Claimed {
+                owner: 7,
+                destination: Destination::Returns(3),
+            }),
+            (5, Ownership::Claimed {
+                owner: 7,
+                destination: Destination::Nowhere,
+            }),
+        ] {
+            ownerships.step(OwnershipEvent::Owned {
+                window,
+                owned: Owned::Owner(ownership),
+            });
+        }
+        assert_eq!(orphans(&ownerships, &topology), vec![(2, 2), (4, 3)]);
     }
 
     #[test]

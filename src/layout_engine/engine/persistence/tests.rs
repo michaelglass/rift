@@ -746,12 +746,26 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     assert!(engine.workspaces.workspace_ids(c).is_empty());
     assert_eq!(ws(&engine, d, 0), kept);
 
-    // Remapping over a workspace leaves nothing that still names it.
+    // Remapping over a workspace leaves nothing that still names it: not a floating position,
+    // not a window's assignment or a claim's destination, in the store or the core's shadow.
     let (mut engine, mut store) = fresh(&per_display, &[(a, "x"), (b, "y")]);
     let replaced = ws(&engine, b, 0);
     engine.floating_positions.store(replaced, w1, frame);
+    open(&mut engine, &mut store, replaced, w2);
+    open(&mut engine, &mut store, replaced, w3);
+    store.insert_claim(
+        w3,
+        crate::model::window_store::ClaimOwner(7),
+        rift_protocol::WindowClaimFlags::empty(),
+    );
     engine.remap_space(&mut store, a, b);
     assert_eq!(engine.floating_positions.get(replaced, w1), None);
+    assert_ne!(store.workspace_for_window(w2), Some(replaced));
+    assert_eq!(store.ownership_divergences(), vec![]);
+    assert_eq!(
+        rift_core::workspaces::orphans(store.core_ownerships(), engine.workspaces.core_topology()),
+        vec![]
+    );
 
     // Shared mode: the catalog is global, so a lost desktop's workspaces stay reachable.
     let file = session(&shared, &[(a, "x", &[w1]), (b, "away", &[other])]);

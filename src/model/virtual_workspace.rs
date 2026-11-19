@@ -1853,6 +1853,13 @@ impl WorkspaceStore {
         }
     }
 
+    /// The core's topology (the shadow).
+    pub(crate) fn core_topology(
+        &self,
+    ) -> &rift_core::workspaces::Topology<VirtualWorkspaceId, SpaceId> {
+        &self.shadow
+    }
+
     /// Every disagreement between the store's topology and the core's shadow. Empty unless a
     /// write bypassed the helpers above.
     pub(crate) fn workspace_divergences(&self) -> Vec<WorkspaceDivergence> {

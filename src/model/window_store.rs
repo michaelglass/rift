@@ -419,11 +419,24 @@ impl WindowRecord {
             Ownership::Unassigned | Ownership::Assigned(_) => None,
         }
     }
+}
 
-    fn claim_mut(&mut self) -> Option<&mut WindowClaim> {
-        match &mut self.ownership {
-            Ownership::Claimed(claim) => Some(claim),
-            Ownership::Unassigned | Ownership::Assigned(_) => None,
+impl Ownership {
+    /// The ownership in the core's terms (a claim's flags and original id stay here).
+    fn core(self) -> CoreOwned {
+        use rift_core::workspaces::{Destination, Owned};
+        match self {
+            Ownership::Unassigned => Owned::Unowned,
+            Ownership::Assigned(workspace) => {
+                Owned::Owner(rift_core::workspaces::Ownership::Assigned(workspace))
+            }
+            Ownership::Claimed(claim) => Owned::Owner(rift_core::workspaces::Ownership::Claimed {
+                owner: claim.owner,
+                destination: match claim.workspace {
+                    Some(workspace) => Destination::Returns(workspace),
+                    None => Destination::Nowhere,
+                },
+            }),
         }
     }
 }
@@ -565,6 +578,10 @@ pub struct WindowStore {
     /// The core's lifecycle, in shadow: every live window's admission facts, told each change
     /// the store makes. [`Self::lifecycle_divergences`] holds the two to agreeing.
     lifecycle: rift_core::lifecycle::Lifecycle<WindowId>,
+    /// The core's ownerships, in shadow: who places each window, told every ownership change
+    /// (only [`Self::set_ownership`] writes one). [`Self::ownership_divergences`] holds the two
+    /// to agreeing.
+    ownerships: rift_core::workspaces::Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner>,
 }
 
 /// Whether a window that leaves the layout is away for now or for good.
@@ -584,6 +601,17 @@ pub(crate) struct LifecycleDivergence {
     pub(crate) snapshot: Option<(rift_core::lifecycle::AxKind, rift_core::lifecycle::Minimize)>,
     /// The core's; `None` when it holds no facts.
     pub(crate) core: Option<(rift_core::lifecycle::AxKind, rift_core::lifecycle::Minimize)>,
+}
+
+/// A window's ownership in the core's terms.
+type CoreOwned = rift_core::workspaces::Owned<VirtualWorkspaceId, ClaimOwner>;
+
+/// Where the store's ownership of a window and the core's disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnershipDivergence {
+    pub(crate) window: WindowId,
+    pub(crate) store: CoreOwned,
+    pub(crate) core: CoreOwned,
 }
 
 /// Restored native lifecycle facts; placement and actor effects remain external.
@@ -697,26 +725,28 @@ impl WindowStore {
     pub fn insert_claim(&mut self, wid: WindowId, owner: ClaimOwner, flags: WindowClaimFlags) {
         debug_assert!(self.contains_window(wid) && !self.is_claimed(wid));
         let workspace = self.take_assignment(wid);
-        self.windows.get_mut(&wid).unwrap().ownership = Ownership::Claimed(WindowClaim {
-            owner,
-            flags,
-            original: wid,
-            workspace,
-        });
+        self.set_ownership(
+            wid,
+            Ownership::Claimed(WindowClaim {
+                owner,
+                flags,
+                original: wid,
+                workspace,
+            }),
+        );
         self.claims.entry(owner).or_default().push(wid);
     }
 
     pub fn set_claim_flags(&mut self, wid: WindowId, flags: WindowClaimFlags) {
-        if let Some(claim) = self.windows.get_mut(&wid).and_then(|record| record.claim_mut()) {
-            claim.flags = flags;
+        if let Some(claim) = self.claim(wid) {
+            self.set_ownership(wid, Ownership::Claimed(WindowClaim { flags, ..claim }));
         }
     }
 
     /// End a claim. The caller restores the returned assignment if it is still valid.
     pub fn remove_claim(&mut self, wid: WindowId) -> Option<WindowClaim> {
-        let record = self.windows.get_mut(&wid)?;
-        let claim = record.claim()?;
-        record.ownership = Ownership::Unassigned;
+        let claim = self.windows.get(&wid)?.claim()?;
+        self.set_ownership(wid, Ownership::Unassigned);
         self.unindex_claim(claim.owner, wid);
         self.prune_window_record(wid);
         Some(claim)
@@ -734,10 +764,11 @@ impl WindowStore {
     /// Takes a window's ownership out of the record and out of the indexes it is in, leaving
     /// it unassigned.
     fn take_ownership(&mut self, wid: WindowId) -> Ownership {
-        let Some(record) = self.windows.get_mut(&wid) else {
+        let Some(record) = self.windows.get(&wid) else {
             return Ownership::Unassigned;
         };
-        let ownership = std::mem::take(&mut record.ownership);
+        let ownership = record.ownership;
+        self.set_ownership(wid, Ownership::Unassigned);
         match ownership {
             Ownership::Unassigned => {}
             Ownership::Assigned(workspace) => {
@@ -750,7 +781,7 @@ impl WindowStore {
 
     /// Gives an unassigned window `ownership`, and puts it in the index that goes with it.
     fn give_ownership(&mut self, wid: WindowId, ownership: Ownership) {
-        self.windows.entry_or_default(wid).ownership = ownership;
+        self.set_ownership(wid, ownership);
         match ownership {
             Ownership::Unassigned => {}
             Ownership::Assigned(workspace) => self.add_window_to_workspace_index(wid, workspace),
@@ -759,11 +790,56 @@ impl WindowStore {
     }
 
     fn take_assignment(&mut self, wid: WindowId) -> Option<VirtualWorkspaceId> {
-        let record = self.windows.get_mut(&wid)?;
-        let assignment = record.assignment()?;
-        record.ownership = Ownership::Unassigned;
+        let assignment = self.windows.get(&wid)?.assignment()?;
+        self.set_ownership(wid, Ownership::Unassigned);
         self.remove_window_from_workspace_index(wid, assignment);
         Some(assignment)
+    }
+
+    /// The only writer of a record's ownership; the core's shadow is told each change.
+    fn set_ownership(&mut self, wid: WindowId, ownership: Ownership) {
+        self.windows.entry_or_default(wid).ownership = ownership;
+        self.tell_ownership(wid, ownership);
+    }
+
+    fn tell_ownership(&mut self, window: WindowId, ownership: Ownership) {
+        self.ownerships.step(rift_core::workspaces::OwnershipEvent::Owned {
+            window,
+            owned: ownership.core(),
+        });
+    }
+
+    /// The core's ownerships (the shadow).
+    pub(crate) fn core_ownerships(
+        &self,
+    ) -> &rift_core::workspaces::Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner> {
+        &self.ownerships
+    }
+
+    /// Every window whose ownership the store and the core's shadow disagree on. Empty unless
+    /// a write bypassed [`Self::set_ownership`].
+    pub(crate) fn ownership_divergences(&self) -> Vec<OwnershipDivergence> {
+        let mut windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, record)| record.ownership != Ownership::Unassigned)
+            .map(|(window, _)| *window)
+            .chain(self.ownerships.owners().map(|(window, _)| window))
+            .collect();
+        windows.sort_by_key(|window| (window.pid, window.idx.get()));
+        windows.dedup();
+        windows
+            .into_iter()
+            .filter_map(|window| {
+                let store = self
+                    .windows
+                    .get(&window)
+                    .map_or(Ownership::Unassigned, |record| record.ownership)
+                    .core();
+                let core = self.ownerships.owned(window);
+                (store != core).then_some(OwnershipDivergence { window, store, core })
+            })
+            .collect()
     }
 
     /// Temporary unavailability changes admission, not logical workspace ownership.
@@ -1997,8 +2073,15 @@ impl WindowStore {
         assignment: VirtualWorkspaceId,
     ) -> Option<VirtualWorkspaceId> {
         // A claimed window never enters the index; any placement updates its destination.
-        if let Some(claim) = self.windows.get_mut(&window_id).and_then(WindowRecord::claim_mut) {
-            return claim.workspace.replace(assignment);
+        if let Some(claim) = self.claim(window_id) {
+            self.set_ownership(
+                window_id,
+                Ownership::Claimed(WindowClaim {
+                    workspace: Some(assignment),
+                    ..claim
+                }),
+            );
+            return claim.workspace;
         }
         let old = self.windows.get(&window_id).and_then(WindowRecord::assignment);
         if old == Some(assignment) {
@@ -2007,7 +2090,7 @@ impl WindowStore {
         if let Some(old_assignment) = old {
             self.remove_window_from_workspace_index(window_id, old_assignment);
         }
-        self.windows.entry_or_default(window_id).ownership = Ownership::Assigned(assignment);
+        self.set_ownership(window_id, Ownership::Assigned(assignment));
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         self.add_window_to_workspace_index(window_id, assignment);
         if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
@@ -2186,6 +2269,7 @@ impl WindowStore {
             }
             Ownership::Claimed(claim) => self.unindex_claim(claim.owner, window_id),
         }
+        self.tell_ownership(window_id, Ownership::Unassigned);
         if let Some(wsid) = record.window_server_id {
             self.remove_window_server_state(wsid);
         }
@@ -2257,11 +2341,18 @@ impl WindowStore {
                 record.workspace = replacement;
             }
         }
-        for wid in self.claims.values().flatten() {
-            if let Some(claim) = self.windows.get_mut(wid).and_then(|r| r.claim_mut())
+        let claimed: Vec<WindowId> = self.claims.values().flatten().copied().collect();
+        for wid in claimed {
+            if let Some(claim) = self.claim(wid)
                 && claim.workspace == Some(old)
             {
-                claim.workspace = replacement;
+                self.set_ownership(
+                    wid,
+                    Ownership::Claimed(WindowClaim {
+                        workspace: replacement,
+                        ..claim
+                    }),
+                );
             }
         }
     }
@@ -3569,5 +3660,66 @@ mod tests {
             );
         }
         assert_eq!(store.workspace_window_count(workspace_id), 2);
+    }
+
+    #[test]
+    fn the_core_follows_every_ownership_the_store_gives() {
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(10);
+        let mut workspaces = WorkspaceStore::new();
+        let [a, b, c] = ["A", "B", "C"]
+            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+        let id = |idx| WindowId::new(1, idx);
+        let wsid = WindowServerId::new;
+        let owner = ClaimOwner(7);
+        let agree = |store: &WindowStore, step: &str| {
+            assert_eq!(store.ownership_divergences(), vec![], "after {step}");
+        };
+
+        store.insert_window(id(1), admitted(id(1), wsid(1)));
+        store.assign_window_to_workspace(id(1), a);
+        agree(&store, "assign");
+        store.assign_window_to_workspace(id(1), b);
+        agree(&store, "reassign");
+        store.insert_claim(id(1), owner, WindowClaimFlags::empty());
+        agree(&store, "claim");
+        store.assign_window_to_workspace(id(1), c);
+        agree(&store, "a claimed window's destination");
+        store.set_claim_flags(id(1), WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
+        agree(&store, "claim flags");
+        store.remap_workspace(c, Some(a));
+        agree(&store, "a claim's destination remapped");
+        store.remap_workspace(a, None);
+        agree(&store, "a claim's destination removed");
+        store.remove_claim(id(1));
+        agree(&store, "release");
+
+        store.insert_window(id(2), admitted(id(2), wsid(2)));
+        store.assign_window_to_workspace(id(2), b);
+        store.remap_workspace(b, Some(c));
+        agree(&store, "an assignment remapped");
+        store.remap_workspace(c, None);
+        agree(&store, "an assignment removed");
+        store.assign_window_to_workspace(id(2), b);
+        store.remove_window_assignment(id(2));
+        agree(&store, "unassign");
+
+        // An identity merge moves ownership to the recognized identity.
+        store.assign_window_to_workspace(id(2), b);
+        store.insert_window(id(3), admitted(id(3), wsid(3)));
+        store.assign_window_to_workspace(id(3), a);
+        store.insert_claim(id(3), owner, WindowClaimFlags::empty());
+        store.reconcile_ax_identity(id(3), Some(wsid(2)));
+        agree(&store, "identity merge");
+        store.remove_window(id(3));
+        store.remove_window(id(2));
+        agree(&store, "removal");
+
+        // A write around the store is caught.
+        store.insert_window(id(4), admitted(id(4), wsid(4)));
+        store.windows.get_mut(&id(4)).unwrap().ownership = Ownership::Assigned(b);
+        assert!(matches!(store.ownership_divergences().as_slice(), [
+            OwnershipDivergence { window, .. }
+        ] if *window == id(4)));
     }
 }

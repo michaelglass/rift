@@ -1556,6 +1556,13 @@ impl Reactor {
             assert!(divergences.is_empty(), "lifecycle-divergence: {divergences:?}");
             let divergences = workspaces.workspace_divergences();
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
+            let divergences = self.state.windows.ownership_divergences();
+            assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
+            let orphans = rift_core::workspaces::orphans(
+                self.state.windows.core_ownerships(),
+                workspaces.core_topology(),
+            );
+            assert!(orphans.is_empty(), "workspace-divergence: orphans {orphans:?}");
         }
         #[cfg(not(test))]
         if tracing::enabled!(tracing::Level::DEBUG) {
@@ -1569,6 +1576,22 @@ impl Reactor {
                 debug!(
                     ?divergence,
                     "workspace-divergence: store and core disagree on workspaces"
+                );
+            }
+            for divergence in self.state.windows.ownership_divergences() {
+                debug!(
+                    ?divergence,
+                    "workspace-divergence: store and core disagree on a window's ownership"
+                );
+            }
+            for (window, workspace) in rift_core::workspaces::orphans(
+                self.state.windows.core_ownerships(),
+                workspaces.core_topology(),
+            ) {
+                debug!(
+                    ?window,
+                    ?workspace,
+                    "workspace-divergence: a window is owned by a workspace the catalog lacks"
                 );
             }
         }
