@@ -1487,6 +1487,78 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     }
 }
 
+/// What dropping one window on another does: they swap, the dropped one joins the other's
+/// stack, or it splits the other's leaf toward a side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drop {
+    Swap,
+    Stack,
+    Insert(Direction),
+}
+
+impl<W: Copy + Ord + Debug> Layout<W> {
+    /// Drops `source` on `target`. False if either is left out or not here, or they are one.
+    pub fn drop_on(
+        &mut self,
+        source: W,
+        target: W,
+        drop: Drop,
+        who: Participation<W>,
+        tags: &mut Tags,
+    ) -> bool {
+        if !who.takes_part(&source) || !who.takes_part(&target) {
+            return false;
+        }
+        if source == target || !self.contains(source) || !self.contains(target) {
+            return false;
+        }
+        let into = match drop {
+            Drop::Swap => return self.swap(source, target, who),
+            Drop::Stack => None,
+            Drop::Insert(direction) => Some(direction),
+        };
+        while self.remove_one(source, who) {}
+        let Some((at, _)) = self.leaf_of(target) else {
+            return false;
+        };
+        match into {
+            None => {
+                let Node::Leaf(leaf) = self.root.at_mut(&at) else {
+                    return false;
+                };
+                let (before, fill) = match &leaf.content {
+                    Content::Stack { tabs, fill } => {
+                        (tabs.members().filter(|w| *w != source).collect(), *fill)
+                    }
+                    Content::Window { window, fill } => (vec![*window], *fill),
+                    Content::Empty => return false,
+                };
+                leaf.content = Content::Stack {
+                    tabs: Tabs {
+                        before,
+                        top: source,
+                        after: Vec::new(),
+                    },
+                    fill,
+                };
+                self.root.select(&at);
+            }
+            Some(direction) => {
+                let side_of_new = match direction {
+                    Direction::Left | Direction::Up => Side::First,
+                    Direction::Right | Direction::Down => Side::Second,
+                };
+                let new = Content::Window {
+                    window: source,
+                    fill: Fill::Tiled,
+                };
+                self.split_leaf(&at, new, direction.orientation(), side_of_new, tags);
+            }
+        }
+        true
+    }
+}
+
 /// Rebalances `node`'s splits; answers how many tiles it spans along `parent_axis`.
 fn rebalance<W>(node: &mut Node<W>, parent_axis: Orientation) -> usize {
     let Node::Split(split) = node else { return 1 };
@@ -1591,6 +1663,24 @@ impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
     }
 
     pub fn rebalance(&mut self, layout: L) { self.change(layout, |tree, _, _| tree.rebalance()); }
+
+    pub fn drop_on(&mut self, layout: L, source: W, target: W, drop: Drop) -> bool {
+        self.change(layout, |tree, who, tags| {
+            tree.drop_on(source, target, drop, who, tags)
+        })
+        .unwrap_or(false)
+    }
+
+    /// Moves `from`'s selected window, every occurrence of it, to `to` (inserted as
+    /// `insertion` says).
+    pub fn move_selected(&mut self, from: L, to: L, insertion: Insertion) {
+        let Some(window) = self.projection(from).and_then(|projection| projection.selected_window)
+        else {
+            return;
+        };
+        self.change(from, |tree, who, _| while tree.remove_one(window, who) {});
+        self.add(to, window, insertion);
+    }
 
     pub fn join(&mut self, layout: L, direction: Direction) {
         self.change(layout, |tree, who, tags| tree.join(direction, who, tags));
