@@ -1371,6 +1371,166 @@ mod tests {
 
 /// The bodies of the operations the core shadows in test builds (see `shadowed`).
 impl BspLayoutSystem {
+    fn clone_layout_unshadowed(&mut self, layout: LayoutId) -> LayoutId {
+        let mut groups = Vec::new();
+        if let Some(state) = self.layouts.get(layout).copied() {
+            for node in state.root.traverse_preorder(&self.tree.map) {
+                if let Some(NodeKind::Leaf { window: Some(window), .. }) = self.kind.get(node) {
+                    groups.push(self.stacks.get(&node).cloned().unwrap_or_else(|| vec![*window]));
+                }
+            }
+        }
+        let new_layout = self.create_layout();
+        for group in groups {
+            let mut members = group.into_iter();
+            let Some(first) = members.next() else { continue };
+            self.add_window_after_selection(new_layout, first);
+            let mut target = first;
+            for window in members {
+                self.add_window_after_selection(new_layout, window);
+                let _ = self.apply_window_drop(
+                    new_layout,
+                    window,
+                    target,
+                    crate::layout_engine::WindowDropAction::Stack,
+                );
+                target = window;
+            }
+        }
+        new_layout
+    }
+
+    fn on_window_resized_unshadowed(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        old_frame: CGRect,
+        new_frame: CGRect,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) {
+        if !self.window_participates(wid) {
+            return;
+        }
+        if let Some(node) = self.node_for_window_in_layout(layout, wid) {
+            let tiling = compute_tiling_area(screen, gaps);
+            let mut fullscreen_transition = false;
+            if let Some(NodeKind::Leaf {
+                window: _,
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) = self.kind.get_mut(node)
+            {
+                if new_frame == screen {
+                    *fullscreen = true;
+                    *fullscreen_within_gaps = false;
+                    fullscreen_transition = true;
+                } else if old_frame == screen {
+                    *fullscreen = false;
+                    fullscreen_transition = true;
+                } else {
+                    if new_frame == tiling {
+                        *fullscreen_within_gaps = true;
+                        *fullscreen = false;
+                        fullscreen_transition = true;
+                    } else if old_frame == tiling {
+                        *fullscreen_within_gaps = false;
+                        fullscreen_transition = true;
+                    }
+                }
+            }
+
+            if fullscreen_transition {
+                return;
+            }
+
+            let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
+            let height_changed = (new_frame.size.height - old_frame.size.height).abs() > 0.5;
+            if !width_changed && !height_changed {
+                return;
+            }
+
+            let mut current = node;
+            while let Some(parent) = current.parent(&self.tree.map) {
+                let Some(NodeKind::Split { orientation, ratio }) = self.kind.get_mut(parent) else {
+                    current = parent;
+                    continue;
+                };
+
+                let (old_len, new_len) = match orientation {
+                    Orientation::Horizontal if width_changed => {
+                        (old_frame.size.width, new_frame.size.width)
+                    }
+                    Orientation::Vertical if height_changed => {
+                        (old_frame.size.height, new_frame.size.height)
+                    }
+                    _ => {
+                        current = parent;
+                        continue;
+                    }
+                };
+
+                let current_ratio = f64::from(*ratio);
+                let is_first = Some(current) == parent.first_child(&self.tree.map);
+                let denom = if is_first {
+                    current_ratio
+                } else {
+                    1.0 - current_ratio
+                };
+                if old_len <= 0.0 || denom <= f64::EPSILON {
+                    break;
+                }
+
+                let parent_len = old_len / denom;
+                if parent_len <= 0.0 {
+                    break;
+                }
+
+                let raw_ratio = (new_len / parent_len).clamp(0.05, 0.95);
+                *ratio = if is_first {
+                    raw_ratio as f32
+                } else {
+                    (1.0 - raw_ratio) as f32
+                };
+                break;
+            }
+        }
+    }
+
+    fn set_windows_for_app_unshadowed(
+        &mut self,
+        layout: LayoutId,
+        pid: pid_t,
+        desired: Vec<WindowId>,
+    ) {
+        let current = if let Some(state) = self.layouts.get(layout).copied() {
+            let mut under: Vec<WindowId> = Vec::new();
+            self.collect_windows_under(state.root, &mut under);
+            under.into_iter().filter(|w| w.pid == pid).collect()
+        } else {
+            Vec::new()
+        };
+        let delta =
+            reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
+        for wid in delta.removals {
+            if let Some(node) = self.node_for_window_in_layout(layout, wid)
+                && let Some(NodeKind::Leaf {
+                    fullscreen,
+                    fullscreen_within_gaps,
+                    ..
+                }) = self.kind.get(node)
+                && (*fullscreen || *fullscreen_within_gaps)
+            {
+                continue;
+            }
+            self.remove_window_internal(layout, wid);
+        }
+        for wid in delta.additions {
+            self.add_window_after_selection(layout, wid);
+        }
+    }
+
     fn apply_target_drop_unshadowed(
         &mut self,
         layout: LayoutId,
@@ -2022,32 +2182,20 @@ impl LayoutSystem for BspLayoutSystem {
 
     /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let mut groups = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            for node in state.root.traverse_preorder(&self.tree.map) {
-                if let Some(NodeKind::Leaf { window: Some(window), .. }) = self.kind.get(node) {
-                    groups.push(self.stacks.get(&node).cloned().unwrap_or_else(|| vec![*window]));
-                }
-            }
+        #[cfg(test)]
+        let before = self.core_state();
+        let copy = self.clone_layout_unshadowed(layout);
+        #[cfg(test)]
+        {
+            let mut shadow = before;
+            let insertion = match self.window_insertion_point {
+                WindowInsertionPoint::EndOfTree => bsp_tree::Insertion::EndOfTree,
+                _ => bsp_tree::Insertion::AtFocus,
+            };
+            shadow.clone_layout(layout, copy, insertion);
+            self.assert_held_as("clone_layout", Scope::All, &shadow);
         }
-        let new_layout = self.create_layout();
-        for group in groups {
-            let mut members = group.into_iter();
-            let Some(first) = members.next() else { continue };
-            self.add_window_after_selection(new_layout, first);
-            let mut target = first;
-            for window in members {
-                self.add_window_after_selection(new_layout, window);
-                let _ = self.apply_window_drop(
-                    new_layout,
-                    window,
-                    target,
-                    crate::layout_engine::WindowDropAction::Stack,
-                );
-                target = window;
-            }
-        }
-        new_layout
+        copy
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
@@ -2384,31 +2532,22 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
-        let current = if let Some(state) = self.layouts.get(layout).copied() {
-            let mut under: Vec<WindowId> = Vec::new();
-            self.collect_windows_under(state.root, &mut under);
-            under.into_iter().filter(|w| w.pid == pid).collect()
-        } else {
-            Vec::new()
+        #[cfg(test)]
+        return {
+            let (removals, additions) = self.app_delta(layout, pid, desired.clone());
+            let insertion = match self.window_insertion_point {
+                WindowInsertionPoint::EndOfTree => bsp_tree::Insertion::EndOfTree,
+                _ => bsp_tree::Insertion::AtFocus,
+            };
+            self.shadowed(
+                "set_windows_for_app",
+                Scope::One(layout),
+                |this| this.set_windows_for_app_unshadowed(layout, pid, desired),
+                |core| core.set_app_windows(layout, &removals, &additions, insertion),
+            )
         };
-        let delta =
-            reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
-        for wid in delta.removals {
-            if let Some(node) = self.node_for_window_in_layout(layout, wid)
-                && let Some(NodeKind::Leaf {
-                    fullscreen,
-                    fullscreen_within_gaps,
-                    ..
-                }) = self.kind.get(node)
-                && (*fullscreen || *fullscreen_within_gaps)
-            {
-                continue;
-            }
-            self.remove_window_internal(layout, wid);
-        }
-        for wid in delta.additions {
-            self.add_window_after_selection(layout, wid);
-        }
+        #[cfg(not(test))]
+        self.set_windows_for_app_unshadowed(layout, pid, desired)
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
@@ -2438,93 +2577,27 @@ impl LayoutSystem for BspLayoutSystem {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     ) {
-        if !self.window_participates(wid) {
-            return;
-        }
-        if let Some(node) = self.node_for_window_in_layout(layout, wid) {
-            let tiling = compute_tiling_area(screen, gaps);
-            let mut fullscreen_transition = false;
-            if let Some(NodeKind::Leaf {
-                window: _,
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            }) = self.kind.get_mut(node)
-            {
-                if new_frame == screen {
-                    *fullscreen = true;
-                    *fullscreen_within_gaps = false;
-                    fullscreen_transition = true;
-                } else if old_frame == screen {
-                    *fullscreen = false;
-                    fullscreen_transition = true;
-                } else {
-                    if new_frame == tiling {
-                        *fullscreen_within_gaps = true;
-                        *fullscreen = false;
-                        fullscreen_transition = true;
-                    } else if old_frame == tiling {
-                        *fullscreen_within_gaps = false;
-                        fullscreen_transition = true;
-                    }
-                }
-            }
-
-            if fullscreen_transition {
-                return;
-            }
-
-            let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
-            let height_changed = (new_frame.size.height - old_frame.size.height).abs() > 0.5;
-            if !width_changed && !height_changed {
-                return;
-            }
-
-            let mut current = node;
-            while let Some(parent) = current.parent(&self.tree.map) {
-                let Some(NodeKind::Split { orientation, ratio }) = self.kind.get_mut(parent) else {
-                    current = parent;
-                    continue;
-                };
-
-                let (old_len, new_len) = match orientation {
-                    Orientation::Horizontal if width_changed => {
-                        (old_frame.size.width, new_frame.size.width)
-                    }
-                    Orientation::Vertical if height_changed => {
-                        (old_frame.size.height, new_frame.size.height)
-                    }
-                    _ => {
-                        current = parent;
-                        continue;
-                    }
-                };
-
-                let current_ratio = f64::from(*ratio);
-                let is_first = Some(current) == parent.first_child(&self.tree.map);
-                let denom = if is_first {
-                    current_ratio
-                } else {
-                    1.0 - current_ratio
-                };
-                if old_len <= 0.0 || denom <= f64::EPSILON {
-                    break;
-                }
-
-                let parent_len = old_len / denom;
-                if parent_len <= 0.0 {
-                    break;
-                }
-
-                let raw_ratio = (new_len / parent_len).clamp(0.05, 0.95);
-                *ratio = if is_first {
-                    raw_ratio as f32
-                } else {
-                    (1.0 - raw_ratio) as f32
-                };
-                break;
-            }
-        }
+        #[cfg(test)]
+        return {
+            let resized = bsp_tree::Resized {
+                old: crate::layout_engine::core_rect(old_frame),
+                new: crate::layout_engine::core_rect(new_frame),
+                screen: crate::layout_engine::core_rect(screen),
+                tiling: crate::layout_engine::core_rect(compute_tiling_area(screen, gaps)),
+            };
+            self.shadowed(
+                "on_window_resized",
+                Scope::One(layout),
+                |this| {
+                    this.on_window_resized_unshadowed(
+                        layout, wid, old_frame, new_frame, screen, gaps,
+                    )
+                },
+                |core| core.resized(layout, wid, resized),
+            )
+        };
+        #[cfg(not(test))]
+        self.on_window_resized_unshadowed(layout, wid, old_frame, new_frame, screen, gaps)
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
@@ -2897,6 +2970,23 @@ impl BspLayoutSystem {
         answer
     }
 
+    /// The windows `set_windows_for_app` will take out and put in, as it computes them.
+    fn app_delta(
+        &self,
+        layout: LayoutId,
+        pid: pid_t,
+        desired: Vec<WindowId>,
+    ) -> (Vec<WindowId>, Vec<WindowId>) {
+        let current: Vec<WindowId> = self
+            .all_windows_in_layout(layout)
+            .into_iter()
+            .filter(|w| w.pid == pid)
+            .collect();
+        let delta =
+            reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
+        (delta.removals, delta.additions)
+    }
+
     fn shadow_created(&self, layout: LayoutId) {
         let mut shadow = self.core_state();
         shadow.remove_layout(layout);
@@ -3166,11 +3256,13 @@ mod core_tree_differential {
         Unjoin,
         ConsumeOrExpel(Direction, bsp_tree::Direction),
         Drop(u32, u32, u8, Direction, bsp_tree::Direction),
+        Resized(u32, u8, u8, f64, f64),
+        Clone,
     }
 
     fn step(rng: &mut Rng) -> Step {
         let window = |rng: &mut Rng| 1 + rng.below(u64::from(POOL)) as u32;
-        match rng.below(33) {
+        match rng.below(36) {
             0..=4 => Step::Add(window(rng)),
             5 | 6 => Step::Remove(window(rng)),
             7 | 8 => Step::Select(window(rng)),
@@ -3196,6 +3288,14 @@ mod core_tree_differential {
                 Step::Join(old, core)
             }
             27 => Step::Unjoin,
+            32 | 33 => Step::Resized(
+                window(rng),
+                rng.below(3) as u8,
+                rng.below(3) as u8,
+                (rng.below(1600) as f64) - 50.0,
+                (rng.below(1000) as f64) - 50.0,
+            ),
+            34 => Step::Clone,
             29..=31 => {
                 let (old, core) = direction(rng);
                 Step::Drop(window(rng), window(rng), rng.below(3) as u8, old, core)
@@ -3331,6 +3431,32 @@ mod core_tree_differential {
                 if x != y {
                     return differ("drop", &x, &y);
                 }
+            }
+            Step::Resized(i, old_kind, new_kind, width, height) => {
+                let screen = CGRect::new(CGPoint::new(0., 25.), CGSize::new(1512., 957.));
+                let gaps = GapSettings::default();
+                let tiling = compute_tiling_area(screen, &gaps);
+                let frame = |kind: u8| match kind {
+                    0 => screen,
+                    1 => tiling,
+                    _ => CGRect::new(CGPoint::new(10., 40.), CGSize::new(width, height)),
+                };
+                let (from, to) = (
+                    frame(old_kind),
+                    CGRect::new(CGPoint::new(10., 40.), CGSize::new(height, width)),
+                );
+                let to = if new_kind < 2 { frame(new_kind) } else { to };
+                old.on_window_resized(layout, w(i), from, to, screen, &gaps);
+                core.resized(LAYOUT, w(i), bsp_tree::Resized {
+                    old: crate::layout_engine::core_rect(from),
+                    new: crate::layout_engine::core_rect(to),
+                    screen: crate::layout_engine::core_rect(screen),
+                    tiling: crate::layout_engine::core_rect(tiling),
+                });
+            }
+            Step::Clone => {
+                // The shadow holds the clone to the core's (and every later step checks it).
+                let _ = old.clone_layout(layout);
             }
             Step::Rebalance => {
                 old.rebalance(layout);
