@@ -134,7 +134,7 @@ counts only under the `respect_min_size` app rule).
 
 ## Evidence
 
-- `cargo test --workspace`: 963 pass (1 ignored, the trace dump), fuzzer clean at 2000 × 40.
+- `cargo test --workspace`: 1107 pass at 57426401 (2 ignored: the trace dump and the BSP clone-cost benchmark), fuzzer clean at 2000 × 40.
 - `the_core_on_plain_data_decides_what_the_reactor_decided` (fuzz.rs): every seed's run,
   translated to plain data, replayed through `RustCore<Plain>`: the same effects at every step,
   and every event and effect survives the wire.
@@ -228,13 +228,24 @@ wire encode and decode.
   952a2a0b (the conversion from rift's NodeId trees, with a typed OldTraditionalTree, and every
   query held to the core's answer on all 998 lib tests, draw_tree and container_tree compared
   with node ids renumbered). Found: an emptied container is kept as a placeholder a restore
-  refills. Parked, uncommitted to roc-2: the first operations with an operation-level shadow
-  (change mnzktyzo); a guard against adding a window a layout already holds, which exposed that
-  joining toward an adjacent stack does not grow it (an upstream test passed only through the
-  duplicate; change wxsqyrxs, pending a ruling). To apply on resuming: the placeholder named in
+  refills. **Stopped, 2026-11-19, after two old-system fixes (upstream candidates) on roc-2:**
+  6027249e (rnnxzrzu) adding a window a layout already holds changes nothing (literal test
+  `adding_a_window_a_layout_already_holds_changes_nothing`); aba68bce (wmowqklx) joining toward
+  an adjacent stack joins that stack (the lead's ruling), at the end it came from and still
+  selected. Upstream's `joining_into_existing_stack_keeps_it_stacked` passed only through the
+  duplicate add; it is rewritten without it (ignored in the first commit, un-ignored by the
+  fix). Removing either fix fails its test. No more traditional work until #688 lands; the issue
+  draft is `developer-docs/rift/issues/traditional-join-into-stack.md`. Still parked off roc-2:
+  the first operations with an operation-level shadow (change mnzktyzo; wxsqyrxs is now
+  superseded by the two commits). To apply on resuming: the placeholder named in
   the type (`Placeholder` with its weight, or `Holding(Children)`), not `Option<Children>`; the
   leaves' Sizing as the play line has it; no resync seam (master-stack and stack policy into the
   core before the flip); phase A to the play line first, with a `traditional-divergence:` line.
+- **Tests read the live window server (fixed, 57426401).** In test builds `window_spaces` and
+  `window_ordered_in` fell through to SkyLight without an override; fixture ids are real window
+  ids too, so after a restart two reactor tests failed on every revision back to a9d2a909. Test
+  builds now answer from the override alone. Still live in test builds, not yet seen to bite:
+  `space_is_user` (inside `window_space`), `app_window_suitability`.
 - **Floating, a known cost.** 0.42 µs per layout of one to six newcomers in Roc (best of 5
   over 200,000); the parity runs 200,000 random layouts bit-identical.
 - **Scrolling, a known cost.** 4.4 µs per strip in Roc (best of 5 over 200,000 random strips;
@@ -361,6 +372,29 @@ notes called several of these friction; they are Roc's design, and the core foll
 - `var` with `while` / `for` makes the deadline loops and the wire codec direct ports.
 - Nothing crashed, leaked or miscompiled on 829,148 differential steps, 4.2 million session
   steps and 3.5 million geometry frames.
+
+## Pure edges, step 3 (the reactor's remaining effectful handlers)
+
+Steps 1–2 are the `refactor/pure-edges` commits ending at a9d2a909 (on the play stack and
+roc-2). Step 3 moves the decisions left in effectful handlers into pure functions with a thin
+edge: test first, each commit verified on its own (fmt, workspace tests, fuzz 2000 × 40),
+layout_engine untouched, then mirrored into Roc with a bit-identical differential. Ranked by
+fuzzer and bug history:
+
+1. **Space activation and the topology snapshot merge**: the per-window native Space and
+   fullscreen observation in `on_windows_discovered_with_app_info`; SpaceStateChanged admission
+   and commit (`events/space.rs`); `reconcile_windows_with_authoritative_spaces`; the
+   `set_active_spaces*` family. History: #691, duplicate workspaces on single-display changes,
+   fullscreen-return fixes, #665.
+2. **Window lifecycle**: `sync_native_admission`, `observe_transient_lifecycle`,
+   `maybe_reapply_app_rules_for_window`, `place_new_window_on_pointer_display`, inventory
+   retirement's inputs. History: #690, #684, #652, #651, #658, unminimize.
+3. **Raise and focus sequencing**: `focus_desktop_if_active_workspace_empty`,
+   `request_refocus_if_hidden`, `prepare_refocus_*`, `follow_focused_window_to_its_display`,
+   `auto_switch_to_window_workspace`, `focus_untracked_window_under_cursor`. History: #677,
+   raise_manager and Mission Control, #661 twice.
+
+Not in the list: the input mode table, already pure (`src/actor/reactor/modes.rs`).
 
 ## Roadmap: to "the reactor is only an applier"
 
