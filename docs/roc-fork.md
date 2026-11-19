@@ -528,6 +528,16 @@ topology into the core; W6 last, after upstream #688: the engine glue and persis
   flag; a Direction other than left or right goes nowhere at the edge.
 - a9b59c3c (W1, Roc): `roc/core/Workspaces.roc`, tags 29 to 31; 200,000 random questions each,
   identical word for word; a planted bug in the Roc reachability rule fails it.
+- da583e7f (W3, held): the core shadow. `rift_core::workspaces::Topology` holds the catalog
+  (workspace and Space, in order) and each Space's activation, told by `TopologyEvent::Created |
+  Removed | Moved | Activated | Cleared`. The store's activation map is private, written only
+  through its activation helpers; catalog inserts, removals and Space moves go through
+  `catalog_insert`, `catalog_remove`, `move_workspace`; a loaded store seeds the shadow once.
+  After every reactor event `workspace_divergences` must be empty (tests fail; a running Rift
+  logs `workspace-divergence:` at debug under `rift_wm::actor::reactor`). A direct write to a
+  workspace's Space is caught; `move_workspace` skipping the core fails reactor tests. Window
+  ownership (still on the window record) joins the shadow in a later W3 slice. Not yet
+  mirrored in Roc: `Topology::step`.
 - **Open item for W5:** no fuzzer step reaches DisplayDeparture. The new DisplayDeparts /
   DisplayReturns steps run (not while a window is held), but in the test reactor's global-mode
   setup a departure moves no workspace (the departed display's workspaces stay dormant on its
