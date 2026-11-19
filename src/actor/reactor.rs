@@ -72,6 +72,7 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
+use rift_core::lifecycle::RuleRun;
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
@@ -94,7 +95,7 @@ use crate::actor::reactor::reconciler::CoreEvent;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
-use crate::common::collections::{BTreeMap, HashMap, HashSet};
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::expecting::{Echo, Expecting};
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
@@ -5460,25 +5461,24 @@ impl Reactor {
             return;
         }
 
-        let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
-        for &wid in &window_ids {
-            if !self.state.windows.can_reconcile_admission(wid) && !reapply_effects {
-                continue;
-            }
-            let Some(space) = self
-                .assigned_space_for_window_id(wid)
-                .or_else(|| self.best_space_for_window_id(wid))
-            else {
-                continue;
-            };
-            windows_by_space.entry(space).or_default().push(wid);
-        }
+        let run = if reapply_effects {
+            RuleRun::Reapply
+        } else {
+            RuleRun::Admission
+        };
+        let targets = rift_core::lifecycle::rule_targets(
+            &window_ids,
+            run,
+            |wid| self.state.windows.can_reconcile_admission(wid),
+            |wid| {
+                self.assigned_space_for_window_id(wid)
+                    .or_else(|| self.best_space_for_window_id(wid))
+            },
+            |space| self.is_space_active(space),
+        );
 
         let visible: Vec<_> = self.iter_active_spaces().collect();
-        for (space, wids) in windows_by_space {
-            if !self.is_space_active(space) {
-                continue;
-            }
+        for (space, wids) in targets {
             let mut windows_needing_layout_refresh = Vec::new();
 
             for wid in &wids {
@@ -5509,13 +5509,15 @@ impl Reactor {
                     self.send_layout_event(event);
                 }
                 if let Some(assignment) = effects {
-                    let effective_floating = assignment.should_float(was_floating);
-                    if reapply_effects
-                        || self.state.windows.is_temporarily_unavailable(*wid)
-                        || previous_workspace != Some(assignment.workspace_id)
-                        || was_floating != effective_floating
-                        || was_ignored
-                    {
+                    let outcome = rift_core::lifecycle::RuleOutcome {
+                        workspace_before: previous_workspace,
+                        workspace: assignment.workspace_id,
+                        floating_before: was_floating,
+                        floating: assignment.should_float(was_floating),
+                        was_ignored,
+                        unavailable: self.state.windows.is_temporarily_unavailable(*wid),
+                    };
+                    if rift_core::lifecycle::rule_refreshes_layout(run, &outcome) {
                         windows_needing_layout_refresh.push((*wid, assignment));
                     }
                 }

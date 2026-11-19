@@ -8,6 +8,7 @@
 
 pub mod core;
 pub mod layout;
+pub mod lifecycle;
 pub mod plain;
 pub mod pointer;
 pub mod reconciler;
