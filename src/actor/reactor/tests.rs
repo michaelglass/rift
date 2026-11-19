@@ -14551,3 +14551,35 @@ fn a_discovered_windows_native_space_is_its_one_live_space_or_a_fallback_by_its_
         (None, None)
     );
 }
+
+#[test]
+fn only_an_admissible_window_gets_a_discovery_space_and_it_prefers_the_assignment() {
+    let (native, assigned, framed) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
+    use DiscoveryStanding::{Admissible, FullscreenRecorded, Placeholder};
+    let no_frame = || panic!("the frame is asked only when nothing else answers");
+    // Authoritative is the native Space, else the assignment, whatever the standing.
+    for standing in [FullscreenRecorded, Placeholder] {
+        assert_eq!(
+            discovery_spaces(standing, Some(native), Some(assigned), no_frame),
+            (Some(native), None)
+        );
+        assert_eq!(
+            discovery_spaces(standing, None, Some(assigned), no_frame),
+            (Some(assigned), None)
+        );
+    }
+    // Discovery prefers the assignment, then the native Space, then the frame.
+    assert_eq!(
+        discovery_spaces(Admissible, Some(native), Some(assigned), no_frame),
+        (Some(native), Some(assigned))
+    );
+    assert_eq!(
+        discovery_spaces(Admissible, Some(native), None, no_frame),
+        (Some(native), Some(native))
+    );
+    assert_eq!(
+        discovery_spaces(Admissible, None, None, || Some(framed)),
+        (None, Some(framed))
+    );
+    assert_eq!(discovery_spaces(Admissible, None, None, || None), (None, None));
+}
