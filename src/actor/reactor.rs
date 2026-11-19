@@ -4515,7 +4515,7 @@ impl Reactor {
             .chain(new.iter().filter_map(|(_, info)| info.sys_id))
         {
             native_spaces.entry(wsid).or_insert_with(|| {
-                let recovering = self
+                let standing = if self
                     .state
                     .windows
                     .native_fullscreen_record_for_window_server_id(wsid)
@@ -4524,31 +4524,32 @@ impl Reactor {
                         .state
                         .windows
                         .pending_native_fullscreen_record_for_window_server_id(wsid)
-                        .is_some();
-                if recovering || self.state.windows.tracked_window_id(wsid).is_none() {
-                    // Multiple memberships are transitional, even if one is a
-                    // user Space. Do not let the generic user-Space preference
-                    // turn contradictory evidence into a completed exit.
-                    let spaces = self.native.window_spaces(wsid);
-                    let live = (spaces.len() == 1).then(|| spaces[0]);
-                    if let Some(space) = live.filter(|space| {
-                        self.is_fullscreen_space(*space)
+                        .is_some()
+                {
+                    Standing::RecoveringFullscreen
+                } else if self.state.windows.tracked_window_id(wsid).is_none() {
+                    Standing::Untracked
+                } else {
+                    Standing::Tracked
+                };
+                let discovered = discovered_space(
+                    standing,
+                    || native::Native::window_spaces(&self.native, wsid),
+                    |space| {
+                        self.is_fullscreen_space(space)
                             || self
                                 .space_state
                                 .display_space_ids
                                 .values()
-                                .any(|spaces| spaces.contains(space))
-                    }) {
-                        fullscreen_observations.insert(wsid, space);
-                    }
-                    live.or_else(|| {
-                        (!recovering)
-                            .then(|| self.state.windows.window_server_space(wsid))
-                            .flatten()
-                    })
-                } else {
-                    self.resolve_native_space(wsid, None)
+                                .any(|spaces| spaces.contains(&space))
+                    },
+                    || self.state.windows.window_server_space(wsid),
+                    || self.resolve_native_space(wsid, None),
+                );
+                if let Some(space) = discovered.observation() {
+                    fullscreen_observations.insert(wsid, space);
                 }
+                discovered.native()
             });
         }
         if self.state.windows.window_ids_for_pid(pid).any(|wid| {
@@ -6920,6 +6921,68 @@ enum Resolved {
         space: SpaceId,
         user: bool,
     },
+}
+
+/// Where an app inventory finds a window, by what rift already knows of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Standing {
+    /// It has a native fullscreen record, settled or pending.
+    RecoveringFullscreen,
+    /// Rift tracks no window with its window-server id.
+    Untracked,
+    /// Rift tracks it and has no fullscreen record for it.
+    Tracked,
+}
+
+/// The Space an app inventory takes a window to be on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DiscoveredSpace {
+    /// Live on exactly one Space, a fullscreen one or a display's: also evidence of a
+    /// fullscreen entry or exit.
+    Observed(SpaceId),
+    /// Live on exactly one other Space.
+    Live(SpaceId),
+    /// Not live on exactly one Space: what rift resolves for it, if anything.
+    Fallback(Option<SpaceId>),
+}
+
+impl DiscoveredSpace {
+    fn native(self) -> Option<SpaceId> {
+        match self {
+            DiscoveredSpace::Observed(space) | DiscoveredSpace::Live(space) => Some(space),
+            DiscoveredSpace::Fallback(space) => space,
+        }
+    }
+
+    fn observation(self) -> Option<SpaceId> {
+        match self {
+            DiscoveredSpace::Observed(space) => Some(space),
+            DiscoveredSpace::Live(_) | DiscoveredSpace::Fallback(_) => None,
+        }
+    }
+}
+
+/// A tracked window resolves as usual. An untracked or recovering one is where it is live, if
+/// that is exactly one Space: several memberships are transitional, even if one is a user
+/// Space, and contradictory evidence must not complete a fullscreen exit. Failing that, an
+/// untracked window falls back to its recorded Space and a recovering one to none.
+fn discovered_space(
+    standing: Standing,
+    live: impl FnOnce() -> Vec<SpaceId>,
+    observable: impl Fn(SpaceId) -> bool,
+    recorded: impl FnOnce() -> Option<SpaceId>,
+    resolved: impl FnOnce() -> Option<SpaceId>,
+) -> DiscoveredSpace {
+    let one_live = || match live().as_slice() {
+        &[space] if observable(space) => Some(DiscoveredSpace::Observed(space)),
+        &[space] => Some(DiscoveredSpace::Live(space)),
+        _ => None,
+    };
+    match standing {
+        Standing::Tracked => DiscoveredSpace::Fallback(resolved()),
+        Standing::Untracked => one_live().unwrap_or_else(|| DiscoveredSpace::Fallback(recorded())),
+        Standing::RecoveringFullscreen => one_live().unwrap_or(DiscoveredSpace::Fallback(None)),
+    }
 }
 
 /// What a window missing from an authoritative snapshot of the active Spaces comes to.
