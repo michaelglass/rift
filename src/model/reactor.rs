@@ -85,9 +85,11 @@ pub(crate) struct WindowState {
     frame_monotonic: CGRect,
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.
-    pub(crate) is_manageable: bool,
-    pub(crate) native_transient: bool,
-    pub(crate) manage_override: Option<bool>,
+    // The admission facts are written only by the window store, which tells the core's
+    // lifecycle each change (`WindowStore::set_*`); everything else reads them.
+    pub(in crate::model) is_manageable: bool,
+    pub(in crate::model) native_transient: bool,
+    pub(in crate::model) manage_override: Option<bool>,
 }
 
 impl WindowState {
@@ -96,6 +98,25 @@ impl WindowState {
 
     /// The core's `Effect::Seen`, applied by the reactor's projection and nothing else.
     pub(crate) fn project_seen(&mut self, frame: CGRect) { self.frame_monotonic = frame; }
+
+    pub(crate) fn manage_override(&self) -> Option<bool> { self.manage_override }
+
+    #[cfg(test)]
+    pub(crate) fn is_manageable(&self) -> bool { self.is_manageable }
+
+    #[cfg(test)]
+    pub(crate) fn native_transient(&self) -> bool { self.native_transient }
+
+    /// This state, with an app rule's override, before it is inserted into the store.
+    pub(crate) fn with_manage_override(self, manage_override: Option<bool>) -> Self {
+        WindowState { manage_override, ..self }
+    }
+
+    /// This state, with the heuristic's verdict, before it is inserted into the store.
+    #[cfg(test)]
+    pub(crate) fn with_manageable(self, is_manageable: bool) -> Self {
+        WindowState { is_manageable, ..self }
+    }
 }
 
 impl From<WindowInfo> for WindowState {
@@ -130,20 +151,24 @@ impl WindowState {
     }
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        use rift_core::lifecycle::{
-            Admission, AdmissionFacts, AxKind, Manageability, Minimize, NativeKind, Rule,
-        };
-        let facts = AdmissionFacts {
+        rift_core::lifecycle::admission(self.admission_facts(manage_override))
+            == rift_core::lifecycle::Admission::Admitted
+    }
+
+    /// What admission reads of this window, parsed at the boundary, with `manage_override` as
+    /// its rule.
+    pub(crate) fn admission_facts(
+        &self,
+        manage_override: Option<bool>,
+    ) -> rift_core::lifecycle::AdmissionFacts {
+        use rift_core::lifecycle::{AdmissionFacts, AxKind, Manageability, Minimize, NativeKind};
+        AdmissionFacts {
             manageability: if self.is_manageable {
                 Manageability::Manageable
             } else {
                 Manageability::Unmanageable
             },
-            rule: match manage_override {
-                None => Rule::NoRule,
-                Some(true) => Rule::Manage,
-                Some(false) => Rule::Ignore,
-            },
+            rule: rule_of(manage_override),
             ax: AxKind::classify(
                 crate::sys::app::is_ax_transient(&self.info),
                 self.info.ax_role.as_deref() == Some("AXWindow")
@@ -159,11 +184,20 @@ impl WindowState {
             } else {
                 Minimize::Shown
             },
-        };
-        rift_core::lifecycle::admission(facts) == Admission::Admitted
+        }
     }
 
     pub(crate) fn can_reconcile_admission(&self) -> bool { !self.info.is_minimized }
+}
+
+/// An app rule's override as the rule it is.
+pub(crate) fn rule_of(manage_override: Option<bool>) -> rift_core::lifecycle::Rule {
+    use rift_core::lifecycle::Rule;
+    match manage_override {
+        None => Rule::NoRule,
+        Some(true) => Rule::Manage,
+        Some(false) => Rule::Ignore,
+    }
 }
 
 use thiserror::Error;

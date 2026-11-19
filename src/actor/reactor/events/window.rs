@@ -41,9 +41,8 @@ pub fn handle_window_created(
         state.windows.track_window_server_info(info);
     }
 
-    let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
-    let mut window_state: WindowState = window.into();
-    window_state.manage_override = rule_override;
+    let rule_override = state.windows.window(wid).and_then(WindowState::manage_override);
+    let window_state = WindowState::from(window).with_manage_override(rule_override);
 
     state.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
@@ -110,12 +109,12 @@ pub fn handle_window_visibility_changed(
             .with_layout_event(LayoutEvent::WindowSuspended(wid)));
     }
     let ax_returned = state.windows.validate_ax_identity(wid);
-    match state.windows.window_mut(wid) {
+    match state.windows.window(wid) {
         Some(window) => {
             if !window.info.is_minimized && !ax_returned {
                 return Ok(crate::actor::reactor::events::EventOutcome::no_change());
             }
-            window.info.is_minimized = false;
+            state.windows.set_minimized(wid, false);
         }
         None => {
             debug!(

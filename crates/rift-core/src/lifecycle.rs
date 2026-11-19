@@ -294,6 +294,96 @@ pub fn admission(facts: AdmissionFacts) -> Admission {
     }
 }
 
+/// One admission fact, changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactChange {
+    Manageability(Manageability),
+    Rule(Rule),
+    Ax(AxKind),
+    Native(NativeKind),
+    Minimize(Minimize),
+}
+
+/// What the platform tells the lifecycle about a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleEvent<W> {
+    /// The window has AX state, read afresh: these are its facts now.
+    Live { window: W, facts: AdmissionFacts },
+    /// One of a live window's facts changed. A window with no AX state has no facts to change.
+    Changed { window: W, change: FactChange },
+    /// The window's AX state is gone (destroyed, retired, replaced by a new identity).
+    Gone(W),
+}
+
+/// A change in whether rift manages a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition<W> {
+    Admitted(W),
+    Suspended(W, Veto),
+}
+
+/// Every live window's admission facts. Admission is not stored: it is read off the facts, so
+/// it can never disagree with them.
+#[derive(Debug, Clone)]
+pub struct Lifecycle<W> {
+    windows: std::collections::BTreeMap<W, AdmissionFacts>,
+}
+
+impl<W> Default for Lifecycle<W> {
+    fn default() -> Self { Lifecycle { windows: Default::default() } }
+}
+
+impl<W: Copy + Ord> Lifecycle<W> {
+    /// Applies `event`; the transition it makes, if any. Only a change between admitted and
+    /// vetoed is one: a new window that is admitted counts, a window going away does not.
+    pub fn step(&mut self, event: LifecycleEvent<W>) -> Option<Transition<W>> {
+        let window = match event {
+            LifecycleEvent::Live { window, .. }
+            | LifecycleEvent::Changed { window, .. }
+            | LifecycleEvent::Gone(window) => window,
+        };
+        let before = self.admission(window);
+        match event {
+            LifecycleEvent::Live { window, facts } => {
+                self.windows.insert(window, facts);
+            }
+            LifecycleEvent::Changed { window, change } => {
+                let Some(facts) = self.windows.get_mut(&window) else {
+                    return None;
+                };
+                match change {
+                    FactChange::Manageability(manageability) => facts.manageability = manageability,
+                    FactChange::Rule(rule) => facts.rule = rule,
+                    FactChange::Ax(ax) => facts.ax = ax,
+                    FactChange::Native(native) => facts.native = native,
+                    FactChange::Minimize(minimize) => facts.minimize = minimize,
+                }
+            }
+            LifecycleEvent::Gone(window) => {
+                self.windows.remove(&window);
+                return None;
+            }
+        }
+        match (before, self.admission(window)) {
+            (Some(Admission::Admitted), Some(Admission::Vetoed(why))) => {
+                Some(Transition::Suspended(window, why))
+            }
+            (None | Some(Admission::Vetoed(_)), Some(Admission::Admitted)) => {
+                Some(Transition::Admitted(window))
+            }
+            (_, _) => None,
+        }
+    }
+
+    /// A live window's admission; `None` for a window with no AX state.
+    pub fn admission(&self, window: W) -> Option<Admission> {
+        self.windows.get(&window).copied().map(admission)
+    }
+
+    /// The live windows.
+    pub fn windows(&self) -> impl Iterator<Item = W> + '_ { self.windows.keys().copied() }
+}
+
 /// Each decision as a question on plain data: every fact it may ask for is in the question.
 /// Windows, Spaces, window-server ids and apps are one word each.
 pub mod plain {
@@ -724,6 +814,98 @@ mod tests {
             }),
             Veto::Unmanageable
         );
+    }
+
+    #[test]
+    fn the_lifecycle_tracks_live_windows_facts_and_reports_admission_transitions() {
+        let facts = AdmissionFacts {
+            manageability: Manageability::Manageable,
+            rule: Rule::NoRule,
+            ax: AxKind::Ordinary,
+            native: NativeKind::Ordinary,
+            minimize: Minimize::Shown,
+        };
+        let mut lifecycle = Lifecycle::default();
+        assert_eq!(lifecycle.admission(1_u32), None);
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Live { window: 1, facts }),
+            Some(Transition::Admitted(1))
+        );
+        assert_eq!(lifecycle.admission(1), Some(Admission::Admitted));
+        // A change that keeps it admitted is no transition.
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Changed {
+                window: 1,
+                change: FactChange::Rule(Rule::Manage)
+            }),
+            None
+        );
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Changed {
+                window: 1,
+                change: FactChange::Minimize(Minimize::Minimized)
+            }),
+            Some(Transition::Suspended(1, Veto::Minimized))
+        );
+        // Vetoed to vetoed for another reason: no transition.
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Changed {
+                window: 1,
+                change: FactChange::Native(NativeKind::Transient)
+            }),
+            None
+        );
+        assert_eq!(
+            lifecycle.admission(1),
+            Some(Admission::Vetoed(Veto::NativeTransient))
+        );
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Changed {
+                window: 1,
+                change: FactChange::Native(NativeKind::Ordinary)
+            }),
+            None
+        );
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Changed {
+                window: 1,
+                change: FactChange::Minimize(Minimize::Shown)
+            }),
+            Some(Transition::Admitted(1))
+        );
+        // A new live reading replaces the facts, the earlier Manage rule with them.
+        let unmanageable = AdmissionFacts {
+            manageability: Manageability::Unmanageable,
+            ..facts
+        };
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Live { window: 1, facts: unmanageable }),
+            Some(Transition::Suspended(1, Veto::Unmanageable))
+        );
+        let _ = lifecycle.step(LifecycleEvent::Changed {
+            window: 1,
+            change: FactChange::Ax(AxKind::Transient),
+        });
+        assert_eq!(
+            lifecycle.admission(1),
+            Some(Admission::Vetoed(Veto::AxTransient))
+        );
+        let _ = lifecycle.step(LifecycleEvent::Changed {
+            window: 1,
+            change: FactChange::Manageability(Manageability::Manageable),
+        });
+        // Gone: no facts, no transition; a change for a window with no AX state is ignored.
+        assert_eq!(lifecycle.step(LifecycleEvent::Gone(1)), None);
+        assert_eq!(lifecycle.admission(1), None);
+        assert_eq!(
+            lifecycle.step(LifecycleEvent::Changed {
+                window: 1,
+                change: FactChange::Rule(Rule::Manage)
+            }),
+            None
+        );
+        assert_eq!(lifecycle.admission(1), None);
+        assert_eq!(lifecycle.windows().count(), 0);
     }
 
     #[test]

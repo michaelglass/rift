@@ -33,7 +33,7 @@ fn live_state(window: WindowId) -> WindowState {
     let saved = evidence(window);
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(saved.width, saved.height));
     {
-        let mut state = WindowState::from(WindowInfo {
+        let state = WindowState::from(WindowInfo {
             has_native_tabs: false,
             is_standard: true,
             is_root: true,
@@ -49,8 +49,7 @@ fn live_state(window: WindowId) -> WindowState {
             ax_role: None,
             ax_subrole: None,
         });
-        state.is_manageable = true;
-        state
+        state.with_manageable(true)
     }
 }
 

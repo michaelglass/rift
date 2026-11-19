@@ -21,11 +21,10 @@ pub(crate) fn refresh_heuristic(
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
         state.windows.get_window_server_info(wsid)
     });
-    let window = state.windows.window_mut(wid)?;
-    window.is_manageable = manageable;
+    state.windows.set_manageable(wid, manageable);
     Some(AdmissionTransition {
         was_admitted,
-        is_admitted: window.is_admitted(),
+        is_admitted: state.windows.window(wid)?.is_admitted(),
     })
 }
 
@@ -37,7 +36,7 @@ pub(crate) fn rejection_needs_removal(
 ) -> bool {
     let engine = &layout.layout_engine;
     if state.windows.is_temporarily_unavailable(wid)
-        && !state.windows.window(wid).is_some_and(|w| w.manage_override == Some(false))
+        && !state.windows.window(wid).is_some_and(|w| w.manage_override() == Some(false))
     {
         return false;
     }
@@ -46,9 +45,7 @@ pub(crate) fn rejection_needs_removal(
 }
 
 pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
-    if let Some(window) = state.windows.window_mut(wid) {
-        window.manage_override = None;
-    }
+    state.windows.set_manage_override(wid, None);
 }
 
 pub(super) fn compute_window_info_manageability(

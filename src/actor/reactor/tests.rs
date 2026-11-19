@@ -4148,9 +4148,8 @@ fn same_app_native_focus_respects_auto_switch_guards() {
                 assert!(reactor.state.windows.has_pending_window_for_pid(2));
             }
             "unmanaged" => {
-                let window = reactor.state.windows.window_mut(hidden).unwrap();
-                window.is_manageable = false;
-                window.manage_override = Some(false);
+                reactor.state.windows.set_manageable(hidden, false);
+                reactor.state.windows.set_manage_override(hidden, Some(false));
             }
             "disabled" => reactor.active_spaces.clear(),
             "duplicate" => {}
@@ -4647,9 +4646,8 @@ fn native_focus_refreshes_stale_window_admission() {
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
     let fresh = reactor.state.windows.window(wid).unwrap().info.clone();
     reactor.handle_event(Event::WindowMinimized(wid));
-    let stale = reactor.state.windows.window_mut(wid).unwrap();
-    stale.info.is_minimized = false;
-    stale.is_manageable = false;
+    reactor.state.windows.set_minimized(wid, false);
+    reactor.state.windows.set_manageable(wid, false);
     let _ = apps.requests();
     assert!(reactor.query_window_info(wid).is_none());
 
@@ -4680,7 +4678,7 @@ fn carbon_activation_refreshes_inventory_once_when_no_windows_are_admitted() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
     apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 7, make_windows(1));
-    reactor.state.windows.window_mut(WindowId::new(7, 1)).unwrap().is_manageable = false;
+    reactor.state.windows.set_manageable(WindowId::new(7, 1), false);
     let _ = apps.requests();
     reactor.handle_event(Event::ApplicationGloballyActivated(7));
     reactor.handle_event(Event::ApplicationGloballyActivated(7));
@@ -4717,19 +4715,24 @@ fn focus_and_activation_do_not_rescan_intentionally_excluded_windows() {
                 wid.pid,
                 make_windows(1),
             );
-            let window = reactor.state.windows.window_mut(wid).unwrap();
             if case != "healthy" {
-                window.is_manageable = false;
+                reactor.state.windows.set_manageable(wid, false);
             }
             match case {
-                "unmanaged" => window.manage_override = Some(false),
-                "minimized" => window.info.is_minimized = true,
-                "nonstandard" => window.info.is_standard = false,
-                "child" => window.info.is_root = false,
-                "role" => window.info.ax_role = Some("AXTextField".into()),
+                "unmanaged" => reactor.state.windows.set_manage_override(wid, Some(false)),
+                "minimized" => reactor.state.windows.set_minimized(wid, true),
+                "nonstandard" => {
+                    reactor.state.windows.window_mut(wid).unwrap().info.is_standard = false
+                }
+                "child" => reactor.state.windows.window_mut(wid).unwrap().info.is_root = false,
+                "role" => {
+                    let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+                    info.ax_role = Some("AXTextField".into());
+                    reactor.state.windows.replace_info(wid, info);
+                }
                 "layer" => {
                     let wsid = WindowServerId(u32::MAX - 7);
-                    window.info.sys_id = Some(wsid);
+                    reactor.state.windows.window_mut(wid).unwrap().info.sys_id = Some(wsid);
                     reactor.track_test_window_server_info(wsid, wid.pid, screen);
                     let mut info = reactor.state.windows.get_window_server_info(wsid).unwrap();
                     info.layer = 1;
@@ -6450,7 +6453,7 @@ fn discovery_manageability_loss_removes_window_from_layout() {
         "window must be removed from layout when discovery marks it unmanageable"
     );
     assert!(
-        reactor.state.windows.window(wid).is_some_and(|window| !window.is_manageable),
+        reactor.state.windows.window(wid).is_some_and(|window| !window.is_manageable()),
         "reactor state must keep the window marked unmanageable"
     );
 }
@@ -12541,12 +12544,11 @@ fn native_admission_veto_survives_manage_rule() {
     info.ax_role = Some("AXWindow".into());
     info.ax_subrole = Some("AXStandardWindow".into());
     reactor.handle_event(Event::WindowCreated(wid, info, None));
-    let window = reactor.state.windows.window_mut(wid).unwrap();
-    window.manage_override = Some(true);
-    assert!(!window.is_admitted());
+    reactor.state.windows.set_manage_override(wid, Some(true));
+    assert!(!reactor.state.windows.window(wid).unwrap().is_admitted());
     assert!(reactor.test_workspace_for_window(space, wid).is_none());
     reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
-    assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
+    assert!(!reactor.state.windows.window(wid).unwrap().native_transient());
     apps.simulate_until_quiet(&mut reactor);
 }
 

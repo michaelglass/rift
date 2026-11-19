@@ -783,7 +783,7 @@ impl Reactor {
             // eligibility checks. Minimized, rule-excluded, and heuristic-
             // excluded windows must not trigger an AX scan just for focus.
             !window.is_admitted()
-                && window.manage_override != Some(false)
+                && window.manage_override() != Some(false)
                 && utils::compute_window_info_manageability(&window.info, |wsid| {
                     self.state.windows.get_window_server_info(wsid)
                 })
@@ -1540,6 +1540,27 @@ impl Reactor {
             self.handle_event_inner(event);
         } else {
             self.handle_event_traced(event);
+        }
+        self.check_lifecycle_shadow();
+    }
+
+    /// The core's lifecycle runs in shadow of the store's admission: after every event the two
+    /// must agree. A disagreement is a write that bypassed the store's setters. Tests fail on
+    /// it; a running Rift logs it (`lifecycle-divergence:`, at debug) and goes on.
+    fn check_lifecycle_shadow(&self) {
+        #[cfg(test)]
+        {
+            let divergences = self.state.windows.lifecycle_divergences();
+            assert!(divergences.is_empty(), "lifecycle-divergence: {divergences:?}");
+        }
+        #[cfg(not(test))]
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for divergence in self.state.windows.lifecycle_divergences() {
+                debug!(
+                    ?divergence,
+                    "lifecycle-divergence: store and core disagree on admission"
+                );
+            }
         }
     }
 
@@ -5333,7 +5354,7 @@ impl Reactor {
     }
 
     fn sync_native_admission(&mut self, wid: WindowId) {
-        let Some(window) = self.state.windows.window_mut(wid) else {
+        let Some(window) = self.state.windows.window(wid) else {
             return;
         };
         let was_admitted = window.is_admitted();
@@ -5342,10 +5363,11 @@ impl Reactor {
             .sys_id
             .and_then(|id| self.transient_focus.windows.get(&id))
             .map(|t| (transient_origin(t.native), t.pid));
-        window.native_transient = rift_core::lifecycle::is_native_transient(entry, wid.pid, || {
+        let transient = rift_core::lifecycle::is_native_transient(entry, wid.pid, || {
             crate::sys::app::is_ibkr_desktop_dialog(&window.info)
         });
-        if was_admitted && !window.is_admitted() {
+        self.state.windows.set_native_transient(wid, transient);
+        if was_admitted && !self.state.windows.is_admitted_state(wid) {
             self.send_layout_event(LayoutEvent::WindowSuspended(wid));
         }
     }
@@ -5499,7 +5521,7 @@ impl Reactor {
                         self.state
                             .windows
                             .window(*wid)
-                            .is_some_and(|window| window.manage_override == Some(false)),
+                            .is_some_and(|window| window.manage_override() == Some(false)),
                     )
                 };
                 let (effects, removal) = window_discovery::assign_window(

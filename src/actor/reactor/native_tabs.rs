@@ -52,7 +52,7 @@ impl Reactor {
                 {
                     return None;
                 }
-                Some((old, window.frame_monotonic(), window.manage_override, wsid))
+                Some((old, window.frame_monotonic(), window.manage_override(), wsid))
             })
             .collect();
         let [(old, frame, manage_override, old_wsid)] = candidates.as_slice() else {
@@ -60,8 +60,7 @@ impl Reactor {
         };
         let (old, frame, manage_override, old_wsid) = (*old, *frame, *manage_override, *old_wsid);
         info.frame = frame;
-        let mut replacement = WindowState::from(info.clone());
-        replacement.manage_override = manage_override;
+        let replacement = WindowState::from(info.clone()).with_manage_override(manage_override);
         self.state.insert_window(incoming, replacement);
         // Same window, new identity: a grip on it moves first, through the core.
         self.state.step(CoreEvent::Rekeyed { from: old, to: incoming });

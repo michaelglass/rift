@@ -1,3 +1,4 @@
+use rift_core::lifecycle::{FactChange, LifecycleEvent, Manageability, Minimize, NativeKind};
 use rift_protocol::WindowClaimFlags;
 
 use crate::actor::app::WindowId;
@@ -522,6 +523,18 @@ pub struct WindowStore {
     native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
     claims: HashMap<ClaimOwner, Vec<WindowId>>,
+    /// The core's lifecycle, in shadow: every live window's admission facts, told each change
+    /// the store makes. [`Self::lifecycle_divergences`] holds the two to agreeing.
+    lifecycle: rift_core::lifecycle::Lifecycle<WindowId>,
+}
+
+/// Where the store's admission of a window and the core's lifecycle disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LifecycleDivergence {
+    pub(crate) window: WindowId,
+    /// The store's admission; `None` without AX state.
+    pub(crate) store: Option<bool>,
+    pub(crate) core: Option<rift_core::lifecycle::Admission>,
 }
 
 /// Restored native lifecycle facts; placement and actor effects remain external.
@@ -853,6 +866,9 @@ impl WindowStore {
             self.transfer_persistent_window_metadata(old, wid);
             if !self.contains_window(wid) {
                 let state = self.windows.get_mut(&old).and_then(|record| record.state.take());
+                if state.is_some() {
+                    self.lifecycle.step(LifecycleEvent::Gone(old));
+                }
                 if let Some(state) = state {
                     self.insert_window(wid, state);
                 }
@@ -882,11 +898,11 @@ impl WindowStore {
     /// Every known identity requests projection repair; the projection reports
     /// whether removal actually changed geometry, so correct duplicates are cheap.
     pub(crate) fn observe_minimized(&mut self, wid: WindowId) -> bool {
-        let Some(window) = self.window_mut(wid) else {
+        if self.window(wid).is_none() {
             return false;
-        };
-        window.info.is_minimized = true;
-        window.is_manageable = false;
+        }
+        self.set_minimized(wid, true);
+        self.set_manageable(wid, false);
         if let Some(wsid) = self.record(wid).and_then(|record| record.window_server_id()) {
             self.mark_window_hidden(wsid);
         }
@@ -1119,8 +1135,106 @@ impl WindowStore {
         self.windows.get_mut(&window_id).and_then(|record| record.state.as_mut())
     }
 
+    // The admission facts' only writers: each tells the core's lifecycle the change.
+
+    /// The manageability heuristic's verdict for a window with AX state.
+    pub(crate) fn set_manageable(&mut self, window: WindowId, manageable: bool) {
+        let Some(state) = self.window_mut(window) else { return };
+        state.is_manageable = manageable;
+        let manageability = if manageable {
+            Manageability::Manageable
+        } else {
+            Manageability::Unmanageable
+        };
+        self.tell_lifecycle(window, FactChange::Manageability(manageability));
+    }
+
+    /// An app rule's override (or none) for a window with AX state.
+    pub(crate) fn set_manage_override(&mut self, window: WindowId, manage_override: Option<bool>) {
+        let Some(state) = self.window_mut(window) else { return };
+        state.manage_override = manage_override;
+        self.tell_lifecycle(
+            window,
+            FactChange::Rule(crate::model::reactor::rule_of(manage_override)),
+        );
+    }
+
+    /// Whether the window server marks a window with AX state transient.
+    pub(crate) fn set_native_transient(&mut self, window: WindowId, transient: bool) {
+        let Some(state) = self.window_mut(window) else { return };
+        state.native_transient = transient;
+        let native = if transient {
+            NativeKind::Transient
+        } else {
+            NativeKind::Ordinary
+        };
+        self.tell_lifecycle(window, FactChange::Native(native));
+    }
+
+    /// Whether a window with AX state is minimized.
+    pub(crate) fn set_minimized(&mut self, window: WindowId, minimized: bool) {
+        let Some(state) = self.window_mut(window) else { return };
+        state.info.is_minimized = minimized;
+        let minimize = if minimized {
+            Minimize::Minimized
+        } else {
+            Minimize::Shown
+        };
+        self.tell_lifecycle(window, FactChange::Minimize(minimize));
+    }
+
+    /// A fresh AX reading of a window with AX state: its roles and minimized flag with it.
+    pub(crate) fn replace_info(&mut self, window: WindowId, info: crate::sys::app::WindowInfo) {
+        let Some(state) = self.window_mut(window) else { return };
+        state.info = info;
+        let facts = state.admission_facts(state.manage_override);
+        self.tell_lifecycle(window, FactChange::Ax(facts.ax));
+        self.tell_lifecycle(window, FactChange::Minimize(facts.minimize));
+    }
+
+    /// A window's admission by its own facts (claims and AX invalidation aside); false
+    /// without AX state.
+    pub(crate) fn is_admitted_state(&self, window: WindowId) -> bool {
+        self.window(window).is_some_and(WindowState::is_admitted)
+    }
+
+    fn tell_lifecycle(&mut self, window: WindowId, change: FactChange) {
+        self.lifecycle.step(LifecycleEvent::Changed { window, change });
+    }
+
+    /// Every window whose admission the store and the core's lifecycle disagree on, in window
+    /// order. Empty unless a write bypassed the setters above.
+    pub(crate) fn lifecycle_divergences(&self) -> Vec<LifecycleDivergence> {
+        let mut windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, record)| record.state.is_some())
+            .map(|(window, _)| *window)
+            .chain(self.lifecycle.windows())
+            .collect();
+        windows.sort_by_key(|window| (window.pid, window.idx.get()));
+        windows.dedup();
+        windows
+            .into_iter()
+            .filter_map(|window| {
+                let store = self.window(window).map(WindowState::is_admitted);
+                let core = self.lifecycle.admission(window);
+                let agree = match (store, core) {
+                    (None, None) => true,
+                    (Some(admitted), Some(admission)) => {
+                        admitted == (admission == rift_core::lifecycle::Admission::Admitted)
+                    }
+                    (Some(_), None) | (None, Some(_)) => false,
+                };
+                (!agree).then_some(LifecycleDivergence { window, store, core })
+            })
+            .collect()
+    }
+
     pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
         let wsid = window.info.sys_id;
+        let facts = window.admission_facts(window.manage_override());
+        self.lifecycle.step(LifecycleEvent::Live { window: window_id, facts });
         let retained_workspace = {
             let record = self.windows.entry_or_default(window_id);
             record.state = Some(window);
@@ -1604,8 +1718,10 @@ impl WindowStore {
         if self.native_fullscreen_record_for_window(window).is_none() {
             return false;
         }
-        if let Some(record) = self.windows.get_mut(&window) {
-            record.state = None;
+        if let Some(record) = self.windows.get_mut(&window)
+            && record.state.take().is_some()
+        {
+            self.lifecycle.step(LifecycleEvent::Gone(window));
         }
         true
     }
@@ -1837,6 +1953,9 @@ impl WindowStore {
         let Some(record) = self.windows.remove(&window_id) else {
             return None;
         };
+        if record.state.is_some() {
+            self.lifecycle.step(LifecycleEvent::Gone(window_id));
+        }
         // A drag holding the window ends with it; one elsewhere can no longer drop onto it.
         if let Some((_, session)) = self.drag_mut() {
             session.forget_target(window_id);
@@ -2854,6 +2973,59 @@ mod tests {
                 state.windows.debug_assert_invariants();
             }
         }
+    }
+
+    #[test]
+    fn the_lifecycle_shadow_agrees_through_the_setters_and_catches_a_write_around_them() {
+        let wid = WindowId::new(3, 1);
+        let mut store = WindowStore::default();
+        let info = crate::sys::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "w".into(),
+            frame: objc2_core_foundation::CGRect::ZERO,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: Some("AXWindow".into()),
+            ax_subrole: Some("AXStandardWindow".into()),
+        };
+        store.insert_window(wid, WindowState::from(info.clone()).with_manageable(true));
+        assert_eq!(store.lifecycle_divergences(), vec![]);
+        store.set_minimized(wid, true);
+        store.set_minimized(wid, false);
+        store.set_manage_override(wid, Some(false));
+        store.set_manage_override(wid, None);
+        store.set_native_transient(wid, true);
+        store.set_native_transient(wid, false);
+        store.set_manageable(wid, false);
+        store.set_manageable(wid, true);
+        let mut dialog = info.clone();
+        dialog.ax_subrole = Some("AXDialog".into());
+        store.replace_info(wid, dialog);
+        assert_eq!(store.lifecycle_divergences(), vec![]);
+        store.replace_info(wid, info);
+        assert!(store.is_admitted(wid));
+        assert_eq!(store.lifecycle_divergences(), vec![]);
+
+        // A write around the setters is caught.
+        store.window_mut(wid).unwrap().info.is_minimized = true;
+        assert_eq!(store.lifecycle_divergences(), vec![LifecycleDivergence {
+            window: wid,
+            store: Some(false),
+            core: Some(rift_core::lifecycle::Admission::Admitted),
+        }]);
+        store.set_minimized(wid, true);
+        assert_eq!(store.lifecycle_divergences(), vec![]);
+
+        // Removing the window leaves neither side holding it.
+        store.remove_window(wid);
+        assert_eq!(store.lifecycle_divergences(), vec![]);
     }
 
     #[test]

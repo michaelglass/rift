@@ -1567,9 +1567,7 @@ impl WorkspaceStore {
             // Assignment tests and restore paths may not yet have an AX
             // snapshot. In that case only an explicit rejection can deny it.
             .unwrap_or(rule_override != Some(false));
-        if let Some(window) = window_store.window_mut(window_id) {
-            window.manage_override = rule_override;
-        }
+        window_store.set_manage_override(window_id, rule_override);
         if !admitted {
             if !window_store.is_temporarily_unavailable(window_id) || rule_override == Some(false) {
                 window_store.clear_rule_floating(window_id);

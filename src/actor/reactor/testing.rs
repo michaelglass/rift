@@ -259,7 +259,7 @@ impl Reactor {
         is_manageable: bool,
     ) {
         self.state.insert_window(wid, {
-            let mut state = super::WindowState::from(WindowInfo {
+            let state = super::WindowState::from(WindowInfo {
                 has_native_tabs: false,
                 is_standard: true,
                 is_root: true,
@@ -275,8 +275,7 @@ impl Reactor {
                 ax_role: None,
                 ax_subrole: None,
             });
-            state.is_manageable = is_manageable;
-            state
+            state.with_manageable(is_manageable)
         });
     }
 }

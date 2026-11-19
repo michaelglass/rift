@@ -24,7 +24,7 @@ fn sync_existing_window_state(
     let is_minimized = info.is_minimized;
     let claimed = state.windows.is_claimed(wid);
     let frame = info.frame;
-    let Some(existing) = state.windows.window_mut(wid) else {
+    let Some(existing) = state.windows.window(wid) else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
     };
     let constraints_changed = existing.info.is_resizable != info.is_resizable
@@ -33,7 +33,7 @@ fn sync_existing_window_state(
     // Preserve the observed frame and minimize transition until their handlers run.
     info.frame = existing.info.frame;
     info.is_minimized = was_minimized;
-    existing.info = info;
+    state.windows.replace_info(wid, info);
     // Where the inventory read it: a read like any other, news only if the core says so (a
     // read from before the app applied Rift's latest word is not).
     let valid_frame = frame.size.width != 0.0 || frame.size.height != 0.0;
