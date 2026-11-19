@@ -88,6 +88,100 @@ pub fn hides_focus<W: Copy + PartialEq>(
     (main == Some(window) || focused == Some(window)) && in_inactive_workspace()
 }
 
+/// What the platform knows of an activated window, asked in this order and no further than an
+/// activation follow needs.
+pub trait ActivationFacts {
+    type Space: Copy;
+    type Workspace: Copy + PartialEq;
+    /// An input mode that refuses to follow activations.
+    type Mode;
+    /// A window-server id.
+    type Server;
+
+    /// A standard window (not a panel, sheet, ...).
+    fn standard(&self) -> bool;
+    /// Temporarily unavailable (hidden, minimized, on its way somewhere).
+    fn unavailable(&self) -> bool;
+    fn space(&self) -> Option<Self::Space>;
+    fn workspace(&self, space: Self::Space) -> Option<Self::Workspace>;
+    fn active_workspace(&self, space: Self::Space) -> Option<Self::Workspace>;
+    /// The app has a window macOS reported that AX has not admitted yet.
+    fn pending_window(&self) -> bool;
+    fn mode_refusal(&self) -> Option<Self::Mode>;
+    /// The active Space is a fullscreen one.
+    fn active_space_fullscreen(&self) -> bool;
+    /// The window the activation came from, if it is not manageable.
+    fn unmanageable_source(&self) -> Option<Self::Server>;
+    /// Whether the app is blacklisted for auto-focus; `None` without a bundle id.
+    fn blacklisted(&self) -> Option<bool>;
+}
+
+/// Why an activation does not follow its window to its workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stay<M, V> {
+    NotStandard,
+    Unavailable,
+    NoSpace,
+    NoWorkspace,
+    /// Its workspace is the active one (or its Space has none).
+    AlreadyActive,
+    /// A newly appearing native window can leave focus on the app's old window until AX
+    /// admission completes.
+    PendingWindow,
+    Mode(M),
+    FullscreenActive,
+    Unmanageable(V),
+    NoBundleId,
+    Blacklisted,
+}
+
+/// Whether an activation of a window follows it to its workspace, and where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Follow<S, K, M, V> {
+    To(S, K),
+    Stay(Stay<M, V>),
+}
+
+/// Follows an activated window to its workspace when that is not its Space's active one and
+/// nothing says not to.
+pub fn activation_follow<F: ActivationFacts>(
+    facts: &F,
+) -> Follow<F::Space, F::Workspace, F::Mode, F::Server> {
+    let stay = |why| Follow::Stay(why);
+    if !facts.standard() {
+        return stay(Stay::NotStandard);
+    }
+    if facts.unavailable() {
+        return stay(Stay::Unavailable);
+    }
+    let Some(space) = facts.space() else {
+        return stay(Stay::NoSpace);
+    };
+    let Some(workspace) = facts.workspace(space) else {
+        return stay(Stay::NoWorkspace);
+    };
+    if facts.active_workspace(space).is_none_or(|active| active == workspace) {
+        return stay(Stay::AlreadyActive);
+    }
+    if facts.pending_window() {
+        return stay(Stay::PendingWindow);
+    }
+    if let Some(mode) = facts.mode_refusal() {
+        return stay(Stay::Mode(mode));
+    }
+    if facts.active_space_fullscreen() {
+        return stay(Stay::FullscreenActive);
+    }
+    if let Some(server) = facts.unmanageable_source() {
+        return stay(Stay::Unmanageable(server));
+    }
+    match facts.blacklisted() {
+        None => stay(Stay::NoBundleId),
+        Some(true) => stay(Stay::Blacklisted),
+        Some(false) => Follow::To(space, workspace),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +216,193 @@ mod tests {
         assert!(hides_focus(1, None, Some(1), || true));
         assert!(!hides_focus(1, Some(1), Some(1), || false));
         assert!(!hides_focus(1, Some(2), Some(3), || panic!("not asked")));
+    }
+
+    /// Facts as data; a fact left `None` panics if asked.
+    #[derive(Clone, Copy)]
+    struct Facts {
+        standard: bool,
+        unavailable: bool,
+        space: Option<Option<u64>>,
+        workspace: Option<Option<u32>>,
+        active: Option<Option<u32>>,
+        pending: Option<bool>,
+        mode: Option<Option<&'static str>>,
+        fullscreen: Option<bool>,
+        unmanageable: Option<Option<u32>>,
+        blacklisted: Option<Option<bool>>,
+    }
+
+    impl ActivationFacts for Facts {
+        type Mode = &'static str;
+        type Server = u32;
+        type Space = u64;
+        type Workspace = u32;
+
+        fn standard(&self) -> bool { self.standard }
+
+        fn unavailable(&self) -> bool { self.unavailable }
+
+        fn space(&self) -> Option<u64> { self.space.expect("space asked") }
+
+        fn workspace(&self, _: u64) -> Option<u32> { self.workspace.expect("workspace asked") }
+
+        fn active_workspace(&self, _: u64) -> Option<u32> { self.active.expect("active asked") }
+
+        fn pending_window(&self) -> bool { self.pending.expect("pending asked") }
+
+        fn mode_refusal(&self) -> Option<&'static str> { self.mode.expect("mode asked") }
+
+        fn active_space_fullscreen(&self) -> bool { self.fullscreen.expect("fullscreen asked") }
+
+        fn unmanageable_source(&self) -> Option<u32> { self.unmanageable.expect("source asked") }
+
+        fn blacklisted(&self) -> Option<bool> { self.blacklisted.expect("blacklist asked") }
+    }
+
+    #[test]
+    fn an_activation_follows_its_window_to_another_workspace_unless_something_says_not_to() {
+        let follows = Facts {
+            standard: true,
+            unavailable: false,
+            space: Some(Some(1)),
+            workspace: Some(Some(7)),
+            active: Some(Some(3)),
+            pending: Some(false),
+            mode: Some(None),
+            fullscreen: Some(false),
+            unmanageable: Some(None),
+            blacklisted: Some(Some(false)),
+        };
+        assert_eq!(activation_follow(&follows), Follow::To(1, 7));
+        let unasked = |facts: Facts| Facts {
+            space: None,
+            workspace: None,
+            active: None,
+            pending: None,
+            mode: None,
+            fullscreen: None,
+            unmanageable: None,
+            blacklisted: None,
+            ..facts
+        };
+        // Each reason stops it, and nothing after it is asked.
+        assert_eq!(
+            activation_follow(&unasked(Facts { standard: false, ..follows })),
+            Follow::Stay(Stay::NotStandard)
+        );
+        assert_eq!(
+            activation_follow(&unasked(Facts { unavailable: true, ..follows })),
+            Follow::Stay(Stay::Unavailable)
+        );
+        let cases: [(Facts, Stay<&str, u32>); 9] = [
+            (
+                Facts {
+                    space: Some(None),
+                    workspace: None,
+                    active: None,
+                    pending: None,
+                    mode: None,
+                    fullscreen: None,
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::NoSpace,
+            ),
+            (
+                Facts {
+                    workspace: Some(None),
+                    active: None,
+                    pending: None,
+                    mode: None,
+                    fullscreen: None,
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::NoWorkspace,
+            ),
+            (
+                Facts {
+                    active: Some(Some(7)),
+                    pending: None,
+                    mode: None,
+                    fullscreen: None,
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::AlreadyActive,
+            ),
+            (
+                Facts {
+                    active: Some(None),
+                    pending: None,
+                    mode: None,
+                    fullscreen: None,
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::AlreadyActive,
+            ),
+            (
+                Facts {
+                    pending: Some(true),
+                    mode: None,
+                    fullscreen: None,
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::PendingWindow,
+            ),
+            (
+                Facts {
+                    mode: Some(Some("drag")),
+                    fullscreen: None,
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::Mode("drag"),
+            ),
+            (
+                Facts {
+                    fullscreen: Some(true),
+                    unmanageable: None,
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::FullscreenActive,
+            ),
+            (
+                Facts {
+                    unmanageable: Some(Some(42)),
+                    blacklisted: None,
+                    ..follows
+                },
+                Stay::Unmanageable(42),
+            ),
+            (
+                Facts {
+                    blacklisted: Some(None),
+                    ..follows
+                },
+                Stay::NoBundleId,
+            ),
+        ];
+        for (facts, why) in cases {
+            assert_eq!(activation_follow(&facts), Follow::Stay(why));
+        }
+        assert_eq!(
+            activation_follow(&Facts {
+                blacklisted: Some(Some(true)),
+                ..follows
+            }),
+            Follow::Stay(Stay::Blacklisted)
+        );
     }
 
     #[test]

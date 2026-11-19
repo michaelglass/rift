@@ -72,7 +72,7 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
-use rift_core::focus::{Removal, RemovalFocus};
+use rift_core::focus::{Follow, Removal, RemovalFocus, Stay};
 use rift_core::lifecycle::{
     Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
 };
@@ -5581,48 +5581,38 @@ impl Reactor {
         &self,
         window: WindowId,
     ) -> Option<(SpaceId, crate::model::VirtualWorkspaceId)> {
-        if !self.window_is_standard(window) || self.state.windows.is_temporarily_unavailable(window)
-        {
-            return None;
-        }
         let pid = window.pid;
-        let space = self.best_space_for_window_id(window)?;
-        let workspaces = self.layout_manager.layout_engine.workspaces();
-        let workspace = workspaces.workspace_for_window(&self.state.windows, space, window)?;
-        // A newly appearing native window can leave focus temporarily pointing at the app's
-        // old window until AX admission completes.
-        if workspaces.active_workspace(space).is_none_or(|active| active == workspace)
-            || self.state.windows.has_pending_window_for_pid(pid)
-        {
-            return None;
+        match rift_core::focus::activation_follow(&ActivationQuery { reactor: self, window }) {
+            Follow::To(space, workspace) => Some((space, workspace)),
+            Follow::Stay(why) => {
+                match why {
+                    Stay::Mode(mode) => {
+                        debug!(pid, "mode-gate: discarded activation follow during {mode}")
+                    }
+                    Stay::FullscreenActive => debug!(
+                        pid,
+                        "Skipping auto workspace switch: the active space is fullscreen"
+                    ),
+                    Stay::Unmanageable(wsid) => debug!(
+                        ?wsid,
+                        pid,
+                        "Skipping auto workspace switch: the activated window is not manageable"
+                    ),
+                    Stay::Blacklisted => debug!(
+                        pid,
+                        "Blacklisted for auto-focus workspace switching, ignoring activation"
+                    ),
+                    Stay::NotStandard
+                    | Stay::Unavailable
+                    | Stay::NoSpace
+                    | Stay::NoWorkspace
+                    | Stay::AlreadyActive
+                    | Stay::PendingWindow
+                    | Stay::NoBundleId => {}
+                }
+                None
+            }
         }
-        if let Some(mode) = self.modes().refusal(Initiative::FollowActivation) {
-            debug!(pid, "mode-gate: discarded activation follow during {mode:?}");
-            return None;
-        }
-        if self.raw_command_space().is_some_and(|active| self.is_fullscreen_space(active)) {
-            debug!(
-                pid,
-                "Skipping auto workspace switch: the active space is fullscreen"
-            );
-            return None;
-        }
-        if let Some(wsid) = self.activation_from_unmanageable_window(pid) {
-            debug!(
-                ?wsid,
-                pid, "Skipping auto workspace switch: the activated window is not manageable"
-            );
-            return None;
-        }
-        let bundle_id = self.app_manager.apps.get(&pid)?.info.bundle_id.as_ref()?;
-        if self.config.settings.auto_focus_blacklist.contains(bundle_id) {
-            debug!(
-                bundle_id,
-                "Blacklisted for auto-focus workspace switching, ignoring activation"
-            );
-            return None;
-        }
-        Some((space, workspace))
     }
 
     fn handle_layout_response(
@@ -6898,6 +6888,67 @@ enum Resolved {
         space: SpaceId,
         user: bool,
     },
+}
+
+/// What the reactor knows of an activated window, for [`rift_core::focus::activation_follow`].
+struct ActivationQuery<'a> {
+    reactor: &'a Reactor,
+    window: WindowId,
+}
+
+impl rift_core::focus::ActivationFacts for ActivationQuery<'_> {
+    type Mode = String;
+    type Server = WindowServerId;
+    type Space = SpaceId;
+    type Workspace = crate::model::VirtualWorkspaceId;
+
+    fn standard(&self) -> bool { self.reactor.window_is_standard(self.window) }
+
+    fn unavailable(&self) -> bool {
+        self.reactor.state.windows.is_temporarily_unavailable(self.window)
+    }
+
+    fn space(&self) -> Option<SpaceId> { self.reactor.best_space_for_window_id(self.window) }
+
+    fn workspace(&self, space: SpaceId) -> Option<Self::Workspace> {
+        let reactor = self.reactor;
+        reactor.layout_manager.layout_engine.workspaces().workspace_for_window(
+            &reactor.state.windows,
+            space,
+            self.window,
+        )
+    }
+
+    fn active_workspace(&self, space: SpaceId) -> Option<Self::Workspace> {
+        self.reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+    }
+
+    fn pending_window(&self) -> bool {
+        self.reactor.state.windows.has_pending_window_for_pid(self.window.pid)
+    }
+
+    fn mode_refusal(&self) -> Option<String> {
+        self.reactor
+            .modes()
+            .refusal(Initiative::FollowActivation)
+            .map(|mode| format!("{mode:?}"))
+    }
+
+    fn active_space_fullscreen(&self) -> bool {
+        self.reactor
+            .raw_command_space()
+            .is_some_and(|active| self.reactor.is_fullscreen_space(active))
+    }
+
+    fn unmanageable_source(&self) -> Option<WindowServerId> {
+        self.reactor.activation_from_unmanageable_window(self.window.pid)
+    }
+
+    fn blacklisted(&self) -> Option<bool> {
+        let reactor = self.reactor;
+        let bundle_id = reactor.app_manager.apps.get(&self.window.pid)?.info.bundle_id.as_ref()?;
+        Some(reactor.config.settings.auto_focus_blacklist.contains(bundle_id))
+    }
 }
 
 /// Where a transient entry's evidence came from.
