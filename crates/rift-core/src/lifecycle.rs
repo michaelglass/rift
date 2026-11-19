@@ -530,6 +530,169 @@ impl<W: Copy + Ord> Lifecycle<W> {
     pub fn windows(&self) -> impl Iterator<Item = W> + '_ { self.windows.keys().copied() }
 }
 
+/// Whether an app inventory reported a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Report {
+    Reported,
+    Omitted,
+}
+
+/// Whether an inventory can see the window at all (see [`out_of_inventory_view`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryView {
+    InView,
+    OutOfView,
+}
+
+/// Whether the window has a native fullscreen record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullscreenRecord {
+    Recorded,
+    NotRecorded,
+}
+
+/// The window's window-server id, if known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeIdentity<V> {
+    Known(V),
+    Unknown,
+}
+
+/// Whether the window's AX element is still valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxValidity {
+    Valid,
+    Invalidated,
+}
+
+/// What the platform knows of a window an inventory is reconciled against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryFacts<V> {
+    pub report: Report,
+    pub view: InventoryView,
+    /// `None` without AX state.
+    pub minimize: Option<Minimize>,
+    pub fullscreen: FullscreenRecord,
+    pub identity: NativeIdentity<V>,
+    pub validity: AxValidity,
+}
+
+/// The window server's type for a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Suitability {
+    Suitable,
+    Unsuitable,
+}
+
+/// Whether the window server has the window ordered in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ordering {
+    OrderedIn,
+    OrderedOut,
+}
+
+/// What the window server's record of a window looks like: a window, or not one (a nonzero
+/// layer, or a frame under two points on an axis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeLook {
+    Window,
+    NotAWindow,
+}
+
+/// What the window server says of an omitted window; each `None` is unknown, which carries no
+/// negative authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeEvidence {
+    pub suitability: Option<Suitability>,
+    pub ordering: Option<Ordering>,
+    pub look: Option<NativeLook>,
+}
+
+/// Why an inventory leaves a window alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    Reported,
+    OutOfView,
+    NoAxState,
+    Minimized,
+    Fullscreen,
+    NoNativeIdentity,
+    /// Ordered out while its AX identity is valid: native ordering explains the omission.
+    /// After an invalidation, omission plus ordering out confirms retirement.
+    NativeOrdering,
+    /// Nothing native says it is gone.
+    NoNegativeEvidence,
+}
+
+/// Whether an inventory retires a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retirement {
+    Retire,
+    Keep(Keep),
+}
+
+/// A current, successful inventory omission retires a window only with native negative
+/// evidence: unsuitable, ordered out, or not a window. The evidence is asked only for an
+/// omitted window in view with AX state, shown, not in fullscreen and with a native identity.
+pub fn retirement<V: Copy>(
+    facts: InventoryFacts<V>,
+    evidence: impl FnOnce(V) -> NativeEvidence,
+) -> Retirement {
+    let identity = match facts {
+        InventoryFacts { report: Report::Reported, .. } => Err(Keep::Reported),
+        InventoryFacts {
+            view: InventoryView::OutOfView, ..
+        } => Err(Keep::OutOfView),
+        InventoryFacts { minimize: None, .. } => Err(Keep::NoAxState),
+        InventoryFacts {
+            minimize: Some(Minimize::Minimized),
+            ..
+        } => Err(Keep::Minimized),
+        InventoryFacts {
+            fullscreen: FullscreenRecord::Recorded,
+            ..
+        } => Err(Keep::Fullscreen),
+        InventoryFacts {
+            identity: NativeIdentity::Unknown,
+            ..
+        } => Err(Keep::NoNativeIdentity),
+        InventoryFacts {
+            identity: NativeIdentity::Known(identity),
+            ..
+        } => Ok(identity),
+    };
+    let evidence = match identity {
+        Ok(identity) => evidence(identity),
+        Err(why) => return Retirement::Keep(why),
+    };
+    match (evidence, facts.validity) {
+        (
+            NativeEvidence {
+                suitability: Some(Suitability::Suitable),
+                ordering: Some(Ordering::OrderedOut),
+                ..
+            },
+            AxValidity::Valid,
+        ) => Retirement::Keep(Keep::NativeOrdering),
+        (
+            NativeEvidence {
+                suitability: Some(Suitability::Unsuitable),
+                ..
+            }
+            | NativeEvidence {
+                ordering: Some(Ordering::OrderedOut),
+                ..
+            }
+            | NativeEvidence {
+                look: Some(NativeLook::NotAWindow),
+                ..
+            },
+            _,
+        ) => Retirement::Retire,
+        (_, _) => Retirement::Keep(Keep::NoNegativeEvidence),
+    }
+}
+
 /// Each decision as a question on plain data: every fact it may ask for is in the question.
 /// Windows, Spaces, window-server ids and apps are one word each.
 pub mod plain {
@@ -1096,6 +1259,181 @@ mod tests {
         // Gone takes the invalidation with it.
         lifecycle.step(LifecycleEvent::Gone(2));
         assert!(!lifecycle.is_invalidated(2));
+    }
+
+    #[test]
+    fn retirement_is_todays_rule_over_every_combination_of_inventory_facts() {
+        // The rule as rift wrote it: an omission retires only with native negative evidence;
+        // native ordering out explains an omission while the AX identity is valid.
+        let reference = |reported: bool,
+                         out_of_view: bool,
+                         minimized: Option<bool>,
+                         fullscreen: bool,
+                         identified: bool,
+                         invalidated: bool,
+                         suitable: Option<bool>,
+                         ordered_in: Option<bool>,
+                         not_a_window: Option<bool>| {
+            if reported || out_of_view {
+                return false;
+            }
+            let Some(minimized) = minimized else { return false };
+            if minimized || fullscreen || !identified {
+                return false;
+            }
+            if suitable == Some(true) && ordered_in == Some(false) && !invalidated {
+                return false;
+            }
+            suitable == Some(false) || ordered_in == Some(false) || not_a_window == Some(true)
+        };
+        let options = [None, Some(false), Some(true)];
+        let mut checked = 0;
+        for reported in [false, true] {
+            for out_of_view in [false, true] {
+                for minimized in options {
+                    for fullscreen in [false, true] {
+                        for identified in [false, true] {
+                            for invalidated in [false, true] {
+                                for suitable in options {
+                                    for ordered_in in options {
+                                        for not_a_window in options {
+                                            let evidence = NativeEvidence {
+                                                suitability: suitable.map(|s| {
+                                                    if s {
+                                                        Suitability::Suitable
+                                                    } else {
+                                                        Suitability::Unsuitable
+                                                    }
+                                                }),
+                                                ordering: ordered_in.map(|o| {
+                                                    if o {
+                                                        Ordering::OrderedIn
+                                                    } else {
+                                                        Ordering::OrderedOut
+                                                    }
+                                                }),
+                                                look: not_a_window.map(|n| {
+                                                    if n {
+                                                        NativeLook::NotAWindow
+                                                    } else {
+                                                        NativeLook::Window
+                                                    }
+                                                }),
+                                            };
+                                            let verdict = retirement(
+                                                InventoryFacts {
+                                                    report: if reported {
+                                                        Report::Reported
+                                                    } else {
+                                                        Report::Omitted
+                                                    },
+                                                    view: if out_of_view {
+                                                        InventoryView::OutOfView
+                                                    } else {
+                                                        InventoryView::InView
+                                                    },
+                                                    minimize: minimized.map(|m| {
+                                                        if m {
+                                                            Minimize::Minimized
+                                                        } else {
+                                                            Minimize::Shown
+                                                        }
+                                                    }),
+                                                    fullscreen: if fullscreen {
+                                                        FullscreenRecord::Recorded
+                                                    } else {
+                                                        FullscreenRecord::NotRecorded
+                                                    },
+                                                    identity: if identified {
+                                                        NativeIdentity::Known(9_u32)
+                                                    } else {
+                                                        NativeIdentity::Unknown
+                                                    },
+                                                    validity: if invalidated {
+                                                        AxValidity::Invalidated
+                                                    } else {
+                                                        AxValidity::Valid
+                                                    },
+                                                },
+                                                |_| evidence,
+                                            );
+                                            let expected = reference(
+                                                reported,
+                                                out_of_view,
+                                                minimized,
+                                                fullscreen,
+                                                identified,
+                                                invalidated,
+                                                suitable,
+                                                ordered_in,
+                                                not_a_window,
+                                            );
+                                            assert_eq!(
+                                                verdict == Retirement::Retire,
+                                                expected,
+                                                "{verdict:?}"
+                                            );
+                                            checked += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 2 * 3 * 2 * 2 * 2 * 27);
+        // The native evidence is asked only for an identified, omitted, shown, unrecorded
+        // window in view.
+        let kept = |facts| retirement(facts, |_| -> NativeEvidence { panic!("not asked") });
+        let omitted = InventoryFacts {
+            report: Report::Omitted,
+            view: InventoryView::InView,
+            minimize: Some(Minimize::Shown),
+            fullscreen: FullscreenRecord::NotRecorded,
+            identity: NativeIdentity::Known(9_u32),
+            validity: AxValidity::Valid,
+        };
+        assert_eq!(
+            kept(InventoryFacts {
+                report: Report::Reported,
+                ..omitted
+            }),
+            Retirement::Keep(Keep::Reported)
+        );
+        assert_eq!(
+            kept(InventoryFacts {
+                view: InventoryView::OutOfView,
+                ..omitted
+            }),
+            Retirement::Keep(Keep::OutOfView)
+        );
+        assert_eq!(
+            kept(InventoryFacts { minimize: None, ..omitted }),
+            Retirement::Keep(Keep::NoAxState)
+        );
+        assert_eq!(
+            kept(InventoryFacts {
+                minimize: Some(Minimize::Minimized),
+                ..omitted
+            }),
+            Retirement::Keep(Keep::Minimized)
+        );
+        assert_eq!(
+            kept(InventoryFacts {
+                fullscreen: FullscreenRecord::Recorded,
+                ..omitted
+            }),
+            Retirement::Keep(Keep::Fullscreen)
+        );
+        assert_eq!(
+            kept(InventoryFacts {
+                identity: NativeIdentity::Unknown,
+                ..omitted
+            }),
+            Retirement::Keep(Keep::NoNativeIdentity)
+        );
     }
 
     #[test]

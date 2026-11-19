@@ -1011,40 +1011,71 @@ impl WindowStore {
         inactive: &HashSet<WindowId>,
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
     ) -> Vec<(WindowId, Option<WindowServerId>)> {
+        use rift_core::lifecycle::{
+            AxValidity, FullscreenRecord, InventoryFacts, InventoryView, NativeEvidence,
+            NativeIdentity, NativeLook, Ordering, Report, Retirement, Suitability,
+        };
         let observed: HashSet<_> = observed.iter().copied().collect();
-        let retired: Vec<_> = self
-            .window_ids_for_pid(pid)
+        self.window_ids_for_pid(pid)
             .filter_map(|wid| {
                 let record = self.record(wid)?;
-                if observed.contains(&wid)
-                    || inactive.contains(&wid)
-                    || record.state.as_ref()?.info.is_minimized
-                    || self.native_fullscreen_record_for_window(wid).is_some()
-                {
-                    return None;
-                }
-                let wsid = record.window_server_id?;
-                let observation = observe(wsid, self.get_window_server_info(wsid));
-                if observation.suitable == Some(true)
-                    && observation.ordered_in == Some(false)
-                    && !self.lifecycle.is_invalidated(wid)
-                {
-                    // AX omission can be caused by native ordering. After AX
-                    // invalidation, omission plus ordering out confirms retirement;
-                    // native suitability describes type, not AX liveness.
-                    return None;
-                }
-                (observation.suitable == Some(false)
-                    || observation.ordered_in == Some(false)
-                    || observation.info.is_some_and(|info| {
-                        info.layer != 0
-                            || info.frame.size.width.abs() < 2.0
-                            || info.frame.size.height.abs() < 2.0
-                    }))
-                .then_some((wid, Some(wsid)))
+                let wsid = record.window_server_id;
+                let facts = InventoryFacts {
+                    report: if observed.contains(&wid) {
+                        Report::Reported
+                    } else {
+                        Report::Omitted
+                    },
+                    view: if inactive.contains(&wid) {
+                        InventoryView::OutOfView
+                    } else {
+                        InventoryView::InView
+                    },
+                    minimize: record.state.as_ref().map(WindowState::minimize),
+                    fullscreen: if self.native_fullscreen_record_for_window(wid).is_some() {
+                        FullscreenRecord::Recorded
+                    } else {
+                        FullscreenRecord::NotRecorded
+                    },
+                    identity: wsid.map_or(NativeIdentity::Unknown, NativeIdentity::Known),
+                    validity: if self.lifecycle.is_invalidated(wid) {
+                        AxValidity::Invalidated
+                    } else {
+                        AxValidity::Valid
+                    },
+                };
+                let verdict = rift_core::lifecycle::retirement(facts, |wsid| {
+                    let observation = observe(wsid, self.get_window_server_info(wsid));
+                    NativeEvidence {
+                        suitability: observation.suitable.map(|suitable| {
+                            if suitable {
+                                Suitability::Suitable
+                            } else {
+                                Suitability::Unsuitable
+                            }
+                        }),
+                        ordering: observation.ordered_in.map(|ordered_in| {
+                            if ordered_in {
+                                Ordering::OrderedIn
+                            } else {
+                                Ordering::OrderedOut
+                            }
+                        }),
+                        look: observation.info.map(|info| {
+                            if info.layer != 0
+                                || info.frame.size.width.abs() < 2.0
+                                || info.frame.size.height.abs() < 2.0
+                            {
+                                NativeLook::NotAWindow
+                            } else {
+                                NativeLook::Window
+                            }
+                        }),
+                    }
+                });
+                (verdict == Retirement::Retire).then_some((wid, wsid))
             })
-            .collect();
-        retired
+            .collect()
     }
 
     /// Apply native presence and visibility, returning only affected logical
