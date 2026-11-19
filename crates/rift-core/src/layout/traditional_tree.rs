@@ -127,12 +127,14 @@ pub struct WindowLeaf<W> {
     pub fill: Fill,
 }
 
+/// A container. One may be empty: rift keeps an emptied container as the placeholder a window
+/// comes back to (a native tab closed, a window deminiaturized), its weight still held.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Container<W> {
     pub tag: Tag,
     pub kind: Kind,
     pub fill: Fill,
-    pub children: Children<W>,
+    pub children: Option<Children<W>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,7 +172,7 @@ impl<'a, W: Copy + Ord + Debug> At<'a, W> {
     fn children(self) -> Option<&'a Children<W>> {
         match self {
             At::Root(root) => root.children.as_ref(),
-            At::Node(Node::Container(container)) => Some(&container.children),
+            At::Node(Node::Container(container)) => container.children.as_ref(),
             At::Node(Node::Window(_)) => None,
         }
     }
@@ -593,7 +595,7 @@ fn view<W: Copy + Ord + Debug>(
     };
     let (tag, kind) = match at {
         At::Root(root) => container(root.tag, root.kind, root.children.as_ref()),
-        At::Node(Node::Container(node)) => container(node.tag, node.kind, Some(&node.children)),
+        At::Node(Node::Container(node)) => container(node.tag, node.kind, node.children.as_ref()),
         At::Node(Node::Window(leaf)) => (leaf.tag, ViewKind::Window(leaf.window)),
     };
     View {
@@ -666,12 +668,12 @@ mod tests {
                     ungrouped: Orientation::Vertical,
                 },
                 fill: Fill::Tiled,
-                children: Children::Remembered {
+                children: Some(Children::Remembered {
                     before: vec![two],
                     at: Box::new(three),
                     after: vec![],
                     walk: Walk::Enters,
-                },
+                }),
             })),
         };
         let four = window(&mut tags, 4);
