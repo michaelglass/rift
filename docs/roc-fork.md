@@ -528,6 +528,13 @@ as presence; L5 claims as presence; L6 retirement in the core.
   checks the snapshot and the core agree on them. Making `set_native_transient` skip the core
   fails a reactor test. Left for later: `refresh_heuristic`'s callers still compare admission
   before and after.
+- c173c69f (L4, AX invalidation as presence; held behind the L2 soak with L3): the record's
+  `ax_invalidated` flag goes. The core's `Lifecycle` holds a window with AX state as
+  `Live(facts) | Invalidated(facts)`: invalidated keeps its facts and place, is not managed, and
+  comes back on a positive AX observation or a fresh reading; an identity moving on carries
+  its invalidation. Invalidating a window with no AX state is nothing (it never had an AX
+  element, or its fullscreen identity is already unavailable). Three engine tests gave AX state
+  to windows built from layout events alone. The lifecycle line pauses here until the L2 soak.
 - A placeholder (a record with an assignment and no AX state: a restored layout's window not
   yet seen, a rule's pre-assignment, a fullscreen AX identity being replaced) has no facts in
   the core, so it can never be admitted; L4 names it as presence.
