@@ -505,6 +505,20 @@ topology into the core; W6 last, after upstream #688: the engine glue and persis
   without one remembered). Shown and remembered at once, or a previous with nothing shown,
   never occur after an event; the store's own methods make them mid-operation, and old saved
   files could hold them.
+- 6f757581 (W2b, held): `SpaceActivation = Showing { current, previous, remembered } | Vacant {
+  remembered }`. The first proposal (remembered only while vacant) was wrong: an upstream
+  legacy-load test showed a Space can show a fallback and still remember the workspace its
+  departed display showed, so a returning display takes it back; the measurement missed it
+  because every tested departure emptied the display. What the type rules out is history with
+  nothing shown: repair panics on it in tests and logs `workspace-activation:` in a running Rift;
+  a saved file with it loads as `Vacant { remembered }` with one `workspace-load: normalized`
+  line. A literal test covers a departure that leaves a fallback shown and the return.
+- **Open item for W5:** no fuzzer step reaches DisplayDeparture. The new DisplayDeparts /
+  DisplayReturns steps run (not while a window is held), but in the test reactor's global-mode
+  setup a departure moves no workspace (the departed display's workspaces stay dormant on its
+  Space). Find the snapshot that drives `plan_workspace_placements` to a DisplayDeparture
+  transfer, make a fuzzer step reach it, and re-measure activation shapes after W5. The
+  store-level literal test covers the shape until then.
 
 ## Window lifecycle as core events
 
