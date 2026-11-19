@@ -152,7 +152,7 @@ enum Step {
     /// is held).
     DisplayDeparts,
     /// The display that left is reconnected, with its Space or, `renumbered`, a new one (macOS
-    /// renumbered its desktop while it was away).
+    /// renumbered its desktop while it was away; the snapshot pairs the two as a remap).
     DisplayReturns { renumbered: bool },
     /// The user switches workspace on the focused display.
     SwitchWorkspace { to: Switch },
@@ -224,7 +224,7 @@ impl Rng {
 fn generate(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng::new(seed);
     (0..len)
-        .map(|_| match rng.below(110) {
+        .map(|_| match rng.below(112) {
             0..9 => Step::DragStart {
                 w: rng.below(16),
                 dx: rng.delta(),
@@ -289,7 +289,16 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
             106 => Step::DestroyIdentity { w: rng.below(16) },
             107 => Step::LeaveFullscreen { w: rng.below(16) },
             108 => Step::DisplayDeparts,
-            _ => Step::DisplayReturns { renumbered: false },
+            109 => Step::DisplayReturns { renumbered: rng.below(2) == 1 },
+            110 => Step::DesktopReplaced { d: rng.below(3) },
+            _ => Step::SwitchWorkspace {
+                to: match rng.below(4) {
+                    0 => Switch::Next,
+                    1 => Switch::Previous,
+                    2 => Switch::To(rng.below(4)),
+                    _ => Switch::Last,
+                },
+            },
         })
         .collect()
 }
@@ -422,8 +431,8 @@ type Read = (CGRect, TransactionId);
 /// What a case is set up with: two or three displays; on some seeds animation is on (the
 /// animation thread runs in step with the case, `TestPresenter`), and on some of those the
 /// first space's workspace is a scrolling layout, so every arrange there presents a camera.
-/// Workspaces are per display, or shared across displays (global mode, where display changes
-/// move workspaces), some with a display rule.
+/// Half the seeds keep per-display workspaces; the rest share one catalog across displays
+/// (global mode, where display changes move workspaces), some with a display rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Setup {
     displays: usize,
@@ -448,7 +457,11 @@ impl Setup {
             displays: 2 + (seed % 2) as usize,
             animate,
             scrolling: animate && (seed / 4) % 2 == 1,
-            workspaces: Workspaces::PerDisplay,
+            workspaces: match (seed / 8) % 4 {
+                0 | 1 => Workspaces::PerDisplay,
+                2 => Workspaces::Global,
+                _ => Workspaces::GlobalRuled,
+            },
         }
     }
 
@@ -752,6 +765,13 @@ impl Sim {
 
     /// The displays as they are now, with the given Space remaps.
     fn announce_displays_with(&mut self, changed: bool, remaps: Vec<(SpaceId, SpaceId)>) {
+        // A remap renames a desktop: the held window's Space is renamed with it, not moved.
+        if let Some(held) = &mut self.held
+            && let Some(&(_, new)) =
+                remaps.iter().find(|(old, _)| Some(*old) == held.assigned_at_start)
+        {
+            held.assigned_at_start = Some(new);
+        }
         let mut state = self.space_state();
         state.display_set_changed = changed;
         state.membership_complete = true;
@@ -1087,17 +1107,20 @@ impl Sim {
                 }
             }
             Step::DisplayReturns { renumbered } => {
-                if let Some((screen, space, uuid)) = self.departed.take() {
-                    let space = if renumbered {
+                if let Some((screen, old, uuid)) = self.departed.take() {
+                    // A renumbered desktop is paired with the one the display had, as the
+                    // spaces actor pairs a unique same-display delta.
+                    let (space, remaps) = if renumbered {
                         self.next_space += 1;
-                        SpaceId::new(self.next_space - 1)
+                        let space = SpaceId::new(self.next_space - 1);
+                        (space, vec![(old, space)])
                     } else {
-                        space
+                        (old, Vec::new())
                     };
                     self.screens.push(screen);
                     self.spaces.push(space);
                     self.uuids.push(uuid);
-                    self.announce_displays(true);
+                    self.announce_displays_with(true, remaps);
                 }
             }
             Step::DesktopReplaced { d } => {
@@ -2373,4 +2396,82 @@ fn a_stopped_animation_leaves_a_write_in_flight_under_its_request_alone() {
         Step::DesktopReplaced { d: 0 },
     ];
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}
+
+/// The shapes Space activations take after every fuzzer step, by workspace setup, and how often
+/// each display step moved a workspace to another Space (display departures and returns
+/// reaching the placement planner's transfers; replaced desktops, the Space remap). A measurement, not a check:
+/// `RIFT_FUZZ_CASES=2000 RIFT_FUZZ_STEPS=40 cargo test --lib activation_shapes -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn activation_shapes_across_the_fuzzer() {
+    use crate::model::virtual_workspace::SpaceActivation;
+    let (cases, len) = (budget("RIFT_FUZZ_CASES", 200), budget("RIFT_FUZZ_STEPS", 30));
+    let quiet = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut shapes: BTreeMap<(String, &'static str), u64> = BTreeMap::new();
+    let mut moves: BTreeMap<(String, &'static str), (u64, u64)> = BTreeMap::new();
+    for seed in 0..cases as u64 {
+        let setup = Setup::of(seed);
+        let mode = format!("{:?}", setup.workspaces);
+        _ = catch_unwind(AssertUnwindSafe(|| {
+            let mut sim = Sim::new(setup);
+            for step in generate(seed, len) {
+                let placed = |sim: &Sim| -> Vec<_> {
+                    let workspaces = sim.reactor.layout_manager.layout_engine.workspaces();
+                    workspaces.catalog().map(|id| (id, workspaces[id].space)).collect()
+                };
+                let before = placed(&sim);
+                let emitted = sim.run(step);
+                sim.pending.extend(emitted);
+                if matches!(
+                    step,
+                    Step::DisplayDeparts
+                        | Step::DisplayReturns { .. }
+                        | Step::DesktopReplaced { .. }
+                ) {
+                    let moved = before != placed(&sim);
+                    let entry = moves.entry((mode.clone(), step.kind())).or_default();
+                    entry.0 += 1;
+                    entry.1 += u64::from(moved);
+                }
+                let workspaces = sim.reactor.layout_manager.layout_engine.workspaces();
+                for activation in workspaces.active_workspace_per_space().values() {
+                    let shape = match activation {
+                        SpaceActivation::Showing {
+                            previous: None,
+                            remembered: None,
+                            ..
+                        } => "showing",
+                        SpaceActivation::Showing {
+                            previous: Some(_),
+                            remembered: None,
+                            ..
+                        } => "showing, previous",
+                        SpaceActivation::Showing {
+                            previous: None,
+                            remembered: Some(_),
+                            ..
+                        } => "showing, remembered",
+                        SpaceActivation::Showing {
+                            previous: Some(_),
+                            remembered: Some(_),
+                            ..
+                        } => "showing, previous, remembered",
+                        SpaceActivation::Vacant { remembered: None } => "vacant",
+                        SpaceActivation::Vacant { remembered: Some(_) } => "vacant, remembered",
+                    };
+                    *shapes.entry((mode.clone(), shape)).or_default() += 1;
+                }
+            }
+        }));
+    }
+    std::panic::set_hook(quiet);
+    for ((mode, shape), count) in &shapes {
+        eprintln!("shape {mode:<12} {shape:<30} {count}");
+    }
+    for ((mode, kind), (steps, moved)) in &moves {
+        eprintln!("moves {mode:<12} {kind:<16} {moved} of {steps} steps moved a workspace");
+    }
 }
