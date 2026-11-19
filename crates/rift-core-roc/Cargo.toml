@@ -33,6 +33,10 @@ name = "topology"
 required-features = ["roc"]
 
 [[test]]
+name = "lifecycle"
+required-features = ["roc"]
+
+[[test]]
 name = "measure"
 required-features = ["roc"]
 

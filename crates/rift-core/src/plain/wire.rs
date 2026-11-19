@@ -19,6 +19,9 @@ use crate::layout::bsp::{Bsp, Children, Fill, Node, Slot};
 use crate::layout::floating::{Floating, Newcomer, Seen};
 use crate::layout::traditional::{self, StackLine, Traditional};
 use crate::layout::{Gaps, Size, Sizing, WindowConstraints, scrolling};
+use crate::lifecycle::{
+    self, Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
+};
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
 use crate::reconciler::{Answer, Note, Reply, Want, Write};
@@ -744,6 +747,171 @@ impl Words {
         self.list(displays.spaces, |words, (display, spaces)| {
             words.word(display);
             words.list(spaces, Words::word);
+        });
+    }
+}
+
+/// A lifecycle answer that is a yes or a no, as one word.
+pub fn encode_verdict(answer: bool) -> Vec<u64> { vec![u64::from(answer)] }
+
+/// A Space or none, as an option.
+pub fn encode_maybe_space(answer: Option<u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.option(answer, Words::word);
+    words.0
+}
+
+/// App-rule targets as words: each Space and its windows.
+pub fn encode_rule_targets(answer: Vec<(u64, Vec<u64>)>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.list(answer, |words, (space, windows)| {
+        words.word(space);
+        words.list(windows, Words::word);
+    });
+    words.0
+}
+
+/// Tag 9, [`lifecycle::plain::RuleTargets`]: the windows, the run (0 admission, 1 re-apply),
+/// the reconcilable windows, the windows' Spaces (window, Space), the active Spaces.
+pub fn encode_rule_targets_question(question: lifecycle::plain::RuleTargets) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(9);
+    words.list(question.windows, Words::word);
+    words.rule_run(question.run);
+    words.list(question.reconcilable, Words::word);
+    words.list(question.spaces, |words, (window, space)| {
+        words.word(window);
+        words.word(space);
+    });
+    words.list(question.active, Words::word);
+    words.0
+}
+
+/// Tag 10, [`lifecycle::plain::RuleRefresh`]: the run, the workspace before (an option) and
+/// after, floating before and after, ignored, unavailable.
+pub fn encode_rule_refresh(question: lifecycle::plain::RuleRefresh) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(10);
+    words.rule_run(question.run);
+    let outcome = question.outcome;
+    words.option(outcome.workspace_before, Words::word);
+    words.word(outcome.workspace);
+    words.flag(outcome.floating_before);
+    words.flag(outcome.floating);
+    words.flag(outcome.was_ignored);
+    words.flag(outcome.unavailable);
+    words.0
+}
+
+/// Tag 11, [`lifecycle::plain::PointerTarget`]: the mode (0 per display, 1 global), the Space
+/// it opened on, the pointer's Space (an option), the active Spaces, the window (0 untracked, 1
+/// not standard, 2 standard), whether a rule names its workspace.
+pub fn encode_pointer_target(question: lifecycle::plain::PointerTarget) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(11);
+    words.word(match question.mode {
+        WorkspaceMode::PerDisplay => 0,
+        WorkspaceMode::Global => 1,
+    });
+    words.word(question.opened_on);
+    words.option(question.pointer, Words::word);
+    words.list(question.active, Words::word);
+    words.word(match question.window {
+        NewWindow::Untracked => 0,
+        NewWindow::NotStandard => 1,
+        NewWindow::Standard(()) => 2,
+    });
+    words.flag(question.rule_names_workspace);
+    words.0
+}
+
+/// Tag 12, [`lifecycle::plain::NativeTransient`]: the entry (an option of origin, owner), the
+/// window's app, whether it is exempt.
+pub fn encode_native_transient(question: lifecycle::plain::NativeTransient) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(12);
+    words.option(question.entry, |words, (origin, owner)| {
+        words.origin(origin);
+        words.word(owner);
+    });
+    words.word(question.owner);
+    words.flag(question.exempt);
+    words.0
+}
+
+/// Tag 13, [`lifecycle::plain::KeepsTransient`]: the departure (0 destroyed, then an option of
+/// its id; 1 closed, then its id; 2 an app gone, then its pid), the entry's id, origin, owner.
+pub fn encode_keeps_transient(question: lifecycle::plain::KeepsTransient) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(13);
+    match question.departure {
+        Departure::Destroyed(id) => {
+            words.word(0);
+            words.option(id, Words::word);
+        }
+        Departure::Closed(id) => {
+            words.word(1);
+            words.word(id);
+        }
+        Departure::AppGone(pid) => {
+            words.word(2);
+            words.word(pid);
+        }
+    }
+    words.word(question.id);
+    words.origin(question.origin);
+    words.word(question.owner);
+    words.0
+}
+
+/// Tag 14, [`lifecycle::plain::Misplaced`]: the assignment and the native Space, options.
+pub fn encode_misplaced(question: lifecycle::plain::Misplaced) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(14);
+    words.option(question.assigned, Words::word);
+    words.option(question.native, Words::word);
+    words.0
+}
+
+/// Tag 15, [`lifecycle::plain::OutOfView`]: the native Space and the assignment (options), the
+/// active Spaces, whether it is parked.
+pub fn encode_out_of_view(question: lifecycle::plain::OutOfView) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(15);
+    words.option(question.native, Words::word);
+    words.option(question.assigned, Words::word);
+    words.list(question.active, Words::word);
+    words.flag(question.parked);
+    words.0
+}
+
+/// Tag 16, [`lifecycle::plain::TitleChange`]: the setting (0 ignore, 1 re-apply), the window's
+/// Space (an option), the active Spaces, whether it is reconcilable.
+pub fn encode_title_change(question: lifecycle::plain::TitleChange) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(16);
+    words.word(match question.configured {
+        OnTitleChange::Ignore => 0,
+        OnTitleChange::Reapply => 1,
+    });
+    words.option(question.space, Words::word);
+    words.list(question.active, Words::word);
+    words.flag(question.reconcilable);
+    words.0
+}
+
+impl Words {
+    fn rule_run(&mut self, run: RuleRun) {
+        self.word(match run {
+            RuleRun::Admission => 0,
+            RuleRun::Reapply => 1,
+        });
+    }
+
+    fn origin(&mut self, origin: TransientOrigin) {
+        self.word(match origin {
+            TransientOrigin::Native => 0,
+            TransientOrigin::Heuristic => 1,
         });
     }
 }

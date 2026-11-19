@@ -10,6 +10,7 @@ import Traditional
 import Scrolling
 import Floating
 import Topology
+import Lifecycle
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -115,7 +116,8 @@ core = { init, step, tile }
 
 ## The model-free questions: layout geometry and the topology decisions. A question's words
 ## (its tag first: 0 BSP, 1 traditional, 2 a scrolling strip, 3 a settle question on a strip's
-## placement, 4 a floating layout's newcomers; 5 to 8 the topology decisions, `Topology`) in;
+## placement, 4 a floating layout's newcomers; 5 to 8 the topology decisions, `Topology`; 9 to
+## 16 the lifecycle decisions, `Lifecycle`) in;
 ## out, a 0 and the answer's words (the frames; for a strip, where it placed everything; for a
 ## settle question, where the camera settles; for newcomers, their first frames; for a topology
 ## question, its answer), or a 1: the words were not a question it answers.
@@ -140,6 +142,14 @@ shape_answer = |words| {
 		6 => Topology.discovery_words(cursor)
 		7 => Topology.admit_words(cursor)
 		8 => Topology.candidates_words(cursor)
+		9 => Lifecycle.rule_targets_words(cursor)
+		10 => Lifecycle.rule_refresh_words(cursor)
+		11 => Lifecycle.pointer_target_words(cursor)
+		12 => Lifecycle.native_transient_words(cursor)
+		13 => Lifecycle.keeps_transient_words(cursor)
+		14 => Lifecycle.misplaced_words(cursor)
+		15 => Lifecycle.out_of_view_words(cursor)
+		16 => Lifecycle.title_change_words(cursor)
 		_ => Err(Malformed)
 	}
 }
