@@ -450,6 +450,20 @@ impl<W> Node<W> {
     }
 }
 
+fn same_nodes<W: PartialEq>(a: &Node<W>, b: &Node<W>) -> bool {
+    match (a, b) {
+        (Node::Split(a), Node::Split(b)) => {
+            a.orientation == b.orientation
+                && a.ratio == b.ratio
+                && a.memory == b.memory
+                && same_nodes(&a.first, &b.first)
+                && same_nodes(&a.second, &b.second)
+        }
+        (Node::Leaf(a), Node::Leaf(b)) => a.content == b.content && a.preselect == b.preselect,
+        (Node::Split(_), Node::Leaf(_)) | (Node::Leaf(_), Node::Split(_)) => false,
+    }
+}
+
 fn shape<W: Copy + Ord + Debug>(
     node: &Node<W>,
     who: Participation<W>,
@@ -759,6 +773,9 @@ impl<W: Copy + Ord + Debug> Layout<W> {
 
     pub fn contains(&self, window: W) -> bool { self.leaf_of(window).is_some() }
 
+    /// Whether `other` is the same tree, nodes' tags aside.
+    pub fn same_as(&self, other: &Layout<W>) -> bool { same_nodes(&self.root, &other.root) }
+
     /// Where commands act: the focus, or with none the selection.
     fn acting_at(&self, who: Participation<W>) -> Path {
         let nodes = self.root.preorder();
@@ -1065,6 +1082,16 @@ impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
     pub fn projection(&self, layout: L) -> Option<Projection<W>> {
         Some(self.layout(layout)?.projection(self.participation()))
     }
+
+    /// A layout built elsewhere (from a saved layout, or the platform's own tree), under the
+    /// platform's id, its nodes tagged from this set's tags.
+    pub fn adopt(&mut self, layout: L, build: impl FnOnce(&mut Tags) -> Layout<W>) {
+        let tree = build(&mut self.tags);
+        self.layouts.insert(layout, tree);
+    }
+
+    /// The layouts, by the platform's id.
+    pub fn iter(&self) -> impl Iterator<Item = (&L, &Layout<W>)> { self.layouts.iter() }
 
     /// A new layout of one empty leaf, under the platform's id.
     pub fn create(&mut self, layout: L) {

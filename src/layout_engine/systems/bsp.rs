@@ -1,5 +1,7 @@
 use objc2_core_foundation::CGRect;
 use rift_core::layout::bsp;
+#[cfg(test)]
+use rift_core::layout::bsp_tree;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
@@ -1331,10 +1333,13 @@ mod tests {
     }
 }
 
-impl LayoutSystem for BspLayoutSystem {
-    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
-
-    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
+/// The bodies of the operations the core shadows in test builds (see `shadowed`).
+impl BspLayoutSystem {
+    fn set_window_participation_unshadowed(
+        &mut self,
+        window: WindowId,
+        participates: bool,
+    ) -> bool {
         if participates {
             self.inactive.remove(&window)
         } else {
@@ -1342,10 +1347,181 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn create_layout(&mut self) -> LayoutId {
+    fn remove_layout_unshadowed(&mut self, layout: LayoutId) {
+        if let Some(state) = self.layouts.remove(layout) {
+            let ids: Vec<_> = state.root.traverse_preorder(&self.tree.map).collect();
+            for id in ids {
+                self.kind.remove(id);
+                self.stacks.remove(&id);
+            }
+            state.root.remove_root(&mut self.tree);
+        }
+    }
+
+    fn ascend_selection_unshadowed(&mut self, layout: LayoutId) -> bool {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            if self.kind.get(sel).is_none() {
+                return false;
+            }
+            let parent_opt = sel.parent(&self.tree.map);
+            if let Some(parent) = parent_opt {
+                let new_sel = self.descend_to_leaf(parent);
+                self.tree.data.selection.select(&self.tree.map, new_sel);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn descend_selection_unshadowed(&mut self, layout: LayoutId) -> bool {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            let new_sel = self.descend_to_leaf(sel);
+            if new_sel != sel {
+                self.tree.data.selection.select(&self.tree.map, new_sel);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn move_focus_unshadowed(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+    ) -> (Option<WindowId>, Vec<WindowId>) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return (None, vec![]);
+        }
+        let sel_snapshot = self.selection_of_layout(layout);
+        let Some(current_sel) = sel_snapshot else {
+            return (None, vec![]);
+        };
+        let current_leaf = self.descend_to_leaf(current_sel);
+        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
+            return (None, vec![]);
+        };
+        self.tree.data.selection.select(&self.tree.map, next_leaf);
+        let focus = self.participating_window(next_leaf);
+        // Tiled BSP windows never overlap, so only the focus target needs to be
+        // raised. Raising every visible window makes the raise manager front
+        // each app in turn (via make_key_window) before the target, which
+        // flickers the menu bar and any focus border on every focus move. The
+        // traditional engine already raises only the revealed group.
+        (focus, focus.into_iter().collect())
+    }
+
+    fn add_window_after_selection_unshadowed(&mut self, layout: LayoutId, wid: WindowId) {
+        if self.contains_window(layout, wid) {
+            return;
+        }
+        if self.layouts.get(layout).is_some() {
+            if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
+                let root = self.layouts[layout].root;
+                if let Some(leaf) = root
+                    .traverse_preorder(&self.tree.map)
+                    .filter(|node| matches!(self.kind.get(*node), Some(NodeKind::Leaf { .. })))
+                    .last()
+                {
+                    self.tree.data.selection.select(&self.tree.map, leaf);
+                }
+                self.insert_window_at_selection(layout, wid);
+                return;
+            }
+            // Try smart insertion first (with preselection support)
+            if !self.smart_insert_window(layout, wid) {
+                // Fall back to default insertion
+                self.insert_window_at_selection(layout, wid);
+            }
+        }
+    }
+
+    fn replace_window_unshadowed(&mut self, from: WindowId, to: WindowId) {
+        if self.inactive.remove(&from) {
+            self.inactive.insert(to);
+        }
+        if from == to {
+            return;
+        }
+        let layouts: Vec<_> = self.layouts.keys().collect();
+        for layout in layouts {
+            if !self.contains_window(layout, from) {
+                continue;
+            }
+            // A replacement may already be present after restore matching.
+            while self.remove_window_internal(layout, to) {}
+            let root = self.layouts[layout].root;
+            for node in root.traverse_preorder(&self.tree.map) {
+                if let Some(stack) = self.stacks.get_mut(&node) {
+                    for member in stack.iter_mut().filter(|member| **member == from) {
+                        *member = to;
+                    }
+                }
+                if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node)
+                    && *window == Some(from)
+                {
+                    *window = Some(to);
+                }
+            }
+        }
+    }
+
+    fn remove_window_unshadowed(&mut self, wid: WindowId) {
+        self.inactive.remove(&wid);
+        let layouts: Vec<_> = self.layouts.keys().collect();
+        for layout in layouts {
+            while self.remove_window_internal(layout, wid) {}
+        }
+    }
+
+    fn select_window_unshadowed(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+        if self.inactive.contains(&wid) {
+            return false;
+        }
+        let Some(node) = self.node_for_window_in_layout(layout, wid) else {
+            return false;
+        };
+        if let Some(stack) = self.stacks.get_mut(&node)
+            && let Some(index) = stack.iter().position(|member| *member == wid)
+        {
+            stack.remove(index);
+            stack.push(wid);
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node) {
+                *window = Some(wid);
+            }
+        }
+        self.tree.data.selection.select(&self.tree.map, node);
+        true
+    }
+
+    fn create_layout_unshadowed(&mut self) -> LayoutId {
         let leaf = self.make_leaf(None);
         let state = LayoutState { root: leaf };
         self.layouts.insert(state)
+    }
+}
+
+impl LayoutSystem for BspLayoutSystem {
+    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
+
+    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "set_window_participation",
+                Scope::All,
+                |this| this.set_window_participation_unshadowed(window, participates),
+                |core| core.set_participation(window, participates),
+            )
+        };
+        #[cfg(not(test))]
+        self.set_window_participation_unshadowed(window, participates)
+    }
+
+    fn create_layout(&mut self) -> LayoutId {
+        let layout = self.create_layout_unshadowed();
+        #[cfg(test)]
+        self.shadow_created(layout);
+        layout
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
@@ -1381,14 +1557,17 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.remove(layout) {
-            let ids: Vec<_> = state.root.traverse_preorder(&self.tree.map).collect();
-            for id in ids {
-                self.kind.remove(id);
-                self.stacks.remove(&id);
-            }
-            state.root.remove_root(&mut self.tree);
-        }
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "remove_layout",
+                Scope::All,
+                |this| this.remove_layout_unshadowed(layout),
+                |core| core.remove_layout(layout),
+            )
+        };
+        #[cfg(not(test))]
+        self.remove_layout_unshadowed(layout)
     }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
@@ -1597,29 +1776,31 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            if self.kind.get(sel).is_none() {
-                return false;
-            }
-            let parent_opt = sel.parent(&self.tree.map);
-            if let Some(parent) = parent_opt {
-                let new_sel = self.descend_to_leaf(parent);
-                self.tree.data.selection.select(&self.tree.map, new_sel);
-                return true;
-            }
-        }
-        false
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "ascend_selection",
+                Scope::One(layout),
+                |this| this.ascend_selection_unshadowed(layout),
+                |core| core.ascend(layout),
+            )
+        };
+        #[cfg(not(test))]
+        self.ascend_selection_unshadowed(layout)
     }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let new_sel = self.descend_to_leaf(sel);
-            if new_sel != sel {
-                self.tree.data.selection.select(&self.tree.map, new_sel);
-                return true;
-            }
-        }
-        false
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "descend_selection",
+                Scope::One(layout),
+                |this| this.descend_selection_unshadowed(layout),
+                |core| core.descend(layout),
+            )
+        };
+        #[cfg(not(test))]
+        self.descend_selection_unshadowed(layout)
     }
 
     fn move_focus(
@@ -1627,25 +1808,20 @@ impl LayoutSystem for BspLayoutSystem {
         layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
-            return (None, vec![]);
-        }
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(current_sel) = sel_snapshot else {
-            return (None, vec![]);
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "move_focus",
+                Scope::One(layout),
+                |this| this.move_focus_unshadowed(layout, direction),
+                |core| {
+                    let focus = core.move_focus(layout, core_direction(direction));
+                    (focus, focus.into_iter().collect())
+                },
+            )
         };
-        let current_leaf = self.descend_to_leaf(current_sel);
-        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
-            return (None, vec![]);
-        };
-        self.tree.data.selection.select(&self.tree.map, next_leaf);
-        let focus = self.participating_window(next_leaf);
-        // Tiled BSP windows never overlap, so only the focus target needs to be
-        // raised. Raising every visible window makes the raise manager front
-        // each app in turn (via make_key_window) before the target, which
-        // flickers the menu bar and any focus border on every focus move. The
-        // traditional engine already raises only the revealed group.
-        (focus, focus.into_iter().collect())
+        #[cfg(not(test))]
+        self.move_focus_unshadowed(layout, direction)
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -1655,66 +1831,49 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        if self.contains_window(layout, wid) {
-            return;
-        }
-        if self.layouts.get(layout).is_some() {
-            if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
-                let root = self.layouts[layout].root;
-                if let Some(leaf) = root
-                    .traverse_preorder(&self.tree.map)
-                    .filter(|node| matches!(self.kind.get(*node), Some(NodeKind::Leaf { .. })))
-                    .last()
-                {
-                    self.tree.data.selection.select(&self.tree.map, leaf);
-                }
-                self.insert_window_at_selection(layout, wid);
-                return;
-            }
-            // Try smart insertion first (with preselection support)
-            if !self.smart_insert_window(layout, wid) {
-                // Fall back to default insertion
-                self.insert_window_at_selection(layout, wid);
-            }
-        }
+        #[cfg(test)]
+        return {
+            let insertion = match self.window_insertion_point {
+                WindowInsertionPoint::EndOfTree => bsp_tree::Insertion::EndOfTree,
+                _ => bsp_tree::Insertion::AtFocus,
+            };
+            self.shadowed(
+                "add_window_after_selection",
+                Scope::One(layout),
+                |this| this.add_window_after_selection_unshadowed(layout, wid),
+                |core| core.add(layout, wid, insertion),
+            )
+        };
+        #[cfg(not(test))]
+        self.add_window_after_selection_unshadowed(layout, wid)
     }
 
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
-        if self.inactive.remove(&from) {
-            self.inactive.insert(to);
-        }
-        if from == to {
-            return;
-        }
-        let layouts: Vec<_> = self.layouts.keys().collect();
-        for layout in layouts {
-            if !self.contains_window(layout, from) {
-                continue;
-            }
-            // A replacement may already be present after restore matching.
-            while self.remove_window_internal(layout, to) {}
-            let root = self.layouts[layout].root;
-            for node in root.traverse_preorder(&self.tree.map) {
-                if let Some(stack) = self.stacks.get_mut(&node) {
-                    for member in stack.iter_mut().filter(|member| **member == from) {
-                        *member = to;
-                    }
-                }
-                if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node)
-                    && *window == Some(from)
-                {
-                    *window = Some(to);
-                }
-            }
-        }
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "replace_window",
+                Scope::All,
+                |this| this.replace_window_unshadowed(from, to),
+                |core| core.rekey(from, to),
+            )
+        };
+        #[cfg(not(test))]
+        self.replace_window_unshadowed(from, to)
     }
 
     fn remove_window(&mut self, wid: WindowId) {
-        self.inactive.remove(&wid);
-        let layouts: Vec<_> = self.layouts.keys().collect();
-        for layout in layouts {
-            while self.remove_window_internal(layout, wid) {}
-        }
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "remove_window",
+                Scope::All,
+                |this| this.remove_window_unshadowed(wid),
+                |core| core.remove_window(wid),
+            )
+        };
+        #[cfg(not(test))]
+        self.remove_window_unshadowed(wid)
     }
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
@@ -1763,23 +1922,17 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        if self.inactive.contains(&wid) {
-            return false;
-        }
-        let Some(node) = self.node_for_window_in_layout(layout, wid) else {
-            return false;
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "select_window",
+                Scope::One(layout),
+                |this| this.select_window_unshadowed(layout, wid),
+                |core| core.select_window(layout, wid),
+            )
         };
-        if let Some(stack) = self.stacks.get_mut(&node)
-            && let Some(index) = stack.iter().position(|member| *member == wid)
-        {
-            stack.remove(index);
-            stack.push(wid);
-            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node) {
-                *window = Some(wid);
-            }
-        }
-        self.tree.data.selection.select(&self.tree.map, node);
-        true
+        #[cfg(not(test))]
+        self.select_window_unshadowed(layout, wid)
     }
 
     fn on_window_resized(
@@ -2341,6 +2494,346 @@ impl LayoutSystem for BspLayoutSystem {
     }
 }
 
+/// In test builds every operation the core models runs on both this system and the core's
+/// BSP tree (`rift_core::layout::bsp_tree`), starting from this system's state converted: the
+/// answers, the trees (tags aside) and the container query (node ids aside) must agree.
+#[cfg(test)]
+impl BspLayoutSystem {
+    /// This system as the core holds it: every layout converted, the windows left out.
+    fn core_state(&self) -> bsp_tree::Layouts<LayoutId, WindowId> { self.core_state_of(Scope::All) }
+
+    /// This system as the core holds it, the layouts in `scope` converted.
+    fn core_state_of(&self, scope: Scope) -> bsp_tree::Layouts<LayoutId, WindowId> {
+        let mut core = bsp_tree::Layouts::default();
+        for window in &self.inactive {
+            core.set_participation(*window, false);
+        }
+        for (layout, state) in self.layouts.iter().filter(|(id, _)| scope.covers(*id)) {
+            let root = state.root;
+            core.adopt(layout, |tags| bsp_tree::Layout {
+                root: self.core_node(root, tags).unwrap_or_else(|problem| {
+                    panic!(
+                        "the core cannot hold this tree: {problem}\n{}",
+                        self.draw_tree(layout)
+                    )
+                }),
+            });
+        }
+        core
+    }
+
+    fn core_node(
+        &self,
+        node: NodeId,
+        tags: &mut bsp_tree::Tags,
+    ) -> Result<bsp_tree::Node<WindowId>, String> {
+        let memory = self.tree.data.selection.memory_of(node);
+        match self.kind.get(node).ok_or("a node without a kind")? {
+            NodeKind::Split { orientation, ratio } => {
+                let children: Vec<NodeId> = node.children(&self.tree.map).collect();
+                let [first, second] = children.as_slice() else {
+                    return Err(format!("a split of {} children", children.len()));
+                };
+                let memory = match memory {
+                    Some((child, false)) if child == *first => {
+                        bsp_tree::Memory::Toward(bsp_tree::Side::First)
+                    }
+                    Some((child, false)) if child == *second => {
+                        bsp_tree::Memory::Toward(bsp_tree::Side::Second)
+                    }
+                    Some((_, false)) => {
+                        return Err("a split remembering a node not its child".into());
+                    }
+                    Some((_, true)) | None => bsp_tree::Memory::Stops,
+                };
+                Ok(bsp_tree::Node::Split(Box::new(bsp_tree::Split {
+                    tag: tags.mint(),
+                    orientation: match orientation {
+                        Orientation::Horizontal => bsp_tree::Orientation::Horizontal,
+                        Orientation::Vertical => bsp_tree::Orientation::Vertical,
+                    },
+                    ratio: bsp_tree::Ratio::clamped(*ratio)
+                        .filter(|clamped| clamped.get() == *ratio)
+                        .ok_or_else(|| format!("a ratio of {ratio}"))?,
+                    memory,
+                    first: self.core_node(*first, tags)?,
+                    second: self.core_node(*second, tags)?,
+                })))
+            }
+            NodeKind::Leaf {
+                window,
+                fullscreen,
+                fullscreen_within_gaps,
+                preselected,
+            } => {
+                if memory.is_some() {
+                    return Err("a leaf with a selection memory".into());
+                }
+                let fill = match (fullscreen, fullscreen_within_gaps) {
+                    (false, false) => bsp_tree::Fill::Tiled,
+                    (true, false) => bsp_tree::Fill::Screen,
+                    (false, true) => bsp_tree::Fill::WithinGaps,
+                    (true, true) => return Err("a leaf both fullscreen and within gaps".into()),
+                };
+                let content = match (window, self.stacks.get(&node)) {
+                    (None, None) if fill == bsp_tree::Fill::Tiled => bsp_tree::Content::Empty,
+                    (None, None) => return Err(format!("an empty leaf filling {fill:?}")),
+                    (Some(window), None) => bsp_tree::Content::Window { window: *window, fill },
+                    (Some(top), Some(members)) => {
+                        let at = members
+                            .iter()
+                            .position(|member| member == top)
+                            .ok_or("a stack whose shown window is not a member")?;
+                        bsp_tree::Content::Stack {
+                            tabs: bsp_tree::Tabs {
+                                before: members[..at].to_vec(),
+                                top: *top,
+                                after: members[at + 1..].to_vec(),
+                            },
+                            fill,
+                        }
+                    }
+                    (None, Some(_)) => return Err("a stack with nothing shown".into()),
+                };
+                Ok(bsp_tree::Node::Leaf(bsp_tree::Leaf {
+                    tag: tags.mint(),
+                    content,
+                    preselect: match preselected {
+                        None => bsp_tree::Preselect::Unset,
+                        Some(direction) => bsp_tree::Preselect::Toward(core_direction(*direction)),
+                    },
+                }))
+            }
+        }
+    }
+
+    /// Runs an operation on this system (`old`) and on the core holding this system's state
+    /// (`core`), and holds them to each other.
+    fn shadowed<A: PartialEq + std::fmt::Debug>(
+        &mut self,
+        operation: &str,
+        scope: Scope,
+        old: impl FnOnce(&mut Self) -> A,
+        core: impl FnOnce(&mut bsp_tree::Layouts<LayoutId, WindowId>) -> A,
+    ) -> A {
+        let mut shadow = self.core_state_of(scope);
+        let answer = old(self);
+        let core_answer = core(&mut shadow);
+        assert_eq!(answer, core_answer, "{operation}: the core answered differently");
+        self.assert_held_as(operation, scope, &shadow);
+        answer
+    }
+
+    fn shadow_created(&self, layout: LayoutId) {
+        let mut shadow = self.core_state();
+        shadow.remove_layout(layout);
+        shadow.create(layout);
+        self.assert_held_as("create_layout", Scope::All, &shadow);
+    }
+
+    /// This system's state must be `shadow`'s: the same layouts, the same trees (tags aside),
+    /// the same windows left out, the same container query (node ids aside).
+    fn assert_held_as(
+        &self,
+        operation: &str,
+        scope: Scope,
+        shadow: &bsp_tree::Layouts<LayoutId, WindowId>,
+    ) {
+        let now = self.core_state_of(scope);
+        let ids = |layouts: &bsp_tree::Layouts<LayoutId, WindowId>| {
+            layouts.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&now),
+            ids(shadow),
+            "{operation}: the core holds other layouts"
+        );
+        let left_out =
+            |layouts: &bsp_tree::Layouts<LayoutId, WindowId>| match layouts.participation() {
+                bsp_tree::Participation::Everyone => Vec::new(),
+                bsp_tree::Participation::Except(set) => set.iter().copied().collect(),
+            };
+        assert_eq!(
+            left_out(&now),
+            left_out(shadow),
+            "{operation}: the core leaves out other windows"
+        );
+        for (id, tree) in shadow.iter() {
+            let held = now.layout(*id).expect("the same layouts");
+            assert!(
+                held.same_as(tree),
+                "{operation}: the core's tree differs\n  this system: {held:?}\n  the core:    {tree:?}"
+            );
+            let container = normalized(self.container_tree(*id));
+            let core_container = normalized(container_node(&tree.view()));
+            assert_eq!(
+                container, core_container,
+                "{operation}: the container query differs"
+            );
+        }
+    }
+}
+
+/// Which layouts an operation can change: one, or (acting on windows or participation) all.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+enum Scope {
+    One(LayoutId),
+    All,
+}
+
+#[cfg(test)]
+impl Scope {
+    fn covers(self, layout: LayoutId) -> bool {
+        match self {
+            Scope::One(one) => one == layout,
+            Scope::All => true,
+        }
+    }
+}
+
+#[cfg(test)]
+fn core_direction(direction: Direction) -> bsp_tree::Direction {
+    match direction {
+        Direction::Left => bsp_tree::Direction::Left,
+        Direction::Right => bsp_tree::Direction::Right,
+        Direction::Up => bsp_tree::Direction::Up,
+        Direction::Down => bsp_tree::Direction::Down,
+    }
+}
+
+/// The container query's node for the core's view of a BSP layout, field for field what
+/// `container_tree` reports.
+#[cfg(test)]
+fn container_node(view: &bsp_tree::View<WindowId>) -> rift_protocol::ContainerTreeNode {
+    let fullscreen = |fill: bsp_tree::Fill| match fill {
+        bsp_tree::Fill::Tiled => (false, false),
+        bsp_tree::Fill::Screen => (true, false),
+        bsp_tree::Fill::WithinGaps => (false, true),
+    };
+    match &view.kind {
+        bsp_tree::ViewKind::Split { orientation, first, second } => {
+            rift_protocol::ContainerTreeNode {
+                node_id: view.tag.get(),
+                node_type: rift_protocol::ContainerNodeType::Container,
+                frame: Default::default(),
+                layout_kind: Some(rift_protocol::LayoutKind::from(match orientation {
+                    bsp_tree::Orientation::Horizontal => Orientation::Horizontal,
+                    bsp_tree::Orientation::Vertical => Orientation::Vertical,
+                })),
+                weight: view.weight,
+                window_id: None,
+                is_selected: view.selected,
+                is_fullscreen: false,
+                is_fullscreen_within_gaps: false,
+                role: None,
+                pending_split: None,
+                children: vec![container_node(first), container_node(second)],
+            }
+        }
+        bsp_tree::ViewKind::Leaf { content, preselect } => {
+            let (
+                node_type,
+                layout_kind,
+                window_id,
+                (is_fullscreen, is_fullscreen_within_gaps),
+                children,
+            ) = match content {
+                bsp_tree::Content::Empty => (
+                    rift_protocol::ContainerNodeType::Placeholder,
+                    None,
+                    None,
+                    (false, false),
+                    Vec::new(),
+                ),
+                bsp_tree::Content::Window { window, fill } => (
+                    rift_protocol::ContainerNodeType::Window,
+                    None,
+                    Some((*window).into()),
+                    fullscreen(*fill),
+                    Vec::new(),
+                ),
+                bsp_tree::Content::Stack { tabs, fill } => {
+                    let (screen, gaps) = fullscreen(*fill);
+                    let members = tabs
+                        .members()
+                        .map(|member| rift_protocol::ContainerTreeNode {
+                            node_id: (u64::from(member.pid as u32) << 32)
+                                | u64::from(member.idx.get()),
+                            node_type: rift_protocol::ContainerNodeType::Window,
+                            frame: Default::default(),
+                            layout_kind: None,
+                            weight: None,
+                            window_id: Some(member.into()),
+                            is_selected: view.selected && tabs.top == member,
+                            is_fullscreen: screen,
+                            is_fullscreen_within_gaps: gaps,
+                            role: None,
+                            pending_split: None,
+                            children: Vec::new(),
+                        })
+                        .collect();
+                    (
+                        rift_protocol::ContainerNodeType::Container,
+                        Some(rift_protocol::LayoutKind::HorizontalStack),
+                        None,
+                        (screen, gaps),
+                        members,
+                    )
+                }
+            };
+            rift_protocol::ContainerTreeNode {
+                node_id: view.tag.get(),
+                node_type,
+                frame: Default::default(),
+                layout_kind,
+                weight: view.weight,
+                window_id,
+                is_selected: view.selected,
+                is_fullscreen,
+                is_fullscreen_within_gaps,
+                role: None,
+                pending_split: match preselect {
+                    bsp_tree::Preselect::Unset => None,
+                    bsp_tree::Preselect::Toward(direction) => Some(
+                        match direction {
+                            bsp_tree::Direction::Left => Direction::Left,
+                            bsp_tree::Direction::Right => Direction::Right,
+                            bsp_tree::Direction::Up => Direction::Up,
+                            bsp_tree::Direction::Down => Direction::Down,
+                        }
+                        .into(),
+                    ),
+                },
+                children,
+            }
+        }
+    }
+}
+
+/// The container query with the `node_id` of every split and leaf replaced by the order of its
+/// first appearance (depth first): two trees then serialise to the same bytes exactly when they
+/// agree in everything but those ids' values. A stack member's id is its window's (pid and
+/// index), so it is kept as it is.
+#[cfg(test)]
+fn normalized(mut node: rift_protocol::ContainerTreeNode) -> rift_protocol::ContainerTreeNode {
+    fn walk(node: &mut rift_protocol::ContainerTreeNode, seen: &mut Vec<u64>) {
+        let index = seen.iter().position(|id| *id == node.node_id).unwrap_or_else(|| {
+            seen.push(node.node_id);
+            seen.len() - 1
+        });
+        node.node_id = index as u64;
+        // A stack's members keep their windows' ids.
+        if node.layout_kind != Some(rift_protocol::LayoutKind::HorizontalStack) {
+            for child in &mut node.children {
+                walk(child, seen);
+            }
+        }
+    }
+    walk(&mut node, &mut Vec::new());
+    node
+}
+
 /// The core's BSP tree (`rift_core::layout::bsp_tree`) held to this system: random small steps
 /// applied to both, and everything a caller can observe compared after each one.
 #[cfg(test)]
@@ -2613,5 +3106,54 @@ mod core_tree_differential {
                 }
             }
         }
+    }
+
+    /// The owner's scripts read `rift-cli query layout` with these patterns (copied from
+    /// `apply-display-layouts.sh` and `swap-rotate.sh`): on the core's container tree they
+    /// must find what they find on this system's, field order, adjacency and tree order included.
+    #[test]
+    fn the_owners_script_patterns_read_the_cores_container_tree_as_this_systems() {
+        let kind = regex::Regex::new(
+            r#""layout_kind":"[a-z_]*","node_id":[0-9]*,"node_type":"container""#,
+        )
+        .unwrap();
+        let ids = regex::Regex::new(r#""window_id":\{"idx":[0-9]*,"pid":[0-9]*\}"#).unwrap();
+        let mut old = BspLayoutSystem::default();
+        let layout = old.create_layout();
+        for i in 1..=5 {
+            old.add_window_after_selection(layout, w(i));
+        }
+        old.join_selection_with_direction(layout, Direction::Left);
+        let core = old.core_state();
+        let tree = core.layout(layout).expect("the layout");
+        assert!(
+            tree.stack_members(w(5)).len() > 1,
+            "a stack is in the tree: {}",
+            old.draw_tree(layout)
+        );
+        let printed = |node: &rift_protocol::ContainerTreeNode| {
+            serde_json::to_value(node).unwrap().to_string()
+        };
+        let (old_json, core_json) = (
+            printed(&old.container_tree(layout)),
+            printed(&container_node(&tree.view())),
+        );
+        // apply-display-layouts.sh: the first container's kind (`head -1 | cut -d'"' -f4`).
+        let first_kind =
+            |json: &str| kind.find(json).map(|m| m.as_str().split('"').nth(3).unwrap().to_string());
+        assert!(
+            first_kind(&core_json).is_some(),
+            "the pattern finds a container: {core_json}"
+        );
+        assert_eq!(first_kind(&core_json), first_kind(&old_json));
+        assert_eq!(
+            kind.find_iter(&core_json).count(),
+            kind.find_iter(&old_json).count()
+        );
+        // swap-rotate.sh: the windows in the order the tree is written out.
+        let order =
+            |json: &str| ids.find_iter(json).map(|m| m.as_str().to_string()).collect::<Vec<_>>();
+        assert_eq!(order(&core_json).len(), 5);
+        assert_eq!(order(&core_json), order(&old_json));
     }
 }
