@@ -210,3 +210,39 @@ fn the_roc_core_reapplies_rules_on_a_title_change_as_the_rust_core_does() {
         (wire::encode_title_change(question), rust)
     });
 }
+
+#[test]
+fn the_roc_core_admits_windows_as_the_rust_core_does_for_every_combination_of_facts() {
+    use rift_core::lifecycle::{AdmissionFacts, AxKind, Manageability, Minimize, NativeKind, Rule};
+    let before = AllocationCount::now();
+    let mut checked = 0;
+    for manageability in [Manageability::Manageable, Manageability::Unmanageable] {
+        for rule in [Rule::NoRule, Rule::Manage, Rule::Ignore] {
+            for ax in [AxKind::Ordinary, AxKind::DialogWindow, AxKind::Transient] {
+                for native in [NativeKind::Ordinary, NativeKind::Transient] {
+                    for minimize in [Minimize::Shown, Minimize::Minimized] {
+                        let facts = AdmissionFacts {
+                            manageability,
+                            rule,
+                            ax,
+                            native,
+                            minimize,
+                        };
+                        let rust =
+                            wire::encode_window_admission(rift_core::lifecycle::admission(facts));
+                        assert_eq!(
+                            tile_words(&wire::encode_admission_facts(facts)),
+                            Ok(rust),
+                            "{facts:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 72);
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("lifecycle: all {checked} admission fact combinations answered identically");
+}

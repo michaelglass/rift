@@ -1095,6 +1095,54 @@ pub fn encode_desktop(question: focus::plain::Desktop) -> Vec<u64> {
     words.0
 }
 
+/// Tag 24, [`lifecycle::AdmissionFacts`]: manageability (0 manageable, 1 not), the rule (0
+/// none, 1 manage, 2 ignore), the AX kind (0 ordinary, 1 dialog window, 2 transient), the
+/// native kind (0 ordinary, 1 transient), minimized (0 shown, 1 minimized).
+pub fn encode_admission_facts(facts: lifecycle::AdmissionFacts) -> Vec<u64> {
+    use lifecycle::{AxKind, Manageability, Minimize, NativeKind, Rule};
+    let mut words = Words::default();
+    words.word(24);
+    words.word(match facts.manageability {
+        Manageability::Manageable => 0,
+        Manageability::Unmanageable => 1,
+    });
+    words.word(match facts.rule {
+        Rule::NoRule => 0,
+        Rule::Manage => 1,
+        Rule::Ignore => 2,
+    });
+    words.word(match facts.ax {
+        AxKind::Ordinary => 0,
+        AxKind::DialogWindow => 1,
+        AxKind::Transient => 2,
+    });
+    words.word(match facts.native {
+        NativeKind::Ordinary => 0,
+        NativeKind::Transient => 1,
+    });
+    words.word(match facts.minimize {
+        Minimize::Shown => 0,
+        Minimize::Minimized => 1,
+    });
+    words.0
+}
+
+/// An admission as words: 0 admitted, or 1 and the veto (0 native transient, 1 minimized, 2 AX
+/// transient, 3 rule ignores, 4 unmanageable).
+pub fn encode_window_admission(answer: lifecycle::Admission) -> Vec<u64> {
+    use lifecycle::{Admission, Veto};
+    match answer {
+        Admission::Admitted => vec![0],
+        Admission::Vetoed(why) => vec![1, match why {
+            Veto::NativeTransient => 0,
+            Veto::Minimized => 1,
+            Veto::AxTransient => 2,
+            Veto::RuleIgnores => 3,
+            Veto::Unmanageable => 4,
+        }],
+    }
+}
+
 /// One step of a trace (its event, then its effects), appended to `trace`.
 pub fn record_step(trace: &mut Vec<u64>, event: Event<Plain>, effects: Vec<Effect<Plain>>) {
     trace.extend(encode_event(event));

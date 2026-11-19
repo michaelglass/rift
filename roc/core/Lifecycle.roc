@@ -182,6 +182,82 @@ Lifecycle := [].{
 			False
 		}
 
+	## Whether rift manages a window, and if not the first veto that applies: 0 admitted, or 1
+	## and the veto (0 native transient, 1 minimized, 2 AX transient, 3 rule ignores, 4
+	## unmanageable).
+	admission : { manageable : Bool, rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native_transient : Bool, minimized : Bool } -> List(U64)
+	admission = |facts|
+		if facts.native_transient {
+			[1, 0]
+		} else if facts.minimized {
+			[1, 1]
+		} else {
+			ax_vetoes =
+				match facts.ax {
+					Transient => True
+					DialogWindow =>
+						match facts.rule {
+							Manage => False
+							NoRule => True
+							Ignore => True
+						}
+					Ordinary => False
+				}
+			if ax_vetoes {
+				[1, 2]
+			} else {
+				match facts.rule {
+					Ignore => [1, 3]
+					Manage => [0]
+					NoRule => if (facts.manageable) [0] else [1, 4]
+				}
+			}
+		}
+
+	## Tag 24.
+	admission_words : Words -> Try(List(U64), [Malformed])
+	admission_words = |c0| {
+		(manageability, c1) = take(c0)?
+		(rule_word, c2) = take(c1)?
+		(ax_word, c3) = take(c2)?
+		(native_word, c4) = take(c3)?
+		(minimize_word, c5) = take(c4)?
+		finished(c5)?
+		manageable =
+			match manageability {
+				0 => Ok(True)
+				1 => Ok(False)
+				_ => Err(Malformed)
+			}?
+		rule =
+			match rule_word {
+				0 => Ok(NoRule)
+				1 => Ok(Manage)
+				2 => Ok(Ignore)
+				_ => Err(Malformed)
+			}?
+		ax =
+			match ax_word {
+				0 => Ok(Ordinary)
+				1 => Ok(DialogWindow)
+				2 => Ok(Transient)
+				_ => Err(Malformed)
+			}?
+		native_transient =
+			match native_word {
+				0 => Ok(False)
+				1 => Ok(True)
+				_ => Err(Malformed)
+			}?
+		minimized =
+			match minimize_word {
+				0 => Ok(False)
+				1 => Ok(True)
+				_ => Err(Malformed)
+			}?
+		Ok(admission({ manageable, rule, ax, native_transient, minimized }))
+	}
+
 	# The wire.
 
 	take_space : Words -> Taken(MaybeSpace)
