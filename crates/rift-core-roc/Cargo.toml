@@ -41,6 +41,10 @@ name = "focus"
 required-features = ["roc"]
 
 [[test]]
+name = "workspaces"
+required-features = ["roc"]
+
+[[test]]
 name = "measure"
 required-features = ["roc"]
 

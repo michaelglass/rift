@@ -127,6 +127,92 @@ pub fn previous<K: Copy, S: Copy + PartialEq>(
     eligible(mode, context, on).then_some((id, on))
 }
 
+/// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
+pub mod plain {
+    use super::{Context, Selector, SkipEmpty, Step, Wrapping};
+    use crate::lifecycle::WorkspaceMode;
+
+    /// [`super::step`]: the workspaces with windows.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct StepQuestion {
+        pub mode: WorkspaceMode,
+        pub catalog: Vec<(u64, u64)>,
+        pub space: u64,
+        pub visible: Vec<u64>,
+        pub current: u64,
+        pub way: Step,
+        pub skip_empty: SkipEmpty,
+        pub wrapping: Wrapping,
+        pub with_windows: Vec<u64>,
+    }
+
+    impl StepQuestion {
+        pub fn answer(&self) -> Option<u64> {
+            super::step(
+                self.mode,
+                &self.catalog,
+                Context {
+                    space: self.space,
+                    visible: &self.visible,
+                },
+                self.current,
+                self.way,
+                self.skip_empty,
+                self.wrapping,
+                |id| self.with_windows.contains(&id),
+            )
+        }
+    }
+
+    /// [`super::resolve`].
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ResolveQuestion {
+        pub mode: WorkspaceMode,
+        pub scope: Vec<(u64, u64, u64)>,
+        pub space: u64,
+        pub visible: Vec<u64>,
+        pub selector: Selector<u64>,
+    }
+
+    impl ResolveQuestion {
+        pub fn answer(&self) -> Option<(u64, u64)> {
+            super::resolve(
+                self.mode,
+                &self.scope,
+                Context {
+                    space: self.space,
+                    visible: &self.visible,
+                },
+                &self.selector,
+            )
+        }
+    }
+
+    /// [`super::previous`]: the Space the history's workspace is on, if it still exists.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct PreviousQuestion {
+        pub mode: WorkspaceMode,
+        pub space: u64,
+        pub visible: Vec<u64>,
+        pub last: Option<u64>,
+        pub on: Option<u64>,
+    }
+
+    impl PreviousQuestion {
+        pub fn answer(&self) -> Option<(u64, u64)> {
+            super::previous(
+                self.mode,
+                Context {
+                    space: self.space,
+                    visible: &self.visible,
+                },
+                self.last,
+                |_| self.on,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use WorkspaceMode::{Global, PerDisplay};

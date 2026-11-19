@@ -29,6 +29,7 @@ use crate::reconciler::{Answer, Note, Reply, Want, Write};
 use crate::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
 };
+use crate::workspaces;
 
 /// What a word stream that is not a well-formed event or effect list breaks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1414,6 +1415,96 @@ impl Words {
                 self.word(veto_word(why));
             }
         }
+    }
+}
+
+/// Tag 29, [`workspaces::plain::StepQuestion`]: mode (0 per display, 1 global), the catalog
+/// (id, Space), the acting Space, the visible Spaces, the current workspace, the way (0 next, 1
+/// previous), skipping (0 keep, 1 skip empty), wrapping (0 wrap, 1 stop), the workspaces with
+/// windows.
+pub fn encode_step(question: workspaces::plain::StepQuestion) -> Vec<u64> {
+    use workspaces::{SkipEmpty, Step, Wrapping};
+    let mut words = Words::default();
+    words.word(29);
+    words.mode(question.mode);
+    words.list(question.catalog, |words, (id, space)| {
+        words.word(id);
+        words.word(space);
+    });
+    words.word(question.space);
+    words.list(question.visible, Words::word);
+    words.word(question.current);
+    words.word(match question.way {
+        Step::Next => 0,
+        Step::Previous => 1,
+    });
+    words.word(match question.skip_empty {
+        SkipEmpty::Keep => 0,
+        SkipEmpty::Skip => 1,
+    });
+    words.word(match question.wrapping {
+        Wrapping::Wrap => 0,
+        Wrapping::Stop => 1,
+    });
+    words.list(question.with_windows, Words::word);
+    words.0
+}
+
+/// Tag 30, [`workspaces::plain::ResolveQuestion`]: mode, the scope (id, Space, name), the acting
+/// Space, the visible Spaces, the selector (0 an index, then it; 1 a name, then it).
+pub fn encode_resolve(question: workspaces::plain::ResolveQuestion) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(30);
+    words.mode(question.mode);
+    words.list(question.scope, |words, (id, space, name)| {
+        words.word(id);
+        words.word(space);
+        words.word(name);
+    });
+    words.word(question.space);
+    words.list(question.visible, Words::word);
+    match question.selector {
+        workspaces::Selector::Index(index) => {
+            words.word(0);
+            words.word(index as u64);
+        }
+        workspaces::Selector::Name(name) => {
+            words.word(1);
+            words.word(name);
+        }
+    }
+    words.0
+}
+
+/// Tag 31, [`workspaces::plain::PreviousQuestion`]: mode, the acting Space, the visible Spaces,
+/// the history's workspace and the Space it is on (options).
+pub fn encode_previous(question: workspaces::plain::PreviousQuestion) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(31);
+    words.mode(question.mode);
+    words.word(question.space);
+    words.list(question.visible, Words::word);
+    words.option(question.last, Words::word);
+    words.option(question.on, Words::word);
+    words.0
+}
+
+/// A workspace target, as an option of (id, Space).
+pub fn encode_target(answer: Option<(u64, u64)>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.option(answer, |words, (id, space)| {
+        words.word(id);
+        words.word(space);
+    });
+    words.0
+}
+
+impl Words {
+    fn mode(&mut self, mode: lifecycle::WorkspaceMode) {
+        self.word(match mode {
+            lifecycle::WorkspaceMode::PerDisplay => 0,
+            lifecycle::WorkspaceMode::Global => 1,
+        });
     }
 }
 
