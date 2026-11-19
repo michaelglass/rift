@@ -234,8 +234,8 @@ wire encode and decode.
   an adjacent stack joins that stack (the lead's ruling), at the end it came from and still
   selected. Upstream's `joining_into_existing_stack_keeps_it_stacked` passed only through the
   duplicate add; it is rewritten without it (ignored in the first commit, un-ignored by the
-  fix). Removing either fix fails its test. No more traditional work until #688 lands; the issue
-  draft is `developer-docs/rift/issues/traditional-join-into-stack.md`. Still parked off roc-2:
+  fix). Removing either fix fails its test. No more traditional work until #688 lands; the bug is
+  written up as an upstream issue draft. Still parked off roc-2:
   the first operations with an operation-level shadow (change mnzktyzo; wxsqyrxs is now
   superseded by the two commits). To apply on resuming: the placeholder named in
   the type (`Placeholder` with its weight, or `Holding(Children)`), not `Option<Children>`; the
