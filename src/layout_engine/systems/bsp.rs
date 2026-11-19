@@ -1056,6 +1056,23 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_layout_parses_into_the_cores_tree_or_says_why_not() {
+        let (system, layout) = tiled(&[1, 2, 3]);
+        let saved = ron::to_string(&system).unwrap();
+        let restored: BspLayoutSystem = ron::from_str(&saved).unwrap();
+        let core = restored.core_layouts().expect("a saved layout parses");
+        let projection = core.projection(layout).expect("the layout");
+        assert_eq!(projection.windows, vec![w(1), w(2), w(3)]);
+        assert_eq!(projection.selected_window, restored.selected_window(layout));
+        assert_eq!(core.layout(layout).unwrap().draw(), restored.draw_tree(layout));
+        // A stack on a leaf showing nothing: refused, not a panic mid-restore.
+        let (mut broken, layout) = tiled(&[]);
+        let root = broken.layouts[layout].root;
+        broken.stacks.insert(root, vec![w(1)]);
+        assert_eq!(broken.core_layouts().err(), Some(OldTree::StackShowsNothing));
+    }
+
+    #[test]
     fn insertion_alternates_splits_and_navigation_follows_orientation() {
         let (mut system, layout) = tiled(&[1, 2]);
         assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
@@ -2840,6 +2857,141 @@ impl LayoutSystem for BspLayoutSystem {
     }
 }
 
+/// A tree the core cannot hold, as this system (or a saved layout) has it.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum OldTree {
+    NodeWithoutKind,
+    /// A split of other than two children.
+    SplitOf(usize),
+    /// A split whose remembered child is not one of its children.
+    SplitRemembersAStranger,
+    /// A split ratio outside 0.05..=0.95, or not a number.
+    Ratio(f32),
+    /// A leaf with a selection memory (only splits remember).
+    LeafWithMemory,
+    /// A leaf flagged both fullscreen and fullscreen within gaps.
+    BothFullscreens,
+    /// An empty leaf with a fill.
+    EmptyFilled(bsp_tree::Fill),
+    /// A stack whose shown window is not one of its members.
+    StackShowsAStranger,
+    /// A stack on a leaf showing no window.
+    StackShowsNothing,
+}
+
+/// This system's trees parsed into the core's: the boundary where a saved layout (rift's
+/// NodeId form) becomes the core's state. (Test builds only until the core answers.)
+#[cfg(test)]
+impl BspLayoutSystem {
+    /// Every layout as the core holds it, and the windows left out; or why one cannot be held.
+    pub(crate) fn core_layouts(&self) -> Result<bsp_tree::Layouts<LayoutId, WindowId>, OldTree> {
+        let mut core = bsp_tree::Layouts::default();
+        for window in &self.inactive {
+            core.set_participation(*window, false);
+        }
+        for (layout, state) in &self.layouts {
+            let mut failed = None;
+            core.adopt(layout, |tags| match self.core_node(state.root, tags) {
+                Ok(root) => bsp_tree::Layout { root },
+                Err(problem) => {
+                    failed = Some(problem);
+                    bsp_tree::Layout::new(tags)
+                }
+            });
+            if let Some(problem) = failed {
+                return Err(problem);
+            }
+        }
+        Ok(core)
+    }
+
+    fn core_node(
+        &self,
+        node: NodeId,
+        tags: &mut bsp_tree::Tags,
+    ) -> Result<bsp_tree::Node<WindowId>, OldTree> {
+        let memory = self.tree.data.selection.memory_of(node);
+        match self.kind.get(node).ok_or(OldTree::NodeWithoutKind)? {
+            NodeKind::Split { orientation, ratio } => {
+                let children: Vec<NodeId> = node.children(&self.tree.map).collect();
+                let [first, second] = children.as_slice() else {
+                    return Err(OldTree::SplitOf(children.len()));
+                };
+                let memory = match memory {
+                    Some((child, false)) if child == *first => {
+                        bsp_tree::Memory::Toward(bsp_tree::Side::First)
+                    }
+                    Some((child, false)) if child == *second => {
+                        bsp_tree::Memory::Toward(bsp_tree::Side::Second)
+                    }
+                    Some((_, false)) => {
+                        return Err(OldTree::SplitRemembersAStranger);
+                    }
+                    Some((_, true)) | None => bsp_tree::Memory::Stops,
+                };
+                Ok(bsp_tree::Node::Split(Box::new(bsp_tree::Split {
+                    tag: tags.mint(),
+                    orientation: match orientation {
+                        Orientation::Horizontal => bsp_tree::Orientation::Horizontal,
+                        Orientation::Vertical => bsp_tree::Orientation::Vertical,
+                    },
+                    ratio: bsp_tree::Ratio::clamped(*ratio)
+                        .filter(|clamped| clamped.get() == *ratio)
+                        .ok_or(OldTree::Ratio(*ratio))?,
+                    memory,
+                    first: self.core_node(*first, tags)?,
+                    second: self.core_node(*second, tags)?,
+                })))
+            }
+            NodeKind::Leaf {
+                window,
+                fullscreen,
+                fullscreen_within_gaps,
+                preselected,
+            } => {
+                if memory.is_some() {
+                    return Err(OldTree::LeafWithMemory);
+                }
+                let fill = match (fullscreen, fullscreen_within_gaps) {
+                    (false, false) => bsp_tree::Fill::Tiled,
+                    (true, false) => bsp_tree::Fill::Screen,
+                    (false, true) => bsp_tree::Fill::WithinGaps,
+                    (true, true) => return Err(OldTree::BothFullscreens),
+                };
+                let content = match (window, self.stacks.get(&node)) {
+                    (None, None) if fill == bsp_tree::Fill::Tiled => bsp_tree::Content::Empty,
+                    (None, None) => return Err(OldTree::EmptyFilled(fill)),
+                    (Some(window), None) => bsp_tree::Content::Window { window: *window, fill },
+                    (Some(top), Some(members)) => {
+                        let at = members
+                            .iter()
+                            .position(|member| member == top)
+                            .ok_or(OldTree::StackShowsAStranger)?;
+                        bsp_tree::Content::Stack {
+                            tabs: bsp_tree::Tabs {
+                                before: members[..at].to_vec(),
+                                top: *top,
+                                after: members[at + 1..].to_vec(),
+                            },
+                            fill,
+                        }
+                    }
+                    (None, Some(_)) => return Err(OldTree::StackShowsNothing),
+                };
+                Ok(bsp_tree::Node::Leaf(bsp_tree::Leaf {
+                    tag: tags.mint(),
+                    content,
+                    preselect: match preselected {
+                        None => bsp_tree::Preselect::Unset,
+                        Some(direction) => bsp_tree::Preselect::Toward(core_direction(*direction)),
+                    },
+                }))
+            }
+        }
+    }
+}
+
 /// In test builds every operation the core models runs on both this system and the core's
 /// BSP tree (`rift_core::layout::bsp_tree`), starting from this system's state converted: the
 /// answers, the trees (tags aside) and the container query (node ids aside) must agree.
@@ -2859,98 +3011,13 @@ impl BspLayoutSystem {
             core.adopt(layout, |tags| bsp_tree::Layout {
                 root: self.core_node(root, tags).unwrap_or_else(|problem| {
                     panic!(
-                        "the core cannot hold this tree: {problem}\n{}",
+                        "the core cannot hold this tree: {problem:?}\n{}",
                         self.draw_tree(layout)
                     )
                 }),
             });
         }
         core
-    }
-
-    fn core_node(
-        &self,
-        node: NodeId,
-        tags: &mut bsp_tree::Tags,
-    ) -> Result<bsp_tree::Node<WindowId>, String> {
-        let memory = self.tree.data.selection.memory_of(node);
-        match self.kind.get(node).ok_or("a node without a kind")? {
-            NodeKind::Split { orientation, ratio } => {
-                let children: Vec<NodeId> = node.children(&self.tree.map).collect();
-                let [first, second] = children.as_slice() else {
-                    return Err(format!("a split of {} children", children.len()));
-                };
-                let memory = match memory {
-                    Some((child, false)) if child == *first => {
-                        bsp_tree::Memory::Toward(bsp_tree::Side::First)
-                    }
-                    Some((child, false)) if child == *second => {
-                        bsp_tree::Memory::Toward(bsp_tree::Side::Second)
-                    }
-                    Some((_, false)) => {
-                        return Err("a split remembering a node not its child".into());
-                    }
-                    Some((_, true)) | None => bsp_tree::Memory::Stops,
-                };
-                Ok(bsp_tree::Node::Split(Box::new(bsp_tree::Split {
-                    tag: tags.mint(),
-                    orientation: match orientation {
-                        Orientation::Horizontal => bsp_tree::Orientation::Horizontal,
-                        Orientation::Vertical => bsp_tree::Orientation::Vertical,
-                    },
-                    ratio: bsp_tree::Ratio::clamped(*ratio)
-                        .filter(|clamped| clamped.get() == *ratio)
-                        .ok_or_else(|| format!("a ratio of {ratio}"))?,
-                    memory,
-                    first: self.core_node(*first, tags)?,
-                    second: self.core_node(*second, tags)?,
-                })))
-            }
-            NodeKind::Leaf {
-                window,
-                fullscreen,
-                fullscreen_within_gaps,
-                preselected,
-            } => {
-                if memory.is_some() {
-                    return Err("a leaf with a selection memory".into());
-                }
-                let fill = match (fullscreen, fullscreen_within_gaps) {
-                    (false, false) => bsp_tree::Fill::Tiled,
-                    (true, false) => bsp_tree::Fill::Screen,
-                    (false, true) => bsp_tree::Fill::WithinGaps,
-                    (true, true) => return Err("a leaf both fullscreen and within gaps".into()),
-                };
-                let content = match (window, self.stacks.get(&node)) {
-                    (None, None) if fill == bsp_tree::Fill::Tiled => bsp_tree::Content::Empty,
-                    (None, None) => return Err(format!("an empty leaf filling {fill:?}")),
-                    (Some(window), None) => bsp_tree::Content::Window { window: *window, fill },
-                    (Some(top), Some(members)) => {
-                        let at = members
-                            .iter()
-                            .position(|member| member == top)
-                            .ok_or("a stack whose shown window is not a member")?;
-                        bsp_tree::Content::Stack {
-                            tabs: bsp_tree::Tabs {
-                                before: members[..at].to_vec(),
-                                top: *top,
-                                after: members[at + 1..].to_vec(),
-                            },
-                            fill,
-                        }
-                    }
-                    (None, Some(_)) => return Err("a stack with nothing shown".into()),
-                };
-                Ok(bsp_tree::Node::Leaf(bsp_tree::Leaf {
-                    tag: tags.mint(),
-                    content,
-                    preselect: match preselected {
-                        None => bsp_tree::Preselect::Unset,
-                        Some(direction) => bsp_tree::Preselect::Toward(core_direction(*direction)),
-                    },
-                }))
-            }
-        }
     }
 
     /// Runs an operation on this system (`old`) and on the core holding this system's state
