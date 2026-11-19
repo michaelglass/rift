@@ -59,6 +59,7 @@ conflict; take the line in order unless the lead says otherwise.
 | 3fb35b51 | Rust | W1: workspace command decisions in `rift_core::workspaces` |
 | a9b59c3c | Roc | W1 mirror, tags 29–31 |
 | da583e7f | Rust | W3: workspaces core shadow + `workspace-divergence:` tripwire |
+| cce4745b | Roc + core refactor | `Topology::step` mirror, tag 32 |
 
 Play-line tripwires (debug, target `rift_wm::actor::reactor`): `lifecycle-divergence:` (from
 L2), `workspace-divergence:` (from W3), `workspace-activation:` (W2b runtime drop),
@@ -68,9 +69,13 @@ ship.
 
 ### Open items
 
-1. **W3, window ownership.** `Ownership = Unassigned | Assigned(workspace) | Claimed(claim)` is
-   on the window record (L5) and not yet in the workspaces shadow.
-2. **`Topology::step` has no Roc mirror** (W3's new core logic).
+1. **W3b, window ownership.** `Ownership = Unassigned | Assigned(workspace) | Claimed(claim)` is
+   on the window record (L5) and not yet in a core shadow. Ruled (lead): a separate
+   `rift_core::workspaces::Ownerships`, held by the window store beside its lifecycle shadow,
+   told every ownership write through one helper; joined to `Topology` at W4.
+2. **W4 obligation.** While ownership and the catalog are separate values, a window assigned
+   to a workspace that no longer exists is not ruled out by the types. When W4 joins them, a
+   workspace's removal must reassign or unassign its windows in the same step.
 3. **W5 fuzzer gap.** No fuzzer step reaches a DisplayDeparture transfer: in the test
    reactor's global-mode setup a departure moves no workspace. Find the snapshot that drives
    `plan_workspace_placements` to one, make a fuzzer step reach it, and re-measure activation
@@ -81,10 +86,10 @@ ship.
 
 ### Next steps
 
-(a) The Roc mirror of `Topology::step` (a model-free tag; exhaustive or 200k random
-differential; a planted bug proven caught). Then (b) W3b: window ownership in the workspaces
-shadow (the window store tells the core each ownership change; the tripwire compares). Send the
-lead a short plan before (b).
+(a) done: the Roc mirror of `Topology::step` (tag 32, cce4745b). Next, (b) W3b: window
+ownership in a core shadow held by the window store (each ownership change told to the core;
+the `workspace-divergence:` tripwire compares, and flags an ownership naming a workspace the
+topology lacks), then its Roc mirror.
 
 ### Rulings that bind (the lead's and the owner's)
 
@@ -238,7 +243,8 @@ counts only under the `respect_min_size` app rule).
   the window to focus, hidden focus, following an activation, the fallbacks), tags 17 to 23.
   Held to the Rust by `tests/focus.rs`; not on rift's path.
 - `roc/core/Workspaces.roc`: the workspace decisions (`rift_core::workspaces`: reachability,
-  stepping, selectors, navigation history), tags 29 to 31. Held to the Rust by
+  stepping, selectors, navigation history), tags 29 to 31, and the topology's step (the
+  topology an empty one becomes after a run of events), tag 32. Held to the Rust by
   `tests/workspaces.rs`; not on rift's path.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
