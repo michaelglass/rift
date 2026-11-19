@@ -577,6 +577,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
             window_title: title.as_deref(),
             ax_role: None,
             ax_subrole: None,
+            window_tags: None,
         },
         false,
     );
@@ -932,12 +933,16 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let report = restore_on(&mut engine, &mut store, &master, displays, c, source, &[c, b]);
     assert_eq!(report.unwrap().moved, []);
     assert_eq!(tree(&engine, on_new), [w1]);
-    let master = session(&shared, &[(a, "x", &[w1]), (b, "y", &[w3])]);
-    let (mut engine, mut store) = fresh(&shared, &[(a, "x"), (b, "y")]);
+    let shared_three = VirtualWorkspaceSettings {
+        default_workspace_count: 3,
+        ..shared.clone()
+    };
+    let master = session(&shared_three, &[(a, "x", &[w1]), (b, "y", &[w3])]);
+    let (mut engine, mut store) = fresh(&shared_three, &[(a, "x"), (b, "y")]);
     let (first, second) = (ws(&engine, a, 0), ws(&engine, b, 0));
     engine
         .workspaces
-        .transfer_workspace(second, a, None, WorkspaceTransferReason::Explicit);
+        .transfer_workspace(first, b, None, WorkspaceTransferReason::Explicit);
     open(&mut engine, &mut store, first, w1);
     open(&mut engine, &mut store, second, w3);
     let report = restore_on(&mut engine, &mut store, &master, displays, a, source, &[a, b]);
@@ -1099,6 +1104,34 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     [w1, w2].iter().for_each(|w| open(&mut engine, &mut store, id, *w));
     engine.transfer_persistent_window_identity(w1, win(70, 1));
     assert_eq!(tree(&engine, id), [win(70, 1), w2]);
+}
+
+#[test]
+fn single_display_restore_keeps_the_surviving_desktops_catalog() {
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 2,
+        workspace_names: vec!["1".into(), "2".into()],
+        ..Default::default()
+    };
+    let (old, current) = (SpaceId::new(801), SpaceId::new(802));
+    for exposed in [true, false] {
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
+        engine.workspaces.ensure_space_initialized(old);
+        if exposed {
+            engine.update_space_display(old, Some("display".into()));
+        }
+        engine.update_space_display(current, Some("display".into()));
+        let expected = engine.workspaces.workspace_ids(current);
+        let saved = engine.serialize_to_string(&WindowStore::default());
+        let (mut engine, mut store) = boot(&settings, &saved);
+        resolve(&mut engine, &mut store, &[(current, "display")], &[(
+            "display",
+            &[current],
+        )]);
+        assert_eq!(engine.workspaces.workspace_ids(current), expected);
+    }
 }
 
 #[test]

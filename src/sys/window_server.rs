@@ -414,6 +414,14 @@ pub fn mission_control_dock_overlay_visible() -> bool {
         })
 }
 
+/// Read tags without treating a failed query as an empty mask.
+pub fn window_tags(id: WindowServerId) -> Option<u64> {
+    let query = WindowIterator::new(&[id])?;
+    (query.count() == 1)
+        .then(|| query.advance().map(|window| window.tags()))
+        .flatten()
+}
+
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     let query = WindowIterator::new(&[id])?;
     if query.count() == 1 {
@@ -634,7 +642,9 @@ pub(crate) fn get_window_with_transient(id: WindowServerId) -> Option<(WindowSer
 fn native_window_is_transient(tags: SLSWindowTags, parent: u32) -> bool {
     !tags.contains(SLSWindowTags::IGNORE_FOR_EVENTS)
         && (tags.contains(SLSWindowTags::MODAL)
-            || (parent != 0 && tags.contains(SLSWindowTags::ATTACHED))
+            || (parent != 0
+                && tags.contains(SLSWindowTags::ATTACHED)
+                && !tags.contains(SLSWindowTags::PREVENTS_ACTIVATION))
             || tags.contains(
                 SLSWindowTags::FLOATING
                     | SLSWindowTags::HIDE_ON_DEACTIVATE
