@@ -357,6 +357,9 @@ macro_rules! delegate_traditional_layout_system {
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
+/// The core's trees' saved form; wired into saving and loading in phase C.
+#[cfg(test)]
+mod bsp_saved;
 pub use bsp::BspLayoutSystem;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
