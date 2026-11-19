@@ -126,6 +126,9 @@ counts only under the `respect_min_size` app rule).
   finds a window, which Space discovery may admit it on, a space snapshot's admission, the
   windows an activation re-applies app rules to), as questions on plain data behind the
   model-free entry (tags 5 to 8). Held to the Rust by `tests/topology.rs`; not on rift's path.
+- `roc/core/Lifecycle.roc`: the lifecycle decisions (`rift_core::lifecycle`: app-rule targets
+  and refreshes, a new window's display, native transients, inventory omissions, title-change
+  re-application), tags 9 to 16. Held to the Rust by `tests/lifecycle.rs`; not on rift's path.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
   rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
@@ -434,7 +437,26 @@ Done (Rust; the Roc mirror follows the Rust side):
   identical word for word, no Roc allocation left live; a planted bug in the Roc admission
   fails it. The reactor still decides with the Rust.
 
-Next: #2 (window lifecycle).
+#2, window lifecycle, in `rift_core::lifecycle` from the start (the reactor asks it):
+
+- e5aeb256: which windows app rules run over, and whether the layout hears of one,
+  `rule_targets` / `rule_refreshes_layout` (`RuleRun::Admission | Reapply`, `RuleOutcome`),
+  out of `process_windows_for_app_rules`.
+- 8d4f04bd: where a new window opens in global mode, `pointer_display_target`
+  (`NewWindow::Untracked | NotStandard | Standard(rule inputs)`), out of
+  `place_new_window_on_pointer_display`.
+- 968544ed: native transients and which entries outlive a window or app,
+  `is_native_transient` / `keeps_transient` (`TransientOrigin`, `Departure`), out of
+  `sync_native_admission` and `observe_transient_lifecycle`.
+- 9e5a8f6f: what an inventory says about the windows it omits, `misplaced` /
+  `out_of_inventory_view`, out of `on_windows_discovered_with_app_info`.
+- 15e3d902: whether a title change re-applies app rules, `reapplies_on_title_change`
+  (`OnTitleChange`), out of `maybe_reapply_app_rules_for_window`.
+- 7a76eb0a: the Roc mirror, `roc/core/Lifecycle.roc`, tags 9 to 16;
+  `crates/rift-core-roc/tests/lifecycle.rs`, 200,000 random questions each, identical word for
+  word; a planted bug in the Roc Space ordering fails it.
+
+Next: #3 (raise and focus sequencing).
 
 ## Roadmap: to "the reactor is only an applier"
 
