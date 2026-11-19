@@ -72,6 +72,7 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
+use rift_core::focus::{Removal, RemovalFocus};
 use rift_core::lifecycle::{
     Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
 };
@@ -6022,9 +6023,11 @@ impl Reactor {
     }
 
     fn prepare_refocus_before_removal(&mut self, event: &LayoutEvent) {
-        if !matches!(event, LayoutEvent::AppClosed(_) | LayoutEvent::WindowRemoved(_)) {
-            return;
-        }
+        let removal = match *event {
+            LayoutEvent::AppClosed(pid) => Removal::AppClosed(pid),
+            LayoutEvent::WindowRemoved(wid) => Removal::WindowRemoved(wid),
+            _ => return,
+        };
         let focused = self.layout_manager.layout_engine.focused_window().or_else(|| {
             // AX suspension clears current focus before authoritative removal arrives.
             // Use workspace history without visibility filtering: the departing window
@@ -6033,44 +6036,38 @@ impl Reactor {
             let workspaces = self.layout_manager.layout_engine.workspaces();
             workspaces.last_focused_window(space, workspaces.active_workspace(space)?)
         });
-        let removed_focus = match event {
-            LayoutEvent::AppClosed(pid) => focused.filter(|wid| wid.pid == *pid),
-            LayoutEvent::WindowRemoved(wid) if focused == Some(*wid) => focused,
-            _ => None,
-        };
-        if let Some(wid) = removed_focus
-            && let Some(space) = self
-                .layout_manager
-                .layout_engine
-                .space_with_window(wid)
-                .filter(|space| self.is_space_active(*space))
-                .or_else(|| self.workspace_command_space())
-        {
-            // A native tab departure can arrive before either AX or the debounced
-            // WindowServer focus notification. Sample native focus before raising
-            // a fallback, otherwise that raise can steal focus from the new tab.
-            let native_focus = matches!(event, LayoutEvent::WindowRemoved(_))
-                .then(|| self.native.key_focused_window(space))
-                .flatten();
-            if matches!(event, LayoutEvent::WindowRemoved(_))
-                && let Some(native) = native_focus
-                && native.pid == wid.pid
-                && native != wid
-            {
-                let successor = self
-                    .state
+        // A native tab departure can arrive before either AX or the debounced WindowServer
+        // focus notification, so native focus is sampled before a fallback is raised.
+        match rift_core::focus::removal_focus(
+            removal,
+            focused,
+            |window| window.pid,
+            |window| {
+                self.layout_manager
+                    .layout_engine
+                    .space_with_window(window)
+                    .filter(|space| self.is_space_active(*space))
+                    .or_else(|| self.workspace_command_space())
+            },
+            |space| self.native.key_focused_window(space),
+            |native| {
+                self.state
                     .windows
                     .tracked_window_id(WindowServerId::new(native.idx.get()))
-                    .unwrap_or(native);
-                if successor != wid && !self.window_in_non_active_workspace(space, successor) {
-                    if !self.state.windows.contains_window(successor) {
-                        self.request_window_inventory(successor.pid);
-                    }
-                    debug!(?wid, ?successor, "Preserving native focus during window removal");
-                    return;
+                    .unwrap_or(native)
+            },
+            |space, successor| self.window_in_non_active_workspace(space, successor),
+        ) {
+            RemovalFocus::Unaffected => {}
+            RemovalFocus::KeepNative(successor) => {
+                if !self.state.windows.contains_window(successor) {
+                    self.request_window_inventory(successor.pid);
                 }
+                debug!(?successor, "Preserving native focus during window removal");
             }
-            self.refocus_manager.refocus_state = RefocusState::Pending(space);
+            RemovalFocus::Refocus(space) => {
+                self.refocus_manager.refocus_state = RefocusState::Pending(space);
+            }
         }
     }
 
