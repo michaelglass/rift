@@ -122,6 +122,10 @@ counts only under the `respect_min_size` app rule).
   traditional trees); `roc/core/Geometry.roc`: what the systems share (Rust's float helpers,
   constraints, the tiling area, the axis solver). A shape's words start with its system's tag
   (0 BSP, 1 traditional) and `main.roc`'s `tile` dispatches on it.
+- `roc/core/Topology.roc`: the topology decisions (`rift_core::topology`: where an inventory
+  finds a window, which Space discovery may admit it on, a space snapshot's admission, the
+  windows an activation re-applies app rules to), as questions on plain data behind the
+  model-free entry (tags 5 to 8). Held to the Rust by `tests/topology.rs`; not on rift's path.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
   rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
@@ -423,7 +427,14 @@ Done (Rust; the Roc mirror follows the Rust side):
   out of `apply_app_rules_for_activated_spaces`. (Computing the active set was already pure,
   `SpaceActivationPolicy::compute_active_spaces`; whether it changed is one set comparison.)
 
-Next: the Roc mirror of #1, then #2 (window lifecycle).
+- 7938584b: the Roc mirror of #1. The four decisions moved into `rift_core::topology`
+  (generic over Spaces, windows, window-server ids and displays; the reactor builds the plain
+  views and asks), and `roc/core/Topology.roc` answers them behind the model-free entry, tags
+  5 to 8. `crates/rift-core-roc/tests/topology.rs`: 200,000 random questions each, every answer
+  identical word for word, no Roc allocation left live; a planted bug in the Roc admission
+  fails it. The reactor still decides with the Rust.
+
+Next: #2 (window lifecycle).
 
 ## Roadmap: to "the reactor is only an applier"
 
