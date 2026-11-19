@@ -246,3 +246,68 @@ fn the_roc_core_admits_windows_as_the_rust_core_does_for_every_combination_of_fa
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("lifecycle: all {checked} admission fact combinations answered identically");
 }
+
+#[test]
+fn the_roc_core_reads_every_lifecycle_reading_as_the_rust_core_does() {
+    use rift_core::lifecycle::{
+        AdmissionFacts, AxKind, FactChange, Manageability, Minimize, NativeKind, Reading, Rule,
+    };
+    let mut all_facts = Vec::new();
+    for manageability in [Manageability::Manageable, Manageability::Unmanageable] {
+        for rule in [Rule::NoRule, Rule::Manage, Rule::Ignore] {
+            for ax in [AxKind::Ordinary, AxKind::DialogWindow, AxKind::Transient] {
+                for native in [NativeKind::Ordinary, NativeKind::Transient] {
+                    for minimize in [Minimize::Shown, Minimize::Minimized] {
+                        all_facts.push(AdmissionFacts {
+                            manageability,
+                            rule,
+                            ax,
+                            native,
+                            minimize,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let changes = [
+        FactChange::Manageability(Manageability::Manageable),
+        FactChange::Manageability(Manageability::Unmanageable),
+        FactChange::Rule(Rule::NoRule),
+        FactChange::Rule(Rule::Manage),
+        FactChange::Rule(Rule::Ignore),
+        FactChange::Ax(AxKind::Ordinary),
+        FactChange::Ax(AxKind::DialogWindow),
+        FactChange::Ax(AxKind::Transient),
+        FactChange::Native(NativeKind::Ordinary),
+        FactChange::Native(NativeKind::Transient),
+        FactChange::Minimize(Minimize::Shown),
+        FactChange::Minimize(Minimize::Minimized),
+    ];
+    let readings: Vec<Reading> = all_facts
+        .iter()
+        .copied()
+        .map(Reading::Live)
+        .chain(changes.into_iter().map(Reading::Changed))
+        .chain([Reading::Gone])
+        .collect();
+    let befores: Vec<Option<AdmissionFacts>> =
+        std::iter::once(None).chain(all_facts.iter().copied().map(Some)).collect();
+    let before_count = AllocationCount::now();
+    let mut checked = 0;
+    for &before in &befores {
+        for &reading in &readings {
+            let rust = wire::encode_read(rift_core::lifecycle::read(before, reading));
+            assert_eq!(
+                tile_words(&wire::encode_reading(before, reading)),
+                Ok(rust),
+                "{before:?} {reading:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 73 * 85);
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before_count.live(), "Roc allocations left live");
+    eprintln!("lifecycle: all {checked} lifecycle readings answered identically");
+}

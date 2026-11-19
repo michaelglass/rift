@@ -20,6 +20,9 @@ RuleRun : [Admission, Reapply]
 ## Where a transient entry's evidence came from.
 Origin : [Native, Heuristic]
 
+## What admission reads of a window.
+Facts : { manageable : Bool, rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native_transient : Bool, minimized : Bool }
+
 Lifecycle := [].{
 
 	## The windows app rules run over, by Space in Space order.
@@ -185,12 +188,20 @@ Lifecycle := [].{
 	## Whether rift manages a window, and if not the first veto that applies: 0 admitted, or 1
 	## and the veto (0 native transient, 1 minimized, 2 AX transient, 3 rule ignores, 4
 	## unmanageable).
-	admission : { manageable : Bool, rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native_transient : Bool, minimized : Bool } -> List(U64)
+	admission : Facts -> List(U64)
 	admission = |facts|
+		match admits(facts) {
+			Admitted => [0]
+			Vetoed(why) => [1, why]
+		}
+
+	## Admitted, or vetoed with the veto's word.
+	admits : Facts -> [Admitted, Vetoed(U64)]
+	admits = |facts|
 		if facts.native_transient {
-			[1, 0]
+			Vetoed(0)
 		} else if facts.minimized {
-			[1, 1]
+			Vetoed(1)
 		} else {
 			ax_vetoes =
 				match facts.ax {
@@ -204,15 +215,165 @@ Lifecycle := [].{
 					Ordinary => False
 				}
 			if ax_vetoes {
-				[1, 2]
+				Vetoed(2)
 			} else {
 				match facts.rule {
-					Ignore => [1, 3]
-					Manage => [0]
-					NoRule => if (facts.manageable) [0] else [1, 4]
+					Ignore => Vetoed(3)
+					Manage => Admitted
+					NoRule => if (facts.manageable) Admitted else Vetoed(4)
 				}
 			}
 		}
+
+	## A window's facts after a reading (none without AX state), and the change in its
+	## admission: 0 none, 1 admitted, 2 suspended (and the veto).
+	read : [Known(Facts), NoFacts], [Live(Facts), Changed({ fact : U64, value : U64 }), Gone] -> Try(([Known(Facts), NoFacts], List(U64)), [Malformed])
+	read = |before, reading| {
+		after_try =
+			match reading {
+				Live(facts) => Ok(Known(facts))
+				Gone => Ok(NoFacts)
+				Changed(change) =>
+					match before {
+						NoFacts => Ok(NoFacts)
+						Known(facts) => changed(facts, change).map_ok(|now| Known(now))
+					}
+			}
+		after = after_try?
+		change =
+			match after {
+				NoFacts => [0]
+				Known(now) =>
+					match admits(now) {
+						Admitted =>
+							match before {
+								Known(was) =>
+									match admits(was) {
+										Admitted => [0]
+										Vetoed(_) => [1]
+									}
+								NoFacts => [1]
+							}
+						Vetoed(why) =>
+							match before {
+								Known(was) =>
+									match admits(was) {
+										Admitted => [2, why]
+										Vetoed(_) => [0]
+									}
+								NoFacts => [0]
+							}
+					}
+			}
+		Ok((after, change))
+	}
+
+	changed : Facts, { fact : U64, value : U64 } -> Try(Facts, [Malformed])
+	changed = |facts, change|
+		match change.fact {
+			0 => binary(change.value).map_ok(|unmanageable| { ..facts, manageable: !unmanageable })
+			1 => rule_of(change.value).map_ok(|rule| { ..facts, rule })
+			2 => ax_of(change.value).map_ok(|ax| { ..facts, ax })
+			3 => binary(change.value).map_ok(|native_transient| { ..facts, native_transient })
+			4 => binary(change.value).map_ok(|minimized| { ..facts, minimized })
+			_ => Err(Malformed)
+		}
+
+	binary : U64 -> Try(Bool, [Malformed])
+	binary = |word|
+		match word {
+			0 => Ok(False)
+			1 => Ok(True)
+			_ => Err(Malformed)
+		}
+
+	rule_of : U64 -> Try([NoRule, Manage, Ignore], [Malformed])
+	rule_of = |word|
+		match word {
+			0 => Ok(NoRule)
+			1 => Ok(Manage)
+			2 => Ok(Ignore)
+			_ => Err(Malformed)
+		}
+
+	ax_of : U64 -> Try([Ordinary, DialogWindow, Transient], [Malformed])
+	ax_of = |word|
+		match word {
+			0 => Ok(Ordinary)
+			1 => Ok(DialogWindow)
+			2 => Ok(Transient)
+			_ => Err(Malformed)
+		}
+
+	take_facts : Words -> Taken(Facts)
+	take_facts = |c0| {
+		(manageability, c1) = take(c0)?
+		(rule_word, c2) = take(c1)?
+		(ax_word, c3) = take(c2)?
+		(native_word, c4) = take(c3)?
+		(minimize_word, c5) = take(c4)?
+		unmanageable = binary(manageability)?
+		rule = rule_of(rule_word)?
+		ax = ax_of(ax_word)?
+		native_transient = binary(native_word)?
+		minimized = binary(minimize_word)?
+		Ok(({ manageable: !unmanageable, rule, ax, native_transient, minimized }, c5))
+	}
+
+	put_facts : List(U64), Facts -> List(U64)
+	put_facts = |words, facts| {
+		rule =
+			match facts.rule {
+				NoRule => 0
+				Manage => 1
+				Ignore => 2
+			}
+		ax =
+			match facts.ax {
+				Ordinary => 0
+				DialogWindow => 1
+				Transient => 2
+			}
+		words
+			.append(if (facts.manageable) 0 else 1)
+			.append(rule)
+			.append(ax)
+			.append(if (facts.native_transient) 1 else 0)
+			.append(if (facts.minimized) 1 else 0)
+	}
+
+	## Tag 25.
+	reading_words : Words -> Try(List(U64), [Malformed])
+	reading_words = |c0| {
+		(has_before, c1) = take_flag(c0)?
+		(before, c2) =
+			if has_before {
+				(facts, rest) = take_facts(c1)?
+				(Known(facts), rest)
+			} else {
+				(NoFacts, c1)
+			}
+		(kind, c3) = take(c2)?
+		(reading, c4) =
+			match kind {
+				0 => take_facts(c3).map_ok(|(facts, rest)| (Live(facts), rest))
+				1 => {
+					(fact, after) = take(c3)?
+					(value, rest) = take(after)?
+					Ok((Changed({ fact, value }), rest))
+				}
+				2 => Ok((Gone, c3))
+				_ => Err(Malformed)
+			}?
+		finished(c4)?
+		(after, change) = read(before, reading)?
+		words =
+			match after {
+				Known(facts) => put_facts([1], facts)
+				NoFacts => [0]
+			}
+		Ok(words.concat(change))
+	}
 
 	## Tag 24.
 	admission_words : Words -> Try(List(U64), [Malformed])

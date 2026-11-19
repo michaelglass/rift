@@ -1099,47 +1099,129 @@ pub fn encode_desktop(question: focus::plain::Desktop) -> Vec<u64> {
 /// none, 1 manage, 2 ignore), the AX kind (0 ordinary, 1 dialog window, 2 transient), the
 /// native kind (0 ordinary, 1 transient), minimized (0 shown, 1 minimized).
 pub fn encode_admission_facts(facts: lifecycle::AdmissionFacts) -> Vec<u64> {
-    use lifecycle::{AxKind, Manageability, Minimize, NativeKind, Rule};
     let mut words = Words::default();
     words.word(24);
-    words.word(match facts.manageability {
-        Manageability::Manageable => 0,
-        Manageability::Unmanageable => 1,
-    });
-    words.word(match facts.rule {
-        Rule::NoRule => 0,
-        Rule::Manage => 1,
-        Rule::Ignore => 2,
-    });
-    words.word(match facts.ax {
-        AxKind::Ordinary => 0,
-        AxKind::DialogWindow => 1,
-        AxKind::Transient => 2,
-    });
-    words.word(match facts.native {
-        NativeKind::Ordinary => 0,
-        NativeKind::Transient => 1,
-    });
-    words.word(match facts.minimize {
-        Minimize::Shown => 0,
-        Minimize::Minimized => 1,
-    });
+    words.admission_facts(facts);
     words.0
+}
+
+/// Tag 25, a lifecycle reading: the window's facts before (an option of the five words of
+/// [`encode_admission_facts`]), then the reading: 0 live (then its facts), 1 changed (then the
+/// fact, 0 manageability, 1 rule, 2 AX kind, 3 native kind, 4 minimize, and its value's word),
+/// or 2 gone.
+pub fn encode_reading(
+    before: Option<lifecycle::AdmissionFacts>,
+    reading: lifecycle::Reading,
+) -> Vec<u64> {
+    use lifecycle::{FactChange, Reading};
+    let mut words = Words::default();
+    words.word(25);
+    words.option(before, Words::admission_facts);
+    match reading {
+        Reading::Live(facts) => {
+            words.word(0);
+            words.admission_facts(facts);
+        }
+        Reading::Changed(change) => {
+            words.word(1);
+            let (fact, value) = match change {
+                FactChange::Manageability(m) => (0, manageability_word(m)),
+                FactChange::Rule(r) => (1, rule_word(r)),
+                FactChange::Ax(a) => (2, ax_word(a)),
+                FactChange::Native(n) => (3, native_word(n)),
+                FactChange::Minimize(m) => (4, minimize_word(m)),
+            };
+            words.word(fact);
+            words.word(value);
+        }
+        Reading::Gone => words.word(2),
+    }
+    words.0
+}
+
+/// A reading's outcome: the facts after (an option), then the change (0 none, 1 admitted, 2
+/// suspended and the veto's word, as [`encode_window_admission`] numbers them).
+pub fn encode_read(
+    answer: (Option<lifecycle::AdmissionFacts>, Option<lifecycle::Change>),
+) -> Vec<u64> {
+    use lifecycle::Change;
+    let mut words = Words::default();
+    words.option(answer.0, Words::admission_facts);
+    match answer.1 {
+        None => words.word(0),
+        Some(Change::Admitted) => words.word(1),
+        Some(Change::Suspended(why)) => {
+            words.word(2);
+            words.word(veto_word(why));
+        }
+    }
+    words.0
+}
+
+fn manageability_word(manageability: lifecycle::Manageability) -> u64 {
+    match manageability {
+        lifecycle::Manageability::Manageable => 0,
+        lifecycle::Manageability::Unmanageable => 1,
+    }
+}
+
+fn rule_word(rule: lifecycle::Rule) -> u64 {
+    match rule {
+        lifecycle::Rule::NoRule => 0,
+        lifecycle::Rule::Manage => 1,
+        lifecycle::Rule::Ignore => 2,
+    }
+}
+
+fn ax_word(ax: lifecycle::AxKind) -> u64 {
+    match ax {
+        lifecycle::AxKind::Ordinary => 0,
+        lifecycle::AxKind::DialogWindow => 1,
+        lifecycle::AxKind::Transient => 2,
+    }
+}
+
+fn native_word(native: lifecycle::NativeKind) -> u64 {
+    match native {
+        lifecycle::NativeKind::Ordinary => 0,
+        lifecycle::NativeKind::Transient => 1,
+    }
+}
+
+fn minimize_word(minimize: lifecycle::Minimize) -> u64 {
+    match minimize {
+        lifecycle::Minimize::Shown => 0,
+        lifecycle::Minimize::Minimized => 1,
+    }
+}
+
+fn veto_word(why: lifecycle::Veto) -> u64 {
+    match why {
+        lifecycle::Veto::NativeTransient => 0,
+        lifecycle::Veto::Minimized => 1,
+        lifecycle::Veto::AxTransient => 2,
+        lifecycle::Veto::RuleIgnores => 3,
+        lifecycle::Veto::Unmanageable => 4,
+    }
+}
+
+impl Words {
+    fn admission_facts(&mut self, facts: lifecycle::AdmissionFacts) {
+        self.word(manageability_word(facts.manageability));
+        self.word(rule_word(facts.rule));
+        self.word(ax_word(facts.ax));
+        self.word(native_word(facts.native));
+        self.word(minimize_word(facts.minimize));
+    }
 }
 
 /// An admission as words: 0 admitted, or 1 and the veto (0 native transient, 1 minimized, 2 AX
 /// transient, 3 rule ignores, 4 unmanageable).
 pub fn encode_window_admission(answer: lifecycle::Admission) -> Vec<u64> {
-    use lifecycle::{Admission, Veto};
+    use lifecycle::Admission;
     match answer {
         Admission::Admitted => vec![0],
-        Admission::Vetoed(why) => vec![1, match why {
-            Veto::NativeTransient => 0,
-            Veto::Minimized => 1,
-            Veto::AxTransient => 2,
-            Veto::RuleIgnores => 3,
-            Veto::Unmanageable => 4,
-        }],
+        Admission::Vetoed(why) => vec![1, veto_word(why)],
     }
 }
 

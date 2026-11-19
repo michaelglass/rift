@@ -333,46 +333,68 @@ impl<W> Default for Lifecycle<W> {
     fn default() -> Self { Lifecycle { windows: Default::default() } }
 }
 
+/// What the platform read of one window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    Live(AdmissionFacts),
+    Changed(FactChange),
+    Gone,
+}
+
+/// A change in whether rift manages one window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Admitted,
+    Suspended(Veto),
+}
+
+/// A window's facts after `reading` (none without AX state), and the change in its admission.
+/// Only a change between admitted and vetoed is one: a new window that is admitted counts, a
+/// window going away does not, and a change to a window with no AX state is ignored.
+pub fn read(
+    before: Option<AdmissionFacts>,
+    reading: Reading,
+) -> (Option<AdmissionFacts>, Option<Change>) {
+    let after = match (before, reading) {
+        (_, Reading::Live(facts)) => facts,
+        (None, Reading::Changed(_)) | (_, Reading::Gone) => return (None, None),
+        (Some(mut facts), Reading::Changed(change)) => {
+            match change {
+                FactChange::Manageability(manageability) => facts.manageability = manageability,
+                FactChange::Rule(rule) => facts.rule = rule,
+                FactChange::Ax(ax) => facts.ax = ax,
+                FactChange::Native(native) => facts.native = native,
+                FactChange::Minimize(minimize) => facts.minimize = minimize,
+            }
+            facts
+        }
+    };
+    let change = match (before.map(admission), admission(after)) {
+        (Some(Admission::Admitted), Admission::Vetoed(why)) => Some(Change::Suspended(why)),
+        (None | Some(Admission::Vetoed(_)), Admission::Admitted) => Some(Change::Admitted),
+        (Some(Admission::Admitted), Admission::Admitted)
+        | (None | Some(Admission::Vetoed(_)), Admission::Vetoed(_)) => None,
+    };
+    (Some(after), change)
+}
+
 impl<W: Copy + Ord> Lifecycle<W> {
-    /// Applies `event`; the transition it makes, if any. Only a change between admitted and
-    /// vetoed is one: a new window that is admitted counts, a window going away does not.
+    /// Applies `event`; the transition it makes, if any (see [`read`]).
     pub fn step(&mut self, event: LifecycleEvent<W>) -> Option<Transition<W>> {
-        let window = match event {
-            LifecycleEvent::Live { window, .. }
-            | LifecycleEvent::Changed { window, .. }
-            | LifecycleEvent::Gone(window) => window,
+        let (window, reading) = match event {
+            LifecycleEvent::Live { window, facts } => (window, Reading::Live(facts)),
+            LifecycleEvent::Changed { window, change } => (window, Reading::Changed(change)),
+            LifecycleEvent::Gone(window) => (window, Reading::Gone),
         };
-        let before = self.admission(window);
-        match event {
-            LifecycleEvent::Live { window, facts } => {
-                self.windows.insert(window, facts);
-            }
-            LifecycleEvent::Changed { window, change } => {
-                let Some(facts) = self.windows.get_mut(&window) else {
-                    return None;
-                };
-                match change {
-                    FactChange::Manageability(manageability) => facts.manageability = manageability,
-                    FactChange::Rule(rule) => facts.rule = rule,
-                    FactChange::Ax(ax) => facts.ax = ax,
-                    FactChange::Native(native) => facts.native = native,
-                    FactChange::Minimize(minimize) => facts.minimize = minimize,
-                }
-            }
-            LifecycleEvent::Gone(window) => {
-                self.windows.remove(&window);
-                return None;
-            }
-        }
-        match (before, self.admission(window)) {
-            (Some(Admission::Admitted), Some(Admission::Vetoed(why))) => {
-                Some(Transition::Suspended(window, why))
-            }
-            (None | Some(Admission::Vetoed(_)), Some(Admission::Admitted)) => {
-                Some(Transition::Admitted(window))
-            }
-            (_, _) => None,
-        }
+        let (after, change) = read(self.windows.get(&window).copied(), reading);
+        match after {
+            Some(facts) => self.windows.insert(window, facts),
+            None => self.windows.remove(&window),
+        };
+        change.map(|change| match change {
+            Change::Admitted => Transition::Admitted(window),
+            Change::Suspended(why) => Transition::Suspended(window, why),
+        })
     }
 
     /// A live window's admission; `None` for a window with no AX state.

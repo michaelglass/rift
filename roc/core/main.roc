@@ -119,7 +119,7 @@ core = { init, step, tile }
 ## (its tag first: 0 BSP, 1 traditional, 2 a scrolling strip, 3 a settle question on a strip's
 ## placement, 4 a floating layout's newcomers; 5 to 8 the topology decisions, `Topology`; 9 to
 ## 16 the lifecycle decisions, `Lifecycle`; 17 to 23 the focus decisions, `Focus`;
-## 24 a window's admission, `Lifecycle`) in;
+## 24 a window's admission, 25 a lifecycle reading, `Lifecycle`) in;
 ## out, a 0 and the answer's words (the frames; for a strip, where it placed everything; for a
 ## settle question, where the camera settles; for newcomers, their first frames; for a topology
 ## question, its answer), or a 1: the words were not a question it answers.
@@ -160,6 +160,7 @@ shape_answer = |words| {
 		22 => Focus.untracked_words(cursor)
 		23 => Focus.desktop_words(cursor)
 		24 => Lifecycle.admission_words(cursor)
+		25 => Lifecycle.reading_words(cursor)
 		_ => Err(Malformed)
 	}
 }
