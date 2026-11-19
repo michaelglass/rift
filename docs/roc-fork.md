@@ -396,6 +396,16 @@ fuzzer and bug history:
 
 Not in the list: the input mode table, already pure (`src/actor/reactor/modes.rs`).
 
+Done (Rust; the Roc mirror follows the Rust side):
+
+- 91726e1b: where an app inventory finds a window, `discovered_space` (`Standing` →
+  `DiscoveredSpace::Observed | Live | Fallback`), out of `on_windows_discovered_with_app_info`.
+- e2757007: which Space discovery may admit a reported window on, `discovery_spaces`
+  (`DiscoveryStanding::FullscreenRecorded | Placeholder | Admissible`), out of
+  `discovery_spaces_for_window`.
+
+Next in #1: SpaceStateChanged admission and commit, then the `set_active_spaces*` family.
+
 ## Roadmap: to "the reactor is only an applier"
 
 Each slice moves state into the core (Rust first), deletes reactor code, keeps the fuzzer, the
