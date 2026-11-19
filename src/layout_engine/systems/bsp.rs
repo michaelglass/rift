@@ -2470,6 +2470,8 @@ impl LayoutSystem for BspLayoutSystem {
             self.core.create(layout);
             #[cfg(test)]
             self.assert_held_as("create_layout", Scope::All, &self.core);
+            #[cfg(not(test))]
+            self.report_divergence("create_layout", Scope::One(layout), &(), &());
         }
         layout
     }
@@ -2498,6 +2500,8 @@ impl LayoutSystem for BspLayoutSystem {
             self.core.clone_layout(layout, copy, insertion);
             #[cfg(test)]
             self.assert_held_as("clone_layout", Scope::All, &self.core);
+            #[cfg(not(test))]
+            self.report_divergence("clone_layout", Scope::One(copy), &(), &());
         }
         copy
     }
@@ -3073,7 +3077,7 @@ impl BspLayoutSystem {
             self.assert_held_as(operation, scope, &self.core);
         }
         #[cfg(not(test))]
-        let _ = (operation, scope, answer);
+        self.report_divergence(operation, scope, &answer, &core_answer);
         core_answer
     }
 
@@ -3092,6 +3096,45 @@ impl BspLayoutSystem {
         let delta =
             reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
         (delta.removals, delta.additions)
+    }
+
+    /// The soak's tripwire (outside tests, where the core's answer wins): a debug line, prefixed
+    /// `bsp-divergence:`, when the old trees answered otherwise, and (only while debug logging
+    /// is on, so it costs nothing otherwise) when the old trees, parsed, are not the core's.
+    /// Queries are not checked: they are the hot path.
+    #[cfg(not(test))]
+    fn report_divergence<A: PartialEq + std::fmt::Debug>(
+        &self,
+        operation: &str,
+        scope: Scope,
+        old: &A,
+        core: &A,
+    ) {
+        if old != core {
+            tracing::debug!(
+                "bsp-divergence: {operation}: the old trees answered {old:?}, the core {core:?}"
+            );
+        }
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+        match self.core_layouts() {
+            Ok(parsed) => {
+                for (id, held) in self.core.iter().filter(|(id, _)| scope.covers(**id)) {
+                    if !parsed.layout(*id).is_some_and(|tree| tree.same_as(held)) {
+                        tracing::debug!(
+                            "bsp-divergence: {operation}: layout {id:?}: the old trees hold {:?}, the core {held:?}",
+                            parsed.layout(*id)
+                        );
+                    }
+                }
+            }
+            Err(problem) => {
+                tracing::debug!(
+                    "bsp-divergence: {operation}: the old trees no longer parse: {problem}"
+                );
+            }
+        }
     }
 
     /// The window insertion setting as the core takes it.
@@ -3296,20 +3339,10 @@ impl BspLayoutSystem {
 /// Which layouts an operation can change: one, or (acting on windows or participation) all.
 #[derive(Debug, Clone, Copy)]
 enum Scope {
-    One(
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "only test builds check the layouts an operation touched"
-            )
-        )]
-        LayoutId,
-    ),
+    One(LayoutId),
     All,
 }
 
-#[cfg(test)]
 impl Scope {
     fn covers(self, layout: LayoutId) -> bool {
         match self {

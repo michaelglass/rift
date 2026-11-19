@@ -200,12 +200,22 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             Ok(layout) => layout,
             Err(error) => {
                 // Loud and named, but never fatal: a layout that will not load (say, a BSP tree
-                // the core cannot hold) must not keep rift from starting.
-                tracing::error!(
-                    path = %path.display(),
-                    error = %format!("{error:#}"),
-                    "Could not restore the saved layout; starting with a fresh layout"
-                );
+                // the core cannot hold) must not keep rift from starting. Its file is copied
+                // aside first, so the next save cannot take the repro with it.
+                match LayoutEngine::set_aside_unreadable(&path, std::time::SystemTime::now()) {
+                    Ok(copy) => tracing::error!(
+                        path = %path.display(),
+                        copy = %copy.display(),
+                        error = %format!("{error:#}"),
+                        "Could not restore the saved layout; kept a copy, starting with a fresh layout"
+                    ),
+                    Err(copy_error) => tracing::error!(
+                        path = %path.display(),
+                        error = %format!("{error:#}"),
+                        copy_error = %copy_error,
+                        "Could not restore the saved layout, nor keep a copy of it; starting with a fresh layout"
+                    ),
+                }
                 eprintln!(
                     "Could not restore master file at {}; starting with a fresh layout: {error:#}",
                     path.display()
