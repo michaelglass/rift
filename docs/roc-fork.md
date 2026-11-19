@@ -486,6 +486,26 @@ Done (Rust; the Roc mirror follows the Rust side):
 
 Step 3 is done (the input mode table was already pure).
 
+## Workspaces and spaces
+
+Plan approved (W1 activation decisions as pure core functions; W2 the catalog made structural on
+the store side; W3 core shadow with a `workspace-divergence:` tripwire; W4 the flip; W5
+topology into the core; W6 last, after upstream #688: the engine glue and persistence, which
+#688 rewrites). Order: W2 then W1, so W1's functions take the typed state.
+
+- 1026e20a (W2a, held): a workspace's `preferred_display` + `home_space` options are one
+  `Home::Unplaced | Space(space) | OnDisplay { space, display } | DisplayOnly(display)`, and
+  `rule_overridden: bool` is `RuleStanding::Followed | Overridden`. The saved form is unchanged
+  (loads through `SavedWorkspace`, writes through `SavedWorkspaceRef`); a test loads four
+  workspaces saved by the code before (every combination of the old fields) into the right
+  types and writes each back byte for byte.
+- W2b (activation), measured before typing it: across every reactor test and the fuzzer at
+  2000 × 40 (about 517,000 observations after reactor events) a Space's activation is only
+  ever showing a workspace (with or without a different previous one) or showing none (with or
+  without one remembered). Shown and remembered at once, or a previous with nothing shown,
+  never occur after an event; the store's own methods make them mid-operation, and old saved
+  files could hold them.
+
 ## Window lifecycle as core events
 
 The lead's ruling: move window lifecycle (then workspaces and spaces) into the core as events;
