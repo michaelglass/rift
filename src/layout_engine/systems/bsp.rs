@@ -1371,6 +1371,66 @@ mod tests {
 
 /// The bodies of the operations the core shadows in test builds (see `shadowed`).
 impl BspLayoutSystem {
+    fn apply_target_drop_unshadowed(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if !self.window_participates(source) || !self.window_participates(target) {
+            return false;
+        }
+        if source == target
+            || !self.contains_window(layout, source)
+            || !self.contains_window(layout, target)
+        {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+
+        while self.remove_window_internal(layout, source) {}
+        let Some(target_node) = self.node_for_window_in_layout(layout, target) else {
+            return false;
+        };
+        match action {
+            crate::layout_engine::WindowDropAction::Stack => {
+                let stack = self.stacks.entry(target_node).or_insert_with(|| vec![target]);
+                stack.retain(|window| *window != source);
+                stack.push(source);
+                if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(target_node) {
+                    *window = Some(source);
+                }
+
+                self.tree.data.selection.select(&self.tree.map, target_node);
+                true
+            }
+            crate::layout_engine::WindowDropAction::Insert(direction) => {
+                self.split_leaf_in_direction(target_node, direction, source);
+                true
+            }
+            crate::layout_engine::WindowDropAction::Swap
+            | crate::layout_engine::WindowDropAction::Move(_)
+            | crate::layout_engine::WindowDropAction::ConsumeOrExpel(_) => {
+                unreachable!()
+            }
+        }
+    }
+
+    fn move_selection_to_layout_after_selection_unshadowed(
+        &mut self,
+        from_layout: LayoutId,
+        to_layout: LayoutId,
+    ) {
+        let sel = self.selected_window(from_layout);
+        if let Some(w) = sel {
+            while self.remove_window_internal(from_layout, w) {}
+            self.add_window_after_selection(to_layout, w);
+        }
+    }
+
     fn join_selection_with_direction_unshadowed(&mut self, layout: LayoutId, direction: Direction) {
         let Some(sel) = self.selection_of_layout(layout) else {
             return;
@@ -2502,45 +2562,28 @@ impl LayoutSystem for BspLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
-        if !self.window_participates(source) || !self.window_participates(target) {
-            return false;
-        }
-        if source == target
-            || !self.contains_window(layout, source)
-            || !self.contains_window(layout, target)
-        {
-            return false;
-        }
-        if action == crate::layout_engine::WindowDropAction::Swap {
-            return self.swap_windows(layout, source, target);
-        }
-
-        while self.remove_window_internal(layout, source) {}
-        let Some(target_node) = self.node_for_window_in_layout(layout, target) else {
-            return false;
+        #[cfg(test)]
+        return {
+            use crate::layout_engine::WindowDropAction as Action;
+            self.shadowed(
+                "apply_target_drop",
+                Scope::One(layout),
+                |this| this.apply_target_drop_unshadowed(layout, source, target, action),
+                |core| match action {
+                    Action::Swap => core.drop_on(layout, source, target, bsp_tree::Drop::Swap),
+                    Action::Stack => core.drop_on(layout, source, target, bsp_tree::Drop::Stack),
+                    Action::Insert(direction) => core.drop_on(
+                        layout,
+                        source,
+                        target,
+                        bsp_tree::Drop::Insert(core_direction(direction)),
+                    ),
+                    Action::Move(_) | Action::ConsumeOrExpel(_) => false,
+                },
+            )
         };
-        match action {
-            crate::layout_engine::WindowDropAction::Stack => {
-                let stack = self.stacks.entry(target_node).or_insert_with(|| vec![target]);
-                stack.retain(|window| *window != source);
-                stack.push(source);
-                if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(target_node) {
-                    *window = Some(source);
-                }
-
-                self.tree.data.selection.select(&self.tree.map, target_node);
-                true
-            }
-            crate::layout_engine::WindowDropAction::Insert(direction) => {
-                self.split_leaf_in_direction(target_node, direction, source);
-                true
-            }
-            crate::layout_engine::WindowDropAction::Swap
-            | crate::layout_engine::WindowDropAction::Move(_)
-            | crate::layout_engine::WindowDropAction::ConsumeOrExpel(_) => {
-                unreachable!()
-            }
-        }
+        #[cfg(not(test))]
+        self.apply_target_drop_unshadowed(layout, source, target, action)
     }
 
     fn move_selection_to_layout_after_selection(
@@ -2548,11 +2591,23 @@ impl LayoutSystem for BspLayoutSystem {
         from_layout: LayoutId,
         to_layout: LayoutId,
     ) {
-        let sel = self.selected_window(from_layout);
-        if let Some(w) = sel {
-            while self.remove_window_internal(from_layout, w) {}
-            self.add_window_after_selection(to_layout, w);
-        }
+        #[cfg(test)]
+        return {
+            let insertion = match self.window_insertion_point {
+                WindowInsertionPoint::EndOfTree => bsp_tree::Insertion::EndOfTree,
+                _ => bsp_tree::Insertion::AtFocus,
+            };
+            self.shadowed(
+                "move_selection_to_layout_after_selection",
+                Scope::All,
+                |this| {
+                    this.move_selection_to_layout_after_selection_unshadowed(from_layout, to_layout)
+                },
+                |core| core.move_selected(from_layout, to_layout, insertion),
+            )
+        };
+        #[cfg(not(test))]
+        self.move_selection_to_layout_after_selection_unshadowed(from_layout, to_layout)
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
@@ -3110,11 +3165,12 @@ mod core_tree_differential {
         Join(Direction, bsp_tree::Direction),
         Unjoin,
         ConsumeOrExpel(Direction, bsp_tree::Direction),
+        Drop(u32, u32, u8, Direction, bsp_tree::Direction),
     }
 
     fn step(rng: &mut Rng) -> Step {
         let window = |rng: &mut Rng| 1 + rng.below(u64::from(POOL)) as u32;
-        match rng.below(30) {
+        match rng.below(33) {
             0..=4 => Step::Add(window(rng)),
             5 | 6 => Step::Remove(window(rng)),
             7 | 8 => Step::Select(window(rng)),
@@ -3140,6 +3196,10 @@ mod core_tree_differential {
                 Step::Join(old, core)
             }
             27 => Step::Unjoin,
+            29..=31 => {
+                let (old, core) = direction(rng);
+                Step::Drop(window(rng), window(rng), rng.below(3) as u8, old, core)
+            }
             28 => {
                 let (old, core) = direction(rng);
                 Step::ConsumeOrExpel(old, core)
@@ -3256,6 +3316,21 @@ mod core_tree_differential {
             Step::ConsumeOrExpel(direction, core_direction) => {
                 old.consume_or_expel_selection(layout, direction);
                 core.consume_or_expel(LAYOUT, core_direction);
+            }
+            Step::Drop(source, target, kind, direction, core_direction) => {
+                use crate::layout_engine::WindowDropAction as Action;
+                let (action, drop) = match kind {
+                    0 => (Action::Swap, bsp_tree::Drop::Swap),
+                    1 => (Action::Stack, bsp_tree::Drop::Stack),
+                    _ => (Action::Insert(direction), bsp_tree::Drop::Insert(core_direction)),
+                };
+                let (x, y) = (
+                    old.apply_window_drop(layout, w(source), w(target), action),
+                    core.drop_on(LAYOUT, w(source), w(target), drop),
+                );
+                if x != y {
+                    return differ("drop", &x, &y);
+                }
             }
             Step::Rebalance => {
                 old.rebalance(layout);
