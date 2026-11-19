@@ -108,7 +108,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::virtual_workspace::RuleStanding;
+use crate::model::virtual_workspace::{RuleStanding, SpaceActivation};
 use crate::model::window_store::{NativeFullscreenTransition, Pointer};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -1549,10 +1549,13 @@ impl Reactor {
     /// must agree. A disagreement is a write that bypassed the store's setters. Tests fail on
     /// it; a running Rift logs it (`lifecycle-divergence:`, at debug) and goes on.
     fn check_lifecycle_shadow(&self) {
+        let workspaces = self.layout_manager.layout_engine.workspaces();
         #[cfg(test)]
         {
             let divergences = self.state.windows.lifecycle_divergences();
             assert!(divergences.is_empty(), "lifecycle-divergence: {divergences:?}");
+            let divergences = workspaces.workspace_divergences();
+            assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
         }
         #[cfg(not(test))]
         if tracing::enabled!(tracing::Level::DEBUG) {
@@ -1560,6 +1563,12 @@ impl Reactor {
                 debug!(
                     ?divergence,
                     "lifecycle-divergence: store and core disagree on admission"
+                );
+            }
+            for divergence in workspaces.workspace_divergences() {
+                debug!(
+                    ?divergence,
+                    "workspace-divergence: store and core disagree on workspaces"
                 );
             }
         }
@@ -4001,10 +4010,10 @@ impl Reactor {
                 let old = workspaces[id].home.space().unwrap();
                 let target = self.space_state.screens[target].space.unwrap();
                 workspaces[id].home = workspaces[id].home.with_space(target);
-                if let Some(activation) = workspaces.active_workspace_per_space.get_mut(&old)
-                    && activation.remembered().or(activation.current()) == Some(id)
-                {
-                    activation.forget_memory();
+                if workspaces.active_workspace_per_space().get(&old).is_some_and(|activation| {
+                    activation.remembered().or(activation.current()) == Some(id)
+                }) {
+                    workspaces.update_activation(old, SpaceActivation::forget_memory);
                     if workspaces[id].space == target {
                         workspaces.set_active_workspace(target, id);
                     } else {

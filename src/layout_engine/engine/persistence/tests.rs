@@ -279,7 +279,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         .workspaces
         .transfer_workspace(moved, b, None, WorkspaceTransferReason::DisplayDeparture);
     let replacement = engine.workspaces.active_workspace(a);
-    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space).unwrap();
+    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space()).unwrap();
     let old = ron::ser::to_string(&HashMap::from_iter([
         (a, (None::<VirtualWorkspaceId>, moved)),
         (b, (None, engine.workspaces.active_workspace(b).unwrap())),
@@ -289,7 +289,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let loaded = LayoutEngine::deserialize_from_str(&file).unwrap();
     assert_eq!(loaded.workspaces.active_workspace(a), replacement);
     assert_eq!(
-        loaded.workspaces.active_workspace_per_space[&a].remembered(),
+        loaded.workspaces.active_workspace_per_space()[&a].remembered(),
         Some(moved)
     );
 

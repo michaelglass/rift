@@ -455,6 +455,19 @@ pub enum SpaceActivation {
 // In both, `remembered` is the presentation a departed display takes back when that
 // workspace's ownership returns; none if `None`.
 
+impl SpaceActivation {
+    /// The same activation in the core's terms.
+    fn to_core(self) -> rift_core::workspaces::Activation<VirtualWorkspaceId> {
+        use rift_core::workspaces::Activation;
+        match self {
+            SpaceActivation::Showing { current, previous, remembered } => {
+                Activation::Showing { current, previous, remembered }
+            }
+            SpaceActivation::Vacant { remembered } => Activation::Vacant { remembered },
+        }
+    }
+}
+
 impl Default for SpaceActivation {
     fn default() -> Self { SpaceActivation::Vacant { remembered: None } }
 }
@@ -647,9 +660,30 @@ pub struct WorkspaceStore {
     pub(crate) workspaces: Catalog,
     /// Last accepted physical topology also scopes configuration during restore.
     single_display: bool,
-    pub active_workspace_per_space: HashMap<SpaceId, SpaceActivation>,
+    /// What each native Space shows. Written only through the activation helpers, which tell
+    /// the core's shadow.
+    activations: HashMap<SpaceId, SpaceActivation>,
     pub(crate) settings: VirtualWorkspaceSettings,
     pub layout_settings: LayoutSettings,
+    /// The core's topology, in shadow: the catalog and the activations, told every change
+    /// (`workspace_divergences` holds the two to agreeing).
+    shadow: rift_core::workspaces::Topology<VirtualWorkspaceId, SpaceId>,
+}
+
+/// Where the store's workspace topology and the core's shadow disagree.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WorkspaceDivergence {
+    /// The catalog (each workspace with its Space, in order) differs.
+    Catalog {
+        store: Vec<(VirtualWorkspaceId, SpaceId)>,
+        core: Vec<(VirtualWorkspaceId, SpaceId)>,
+    },
+    /// What a Space shows differs.
+    Activation {
+        space: SpaceId,
+        store: Option<SpaceActivation>,
+        core: Option<rift_core::workspaces::Activation<VirtualWorkspaceId>>,
+    },
 }
 
 /// Every workspace, by id, in one catalog order: the order lists each workspace exactly once,
@@ -824,7 +858,7 @@ impl Serialize for WorkspaceStore {
             workspaces: &self.workspaces.workspaces,
             order: &self.workspaces.order,
             single_display: self.single_display,
-            active_workspace_per_space: &self.active_workspace_per_space,
+            active_workspace_per_space: &self.activations,
         }
         .serialize(serializer)
     }
@@ -835,13 +869,16 @@ impl<'de> Deserialize<'de> for WorkspaceStore {
         let saved = SavedStore::deserialize(deserializer)?;
         let workspaces =
             Catalog::parse(saved.workspaces, saved.order).map_err(serde::de::Error::custom)?;
-        Ok(WorkspaceStore {
+        let mut store = WorkspaceStore {
             workspaces,
             single_display: saved.single_display,
-            active_workspace_per_space: saved.active_workspace_per_space,
+            activations: saved.active_workspace_per_space,
             settings: VirtualWorkspaceSettings::default(),
             layout_settings: LayoutSettings::default(),
-        })
+            shadow: Default::default(),
+        };
+        store.seed_shadow();
+        Ok(store)
     }
 }
 
@@ -1053,10 +1090,12 @@ impl WorkspaceStore {
         }
         if reason == WorkspaceTransferReason::Explicit
             && let Some(home) = workspace.home.space()
-            && let Some(activation) = self.active_workspace_per_space.get_mut(&home)
-            && activation.remembered() == Some(id)
+            && self
+                .activations
+                .get(&home)
+                .is_some_and(|activation| activation.remembered() == Some(id))
         {
-            activation.forget_memory();
+            self.update_activation(home, SpaceActivation::forget_memory);
         }
         if source == target {
             if reason != WorkspaceTransferReason::Explicit {
@@ -1069,27 +1108,27 @@ impl WorkspaceStore {
             return changed;
         }
         if reason == WorkspaceTransferReason::DisplayDeparture {
-            let activation = self.active_workspace_per_space.entry(source).or_default();
-            if activation.current() == Some(id) && activation.remembered().is_none() {
-                activation.remember(id);
-            }
+            self.update_activation_or_default(source, |activation| {
+                if activation.current() == Some(id) && activation.remembered().is_none() {
+                    activation.remember(id);
+                }
+            });
         }
-        let workspace = &mut self[id];
         if reason == WorkspaceTransferReason::Explicit {
-            workspace.home = Home::placed(target, display.map(str::to_owned));
+            self[id].home = Home::placed(target, display.map(str::to_owned));
         }
-        workspace.space = target;
+        self.move_workspace(id, target);
         // Remembered presentation becomes active again only when ownership returns.
         if reason == WorkspaceTransferReason::Explicit {
             self.set_active_workspace(target, id);
         } else if self.active_workspace(target).is_none()
             || self
-                .active_workspace_per_space
+                .activations
                 .get(&target)
                 .is_some_and(|activation| activation.remembered() == Some(id))
         {
             self.set_active_workspace(target, id);
-            self.active_workspace_per_space.get_mut(&target).unwrap().forget_memory();
+            self.update_activation(target, SpaceActivation::forget_memory);
         }
         self.repair_activation(source);
         self.repair_activation(target);
@@ -1123,7 +1162,10 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn migrate_legacy_activation(&mut self) {
-        for (&space, activation) in &mut self.active_workspace_per_space {
+        let spaces: Vec<_> = self.activations.keys().copied().collect();
+        for space in spaces {
+            let mut activation = self.activations[&space];
+            let activation = &mut activation;
             if let Some(id) = activation.current()
                 && self.workspaces.get(id).is_some_and(|workspace| {
                     workspace.space != space && workspace.home.space() == Some(space)
@@ -1161,12 +1203,16 @@ impl WorkspaceStore {
             {
                 *previous = None;
             }
+            let migrated = *activation;
+            if self.activations[&space] != migrated {
+                self.set_activation(space, migrated);
+            }
         }
     }
 
     fn repair_activation(&mut self, space: SpaceId) {
         let owned = |id| self.workspaces.get(id).is_some_and(|workspace| workspace.space == space);
-        let activation = self.active_workspace_per_space.get(&space).copied().unwrap_or_default();
+        let activation = self.activations.get(&space).copied().unwrap_or_default();
         let (previous, remembered) = (activation.previous(), activation.remembered());
         let current = activation
             .current()
@@ -1187,7 +1233,7 @@ impl WorkspaceStore {
                 SpaceActivation::Vacant { remembered }
             }
         };
-        self.active_workspace_per_space.insert(space, repaired);
+        self.set_activation(space, repaired);
     }
 
     pub(crate) fn ensure_layouts_for_size(&mut self, space: SpaceId, size: CGSize) {
@@ -1227,9 +1273,10 @@ impl WorkspaceStore {
         Self {
             workspaces: Catalog::default(),
             single_display: false,
-            active_workspace_per_space: HashMap::default(),
+            activations: HashMap::default(),
             settings: config.clone(),
             layout_settings: layout_settings.clone(),
+            shadow: Default::default(),
         }
     }
 
@@ -1392,7 +1439,7 @@ impl WorkspaceStore {
         if let Some(size) = size {
             workspace.ensure_layout_for_size(size);
         }
-        self.workspaces.insert(workspace)
+        self.catalog_insert(workspace)
     }
 
     fn name_exists(&self, space: SpaceId, name: &str) -> bool {
@@ -1462,9 +1509,9 @@ impl WorkspaceStore {
                 let space = spaces[owner];
                 let id = self.append_default_workspace(space);
                 if index == self.settings.default_workspace
-                    || !self.active_workspace_per_space.contains_key(&space)
+                    || !self.activations.contains_key(&space)
                 {
-                    self.active_workspace_per_space.insert(space, SpaceActivation::showing(id));
+                    self.set_activation(space, SpaceActivation::showing(id));
                 }
             }
         } else {
@@ -1506,7 +1553,7 @@ impl WorkspaceStore {
         for index in 0..count {
             let id = self.append_default_workspace(space);
             if index == selected {
-                self.active_workspace_per_space.insert(space, SpaceActivation::showing(id));
+                self.set_activation(space, SpaceActivation::showing(id));
             }
         }
     }
@@ -1550,7 +1597,7 @@ impl WorkspaceStore {
     }
 
     pub fn initialized_spaces(&self) -> Vec<SpaceId> {
-        let mut spaces = self.active_workspace_per_space.keys().copied().collect::<Vec<_>>();
+        let mut spaces = self.activations.keys().copied().collect::<Vec<_>>();
         spaces.sort_unstable();
         spaces
     }
@@ -1560,7 +1607,7 @@ impl WorkspaceStore {
     /// Persistence files are user-visible and may be old, truncated, or manually edited. Loading
     /// malformed topology must return a useful error instead of panicking later through indexing.
     pub(crate) fn validate_persisted_topology(&self) -> Result<(), String> {
-        for (&space, activation) in &self.active_workspace_per_space {
+        for (&space, activation) in &self.activations {
             for (kind, id) in [
                 ("active", activation.current()),
                 ("previous", activation.previous()),
@@ -1585,7 +1632,7 @@ impl WorkspaceStore {
         }
 
         for (workspace, entry) in &self.workspaces {
-            if !self.active_workspace_per_space.contains_key(&entry.space) {
+            if !self.activations.contains_key(&entry.space) {
                 return Err(format!(
                     "workspace {workspace:?} for native space {} is not indexed",
                     entry.space.get()
@@ -1608,7 +1655,7 @@ impl WorkspaceStore {
                 workspace.home = workspace.home.with_space(new_space);
             }
         }
-        if old_space == new_space || !self.active_workspace_per_space.contains_key(&old_space) {
+        if old_space == new_space || !self.activations.contains_key(&old_space) {
             return Vec::new();
         }
 
@@ -1619,13 +1666,18 @@ impl WorkspaceStore {
         } else {
             Vec::new()
         };
-        for workspace in
-            self.workspaces.values_mut().filter(|workspace| workspace.space == old_space)
-        {
-            workspace.space = new_space;
+        let moved: Vec<_> = self
+            .workspaces
+            .order()
+            .iter()
+            .copied()
+            .filter(|&id| self.workspaces[id].space == old_space)
+            .collect();
+        for id in moved {
+            self.move_workspace(id, new_space);
         }
-        if let Some(activation) = self.active_workspace_per_space.remove(&old_space) {
-            self.active_workspace_per_space.insert(new_space, activation);
+        if let Some(activation) = self.clear_activation(old_space) {
+            self.set_activation(new_space, activation);
         }
         window_store.remap_space(old_space, new_space);
 
@@ -1649,12 +1701,10 @@ impl WorkspaceStore {
     pub(crate) fn remove_space(&mut self, space: SpaceId) -> Vec<VirtualWorkspaceId> {
         let removed = self.workspace_ids(space);
         for id in &removed {
-            self.workspaces.remove(*id);
+            self.catalog_remove(*id);
         }
-        self.active_workspace_per_space.remove(&space);
-        for activation in self.active_workspace_per_space.values_mut() {
-            activation.retain(|id| !removed.contains(&id));
-        }
+        self.clear_activation(space);
+        self.update_all_activations(|activation| activation.retain(|id| !removed.contains(&id)));
         removed
     }
 
@@ -1705,15 +1755,144 @@ impl WorkspaceStore {
 
     /// `space` remembers `id`, to take it back when its ownership returns.
     pub(crate) fn remember_on(&mut self, space: SpaceId, id: VirtualWorkspaceId) {
-        self.active_workspace_per_space.entry(space).or_default().remember(id);
+        self.update_activation_or_default(space, |activation| activation.remember(id));
+    }
+
+    /// What each native Space shows.
+    pub fn active_workspace_per_space(&self) -> &HashMap<SpaceId, SpaceActivation> {
+        &self.activations
+    }
+
+    // The topology's only writers: each tells the core's shadow.
+
+    fn tell_activation(&mut self, space: SpaceId) {
+        use rift_core::workspaces::TopologyEvent;
+        let event = match self.activations.get(&space) {
+            Some(activation) => TopologyEvent::Activated {
+                space,
+                activation: activation.to_core(),
+            },
+            None => TopologyEvent::Cleared(space),
+        };
+        self.shadow.step(event);
+    }
+
+    fn set_activation(&mut self, space: SpaceId, activation: SpaceActivation) {
+        self.activations.insert(space, activation);
+        self.tell_activation(space);
+    }
+
+    /// Changes what `space` shows, if it has an activation.
+    pub(crate) fn update_activation(
+        &mut self,
+        space: SpaceId,
+        change: impl FnOnce(&mut SpaceActivation),
+    ) {
+        if let Some(activation) = self.activations.get_mut(&space) {
+            change(activation);
+            self.tell_activation(space);
+        }
+    }
+
+    fn update_activation_or_default(
+        &mut self,
+        space: SpaceId,
+        change: impl FnOnce(&mut SpaceActivation),
+    ) {
+        change(self.activations.entry(space).or_default());
+        self.tell_activation(space);
+    }
+
+    fn clear_activation(&mut self, space: SpaceId) -> Option<SpaceActivation> {
+        let activation = self.activations.remove(&space);
+        self.tell_activation(space);
+        activation
+    }
+
+    fn update_all_activations(&mut self, change: impl Fn(&mut SpaceActivation)) {
+        let spaces: Vec<_> = self.activations.keys().copied().collect();
+        for space in spaces {
+            self.update_activation(space, &change);
+        }
+    }
+
+    fn catalog_insert(&mut self, workspace: VirtualWorkspace) -> VirtualWorkspaceId {
+        let space = workspace.space;
+        let id = self.workspaces.insert(workspace);
+        self.shadow
+            .step(rift_core::workspaces::TopologyEvent::Created { workspace: id, space });
+        id
+    }
+
+    fn catalog_remove(&mut self, id: VirtualWorkspaceId) -> Option<VirtualWorkspace> {
+        let workspace = self.workspaces.remove(id)?;
+        self.shadow.step(rift_core::workspaces::TopologyEvent::Removed(id));
+        Some(workspace)
+    }
+
+    /// Moves a workspace to another Space.
+    fn move_workspace(&mut self, id: VirtualWorkspaceId, space: SpaceId) {
+        self[id].space = space;
+        self.shadow
+            .step(rift_core::workspaces::TopologyEvent::Moved { workspace: id, space });
+    }
+
+    /// Seeds the core's shadow from the store, once, as it is loaded.
+    fn seed_shadow(&mut self) {
+        use rift_core::workspaces::TopologyEvent;
+        self.shadow = Default::default();
+        for &id in self.workspaces.order() {
+            let space = self.workspaces[id].space;
+            self.shadow.step(TopologyEvent::Created { workspace: id, space });
+        }
+        for (&space, activation) in &self.activations {
+            self.shadow.step(TopologyEvent::Activated {
+                space,
+                activation: activation.to_core(),
+            });
+        }
+    }
+
+    /// Every disagreement between the store's topology and the core's shadow. Empty unless a
+    /// write bypassed the helpers above.
+    pub(crate) fn workspace_divergences(&self) -> Vec<WorkspaceDivergence> {
+        let mut divergences = Vec::new();
+        let store: Vec<_> = self
+            .workspaces
+            .order()
+            .iter()
+            .map(|&id| (id, self.workspaces[id].space))
+            .collect();
+        if store.as_slice() != self.shadow.catalog() {
+            divergences.push(WorkspaceDivergence::Catalog {
+                store,
+                core: self.shadow.catalog().to_vec(),
+            });
+        }
+        let mut spaces: Vec<SpaceId> = self
+            .activations
+            .keys()
+            .copied()
+            .chain(self.shadow.activations().iter().map(|(space, _)| *space))
+            .collect();
+        spaces.sort_unstable();
+        spaces.dedup();
+        for space in spaces {
+            let store = self.activations.get(&space).copied();
+            let core = self.shadow.activation(space);
+            if store.map(SpaceActivation::to_core) != core {
+                divergences.push(WorkspaceDivergence::Activation { space, store, core });
+            }
+        }
+        divergences
     }
 
     pub fn last_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.active_workspace_per_space.get(&space)?.previous()
+        self.activations.get(&space)?.previous()
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.active_workspace_per_space.get(&space)?.current()
+        self.activations.get(&space)?.current()
     }
 
     pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
@@ -1735,12 +1914,12 @@ impl WorkspaceStore {
         if !self.set_active_workspace(target, workspace_id) {
             return false;
         }
-        if self.effective_mode() == WorkspaceMode::Global
-            && source != target
-            && let Some(SpaceActivation::Showing { previous: history, .. }) =
-                self.active_workspace_per_space.get_mut(&target)
-        {
-            *history = previous;
+        if self.effective_mode() == WorkspaceMode::Global && source != target {
+            self.update_activation(target, |activation| {
+                if let SpaceActivation::Showing { previous: history, .. } = activation {
+                    *history = previous;
+                }
+            });
         }
         true
     }
@@ -1759,7 +1938,9 @@ impl WorkspaceStore {
                 );
                 return false;
             }
-            self.active_workspace_per_space.entry(space).or_default().activate(workspace_id);
+            self.update_activation_or_default(space, |activation| {
+                activation.activate(workspace_id)
+            });
             true
         })
     }
@@ -3134,7 +3315,7 @@ mod tests {
             WorkspaceTransferReason::DisplayDeparture
         ));
         assert_eq!(
-            store.active_workspace_per_space[&source],
+            store.active_workspace_per_space()[&source],
             SpaceActivation::Showing {
                 current: fallback,
                 previous: None,
@@ -3149,7 +3330,7 @@ mod tests {
             WorkspaceTransferReason::Restoration
         ));
         assert_eq!(store.active_workspace(source), Some(shown));
-        assert_eq!(store.active_workspace_per_space[&source].remembered(), None);
+        assert_eq!(store.active_workspace_per_space()[&source].remembered(), None);
         store.validate_persisted_topology().unwrap();
     }
 
@@ -3310,6 +3491,33 @@ mod tests {
         assert_ne!(broken, saved);
         let error = ron::from_str::<WorkspaceStore>(&broken).unwrap_err().to_string();
         assert!(error.contains("is not indexed"), "{error}");
+    }
+
+    #[test]
+    fn the_workspace_shadow_agrees_through_the_store_and_catches_a_write_around_it() {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            mode: WorkspaceMode::PerDisplay,
+            ..Default::default()
+        };
+        let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let (a, b) = (SpaceId::new(61), SpaceId::new(62));
+        let ids: Vec<_> = store.list_workspaces(a).into_iter().map(|(id, _)| id).collect();
+        store.list_workspaces(b);
+        store.set_active_workspace(a, ids[1]);
+        store.transfer_workspace(ids[0], b, Some("b"), WorkspaceTransferReason::DisplayDeparture);
+        let mut windows = WindowStore::default();
+        store.remap_space(&mut windows, b, SpaceId::new(63));
+        store.remove_space(SpaceId::new(63));
+        assert_eq!(store.workspace_divergences(), vec![]);
+        // A store saved and loaded starts in agreement.
+        let loaded: WorkspaceStore = ron::from_str(&ron::ser::to_string(&store).unwrap()).unwrap();
+        assert_eq!(loaded.workspace_divergences(), vec![]);
+        // A write around the store is caught.
+        store[ids[1]].space = SpaceId::new(99);
+        assert!(matches!(store.workspace_divergences().as_slice(), [
+            WorkspaceDivergence::Catalog { .. }
+        ]));
     }
 
     #[test]

@@ -885,7 +885,7 @@ impl Reactor {
         let totals = (
             workspaces.workspaces.len(),
             self.state.windows.workspace_assignment_count(),
-            workspaces.active_workspace_per_space.len(),
+            workspaces.active_workspace_per_space().len(),
         );
         let workspace_window_counts: serde_json::Map<_, _> = workspaces
             .window_counts(&self.state.windows)

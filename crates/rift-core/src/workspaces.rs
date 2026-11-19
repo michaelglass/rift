@@ -127,6 +127,93 @@ pub fn previous<K: Copy, S: Copy + PartialEq>(
     eligible(mode, context, on).then_some((id, on))
 }
 
+/// What a native Space shows (the platform's `SpaceActivation`, in the core's terms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation<K> {
+    Showing {
+        current: K,
+        previous: Option<K>,
+        remembered: Option<K>,
+    },
+    Vacant {
+        remembered: Option<K>,
+    },
+}
+
+/// A change to the workspaces' topology, as the platform makes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopologyEvent<K, S> {
+    /// A workspace was created on a Space, at the end of the catalog.
+    Created {
+        workspace: K,
+        space: S,
+    },
+    Removed(K),
+    /// A workspace moved to another Space.
+    Moved {
+        workspace: K,
+        space: S,
+    },
+    /// What a Space shows now.
+    Activated {
+        space: S,
+        activation: Activation<K>,
+    },
+    /// A Space has no activation any more.
+    Cleared(S),
+}
+
+/// The workspaces' topology as the core keeps it: the catalog (each workspace with its Space,
+/// in catalog order) and what each Space shows.
+#[derive(Debug, Clone)]
+pub struct Topology<K, S> {
+    catalog: Vec<(K, S)>,
+    activations: Vec<(S, Activation<K>)>,
+}
+
+impl<K, S> Default for Topology<K, S> {
+    fn default() -> Self {
+        Topology {
+            catalog: Vec::new(),
+            activations: Vec::new(),
+        }
+    }
+}
+
+impl<K: Copy + PartialEq, S: Copy + PartialEq> Topology<K, S> {
+    pub fn step(&mut self, event: TopologyEvent<K, S>) {
+        match event {
+            TopologyEvent::Created { workspace, space } => self.catalog.push((workspace, space)),
+            TopologyEvent::Removed(workspace) => self.catalog.retain(|(id, _)| *id != workspace),
+            TopologyEvent::Moved { workspace, space } => {
+                if let Some(entry) = self.catalog.iter_mut().find(|(id, _)| *id == workspace) {
+                    entry.1 = space;
+                }
+            }
+            TopologyEvent::Activated { space, activation } => {
+                match self.activations.iter_mut().find(|(on, _)| *on == space) {
+                    Some(entry) => entry.1 = activation,
+                    None => self.activations.push((space, activation)),
+                }
+            }
+            TopologyEvent::Cleared(space) => self.activations.retain(|(on, _)| *on != space),
+        }
+    }
+
+    /// Each workspace with its Space, in catalog order.
+    pub fn catalog(&self) -> &[(K, S)] { &self.catalog }
+
+    pub fn activation(&self, space: S) -> Option<Activation<K>> {
+        self.activations
+            .iter()
+            .find(|(on, _)| *on == space)
+            .map(|(_, activation)| *activation)
+    }
+
+    /// Every Space with an activation, in the order they first got one.
+    pub fn activations(&self) -> &[(S, Activation<K>)] { &self.activations }
+}
+
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
     use super::{Context, Selector, SkipEmpty, Step, Wrapping};
@@ -218,6 +305,42 @@ mod tests {
     use WorkspaceMode::{Global, PerDisplay};
 
     use super::*;
+
+    #[test]
+    fn the_topology_follows_the_catalog_and_what_each_space_shows() {
+        let mut topology = Topology::<u32, u32>::default();
+        topology.step(TopologyEvent::Created { workspace: 1, space: 10 });
+        topology.step(TopologyEvent::Created { workspace: 2, space: 10 });
+        topology.step(TopologyEvent::Created { workspace: 3, space: 20 });
+        topology.step(TopologyEvent::Moved { workspace: 2, space: 20 });
+        topology.step(TopologyEvent::Removed(1));
+        assert_eq!(topology.catalog(), &[(2, 20), (3, 20)]);
+        let showing = Activation::Showing {
+            current: 2,
+            previous: None,
+            remembered: None,
+        };
+        topology.step(TopologyEvent::Activated { space: 20, activation: showing });
+        topology.step(TopologyEvent::Activated {
+            space: 10,
+            activation: Activation::Vacant { remembered: Some(2) },
+        });
+        assert_eq!(topology.activation(20), Some(showing));
+        let next = Activation::Showing {
+            current: 3,
+            previous: Some(2),
+            remembered: None,
+        };
+        topology.step(TopologyEvent::Activated { space: 20, activation: next });
+        assert_eq!(topology.activation(20), Some(next));
+        topology.step(TopologyEvent::Cleared(10));
+        assert_eq!(topology.activation(10), None);
+        assert_eq!(topology.activations(), &[(20, next)]);
+        // A move or removal of an unknown workspace changes nothing.
+        topology.step(TopologyEvent::Moved { workspace: 9, space: 10 });
+        topology.step(TopologyEvent::Removed(9));
+        assert_eq!(topology.catalog(), &[(2, 20), (3, 20)]);
+    }
 
     #[test]
     fn a_workspace_is_reachable_on_the_acting_space_or_globally_on_a_visible_one() {
