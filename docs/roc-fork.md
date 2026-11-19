@@ -71,11 +71,8 @@ ship.
 
 ### Open items
 
-1. **W3b coverage gap.** No reactor test reaches `remap_workspace` with windows on a
-   workspace a Space remap deletes (per display, the target Space already holding workspaces);
-   the persistence test covers it at engine level. W3b's shadow is `rift_core::workspaces::
-   Ownerships`, held by the window store and written only through `set_ownership`; it joins
-   `Topology` at W4.
+1. **W3b's shadow** is `rift_core::workspaces::Ownerships`, held by the window store and
+   written only through `set_ownership`; it joins `Topology` at W4.
 2. **W4 obligation.** While ownership and the catalog are separate values, a window assigned
    to a workspace that no longer exists is not ruled out by the types. When W4 joins them, a
    workspace's removal must reassign or unassign its windows in the same step.
@@ -83,6 +80,10 @@ ship.
    reactor's global-mode setup a departure moves no workspace. Find the snapshot that drives
    `plan_workspace_placements` to one, make a fuzzer step reach it, and re-measure activation
    shapes after W5. The store-level literal test covers "a departure leaves a fallback shown".
+   Also: a reactor-level path reaching `remap_workspace` with windows or claims on the replaced
+   workspace (per display, a Space remapped onto one already holding workspaces). Today only
+   the persistence test reaches it, at engine level; a remap that skips the core passes every
+   reactor test.
 4. **Later:** W4 (flip catalog + activation to the core), W5 (topology into the core), W6
    (engine glue and persistence; collides with upstream #688, waits for it). BSP phase C waits
    for the soak; traditional trees wait for #688.
@@ -91,7 +92,7 @@ ship.
 
 Done: the Roc mirror of `Topology::step` (tag 32), W3b (ownership shadow + orphans on the
 tripwire) and its Roc mirror (tag 33). Next is the lead's call: W4 (flip catalog + activation,
-and join ownership, to the core), the W5 fuzzer gap, or the W3b reactor coverage gap.
+and join ownership, to the core) or the W5 fuzzer gaps.
 
 ### Rulings that bind (the lead's and the owner's)
 
