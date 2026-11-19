@@ -2337,3 +2337,20 @@ fn app_rules_mid_drag_leave_a_held_window_alone() {
     sim.reactor.process_windows_for_app_rules(vec![held], info, true);
     assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
 }
+
+/// A workspace switch, then a departure that takes every workspace off the Space: the Space
+/// shows nothing and keeps no history (it would not have survived its next activation).
+#[test]
+fn a_switch_then_a_departure_leaves_the_space_without_history() {
+    let setup = Setup {
+        displays: 3,
+        animate: true,
+        scrolling: false,
+        workspaces: Workspaces::GlobalRuled,
+    };
+    let steps = [
+        Step::SwitchWorkspace { to: Switch::To(3) },
+        Step::DisplayDeparts,
+    ];
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}

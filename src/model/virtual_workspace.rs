@@ -601,22 +601,6 @@ impl SpaceActivation {
     }
 }
 
-/// History left on a Space that shows nothing: it never happens after an event, so tests fail
-/// on it, and a running Rift says so, drops it and goes on.
-fn dropped_history(space: SpaceId, previous: VirtualWorkspaceId) {
-    #[cfg(test)]
-    panic!(
-        "workspace-activation: dropped navigation history on space {} ({previous:?})",
-        space.get()
-    );
-    #[cfg(not(test))]
-    warn!(
-        space = space.get(),
-        ?previous,
-        "workspace-activation: dropped navigation history on a Space showing nothing"
-    );
-}
-
 fn deserialize_activations<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<HashMap<SpaceId, SpaceActivation>, D::Error> {
@@ -1226,12 +1210,9 @@ impl WorkspaceStore {
         });
         let repaired = match current {
             Some(current) => SpaceActivation::Showing { current, previous, remembered },
-            None => {
-                if let Some(previous) = previous {
-                    dropped_history(space, previous);
-                }
-                SpaceActivation::Vacant { remembered }
-            }
+            // A Space that shows nothing keeps no history: showing a workspace again makes the
+            // one shown until then, none, the previous one, so the history would never be read.
+            None => SpaceActivation::Vacant { remembered },
         };
         self.set_activation(space, repaired);
     }
@@ -3300,6 +3281,54 @@ mod tests {
                 "the saved form is unchanged"
             );
         }
+    }
+
+    #[test]
+    fn a_space_left_with_history_and_nothing_shown_drops_the_history() {
+        // Global mode: a switch gives the Space history; a departure takes both workspaces.
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            mode: WorkspaceMode::Global,
+            ..Default::default()
+        };
+        let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let (source, target) = (SpaceId::new(61), SpaceId::new(62));
+        let on_source: Vec<_> = store.list_workspaces(source).iter().map(|(id, _)| *id).collect();
+        store.list_workspaces(target);
+        let [first, second] = [on_source[0], on_source[1]];
+        store.set_active_workspace(source, first);
+        store.set_active_workspace(source, second);
+        assert_eq!(store.last_workspace(source), Some(first));
+        for id in [second, first] {
+            store.transfer_workspace(
+                id,
+                target,
+                Some("other"),
+                WorkspaceTransferReason::DisplayDeparture,
+            );
+        }
+        // Nothing shown, the departed workspace remembered, no history.
+        assert_eq!(
+            store.active_workspace_per_space()[&source],
+            SpaceActivation::Vacant { remembered: Some(second) }
+        );
+        assert_eq!(store.last_workspace(source), None);
+        // The history would not have survived the return: showing a workspace again makes the
+        // one shown until then (none) the previous one.
+        store.transfer_workspace(
+            second,
+            source,
+            Some("home"),
+            WorkspaceTransferReason::Restoration,
+        );
+        assert_eq!(
+            store.active_workspace_per_space()[&source],
+            SpaceActivation::Showing {
+                current: second,
+                previous: None,
+                remembered: None
+            }
+        );
     }
 
     #[test]
