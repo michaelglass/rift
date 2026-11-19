@@ -66,6 +66,13 @@ conflict; take the line in order unless the lead says otherwise.
 | eb466e5d | Rust (tests only) | reactor test: a Space remapped onto one holding workspaces takes its windows and claims along |
 | 202c536c | Rust | W4a: the joined `Workspaces` (catalog, activations, ownership; refusals; Removed carries its Successor) |
 | 7300b552 | Roc + core refactor | W4a mirror, tag 34 |
+| 45932e6e | Rust (tests only) | fuzzer setups and steps for the workspaces' topology (not drawn) |
+| 8d1be68a | Rust | C1: a topology change no longer resends a parked window's unanswered write |
+| 61750e77 | Rust | A: a display returning mid-drag leaves the held window where it is (Held) |
+| db6fea40 | Rust + Roc | Held in the core's ownership, the tripwire and the Roc mirror |
+| 09d4d4b7 | Rust | B: a vacant Space drops its history where it goes vacant (tripwire gone) |
+| 9bfb5ce9 | Rust + Roc | C2: `Sync::InFlight` records its origin |
+| 7f5688b0 | Rust (tests only) | the fuzzer draws the new setups and steps; activation-shape measurement |
 
 Play-line tripwires (debug, target `rift_wm::actor::reactor`): `lifecycle-divergence:` (from
 L2), `workspace-divergence:` (from W3), `workspace-activation:` (W2b runtime drop),
@@ -100,52 +107,43 @@ ship.
    store answers from the core; its index and the record's assignment go). **W4d, the catalog
    and activation flip with the saved form written from the core, waits for #688 and goes with
    W6: no persistence change before #688.**
-3. **W5 fuzzer gap (in progress).** Why no departure transferred: the test reactor is
-   **per display**, not global (the earlier note was wrong), and `reconcile_workspace_placements`
-   returns early outside global mode. 45932e6e adds fuzzer setups (`Workspaces::PerDisplay |
-   Global | GlobalRuled`, the rule pinning workspace 2 to display 1), steps (`DesktopReplaced`
-   with its remap, `DisplayReturns { renumbered }`, `SwitchWorkspace`) and sim corrections
-   (stable display UUIDs; `DestroyIdentity` skips the held window); generation does not draw
-   them yet. With them drawn (6000 × 60) the fuzzer found four signatures, ruled:
-   - **A, fix as scoped D (next):** in global mode a display returning mid-drag carries the
-     held window with its workspace (`held-window-keeps-assignment`; shrunk: Global, 2
-     displays, DisplayDeparts, MoveToWorkspace, DragStart, DisplayReturns). At grip nothing
-     changes; only when a workspace transfer would carry the held window does it become a typed
-     held-and-unassigned ownership (Held) that app rules and admission leave alone; the drop
-     assigns it to the drop display's shown workspace, a let-go without a drop to its Space's
-     shown workspace (a named, tested rule). The transfer takes a split `Members { unheld, held
-     }` query. Held then goes into the Ownerships shadow, tripwire and Roc mirror (own commit).
-     Stop and ask if it needs #688's engine glue. Upstream candidate (main has the same
-     planner).
-   - **B, (ii):** a switch then a departure leaves a Space with history and nothing shown;
-     W2b's tripwire panics. Pre-W2b, the next activation cleared that history
-     (`previous = current.replace(id)`), so it was never read: drop it deliberately in the
-     transition into Vacant, a literal test pins that, saved files keep W2b's load
-     normalization, remove the `workspace-activation:` tripwire for that shape, check IPC for
-     `previous`. Lesson: W2b's shape measurement ran without a global-mode fuzzer; a shape
-     measurement only counts across every mode.
-   - **C1, fixed (8d1be68a):** a topology change Forgot parked windows, dropping a write in
-     flight sent earlier in the event; now Distrust.
-   - **C2, decision pending:** an animation stopped under a plain write's request id turns the
-     write in flight into Unknown (`animation_stopped`), and the arrange resends it (shrunk:
-     PerDisplay, animated, scrolling: ModifierDrag, Deliver, Cancel, DesktopReplaced).
-     Proposed: `Sync::InFlight` records its origin (core + Roc core), or the platform stops
-     animating a window the core wrote.
-   - Then the last fuzzer commit draws the new setups and steps (the full version is the
-     working state before 45932e6e trimmed it: `Setup::of` by `(seed / 8) % 4`, `generate`
-     over 112 cases) and adds the ignored `activation_shapes_across_the_fuzzer` measurement.
-   Shapes measured with them drawn (6000 × 60, after every step): showing, showing+previous,
-   vacant, vacant+remembered; never showing+remembered (covered by the store-level literal
-   test only; no natural step leaves a workspace behind on a departed Space).
+3. **W5 fuzzer gap: done.** Why no departure transferred: the test reactor is **per
+   display**, not global (an earlier note was wrong), and `reconcile_workspace_placements`
+   returns early outside global mode. The fuzzer now has setups (`Workspaces::PerDisplay |
+   Global | GlobalRuled`, half the seeds per display; the rule pins workspace 2 to display 1),
+   steps (`DesktopReplaced` with its remap, `DisplayReturns { renumbered }`, `SwitchWorkspace`)
+   and sim corrections (stable display UUIDs; `DestroyIdentity` skips the held window). What it
+   found, each fixed in its own commit with literal tests from the shrunk cases:
+   - **A** (61750e77, then db6fea40 for the core): a display returning mid-drag carried the held
+     window off with its workspace. Only when a transfer would carry it, the held window leaves
+     the workspace as `Ownership::Held` (placed by no workspace; the store refuses to assign
+     it); the drop places it on the drop display's shown workspace, a let-go without a drop on
+     its Space's. `held_member -> Option<HeldMember>` (the index can't hold a Held window).
+     **Upstream candidate:** main has the same planner and transfer loop.
+   - **B** (09d4d4b7): a switch then a departure left history on a vacant Space, which W2b's
+     tripwire panicked on. Pre-W2b the next activation cleared it, so it was never read; repair
+     now drops it where the Space goes vacant. **Lesson: W2b's shape measurement ran without a
+     global-mode fuzzer; a shape measurement only counts across every mode.**
+   - **C1** (8d1be68a): a topology change Forgot parked windows, dropping a write in flight;
+     now Distrust.
+   - **C2** (9bfb5ce9): `Sync::InFlight` records its origin (`Written | AnimationEnded`);
+     `animation_stopped` touches only an animation's. **After #688 (reactor/animation.rs is in
+     its file list): the platform presents only animations the core emitted** (it presented a
+     still animation under a plain write's request, a projection without an effect).
+   Activation shapes (`activation_shapes_across_the_fuzzer`, ignored; 6000 × 60, after every
+   step): showing, showing+previous, vacant+remembered (and, on other runs, vacant) in global
+   modes; showing and showing+previous per display. A renumbered return carries its remap, and
+   the held-window invariant follows a remap (a rename, not a move). Never showing+remembered: covered by the store-level literal
+   test only (no natural step leaves a workspace behind on a departed Space).
 4. **Later:** W4 (flip catalog + activation to the core), W5 (topology into the core), W6
    (engine glue and persistence; collides with upstream #688, waits for it). BSP phase C waits
    for the soak; traditional trees wait for #688.
 
 ### Next steps
 
-Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34). W4b to W4d
-wait for #688 (open item 2). Now (open item 3): A, then B, C2 when ruled, then the fuzzer draws
-the new steps.
+Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34), the W5
+fuzzer gap and its four fixes (open item 3). W4b to W4d wait for #688 (open item 2). Next is the
+lead's call.
 
 ### Rulings that bind (the lead's and the owner's)
 
