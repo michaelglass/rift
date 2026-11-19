@@ -2354,3 +2354,23 @@ fn a_switch_then_a_departure_leaves_the_space_without_history() {
     ];
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
 }
+
+/// A let-go writes the window back while the platform presents a still animation under the same
+/// request; a topology change stops it: the write is still with the app, so the arrange after it
+/// sends nothing equal over it.
+#[test]
+fn a_stopped_animation_leaves_a_write_in_flight_under_its_request_alone() {
+    let setup = Setup {
+        displays: 3,
+        animate: true,
+        scrolling: true,
+        workspaces: Workspaces::PerDisplay,
+    };
+    let steps = [
+        Step::ModifierDrag { w: 1, dx: 136, dy: -59 },
+        Step::Deliver,
+        Step::Cancel,
+        Step::DesktopReplaced { d: 0 },
+    ];
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}

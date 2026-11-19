@@ -87,13 +87,15 @@ pub enum Sync<K: Kinds> {
     /// answer settles it. `last` as for `Settled`.
     Unknown { last: Option<Sent<K::Request>> },
     /// One write is with the app, sent under `request`, from `before`. A newer desire waits in
-    /// `queued` (one, the latest) until the app answers or `deadline` passes.
+    /// `queued` (one, the latest) until the app answers or `deadline` passes. `origin` says
+    /// whether Rift wrote it or an animation ended short of it.
     InFlight {
         target: K::Frame,
         deadline: K::Time,
         queued: Option<K::Frame>,
         request: Sent<K::Request>,
         before: Before<K>,
+        origin: Origin,
     },
     /// The platform is animating the window to `target` (a layout transition or a camera), its
     /// frames sent under `request`. A desire treats the window as at `target`; an answer to an
@@ -121,6 +123,14 @@ pub enum Sync<K: Kinds> {
         request: Sent<K::Request>,
         at: K::Frame,
     },
+}
+
+/// Where a write in flight came from: only an ended animation's can be stopped by the platform
+/// (its frames dropped); a write Rift sent is with the app whatever the platform presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Written,
+    AnimationEnded,
 }
 
 /// What the app had acknowledged when a write was sent: where a write it never answers leaves
@@ -347,12 +357,14 @@ impl<K: Kinds> Reconciler<K> {
                 queued,
                 request,
                 before: _,
+                origin,
             }) => Sync::InFlight {
                 target,
                 deadline,
                 queued,
                 request,
                 before: Before::Unknown,
+                origin,
             },
             Some(
                 sync @ (Sync::Settled { .. }
@@ -393,6 +405,7 @@ impl<K: Kinds> Reconciler<K> {
             queued: None,
             request: Sent(request),
             before,
+            origin: Origin::Written,
         });
         Write { window, frame, request }
     }
@@ -438,6 +451,7 @@ impl<K: Kinds> Reconciler<K> {
                 queued,
                 request: sent,
                 before,
+                origin,
             } => {
                 if K::same_as(desired, target) {
                     if queued.is_some() {
@@ -447,6 +461,7 @@ impl<K: Kinds> Reconciler<K> {
                             queued: None,
                             request: sent,
                             before,
+                            origin,
                         });
                     }
                     return Verdict::Nothing;
@@ -458,6 +473,7 @@ impl<K: Kinds> Reconciler<K> {
                     queued,
                     request: sent,
                     before,
+                    origin,
                 });
                 Verdict::Queued
             }
@@ -501,6 +517,7 @@ impl<K: Kinds> Reconciler<K> {
                 queued,
                 request,
                 before,
+                origin,
             }) => {
                 if queued.is_some() {
                     let queued = None;
@@ -510,6 +527,7 @@ impl<K: Kinds> Reconciler<K> {
                         queued,
                         request,
                         before,
+                        origin,
                     });
                 }
                 true
@@ -734,6 +752,7 @@ impl<K: Kinds> Reconciler<K> {
                 queued,
                 request,
                 before,
+                origin: _,
             } if due == deadline => Some((target, queued, request, before)),
             Sync::InFlight { .. }
             | Sync::Settled { .. }
@@ -848,6 +867,7 @@ impl<K: Kinds> Reconciler<K> {
                 queued: None,
                 request,
                 before: Before::Unknown,
+                origin: Origin::AnimationEnded,
             });
         }
     }
@@ -855,7 +875,8 @@ impl<K: Kinds> Reconciler<K> {
     /// The platform stopped presenting `window` under `request`.
     /// Still animating, it is where it stopped. Waiting for the answer to the animation that
     /// ended, it may never get one (frames the app had not applied are dropped): where the app
-    /// has it is unknown. Anything since (a newer animation or write) is untouched.
+    /// has it is unknown. Anything since (a newer animation or write) is untouched, and so is a
+    /// write Rift sent under the same request: it is with the app whatever the platform presents.
     pub fn animation_stopped(&mut self, window: K::Window, request: Stamp<K::Request>) {
         let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
             return;
@@ -864,9 +885,11 @@ impl<K: Kinds> Reconciler<K> {
             Some(Sync::Animating { request: sent, .. }) if request.names(&sent) => {
                 self.set(window, Sync::Settled { acked: known, last: Some(sent) })
             }
-            Some(Sync::InFlight { request: sent, .. }) if request.names(&sent) => {
-                self.set(window, Sync::Unknown { last: Some(sent) })
-            }
+            Some(Sync::InFlight {
+                request: sent,
+                origin: Origin::AnimationEnded,
+                ..
+            }) if request.names(&sent) => self.set(window, Sync::Unknown { last: Some(sent) }),
             Some(
                 Sync::Animating { .. }
                 | Sync::InFlight { .. }
@@ -1545,6 +1568,14 @@ mod tests {
         _ = want(&mut reconciler, T0, at(10.), at(100.));
         seen_at(&mut reconciler, at(10.)).animation_stopped(window(), Stamp::new(OLD));
         assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+        // Nor is a write Rift sent under the stopped presentation's own request: it is still
+        // with the app, and nothing equal goes over it.
+        seen_at(&mut reconciler, at(100.)).animation_stopped(window(), Stamp::new(R));
+        assert!(matches!(sync(&reconciler), Sync::InFlight {
+            origin: Origin::Written,
+            ..
+        }));
+        assert_eq!(want(&mut reconciler, T0, at(10.), at(100.)), Verdict::Nothing);
     }
 
     #[test]

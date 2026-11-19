@@ -79,11 +79,14 @@ Before : [AckedBefore(Rect), UnknownBefore]
 ## A desire waiting behind the write in flight: the latest, or none.
 Waiting : [Waiting(Rect), NoneWaiting]
 
+## Where a write in flight came from: only an ended animation's can be stopped by the platform.
+Origin : [Written, AnimationEnded]
+
 ## Where one window stands between what Rift asked of its app and what the app answered.
 Sync : [
 	Settled({ acked : Rect, last : Last }),
 	Unknown(Last),
-	InFlight({ target : Rect, deadline : U64, queued : Waiting, request : U32, before : Before }),
+	InFlight({ target : Rect, deadline : U64, queued : Waiting, request : U32, before : Before, origin : Origin }),
 	Animating({ target : Rect, request : U32 }),
 	Refused({ wanted : Rect, got : Rect, request : U32 }),
 
@@ -348,7 +351,7 @@ send : Model, U64, U32, WindowId, Rect, Before -> (Model, WriteFx)
 send = |model, now, request, window, frame, before| {
 	deadline = now + write_deadline_ns
 	queued_up = { ..model, deadlines: model.deadlines.append({ deadline, window }) }
-	sent = set(queued_up, window, InFlight({ target: frame, deadline, queued: NoneWaiting, request, before }))
+	sent = set(queued_up, window, InFlight({ target: frame, deadline, queued: NoneWaiting, request, before, origin: Written }))
 	(sent, { window, frame, request })
 }
 
@@ -563,7 +566,7 @@ waiting = |model, entry|
 	match model.windows.get(entry.window) {
 		Ok(record) =>
 			match record.sync {
-				InFlight({ target, deadline, queued, request, before }) =>
+				InFlight({ target, deadline, queued, request, before, .. }) =>
 					if deadline == entry.deadline {
 						Waits({ target, queued, request, before })
 					} else {
@@ -705,7 +708,7 @@ animation_ended = |model0, now, request| {
 		match record.sync {
 			Animating({ target, .. }) => {
 				queued_up = { ..$model, deadlines: $model.deadlines.append({ deadline, window }) }
-				$model = set(queued_up, window, InFlight({ target, deadline, queued: NoneWaiting, request, before: UnknownBefore }))
+				$model = set(queued_up, window, InFlight({ target, deadline, queued: NoneWaiting, request, before: UnknownBefore, origin: AnimationEnded }))
 			}
 
 			Settled(_) | Refused(_) | Unknown(_) | InFlight(_) | Outside(_) => {}
@@ -723,8 +726,10 @@ animation_stopped = |model, window, request|
 				Animating({ request: sent, .. }) =>
 					if (sent == request) set(model, window, Settled({ acked: seen, last: Sent(request) })) else model
 
-				InFlight({ request: sent, .. }) =>
+				InFlight({ request: sent, origin: AnimationEnded, .. }) =>
 					if (sent == request) set(model, window, Unknown(Sent(request))) else model
+
+				InFlight({ origin: Written, .. }) => model
 
 				Settled(_) | Refused(_) | Unknown(_) | Outside(_) => model
 			}
