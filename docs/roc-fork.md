@@ -505,6 +505,21 @@ as presence; L5 claims as presence; L6 retirement in the core.
   the old boolean rule over all 96 combinations of the loose facts.
 - cf5c2042 (L1, Roc): tag 24; the differential checks all 72 combinations of typed facts;
   a planted bug in the Roc dialog-window rule fails it.
+- 9715b121 (L2): the shadow. `rift_core::lifecycle::Lifecycle` holds every live window's
+  facts (`LifecycleEvent::Live | Changed | Gone` in, `Transition::Admitted | Suspended(why)`
+  out). The window store owns it and is the only writer of the admission facts:
+  `WindowState`'s manageability, native-transient flag and manage override are private to the
+  model, and `set_manageable`, `set_manage_override`, `set_native_transient`, `set_minimized`,
+  `replace_info`, `insert_window` and the AX-state drops tell the core. After every reactor
+  event `lifecycle_divergences` must be empty: tests fail on it; a running Rift logs
+  `lifecycle-divergence:` at debug under `rift_wm::actor::reactor`. A literal test shows a
+  write around the setters is caught; a setter that does not tell the core fails three reactor
+  tests.
+- 7e9e980d (L2, Roc): the step's logic is the pure `read` (facts before + `Reading` → facts
+  after + `Change`); tag 25; the differential checks all 6,205 pairs; a planted bug fails it.
+- A placeholder (a record with an assignment and no AX state: a restored layout's window not
+  yet seen, a rule's pre-assignment, a fullscreen AX identity being replaced) has no facts in
+  the core, so it can never be admitted; L4 names it as presence.
 
 ## Roadmap: to "the reactor is only an applier"
 
