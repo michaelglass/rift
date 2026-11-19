@@ -6,5 +6,7 @@ pub mod common;
 pub mod ipc;
 pub mod layout_engine;
 pub mod model;
+#[cfg(feature = "roc-core")]
+pub(crate) mod roc_path;
 pub mod sys;
 pub mod ui;
