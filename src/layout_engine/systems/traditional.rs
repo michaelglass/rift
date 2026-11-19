@@ -1844,8 +1844,17 @@ impl TraditionalLayoutSystem {
         };
         let desc = format!("{status}{node:?}");
         let desc = match self.window_at(node) {
-            Some(wid) => format!("{desc} {:?} {}", wid, self.tree.data.layout.debug(node, false)),
-            None => format!("{desc} {}", self.tree.data.layout.debug(node, true)),
+            Some(wid) => {
+                format!(
+                    "{desc} {:?} {}",
+                    wid,
+                    self.tree.data.layout.debug(&self.tree.map, node, false)
+                )
+            }
+            None => format!(
+                "{desc} {}",
+                self.tree.data.layout.debug(&self.tree.map, node, true)
+            ),
         };
         let desc = if let Some(label) = labels.and_then(|labels| labels.get(&node).copied()) {
             format!("{desc} [{label}]")
@@ -2758,10 +2767,17 @@ impl Layout {
         info.is_fullscreen || info.is_fullscreen_within_gaps
     }
 
-    fn debug(&self, node: NodeId, is_container: bool) -> String {
+    fn debug(&self, map: &NodeMap, node: NodeId, is_container: bool) -> String {
         let info = &self.info[node];
         if is_container {
-            format!("{:?} [size {} total={}]", info.kind, info.size, info.total)
+            // The weights' real sum: `total` is a running cache only this text ever read, and it
+            // drifts from the sum as children come and go.
+            format!(
+                "{:?} [size {} total={}]",
+                info.kind,
+                info.size,
+                self.children_total(map, node)
+            )
         } else {
             format!("[size {}]", info.size)
         }
@@ -2785,6 +2801,21 @@ mod tests {
     use crate::layout_engine::{Direction, LayoutKind};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn the_drawn_tree_shows_a_containers_real_weight_sum_not_a_drifted_cache() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for i in 1..=3 {
+            system.add_window_after_selection(layout, w(i));
+        }
+        let root = system.root(layout);
+        // The running cache drifts as children come and go; only the drawn text read it.
+        system.tree.data.layout.info[root].total = 99.0;
+        let drawn = system.draw_tree(layout);
+        assert!(drawn.contains("total=3]"), "{drawn}");
+        assert!(!drawn.contains("total=99"), "{drawn}");
+    }
 
     #[test]
     fn window_in_direction_prefers_leftmost_when_moving_right() {
