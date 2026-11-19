@@ -633,23 +633,208 @@ pub(crate) struct WorkspaceSettingsPlan {
 /// to this workspace?" must go through the store-backed helpers on this
 /// manager. Keeping the mapping out of `VirtualWorkspace` prevents stale
 /// duplicated membership from surviving topology churn or discovery refreshes.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct WorkspaceStore {
-    pub(crate) workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
+    /// Every workspace, in catalog order.
+    pub(crate) workspaces: Catalog,
+    /// Last accepted physical topology also scopes configuration during restore.
+    single_display: bool,
+    pub active_workspace_per_space: HashMap<SpaceId, SpaceActivation>,
+    pub(crate) settings: VirtualWorkspaceSettings,
+    pub layout_settings: LayoutSettings,
+}
+
+/// Every workspace, by id, in one catalog order: the order lists each workspace exactly once,
+/// because the two only change together (`insert` appends, `remove` takes it out of both).
+/// Lookups and slot-order iteration read the map as before.
+#[derive(Debug, Default)]
+pub struct Catalog {
+    workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
+    order: Vec<VirtualWorkspaceId>,
+}
+
+/// Why a saved catalog can't be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogError {
+    /// The order names a workspace the catalog doesn't have.
+    Unknown(VirtualWorkspaceId),
+    /// The order names a workspace twice.
+    Duplicate(VirtualWorkspaceId),
+    /// The order leaves a workspace out.
+    Unlisted {
+        id: VirtualWorkspaceId,
+        space: SpaceId,
+    },
+}
+
+impl std::fmt::Display for CatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CatalogError::Unknown(id) => {
+                write!(f, "invalid or duplicate workspace {id:?} in catalog")
+            }
+            CatalogError::Duplicate(id) => {
+                write!(f, "invalid or duplicate workspace {id:?} in catalog")
+            }
+            CatalogError::Unlisted { id, space } => {
+                write!(
+                    f,
+                    "workspace {id:?} for native space {} is not indexed",
+                    space.get()
+                )
+            }
+        }
+    }
+}
+
+impl Catalog {
+    /// A saved map and order as one catalog: the order must name every workspace, each once.
+    fn parse(
+        workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
+        order: Vec<VirtualWorkspaceId>,
+    ) -> Result<Catalog, CatalogError> {
+        let mut listed = HashSet::default();
+        for &id in &order {
+            if !workspaces.contains_key(id) {
+                return Err(CatalogError::Unknown(id));
+            }
+            if !listed.insert(id) {
+                return Err(CatalogError::Duplicate(id));
+            }
+        }
+        if let Some((id, workspace)) = workspaces.iter().find(|(id, _)| !listed.contains(id)) {
+            return Err(CatalogError::Unlisted { id, space: workspace.space });
+        }
+        Ok(Catalog { workspaces, order })
+    }
+
+    /// Adds a workspace at the end of the catalog.
+    pub fn insert(&mut self, workspace: VirtualWorkspace) -> VirtualWorkspaceId {
+        let id = self.workspaces.insert(workspace);
+        self.order.push(id);
+        id
+    }
+
+    /// Takes a workspace out of the catalog.
+    pub fn remove(&mut self, id: VirtualWorkspaceId) -> Option<VirtualWorkspace> {
+        let workspace = self.workspaces.remove(id)?;
+        self.order.retain(|&listed| listed != id);
+        Some(workspace)
+    }
+
+    /// The catalog order.
+    pub fn order(&self) -> &[VirtualWorkspaceId] { &self.order }
+
+    pub fn get(&self, id: VirtualWorkspaceId) -> Option<&VirtualWorkspace> {
+        self.workspaces.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: VirtualWorkspaceId) -> Option<&mut VirtualWorkspace> {
+        self.workspaces.get_mut(id)
+    }
+
+    pub fn contains_key(&self, id: VirtualWorkspaceId) -> bool { self.workspaces.contains_key(id) }
+
+    pub fn len(&self) -> usize { self.workspaces.len() }
+
+    pub fn is_empty(&self) -> bool { self.workspaces.is_empty() }
+
+    pub fn iter(&self) -> slotmap::basic::Iter<'_, VirtualWorkspaceId, VirtualWorkspace> {
+        self.workspaces.iter()
+    }
+
+    pub fn iter_mut(
+        &mut self,
+    ) -> slotmap::basic::IterMut<'_, VirtualWorkspaceId, VirtualWorkspace> {
+        self.workspaces.iter_mut()
+    }
+
+    pub fn values(&self) -> slotmap::basic::Values<'_, VirtualWorkspaceId, VirtualWorkspace> {
+        self.workspaces.values()
+    }
+
+    pub fn values_mut(
+        &mut self,
+    ) -> slotmap::basic::ValuesMut<'_, VirtualWorkspaceId, VirtualWorkspace> {
+        self.workspaces.values_mut()
+    }
+
+    pub fn keys(&self) -> slotmap::basic::Keys<'_, VirtualWorkspaceId, VirtualWorkspace> {
+        self.workspaces.keys()
+    }
+}
+
+impl<'a> IntoIterator for &'a Catalog {
+    type IntoIter = slotmap::basic::Iter<'a, VirtualWorkspaceId, VirtualWorkspace>;
+    type Item = (VirtualWorkspaceId, &'a VirtualWorkspace);
+
+    fn into_iter(self) -> Self::IntoIter { self.workspaces.iter() }
+}
+
+impl std::ops::Index<VirtualWorkspaceId> for Catalog {
+    type Output = VirtualWorkspace;
+
+    fn index(&self, id: VirtualWorkspaceId) -> &VirtualWorkspace { &self.workspaces[id] }
+}
+
+impl std::ops::IndexMut<VirtualWorkspaceId> for Catalog {
+    fn index_mut(&mut self, id: VirtualWorkspaceId) -> &mut VirtualWorkspace {
+        &mut self.workspaces[id]
+    }
+}
+
+/// The store as it is saved: the workspace map and the catalog order as two fields (older
+/// files group the order by Space).
+#[derive(Deserialize)]
+#[serde(rename = "WorkspaceStore")]
+struct SavedStore {
+    workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
     #[serde(
         alias = "workspaces_by_space",
         deserialize_with = "deserialize_workspace_order"
     )]
     order: Vec<VirtualWorkspaceId>,
-    /// Last accepted physical topology also scopes configuration during restore.
     #[serde(default)]
     single_display: bool,
     #[serde(deserialize_with = "deserialize_activations")]
-    pub active_workspace_per_space: HashMap<SpaceId, SpaceActivation>,
-    #[serde(skip)]
-    pub(crate) settings: VirtualWorkspaceSettings,
-    #[serde(skip)]
-    pub layout_settings: LayoutSettings,
+    active_workspace_per_space: HashMap<SpaceId, SpaceActivation>,
+}
+
+/// [`SavedStore`] borrowed from a store, for writing.
+#[derive(Serialize)]
+#[serde(rename = "WorkspaceStore")]
+struct SavedStoreRef<'a> {
+    workspaces: &'a SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
+    order: &'a [VirtualWorkspaceId],
+    single_display: bool,
+    active_workspace_per_space: &'a HashMap<SpaceId, SpaceActivation>,
+}
+
+impl Serialize for WorkspaceStore {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SavedStoreRef {
+            workspaces: &self.workspaces.workspaces,
+            order: &self.workspaces.order,
+            single_display: self.single_display,
+            active_workspace_per_space: &self.active_workspace_per_space,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkspaceStore {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let saved = SavedStore::deserialize(deserializer)?;
+        let workspaces =
+            Catalog::parse(saved.workspaces, saved.order).map_err(serde::de::Error::custom)?;
+        Ok(WorkspaceStore {
+            workspaces,
+            single_display: saved.single_display,
+            active_workspace_per_space: saved.active_workspace_per_space,
+            settings: VirtualWorkspaceSettings::default(),
+            layout_settings: LayoutSettings::default(),
+        })
+    }
 }
 
 /// A rule's `display` only applies in global mode; say so rather than ignore it silently.
@@ -766,7 +951,8 @@ impl WorkspaceStore {
 
     fn scope_ids(&self, space: SpaceId) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
         let namespace = self.namespace(self.settings.mode, space);
-        self.order
+        self.workspaces
+            .order()
             .iter()
             .copied()
             .filter(move |id| self.namespace(self.settings.mode, self[*id].space) == namespace)
@@ -818,7 +1004,7 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn catalog(&self) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
-        self.order.iter().copied()
+        self.workspaces.order().iter().copied()
     }
 
     /// Ownership changes leave the workspace object, layout and focus history intact.
@@ -901,9 +1087,9 @@ impl WorkspaceStore {
     pub(crate) fn normalize_loaded_names(&mut self) { self.normalize_names(false); }
 
     fn normalize_names(&mut self, shared: bool) {
-        for (index, &id) in self.order.iter().enumerate() {
+        for (index, id) in self.workspaces.order().to_vec().into_iter().enumerate() {
             let workspace = &self[id];
-            let duplicate = self.order[..index].iter().any(|&other| {
+            let duplicate = self.workspaces.order()[..index].iter().any(|&other| {
                 (shared || self[other].space == workspace.space)
                     && self[other].name == workspace.name
             });
@@ -930,7 +1116,8 @@ impl WorkspaceStore {
                 // first one, if it has one.
                 let previous = activation.previous();
                 *activation = match self
-                    .order
+                    .workspaces
+                    .order()
                     .iter()
                     .copied()
                     .find(|id| self.workspaces[*id].space == space)
@@ -1021,8 +1208,7 @@ impl WorkspaceStore {
     ) -> Self {
         warn_on_ignored_display_rules(config);
         Self {
-            workspaces: SlotMap::default(),
-            order: Vec::new(),
+            workspaces: Catalog::default(),
             single_display: false,
             active_workspace_per_space: HashMap::default(),
             settings: config.clone(),
@@ -1189,9 +1375,7 @@ impl WorkspaceStore {
         if let Some(size) = size {
             workspace.ensure_layout_for_size(size);
         }
-        let id = self.workspaces.insert(workspace);
-        self.order.push(id);
-        id
+        self.workspaces.insert(workspace)
     }
 
     fn name_exists(&self, space: SpaceId, name: &str) -> bool {
@@ -1335,7 +1519,7 @@ impl WorkspaceStore {
         let order = if self.effective_mode() == WorkspaceMode::Global
             && self.settings.workspace_rules.iter().any(|rule| rule.display.is_some())
         {
-            self.order.as_slice()
+            self.workspaces.order()
         } else {
             &[]
         };
@@ -1359,14 +1543,6 @@ impl WorkspaceStore {
     /// Persistence files are user-visible and may be old, truncated, or manually edited. Loading
     /// malformed topology must return a useful error instead of panicking later through indexing.
     pub(crate) fn validate_persisted_topology(&self) -> Result<(), String> {
-        let mut indexed = HashSet::default();
-        for &workspace in &self.order {
-            if !self.workspaces.contains_key(workspace) || !indexed.insert(workspace) {
-                return Err(format!(
-                    "invalid or duplicate workspace {workspace:?} in catalog"
-                ));
-            }
-        }
         for (&space, activation) in &self.active_workspace_per_space {
             for (kind, id) in [
                 ("active", activation.current()),
@@ -1392,9 +1568,7 @@ impl WorkspaceStore {
         }
 
         for (workspace, entry) in &self.workspaces {
-            if !indexed.contains(&workspace)
-                || !self.active_workspace_per_space.contains_key(&entry.space)
-            {
+            if !self.active_workspace_per_space.contains_key(&entry.space) {
                 return Err(format!(
                     "workspace {workspace:?} for native space {} is not indexed",
                     entry.space.get()
@@ -1460,7 +1634,6 @@ impl WorkspaceStore {
         for id in &removed {
             self.workspaces.remove(*id);
         }
-        self.order.retain(|id| !removed.contains(id));
         self.active_workspace_per_space.remove(&space);
         for activation in self.active_workspace_per_space.values_mut() {
             activation.retain(|id| !removed.contains(&id));
@@ -1597,7 +1770,7 @@ impl WorkspaceStore {
             |id| skip_empty != Some(true) || window_store.workspace_window_count(id) != 0;
         let mut crossed = false;
         let mut wrapped = None;
-        let mut remaining = self.order.iter();
+        let mut remaining = self.workspaces.order().iter();
         loop {
             let id = match dir {
                 Direction::Right => remaining.next(),
@@ -1822,7 +1995,11 @@ impl WorkspaceStore {
         &self,
         space: SpaceId,
     ) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
-        self.order.iter().copied().filter(move |id| self[*id].space == space)
+        self.workspaces
+            .order()
+            .iter()
+            .copied()
+            .filter(move |id| self[*id].space == space)
     }
 
     pub fn rename_workspace(
@@ -3069,6 +3246,66 @@ mod tests {
     }
 
     #[test]
+    fn a_store_saved_before_the_catalog_type_loads_and_saves_unchanged() {
+        // Written by the code before Catalog: two Spaces, two workspaces each.
+        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
+        let store: WorkspaceStore = ron::from_str(saved).unwrap();
+        assert_eq!(store.workspaces.order().len(), 4);
+        assert_eq!(store.workspaces.len(), 4);
+        assert_eq!(
+            ron::ser::to_string(&store).unwrap(),
+            saved,
+            "the saved form is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_catalog_lists_every_workspace_once_and_a_saved_one_that_does_not_is_refused() {
+        let settings = LayoutSettings::default();
+        let workspace = |name: &str| {
+            VirtualWorkspace::new(name.into(), SpaceId::new(1), LayoutMode::default(), &settings)
+        };
+        let mut map = SlotMap::<VirtualWorkspaceId, VirtualWorkspace>::with_key();
+        let (a, b) = (map.insert(workspace("a")), map.insert(workspace("b")));
+        let mut gone = SlotMap::<VirtualWorkspaceId, ()>::with_key();
+        let _ = gone.insert(());
+        let _ = gone.insert(());
+        let unknown = gone.insert(());
+        let parse = |order: Vec<VirtualWorkspaceId>| {
+            let map = map.iter().map(|(_, w)| w.name.clone()).collect::<Vec<_>>();
+            let mut copy = SlotMap::<VirtualWorkspaceId, VirtualWorkspace>::with_key();
+            for name in map {
+                copy.insert(workspace(&name));
+            }
+            Catalog::parse(copy, order).map(|catalog| catalog.order().to_vec())
+        };
+        assert_eq!(parse(vec![b, a]), Ok(vec![b, a]));
+        assert_eq!(parse(vec![a, unknown, b]), Err(CatalogError::Unknown(unknown)));
+        assert_eq!(parse(vec![a, b, a]), Err(CatalogError::Duplicate(a)));
+        assert_eq!(
+            parse(vec![a]),
+            Err(CatalogError::Unlisted { id: b, space: SpaceId::new(1) })
+        );
+        // Changes keep the order whole.
+        let mut catalog = Catalog::parse(map, vec![a, b]).unwrap();
+        let c = catalog.insert(workspace("c"));
+        assert_eq!(catalog.order(), &[a, b, c]);
+        assert_eq!(catalog.remove(b).map(|w| w.name), Some("b".into()));
+        assert_eq!(catalog.order(), &[a, c]);
+        assert!(catalog.remove(b).is_none());
+        assert_eq!(catalog.order(), &[a, c]);
+    }
+
+    #[test]
+    fn a_saved_store_whose_order_leaves_a_workspace_out_does_not_load() {
+        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
+        let broken = saved.replace(",(idx:4,version:1)]", "]");
+        assert_ne!(broken, saved);
+        let error = ron::from_str::<WorkspaceStore>(&broken).unwrap_err().to_string();
+        assert!(error.contains("is not indexed"), "{error}");
+    }
+
+    #[test]
     fn legacy_catalog_preserves_custom_ordinal_order() {
         let settings = VirtualWorkspaceSettings {
             default_workspace_count: 3,
@@ -3081,7 +3318,10 @@ mod tests {
         let mut reversed = store.workspace_ids(space);
         reversed.reverse();
         let serialized = ron::ser::to_string(&store).unwrap();
-        let current = format!("order:{}", ron::ser::to_string(&store.order).unwrap());
+        let current = format!(
+            "order:{}",
+            ron::ser::to_string(store.workspaces.order()).unwrap()
+        );
         let legacy = format!(
             "workspaces_by_space:{}",
             ron::ser::to_string(&HashMap::from_iter([(space, reversed.clone())])).unwrap()
