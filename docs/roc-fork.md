@@ -80,10 +80,8 @@ ship.
    reactor's global-mode setup a departure moves no workspace. Find the snapshot that drives
    `plan_workspace_placements` to one, make a fuzzer step reach it, and re-measure activation
    shapes after W5. The store-level literal test covers "a departure leaves a fallback shown".
-   Also: a reactor-level path reaching `remap_workspace` with windows or claims on the replaced
-   workspace (per display, a Space remapped onto one already holding workspaces). Today only
-   the persistence test reaches it, at engine level; a remap that skips the core passes every
-   reactor test.
+   (The remap path, a Space remapped onto one holding workspaces with a window and a claim on
+   them, is reached by a reactor test now; a remap skipping the core fails it.)
 4. **Later:** W4 (flip catalog + activation to the core), W5 (topology into the core), W6
    (engine glue and persistence; collides with upstream #688, waits for it). BSP phase C waits
    for the soak; traditional trees wait for #688.
