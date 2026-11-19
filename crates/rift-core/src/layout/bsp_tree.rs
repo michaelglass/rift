@@ -823,7 +823,8 @@ impl<W: Copy + Ord + Debug> Layout<W> {
             Direction::Left | Direction::Up => Side::First,
             Direction::Right | Direction::Down => Side::Second,
         };
-        self.split_leaf(&at, window, direction.orientation(), side_of_new, tags);
+        let new = Content::Window { window, fill: Fill::Tiled };
+        self.split_leaf(&at, new, direction.orientation(), side_of_new, tags);
         true
     }
 
@@ -847,7 +848,8 @@ impl<W: Copy + Ord + Debug> Layout<W> {
                 } else {
                     Orientation::Vertical
                 };
-                self.split_leaf(&at, window, orientation, Side::Second, tags);
+                let new = Content::Window { window, fill: Fill::Tiled };
+                self.split_leaf(&at, new, orientation, Side::Second, tags);
             }
             Node::Split(_) => {
                 let leaf = self.root.leaf_under(&at, who);
@@ -858,11 +860,11 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     }
 
     /// Replaces the leaf at `at` by a split (keeping the leaf's tag) of a fresh leaf with what
-    /// it held and a fresh leaf with `window` on `side_of_new`, and selects the new window.
+    /// it held and a fresh leaf holding `new` on `side_of_new`, and selects the new leaf.
     fn split_leaf(
         &mut self,
         at: &[Side],
-        window: W,
+        new: Content<W>,
         orientation: Orientation,
         side_of_new: Side,
         tags: &mut Tags,
@@ -878,7 +880,7 @@ impl<W: Copy + Ord + Debug> Layout<W> {
         });
         let new = Node::Leaf(Leaf {
             tag: tags.mint(),
-            content: Content::Window { window, fill: Fill::Tiled },
+            content: new,
             preselect: Preselect::Unset,
         });
         let (first, second) = match side_of_new {
@@ -1159,6 +1161,194 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     }
 }
 
+impl<W: Copy + Ord + Debug> Layout<W> {
+    /// Splits the focused leaf along `orientation`: what it held moves to a fresh first leaf,
+    /// an empty leaf takes the second side and is selected. Nothing, if nobody in the layout
+    /// takes part (with someone left out).
+    pub fn split(&mut self, orientation: Orientation, who: Participation<W>, tags: &mut Tags) {
+        let nodes = self.root.preorder();
+        if let Participation::Except(_) = who
+            && !nodes.iter().any(|(_, node)| node.holds_window() && node.shown(who).is_some())
+        {
+            return;
+        }
+        let at = self.root.leaf_under(&self.acting_at(who), who);
+        self.split_leaf(&at, Content::Empty, orientation, Side::Second, tags);
+    }
+
+    /// Swaps two windows' places. In one stack, `b` goes just behind `a`, which stays on top
+    /// (and is selected). Where either is stacked, the two groups trade leaves (the last of
+    /// each shows; a group of one is a plain window). Otherwise the two windows trade leaves.
+    /// Fills stay with their leaves. False if either is left out or not here.
+    pub fn swap(&mut self, a: W, b: W, who: Participation<W>) -> bool {
+        if !who.takes_part(&a) || !who.takes_part(&b) {
+            return false;
+        }
+        let (Some((path_a, leaf_a)), Some((path_b, leaf_b))) = (self.leaf_of(a), self.leaf_of(b))
+        else {
+            return false;
+        };
+        let stacked = |leaf: &Leaf<W>| matches!(leaf.content, Content::Stack { .. });
+        if path_a == path_b {
+            let Content::Stack { tabs, .. } = &leaf_a.content else {
+                return false;
+            };
+            let mut members: Vec<W> = tabs.members().filter(|w| *w != a && *w != b).collect();
+            members.push(b);
+            if let Node::Leaf(Leaf {
+                content: Content::Stack { tabs, .. },
+                ..
+            }) = self.root.at_mut(&path_a)
+            {
+                *tabs = Tabs {
+                    before: members,
+                    top: a,
+                    after: Vec::new(),
+                };
+            }
+            self.root.select(&path_a);
+            return true;
+        }
+        // What each leaf will hold, as (all but the last, the last) of its new windows.
+        let (into_a, into_b) = if stacked(leaf_a) || stacked(leaf_b) {
+            // The groups trade leaves: a leaf's group is its stack, or its one window.
+            let group = |leaf: &Leaf<W>, window: W| match &leaf.content {
+                // A stack's last member is its last after the top, or the top.
+                Content::Stack { tabs, .. } => match tabs.after.split_last() {
+                    Some((last, middle)) => {
+                        let rest = tabs
+                            .before
+                            .iter()
+                            .copied()
+                            .chain([tabs.top])
+                            .chain(middle.iter().copied());
+                        (rest.collect(), *last)
+                    }
+                    None => (tabs.before.clone(), tabs.top),
+                },
+                Content::Window { .. } | Content::Empty => (Vec::new(), window),
+            };
+            (group(leaf_b, b), group(leaf_a, a))
+        } else {
+            ((Vec::new(), b), (Vec::new(), a))
+        };
+        let put = |node: &mut Node<W>, (before, top): (Vec<W>, W)| {
+            let Node::Leaf(leaf) = node else { return };
+            let fill = match &leaf.content {
+                Content::Window { fill, .. } | Content::Stack { fill, .. } => *fill,
+                Content::Empty => Fill::Tiled,
+            };
+            leaf.content = if before.is_empty() {
+                Content::Window { window: top, fill }
+            } else {
+                Content::Stack {
+                    tabs: Tabs { before, top, after: Vec::new() },
+                    fill,
+                }
+            };
+        };
+        put(self.root.at_mut(&path_a), into_a);
+        put(self.root.at_mut(&path_b), into_b);
+        true
+    }
+
+    /// Moves the focused leaf (with everything it holds) to its neighbour toward `direction`:
+    /// past a sibling neighbour within their split, into an empty neighbour's place, or beside
+    /// the neighbour in a new split; its old split collapses, and it is selected. False if the
+    /// focus is not a leaf holding a window, or it has no neighbour or no parent.
+    pub fn move_selection(
+        &mut self,
+        direction: Direction,
+        who: Participation<W>,
+        tags: &mut Tags,
+    ) -> bool {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let Some(focus) = self.focus(&nodes, &selection, who) else {
+            return false;
+        };
+        let moving_at = self.root.leaf_under(&focus, who);
+        if !self.root.at(&moving_at).holds_window() {
+            return false;
+        }
+        let mut from = moving_at.clone();
+        let target_at = loop {
+            let Some(next) = self.root.structural_neighbor(&from, direction) else {
+                return false;
+            };
+            match who {
+                Participation::Everyone => break next,
+                Participation::Except(_) if self.root.at(&next).shown(who).is_some() => break next,
+                Participation::Except(_) => from = next,
+            }
+        };
+        let Some((moving_side, old_parent)) = moving_at.split_last() else {
+            return false;
+        };
+        let (moving_side, old_parent) = (*moving_side, old_parent.to_vec());
+        if target_at.split_last().map(|(_, parent)| parent) == Some(&old_parent[..]) {
+            // Siblings: they trade sides, the split and its ratio untouched.
+            if let Node::Split(split) = self.root.at_mut(&old_parent) {
+                std::mem::swap(&mut split.first, &mut split.second);
+            }
+            let mut moved = old_parent;
+            moved.push(match moving_side {
+                Side::First => Side::Second,
+                Side::Second => Side::First,
+            });
+            self.root.select(&moved);
+            return true;
+        }
+        // Leaving a placeholder leaf where the moving leaf was changes no path; nor does putting
+        // a split where the target leaf is (the old split is not under a leaf).
+        let placeholder = Node::Leaf(Leaf {
+            tag: self.root.at(&moving_at).tag(),
+            content: Content::Empty,
+            preselect: Preselect::Unset,
+        });
+        let moving = std::mem::replace(self.root.at_mut(&moving_at), placeholder);
+        let target_node = self.root.at_mut(&target_at);
+        let mut moved = target_at.clone();
+        if let Node::Leaf(Leaf { content: Content::Empty, .. }) = target_node {
+            *target_node = moving;
+        } else {
+            let target_tag = target_node.tag();
+            let target = std::mem::replace(
+                target_node,
+                Node::Leaf(Leaf {
+                    tag: target_tag,
+                    content: Content::Empty,
+                    preselect: Preselect::Unset,
+                }),
+            );
+            let (first, second, side) = match direction {
+                Direction::Left | Direction::Up => (moving, target, Side::First),
+                Direction::Right | Direction::Down => (target, moving, Side::Second),
+            };
+            *target_node = Node::Split(Box::new(Split {
+                tag: tags.mint(),
+                orientation: direction.orientation(),
+                ratio: Ratio::HALF,
+                memory: Memory::Stops,
+                first,
+                second,
+            }));
+            moved.push(side);
+        }
+        // The old split loses the placeholder's side; what was under its other side moves up.
+        self.collapse(&old_parent, moving_side);
+        let kept = match moving_side {
+            Side::First => Side::Second,
+            Side::Second => Side::First,
+        };
+        if moved.starts_with(&old_parent) && moved.get(old_parent.len()) == Some(&kept) {
+            moved.remove(old_parent.len());
+        }
+        self.root.select(&moved);
+        true
+    }
+}
+
 /// Rebalances `node`'s splits; answers how many tiles it spans along `parent_axis`.
 fn rebalance<W>(node: &mut Node<W>, parent_axis: Orientation) -> usize {
     let Node::Split(split) = node else { return 1 };
@@ -1263,6 +1453,21 @@ impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
     }
 
     pub fn rebalance(&mut self, layout: L) { self.change(layout, |tree, _, _| tree.rebalance()); }
+
+    pub fn split(&mut self, layout: L, orientation: Orientation) {
+        self.change(layout, |tree, who, tags| tree.split(orientation, who, tags));
+    }
+
+    pub fn swap(&mut self, layout: L, a: W, b: W) -> bool {
+        self.change(layout, |tree, who, _| tree.swap(a, b, who)).unwrap_or(false)
+    }
+
+    pub fn move_selection(&mut self, layout: L, direction: Direction) -> bool {
+        self.change(layout, |tree, who, tags| {
+            tree.move_selection(direction, who, tags)
+        })
+        .unwrap_or(false)
+    }
 
     pub fn toggle_orientation(&mut self, layout: L) {
         self.change(layout, |tree, who, _| tree.toggle_orientation(who));

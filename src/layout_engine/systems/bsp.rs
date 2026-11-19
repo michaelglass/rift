@@ -1360,6 +1360,170 @@ mod tests {
 
 /// The bodies of the operations the core shadows in test builds (see `shadowed`).
 impl BspLayoutSystem {
+    fn swap_windows_unshadowed(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+        if !self.window_participates(a) || !self.window_participates(b) {
+            return false;
+        }
+        let Some(node_a) = self.node_for_window_in_layout(layout, a) else {
+            return false;
+        };
+        let Some(node_b) = self.node_for_window_in_layout(layout, b) else {
+            return false;
+        };
+        if node_a == node_b {
+            let Some(stack) = self.stacks.get_mut(&node_a) else {
+                return false;
+            };
+            if !stack.contains(&a) || !stack.contains(&b) {
+                return false;
+            }
+            // A BSP stack has one active leaf window. Keep the dragged source active
+            // while moving the target immediately behind it in stack order.
+            stack.retain(|window| *window != a && *window != b);
+            stack.push(b);
+            stack.push(a);
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
+                *window = Some(a);
+            }
+            self.tree.data.selection.select(&self.tree.map, node_a);
+            return true;
+        }
+
+        if self.stacks.contains_key(&node_a) || self.stacks.contains_key(&node_b) {
+            let group_a = self.stacks.remove(&node_a).unwrap_or_else(|| vec![a]);
+            let group_b = self.stacks.remove(&node_b).unwrap_or_else(|| vec![b]);
+            let visible_a = *group_a.last().unwrap();
+            let visible_b = *group_b.last().unwrap();
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
+                *window = Some(visible_b);
+            }
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
+                *window = Some(visible_a);
+            }
+            if group_b.len() > 1 {
+                self.stacks.insert(node_a, group_b);
+            }
+            if group_a.len() > 1 {
+                self.stacks.insert(node_b, group_a);
+            }
+            return true;
+        }
+
+        let mut a_window = None;
+        let mut b_window = None;
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_a) {
+            a_window = *window;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_b) {
+            b_window = *window;
+        }
+
+        if a_window.is_none() && b_window.is_none() {
+            return false;
+        }
+
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
+            *window = b_window;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
+            *window = a_window;
+        }
+
+        true
+    }
+
+    fn move_selection_unshadowed(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let Some(sel) = self.selection_of_layout(layout) else {
+            return false;
+        };
+        let moving = self.descend_to_leaf(sel);
+        if !matches!(
+            self.kind.get(moving),
+            Some(NodeKind::Leaf { window: Some(_), .. })
+        ) {
+            return false;
+        }
+        let Some(target) = self.find_neighbor_leaf(moving, direction) else {
+            return false;
+        };
+        let Some(old_parent) = moving.parent(&self.tree.map) else {
+            return false;
+        };
+
+        // Siblings already share the requested split: reorder them without
+        // resetting the split ratio or exchanging their window state.
+        if target.parent(&self.tree.map) == Some(old_parent) {
+            match direction {
+                Direction::Left | Direction::Up => {
+                    moving.detach(&mut self.tree).insert_before(target);
+                }
+                Direction::Right | Direction::Down => {
+                    moving.detach(&mut self.tree).push_back(old_parent);
+                }
+            }
+        } else if matches!(self.kind.get(target), Some(NodeKind::Leaf { window: None, .. })) {
+            // A pre-created empty slot receives the leaf directly.
+            moving.detach(&mut self.tree).insert_before(target);
+            target.detach(&mut self.tree).remove();
+            self.kind.remove(target);
+            self.collapse_split(old_parent);
+        } else {
+            // Transfer the entire leaf (including stacks and fullscreen state)
+            // onto a new split at the directional neighbor, then reclaim its
+            // old region for the sibling left behind.
+            let split = self.tree.mk_node().into_id();
+            self.kind.insert(split, NodeKind::Split {
+                orientation: direction.orientation(),
+                ratio: 0.5,
+            });
+            split.detach(&mut self.tree).insert_before(target);
+            let (first, second) = match direction {
+                Direction::Left | Direction::Up => (moving, target),
+                Direction::Right | Direction::Down => (target, moving),
+            };
+            first.detach(&mut self.tree).push_back(split);
+            second.detach(&mut self.tree).push_back(split);
+            self.collapse_split(old_parent);
+        }
+        self.tree.data.selection.select(&self.tree.map, moving);
+        true
+    }
+
+    fn split_selection_unshadowed(&mut self, layout: LayoutId, kind: LayoutKind) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
+        let orientation = match kind {
+            LayoutKind::Horizontal => Orientation::Horizontal,
+            LayoutKind::Vertical => Orientation::Vertical,
+            _ => return,
+        };
+        let state = if let Some(s) = self.layouts.get(layout).copied() {
+            s
+        } else {
+            return;
+        };
+
+        let sel = self
+            .selection_of_layout(layout)
+            .unwrap_or_else(|| self.tree.data.selection.current_selection(state.root));
+        let target = self.descend_to_leaf(sel);
+        match self.kind.get(target).cloned() {
+            Some(NodeKind::Leaf { window, .. }) => {
+                let left = self.make_leaf(window);
+                let right = self.make_leaf(None);
+                if let Some(stack) = self.stacks.remove(&target) {
+                    self.stacks.insert(left, stack);
+                }
+                self.kind.insert(target, NodeKind::Split { orientation, ratio: 0.5 });
+                left.detach(&mut self.tree).push_back(target);
+                right.detach(&mut self.tree).push_back(target);
+                self.tree.data.selection.select(&self.tree.map, right);
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_fullscreen_of_selection_unshadowed(&mut self, layout: LayoutId) -> Vec<WindowId> {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
@@ -2183,132 +2347,31 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return false;
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "move_selection",
+                Scope::One(layout),
+                |this| this.move_selection_unshadowed(layout, direction),
+                |core| core.move_selection(layout, core_direction(direction)),
+            )
         };
-        let moving = self.descend_to_leaf(sel);
-        if !matches!(
-            self.kind.get(moving),
-            Some(NodeKind::Leaf { window: Some(_), .. })
-        ) {
-            return false;
-        }
-        let Some(target) = self.find_neighbor_leaf(moving, direction) else {
-            return false;
-        };
-        let Some(old_parent) = moving.parent(&self.tree.map) else {
-            return false;
-        };
-
-        // Siblings already share the requested split: reorder them without
-        // resetting the split ratio or exchanging their window state.
-        if target.parent(&self.tree.map) == Some(old_parent) {
-            match direction {
-                Direction::Left | Direction::Up => {
-                    moving.detach(&mut self.tree).insert_before(target);
-                }
-                Direction::Right | Direction::Down => {
-                    moving.detach(&mut self.tree).push_back(old_parent);
-                }
-            }
-        } else if matches!(self.kind.get(target), Some(NodeKind::Leaf { window: None, .. })) {
-            // A pre-created empty slot receives the leaf directly.
-            moving.detach(&mut self.tree).insert_before(target);
-            target.detach(&mut self.tree).remove();
-            self.kind.remove(target);
-            self.collapse_split(old_parent);
-        } else {
-            // Transfer the entire leaf (including stacks and fullscreen state)
-            // onto a new split at the directional neighbor, then reclaim its
-            // old region for the sibling left behind.
-            let split = self.tree.mk_node().into_id();
-            self.kind.insert(split, NodeKind::Split {
-                orientation: direction.orientation(),
-                ratio: 0.5,
-            });
-            split.detach(&mut self.tree).insert_before(target);
-            let (first, second) = match direction {
-                Direction::Left | Direction::Up => (moving, target),
-                Direction::Right | Direction::Down => (target, moving),
-            };
-            first.detach(&mut self.tree).push_back(split);
-            second.detach(&mut self.tree).push_back(split);
-            self.collapse_split(old_parent);
-        }
-        self.tree.data.selection.select(&self.tree.map, moving);
-        true
+        #[cfg(not(test))]
+        self.move_selection_unshadowed(layout, direction)
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        if !self.window_participates(a) || !self.window_participates(b) {
-            return false;
-        }
-        let Some(node_a) = self.node_for_window_in_layout(layout, a) else {
-            return false;
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "swap_windows",
+                Scope::One(layout),
+                |this| this.swap_windows_unshadowed(layout, a, b),
+                |core| core.swap(layout, a, b),
+            )
         };
-        let Some(node_b) = self.node_for_window_in_layout(layout, b) else {
-            return false;
-        };
-        if node_a == node_b {
-            let Some(stack) = self.stacks.get_mut(&node_a) else {
-                return false;
-            };
-            if !stack.contains(&a) || !stack.contains(&b) {
-                return false;
-            }
-            // A BSP stack has one active leaf window. Keep the dragged source active
-            // while moving the target immediately behind it in stack order.
-            stack.retain(|window| *window != a && *window != b);
-            stack.push(b);
-            stack.push(a);
-            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
-                *window = Some(a);
-            }
-            self.tree.data.selection.select(&self.tree.map, node_a);
-            return true;
-        }
-
-        if self.stacks.contains_key(&node_a) || self.stacks.contains_key(&node_b) {
-            let group_a = self.stacks.remove(&node_a).unwrap_or_else(|| vec![a]);
-            let group_b = self.stacks.remove(&node_b).unwrap_or_else(|| vec![b]);
-            let visible_a = *group_a.last().unwrap();
-            let visible_b = *group_b.last().unwrap();
-            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
-                *window = Some(visible_b);
-            }
-            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
-                *window = Some(visible_a);
-            }
-            if group_b.len() > 1 {
-                self.stacks.insert(node_a, group_b);
-            }
-            if group_a.len() > 1 {
-                self.stacks.insert(node_b, group_a);
-            }
-            return true;
-        }
-
-        let mut a_window = None;
-        let mut b_window = None;
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_a) {
-            a_window = *window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_b) {
-            b_window = *window;
-        }
-
-        if a_window.is_none() && b_window.is_none() {
-            return false;
-        }
-
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
-            *window = b_window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
-            *window = a_window;
-        }
-
-        true
+        #[cfg(not(test))]
+        self.swap_windows_unshadowed(layout, a, b)
     }
 
     fn apply_target_drop(
@@ -2372,38 +2435,21 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
-            return;
-        }
-        let orientation = match kind {
-            LayoutKind::Horizontal => Orientation::Horizontal,
-            LayoutKind::Vertical => Orientation::Vertical,
-            _ => return,
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "split_selection",
+                Scope::One(layout),
+                |this| this.split_selection_unshadowed(layout, kind),
+                |core| match kind {
+                    LayoutKind::Horizontal => core.split(layout, bsp_tree::Orientation::Horizontal),
+                    LayoutKind::Vertical => core.split(layout, bsp_tree::Orientation::Vertical),
+                    _ => {}
+                },
+            )
         };
-        let state = if let Some(s) = self.layouts.get(layout).copied() {
-            s
-        } else {
-            return;
-        };
-
-        let sel = self
-            .selection_of_layout(layout)
-            .unwrap_or_else(|| self.tree.data.selection.current_selection(state.root));
-        let target = self.descend_to_leaf(sel);
-        match self.kind.get(target).cloned() {
-            Some(NodeKind::Leaf { window, .. }) => {
-                let left = self.make_leaf(window);
-                let right = self.make_leaf(None);
-                if let Some(stack) = self.stacks.remove(&target) {
-                    self.stacks.insert(left, stack);
-                }
-                self.kind.insert(target, NodeKind::Split { orientation, ratio: 0.5 });
-                left.detach(&mut self.tree).push_back(target);
-                right.detach(&mut self.tree).push_back(target);
-                self.tree.data.selection.select(&self.tree.map, right);
-            }
-            _ => {}
-        }
+        #[cfg(not(test))]
+        self.split_selection_unshadowed(layout, kind)
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
@@ -3002,11 +3048,14 @@ mod core_tree_differential {
         Rebalance,
         ToggleOrientation,
         Resize(f64, ResizeOrientation),
+        Swap(u32, u32),
+        MoveSelection(Direction, bsp_tree::Direction),
+        Split(bool),
     }
 
     fn step(rng: &mut Rng) -> Step {
         let window = |rng: &mut Rng| 1 + rng.below(u64::from(POOL)) as u32;
-        match rng.below(21) {
+        match rng.below(25) {
             0..=4 => Step::Add(window(rng)),
             5 | 6 => Step::Remove(window(rng)),
             7 | 8 => Step::Select(window(rng)),
@@ -3021,6 +3070,12 @@ mod core_tree_differential {
             16 => Step::Fullscreen(rng.below(2) == 0),
             17 => Step::Rebalance,
             18 => Step::ToggleOrientation,
+            21 => Step::Swap(window(rng), window(rng)),
+            22 | 23 => {
+                let (old, core) = direction(rng);
+                Step::MoveSelection(old, core)
+            }
+            24 => Step::Split(rng.below(2) == 0),
             _ => Step::Resize((rng.below(41) as f64 - 20.0) / 20.0, match rng.below(3) {
                 0 => ResizeOrientation::Horizontal,
                 1 => ResizeOrientation::Vertical,
@@ -3093,6 +3148,33 @@ mod core_tree_differential {
                 };
                 if a != b.into_iter().collect::<Vec<_>>() {
                     return differ("toggle_fullscreen", &a, &b);
+                }
+            }
+            Step::Swap(a, b) => {
+                let (x, y) = (
+                    old.swap_windows(layout, w(a), w(b)),
+                    core.swap(LAYOUT, w(a), w(b)),
+                );
+                if x != y {
+                    return differ("swap", &x, &y);
+                }
+            }
+            Step::MoveSelection(direction, core_direction) => {
+                let (x, y) = (
+                    old.move_selection(layout, direction),
+                    core.move_selection(LAYOUT, core_direction),
+                );
+                if x != y {
+                    return differ("move_selection", &x, &y);
+                }
+            }
+            Step::Split(horizontal) => {
+                if horizontal {
+                    old.split_selection(layout, LayoutKind::Horizontal);
+                    core.split(LAYOUT, bsp_tree::Orientation::Horizontal);
+                } else {
+                    old.split_selection(layout, LayoutKind::Vertical);
+                    core.split(LAYOUT, bsp_tree::Orientation::Vertical);
                 }
             }
             Step::Rebalance => {
