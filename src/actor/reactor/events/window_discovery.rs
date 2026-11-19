@@ -19,7 +19,7 @@ fn sync_existing_window_state(
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let ax_returned = state.windows.validate_ax_identity(wid);
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
-    let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
+    let was_manageable = state.windows.is_admitted_state(wid);
 
     let is_minimized = info.is_minimized;
     let claimed = state.windows.is_claimed(wid);

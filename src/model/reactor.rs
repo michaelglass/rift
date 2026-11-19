@@ -83,13 +83,9 @@ pub(crate) struct WindowState {
     /// words, we only accept reads when we know they come after the last write.
     /// It is the core's model frame, projected: written only by [`Self::project_seen`].
     frame_monotonic: CGRect,
-    /// Rift/macOS heuristic result, kept separately from an explicit app-rule
-    /// override so every discovered window can remain tracked.
-    // The admission facts are written only by the window store, which tells the core's
-    // lifecycle each change (`WindowStore::set_*`); everything else reads them.
-    pub(in crate::model) is_manageable: bool,
-    pub(in crate::model) native_transient: bool,
-    pub(in crate::model) manage_override: Option<bool>,
+    // Admission's own facts (the heuristic's verdict, the rule, native transience) are the
+    // core's lifecycle's, kept by the window store; minimize and the AX roles are read off
+    // `info`, the AX snapshot, and the store tells the core each change to them.
 }
 
 impl WindowState {
@@ -98,25 +94,6 @@ impl WindowState {
 
     /// The core's `Effect::Seen`, applied by the reactor's projection and nothing else.
     pub(crate) fn project_seen(&mut self, frame: CGRect) { self.frame_monotonic = frame; }
-
-    pub(crate) fn manage_override(&self) -> Option<bool> { self.manage_override }
-
-    #[cfg(test)]
-    pub(crate) fn is_manageable(&self) -> bool { self.is_manageable }
-
-    #[cfg(test)]
-    pub(crate) fn native_transient(&self) -> bool { self.native_transient }
-
-    /// This state, with an app rule's override, before it is inserted into the store.
-    pub(crate) fn with_manage_override(self, manage_override: Option<bool>) -> Self {
-        WindowState { manage_override, ..self }
-    }
-
-    /// This state, with the heuristic's verdict, before it is inserted into the store.
-    #[cfg(test)]
-    pub(crate) fn with_manageable(self, is_manageable: bool) -> Self {
-        WindowState { is_manageable, ..self }
-    }
 }
 
 impl From<WindowInfo> for WindowState {
@@ -124,9 +101,6 @@ impl From<WindowInfo> for WindowState {
         WindowState {
             frame_monotonic: info.frame,
             info,
-            is_manageable: false,
-            native_transient: false,
-            manage_override: None,
         }
     }
 }
@@ -145,45 +119,21 @@ impl WindowState {
         }
     }
 
-    /// The single admission policy used by every layout-facing caller.
-    pub(crate) fn is_admitted(&self) -> bool {
-        self.is_admitted_with_override(self.manage_override)
+    /// What the AX roles say of the window, parsed at the boundary.
+    pub(crate) fn ax_kind(&self) -> rift_core::lifecycle::AxKind {
+        rift_core::lifecycle::AxKind::classify(
+            crate::sys::app::is_ax_transient(&self.info),
+            self.info.ax_role.as_deref() == Some("AXWindow")
+                && self.info.ax_subrole.as_deref() == Some("AXDialog"),
+        )
     }
 
-    pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        rift_core::lifecycle::admission(self.admission_facts(manage_override))
-            == rift_core::lifecycle::Admission::Admitted
-    }
-
-    /// What admission reads of this window, parsed at the boundary, with `manage_override` as
-    /// its rule.
-    pub(crate) fn admission_facts(
-        &self,
-        manage_override: Option<bool>,
-    ) -> rift_core::lifecycle::AdmissionFacts {
-        use rift_core::lifecycle::{AdmissionFacts, AxKind, Manageability, Minimize, NativeKind};
-        AdmissionFacts {
-            manageability: if self.is_manageable {
-                Manageability::Manageable
-            } else {
-                Manageability::Unmanageable
-            },
-            rule: rule_of(manage_override),
-            ax: AxKind::classify(
-                crate::sys::app::is_ax_transient(&self.info),
-                self.info.ax_role.as_deref() == Some("AXWindow")
-                    && self.info.ax_subrole.as_deref() == Some("AXDialog"),
-            ),
-            native: if self.native_transient {
-                NativeKind::Transient
-            } else {
-                NativeKind::Ordinary
-            },
-            minimize: if self.info.is_minimized {
-                Minimize::Minimized
-            } else {
-                Minimize::Shown
-            },
+    /// Whether the AX snapshot has the window minimized.
+    pub(crate) fn minimize(&self) -> rift_core::lifecycle::Minimize {
+        if self.info.is_minimized {
+            rift_core::lifecycle::Minimize::Minimized
+        } else {
+            rift_core::lifecycle::Minimize::Shown
         }
     }
 

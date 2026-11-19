@@ -41,10 +41,14 @@ pub fn handle_window_created(
         state.windows.track_window_server_info(info);
     }
 
-    let rule_override = state.windows.window(wid).and_then(WindowState::manage_override);
-    let window_state = WindowState::from(window).with_manage_override(rule_override);
-
-    state.insert_window(wid, window_state);
+    // A fresh AX reading keeps the rule the window was under.
+    let rule = state.windows.rule(wid).unwrap_or(rift_core::lifecycle::Rule::NoRule);
+    state.insert_window_as(
+        wid,
+        WindowState::from(window),
+        rift_core::lifecycle::Manageability::Unmanageable,
+        rule,
+    );
     let _ = utils::refresh_heuristic(state, wid);
 
     // Excluded and claimed windows only need lifecycle notifications; app-rule admission
@@ -302,9 +306,7 @@ pub fn handle_window_frame_changed(
                 if let Some(server) = server_id {
                     state.windows.observe_native_space(server, space, true);
                 }
-                if new_space_active
-                    && state.windows.window(wid).is_some_and(WindowState::is_admitted)
-                {
+                if new_space_active && state.windows.is_admitted_state(wid) {
                     if let Some(workspace) =
                         layout.layout_engine.workspaces().active_workspace(space)
                     {

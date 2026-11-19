@@ -74,7 +74,7 @@ use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
 use rift_core::focus::{Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
 use rift_core::lifecycle::{
-    Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
+    Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, Transition, WorkspaceMode,
 };
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
@@ -782,8 +782,8 @@ impl Reactor {
             // A rejected window is stale only if it now passes the normal
             // eligibility checks. Minimized, rule-excluded, and heuristic-
             // excluded windows must not trigger an AX scan just for focus.
-            !window.is_admitted()
-                && window.manage_override() != Some(false)
+            !self.state.windows.is_admitted_state(wid)
+                && self.state.windows.manage_override(wid) != Some(false)
                 && utils::compute_window_info_manageability(&window.info, |wsid| {
                     self.state.windows.get_window_server_info(wsid)
                 })
@@ -797,7 +797,7 @@ impl Reactor {
         }
         let mut has_stale_window = false;
         for wid in windows {
-            if self.state.windows.window(wid).is_some_and(WindowState::is_admitted) {
+            if self.state.windows.is_admitted_state(wid) {
                 return false;
             }
             has_stale_window |= self.window_needs_inventory(wid);
@@ -3155,7 +3155,9 @@ impl Reactor {
                 .into_iter()
                 .filter_map(|id| {
                     let state = self.state.windows.window(id)?;
-                    (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
+                    (self.state.windows.is_admitted_state(id)
+                        && !state.info.is_minimized
+                        && state.info.is_standard)
                         .then_some((id, state.frame_monotonic()))
                 })
                 .collect();
@@ -3278,7 +3280,8 @@ impl Reactor {
     fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         let window_state = self.state.windows.window(window_id)?;
         let externally_managed = self.state.windows.is_claimed(window_id);
-        if (!window_state.is_admitted() || self.state.windows.is_temporarily_unavailable(window_id))
+        if (!self.state.windows.is_admitted_state(window_id)
+            || self.state.windows.is_temporarily_unavailable(window_id))
             && !externally_managed
         {
             return None;
@@ -4650,9 +4653,8 @@ impl Reactor {
             }
         }
         outcome.absorb(self.reconcile_native_fullscreen_exits(false));
-        let has_admitted_windows = new_window_ids
-            .iter()
-            .any(|wid| self.state.windows.window(*wid).is_some_and(WindowState::is_admitted));
+        let has_admitted_windows =
+            new_window_ids.iter().any(|wid| self.state.windows.is_admitted_state(*wid));
 
         let window_spaces = self
             .state
@@ -5357,7 +5359,6 @@ impl Reactor {
         let Some(window) = self.state.windows.window(wid) else {
             return;
         };
-        let was_admitted = window.is_admitted();
         let entry = window
             .info
             .sys_id
@@ -5366,8 +5367,9 @@ impl Reactor {
         let transient = rift_core::lifecycle::is_native_transient(entry, wid.pid, || {
             crate::sys::app::is_ibkr_desktop_dialog(&window.info)
         });
-        self.state.windows.set_native_transient(wid, transient);
-        if was_admitted && !self.state.windows.is_admitted_state(wid) {
+        if let Some(Transition::Suspended(..)) =
+            self.state.windows.set_native_transient(wid, transient)
+        {
             self.send_layout_event(LayoutEvent::WindowSuspended(wid));
         }
     }
@@ -5418,7 +5420,8 @@ impl Reactor {
         };
 
         if self.state.windows.is_claimed(wid)
-            || (!window.is_admitted() && !self.layout_manager.layout_engine.is_window_floating(wid))
+            || (!self.state.windows.is_admitted_state(wid)
+                && !self.layout_manager.layout_engine.is_window_floating(wid))
         {
             trace!(
                 ?wid,
@@ -5518,10 +5521,7 @@ impl Reactor {
                             *wid,
                         ),
                         engine.is_window_floating(*wid),
-                        self.state
-                            .windows
-                            .window(*wid)
-                            .is_some_and(|window| window.manage_override() == Some(false)),
+                        self.state.windows.manage_override(*wid) == Some(false),
                     )
                 };
                 let (effects, removal) = window_discovery::assign_window(

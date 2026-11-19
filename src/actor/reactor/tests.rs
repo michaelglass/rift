@@ -4719,8 +4719,12 @@ fn focus_and_activation_do_not_rescan_intentionally_excluded_windows() {
                 reactor.state.windows.set_manageable(wid, false);
             }
             match case {
-                "unmanaged" => reactor.state.windows.set_manage_override(wid, Some(false)),
-                "minimized" => reactor.state.windows.set_minimized(wid, true),
+                "unmanaged" => {
+                    reactor.state.windows.set_manage_override(wid, Some(false));
+                }
+                "minimized" => {
+                    reactor.state.windows.set_minimized(wid, true);
+                }
                 "nonstandard" => {
                     reactor.state.windows.window_mut(wid).unwrap().info.is_standard = false
                 }
@@ -6453,7 +6457,9 @@ fn discovery_manageability_loss_removes_window_from_layout() {
         "window must be removed from layout when discovery marks it unmanageable"
     );
     assert!(
-        reactor.state.windows.window(wid).is_some_and(|window| !window.is_manageable()),
+        reactor.state.windows.admission_facts(wid).is_some_and(|facts| {
+            facts.manageability == rift_core::lifecycle::Manageability::Unmanageable
+        }),
         "reactor state must keep the window marked unmanageable"
     );
 }
@@ -12267,7 +12273,7 @@ fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
     info.frame = CGRect::new(CGPoint::new(616., 144.), CGSize::new(280., 503.));
     reactor.handle_events(apps.make_app_with_opts(2, vec![info], Some(about), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(2));
-    assert!(!reactor.state.windows.window(about).unwrap().is_admitted());
+    assert!(!reactor.state.windows.is_admitted_state(about));
     assert!(reactor.test_workspace_for_window(space, about).is_none());
     assert!(reactor.transient_blocks_mouse_focus());
     let (raise_tx, mut raise_rx) = actor::channel();
@@ -12301,7 +12307,7 @@ fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
     let primary = WindowId::new(3, 1);
     reactor.handle_events(apps.make_app_with_opts(3, vec![report], Some(primary), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(3));
-    assert!(reactor.state.windows.window(primary).unwrap().is_admitted());
+    assert!(reactor.state.windows.is_admitted_state(primary));
     assert!(reactor.test_workspace_for_window(space, primary).is_some());
     assert!(!reactor.transient_blocks_mouse_focus());
 }
@@ -12498,11 +12504,11 @@ fn ax_reclassification_updates_blocking_and_preserves_native_only_identity() {
     info.ax_subrole = Some("AXDialog".into());
     reactor.discover_test_windows(2, vec![(wid, info.clone())], vec![]);
     assert!(reactor.transient_blocks_mouse_focus());
-    assert!(!reactor.state.windows.window(wid).unwrap().is_admitted());
+    assert!(!reactor.state.windows.is_admitted_state(wid));
     info.ax_subrole = Some("AXStandardWindow".into());
     reactor.discover_test_windows(2, vec![(wid, info.clone())], vec![]);
     assert!(!reactor.transient_blocks_mouse_focus());
-    assert!(reactor.state.windows.window(wid).unwrap().is_admitted());
+    assert!(reactor.state.windows.is_admitted_state(wid));
     let mut native = reactor.state.windows.get_window_server_info(wsid).unwrap();
     reactor.transient_focus.native(native.id, native.pid, space, true);
     // Missing AX role metadata cannot erase positive native evidence.
@@ -12545,10 +12551,16 @@ fn native_admission_veto_survives_manage_rule() {
     info.ax_subrole = Some("AXStandardWindow".into());
     reactor.handle_event(Event::WindowCreated(wid, info, None));
     reactor.state.windows.set_manage_override(wid, Some(true));
-    assert!(!reactor.state.windows.window(wid).unwrap().is_admitted());
+    assert!(!reactor.state.windows.is_admitted_state(wid));
     assert!(reactor.test_workspace_for_window(space, wid).is_none());
     reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
-    assert!(!reactor.state.windows.window(wid).unwrap().native_transient());
+    assert!(
+        reactor
+            .state
+            .windows
+            .admission_facts(wid)
+            .is_some_and(|facts| { facts.native == rift_core::lifecycle::NativeKind::Ordinary })
+    );
     apps.simulate_until_quiet(&mut reactor);
 }
 

@@ -17,14 +17,14 @@ pub(crate) fn refresh_heuristic(
     wid: WindowId,
 ) -> Option<AdmissionTransition> {
     let window = state.windows.window(wid)?;
-    let was_admitted = window.is_admitted();
+    let was_admitted = state.windows.is_admitted_state(wid);
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
         state.windows.get_window_server_info(wsid)
     });
     state.windows.set_manageable(wid, manageable);
     Some(AdmissionTransition {
         was_admitted,
-        is_admitted: state.windows.window(wid)?.is_admitted(),
+        is_admitted: state.windows.is_admitted_state(wid),
     })
 }
 
@@ -36,7 +36,7 @@ pub(crate) fn rejection_needs_removal(
 ) -> bool {
     let engine = &layout.layout_engine;
     if state.windows.is_temporarily_unavailable(wid)
-        && !state.windows.window(wid).is_some_and(|w| w.manage_override() == Some(false))
+        && state.windows.manage_override(wid) != Some(false)
     {
         return false;
     }

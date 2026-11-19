@@ -1562,8 +1562,7 @@ impl WorkspaceStore {
 
         let rule_override = rule_decision.as_ref().and_then(AppRuleDecision::management_override);
         let admitted = window_store
-            .window(window_id)
-            .map(|window| window.is_admitted_with_override(rule_override))
+            .admitted_with_override(window_id, rule_override)
             // Assignment tests and restore paths may not yet have an AX
             // snapshot. In that case only an explicit rejection can deny it.
             .unwrap_or(rule_override != Some(false));

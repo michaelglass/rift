@@ -1,4 +1,7 @@
-use rift_core::lifecycle::{FactChange, LifecycleEvent, Manageability, Minimize, NativeKind};
+use rift_core::lifecycle::{
+    Admission, AdmissionFacts, FactChange, LifecycleEvent, Manageability, NativeKind, Rule,
+    Transition,
+};
 use rift_protocol::WindowClaimFlags;
 
 use crate::actor::app::WindowId;
@@ -528,13 +531,14 @@ pub struct WindowStore {
     lifecycle: rift_core::lifecycle::Lifecycle<WindowId>,
 }
 
-/// Where the store's admission of a window and the core's lifecycle disagree.
+/// Where the store's AX snapshot of a window and the core's lifecycle disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LifecycleDivergence {
     pub(crate) window: WindowId,
-    /// The store's admission; `None` without AX state.
-    pub(crate) store: Option<bool>,
-    pub(crate) core: Option<rift_core::lifecycle::Admission>,
+    /// The AX snapshot's roles and minimized flag; `None` without AX state.
+    pub(crate) snapshot: Option<(rift_core::lifecycle::AxKind, rift_core::lifecycle::Minimize)>,
+    /// The core's; `None` when it holds no facts.
+    pub(crate) core: Option<(rift_core::lifecycle::AxKind, rift_core::lifecycle::Minimize)>,
 }
 
 /// Restored native lifecycle facts; placement and actor effects remain external.
@@ -597,7 +601,8 @@ impl WindowStore {
         self.record(wid).is_some_and(|record| {
             !record.ax_invalidated
                 && record.claim.is_none()
-                && record.state.as_ref().is_some_and(WindowState::is_admitted)
+                && record.state.is_some()
+                && self.lifecycle.admission(wid) == Some(Admission::Admitted)
         })
     }
 
@@ -691,9 +696,8 @@ impl WindowStore {
 
     /// Temporary unavailability changes admission, not logical workspace ownership.
     pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
-        let admitted = self.window(wid).is_some_and(WindowState::is_admitted);
-        let explicitly_excluded =
-            self.window(wid).is_some_and(|w| w.manage_override == Some(false));
+        let admitted = self.is_admitted_state(wid);
+        let explicitly_excluded = self.rule(wid) == Some(Rule::Ignore);
         if !admitted && (explicitly_excluded || !self.is_temporarily_unavailable(wid)) {
             self.remove_window_assignment(wid);
         }
@@ -719,7 +723,8 @@ impl WindowStore {
     pub(crate) fn is_temporarily_unavailable(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|r| r.ax_invalidated)
             || self.window(wid).is_some_and(|w| {
-                w.info.is_minimized || (w.manage_override != Some(false) && !w.is_admitted())
+                w.info.is_minimized
+                    || (self.rule(wid) != Some(Rule::Ignore) && !self.is_admitted_state(wid))
             })
             || self.is_window_native_fullscreen_suspended(wid)
     }
@@ -866,11 +871,20 @@ impl WindowStore {
             self.transfer_persistent_window_metadata(old, wid);
             if !self.contains_window(wid) {
                 let state = self.windows.get_mut(&old).and_then(|record| record.state.take());
+                let facts = self.lifecycle.facts(old);
                 if state.is_some() {
                     self.lifecycle.step(LifecycleEvent::Gone(old));
                 }
                 if let Some(state) = state {
-                    self.insert_window(wid, state);
+                    // The same window under a new identity keeps its heuristic verdict, rule
+                    // and native transience; its AX snapshot says the rest.
+                    match facts {
+                        Some(facts) => {
+                            self.insert_window_as(wid, state, facts.manageability, facts.rule);
+                            self.set_native_transient(wid, facts.native == NativeKind::Transient);
+                        }
+                        None => self.insert_window(wid, state),
+                    }
                 }
             }
             self.remove_window(old);
@@ -1135,75 +1149,123 @@ impl WindowStore {
         self.windows.get_mut(&window_id).and_then(|record| record.state.as_mut())
     }
 
-    // The admission facts' only writers: each tells the core's lifecycle the change.
+    // Admission's facts are the core's lifecycle's. These are their only writers; each needs
+    // the window's AX state and returns the change in its admission, if any.
 
     /// The manageability heuristic's verdict for a window with AX state.
-    pub(crate) fn set_manageable(&mut self, window: WindowId, manageable: bool) {
-        let Some(state) = self.window_mut(window) else { return };
-        state.is_manageable = manageable;
+    pub(crate) fn set_manageable(
+        &mut self,
+        window: WindowId,
+        manageable: bool,
+    ) -> Option<Transition<WindowId>> {
         let manageability = if manageable {
             Manageability::Manageable
         } else {
             Manageability::Unmanageable
         };
-        self.tell_lifecycle(window, FactChange::Manageability(manageability));
+        self.tell_lifecycle(window, FactChange::Manageability(manageability))
     }
 
     /// An app rule's override (or none) for a window with AX state.
-    pub(crate) fn set_manage_override(&mut self, window: WindowId, manage_override: Option<bool>) {
-        let Some(state) = self.window_mut(window) else { return };
-        state.manage_override = manage_override;
+    pub(crate) fn set_manage_override(
+        &mut self,
+        window: WindowId,
+        manage_override: Option<bool>,
+    ) -> Option<Transition<WindowId>> {
         self.tell_lifecycle(
             window,
             FactChange::Rule(crate::model::reactor::rule_of(manage_override)),
-        );
+        )
     }
 
     /// Whether the window server marks a window with AX state transient.
-    pub(crate) fn set_native_transient(&mut self, window: WindowId, transient: bool) {
-        let Some(state) = self.window_mut(window) else { return };
-        state.native_transient = transient;
+    pub(crate) fn set_native_transient(
+        &mut self,
+        window: WindowId,
+        transient: bool,
+    ) -> Option<Transition<WindowId>> {
         let native = if transient {
             NativeKind::Transient
         } else {
             NativeKind::Ordinary
         };
-        self.tell_lifecycle(window, FactChange::Native(native));
+        self.tell_lifecycle(window, FactChange::Native(native))
     }
 
-    /// Whether a window with AX state is minimized.
-    pub(crate) fn set_minimized(&mut self, window: WindowId, minimized: bool) {
-        let Some(state) = self.window_mut(window) else { return };
+    /// Whether a window with AX state is minimized: its AX snapshot and the core both.
+    pub(crate) fn set_minimized(
+        &mut self,
+        window: WindowId,
+        minimized: bool,
+    ) -> Option<Transition<WindowId>> {
+        let state = self.window_mut(window)?;
         state.info.is_minimized = minimized;
-        let minimize = if minimized {
-            Minimize::Minimized
-        } else {
-            Minimize::Shown
-        };
-        self.tell_lifecycle(window, FactChange::Minimize(minimize));
+        let minimize = state.minimize();
+        self.tell_lifecycle(window, FactChange::Minimize(minimize))
     }
 
     /// A fresh AX reading of a window with AX state: its roles and minimized flag with it.
     pub(crate) fn replace_info(&mut self, window: WindowId, info: crate::sys::app::WindowInfo) {
         let Some(state) = self.window_mut(window) else { return };
         state.info = info;
-        let facts = state.admission_facts(state.manage_override);
-        self.tell_lifecycle(window, FactChange::Ax(facts.ax));
-        self.tell_lifecycle(window, FactChange::Minimize(facts.minimize));
+        let (ax, minimize) = (state.ax_kind(), state.minimize());
+        self.tell_lifecycle(window, FactChange::Ax(ax));
+        self.tell_lifecycle(window, FactChange::Minimize(minimize));
+    }
+
+    fn tell_lifecycle(
+        &mut self,
+        window: WindowId,
+        change: FactChange,
+    ) -> Option<Transition<WindowId>> {
+        self.window(window)?;
+        self.lifecycle.step(LifecycleEvent::Changed { window, change })
     }
 
     /// A window's admission by its own facts (claims and AX invalidation aside); false
     /// without AX state.
     pub(crate) fn is_admitted_state(&self, window: WindowId) -> bool {
-        self.window(window).is_some_and(WindowState::is_admitted)
+        self.lifecycle.admission(window) == Some(Admission::Admitted)
     }
 
-    fn tell_lifecycle(&mut self, window: WindowId, change: FactChange) {
-        self.lifecycle.step(LifecycleEvent::Changed { window, change });
+    /// Whether a window would be admitted under an app rule's override; `None` without AX
+    /// state.
+    pub(crate) fn admitted_with_override(
+        &self,
+        window: WindowId,
+        manage_override: Option<bool>,
+    ) -> Option<bool> {
+        let facts = self.lifecycle.facts(window)?;
+        let rule = crate::model::reactor::rule_of(manage_override);
+        Some(
+            rift_core::lifecycle::admission(AdmissionFacts { rule, ..facts })
+                == Admission::Admitted,
+        )
     }
 
-    /// Every window whose admission the store and the core's lifecycle disagree on, in window
-    /// order. Empty unless a write bypassed the setters above.
+    /// The app rule a window with AX state is under.
+    pub(crate) fn rule(&self, window: WindowId) -> Option<Rule> {
+        self.lifecycle.facts(window).map(|facts| facts.rule)
+    }
+
+    /// The manage override a window with AX state carries, as the rule's `Option<bool>`.
+    pub(crate) fn manage_override(&self, window: WindowId) -> Option<bool> {
+        match self.rule(window)? {
+            Rule::NoRule => None,
+            Rule::Manage => Some(true),
+            Rule::Ignore => Some(false),
+        }
+    }
+
+    /// A window's admission facts, for tests.
+    #[cfg(test)]
+    pub(crate) fn admission_facts(&self, window: WindowId) -> Option<AdmissionFacts> {
+        self.lifecycle.facts(window)
+    }
+
+    /// Every window whose AX snapshot and the core's lifecycle disagree: a window with AX state
+    /// the core holds no facts for (or the reverse), or whose minimized flag or AX roles the
+    /// core does not have. Empty unless a write to the snapshot bypassed the setters above.
     pub(crate) fn lifecycle_divergences(&self) -> Vec<LifecycleDivergence> {
         let mut windows: Vec<WindowId> = self
             .windows
@@ -1217,23 +1279,42 @@ impl WindowStore {
         windows
             .into_iter()
             .filter_map(|window| {
-                let store = self.window(window).map(WindowState::is_admitted);
-                let core = self.lifecycle.admission(window);
-                let agree = match (store, core) {
-                    (None, None) => true,
-                    (Some(admitted), Some(admission)) => {
-                        admitted == (admission == rift_core::lifecycle::Admission::Admitted)
-                    }
-                    (Some(_), None) | (None, Some(_)) => false,
-                };
-                (!agree).then_some(LifecycleDivergence { window, store, core })
+                let snapshot = self.window(window).map(|state| (state.ax_kind(), state.minimize()));
+                let core = self.lifecycle.facts(window).map(|facts| (facts.ax, facts.minimize));
+                (snapshot != core).then_some(LifecycleDivergence { window, snapshot, core })
             })
             .collect()
     }
 
+    /// Tracks a window's AX state as the heuristic's manageable window under no rule.
+    #[cfg(test)]
+    pub(crate) fn insert_manageable_window(&mut self, window_id: WindowId, window: WindowState) {
+        self.insert_window_as(window_id, window, Manageability::Manageable, Rule::NoRule);
+    }
+
+    /// Tracks a window's AX state, read afresh: unmanageable until the heuristic says
+    /// otherwise, under no rule, not a native transient.
     pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
+        self.insert_window_as(window_id, window, Manageability::Unmanageable, Rule::NoRule);
+    }
+
+    /// Tracks a window's AX state, read afresh, with the heuristic's verdict and a rule already
+    /// known (an identity replacing another keeps its rule).
+    pub(crate) fn insert_window_as(
+        &mut self,
+        window_id: WindowId,
+        window: WindowState,
+        manageability: Manageability,
+        rule: Rule,
+    ) {
         let wsid = window.info.sys_id;
-        let facts = window.admission_facts(window.manage_override());
+        let facts = AdmissionFacts {
+            manageability,
+            rule,
+            ax: window.ax_kind(),
+            native: NativeKind::Ordinary,
+            minimize: window.minimize(),
+        };
         self.lifecycle.step(LifecycleEvent::Live { window: window_id, facts });
         let retained_workspace = {
             let record = self.windows.entry_or_default(window_id);
@@ -2384,7 +2465,7 @@ mod tests {
     }
 
     fn admitted(wid: WindowId, wsid: WindowServerId) -> WindowState {
-        let mut state = WindowState::from(crate::sys::app::WindowInfo {
+        let state = WindowState::from(crate::sys::app::WindowInfo {
             has_native_tabs: false,
             is_standard: true,
             is_root: true,
@@ -2400,7 +2481,6 @@ mod tests {
             ax_role: None,
             ax_subrole: None,
         });
-        state.is_manageable = true;
         state
     }
 
@@ -2410,7 +2490,7 @@ mod tests {
         let mut workspaces = WorkspaceStore::new();
         let home = workspaces.create_workspace(SpaceId::new(10), None).unwrap();
         let wid = WindowId::new(1, 1);
-        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
+        store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
         store.assign_window_to_workspace(wid, home);
 
         for _ in 0..2 {
@@ -2421,10 +2501,10 @@ mod tests {
             store.debug_assert_invariants();
         }
 
-        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
+        store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
         assert!(store.reconcile_admission(wid));
         assert_eq!(store.workspace_for_window(wid), Some(home));
-        store.window_mut(wid).unwrap().manage_override = Some(false);
+        store.set_manage_override(wid, Some(false));
         assert!(!store.reconcile_admission(wid));
         assert_eq!(store.workspace_for_window(wid), None);
         assert!(store.workspace_windows(home).is_empty());
@@ -2440,17 +2520,14 @@ mod tests {
         let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
         let (wid, rekeyed, sibling) =
             (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
-        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
-        store.insert_window(sibling, admitted(sibling, WindowServerId::new(3)));
+        store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
+        store.insert_manageable_window(sibling, admitted(sibling, WindowServerId::new(3)));
         store.assign_window_to_workspace(wid, home);
         store.assign_window_to_workspace(sibling, home);
 
         store.insert_claim(wid, owner, WindowClaimFlags::empty());
         assert!(!store.is_admitted(wid) && !store.can_reconcile_admission(wid));
-        assert!(
-            store.window(wid).unwrap().is_admitted(),
-            "native admission is untouched"
-        );
+        assert!(store.is_admitted_state(wid), "native admission is untouched");
         assert_eq!(store.workspace_for_window(wid), None);
         assert_eq!(store.workspace_windows(home), vec![sibling]);
         assert_eq!(store.iter_workspace_assignments().count(), 1);
@@ -2462,7 +2539,7 @@ mod tests {
         store.debug_assert_invariants();
 
         // An AX rekey carries the claim; a replacement assignment folds into it.
-        store.insert_window(rekeyed, admitted(rekeyed, WindowServerId::new(2)));
+        store.insert_manageable_window(rekeyed, admitted(rekeyed, WindowServerId::new(2)));
         store.assign_window_to_workspace(rekeyed, home);
         assert_eq!(
             store.reconcile_ax_identity(rekeyed, Some(WindowServerId::new(1))),
@@ -2995,7 +3072,7 @@ mod tests {
             ax_role: Some("AXWindow".into()),
             ax_subrole: Some("AXStandardWindow".into()),
         };
-        store.insert_window(wid, WindowState::from(info.clone()).with_manageable(true));
+        store.insert_manageable_window(wid, WindowState::from(info.clone()));
         assert_eq!(store.lifecycle_divergences(), vec![]);
         store.set_minimized(wid, true);
         store.set_minimized(wid, false);
@@ -3015,11 +3092,14 @@ mod tests {
 
         // A write around the setters is caught.
         store.window_mut(wid).unwrap().info.is_minimized = true;
-        assert_eq!(store.lifecycle_divergences(), vec![LifecycleDivergence {
-            window: wid,
-            store: Some(false),
-            core: Some(rift_core::lifecycle::Admission::Admitted),
-        }]);
+        {
+            use rift_core::lifecycle::{AxKind, Minimize};
+            assert_eq!(store.lifecycle_divergences(), vec![LifecycleDivergence {
+                window: wid,
+                snapshot: Some((AxKind::Ordinary, Minimize::Minimized)),
+                core: Some((AxKind::Ordinary, Minimize::Shown)),
+            }]);
+        }
         store.set_minimized(wid, true);
         assert_eq!(store.lifecycle_divergences(), vec![]);
 

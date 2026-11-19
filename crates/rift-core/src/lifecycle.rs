@@ -402,6 +402,9 @@ impl<W: Copy + Ord> Lifecycle<W> {
         self.windows.get(&window).copied().map(admission)
     }
 
+    /// A live window's facts; `None` for a window with no AX state.
+    pub fn facts(&self, window: W) -> Option<AdmissionFacts> { self.windows.get(&window).copied() }
+
     /// The live windows.
     pub fn windows(&self) -> impl Iterator<Item = W> + '_ { self.windows.keys().copied() }
 }

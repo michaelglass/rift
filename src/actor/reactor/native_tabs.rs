@@ -52,16 +52,21 @@ impl Reactor {
                 {
                     return None;
                 }
-                Some((old, window.frame_monotonic(), window.manage_override(), wsid))
+                Some((old, window.frame_monotonic(), self.state.windows.rule(old), wsid))
             })
             .collect();
-        let [(old, frame, manage_override, old_wsid)] = candidates.as_slice() else {
+        let [(old, frame, rule, old_wsid)] = candidates.as_slice() else {
             return;
         };
-        let (old, frame, manage_override, old_wsid) = (*old, *frame, *manage_override, *old_wsid);
+        let (old, frame, rule, old_wsid) = (*old, *frame, *rule, *old_wsid);
         info.frame = frame;
-        let replacement = WindowState::from(info.clone()).with_manage_override(manage_override);
-        self.state.insert_window(incoming, replacement);
+        // The tab that took over keeps the rule its predecessor was under.
+        self.state.insert_window_as(
+            incoming,
+            WindowState::from(info.clone()),
+            rift_core::lifecycle::Manageability::Unmanageable,
+            rule.unwrap_or(rift_core::lifecycle::Rule::NoRule),
+        );
         // Same window, new identity: a grip on it moves first, through the core.
         self.state.step(CoreEvent::Rekeyed { from: old, to: incoming });
         self.state.windows.transfer_persistent_window_metadata(old, incoming);

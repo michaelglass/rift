@@ -688,13 +688,13 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
         max_frame: CGSize::ZERO,
     };
     reactor.update_partial_window_server_info(vec![server_info(3)]);
-    assert!(!reactor.state.windows.window(window).unwrap().is_admitted());
+    assert!(!reactor.state.windows.is_admitted_state(window));
     reactor.update_partial_window_server_info(vec![server_info(0)]);
     for standard in [false, true] {
         info.is_standard = standard;
         reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
     }
-    assert!(reactor.state.windows.window(window).unwrap().is_admitted());
+    assert!(reactor.state.windows.is_admitted_state(window));
     assert!(reactor.state.windows.is_claimed(window));
 }
 

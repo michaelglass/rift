@@ -49,7 +49,7 @@ fn live_state(window: WindowId) -> WindowState {
             ax_role: None,
             ax_subrole: None,
         });
-        state.with_manageable(true)
+        state
     }
 }
 
@@ -76,7 +76,7 @@ fn open(
     window: WindowId,
 ) {
     let space = engine.workspaces[id].space;
-    store.insert_window(window, live_state(window));
+    store.insert_manageable_window(window, live_state(window));
     assert!(engine.workspaces.assign_window_to_workspace(store, space, window, id));
     engine.add_window_to_layout(store, space, window);
 }
@@ -394,7 +394,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let minimized = win(7, 5);
     open(&mut engine, &mut store, shown, minimized);
     for (id, window) in [(shown, w2), (hidden, w3)] {
-        store.insert_window(window, live_state(window));
+        store.insert_manageable_window(window, live_state(window));
         assert!(engine.workspaces.assign_window_to_workspace(&mut store, a, window, id));
         engine.floating.add_floating(window);
     }
@@ -564,7 +564,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let (mut engine, mut store) = boot(&ruled, &saved_file);
     resolve(&mut engine, &mut store, &[(a, "x")], &[("x", &[a])]);
     let id = ws(&engine, a, 0);
-    store.insert_window(w1, live_state(w1));
+    store.insert_manageable_window(w1, live_state(w1));
     let title = evidence(w1).title;
     let result = engine.assign_window_with_app_info(
         &mut store,
@@ -963,7 +963,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         let mut state = live_state(window);
         state.info.title = title.into();
         state.info.bundle_id = Some("com.example.terminal".into());
-        store.insert_window(window, state);
+        store.insert_manageable_window(window, state);
     };
     let (mut saved, mut saved_store) = fresh(&per_display, &[(a, "x")]);
     let id = ws(&saved, a, 1);
@@ -995,7 +995,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         ("x", &[b]),
         ("y", &[a]),
     ]);
-    store.insert_window(w1, live_state(w1));
+    store.insert_manageable_window(w1, live_state(w1));
     assert!(observe(&mut engine, &mut store, a, w1, &evidence(w1)));
     assert_eq!(tree(&engine, on_a), [w1, w3]);
 
@@ -1033,7 +1033,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let current = [(a, "x".to_owned(), size)];
     engine.resolve_saved_spaces(&mut store, &current, 2, &inventory);
     assert!(engine.is_restoring() && engine.saved_space_is_unresolved(Some(b)));
-    store.insert_window(w1, live_state(w1));
+    store.insert_manageable_window(w1, live_state(w1));
     assert!(observe(&mut engine, &mut store, a, w1, &evidence(w1)));
     let current = [(a, "x".to_owned(), size), (d, "y".to_owned(), size)];
     engine.resolve_saved_spaces(&mut store, &current, 2, &inventory);

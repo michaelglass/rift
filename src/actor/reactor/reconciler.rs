@@ -766,6 +766,19 @@ impl RiftState {
         self.step(Event::Seen { window, frame });
     }
 
+    /// Tracks a new window's state with the heuristic's verdict and a rule already known.
+    pub(crate) fn insert_window_as(
+        &mut self,
+        window: WindowId,
+        state: crate::model::reactor::WindowState,
+        manageability: rift_core::lifecycle::Manageability,
+        rule: rift_core::lifecycle::Rule,
+    ) {
+        let frame = state.frame_monotonic();
+        self.windows.insert_window_as(window, state, manageability, rule);
+        self.step(Event::Seen { window, frame });
+    }
+
     /// The window server reports a window; a normal-layer one is seen where it reports it.
     pub(crate) fn observe_native_window(
         &mut self,

@@ -258,25 +258,35 @@ impl Reactor {
         sys_id: Option<WindowServerId>,
         is_manageable: bool,
     ) {
-        self.state.insert_window(wid, {
-            let state = super::WindowState::from(WindowInfo {
-                has_native_tabs: false,
-                is_standard: true,
-                is_root: true,
-                is_minimized: false,
-                is_resizable: true,
-                min_size: None,
-                max_size: None,
-                title: format!("Window {wid:?}"),
-                frame,
-                sys_id,
-                bundle_id: None,
-                path: None,
-                ax_role: None,
-                ax_subrole: None,
-            });
-            state.with_manageable(is_manageable)
-        });
+        let manageability = if is_manageable {
+            rift_core::lifecycle::Manageability::Manageable
+        } else {
+            rift_core::lifecycle::Manageability::Unmanageable
+        };
+        self.state.insert_window_as(
+            wid,
+            {
+                let state = super::WindowState::from(WindowInfo {
+                    has_native_tabs: false,
+                    is_standard: true,
+                    is_root: true,
+                    is_minimized: false,
+                    is_resizable: true,
+                    min_size: None,
+                    max_size: None,
+                    title: format!("Window {wid:?}"),
+                    frame,
+                    sys_id,
+                    bundle_id: None,
+                    path: None,
+                    ax_role: None,
+                    ax_subrole: None,
+                });
+                state
+            },
+            manageability,
+            rift_core::lifecycle::Rule::NoRule,
+        );
     }
 }
 

@@ -375,11 +375,7 @@ impl Reactor {
                 let mut windows = self.state.windows.workspace_windows(id);
                 windows.retain(|wid| {
                     self.app_manager.apps.contains_key(&wid.pid)
-                        && self
-                            .state
-                            .windows
-                            .window(*wid)
-                            .is_some_and(|window| window.is_admitted())
+                        && self.state.windows.is_admitted_state(*wid)
                 });
                 let window_count = windows.len();
                 let has_fullscreen =
