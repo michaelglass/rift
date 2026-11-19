@@ -210,10 +210,6 @@ impl Input {
                         && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
             state.event_processing_enabled && state.mouse_hides_on_focus,
-            // Mouse-up delivery is part of the stable configured mask. Drag
-            // start/stop is frequent enough that rebuilding the WindowServer
-            // tap costs more than filtering these releases in the callback.
-            state.event_processing_enabled,
             keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
         if self.mission_control_active.get() {
@@ -1583,17 +1579,16 @@ fn build_event_mask(
     flags_enabled: bool,
     mouse_move_enabled: bool,
     buttons_enabled: bool,
-    release_enabled: bool,
     key_up_enabled: bool,
 ) -> CGEventMask {
-    let mut mask = 0;
+    // Releases are always delivered, startup included: a drag rift saw start (an AX move needs
+    // no press from this tap) must see its end. They are also part of the stable mask:
+    // rebuilding the tap per drag costs more than filtering releases in the callback.
+    let mut mask = (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
     if buttons_enabled {
         for ty in [CGEventType::LeftMouseDown, CGEventType::RightMouseDown] {
             mask |= 1u64 << ty.0;
         }
-    }
-    if release_enabled {
-        mask |= (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
     }
     if key_up_enabled {
         mask |= 1u64 << CGEventType::KeyUp.0;
@@ -2071,15 +2066,30 @@ mod tests {
     }
 
     #[test]
+    fn releases_are_subscribed_before_event_processing_starts() {
+        let (input, _, _) = input();
+        assert!(!input.state.borrow().event_processing_enabled);
+        let release_mask =
+            (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        assert_eq!(
+            input.desired_event_mask() & release_mask,
+            release_mask,
+            "mouse releases are not in the event mask during the startup window"
+        );
+    }
+
+    #[test]
     fn mask_tracks_mouse_feature_enablement() {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());
         let keyboard_mask = 1u64 << CGEventType::KeyDown.0;
-        assert_eq!(input.desired_event_mask(), keyboard_mask);
-        input.state.borrow_mut().mouse_features_enabled = false;
-        input.state.borrow_mut().event_processing_enabled = true;
         let stable_release_mask =
             (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        // Releases are subscribed from the first moment, startup included: a press that began
+        // before rift listened still ends a drag rift saw start.
+        assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
+        input.state.borrow_mut().mouse_features_enabled = false;
+        input.state.borrow_mut().event_processing_enabled = true;
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(
@@ -2553,7 +2563,6 @@ mod tests {
             ] {
                 let (input, _, mut events_rx) = input();
                 input.state.borrow_mut().mouse_features_enabled = enabled;
-                input.state.borrow_mut().event_processing_enabled = true;
                 // Native AX moves/resizes can acquire a drag regardless of drag_drop.enabled.
                 input.native_motion_active.store(true, Ordering::Release);
                 assert_ne!(input.desired_event_mask() & (1u64 << event_type.0), 0);
