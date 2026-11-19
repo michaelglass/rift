@@ -1352,6 +1352,141 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     }
 }
 
+impl<W: Copy + Ord + Debug> Layout<W> {
+    /// The focused leaf's neighbour toward `direction`, skipping leaves showing nothing while
+    /// someone is left out; and the focused leaf.
+    fn focused_neighbor(
+        &self,
+        direction: Direction,
+        who: Participation<W>,
+    ) -> Option<(Path, Path)> {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let focus = self.focus(&nodes, &selection, who)?;
+        let leaf = self.root.leaf_under(&focus, who);
+        let mut from = leaf.clone();
+        loop {
+            let next = self.root.structural_neighbor(&from, direction)?;
+            match who {
+                Participation::Everyone => return Some((leaf, next)),
+                Participation::Except(_) if self.root.at(&next).shown(who).is_some() => {
+                    return Some((leaf, next));
+                }
+                Participation::Except(_) => from = next,
+            }
+        }
+    }
+
+    /// Joins the focused leaf with its neighbour toward `direction`: the split right above the
+    /// neighbour, if the focus is under it and it is not the root, becomes one stack of all its
+    /// windows in tree order (the selected window moved to the end, so it shows), a fresh leaf,
+    /// selected.
+    pub fn join(&mut self, direction: Direction, who: Participation<W>, tags: &mut Tags) {
+        let Some((leaf, neighbor)) = self.focused_neighbor(direction, who) else {
+            return;
+        };
+        let Some((_, parent)) = neighbor.split_last() else {
+            return;
+        };
+        if parent.is_empty() || !leaf.starts_with(parent) {
+            return;
+        }
+        let selected = self.projection(who).selected_window;
+        let mut windows = self
+            .root
+            .at(parent)
+            .preorder()
+            .into_iter()
+            .flat_map(|(_, node)| match node {
+                Node::Leaf(Leaf {
+                    content: Content::Window { window, .. },
+                    ..
+                }) => vec![*window],
+                Node::Leaf(Leaf {
+                    content: Content::Stack { tabs, .. },
+                    ..
+                }) => tabs.members().collect(),
+                Node::Leaf(Leaf { content: Content::Empty, .. }) | Node::Split(_) => Vec::new(),
+            })
+            .collect::<Vec<W>>();
+        if let Some(index) = windows.iter().position(|window| Some(*window) == selected) {
+            windows[index..].rotate_left(1);
+        }
+        let Some(top) = windows.pop() else { return };
+        *self.root.at_mut(parent) = Node::Leaf(Leaf {
+            tag: tags.mint(),
+            content: Content::Stack {
+                tabs: Tabs {
+                    before: windows,
+                    top,
+                    after: Vec::new(),
+                },
+                fill: Fill::Tiled,
+            },
+            preselect: Preselect::Unset,
+        });
+        self.root.select(parent);
+    }
+
+    /// Retiles the focused stack where it is: the leaf empties, each window goes back in at
+    /// the selection (in stack order, so the shown one ends up selected), and the stack's fill
+    /// goes to the leaf then focused.
+    pub fn unjoin(&mut self, who: Participation<W>, tags: &mut Tags) {
+        let Some(focus) = self.acting_at_or_none(who) else {
+            return;
+        };
+        let at = self.root.leaf_under(&focus, who);
+        let Node::Leaf(leaf) = self.root.at_mut(&at) else {
+            return;
+        };
+        let Content::Stack { tabs, fill } = &leaf.content else {
+            return;
+        };
+        let (members, fill): (Vec<W>, Fill) = (tabs.members().collect(), *fill);
+        leaf.content = Content::Empty;
+        self.root.select(&at);
+        for member in members {
+            self.insert_at_selection(member, who, tags);
+        }
+        let Some(focus) = self.acting_at_or_none(who) else {
+            return;
+        };
+        if let Node::Leaf(Leaf {
+            content: Content::Window { fill: kept, .. } | Content::Stack { fill: kept, .. },
+            ..
+        }) = self.root.at_mut(&focus)
+        {
+            *kept = fill;
+        }
+    }
+
+    /// The focus (none if nobody in the layout takes part, with someone left out).
+    fn acting_at_or_none(&self, who: Participation<W>) -> Option<Path> {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        self.focus(&nodes, &selection, who)
+    }
+
+    /// Unjoins the focused leaf if it is a stack of more than one window, else joins it toward
+    /// `direction`.
+    pub fn consume_or_expel(
+        &mut self,
+        direction: Direction,
+        who: Participation<W>,
+        tags: &mut Tags,
+    ) {
+        let joined = self.acting_at_or_none(who).is_some_and(|focus| {
+            let at = self.root.leaf_under(&focus, who);
+            matches!(self.root.at(&at), Node::Leaf(Leaf { content: Content::Stack { tabs, .. }, .. }) if !tabs.before.is_empty() || !tabs.after.is_empty())
+        });
+        if joined {
+            self.unjoin(who, tags)
+        } else {
+            self.join(direction, who, tags)
+        }
+    }
+}
+
 /// Rebalances `node`'s splits; answers how many tiles it spans along `parent_axis`.
 fn rebalance<W>(node: &mut Node<W>, parent_axis: Orientation) -> usize {
     let Node::Split(split) = node else { return 1 };
@@ -1456,6 +1591,20 @@ impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
     }
 
     pub fn rebalance(&mut self, layout: L) { self.change(layout, |tree, _, _| tree.rebalance()); }
+
+    pub fn join(&mut self, layout: L, direction: Direction) {
+        self.change(layout, |tree, who, tags| tree.join(direction, who, tags));
+    }
+
+    pub fn unjoin(&mut self, layout: L) {
+        self.change(layout, |tree, who, tags| tree.unjoin(who, tags));
+    }
+
+    pub fn consume_or_expel(&mut self, layout: L, direction: Direction) {
+        self.change(layout, |tree, who, tags| {
+            tree.consume_or_expel(direction, who, tags)
+        });
+    }
 
     pub fn split(&mut self, layout: L, orientation: Orientation) {
         self.change(layout, |tree, who, tags| tree.split(orientation, who, tags));
