@@ -144,6 +144,11 @@ counts only under the `respect_min_size` app rule).
 
 ## Evidence
 
+- **Every differential has a planted bug proven caught.** A differential is evidence only if a
+  deliberate bug in the Roc side fails it: plant one that changes an answer in a case the
+  decision turns on, and that compiles (an unused variable is a warning, and warnings fail the
+  Roc build). If it passes, the generator is too uniform to line up the deciding facts: bias it
+  toward them (as `tests/focus.rs`'s removal questions are) until the bug fails it.
 - `cargo test --workspace`: 1107 pass at 57426401 (2 ignored: the trace dump and the BSP clone-cost benchmark), fuzzer clean at 2000 × 40.
 - `the_core_on_plain_data_decides_what_the_reactor_decided` (fuzz.rs): every seed's run,
   translated to plain data, replayed through `RustCore<Plain>`: the same effects at every step,
