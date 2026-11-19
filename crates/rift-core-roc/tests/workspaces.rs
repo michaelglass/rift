@@ -1,12 +1,16 @@
 //! The Roc core's workspace decisions against the Rust core's (`rift_core::workspaces`), on
 //! random questions: the answers must be identical word for word. Catalogs are small and their
 //! Spaces few, the current workspace is usually in them, names repeat, and visible sets overlap,
-//! so steps cross, wrap and stop.
+//! so steps cross, wrap and stop. Topology event runs reuse a few workspaces and Spaces, so
+//! moves and removals mostly find their workspace, and Spaces are activated again, cleared and
+//! activated anew.
 
 use rift_core::lifecycle::WorkspaceMode;
 use rift_core::plain::wire;
-use rift_core::workspaces::plain::{PreviousQuestion, ResolveQuestion, StepQuestion};
-use rift_core::workspaces::{Selector, SkipEmpty, Step, Wrapping};
+use rift_core::workspaces::plain::{
+    PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
+};
+use rift_core::workspaces::{Activation, Selector, SkipEmpty, Step, TopologyEvent, Wrapping};
 use rift_core_roc::{AllocationCount, tile_words};
 
 /// xorshift64*: deterministic, no dependency.
@@ -151,5 +155,55 @@ fn the_roc_core_follows_navigation_history_as_the_rust_core_does() {
         };
         let rust = wire::encode_target(question.answer());
         (wire::encode_previous(question), rust)
+    });
+}
+
+#[test]
+fn the_roc_core_steps_the_topology_as_the_rust_core_does() {
+    differential("topology", 0x7090_0000_0000_0032, |rng| {
+        let mut created: Vec<u64> = Vec::new();
+        let mut events = Vec::new();
+        for _ in 0..rng.below(25) {
+            // A known workspace usually; one never created sometimes.
+            let known = |rng: &mut Rng, created: &[u64]| match created.len() {
+                0 => 1 + rng.below(6),
+                n if rng.chance(85) => created[rng.below(n as u64) as usize],
+                _ => 1 + rng.below(6),
+            };
+            let maybe = |rng: &mut Rng| rng.chance(60).then(|| 1 + rng.below(6));
+            let event = match rng.below(100) {
+                0..25 => {
+                    // A fresh id usually; one already in the catalog rarely.
+                    let workspace = match (1..=6).find(|id| !created.contains(id)) {
+                        Some(fresh) if rng.chance(95) => fresh,
+                        _ => 1 + rng.below(6),
+                    };
+                    created.push(workspace);
+                    TopologyEvent::Created { workspace, space: rng.space() }
+                }
+                25..35 => TopologyEvent::Removed(known(rng, &created)),
+                35..55 => TopologyEvent::Moved {
+                    workspace: known(rng, &created),
+                    space: rng.space(),
+                },
+                55..90 => {
+                    let activation = if rng.chance(75) {
+                        Activation::Showing {
+                            current: known(rng, &created),
+                            previous: maybe(rng),
+                            remembered: maybe(rng),
+                        }
+                    } else {
+                        Activation::Vacant { remembered: maybe(rng) }
+                    };
+                    TopologyEvent::Activated { space: rng.space(), activation }
+                }
+                _ => TopologyEvent::Cleared(rng.space()),
+            };
+            events.push(event);
+        }
+        let question = TopologyQuestion { events };
+        let rust = wire::encode_topology(&question.answer());
+        (wire::encode_topology_steps(question), rust)
     });
 }

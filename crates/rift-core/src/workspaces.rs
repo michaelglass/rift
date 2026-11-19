@@ -216,7 +216,7 @@ impl<K: Copy + PartialEq, S: Copy + PartialEq> Topology<K, S> {
 
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
-    use super::{Context, Selector, SkipEmpty, Step, Wrapping};
+    use super::{Context, Selector, SkipEmpty, Step, Topology, TopologyEvent, Wrapping};
     use crate::lifecycle::WorkspaceMode;
 
     /// [`super::step`]: the workspaces with windows.
@@ -296,6 +296,23 @@ pub mod plain {
                 self.last,
                 |_| self.on,
             )
+        }
+    }
+
+    /// [`super::Topology::step`]: the topology an empty one becomes after these events, in
+    /// order (every topology is reached this way).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TopologyQuestion {
+        pub events: Vec<TopologyEvent<u64, u64>>,
+    }
+
+    impl TopologyQuestion {
+        pub fn answer(&self) -> Topology<u64, u64> {
+            let mut topology = Topology::default();
+            for event in &self.events {
+                topology.step(*event);
+            }
+            topology
         }
     }
 }

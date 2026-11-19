@@ -1,7 +1,7 @@
 ## Decisions about virtual workspaces (`rift_core::workspaces`): which workspace a command
 ## reaches and where stepping goes. Workspaces, Spaces and names are one word each.
 
-import Wire exposing [finished, take, take_flag, take_list]
+import Wire exposing [finished, put_list, take, take_flag, take_list]
 
 ## Words being read, and where.
 Words : { words : List(U64), at : U64 }
@@ -11,6 +11,25 @@ Taken(a) : Try((a, Words), [Malformed])
 
 ## Where a command is given: the acting Space, and the Spaces visible now.
 Context : { space : U64, visible : List(U64) }
+
+## A workspace, when there is one.
+Maybe : [Some(U64), Nothing]
+
+## What a native Space shows.
+Activation : [Showing({ current : U64, previous : Maybe, remembered : Maybe }), Vacant(Maybe)]
+
+## A change to the workspaces' topology, as the platform makes it.
+TopologyEvent : [
+	Created({ workspace : U64, space : U64 }),
+	Removed(U64),
+	Moved({ workspace : U64, space : U64 }),
+	Activated({ space : U64, activation : Activation }),
+	Cleared(U64),
+]
+
+## The catalog (each workspace with its Space, in catalog order) and what each Space shows (in
+## the order the Spaces first got an activation).
+Topology : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }) }
 
 Workspaces := [].{
 
@@ -101,6 +120,52 @@ Workspaces := [].{
 		}
 	}
 
+	## The topology after one event. A move or removal of an unknown workspace, or a clear of
+	## a Space without an activation, changes nothing; a move moves the first entry for the
+	## workspace; an activation replaces the Space's in place, or comes last.
+	topology_step : Topology, TopologyEvent -> Topology
+	topology_step = |topology, event|
+		match event {
+			Created(entry) => { ..topology, catalog: topology.catalog.append(entry) }
+			Removed(workspace) => { ..topology, catalog: topology.catalog.keep_if(|entry| entry.workspace != workspace) }
+			Moved(moved) => {
+				var $catalog = []
+				var $moving = Moving
+				for entry in topology.catalog {
+					match $moving {
+						Moving if entry.workspace == moved.workspace => {
+							$catalog = $catalog.append({ workspace: entry.workspace, space: moved.space })
+							$moving = Moved
+						}
+						_ => {
+							$catalog = $catalog.append(entry)
+						}
+					}
+				}
+				{ ..topology, catalog: $catalog }
+			}
+			Activated(shown) => {
+				var $activations = []
+				var $placing = Placing
+				for entry in topology.activations {
+					match $placing {
+						Placing if entry.space == shown.space => {
+							$activations = $activations.append(shown)
+							$placing = Placed
+						}
+						_ => {
+							$activations = $activations.append(entry)
+						}
+					}
+				}
+				match $placing {
+					Placing => { ..topology, activations: $activations.append(shown) }
+					Placed => { ..topology, activations: $activations }
+				}
+			}
+			Cleared(space) => { ..topology, activations: topology.activations.keep_if(|entry| entry.space != space) }
+		}
+
 	# The wire.
 
 	take_mode : Words -> Taken(Bool)
@@ -170,15 +235,6 @@ Workspaces := [].{
 	## Tag 31.
 	previous_words : Words -> Try(List(U64), [Malformed])
 	previous_words = |c0| {
-		take_maybe = |c| {
-			(present, after) = take_flag(c)?
-			if present {
-				(word, rest) = take(after)?
-				Ok((Some(word), rest))
-			} else {
-				Ok((Nothing, after))
-			}
-		}
 		(global, c1) = take_mode(c0)?
 		(context, c2) = take_context(c1)?
 		(last, c3) = take_maybe(c2)?
@@ -194,5 +250,89 @@ Workspaces := [].{
 				Nothing => [0]
 			},
 		)
+	}
+
+	take_maybe : Words -> Taken(Maybe)
+	take_maybe = |c0| {
+		(present, c1) = take_flag(c0)?
+		if present {
+			(word, c2) = take(c1)?
+			Ok((Some(word), c2))
+		} else {
+			Ok((Nothing, c1))
+		}
+	}
+
+	take_activation : Words -> Taken(Activation)
+	take_activation = |c0| {
+		(kind, c1) = take(c0)?
+		match kind {
+			0 => {
+				(current, c2) = take(c1)?
+				(previous, c3) = take_maybe(c2)?
+				(remembered, c4) = take_maybe(c3)?
+				Ok((Showing({ current, previous, remembered }), c4))
+			}
+			1 => {
+				(remembered, c2) = take_maybe(c1)?
+				Ok((Vacant(remembered), c2))
+			}
+			_ => Err(Malformed)
+		}
+	}
+
+	take_topology_event : Words -> Taken(TopologyEvent)
+	take_topology_event = |c0| {
+		(kind, c1) = take(c0)?
+		match kind {
+			0 => {
+				(workspace, c2) = take(c1)?
+				(space, c3) = take(c2)?
+				Ok((Created({ workspace, space }), c3))
+			}
+			1 => {
+				(workspace, c2) = take(c1)?
+				Ok((Removed(workspace), c2))
+			}
+			2 => {
+				(workspace, c2) = take(c1)?
+				(space, c3) = take(c2)?
+				Ok((Moved({ workspace, space }), c3))
+			}
+			3 => {
+				(space, c2) = take(c1)?
+				(activation, c3) = take_activation(c2)?
+				Ok((Activated({ space, activation }), c3))
+			}
+			4 => {
+				(space, c2) = take(c1)?
+				Ok((Cleared(space), c2))
+			}
+			_ => Err(Malformed)
+		}
+	}
+
+	put_maybe : List(U64), Maybe -> List(U64)
+	put_maybe = |words, maybe|
+		match maybe {
+			Some(word) => words.append(1).append(word)
+			Nothing => words.append(0)
+		}
+
+	put_activation : List(U64), Activation -> List(U64)
+	put_activation = |words, activation|
+		match activation {
+			Showing(shown) => put_maybe(put_maybe(words.append(0).append(shown.current), shown.previous), shown.remembered)
+			Vacant(remembered) => put_maybe(words.append(1), remembered)
+		}
+
+	## Tag 32: the topology an empty one becomes after the events.
+	topology_words : Words -> Try(List(U64), [Malformed])
+	topology_words = |c0| {
+		(events, c1) = take_list(c0, take_topology_event)?
+		finished(c1)?
+		topology = events.fold({ catalog: [], activations: [] }, topology_step)
+		with_catalog = put_list([], topology.catalog, |words, entry| words.append(entry.workspace).append(entry.space))
+		Ok(put_list(with_catalog, topology.activations, |words, entry| put_activation(words.append(entry.space), entry.activation)))
 	}
 }

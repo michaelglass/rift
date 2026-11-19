@@ -1499,12 +1499,79 @@ pub fn encode_target(answer: Option<(u64, u64)>) -> Vec<u64> {
     words.0
 }
 
+/// Tag 32, [`workspaces::plain::TopologyQuestion`]: the events, each a kind and its fields (0
+/// created: the workspace, its Space; 1 removed: the workspace; 2 moved: the workspace, its new
+/// Space; 3 activated: the Space, the activation; 4 cleared: the Space).
+pub fn encode_topology_steps(question: workspaces::plain::TopologyQuestion) -> Vec<u64> {
+    use workspaces::TopologyEvent;
+    let mut words = Words::default();
+    words.word(32);
+    words.list(question.events, |words, event| match event {
+        TopologyEvent::Created { workspace, space } => {
+            words.word(0);
+            words.word(workspace);
+            words.word(space);
+        }
+        TopologyEvent::Removed(workspace) => {
+            words.word(1);
+            words.word(workspace);
+        }
+        TopologyEvent::Moved { workspace, space } => {
+            words.word(2);
+            words.word(workspace);
+            words.word(space);
+        }
+        TopologyEvent::Activated { space, activation } => {
+            words.word(3);
+            words.word(space);
+            words.activation(activation);
+        }
+        TopologyEvent::Cleared(space) => {
+            words.word(4);
+            words.word(space);
+        }
+    });
+    words.0
+}
+
+/// A topology as words: its catalog (workspace, Space), then each Space with an activation and
+/// the activation, in the topology's own orders.
+pub fn encode_topology(topology: &workspaces::Topology<u64, u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.list(topology.catalog().to_vec(), |words, (workspace, space)| {
+        words.word(workspace);
+        words.word(space);
+    });
+    words.list(topology.activations().to_vec(), |words, (space, activation)| {
+        words.word(space);
+        words.activation(activation);
+    });
+    words.0
+}
+
 impl Words {
     fn mode(&mut self, mode: lifecycle::WorkspaceMode) {
         self.word(match mode {
             lifecycle::WorkspaceMode::PerDisplay => 0,
             lifecycle::WorkspaceMode::Global => 1,
         });
+    }
+
+    /// 0 showing: the current workspace, the previous and remembered ones (options); 1 vacant:
+    /// the remembered one (an option).
+    fn activation(&mut self, activation: workspaces::Activation<u64>) {
+        match activation {
+            workspaces::Activation::Showing { current, previous, remembered } => {
+                self.word(0);
+                self.word(current);
+                self.option(previous, Words::word);
+                self.option(remembered, Words::word);
+            }
+            workspaces::Activation::Vacant { remembered } => {
+                self.word(1);
+                self.option(remembered, Words::word);
+            }
+        }
     }
 }
 
