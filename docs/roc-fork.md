@@ -132,6 +132,9 @@ counts only under the `respect_min_size` app rule).
 - `roc/core/Focus.roc`: the focus decisions (`rift_core::focus`: a removal's effect on focus,
   the window to focus, hidden focus, following an activation, the fallbacks), tags 17 to 23.
   Held to the Rust by `tests/focus.rs`; not on rift's path.
+- `roc/core/Workspaces.roc`: the workspace decisions (`rift_core::workspaces`: reachability,
+  stepping, selectors, navigation history), tags 29 to 31. Held to the Rust by
+  `tests/workspaces.rs`; not on rift's path.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
   rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
@@ -519,6 +522,12 @@ topology into the core; W6 last, after upstream #688: the engine glue and persis
   unchanged; at load the order is parsed into the catalog, and an unknown, duplicate or missing
   entry is refused with a typed `CatalogError`, as validation refused it before. A test loads a
   store saved by the code before and writes it back byte for byte.
+- 3fb35b51 (W1, held): `rift_core::workspaces` decides which workspace a command reaches and
+  where stepping goes (`eligible`, `step`, `resolve`, `previous`), from the catalog the store
+  hands it; typed `Step`, `SkipEmpty`, `Wrapping` replace a Direction, an `Option<bool>` and a
+  flag; a Direction other than left or right goes nowhere at the edge.
+- a9b59c3c (W1, Roc): `roc/core/Workspaces.roc`, tags 29 to 31; 200,000 random questions each,
+  identical word for word; a planted bug in the Roc reachability rule fails it.
 - **Open item for W5:** no fuzzer step reaches DisplayDeparture. The new DisplayDeparts /
   DisplayReturns steps run (not while a window is held), but in the test reactor's global-mode
   setup a departure moves no workspace (the departed display's workspaces stay dormant on its
