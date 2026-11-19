@@ -3679,4 +3679,34 @@ mod core_tree_differential {
         assert_eq!(order(&core_json).len(), 5);
         assert_eq!(order(&core_json), order(&old_json));
     }
+
+    /// Decision (c): what a drag preview's clone costs, the old system's against the core's
+    /// plain values. `cargo test --release --lib clone_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn clone_cost() {
+        for (layouts, windows) in [(1, 4), (1, 20), (4, 20), (8, 50)] {
+            let mut old = BspLayoutSystem::default();
+            for l in 0..layouts {
+                let layout = old.create_layout_unshadowed();
+                for i in 0..windows {
+                    old.add_window_after_selection_unshadowed(layout, WindowId::new(1 + l, i + 1));
+                }
+            }
+            let core = old.core_state();
+            let rounds = 20_000;
+            let time = |f: &dyn Fn()| {
+                let start = std::time::Instant::now();
+                for _ in 0..rounds {
+                    f();
+                }
+                start.elapsed() / rounds
+            };
+            let old_clone = time(&|| drop(std::hint::black_box(old.clone())));
+            let core_clone = time(&|| drop(std::hint::black_box(core.clone())));
+            eprintln!(
+                "CLONE {layouts} layouts x {windows} windows: old system {old_clone:?}, core {core_clone:?}"
+            );
+        }
+    }
 }

@@ -218,6 +218,7 @@ wire encode and decode.
   shape, traditional 5.6–5.9 → 8.1 µs. If a profile ever asks, optimise inside these
   structures (the measured costs: bigger records than parallel float lists, and one list for
   each zip). The per-step core is unaffected.
+- **BSP trees in the core (phase A).** Every operation is checked from the old system's true state: its state converted into the core's, the operation run on both, the answers, the trees (memories included, tags aside) and the container query (node ids renumbered, everything else byte for byte, stack members' ids exact) compared. The owner's scripts' patterns (`apply-display-layouts.sh`, `swap-rotate.sh`) read the core's container tree as the old one. Found and fixed in the old system on the way (upstream candidates): an emptied fullscreen leaf kept its fullscreen flags (739cddd3); a stacked window swapped with itself was duplicated (18607987). Noted, not changed: the old container query's node ids can collide (a slotmap key equal to a member's pid<<32|idx). Clone cost (decision c), release, per clone: 1 layout x 4 windows 113 ns old / 121 ns core; 1 x 20: 0.2 / 0.43 us; 4 x 20: 0.55 / 1.6 us; 8 x 50: 2.7 / 12.3 us (a box per split). Microseconds against a 16 ms frame: no sharing needed unless a profile says otherwise.
 - **Floating, a known cost.** 0.42 µs per layout of one to six newcomers in Roc (best of 5
   over 200,000); the parity runs 200,000 random layouts bit-identical.
 - **Scrolling, a known cost.** 4.4 µs per strip in Roc (best of 5 over 200,000 random strips;
@@ -361,7 +362,7 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Sizing (respect_min_size in the core) | S | Done, Rust (the play line) and Roc, with its own wire encoding. |
 | Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
 | Layout geometry: floating | S | Done, Rust and Roc: first frames and the cascade (`layout::floating`, `Floating.roc`). |
-| Layout trees into the core | L+ | **Next.** Tree mutations as core events, the engine's trees a projection of effects; the shapes become core state. Per system, BSP first. |
+| Layout trees into the core | L+ | **In progress, BSP first.** `layout::bsp_tree` holds a BSP layout (splits of two, leaves of nothing / a window / a stack, the selection as each split's memory, node tags the core mints) and every change rift makes to one; in test builds each of `BspLayoutSystem`'s operations is shadowed by the core on all traffic, and a tree fuzzer composes them. Next: the core answers (the flip), then the old system goes. Then traditional, scrolling's columns, floating. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
