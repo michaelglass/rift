@@ -64,139 +64,246 @@ enum Grip {
 /// What the pointer is doing with windows: the core's type, on Rift's window ids.
 pub(crate) type Pointer = rift_core::Pointer<WindowId>;
 
-/// A record Rift places: the window's data and the transfer in flight, if any.
-#[derive(Debug, Default)]
-struct Loose {
-    record: WindowRecord,
-    transfer: Option<Transfer>,
-}
-
-/// The record of the one window the user's hand is on. It has no transfer to request or
-/// advance: the user places this window.
+/// The user's one hand. [`Records::default`] makes the only one a store has, and it is neither
+/// `Clone` nor `Copy`: the entry holding it is the gripped one, so a second gripped entry would
+/// need a second hand, which can't exist.
 #[derive(Debug)]
-struct Gripped {
-    window: WindowId,
-    record: WindowRecord,
-    grip: Grip,
+struct Hand(());
+
+/// A window's record and, by what is happening to it, what goes with it.
+#[derive(Debug)]
+enum Entry {
+    /// Rift places this window: its data and the transfer in flight, if any.
+    Loose {
+        record: WindowRecord,
+        transfer: Option<Transfer>,
+    },
+    /// The user's hand is on this window. It has no transfer to request or advance: the user
+    /// places this window.
+    Gripped {
+        record: WindowRecord,
+        grip: Grip,
+        hand: Hand,
+    },
 }
 
-/// Every window's record, each in exactly one place: with the windows Rift places, or in the
-/// single slot for the window under the user's hand. One slot, so one press or drag at a time;
-/// no transfer in the slot, so a pressed or dragged window can't be pulled back to its
-/// assignment; and a drag starts only from the slot's [`Pressed`].
-#[derive(Debug, Default)]
+impl Entry {
+    fn loose(record: WindowRecord) -> Self { Entry::Loose { record, transfer: None } }
+
+    fn record(&self) -> &WindowRecord {
+        match self {
+            Entry::Loose { record, .. } | Entry::Gripped { record, .. } => record,
+        }
+    }
+
+    fn record_mut(&mut self) -> &mut WindowRecord {
+        match self {
+            Entry::Loose { record, .. } | Entry::Gripped { record, .. } => record,
+        }
+    }
+
+    #[cfg(test)]
+    fn is_gripped(&self) -> bool { matches!(self, Entry::Gripped { .. }) }
+}
+
+/// Why the store would not take hold of a window: the core grips only after it ungripped, so
+/// a refusal means the store and the core disagree, and the core's next effect corrects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GripRefused {
+    /// The hand is already on this window.
+    Holding(WindowId),
+    /// A re-key, with nothing held.
+    NothingHeld,
+    /// No entry holds the hand and it is not free: an entry holding it was dropped.
+    HandLost,
+}
+
+/// Every window's record, each in exactly one place: one map, one entry per window. The hand
+/// is in the gripped entry or, while nothing is held, in `free`; so one press or drag at a
+/// time, a pressed or dragged window can't be pulled back to its assignment (its entry has no
+/// transfer), and a drag starts only from a [`Grip::Pressed`].
+#[derive(Debug)]
 struct Records {
-    loose: HashMap<WindowId, Loose>,
-    gripped: Option<Gripped>,
+    entries: HashMap<WindowId, Entry>,
+    /// The hand while no entry holds it.
+    free: Option<Hand>,
+}
+
+impl Default for Records {
+    fn default() -> Self {
+        Records {
+            entries: HashMap::default(),
+            free: Some(Hand(())),
+        }
+    }
 }
 
 impl Records {
     fn get(&self, window: &WindowId) -> Option<&WindowRecord> {
-        match &self.gripped {
-            Some(gripped) if gripped.window == *window => Some(&gripped.record),
-            _ => self.loose.get(window).map(|loose| &loose.record),
-        }
+        self.entries.get(window).map(Entry::record)
     }
 
     fn get_mut(&mut self, window: &WindowId) -> Option<&mut WindowRecord> {
-        match &mut self.gripped {
-            Some(gripped) if gripped.window == *window => Some(&mut gripped.record),
-            _ => self.loose.get_mut(window).map(|loose| &mut loose.record),
-        }
+        self.entries.get_mut(window).map(Entry::record_mut)
     }
 
     /// The record for `window`, tracked loose if it is new.
     fn entry_or_default(&mut self, window: WindowId) -> &mut WindowRecord {
-        match &mut self.gripped {
-            Some(gripped) if gripped.window == window => &mut gripped.record,
-            _ => &mut self.loose.entry(window).or_default().record,
+        self.entries
+            .entry(window)
+            .or_insert_with(|| Entry::loose(Default::default()))
+            .record_mut()
+    }
+
+    /// `window`'s transfer slot, tracked loose if it is new; `None` for the gripped window.
+    fn loose_or_new(&mut self, window: WindowId) -> Option<&mut Option<Transfer>> {
+        match self.entries.entry(window).or_insert_with(|| Entry::loose(Default::default())) {
+            Entry::Loose { transfer, .. } => Some(transfer),
+            Entry::Gripped { .. } => None,
         }
     }
 
-    /// `window`'s loose record, tracked if it is new; `None` for the gripped window.
-    fn loose_or_new(&mut self, window: WindowId) -> Option<&mut Loose> {
-        match &self.gripped {
-            Some(gripped) if gripped.window == window => None,
-            _ => Some(self.loose.entry(window).or_default()),
+    /// Removes `window`'s entry: the one place an entry leaves the map (the only
+    /// `HashMap::remove`), so a gripped entry's hand always goes back to `free` and can't be
+    /// dropped with it. A transfer goes with the entry; a grip is returned.
+    fn take(&mut self, window: &WindowId) -> Option<(WindowRecord, Option<Grip>)> {
+        match self.entries.remove(window)? {
+            Entry::Loose { record, .. } => Some((record, None)),
+            Entry::Gripped { record, grip, hand } => {
+                self.free = Some(hand);
+                Some((record, Some(grip)))
+            }
         }
     }
 
-    /// Removes a loose record. The gripped one is never removed here: the core ungrips a
-    /// window that goes away (`Gone`) before its record is removed.
+    /// Removes a record. The core ungrips a window that goes away (`Gone`) before its record is
+    /// removed; were it not to, the hand still comes back (`take`).
     fn remove(&mut self, window: &WindowId) -> Option<WindowRecord> {
         debug_assert_ne!(
             self.gripped_window(),
             Some(*window),
             "removing the gripped record"
         );
-        self.loose.remove(window).map(|loose| loose.record)
+        self.take(window).map(|(record, _)| record)
     }
 
     fn iter(&self) -> impl Iterator<Item = (&WindowId, &WindowRecord)> {
-        let gripped = self.gripped.iter().map(|gripped| (&gripped.window, &gripped.record));
-        self.loose.iter().map(|(window, loose)| (window, &loose.record)).chain(gripped)
+        self.entries.iter().map(|(window, entry)| (window, entry.record()))
     }
 
     fn values(&self) -> impl Iterator<Item = &WindowRecord> {
         self.iter().map(|(_, record)| record)
     }
 
-    fn transfer(&self, window: &WindowId) -> Option<Transfer> { self.loose.get(window)?.transfer }
-
-    fn transfers(&self) -> impl Iterator<Item = (WindowId, Transfer)> {
-        self.loose.iter().filter_map(|(window, loose)| Some((*window, loose.transfer?)))
-    }
-
-    fn transfers_mut(&mut self) -> impl Iterator<Item = &mut Transfer> {
-        self.loose.values_mut().filter_map(|loose| loose.transfer.as_mut())
-    }
-
-    /// Forgets a transfer. Only a loose window has one.
-    fn clear_transfer(&mut self, window: &WindowId) {
-        if let Some(loose) = self.loose.get_mut(window) {
-            loose.transfer = None;
+    fn transfer(&self, window: &WindowId) -> Option<Transfer> {
+        match self.entries.get(window)? {
+            Entry::Loose { transfer, .. } => *transfer,
+            Entry::Gripped { .. } => None,
         }
     }
 
-    fn gripped_window(&self) -> Option<WindowId> {
-        self.gripped.as_ref().map(|gripped| gripped.window)
+    fn transfers(&self) -> impl Iterator<Item = (WindowId, Transfer)> {
+        self.entries.iter().filter_map(|(window, entry)| match entry {
+            Entry::Loose { transfer, .. } => Some((*window, (*transfer)?)),
+            Entry::Gripped { .. } => None,
+        })
     }
 
-    /// The core gripped `window`: its record moves into the slot. Its transfer is discarded,
-    /// not set aside: the user places this window now, and the release re-derives.
-    fn grip(&mut self, window: WindowId) {
-        let Loose { record, .. } = self.loose.remove(&window).unwrap_or_default();
-        self.gripped = Some(Gripped {
-            window,
-            record,
-            grip: Grip::Pressed,
-        });
+    fn transfers_mut(&mut self) -> impl Iterator<Item = &mut Transfer> {
+        self.entries.values_mut().filter_map(|entry| match entry {
+            Entry::Loose { transfer, .. } => transfer.as_mut(),
+            Entry::Gripped { .. } => None,
+        })
+    }
+
+    /// Sets a loose window's transfer; the gripped window has none.
+    fn set_transfer(&mut self, window: &WindowId, to: Option<Transfer>) {
+        if let Some(Entry::Loose { transfer, .. }) = self.entries.get_mut(window) {
+            *transfer = to;
+        }
+    }
+
+    /// Forgets a transfer. Only a loose window has one.
+    fn clear_transfer(&mut self, window: &WindowId) { self.set_transfer(window, None); }
+
+    /// The window the hand is on, and its grip.
+    fn held(&self) -> Option<(WindowId, &Grip)> {
+        self.entries.iter().find_map(|(window, entry)| match entry {
+            Entry::Gripped { grip, .. } => Some((*window, grip)),
+            Entry::Loose { .. } => None,
+        })
+    }
+
+    fn held_mut(&mut self) -> Option<(WindowId, &mut Grip)> {
+        self.entries.iter_mut().find_map(|(window, entry)| match entry {
+            Entry::Gripped { grip, .. } => Some((*window, grip)),
+            Entry::Loose { .. } => None,
+        })
+    }
+
+    fn gripped_window(&self) -> Option<WindowId> { self.held().map(|(window, _)| window) }
+
+    /// How many hands the store has: always one, in an entry or free.
+    #[cfg(test)]
+    fn hands(&self) -> usize {
+        usize::from(self.free.is_some())
+            + self.entries.values().filter(|entry| entry.is_gripped()).count()
+    }
+
+    /// The hand takes `window` with `grip`, its record being `record`; refused while it is on
+    /// a window.
+    fn hold(
+        &mut self,
+        window: WindowId,
+        record: WindowRecord,
+        grip: Grip,
+    ) -> Result<(), GripRefused> {
+        let Some(hand) = self.free.take() else {
+            return Err(self.busy());
+        };
+        self.entries.insert(window, Entry::Gripped { record, grip, hand });
+        Ok(())
+    }
+
+    /// Why the hand can't take a window now.
+    fn busy(&self) -> GripRefused {
+        self.gripped_window().map_or(GripRefused::HandLost, GripRefused::Holding)
+    }
+
+    /// The core gripped `window`: its entry becomes the gripped one, pressed. Its transfer is
+    /// discarded, not set aside: the user places this window now, and the release re-derives.
+    fn grip(&mut self, window: WindowId) -> Result<(), GripRefused> {
+        // Refused before the entry is touched: a loose window's record stays where it is.
+        if self.free.is_none() {
+            return Err(self.busy());
+        }
+        let record = self.take(&window).map(|(record, _)| record).unwrap_or_default();
+        self.hold(window, record, Grip::Pressed)
     }
 
     /// The user's hand comes off: the record goes back among the loose ones, with no transfer.
     /// A drag's session is returned.
     fn let_go(&mut self) -> Option<(WindowId, Option<Session>)> {
-        let Gripped { window, record, grip } = self.gripped.take()?;
-        let session = match grip {
+        let window = self.gripped_window()?;
+        let (record, grip) = self.take(&window)?;
+        self.entries.insert(window, Entry::loose(record));
+        let session = grip.and_then(|grip| match grip {
             Grip::Pressed => None,
             Grip::Dragging(session) => Some(*session),
-        };
-        self.loose.insert(window, Loose { record, transfer: None });
+        });
         Some((window, session))
     }
 
-    /// macOS rekeyed the gripped window: the grip moves to its new identity.
-    fn regrip(&mut self, from: WindowId, to: WindowId) {
-        let Some(Gripped { record, grip, .. }) = self.gripped.take() else {
-            return;
-        };
-        let replacement = self.loose.remove(&to).unwrap_or_default();
-        self.loose.insert(from, Loose { record, transfer: None });
-        self.gripped = Some(Gripped {
-            window: to,
-            record: replacement.record,
-            grip,
-        });
+    /// macOS rekeyed the gripped window: the grip moves to its new identity. The old identity's
+    /// record stays, loose; the new one's record is the one held.
+    fn regrip(&mut self, from: WindowId, to: WindowId) -> Result<(), GripRefused> {
+        let held = self.gripped_window().ok_or(GripRefused::NothingHeld)?;
+        debug_assert_eq!(held, from, "the core re-keys its grip");
+        let (record, grip) = self.take(&held).ok_or(GripRefused::NothingHeld)?;
+        self.entries.insert(held, Entry::loose(record));
+        let grip = grip.ok_or(GripRefused::NothingHeld)?;
+        let replacement = self.take(&to).map(|(record, _)| record).unwrap_or_default();
+        self.hold(to, replacement, grip)
     }
 }
 
@@ -1651,9 +1758,7 @@ impl WindowStore {
             "re-key the grip first"
         );
         let transfer = self.windows.transfer(&from);
-        if let Some(replacement) = self.windows.loose.get_mut(&to) {
-            replacement.transfer = transfer;
-        }
+        self.windows.set_transfer(&to, transfer);
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
@@ -1900,16 +2005,10 @@ impl WindowStore {
 
     /// What the pointer is doing, for whoever has a rule about it.
     pub(crate) fn pointer(&self) -> Pointer {
-        match &self.windows.gripped {
+        match self.windows.held() {
             None => Pointer::Idle,
-            Some(Gripped {
-                window, grip: Grip::Pressed, ..
-            }) => Pointer::Pressing(*window),
-            Some(Gripped {
-                window,
-                grip: Grip::Dragging(_),
-                ..
-            }) => Pointer::Dragging(*window),
+            Some((window, Grip::Pressed)) => Pointer::Pressing(window),
+            Some((window, Grip::Dragging(_))) => Pointer::Dragging(window),
         }
     }
 
@@ -1923,40 +2022,35 @@ impl WindowStore {
 
     /// The user's drag and the window it holds.
     pub(crate) fn drag(&self) -> Option<(WindowId, &Session)> {
-        match &self.windows.gripped {
-            Some(Gripped {
-                window,
-                grip: Grip::Dragging(session),
-                ..
-            }) => Some((*window, session)),
-            Some(Gripped { grip: Grip::Pressed, .. }) | None => None,
+        match self.windows.held() {
+            Some((window, Grip::Dragging(session))) => Some((window, session)),
+            Some((_, Grip::Pressed)) | None => None,
         }
     }
 
     pub(crate) fn drag_mut(&mut self) -> Option<(WindowId, &mut Session)> {
-        match &mut self.windows.gripped {
-            Some(Gripped {
-                window,
-                grip: Grip::Dragging(session),
-                ..
-            }) => Some((*window, session)),
-            Some(Gripped { grip: Grip::Pressed, .. }) | None => None,
+        match self.windows.held_mut() {
+            Some((window, Grip::Dragging(session))) => Some((window, session)),
+            Some((_, Grip::Pressed)) | None => None,
         }
     }
 
     // The projection of the core's grip. Only `RiftState`'s grip methods call these, each with
     // the core's effect in hand.
 
-    /// Effect `Grip`: `window`'s record goes into the slot, pressed.
-    pub(crate) fn project_grip(&mut self, window: WindowId) { self.windows.grip(window); }
+    /// Effect `Grip`: `window`'s entry becomes the gripped one, pressed. Refused while the hand
+    /// is on a window: the core ungrips first, so a refusal is a disagreement to log.
+    pub(crate) fn project_grip(&mut self, window: WindowId) -> Result<(), GripRefused> {
+        self.windows.grip(window)
+    }
 
     /// Effect `DragBegan`: the pressed window's grip becomes the drag `session`.
     pub(crate) fn project_drag(&mut self, session: Session) {
-        let gripped = self.windows.gripped.as_mut().expect("the core drags only a press");
-        gripped.grip = Grip::Dragging(Box::new(session));
+        let (_, grip) = self.windows.held_mut().expect("the core drags only a press");
+        *grip = Grip::Dragging(Box::new(session));
     }
 
-    /// Effect `Ungrip`: the slot's record goes back among the loose ones. A drag's session is
+    /// Effect `Ungrip`: the gripped record goes back among the loose ones. A drag's session is
     /// returned.
     pub(crate) fn project_ungrip(&mut self, window: WindowId) -> Option<Session> {
         let (_, session) = self.windows.let_go().expect("the core ungrips only a grip");
@@ -1965,23 +2059,22 @@ impl WindowStore {
     }
 
     /// Effect `Regrip`: the grip moves with its window's new identity.
-    pub(crate) fn project_regrip(&mut self, from: WindowId, to: WindowId) {
-        debug_assert_eq!(
-            self.windows.gripped_window(),
-            Some(from),
-            "the core re-keys its grip"
-        );
-        self.windows.regrip(from, to);
+    pub(crate) fn project_regrip(
+        &mut self,
+        from: WindowId,
+        to: WindowId,
+    ) -> Result<(), GripRefused> {
+        self.windows.regrip(from, to)
     }
 
     /// `window` as Rift may place it, tracking it if need be; `None` while the user's hand is
     /// on it: the slot it is in has no transfer.
     pub(crate) fn unheld(&mut self, window: WindowId) -> Option<Unheld<'_>> {
         let placeable = self.can_place_window(window);
-        let loose = self.windows.loose_or_new(window)?;
+        let transfer = self.windows.loose_or_new(window)?;
         self.app_windows.entry(window.pid).or_default().insert(window);
         Some(Unheld {
-            transfer: &mut loose.transfer,
+            transfer,
             placeable,
             topology_revision: self.topology_revision,
         })
@@ -2593,6 +2686,131 @@ mod tests {
         store.reconcile_ax_identity(replacement, Some(WindowServerId::new(71)));
         assert!(store.record(replacement).unwrap().transfer().is_none());
         store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn one_hand_one_held_window_and_a_second_grip_is_refused() {
+        let (a, b) = (WindowId::new(7, 1), WindowId::new(7, 2));
+        let mut records = Records::default();
+        records.entry_or_default(a);
+        records.entry_or_default(b);
+        assert_eq!(records.hands(), 1);
+        assert_eq!(records.grip(a), Ok(()));
+        assert_eq!(records.gripped_window(), Some(a));
+        // Without a let-go in between, neither another window nor the same one is gripped.
+        assert_eq!(records.grip(b), Err(GripRefused::Holding(a)));
+        assert_eq!(records.grip(a), Err(GripRefused::Holding(a)));
+        assert_eq!(records.gripped_window(), Some(a));
+        assert_eq!(records.hands(), 1);
+        // An entry that leaves the map gives the hand back, even the held one's.
+        assert!(records.take(&a).is_some());
+        assert_eq!((records.gripped_window(), records.hands()), (None, 1));
+        assert_eq!(records.grip(b), Ok(()));
+        assert_eq!(records.let_go().map(|(window, _)| window), Some(b));
+        assert_eq!((records.gripped_window(), records.hands()), (None, 1));
+        assert_eq!(records.regrip(a, b), Err(GripRefused::NothingHeld));
+    }
+
+    #[test]
+    fn a_window_is_in_one_place_and_the_store_holds_what_the_core_holds() {
+        // Random presses, drags, releases, let-gos, re-keys, removals and transfers through the
+        // core. After every step: one hand, at most one held window, no transfer on it, and the
+        // store's pointer is the core's (`project` checks that last one on every step too).
+        use crate::actor::reactor::reconciler::CoreEvent;
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let left = || crate::model::drag::MouseButton::Left.into();
+        for _ in 0..300 {
+            let mut state = crate::model::RiftState::default();
+            let mut live: Vec<WindowId> = (1..=4).map(|idx| WindowId::new(9, idx)).collect();
+            let mut fresh = 5;
+            // Every window has a window-server id, as a tracked one does: its record is never
+            // pruned as empty while it lives.
+            let track = |state: &mut crate::model::RiftState, window: WindowId| {
+                state
+                    .windows
+                    .track_window_server_id(WindowServerId::new(100 + window.idx.get()), window);
+            };
+            for window in &live {
+                track(&mut state, *window);
+            }
+            for _ in 0..40 {
+                let pick = |n: u64, live: &[WindowId]| live.get(n as usize).copied();
+                let window = pick(next(live.len().max(1) as u64 + 1), &live);
+                match next(8) {
+                    // The reactor presses only windows it has a record of (or nothing).
+                    0 | 1 => {
+                        let window =
+                            window.filter(|window| state.windows.record(*window).is_some());
+                        state.step(CoreEvent::Press { window, button: left() });
+                    }
+                    2 => {
+                        if let Some(window) = window {
+                            let frame = objc2_core_foundation::CGRect::ZERO;
+                            let source = crate::model::drag::DragSource {
+                                origin_frame: frame,
+                                last_frame: frame,
+                                origin_space: None,
+                                current_space: None,
+                                tiled: true,
+                            };
+                            state.begin_drag(window, Session::native(source, Default::default()));
+                        }
+                    }
+                    3 => {
+                        state.release(rift_core::Release::Button(left()));
+                    }
+                    4 => {
+                        state.let_go();
+                    }
+                    5 => {
+                        if let Some(from) = window {
+                            let to = WindowId::new(9, fresh);
+                            fresh += 1;
+                            state.step(CoreEvent::Rekeyed { from, to });
+                            state.windows.transfer_persistent_window_metadata(from, to);
+                            track(&mut state, to);
+                            live.retain(|window| *window != from);
+                            live.push(to);
+                        }
+                    }
+                    6 => {
+                        if let Some(window) = window {
+                            state.remove_window(window);
+                            live.retain(|live| *live != window);
+                        }
+                    }
+                    _ => {
+                        if let Some(unheld) = window.and_then(|window| state.windows.unheld(window))
+                        {
+                            unheld.begin_transfer(true);
+                        }
+                    }
+                }
+                let held = state.windows.gripped();
+                assert_eq!(state.windows.windows.hands(), 1);
+                assert_eq!(
+                    state
+                        .windows
+                        .windows
+                        .entries
+                        .values()
+                        .filter(|entry| entry.is_gripped())
+                        .count(),
+                    usize::from(held.is_some())
+                );
+                if let Some(held) = held {
+                    assert_eq!(state.windows.windows.transfer(&held), None);
+                    assert!(state.windows.unheld(held).is_none());
+                }
+                state.windows.debug_assert_invariants();
+            }
+        }
     }
 
     #[test]

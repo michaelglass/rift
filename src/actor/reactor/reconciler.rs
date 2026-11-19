@@ -232,6 +232,18 @@ impl Shadowed {
 #[cfg(test)]
 pub(crate) type Step = (Event, Vec<Effect>);
 
+/// The store refused a grip effect: it and the core disagree about the hand. Logged in a
+/// running Rift (the core's next effect corrects the store); a failure in tests, so the
+/// fuzzer finds what led there.
+fn refused(result: Result<(), crate::model::window_store::GripRefused>, effect: &Effect) {
+    if let Err(refused) = result {
+        #[cfg(test)]
+        panic!("the store refused {effect:?}: {refused:?}");
+        #[cfg(not(test))]
+        tracing::error!(?effect, ?refused, "the store refused a grip effect");
+    }
+}
+
 /// The reactor's handle on the core. The model stays inside: the reactor reads nothing of it
 /// but what effects say (`armed`), except the two Rust-only reads marked below.
 #[derive(Debug, Default)]
@@ -571,8 +583,10 @@ impl RiftState {
                         changed: changed.clone(),
                     });
                 }
-                Effect::Grip { window } => self.windows.project_grip(window),
-                Effect::Regrip { from, to } => self.windows.project_regrip(from, to),
+                Effect::Grip { window } => refused(self.windows.project_grip(window), effect),
+                Effect::Regrip { from, to } => {
+                    refused(self.windows.project_regrip(from, to), effect)
+                }
                 // The pending store the app actors read is the core's pending frames. It is keyed
                 // by window-server id, taken from the record: a suspended identity has no AX
                 // state, but its record (and its server id) remains.
