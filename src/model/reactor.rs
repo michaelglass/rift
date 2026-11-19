@@ -130,17 +130,37 @@ impl WindowState {
     }
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        // A rule that explicitly manages a window outranks the AX role
-        // heuristics when the only transient marker is the `AXDialog` subrole,
-        // which some apps use for a real main window. Native transient
-        // attachments, minimized windows, and other AX chrome stay vetoed.
-        let overrides_dialog_veto = manage_override == Some(true)
-            && self.info.ax_role.as_deref() == Some("AXWindow")
-            && self.info.ax_subrole.as_deref() == Some("AXDialog");
-        !self.native_transient
-            && !self.info.is_minimized
-            && (overrides_dialog_veto || !crate::sys::app::is_ax_transient(&self.info))
-            && manage_override.unwrap_or(self.is_manageable)
+        use rift_core::lifecycle::{
+            Admission, AdmissionFacts, AxKind, Manageability, Minimize, NativeKind, Rule,
+        };
+        let facts = AdmissionFacts {
+            manageability: if self.is_manageable {
+                Manageability::Manageable
+            } else {
+                Manageability::Unmanageable
+            },
+            rule: match manage_override {
+                None => Rule::NoRule,
+                Some(true) => Rule::Manage,
+                Some(false) => Rule::Ignore,
+            },
+            ax: AxKind::classify(
+                crate::sys::app::is_ax_transient(&self.info),
+                self.info.ax_role.as_deref() == Some("AXWindow")
+                    && self.info.ax_subrole.as_deref() == Some("AXDialog"),
+            ),
+            native: if self.native_transient {
+                NativeKind::Transient
+            } else {
+                NativeKind::Ordinary
+            },
+            minimize: if self.info.is_minimized {
+                Minimize::Minimized
+            } else {
+                Minimize::Shown
+            },
+        };
+        rift_core::lifecycle::admission(facts) == Admission::Admitted
     }
 
     pub(crate) fn can_reconcile_admission(&self) -> bool { !self.info.is_minimized }

@@ -194,6 +194,106 @@ pub fn reapplies_on_title_change<S: Copy>(
     }
 }
 
+/// The platform's manageability heuristic, as it judged the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Manageability {
+    Manageable,
+    Unmanageable,
+}
+
+/// What an app rule says about managing the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    NoRule,
+    Manage,
+    Ignore,
+}
+
+/// What the accessibility roles say of the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxKind {
+    Ordinary,
+    /// An AXWindow whose only transient marker is its AXDialog subrole: some apps use it for a
+    /// real main window, so a Manage rule admits it.
+    DialogWindow,
+    /// Any other transient (a non-window role, a sheet, a system dialog).
+    Transient,
+}
+
+impl AxKind {
+    /// From the platform's two readings: whether the roles mark the window transient, and
+    /// whether it is an AXWindow with the AXDialog subrole.
+    pub fn classify(ax_transient: bool, dialog_window: bool) -> AxKind {
+        match (ax_transient, dialog_window) {
+            (false, _) => AxKind::Ordinary,
+            (true, true) => AxKind::DialogWindow,
+            (true, false) => AxKind::Transient,
+        }
+    }
+}
+
+/// Whether the window server marks the window transient (for its own app).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeKind {
+    Ordinary,
+    Transient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Minimize {
+    Shown,
+    Minimized,
+}
+
+/// What admission reads of a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionFacts {
+    pub manageability: Manageability,
+    pub rule: Rule,
+    pub ax: AxKind,
+    pub native: NativeKind,
+    pub minimize: Minimize,
+}
+
+/// Why a window is not admitted, the first that applies in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Veto {
+    NativeTransient,
+    Minimized,
+    AxTransient,
+    RuleIgnores,
+    Unmanageable,
+}
+
+/// Whether rift manages a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Admitted,
+    Vetoed(Veto),
+}
+
+/// A window is admitted unless the window server marks it transient, it is minimized, its
+/// roles mark it transient (a Manage rule outranks only the AXDialog marker), a rule ignores
+/// it, or, with no rule, the heuristic finds it unmanageable.
+pub fn admission(facts: AdmissionFacts) -> Admission {
+    let veto = match (facts.native, facts.minimize, facts.ax, facts.rule) {
+        (NativeKind::Transient, ..) => Some(Veto::NativeTransient),
+        (_, Minimize::Minimized, ..) => Some(Veto::Minimized),
+        (_, _, AxKind::Transient, _) => Some(Veto::AxTransient),
+        (_, _, AxKind::DialogWindow, Rule::NoRule | Rule::Ignore) => Some(Veto::AxTransient),
+        (_, _, _, Rule::Ignore) => Some(Veto::RuleIgnores),
+        (_, _, _, Rule::Manage) => None,
+        (_, _, _, Rule::NoRule) => match facts.manageability {
+            Manageability::Manageable => None,
+            Manageability::Unmanageable => Some(Veto::Unmanageable),
+        },
+    };
+    match veto {
+        None => Admission::Admitted,
+        Some(why) => Admission::Vetoed(why),
+    }
+}
+
 /// Each decision as a question on plain data: every fact it may ask for is in the question.
 /// Windows, Spaces, window-server ids and apps are one word each.
 pub mod plain {
@@ -517,6 +617,113 @@ mod tests {
             active,
             || panic!("nor the window"),
         ));
+    }
+
+    #[test]
+    fn admission_is_todays_boolean_rule_over_every_combination_of_facts() {
+        // The rule as rift wrote it on loose facts: a Manage rule outranks the AX veto only for
+        // an AXWindow/AXDialog; native transients and minimized windows stay vetoed.
+        let reference = |manageable: bool,
+                         rule: Option<bool>,
+                         ax_transient: bool,
+                         dialog_window: bool,
+                         native_transient: bool,
+                         minimized: bool| {
+            let overrides_dialog_veto = rule == Some(true) && dialog_window;
+            !native_transient
+                && !minimized
+                && (overrides_dialog_veto || !ax_transient)
+                && rule.unwrap_or(manageable)
+        };
+        let mut checked = 0;
+        for manageable in [false, true] {
+            for rule in [None, Some(false), Some(true)] {
+                for (ax_transient, dialog_window) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    for native_transient in [false, true] {
+                        for minimized in [false, true] {
+                            let facts = AdmissionFacts {
+                                manageability: if manageable {
+                                    Manageability::Manageable
+                                } else {
+                                    Manageability::Unmanageable
+                                },
+                                rule: match rule {
+                                    None => Rule::NoRule,
+                                    Some(true) => Rule::Manage,
+                                    Some(false) => Rule::Ignore,
+                                },
+                                ax: AxKind::classify(ax_transient, dialog_window),
+                                native: if native_transient {
+                                    NativeKind::Transient
+                                } else {
+                                    NativeKind::Ordinary
+                                },
+                                minimize: if minimized {
+                                    Minimize::Minimized
+                                } else {
+                                    Minimize::Shown
+                                },
+                            };
+                            let expected = reference(
+                                manageable,
+                                rule,
+                                ax_transient,
+                                dialog_window,
+                                native_transient,
+                                minimized,
+                            );
+                            assert_eq!(
+                                admission(facts) == Admission::Admitted,
+                                expected,
+                                "{facts:?}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 96);
+        // The first veto that applies is the one given.
+        let vetoed = |facts| match admission(facts) {
+            Admission::Vetoed(why) => why,
+            Admission::Admitted => panic!("admitted: {facts:?}"),
+        };
+        let worst = AdmissionFacts {
+            manageability: Manageability::Unmanageable,
+            rule: Rule::Ignore,
+            ax: AxKind::Transient,
+            native: NativeKind::Transient,
+            minimize: Minimize::Minimized,
+        };
+        assert_eq!(vetoed(worst), Veto::NativeTransient);
+        assert_eq!(
+            vetoed(AdmissionFacts {
+                native: NativeKind::Ordinary,
+                ..worst
+            }),
+            Veto::Minimized
+        );
+        let shown = AdmissionFacts {
+            native: NativeKind::Ordinary,
+            minimize: Minimize::Shown,
+            ..worst
+        };
+        assert_eq!(vetoed(shown), Veto::AxTransient);
+        assert_eq!(
+            vetoed(AdmissionFacts { ax: AxKind::Ordinary, ..shown }),
+            Veto::RuleIgnores
+        );
+        assert_eq!(
+            vetoed(AdmissionFacts {
+                ax: AxKind::Ordinary,
+                rule: Rule::NoRule,
+                ..shown
+            }),
+            Veto::Unmanageable
+        );
     }
 
     #[test]
