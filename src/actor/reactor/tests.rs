@@ -11252,6 +11252,42 @@ fn commands_follow_a_window_move_node_carried_to_another_display() {
 }
 
 #[test]
+fn a_move_node_follows_its_window_only_onto_a_known_display() {
+    // macOS moves its active display with the key window only later, so a move-node carrying
+    // the focused window to another display makes that display the command display: unless the
+    // display is mid-change (no UUID yet), when there is no display to activate.
+    for (known, expected_command) in [(true, 2), (false, 1)] {
+        let mut reactor = test_reactor_with_workspace_settings(&shared_settings());
+        reactor.config.virtual_workspaces = shared_settings();
+        let (a, b) = (SpaceId::new(1), SpaceId::new(2));
+        let mut screens =
+            make_screen_snapshots(vec![shared_left(), shared_right()], vec![Some(a), Some(b)]);
+        if !known {
+            screens[1].display_uuid = String::new();
+        }
+        reactor.handle_event(space_state_event_from_screens(screens));
+        let mut apps = Apps::new();
+        make_active_app(
+            &mut apps,
+            &mut reactor,
+            1,
+            make_windows(1),
+            Some(WindowId::new(1, 1)),
+        );
+        reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            (
+                reactor.assigned_space_for_window_id(WindowId::new(1, 1)),
+                reactor.space_state.command_space
+            ),
+            (Some(b), Some(SpaceId::new(expected_command))),
+            "display known: {known}"
+        );
+    }
+}
+
+#[test]
 fn shared_mode_opens_new_windows_on_the_pointer_display() {
     let mut ruled = shared_settings();
     ruled.app_rules = vec![crate::common::config::AppWorkspaceRule {

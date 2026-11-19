@@ -72,10 +72,12 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
-use rift_core::focus::{Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
+use rift_core::focus::{ActivationFacts, Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
 use rift_core::lifecycle::{
     Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, Transition, WorkspaceMode,
 };
+#[cfg(feature = "roc-core")]
+use rift_core::plain::wire;
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
@@ -110,6 +112,9 @@ use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolic
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::{RuleStanding, SpaceActivation};
 use crate::model::window_store::{NativeFullscreenTransition, Pointer};
+#[cfg(feature = "roc-core")]
+use crate::roc_path::Word;
+use crate::roc_path::{Asked, AskedAbout};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -5643,7 +5648,36 @@ impl Reactor {
         window: WindowId,
     ) -> Option<(SpaceId, crate::model::VirtualWorkspaceId)> {
         let pid = window.pid;
-        match rift_core::focus::activation_follow(&ActivationQuery { reactor: self, window }) {
+        let facts = AskedActivation::new(ActivationQuery { reactor: self, window });
+        let follow = rift_core::focus::activation_follow(&facts);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::Activation;
+            let question = facts.plain();
+            let answer = match &follow {
+                Follow::To(space, workspace) => Follow::To(space.word(), workspace.word()),
+                Follow::Stay(why) => Follow::Stay(match why {
+                    Stay::NotStandard => Stay::NotStandard,
+                    Stay::Unavailable => Stay::Unavailable,
+                    Stay::NoSpace => Stay::NoSpace,
+                    Stay::NoWorkspace => Stay::NoWorkspace,
+                    Stay::AlreadyActive => Stay::AlreadyActive,
+                    Stay::PendingWindow => Stay::PendingWindow,
+                    Stay::Mode(_) => Stay::Mode(AskedActivation::MODE),
+                    Stay::FullscreenActive => Stay::FullscreenActive,
+                    Stay::Unmanageable(wsid) => Stay::Unmanageable(wsid.word()),
+                    Stay::NoBundleId => Stay::NoBundleId,
+                    Stay::Blacklisted => Stay::Blacklisted,
+                }),
+            };
+            crate::roc_path::check(
+                "activation_follow",
+                Activation::FACTS,
+                &wire::encode_activation(question),
+                &wire::encode_follow(answer),
+            );
+        }
+        match follow {
             Follow::To(space, workspace) => Some((space, workspace)),
             Follow::Stay(why) => {
                 match why {
@@ -5935,17 +5969,46 @@ impl Reactor {
     fn focus_untracked_window_under_cursor(&mut self) -> bool {
         // The fallback exists for ordinary application windows intentionally outside Rift's
         // model; system surfaces must never be made key because the pointer crossed them.
-        match rift_core::focus::untracked_focus(
-            self.window_server_id_under_cursor(),
-            |wsid| self.state.windows.tracked_window_id(wsid).is_some(),
+        let under_cursor = self.window_server_id_under_cursor();
+        let (tracked, known) = (Asked::new(), Asked::new());
+        let decision = rift_core::focus::untracked_focus(
+            under_cursor,
+            |wsid| tracked.ask(|| self.state.windows.tracked_window_id(wsid).is_some()),
             |wsid| {
-                self.state
-                    .windows
-                    .get_window_server_info(wsid)
-                    .or_else(|| window_server::get_window(wsid))
-                    .map(|info| (info.layer, info.pid))
+                known.ask(|| {
+                    self.state
+                        .windows
+                        .get_window_server_info(wsid)
+                        .or_else(|| window_server::get_window(wsid))
+                        .map(|info| (info.layer, info.pid))
+                })
             },
-        ) {
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::Untracked;
+            let question = Untracked {
+                under_cursor: under_cursor.map(Word::word),
+                tracked: tracked.fact(|tracked| tracked),
+                known: known.fact(|known| known.map(|(layer, pid)| (layer, pid.word()))),
+            };
+            let answer = match decision {
+                UntrackedFocus::Nothing => UntrackedFocus::Nothing,
+                UntrackedFocus::SystemSurface { layer, window } => {
+                    UntrackedFocus::SystemSurface { layer, window: window.word() }
+                }
+                UntrackedFocus::MakeKey(pid, window) => {
+                    UntrackedFocus::MakeKey(pid.word(), window.word())
+                }
+            };
+            crate::roc_path::check(
+                "untracked_focus",
+                Untracked::FACTS,
+                &wire::encode_untracked(question),
+                &wire::encode_untracked_focus(answer),
+            );
+        }
+        match decision {
             UntrackedFocus::Nothing => false,
             UntrackedFocus::SystemSurface { layer, window: wsid } => {
                 trace!(?wsid, layer, "Skipping non-application surface under cursor");
@@ -5956,13 +6019,32 @@ impl Reactor {
     }
 
     fn focus_desktop_if_active_workspace_empty(&mut self, space: SpaceId) -> bool {
-        if !rift_core::focus::focuses_desktop(self.is_space_active(space), || {
-            self.layout_manager
-                .layout_engine
-                .workspaces()
-                .windows_in_active_workspace(&self.state.windows, space)
-                .is_empty()
-        }) {
+        let active = self.is_space_active(space);
+        let workspace_empty = Asked::new();
+        let focuses = rift_core::focus::focuses_desktop(active, || {
+            workspace_empty.ask(|| {
+                self.layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&self.state.windows, space)
+                    .is_empty()
+            })
+        });
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::Desktop;
+            let question = Desktop {
+                active,
+                workspace_empty: workspace_empty.fact(|empty| empty),
+            };
+            crate::roc_path::check(
+                "focuses_desktop",
+                Desktop::FACTS,
+                &wire::encode_desktop(question),
+                &wire::encode_verdict(focuses),
+            );
+        }
+        if !focuses {
             return false;
         }
         let Some(screen) = self.space_state.screen_by_space(space) else {
@@ -6022,29 +6104,69 @@ impl Reactor {
                 )
         };
 
-        rift_core::focus::focus_candidate(
+        let (last_focused, in_workspace, visible) = (Asked::new(), Asked::new(), AskedAbout::new());
+        let candidate = rift_core::focus::focus_candidate(
             preferred,
-            || self.last_focused_window_in_space(space),
+            || last_focused.ask(|| self.last_focused_window_in_space(space)),
             || {
-                self.layout_manager
-                    .layout_engine
-                    .workspaces()
-                    .windows_in_active_workspace(&self.state.windows, space)
+                in_workspace.ask(|| {
+                    self.layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .windows_in_active_workspace(&self.state.windows, space)
+                })
             },
-            is_visible_in_space,
-        )
+            |wid| visible.ask(wid, is_visible_in_space),
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::Candidate;
+            let question = Candidate {
+                preferred: preferred.map(Word::word),
+                last_focused: last_focused.fact(|last| last.map(Word::word)),
+                in_workspace: in_workspace
+                    .fact(|windows| windows.into_iter().map(Word::word).collect()),
+                visible: visible.answers(Word::word, |shown| shown),
+            };
+            crate::roc_path::check(
+                "focus_candidate",
+                Candidate::FACTS,
+                &wire::encode_candidate(question),
+                &wire::encode_maybe_space(candidate.map(Word::word)),
+            );
+        }
+        candidate
     }
 
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
         // Membership refreshes also observe unfocused windows on inactive
         // workspaces. Only hidden focus needs a replacement; otherwise this
         // would activate that display's selection and warp the cursor back.
-        if rift_core::focus::hides_focus(
-            window_id,
+        let (main, focused) = (
             self.main_window(),
             self.layout_manager.layout_engine.focused_window(),
-            || self.window_in_non_active_workspace(space, window_id),
-        ) {
+        );
+        let in_inactive_workspace = Asked::new();
+        let hides = rift_core::focus::hides_focus(window_id, main, focused, || {
+            in_inactive_workspace.ask(|| self.window_in_non_active_workspace(space, window_id))
+        });
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::Hides;
+            let question = Hides {
+                window: window_id.word(),
+                main: main.map(Word::word),
+                focused: focused.map(Word::word),
+                in_inactive_workspace: in_inactive_workspace.fact(|inactive| inactive),
+            };
+            crate::roc_path::check(
+                "hides_focus",
+                Hides::FACTS,
+                &wire::encode_hides(question),
+                &wire::encode_verdict(hides),
+            );
+        }
+        if hides {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
     }
@@ -6078,26 +6200,65 @@ impl Reactor {
         });
         // A native tab departure can arrive before either AX or the debounced WindowServer
         // focus notification, so native focus is sampled before a fallback is raised.
-        match rift_core::focus::removal_focus(
+        let (removed_space, native_focus) = (Asked::new(), Asked::new());
+        let (successors, inactive) = (AskedAbout::new(), AskedAbout::new());
+        let decision = rift_core::focus::removal_focus(
             removal,
             focused,
             |window| window.pid,
             |window| {
-                self.layout_manager
-                    .layout_engine
-                    .space_with_window(window)
-                    .filter(|space| self.is_space_active(*space))
-                    .or_else(|| self.workspace_command_space())
+                removed_space.ask(|| {
+                    self.layout_manager
+                        .layout_engine
+                        .space_with_window(window)
+                        .filter(|space| self.is_space_active(*space))
+                        .or_else(|| self.workspace_command_space())
+                })
             },
-            |space| self.native.key_focused_window(space),
+            |space| native_focus.ask(|| self.native.key_focused_window(space)),
             |native| {
-                self.state
-                    .windows
-                    .tracked_window_id(WindowServerId::new(native.idx.get()))
-                    .unwrap_or(native)
+                successors.ask(native, |native| {
+                    self.state
+                        .windows
+                        .tracked_window_id(WindowServerId::new(native.idx.get()))
+                        .unwrap_or(native)
+                })
             },
-            |space, successor| self.window_in_non_active_workspace(space, successor),
-        ) {
+            |space, successor| {
+                inactive.ask(successor, |successor| {
+                    self.window_in_non_active_workspace(space, successor)
+                })
+            },
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::RemovalQuestion;
+
+            use crate::roc_path::window;
+            let question = RemovalQuestion {
+                removal: match removal {
+                    Removal::AppClosed(pid) => Removal::AppClosed(pid),
+                    Removal::WindowRemoved(gone) => Removal::WindowRemoved(window(gone)),
+                },
+                focused: focused.map(window),
+                removed_space: removed_space.fact(|space| space.map(Word::word)),
+                native_focus: native_focus.fact(|native| native.map(window)),
+                successors: successors.answers(window, window),
+                inactive: inactive.answers(window, |hidden| hidden),
+            };
+            let answer = match decision {
+                RemovalFocus::Unaffected => RemovalFocus::Unaffected,
+                RemovalFocus::KeepNative(successor) => RemovalFocus::KeepNative(window(successor)),
+                RemovalFocus::Refocus(space) => RemovalFocus::Refocus(space.word()),
+            };
+            crate::roc_path::check(
+                "removal_focus",
+                RemovalQuestion::FACTS,
+                &wire::encode_removal_question(question),
+                &wire::encode_removal_focus(answer),
+            );
+        }
+        match decision {
             RemovalFocus::Unaffected => {}
             RemovalFocus::KeepNative(successor) => {
                 if !self.state.windows.contains_window(successor) {
@@ -6551,15 +6712,37 @@ impl Reactor {
     /// macOS moves its active display with the key window only later; until then the
     /// next command would act on the display move-node just carried the window off.
     fn follow_focused_window_to_its_display(&mut self, previous_space: Option<SpaceId>) {
-        let Some(space) = rift_core::focus::display_to_follow(
-            self.layout_manager
-                .layout_engine
-                .focused_window()
-                .and_then(|window| self.assigned_space_for_window_id(window)),
+        let focused_space = self
+            .layout_manager
+            .layout_engine
+            .focused_window()
+            .and_then(|window| self.assigned_space_for_window_id(window));
+        let (active, on_known_display) = (AskedAbout::new(), AskedAbout::new());
+        let follow = rift_core::focus::display_to_follow(
+            focused_space,
             previous_space,
-            |space| self.is_space_active(space),
-            |space| self.display_uuid_for_space(space).is_some(),
-        ) else {
+            |space| active.ask(space, |space| self.is_space_active(space)),
+            |space| {
+                on_known_display.ask(space, |space| self.display_uuid_for_space(space).is_some())
+            },
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::DisplayFollow;
+            let question = DisplayFollow {
+                focused_space: focused_space.map(Word::word),
+                previous: previous_space.map(Word::word),
+                active: active.answers(Word::word, |active| active),
+                on_known_display: on_known_display.answers(Word::word, |known| known),
+            };
+            crate::roc_path::check(
+                "display_to_follow",
+                DisplayFollow::FACTS,
+                &wire::encode_display_follow(question),
+                &wire::encode_maybe_space(follow.map(Word::word)),
+            );
+        }
+        let Some(space) = follow else {
             return;
         };
         self.activate_display(space);
@@ -6952,7 +7135,7 @@ struct ActivationQuery<'a> {
     window: WindowId,
 }
 
-impl rift_core::focus::ActivationFacts for ActivationQuery<'_> {
+impl ActivationFacts for ActivationQuery<'_> {
     type Mode = String;
     type Server = WindowServerId;
     type Space = SpaceId;
@@ -7005,6 +7188,97 @@ impl rift_core::focus::ActivationFacts for ActivationQuery<'_> {
         let bundle_id = reactor.app_manager.apps.get(&self.window.pid)?.info.bundle_id.as_ref()?;
         Some(reactor.config.settings.auto_focus_blacklist.contains(bundle_id))
     }
+}
+
+/// An activation's facts as the Rust decision asks them, each remembered for the Roc core's
+/// question (see `roc_path`).
+struct AskedActivation<'a> {
+    query: ActivationQuery<'a>,
+    standard: Asked<bool>,
+    unavailable: Asked<bool>,
+    space: Asked<Option<SpaceId>>,
+    workspace: Asked<Option<crate::model::VirtualWorkspaceId>>,
+    active_workspace: Asked<Option<crate::model::VirtualWorkspaceId>>,
+    pending_window: Asked<bool>,
+    mode_refusal: Asked<Option<String>>,
+    active_space_fullscreen: Asked<bool>,
+    unmanageable_source: Asked<Option<WindowServerId>>,
+    blacklisted: Asked<Option<bool>>,
+}
+
+impl<'a> AskedActivation<'a> {
+    /// A refusing mode, as one word: the decision only names back the mode the platform
+    /// named, so every mode is the same word to it.
+    #[cfg(feature = "roc-core")]
+    const MODE: u64 = 0;
+
+    fn new(query: ActivationQuery<'a>) -> Self {
+        AskedActivation {
+            query,
+            standard: Asked::new(),
+            unavailable: Asked::new(),
+            space: Asked::new(),
+            workspace: Asked::new(),
+            active_workspace: Asked::new(),
+            pending_window: Asked::new(),
+            mode_refusal: Asked::new(),
+            active_space_fullscreen: Asked::new(),
+            unmanageable_source: Asked::new(),
+            blacklisted: Asked::new(),
+        }
+    }
+
+    /// The facts asked, as the Roc core's question.
+    #[cfg(feature = "roc-core")]
+    fn plain(self) -> rift_core::focus::plain::Activation {
+        rift_core::focus::plain::Activation {
+            standard: self.standard.fact(|standard| standard),
+            unavailable: self.unavailable.fact(|unavailable| unavailable),
+            space: self.space.fact(|space| space.map(Word::word)),
+            workspace: self.workspace.fact(|workspace| workspace.map(Word::word)),
+            active_workspace: self.active_workspace.fact(|active| active.map(Word::word)),
+            pending_window: self.pending_window.fact(|pending| pending),
+            mode_refusal: self.mode_refusal.fact(|mode| mode.map(|_| Self::MODE)),
+            active_space_fullscreen: self.active_space_fullscreen.fact(|fullscreen| fullscreen),
+            unmanageable_source: self.unmanageable_source.fact(|wsid| wsid.map(Word::word)),
+            blacklisted: self.blacklisted.fact(|listed| listed),
+        }
+    }
+}
+
+impl rift_core::focus::ActivationFacts for AskedActivation<'_> {
+    type Mode = String;
+    type Server = WindowServerId;
+    type Space = SpaceId;
+    type Workspace = crate::model::VirtualWorkspaceId;
+
+    fn standard(&self) -> bool { self.standard.ask(|| self.query.standard()) }
+
+    fn unavailable(&self) -> bool { self.unavailable.ask(|| self.query.unavailable()) }
+
+    fn space(&self) -> Option<SpaceId> { self.space.ask(|| self.query.space()) }
+
+    fn workspace(&self, space: SpaceId) -> Option<Self::Workspace> {
+        self.workspace.ask(|| self.query.workspace(space))
+    }
+
+    fn active_workspace(&self, space: SpaceId) -> Option<Self::Workspace> {
+        self.active_workspace.ask(|| self.query.active_workspace(space))
+    }
+
+    fn pending_window(&self) -> bool { self.pending_window.ask(|| self.query.pending_window()) }
+
+    fn mode_refusal(&self) -> Option<String> { self.mode_refusal.ask(|| self.query.mode_refusal()) }
+
+    fn active_space_fullscreen(&self) -> bool {
+        self.active_space_fullscreen.ask(|| self.query.active_space_fullscreen())
+    }
+
+    fn unmanageable_source(&self) -> Option<WindowServerId> {
+        self.unmanageable_source.ask(|| self.query.unmanageable_source())
+    }
+
+    fn blacklisted(&self) -> Option<bool> { self.blacklisted.ask(|| self.query.blacklisted()) }
 }
 
 /// Where a transient entry's evidence came from.
