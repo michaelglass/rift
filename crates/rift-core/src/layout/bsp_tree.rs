@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::fmt::{Debug, Write as _};
 
 use super::{WindowConstraints, bsp};
+use crate::plain::Rect;
 
 /// Which way a split divides its area: side by side, or one above the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1559,6 +1560,120 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     }
 }
 
+/// A window's frame changing, against the screen and the tiling area it was laid out in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resized {
+    pub old: Rect,
+    pub new: Rect,
+    pub screen: Rect,
+    pub tiling: Rect,
+}
+
+impl<W: Copy + Ord + Debug> Layout<W> {
+    /// What a window's resize means for the layout: becoming the screen or the tiling area
+    /// fills it so (leaving it, unfills that); otherwise, a change of size past half a point
+    /// moves the nearest split along a changed axis so the window's side takes its new length.
+    pub fn resized(&mut self, window: W, resized: Resized, who: Participation<W>) {
+        if !who.takes_part(&window) {
+            return;
+        }
+        let Some((at, _)) = self.leaf_of(window) else { return };
+        if let Node::Leaf(Leaf {
+            content: Content::Window { fill, .. } | Content::Stack { fill, .. },
+            ..
+        }) = self.root.at_mut(&at)
+        {
+            let changed = if resized.new == resized.screen {
+                Some(Fill::Screen)
+            } else if resized.old == resized.screen {
+                Some(if *fill == Fill::Screen {
+                    Fill::Tiled
+                } else {
+                    *fill
+                })
+            } else if resized.new == resized.tiling {
+                Some(Fill::WithinGaps)
+            } else if resized.old == resized.tiling {
+                Some(if *fill == Fill::WithinGaps {
+                    Fill::Tiled
+                } else {
+                    *fill
+                })
+            } else {
+                None
+            };
+            if let Some(changed) = changed {
+                *fill = changed;
+                return;
+            }
+        }
+        let width_changed = (resized.new.w - resized.old.w).abs() > 0.5;
+        let height_changed = (resized.new.h - resized.old.h).abs() > 0.5;
+        if !width_changed && !height_changed {
+            return;
+        }
+        let mut path = at;
+        while let Some(side) = path.pop() {
+            let Node::Split(split) = self.root.at_mut(&path) else {
+                continue;
+            };
+            let (old_len, new_len) = match split.orientation {
+                Orientation::Horizontal if width_changed => (resized.old.w, resized.new.w),
+                Orientation::Vertical if height_changed => (resized.old.h, resized.new.h),
+                Orientation::Horizontal | Orientation::Vertical => continue,
+            };
+            let ratio = f64::from(split.ratio.get());
+            let share = match side {
+                Side::First => ratio,
+                Side::Second => 1.0 - ratio,
+            };
+            if old_len <= 0.0 || share <= f64::EPSILON {
+                return;
+            }
+            let parent_len = old_len / share;
+            if parent_len <= 0.0 {
+                return;
+            }
+            let raw = (new_len / parent_len).clamp(0.05, 0.95);
+            let first = match side {
+                Side::First => raw as f32,
+                Side::Second => (1.0 - raw) as f32,
+            };
+            if let Some(ratio) = Ratio::clamped(first) {
+                split.ratio = ratio;
+            }
+            return;
+        }
+    }
+
+    /// The window groups in tree order: each leaf's stack, or its one window.
+    fn groups(&self) -> Vec<Vec<W>> {
+        self.root
+            .preorder()
+            .into_iter()
+            .filter_map(|(_, node)| match node {
+                Node::Leaf(Leaf {
+                    content: Content::Window { window, .. },
+                    ..
+                }) => Some(vec![*window]),
+                Node::Leaf(Leaf {
+                    content: Content::Stack { tabs, .. },
+                    ..
+                }) => Some(tabs.members().collect()),
+                Node::Leaf(Leaf { content: Content::Empty, .. }) | Node::Split(_) => None,
+            })
+            .collect()
+    }
+
+    /// Whether `window`'s leaf fills the screen or the gaps.
+    fn is_fullscreen(&self, window: W) -> bool {
+        matches!(
+            self.leaf_of(window),
+            Some((_, Leaf { content: Content::Window { fill, .. } | Content::Stack { fill, .. }, .. })) if *fill != Fill::Tiled
+        )
+    }
+}
+
 /// Rebalances `node`'s splits; answers how many tiles it spans along `parent_axis`.
 fn rebalance<W>(node: &mut Node<W>, parent_axis: Orientation) -> usize {
     let Node::Split(split) = node else { return 1 };
@@ -1680,6 +1795,49 @@ impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
         };
         self.change(from, |tree, who, _| while tree.remove_one(window, who) {});
         self.add(to, window, insertion);
+    }
+
+    pub fn resized(&mut self, layout: L, window: W, resized: Resized) {
+        self.change(layout, |tree, who, _| tree.resized(window, resized, who));
+    }
+
+    /// A new layout under `copy` rebuilt from `layout`'s windows: each group in tree order is
+    /// added, and the rest of a stack dropped onto it in turn.
+    pub fn clone_layout(&mut self, layout: L, copy: L, insertion: Insertion) {
+        let groups = self.layout(layout).map(Layout::groups).unwrap_or_default();
+        self.create(copy);
+        for group in groups {
+            let mut members = group.into_iter();
+            let Some(first) = members.next() else { continue };
+            self.add(copy, first, insertion);
+            let mut target = first;
+            for window in members {
+                self.add(copy, window, insertion);
+                self.drop_on(copy, window, target, Drop::Stack);
+                target = window;
+            }
+        }
+    }
+
+    /// An app's windows in `layout` changed: each of `removals` comes out once (unless its
+    /// leaf is fullscreen), each of `additions` goes in.
+    pub fn set_app_windows(
+        &mut self,
+        layout: L,
+        removals: &[W],
+        additions: &[W],
+        insertion: Insertion,
+    ) {
+        for window in removals {
+            self.change(layout, |tree, who, _| {
+                if !tree.is_fullscreen(*window) {
+                    tree.remove_one(*window, who);
+                }
+            });
+        }
+        for window in additions {
+            self.add(layout, *window, insertion);
+        }
     }
 
     pub fn join(&mut self, layout: L, direction: Direction) {
