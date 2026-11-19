@@ -792,6 +792,7 @@ fn tags_match_app_window_role(tags: SLSWindowTags) -> bool {
 }
 
 /// Returns whether the iterator points at a top-level application window.
+#[cfg_attr(test, allow(dead_code))]
 fn iterator_window_suitable(iterator: *mut CFType) -> bool {
     let tags = iterator_window_tags(iterator);
     let parent_wid = unsafe { SLSWindowIteratorGetParentID(iterator) };
@@ -1008,6 +1009,11 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
     });
 }
 
+/// In tests, what macOS says of a window that does not exist (see `window_spaces`).
+#[cfg(test)]
+pub fn app_window_suitability(_id: WindowServerId) -> Option<bool> { Some(false) }
+
+#[cfg(not(test))]
 pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
     let query = WindowIterator::new(&[id])?;
 
@@ -1022,7 +1028,21 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     app_window_suitability(id).unwrap_or(false)
 }
 
+/// In tests, a Space's kind is read off its id, as `actor::spaces` does: below 0x400000000 a
+/// user desktop, 0x400000000..0x800000000 fullscreen. Fixture ids are real Spaces' ids too.
+#[cfg(test)]
+const TEST_FULLSCREEN_SPACES: std::ops::Range<u64> = 0x400000000..0x800000000;
+
+#[cfg(test)]
+pub fn space_is_user(sid: u64) -> bool { sid < TEST_FULLSCREEN_SPACES.start }
+
+#[cfg(test)]
+pub fn space_is_fullscreen(sid: u64) -> bool { TEST_FULLSCREEN_SPACES.contains(&sid) }
+
+#[cfg(not(test))]
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
+
+#[cfg(not(test))]
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
@@ -1104,6 +1124,33 @@ mod tests {
             let id = WindowServerId::new(id);
             assert_eq!(super::window_spaces(id), Vec::new(), "{id:?}");
             assert_eq!(super::window_ordered_in(id), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn tests_never_read_a_windows_suitability_from_the_live_window_server() {
+        // What macOS says of a window that does not exist; real windows share fixture ids.
+        for id in 1..=4096 {
+            let id = WindowServerId::new(id);
+            assert_eq!(super::app_window_suitability(id), Some(false), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn tests_read_a_spaces_kind_off_its_id_never_the_live_window_server() {
+        // The test convention `actor::spaces` uses: below 0x400000000 a user desktop,
+        // 0x400000000..0x800000000 fullscreen, whatever Spaces this Mac has.
+        for space in (1..=64).chain([0x3ffffffff]) {
+            assert!(super::space_is_user(space), "{space:#x}");
+            assert!(!super::space_is_fullscreen(space), "{space:#x}");
+        }
+        for space in [0x400000000, 0x400000001, 0x7ffffffff] {
+            assert!(!super::space_is_user(space), "{space:#x}");
+            assert!(super::space_is_fullscreen(space), "{space:#x}");
+        }
+        for space in [0x800000000, u64::MAX] {
+            assert!(!super::space_is_user(space), "{space:#x}");
+            assert!(!super::space_is_fullscreen(space), "{space:#x}");
         }
     }
 
