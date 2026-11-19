@@ -67,6 +67,17 @@ enum Mouse {
     ReportsDown,
 }
 
+/// Where a workspace switch goes.
+#[derive(Debug, Clone, Copy)]
+enum Switch {
+    Next,
+    Previous,
+    /// The workspace at this index.
+    To(usize),
+    /// Back to the last workspace.
+    Last,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Step {
     /// The user presses on window `w` and starts dragging it (a native title-bar drag).
@@ -140,8 +151,16 @@ enum Step {
     /// The last display is disconnected (if there is more than one, none is away, and no window
     /// is held).
     DisplayDeparts,
-    /// The display that left is reconnected, with its Space.
-    DisplayReturns,
+    /// The display that left is reconnected, with its Space or, `renumbered`, a new one (macOS
+    /// renumbered its desktop while it was away).
+    DisplayReturns { renumbered: bool },
+    /// The user switches workspace on the focused display.
+    SwitchWorkspace { to: Switch },
+    /// Display `d`'s desktop is replaced while the display stays (macOS renumbered it): it
+    /// shows a new Space, the old one is in no display's inventory, its windows are on the new
+    /// one, and the snapshot pairs the two as a remap, as the spaces actor does for a unique
+    /// same-display delta (not while a window is held).
+    DesktopReplaced { d: usize },
 }
 
 impl Step {
@@ -177,7 +196,9 @@ impl Step {
             Step::LeaveFullscreen { .. } => "leave-fullscreen",
             Step::Sizing { .. } => "sizing",
             Step::DisplayDeparts => "display-departs",
-            Step::DisplayReturns => "display-returns",
+            Step::DisplayReturns { .. } => "display-returns",
+            Step::DesktopReplaced { .. } => "desktop-replaced",
+            Step::SwitchWorkspace { .. } => "command-switch-workspace",
         }
     }
 }
@@ -268,7 +289,7 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
             106 => Step::DestroyIdentity { w: rng.below(16) },
             107 => Step::LeaveFullscreen { w: rng.below(16) },
             108 => Step::DisplayDeparts,
-            _ => Step::DisplayReturns,
+            _ => Step::DisplayReturns { renumbered: false },
         })
         .collect()
 }
@@ -358,7 +379,10 @@ struct Sim {
     stale_reads: BTreeMap<WindowId, Read>,
     held: Option<Held>,
     /// The display that left, and its Space, until it returns.
-    departed: Option<(CGRect, SpaceId)>,
+    departed: Option<(CGRect, SpaceId, String)>,
+    /// Each display's identity, in screen order: it stays with the display when the displays
+    /// are reported in another order, as a real display's UUID does.
+    uuids: Vec<String>,
     pending: Vec<Request>,
     /// The window whose frame this step reported somewhere new.
     moved: Option<WindowId>,
@@ -384,6 +408,8 @@ struct Sim {
     in_flight_before: BTreeMap<WindowId, Vec<CGRect>>,
     /// The index the next replaced identity gets (past every window the sim starts with).
     next_idx: u32,
+    /// The next fresh Space id (a replaced desktop's, a renumbered return's).
+    next_space: u64,
     /// Windows in native fullscreen, by the id they have now.
     fullscreen: BTreeMap<WindowId, Fullscreen>,
     /// The requests the core planned animations and cameras under.
@@ -396,11 +422,23 @@ type Read = (CGRect, TransactionId);
 /// What a case is set up with: two or three displays; on some seeds animation is on (the
 /// animation thread runs in step with the case, `TestPresenter`), and on some of those the
 /// first space's workspace is a scrolling layout, so every arrange there presents a camera.
+/// Workspaces are per display, or shared across displays (global mode, where display changes
+/// move workspaces), some with a display rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Setup {
     displays: usize,
     animate: bool,
     scrolling: bool,
+    workspaces: Workspaces,
+}
+
+/// How a case's workspaces are set up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Workspaces {
+    PerDisplay,
+    Global,
+    /// Global, with the second workspace ruled onto the second display.
+    GlobalRuled,
 }
 
 impl Setup {
@@ -410,6 +448,7 @@ impl Setup {
             displays: 2 + (seed % 2) as usize,
             animate,
             scrolling: animate && (seed / 4) % 2 == 1,
+            workspaces: Workspaces::PerDisplay,
         }
     }
 
@@ -418,6 +457,7 @@ impl Setup {
             displays,
             animate: false,
             scrolling: false,
+            workspaces: Workspaces::PerDisplay,
         }
     }
 }
@@ -428,7 +468,28 @@ impl Sim {
     /// differential test replays it.
     fn new(setup: Setup) -> Self {
         let displays = setup.displays;
-        let (mut apps, mut reactor) = test_context();
+        let (mut apps, mut reactor) = match setup.workspaces {
+            Workspaces::PerDisplay => test_context(),
+            Workspaces::Global | Workspaces::GlobalRuled => {
+                let settings = crate::common::config::VirtualWorkspaceSettings {
+                    mode: crate::common::config::WorkspaceMode::Global,
+                    workspace_rules: match setup.workspaces {
+                        Workspaces::GlobalRuled => {
+                            vec![crate::common::config::WorkspaceLayoutRule {
+                                workspace: crate::common::config::WorkspaceSelector::Index(1),
+                                layout: None,
+                                display: Some(vec!["test-display-1".into()]),
+                            }]
+                        }
+                        Workspaces::PerDisplay | Workspaces::Global => Vec::new(),
+                    },
+                    ..Default::default()
+                };
+                let mut reactor = test_reactor_with_workspace_settings(&settings);
+                reactor.config.virtual_workspaces = settings;
+                (Apps::new(), reactor)
+            }
+        };
         reactor.state.core.trace = Some(Vec::new());
         let screens: Vec<CGRect> = (0..displays)
             .map(|i| {
@@ -494,6 +555,7 @@ impl Sim {
             stale_reads: BTreeMap::new(),
             held: None,
             departed: None,
+            uuids: (0..displays).map(|i| format!("test-display-{i}")).collect(),
             pending: Vec::new(),
             moved: None,
             settled_before: BTreeMap::new(),
@@ -506,6 +568,7 @@ impl Sim {
             animation_requests: Vec::new(),
             in_flight_before: BTreeMap::new(),
             next_idx: 100,
+            next_space: 100,
             fullscreen: BTreeMap::new(),
         };
         if setup.scrolling {
@@ -684,19 +747,26 @@ impl Sim {
     /// The window server reports the displays now, each with its Space, and every window's
     /// Space membership observed, so the snapshot commits; `changed` if the display set changed.
     fn announce_displays(&mut self, changed: bool) {
-        let spaces: Vec<_> = self.spaces.iter().copied().map(Some).collect();
-        let display_space_ids = self
-            .spaces
-            .iter()
-            .enumerate()
-            .map(|(index, space)| (format!("test-display-{index}"), vec![*space]))
-            .collect();
-        self.reactor
-            .handle_event(space_state_event_with(self.screens.clone(), spaces, |state| {
-                state.display_set_changed = changed;
-                state.membership_complete = true;
-                state.display_space_ids = display_space_ids;
-            }));
+        self.announce_displays_with(changed, Vec::new())
+    }
+
+    /// The displays as they are now, with the given Space remaps.
+    fn announce_displays_with(&mut self, changed: bool, remaps: Vec<(SpaceId, SpaceId)>) {
+        let mut state = self.space_state();
+        state.display_set_changed = changed;
+        state.membership_complete = true;
+        state.space_remaps = remaps;
+        self.reactor.handle_event(Event::SpaceStateChanged(state));
+    }
+
+    /// The displays as they are now: each screen with its Space and its own identity.
+    fn space_state(&self) -> ForwardedSpaceState {
+        let spaces = self.spaces.iter().copied().map(Some).collect();
+        let mut screens = make_screen_snapshots(self.screens.clone(), spaces);
+        for (screen, uuid) in screens.iter_mut().zip(&self.uuids) {
+            screen.display_uuid = uuid.clone();
+        }
+        forwarded_space_state(screens)
     }
 
     /// Where the user's pointer is, while they hold a window.
@@ -834,12 +904,9 @@ impl Sim {
                 }
             }
             Step::Wake => {
-                let spaces = self.spaces.iter().copied().map(Some).collect();
-                self.reactor.handle_event(space_state_event_with(
-                    self.screens.clone(),
-                    spaces,
-                    |state| state.should_force_refresh_layout = true,
-                ));
+                let mut state = self.space_state();
+                state.should_force_refresh_layout = true;
+                self.reactor.handle_event(Event::SpaceStateChanged(state));
             }
             Step::DragMove { dx, dy } => {
                 if let Some(wid) = self.held_window() {
@@ -1014,23 +1081,51 @@ impl Sim {
                     self.announce_displays(false);
                     let screen = self.screens.pop().unwrap();
                     let space = self.spaces.pop().unwrap();
-                    self.departed = Some((screen, space));
+                    let uuid = self.uuids.pop().unwrap();
+                    self.departed = Some((screen, space, uuid));
                     self.announce_displays(true);
                 }
             }
-            Step::DisplayReturns => {
-                if let Some((screen, space)) = self.departed.take() {
+            Step::DisplayReturns { renumbered } => {
+                if let Some((screen, space, uuid)) = self.departed.take() {
+                    let space = if renumbered {
+                        self.next_space += 1;
+                        SpaceId::new(self.next_space - 1)
+                    } else {
+                        space
+                    };
                     self.screens.push(screen);
                     self.spaces.push(space);
+                    self.uuids.push(uuid);
                     self.announce_displays(true);
+                }
+            }
+            Step::DesktopReplaced { d } => {
+                if d < self.spaces.len() && self.held.is_none() {
+                    let lost = self.spaces[d];
+                    let space = SpaceId::new(self.next_space);
+                    self.next_space += 1;
+                    let live: Vec<WindowId> = self.live.iter().copied().collect();
+                    for wid in live {
+                        // A window without a server identity yet (a fresh one) has no Space.
+                        let Some(wsid) = self.reactor.state.windows.server_id(wid) else {
+                            continue;
+                        };
+                        if self.reactor.state.windows.window_server_space(wsid) == Some(lost) {
+                            self.reactor.mark_test_window_visible_in_space(wsid, space);
+                        }
+                    }
+                    self.spaces[d] = space;
+                    self.announce_displays_with(true, vec![(lost, space)]);
                 }
             }
             Step::ReorderDisplays => {
                 if self.screens.len() > 1 {
                     self.screens.rotate_left(1);
                     self.spaces.rotate_left(1);
-                    let spaces = self.spaces.iter().copied().map(Some).collect();
-                    self.reactor.handle_event(space_state_event(self.screens.clone(), spaces));
+                    self.uuids.rotate_left(1);
+                    let state = self.space_state();
+                    self.reactor.handle_event(Event::SpaceStateChanged(state));
                 }
             }
             Step::Rekey { w } => {
@@ -1068,7 +1163,9 @@ impl Sim {
             }
             Step::DestroyIdentity { w } => {
                 let wid = self.pick(w);
-                if let Some(fullscreen) = self.fullscreen.get(&wid)
+                // Not the window the user holds, as for the other identity steps.
+                if self.held_window() != Some(wid)
+                    && let Some(fullscreen) = self.fullscreen.get(&wid)
                     && fullscreen.dead.is_none()
                     && let Some(info) = self.reported_info(wid)
                 {
@@ -1107,6 +1204,17 @@ impl Sim {
                     workspace: WorkspaceSelector::Index(k),
                     follow: false,
                     window_id: Some(self.pick(w).idx.get()),
+                });
+            }
+            Step::SwitchWorkspace { to } => {
+                if let Some(held) = &mut self.held {
+                    held.command_during_drag = true;
+                }
+                self.reactor.handle_test_layout_command(match to {
+                    Switch::Next => LayoutCommand::NextWorkspace(None),
+                    Switch::Previous => LayoutCommand::PrevWorkspace(None),
+                    Switch::To(index) => LayoutCommand::SwitchToWorkspace(index),
+                    Switch::Last => LayoutCommand::SwitchToLastWorkspace,
                 });
             }
             Step::Focus { right } => {
@@ -1975,6 +2083,7 @@ fn a_press_and_move_after_a_scrolling_camera_starts_the_drag() {
         displays: 3,
         animate: true,
         scrolling: true,
+        workspaces: Workspaces::PerDisplay,
     };
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
 }
@@ -2045,6 +2154,7 @@ fn a_camera_moving_windows_during_a_drag_does_not_unsettle_them_at_the_drop() {
         displays: 3,
         animate: true,
         scrolling: true,
+        workspaces: Workspaces::PerDisplay,
     };
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
 }
@@ -2076,6 +2186,7 @@ fn a_window_dropped_into_another_displays_scrolling_layout_settles_where_layout_
         displays: 2,
         animate: true,
         scrolling: true,
+        workspaces: Workspaces::PerDisplay,
     };
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
 }
