@@ -14510,3 +14510,46 @@ fn a_resizable_window_keeps_its_reported_minimum_when_tiled_only_under_respect_m
         }
     }
 }
+
+#[test]
+fn a_space_remapped_onto_one_holding_workspaces_takes_its_windows_and_claims_along() {
+    // Per display, macOS can put windows on a desktop before rift learns it replaced another:
+    // the replaced desktop's workspaces go, and a window or a claim on one moves to the
+    // migrated workspace in the same position. The workspace tripwire checks every step.
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        mode: crate::common::config::WorkspaceMode::PerDisplay,
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let (origin, target) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(origin)]));
+    reactor.add_test_app(1);
+    let migrated = reactor.test_workspace(origin, 0);
+    let replaced = reactor.test_workspace(target, 0);
+    let (held, claimed) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    for (window, server) in [(held, 201), (claimed, 202)] {
+        reactor.add_test_window(window, WindowServerId::new(server), Some(target), frame);
+        assert!(reactor.assign_test_window_to_workspace(target, window, replaced));
+    }
+    reactor.state.windows.insert_claim(
+        claimed,
+        crate::model::window_store::ClaimOwner(7),
+        rift_protocol::WindowClaimFlags::empty(),
+    );
+
+    let mut remapped =
+        forwarded_space_state(make_screen_snapshots(vec![frame], vec![Some(target)]));
+    remapped.space_remaps.push((origin, target));
+    reactor.handle_event(Event::SpaceStateChanged(remapped));
+
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert!(!workspaces.catalog().any(|id| id == replaced));
+    assert_eq!(workspaces[migrated].space, target);
+    assert_eq!(reactor.state.windows.workspace_for_window(held), Some(migrated));
+    assert_eq!(
+        reactor.state.windows.claim(claimed).and_then(|claim| claim.workspace()),
+        Some(migrated)
+    );
+}
