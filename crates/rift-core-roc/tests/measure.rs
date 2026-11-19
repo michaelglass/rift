@@ -263,66 +263,70 @@ fn question<Q: Clone>(
 #[ignore]
 fn measure_focus_questions() {
     use rift_core::focus::plain::{Candidate, Untracked};
+    use rift_core::plain::{Answers, Fact};
 
     for windows in [1u64, 10, 50] {
         let in_workspace: Vec<u64> = (1..=windows).collect();
-        let visible: Vec<u64> = in_workspace.iter().copied().filter(|w| w % 3 != 0).collect();
+        // Every window's visibility, as a question on full facts carries it.
+        let visible = |shown: fn(u64) -> bool| {
+            Answers((1..=windows + 1).map(|window| (window, shown(window))).collect())
+        };
         let candidates = vec![
             // The preferred window is visible: answered at once.
             Candidate {
                 preferred: Some(1),
-                last_focused: Some(2),
-                in_workspace: in_workspace.clone(),
-                visible: visible.clone(),
+                last_focused: Fact::Asked(Some(2)),
+                in_workspace: Fact::Asked(in_workspace.clone()),
+                visible: visible(|window| window % 3 != 0),
             },
             // Neither preferred nor last focused is visible: the workspace is scanned.
             Candidate {
                 preferred: Some(windows + 1),
-                last_focused: None,
-                in_workspace: in_workspace.iter().rev().copied().collect(),
-                visible: visible.clone(),
+                last_focused: Fact::Asked(None),
+                in_workspace: Fact::Asked(in_workspace.iter().rev().copied().collect()),
+                visible: visible(|window| window % 3 != 0),
             },
             // Nothing visible: the whole workspace is scanned for nothing.
             Candidate {
                 preferred: None,
-                last_focused: None,
-                in_workspace: in_workspace.clone(),
-                visible: vec![],
+                last_focused: Fact::Asked(None),
+                in_workspace: Fact::Asked(in_workspace.clone()),
+                visible: visible(|_| false),
             },
         ];
         question(
             &format!("focus_candidate, {windows} windows"),
             &candidates,
-            |q| wire::encode_maybe_space(q.answer()),
+            |q| wire::encode_maybe_space(q.answer().expect("full facts")),
             wire::encode_candidate,
         );
     }
     let untracked = vec![
         Untracked {
             under_cursor: None,
-            tracked: false,
-            known: None,
+            tracked: Fact::Asked(false),
+            known: Fact::Asked(None),
         },
         Untracked {
             under_cursor: Some(40),
-            tracked: true,
-            known: None,
+            tracked: Fact::Asked(true),
+            known: Fact::Asked(None),
         },
         Untracked {
             under_cursor: Some(41),
-            tracked: false,
-            known: Some((0, 700)),
+            tracked: Fact::Asked(false),
+            known: Fact::Asked(Some((0, 700))),
         },
         Untracked {
             under_cursor: Some(42),
-            tracked: false,
-            known: Some((25, 0)),
+            tracked: Fact::Asked(false),
+            known: Fact::Asked(Some((25, 0))),
         },
     ];
     question(
         "untracked_focus",
         &untracked,
-        |q| wire::encode_untracked_focus(q.answer()),
+        |q| wire::encode_untracked_focus(q.answer().expect("full facts")),
         wire::encode_untracked,
     );
 }

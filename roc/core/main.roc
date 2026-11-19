@@ -130,16 +130,20 @@ core = { init, step, tile }
 ## `Workspaces`) in;
 ## out, a 0 and the answer's words (the frames; for a strip, where it placed everything; for a
 ## settle question, where the camera settles; for newcomers, their first frames; for a topology
-## question, its answer), or a 1: the words were not a question it answers.
+## question, its answer), or a 1: the words were not a question it answers, or a 2 and a fact's
+## place among its question's facts: the decision read that fact, which the platform's run of
+## it never asked.
 tile : List(U64) -> List(U64)
 tile = |words|
 	match shape_answer(words) {
 		Ok(answer) => [0].concat(answer)
 		# Not a shape: one explicit rejection.
 		Err(Malformed) => [1]
+		# A decision read a fact the platform's run of it never asked: which one.
+		Err(Unasked(fact)) => [2, fact]
 	}
 
-shape_answer : List(U64) -> Try(List(U64), [Malformed])
+shape_answer : List(U64) -> Try(List(U64), [Malformed, Unasked(U64)])
 shape_answer = |words| {
 	(system, cursor) = take({ words, at: 0 })?
 	match system {

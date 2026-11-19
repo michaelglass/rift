@@ -228,13 +228,18 @@ pub enum RocError {
     Rejected,
     /// The Roc core answered with words this side cannot read.
     Unreadable(WireError),
+    /// The decision read a fact its question does not carry (the platform's run of it never
+    /// asked it): the fact's place among the question's facts.
+    Unasked { fact: u64 },
 }
 
-/// The words after Roc's verdict word: 0 and an answer, or 1, a rejection.
+/// The words after Roc's verdict word: 0 and an answer, 1, a rejection, or 2 and the fact a
+/// decision read that its question does not carry.
 fn answer(words: &[u64]) -> Result<&[u64], RocError> {
     match words.split_first() {
         Some((0, answer)) => Ok(answer),
         Some((1, [])) => Err(RocError::Rejected),
+        Some((2, &[fact])) => Err(RocError::Unasked { fact }),
         Some((&word, _)) => Err(RocError::Unreadable(WireError::Unknown { at: 0, word })),
         None => Err(RocError::Unreadable(WireError::Truncated)),
     }

@@ -41,6 +41,91 @@ impl Add<Duration> for Nanos {
     fn add(self, by: Duration) -> Nanos { Nanos(self.0 + by.as_nanos() as u64) }
 }
 
+/// A fact a decision may ask for, as a question on plain data carries it: what the platform
+/// answered, or that the decision the platform ran never asked it. A question built from what
+/// the Rust decision asked leaves the rest `Unasked`, and a decision reading one of those reads
+/// a fact the Rust decision did not: it decides in a different order, and says so
+/// ([`Unasked`]) instead of answering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fact<T> {
+    Asked(T),
+    Unasked,
+}
+
+/// A fact asked about a key (a window's visibility, a Space's activity): the keys asked and
+/// what each answered. Any other key was not asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers<K, V>(pub Vec<(K, V)>);
+
+impl<K, V> Default for Answers<K, V> {
+    fn default() -> Self { Answers(Vec::new()) }
+}
+
+/// A decision read a fact its question does not carry: `fact` is the fact's place among the
+/// question's facts (its `FACTS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unasked {
+    pub fact: u64,
+}
+
+/// What a decision has read of a question's facts so far.
+#[derive(Debug, Clone, Copy)]
+enum Read {
+    Given,
+    Missing(Unasked),
+}
+
+/// Reads a question's facts for a decision, remembering the first fact the question does not
+/// carry. A decision reading it is given `stand_in` and runs on, and its answer is replaced by
+/// the [`Unasked`] (the decision functions take plain closures, which cannot stop it).
+pub(crate) struct Reading(std::cell::Cell<Read>);
+
+impl Reading {
+    pub(crate) fn new() -> Self { Reading(std::cell::Cell::new(Read::Given)) }
+
+    fn missing(&self, fact: u64) {
+        if let Read::Given = self.0.get() {
+            self.0.set(Read::Missing(Unasked { fact }));
+        }
+    }
+
+    /// The `fact`-th fact's answer.
+    pub(crate) fn fact<T: Clone>(&self, given: &Fact<T>, fact: u64, stand_in: T) -> T {
+        match given {
+            Fact::Asked(answer) => answer.clone(),
+            Fact::Unasked => {
+                self.missing(fact);
+                stand_in
+            }
+        }
+    }
+
+    /// The `fact`-th fact's answer for `key`.
+    pub(crate) fn about<K: PartialEq, V: Clone>(
+        &self,
+        given: &Answers<K, V>,
+        key: &K,
+        fact: u64,
+        stand_in: V,
+    ) -> V {
+        match given.0.iter().find(|(asked, _)| asked == key) {
+            Some((_, answer)) => answer.clone(),
+            None => {
+                self.missing(fact);
+                stand_in
+            }
+        }
+    }
+
+    /// The decision's answer, unless it read a fact it was not given.
+    pub(crate) fn answer<A>(self, answer: A) -> Result<A, Unasked> {
+        match self.0.get() {
+            Read::Given => Ok(answer),
+            Read::Missing(unasked) => Err(unasked),
+        }
+    }
+}
+
 fn within(a: f64, tolerance: f64, b: f64) -> bool { (a - b).abs() < tolerance }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

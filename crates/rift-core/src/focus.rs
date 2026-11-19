@@ -232,41 +232,44 @@ pub fn focuses_desktop(active: bool, workspace_empty: impl FnOnce() -> bool) -> 
     active && workspace_empty()
 }
 
-/// Each decision as a question on plain data: every fact it may ask for is in the question.
-/// Spaces, workspaces, window-server ids, modes and apps are one word each; a window that has
-/// an app is a [`WindowId`](crate::plain::WindowId) (its app is its pid).
+/// Each decision as a question on plain data. Its arguments are plain values; every fact it
+/// asks for is a [`Fact`] (or, asked about a key, [`Answers`]): what the platform answered, or
+/// that the platform's run of the decision never asked it. Each question names its facts in
+/// `FACTS`, in the order the wire carries them; an answer that read a fact the question does not
+/// carry is [`Unasked`]. Spaces, workspaces, window-server ids, modes and apps are one word
+/// each; a window that has an app is a [`WindowId`] (its app is its pid).
 pub mod plain {
     use super::{ActivationFacts, Follow, Removal, RemovalFocus, UntrackedFocus};
-    use crate::plain::WindowId;
+    use crate::plain::{Answers, Fact, Reading, Unasked, WindowId};
 
-    /// [`super::removal_focus`]: the successor macOS's key window is tracked as (itself when
-    /// not listed), and the successors in a workspace that is not active.
+    /// [`super::removal_focus`]: the removed window's Space, macOS's key window, the successor
+    /// each native window is tracked as, and whether a successor is in a workspace that is not
+    /// active.
     #[derive(Debug, Clone, PartialEq)]
     pub struct RemovalQuestion {
         pub removal: Removal<WindowId, i32>,
         pub focused: Option<WindowId>,
-        pub removed_space: Option<u64>,
-        pub native_focus: Option<WindowId>,
-        pub successors: Vec<(WindowId, WindowId)>,
-        pub inactive: Vec<WindowId>,
+        pub removed_space: Fact<Option<u64>>,
+        pub native_focus: Fact<Option<WindowId>>,
+        pub successors: Answers<WindowId, WindowId>,
+        pub inactive: Answers<WindowId, bool>,
     }
 
     impl RemovalQuestion {
-        pub fn answer(&self) -> RemovalFocus<WindowId, u64> {
-            super::removal_focus(
+        pub const FACTS: &[&str] = &["removed_space", "native_focus", "successor", "inactive"];
+
+        pub fn answer(&self) -> Result<RemovalFocus<WindowId, u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::removal_focus(
                 self.removal,
                 self.focused,
                 |window| window.pid,
-                |_| self.removed_space,
-                |_| self.native_focus,
-                |native| {
-                    self.successors
-                        .iter()
-                        .find(|(from, _)| *from == native)
-                        .map_or(native, |(_, to)| *to)
-                },
-                |_, successor| self.inactive.contains(&successor),
-            )
+                |_| reading.fact(&self.removed_space, 0, None),
+                |_| reading.fact(&self.native_focus, 1, None),
+                |native| reading.about(&self.successors, &native, 2, native),
+                |_, successor| reading.about(&self.inactive, &successor, 3, false),
+            );
+            reading.answer(answer)
         }
     }
 
@@ -274,19 +277,23 @@ pub mod plain {
     #[derive(Debug, Clone, PartialEq)]
     pub struct Candidate {
         pub preferred: Option<u64>,
-        pub last_focused: Option<u64>,
-        pub in_workspace: Vec<u64>,
-        pub visible: Vec<u64>,
+        pub last_focused: Fact<Option<u64>>,
+        pub in_workspace: Fact<Vec<u64>>,
+        pub visible: Answers<u64, bool>,
     }
 
     impl Candidate {
-        pub fn answer(&self) -> Option<u64> {
-            super::focus_candidate(
+        pub const FACTS: &[&str] = &["last_focused", "in_workspace", "visible"];
+
+        pub fn answer(&self) -> Result<Option<u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::focus_candidate(
                 self.preferred,
-                || self.last_focused,
-                || self.in_workspace.clone(),
-                |window| self.visible.contains(&window),
-            )
+                || reading.fact(&self.last_focused, 0, None),
+                || reading.fact(&self.in_workspace, 1, Vec::new()),
+                |window| reading.about(&self.visible, &window, 2, false),
+            );
+            reading.answer(answer)
         }
     }
 
@@ -296,61 +303,103 @@ pub mod plain {
         pub window: u64,
         pub main: Option<u64>,
         pub focused: Option<u64>,
-        pub in_inactive_workspace: bool,
+        pub in_inactive_workspace: Fact<bool>,
     }
 
     impl Hides {
-        pub fn answer(&self) -> bool {
-            super::hides_focus(self.window, self.main, self.focused, || {
-                self.in_inactive_workspace
-            })
+        pub const FACTS: &[&str] = &["in_inactive_workspace"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::hides_focus(self.window, self.main, self.focused, || {
+                reading.fact(&self.in_inactive_workspace, 0, false)
+            });
+            reading.answer(answer)
         }
     }
 
-    /// [`super::activation_follow`]'s facts, all known.
+    /// [`super::activation_follow`]'s facts.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Activation {
-        pub standard: bool,
-        pub unavailable: bool,
-        pub space: Option<u64>,
-        pub workspace: Option<u64>,
-        pub active_workspace: Option<u64>,
-        pub pending_window: bool,
-        pub mode_refusal: Option<u64>,
-        pub active_space_fullscreen: bool,
-        pub unmanageable_source: Option<u64>,
-        pub blacklisted: Option<bool>,
+        pub standard: Fact<bool>,
+        pub unavailable: Fact<bool>,
+        pub space: Fact<Option<u64>>,
+        pub workspace: Fact<Option<u64>>,
+        pub active_workspace: Fact<Option<u64>>,
+        pub pending_window: Fact<bool>,
+        pub mode_refusal: Fact<Option<u64>>,
+        pub active_space_fullscreen: Fact<bool>,
+        pub unmanageable_source: Fact<Option<u64>>,
+        pub blacklisted: Fact<Option<bool>>,
     }
 
-    impl ActivationFacts for Activation {
+    /// An [`Activation`] being read.
+    struct Reads<'a> {
+        facts: &'a Activation,
+        reading: Reading,
+    }
+
+    impl ActivationFacts for Reads<'_> {
         type Mode = u64;
         type Server = u64;
         type Space = u64;
         type Workspace = u64;
 
-        fn standard(&self) -> bool { self.standard }
+        fn standard(&self) -> bool { self.reading.fact(&self.facts.standard, 0, false) }
 
-        fn unavailable(&self) -> bool { self.unavailable }
+        fn unavailable(&self) -> bool { self.reading.fact(&self.facts.unavailable, 1, false) }
 
-        fn space(&self) -> Option<u64> { self.space }
+        fn space(&self) -> Option<u64> { self.reading.fact(&self.facts.space, 2, None) }
 
-        fn workspace(&self, _: u64) -> Option<u64> { self.workspace }
+        fn workspace(&self, _: u64) -> Option<u64> {
+            self.reading.fact(&self.facts.workspace, 3, None)
+        }
 
-        fn active_workspace(&self, _: u64) -> Option<u64> { self.active_workspace }
+        fn active_workspace(&self, _: u64) -> Option<u64> {
+            self.reading.fact(&self.facts.active_workspace, 4, None)
+        }
 
-        fn pending_window(&self) -> bool { self.pending_window }
+        fn pending_window(&self) -> bool { self.reading.fact(&self.facts.pending_window, 5, false) }
 
-        fn mode_refusal(&self) -> Option<u64> { self.mode_refusal }
+        fn mode_refusal(&self) -> Option<u64> {
+            self.reading.fact(&self.facts.mode_refusal, 6, None)
+        }
 
-        fn active_space_fullscreen(&self) -> bool { self.active_space_fullscreen }
+        fn active_space_fullscreen(&self) -> bool {
+            self.reading.fact(&self.facts.active_space_fullscreen, 7, false)
+        }
 
-        fn unmanageable_source(&self) -> Option<u64> { self.unmanageable_source }
+        fn unmanageable_source(&self) -> Option<u64> {
+            self.reading.fact(&self.facts.unmanageable_source, 8, None)
+        }
 
-        fn blacklisted(&self) -> Option<bool> { self.blacklisted }
+        fn blacklisted(&self) -> Option<bool> {
+            self.reading.fact(&self.facts.blacklisted, 9, None)
+        }
     }
 
     impl Activation {
-        pub fn answer(&self) -> Follow<u64, u64, u64, u64> { super::activation_follow(self) }
+        pub const FACTS: &[&str] = &[
+            "standard",
+            "unavailable",
+            "space",
+            "workspace",
+            "active_workspace",
+            "pending_window",
+            "mode_refusal",
+            "active_space_fullscreen",
+            "unmanageable_source",
+            "blacklisted",
+        ];
+
+        pub fn answer(&self) -> Result<Follow<u64, u64, u64, u64>, Unasked> {
+            let reads = Reads {
+                facts: self,
+                reading: Reading::new(),
+            };
+            let answer = super::activation_follow(&reads);
+            reads.reading.answer(answer)
+        }
     }
 
     /// [`super::display_to_follow`].
@@ -358,32 +407,45 @@ pub mod plain {
     pub struct DisplayFollow {
         pub focused_space: Option<u64>,
         pub previous: Option<u64>,
-        pub active: Vec<u64>,
-        pub on_known_display: Vec<u64>,
+        pub active: Answers<u64, bool>,
+        pub on_known_display: Answers<u64, bool>,
     }
 
     impl DisplayFollow {
-        pub fn answer(&self) -> Option<u64> {
-            super::display_to_follow(
+        pub const FACTS: &[&str] = &["active", "on_known_display"];
+
+        pub fn answer(&self) -> Result<Option<u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::display_to_follow(
                 self.focused_space,
                 self.previous,
-                |space| self.active.contains(&space),
-                |space| self.on_known_display.contains(&space),
-            )
+                |space| reading.about(&self.active, &space, 0, false),
+                |space| reading.about(&self.on_known_display, &space, 1, false),
+            );
+            reading.answer(answer)
         }
     }
 
-    /// [`super::untracked_focus`]: what is known of the window (its layer and app).
+    /// [`super::untracked_focus`]: whether the window is tracked, what is known of it (its
+    /// layer and app).
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Untracked {
         pub under_cursor: Option<u64>,
-        pub tracked: bool,
-        pub known: Option<(i32, u64)>,
+        pub tracked: Fact<bool>,
+        pub known: Fact<Option<(i32, u64)>>,
     }
 
     impl Untracked {
-        pub fn answer(&self) -> UntrackedFocus<u64, u64> {
-            super::untracked_focus(self.under_cursor, |_| self.tracked, |_| self.known)
+        pub const FACTS: &[&str] = &["tracked", "known"];
+
+        pub fn answer(&self) -> Result<UntrackedFocus<u64, u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::untracked_focus(
+                self.under_cursor,
+                |_| reading.fact(&self.tracked, 0, false),
+                |_| reading.fact(&self.known, 1, None),
+            );
+            reading.answer(answer)
         }
     }
 
@@ -391,12 +453,18 @@ pub mod plain {
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Desktop {
         pub active: bool,
-        pub workspace_empty: bool,
+        pub workspace_empty: Fact<bool>,
     }
 
     impl Desktop {
-        pub fn answer(&self) -> bool {
-            super::focuses_desktop(self.active, || self.workspace_empty)
+        pub const FACTS: &[&str] = &["workspace_empty"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::focuses_desktop(self.active, || {
+                reading.fact(&self.workspace_empty, 0, false)
+            });
+            reading.answer(answer)
         }
     }
 }

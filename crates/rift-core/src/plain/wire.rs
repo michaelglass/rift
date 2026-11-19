@@ -13,6 +13,9 @@
 //! ids are the platform's, one word each. A settle question (tag 3, [`encode_settle`]) returns
 //! where the camera settles ([`encode_settled`]); a floating layout's newcomers (tag 4,
 //! [`encode_floating`]) their first frames ([`encode_rects`]).
+//!
+//! A question's [`Fact`] is a flag word (0 unasked, 1 asked) and then the answer; its
+//! [`Answers`] a list of (key, answer).
 
 use crate::core::{Desire, Effect, Event, Plan};
 use crate::focus::{self, Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
@@ -23,7 +26,7 @@ use crate::layout::{Gaps, Size, Sizing, WindowConstraints, scrolling};
 use crate::lifecycle::{
     self, Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
 };
-use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
+use crate::plain::{Answers, Fact, Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
 use crate::reconciler::{Answer, Note, Reply, Want, Write};
 use crate::topology::{
@@ -72,6 +75,28 @@ impl Words {
                 some(self, value)
             }
         }
+    }
+
+    fn fact<T>(&mut self, fact: Fact<T>, mut asked: impl FnMut(&mut Self, T)) {
+        match fact {
+            Fact::Unasked => self.word(0),
+            Fact::Asked(answer) => {
+                self.word(1);
+                asked(self, answer)
+            }
+        }
+    }
+
+    fn answers<K, V>(
+        &mut self,
+        answers: Answers<K, V>,
+        mut key: impl FnMut(&mut Self, K),
+        mut answer: impl FnMut(&mut Self, V),
+    ) {
+        self.list(answers.0, |words, (asked, answered)| {
+            key(words, asked);
+            answer(words, answered);
+        });
     }
 
     fn list<T>(&mut self, items: Vec<T>, mut item: impl FnMut(&mut Self, T)) {
@@ -919,8 +944,9 @@ impl Words {
 }
 
 /// Tag 17, [`focus::plain::RemovalQuestion`]: the removal (0 an app closed, then its pid; 1 a
-/// window removed, then the window), the focused window, the removed window's Space and macOS's
-/// key window (options), the successors (from, to), the successors in an inactive workspace.
+/// window removed, then the window), the focused window (an option), then its facts: the removed
+/// window's Space and macOS's key window (facts of options), the successors (answers: native
+/// window to successor), whether a successor is in an inactive workspace (answers).
 pub fn encode_removal_question(question: focus::plain::RemovalQuestion) -> Vec<u64> {
     let mut words = Words::default();
     words.word(17);
@@ -935,13 +961,14 @@ pub fn encode_removal_question(question: focus::plain::RemovalQuestion) -> Vec<u
         }
     }
     words.option(question.focused, Words::window);
-    words.option(question.removed_space, Words::word);
-    words.option(question.native_focus, Words::window);
-    words.list(question.successors, |words, (from, to)| {
-        words.window(from);
-        words.window(to);
+    words.fact(question.removed_space, |words, space| {
+        words.option(space, Words::word)
     });
-    words.list(question.inactive, Words::window);
+    words.fact(question.native_focus, |words, native| {
+        words.option(native, Words::window)
+    });
+    words.answers(question.successors, Words::window, Words::window);
+    words.answers(question.inactive, Words::window, Words::flag);
     words.0
 }
 
@@ -963,44 +990,52 @@ pub fn encode_removal_focus(answer: RemovalFocus<WindowId, u64>) -> Vec<u64> {
     words.0
 }
 
-/// Tag 18, [`focus::plain::Candidate`]: the preferred and last focused windows (options), the
-/// workspace's windows, the visible ones.
+/// Tag 18, [`focus::plain::Candidate`]: the preferred window (an option), then its facts: the last
+/// focused window (a fact of an option), the workspace's windows (a fact of a list), whether a
+/// window is visible (answers).
 pub fn encode_candidate(question: focus::plain::Candidate) -> Vec<u64> {
     let mut words = Words::default();
     words.word(18);
     words.option(question.preferred, Words::word);
-    words.option(question.last_focused, Words::word);
-    words.list(question.in_workspace, Words::word);
-    words.list(question.visible, Words::word);
+    words.fact(question.last_focused, |words, last| {
+        words.option(last, Words::word)
+    });
+    words.fact(question.in_workspace, |words, windows| {
+        words.list(windows, Words::word)
+    });
+    words.answers(question.visible, Words::word, Words::flag);
     words.0
 }
 
-/// Tag 19, [`focus::plain::Hides`]: the window, the main and focused windows (options), whether
-/// it is in an inactive workspace.
+/// Tag 19, [`focus::plain::Hides`]: the window, the main and focused windows (options), then its
+/// fact: whether it is in an inactive workspace.
 pub fn encode_hides(question: focus::plain::Hides) -> Vec<u64> {
     let mut words = Words::default();
     words.word(19);
     words.word(question.window);
     words.option(question.main, Words::word);
     words.option(question.focused, Words::word);
-    words.flag(question.in_inactive_workspace);
+    words.fact(question.in_inactive_workspace, Words::flag);
     words.0
 }
 
-/// Tag 20, [`focus::plain::Activation`]: the facts in the order they are asked.
+/// Tag 20, [`focus::plain::Activation`]: its facts in the order they are asked.
 pub fn encode_activation(question: focus::plain::Activation) -> Vec<u64> {
     let mut words = Words::default();
     words.word(20);
-    words.flag(question.standard);
-    words.flag(question.unavailable);
-    words.option(question.space, Words::word);
-    words.option(question.workspace, Words::word);
-    words.option(question.active_workspace, Words::word);
-    words.flag(question.pending_window);
-    words.option(question.mode_refusal, Words::word);
-    words.flag(question.active_space_fullscreen);
-    words.option(question.unmanageable_source, Words::word);
-    words.option(question.blacklisted, Words::flag);
+    let maybe = |words: &mut Words, word| words.option(word, Words::word);
+    words.fact(question.standard, Words::flag);
+    words.fact(question.unavailable, Words::flag);
+    words.fact(question.space, maybe);
+    words.fact(question.workspace, maybe);
+    words.fact(question.active_workspace, maybe);
+    words.fact(question.pending_window, Words::flag);
+    words.fact(question.mode_refusal, maybe);
+    words.fact(question.active_space_fullscreen, Words::flag);
+    words.fact(question.unmanageable_source, maybe);
+    words.fact(question.blacklisted, |words, listed| {
+        words.option(listed, Words::flag)
+    });
     words.0
 }
 
@@ -1041,27 +1076,31 @@ pub fn encode_follow(answer: Follow<u64, u64, u64, u64>) -> Vec<u64> {
 }
 
 /// Tag 21, [`focus::plain::DisplayFollow`]: the focused window's Space and the previous one
-/// (options), the active Spaces, the Spaces on a known display.
+/// (options), then its facts: whether a Space is active, whether it is on a known display
+/// (answers).
 pub fn encode_display_follow(question: focus::plain::DisplayFollow) -> Vec<u64> {
     let mut words = Words::default();
     words.word(21);
     words.option(question.focused_space, Words::word);
     words.option(question.previous, Words::word);
-    words.list(question.active, Words::word);
-    words.list(question.on_known_display, Words::word);
+    words.answers(question.active, Words::word, Words::flag);
+    words.answers(question.on_known_display, Words::word, Words::flag);
     words.0
 }
 
-/// Tag 22, [`focus::plain::Untracked`]: the window under the cursor (an option), whether it is
-/// tracked, what is known of it (an option of its layer, sign-extended, and its app).
+/// Tag 22, [`focus::plain::Untracked`]: the window under the cursor (an option), then its facts:
+/// whether it is tracked, what is known of it (a fact of an option of its layer, sign-extended,
+/// and its app).
 pub fn encode_untracked(question: focus::plain::Untracked) -> Vec<u64> {
     let mut words = Words::default();
     words.word(22);
     words.option(question.under_cursor, Words::word);
-    words.flag(question.tracked);
-    words.option(question.known, |words, (layer, app)| {
-        words.word(i64::from(layer) as u64);
-        words.word(app);
+    words.fact(question.tracked, Words::flag);
+    words.fact(question.known, |words, known| {
+        words.option(known, |words, (layer, app)| {
+            words.word(i64::from(layer) as u64);
+            words.word(app);
+        })
     });
     words.0
 }
@@ -1086,13 +1125,13 @@ pub fn encode_untracked_focus(answer: UntrackedFocus<u64, u64>) -> Vec<u64> {
     words.0
 }
 
-/// Tag 23, [`focus::plain::Desktop`]: whether the Space is active, whether its workspace is
-/// empty.
+/// Tag 23, [`focus::plain::Desktop`]: whether the Space is active, then its fact: whether its
+/// workspace is empty.
 pub fn encode_desktop(question: focus::plain::Desktop) -> Vec<u64> {
     let mut words = Words::default();
     words.word(23);
     words.flag(question.active);
-    words.flag(question.workspace_empty);
+    words.fact(question.workspace_empty, Words::flag);
     words.0
 }
 

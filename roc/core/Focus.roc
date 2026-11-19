@@ -19,10 +19,56 @@ Maybe : [Some(U64), Nothing]
 ## A window, or none.
 MaybeWindow : [SomeWindow(WindowId), NoWindow]
 
+## A fact the platform's run of the decision answered, or one it never asked.
+Fact(a) : [Asked(a), Unasked]
+
+## A fact asked about keys: each key asked and its answer. Any other key was not asked.
+Answers(k, v) : List({ key : k, answer : v })
+
+## What a decision decided, or the first fact it read that its question does not carry (the
+## fact's place among the question's facts): it decides in another order than the platform's.
+Read(a) : Try(a, [Unasked(U64)])
+
 Focus := [].{
 
-	## What a removal does to focus.
-	removal_focus : [AppClosed(I32), WindowRemoved(WindowId)], MaybeWindow, Maybe, MaybeWindow, List({ from : WindowId, to : WindowId }), List(WindowId) -> [Unaffected, KeepNative(WindowId), Refocus(U64)]
+	## The `fact`-th fact's answer.
+	ask : Fact(a), U64 -> Read(a)
+	ask = |given, fact|
+		match given {
+			Asked(answer) => Ok(answer)
+			Unasked => Err(Unasked(fact))
+		}
+
+	## The `fact`-th fact's answer for a window.
+	ask_window : Answers(WindowId, v), WindowId, U64 -> Read(v)
+	ask_window = |answers, key, fact| {
+		var $found = Err(Unasked(fact))
+		for entry in answers {
+			match $found {
+				Err(Unasked(_)) => if (entry.key == key) { $found = Ok(entry.answer) } else {}
+				Ok(_) => {}
+			}
+		}
+		$found
+	}
+
+	## The `fact`-th fact's answer for a word.
+	ask_word : Answers(U64, v), U64, U64 -> Read(v)
+	ask_word = |answers, key, fact| {
+		var $found = Err(Unasked(fact))
+		for entry in answers {
+			match $found {
+				Err(Unasked(_)) => if (entry.key == key) { $found = Ok(entry.answer) } else {}
+				Ok(_) => {}
+			}
+		}
+		$found
+	}
+
+	## What a removal does to focus. Facts: 0 the removed window's Space, 1 macOS's key window, 2
+	## the successor a native window is tracked as, 3 whether a successor is in an inactive
+	## workspace.
+	removal_focus : [AppClosed(I32), WindowRemoved(WindowId)], MaybeWindow, Fact(Maybe), Fact(MaybeWindow), Answers(WindowId, WindowId), Answers(WindowId, Bool) -> Read([Unaffected, KeepNative(WindowId), Refocus(U64)])
 	removal_focus = |removal, focused, removed_space, native_focus, successors, inactive| {
 		removed =
 			match focused {
@@ -34,137 +80,169 @@ Focus := [].{
 				NoWindow => NoWindow
 			}
 		match removed {
-			NoWindow => Unaffected
-			SomeWindow(window) =>
-				match removed_space {
-					Nothing => Unaffected
+			NoWindow => Ok(Unaffected)
+			SomeWindow(window) => {
+				space_of = ask(removed_space, 0)?
+				match space_of {
+					Nothing => Ok(Unaffected)
 					Some(space) =>
 						match removal {
-							AppClosed(_) => Refocus(space)
-							WindowRemoved(_) =>
-								match native_focus {
+							AppClosed(_) => Ok(Refocus(space))
+							WindowRemoved(_) => {
+								native_of = ask(native_focus, 1)?
+								match native_of {
 									SomeWindow(native) =>
 										if native.pid == window.pid and native != window {
-											successor = successor_of(successors, native)
-											if successor != window and !inactive.contains(successor) {
-												KeepNative(successor)
+											successor = ask_window(successors, native, 2)?
+											if successor == window {
+												Ok(Refocus(space))
 											} else {
-												Refocus(space)
+												hidden = ask_window(inactive, successor, 3)?
+												if hidden Ok(Refocus(space)) else Ok(KeepNative(successor))
 											}
 										} else {
-											Refocus(space)
+											Ok(Refocus(space))
 										}
-									NoWindow => Refocus(space)
+									NoWindow => Ok(Refocus(space))
 								}
+							}
 						}
 				}
-		}
-	}
-
-	successor_of : List({ from : WindowId, to : WindowId }), WindowId -> WindowId
-	successor_of = |successors, native| {
-		var $found = NoWindow
-		for entry in successors {
-			match $found {
-				NoWindow => if (entry.from == native) { $found = SomeWindow(entry.to) } else {}
-				SomeWindow(_) => {}
 			}
-		}
-		match $found {
-			SomeWindow(to) => to
-			NoWindow => native
 		}
 	}
 
 	## The window to focus: preferred, else last focused, else the first of the workspace's,
-	## whichever is visible first.
-	focus_candidate : Maybe, Maybe, List(U64), List(U64) -> Maybe
+	## whichever is visible first. Facts: 0 the last focused window, 1 the workspace's windows, 2
+	## whether a window is visible.
+	focus_candidate : Maybe, Fact(Maybe), Fact(List(U64)), Answers(U64, Bool) -> Read(Maybe)
 	focus_candidate = |preferred, last_focused, in_workspace, visible| {
 		visible_one = |candidate|
 			match candidate {
-				Some(window) => if (visible.contains(window)) Some(window) else Nothing
-				Nothing => Nothing
+				Some(window) => {
+					shown = ask_word(visible, window, 2)?
+					if shown Ok(Some(window)) else Ok(Nothing)
+				}
+				Nothing => Ok(Nothing)
 			}
-		match visible_one(preferred) {
-			Some(window) => Some(window)
-			Nothing =>
-				match visible_one(last_focused) {
-					Some(window) => Some(window)
+		first = visible_one(preferred)?
+		match first {
+			Some(window) => Ok(Some(window))
+			Nothing => {
+				last = ask(last_focused, 0)?
+				second = visible_one(last)?
+				match second {
+					Some(window) => Ok(Some(window))
 					Nothing => {
-						var $found = Nothing
-						for window in in_workspace {
+						windows = ask(in_workspace, 1)?
+						var $found = Ok(Nothing)
+						for window in windows {
 							match $found {
-								Nothing => if (visible.contains(window)) { $found = Some(window) } else {}
-								Some(_) => {}
+								Ok(Nothing) =>
+									match ask_word(visible, window, 2) {
+										Ok(True) => { $found = Ok(Some(window)) }
+										Ok(False) => {}
+										Err(unasked) => { $found = Err(unasked) }
+									}
+								Ok(Some(_)) => {}
+								Err(_) => {}
 							}
 						}
 						$found
 					}
 				}
+			}
 		}
 	}
 
-	## Whether `window`, the main or the focused one, is hidden in an inactive workspace.
-	hides_focus : U64, Maybe, Maybe, Bool -> Bool
+	## Whether `window`, the main or the focused one, is hidden in an inactive workspace. Fact: 0
+	## whether it is in an inactive workspace.
+	hides_focus : U64, Maybe, Maybe, Fact(Bool) -> Read(Bool)
 	hides_focus = |window, main, focused, in_inactive_workspace| {
 		is = |candidate|
 			match candidate {
 				Some(id) => id == window
 				Nothing => False
 			}
-		(is(main) or is(focused)) and in_inactive_workspace
+		if is(main) or is(focused) ask(in_inactive_workspace, 0) else Ok(False)
 	}
 
 	## Whether an activation follows its window: 0 with the Space and workspace, or 1 with the
-	## reason (and its word, for a mode or an unmanageable source).
-	activation_follow : { standard : Bool, unavailable : Bool, space : Maybe, workspace : Maybe, active_workspace : Maybe, pending_window : Bool, mode_refusal : Maybe, active_space_fullscreen : Bool, unmanageable_source : Maybe, blacklisted : [Listed(Bool), NoBundle] } -> List(U64)
-	activation_follow = |facts|
-		if !facts.standard {
-			[1, 0]
-		} else if facts.unavailable {
-			[1, 1]
+	## reason (and its word, for a mode or an unmanageable source). Facts 0 to 9, in the order
+	## they are asked.
+	activation_follow : { standard : Fact(Bool), unavailable : Fact(Bool), space : Fact(Maybe), workspace : Fact(Maybe), active_workspace : Fact(Maybe), pending_window : Fact(Bool), mode_refusal : Fact(Maybe), active_space_fullscreen : Fact(Bool), unmanageable_source : Fact(Maybe), blacklisted : Fact([Listed(Bool), NoBundle]) } -> Read(List(U64))
+	activation_follow = |facts| {
+		standard = ask(facts.standard, 0)?
+		if !standard {
+			Ok([1, 0])
 		} else {
-			match facts.space {
-				Nothing => [1, 2]
-				Some(space) =>
-					match facts.workspace {
-						Nothing => [1, 3]
-						Some(workspace) => {
-							already =
-								match facts.active_workspace {
-									Some(active) => active == workspace
-									Nothing => True
-								}
-							if already {
-								[1, 4]
-							} else if facts.pending_window {
-								[1, 5]
-							} else {
-								match facts.mode_refusal {
-									Some(mode) => [1, 6, mode]
-									Nothing =>
-										if facts.active_space_fullscreen {
-											[1, 7]
-										} else {
-											match facts.unmanageable_source {
-												Some(server) => [1, 8, server]
-												Nothing =>
-													match facts.blacklisted {
-														NoBundle => [1, 9]
-														Listed(True) => [1, 10]
-														Listed(False) => [0, space, workspace]
-													}
-											}
-										}
+			unavailable = ask(facts.unavailable, 1)?
+			if unavailable {
+				Ok([1, 1])
+			} else {
+				space_of = ask(facts.space, 2)?
+				match space_of {
+					Nothing => Ok([1, 2])
+					Some(space) => {
+						workspace_of = ask(facts.workspace, 3)?
+						match workspace_of {
+							Nothing => Ok([1, 3])
+							Some(workspace) => {
+								active_of = ask(facts.active_workspace, 4)?
+								already =
+									match active_of {
+										Some(active) => active == workspace
+										Nothing => True
+									}
+								if already {
+									Ok([1, 4])
+								} else {
+									after_active(facts, space, workspace)
 								}
 							}
 						}
 					}
+				}
 			}
 		}
+	}
 
-	## The display to activate after a command moved the focused window.
-	display_to_follow : Maybe, Maybe, List(U64), List(U64) -> Maybe
+	## The rest of an activation follow, once its window's workspace is not the active one.
+	after_active : { standard : Fact(Bool), unavailable : Fact(Bool), space : Fact(Maybe), workspace : Fact(Maybe), active_workspace : Fact(Maybe), pending_window : Fact(Bool), mode_refusal : Fact(Maybe), active_space_fullscreen : Fact(Bool), unmanageable_source : Fact(Maybe), blacklisted : Fact([Listed(Bool), NoBundle]) }, U64, U64 -> Read(List(U64))
+	after_active = |facts, space, workspace| {
+		pending = ask(facts.pending_window, 5)?
+		if pending {
+			Ok([1, 5])
+		} else {
+			mode_of = ask(facts.mode_refusal, 6)?
+			match mode_of {
+				Some(mode) => Ok([1, 6, mode])
+				Nothing => {
+					fullscreen = ask(facts.active_space_fullscreen, 7)?
+					if fullscreen {
+						Ok([1, 7])
+					} else {
+						source_of = ask(facts.unmanageable_source, 8)?
+						match source_of {
+							Some(server) => Ok([1, 8, server])
+							Nothing => {
+								listed = ask(facts.blacklisted, 9)?
+								match listed {
+									NoBundle => Ok([1, 9])
+									Listed(True) => Ok([1, 10])
+									Listed(False) => Ok([0, space, workspace])
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	## The display to activate after a command moved the focused window. Facts: 0 whether a Space
+	## is active, 1 whether it is on a known display.
+	display_to_follow : Maybe, Maybe, Answers(U64, Bool), Answers(U64, Bool) -> Read(Maybe)
 	display_to_follow = |focused_space, previous, active, on_known_display|
 		match focused_space {
 			Some(space) => {
@@ -173,9 +251,19 @@ Focus := [].{
 						Some(before) => before != space
 						Nothing => True
 					}
-				if changed and active.contains(space) and on_known_display.contains(space) Some(space) else Nothing
+				if changed {
+					is_active = ask_word(active, space, 0)?
+					if is_active {
+						known = ask_word(on_known_display, space, 1)?
+						if known Ok(Some(space)) else Ok(Nothing)
+					} else {
+						Ok(Nothing)
+					}
+				} else {
+					Ok(Nothing)
+				}
 			}
-			Nothing => Nothing
+			Nothing => Ok(Nothing)
 		}
 
 	# The wire.
@@ -214,6 +302,30 @@ Focus := [].{
 		}
 	}
 
+	## A fact: a flag (0 unasked, 1 asked) and then its answer.
+	take_fact : Words, (Words -> Taken(a)) -> Taken(Fact(a))
+	take_fact = |c0, take_answer| {
+		(asked, c1) = take_flag(c0)?
+		if asked {
+			(answer, c2) = take_answer(c1)?
+			Ok((Asked(answer), c2))
+		} else {
+			Ok((Unasked, c1))
+		}
+	}
+
+	## Answers: a list of (key, answer).
+	take_answers : Words, (Words -> Taken(k)), (Words -> Taken(v)) -> Taken(Answers(k, v))
+	take_answers = |c0, take_key, take_answer|
+		take_list(
+			c0,
+			|c| {
+				(key, after) = take_key(c)?
+				(answer, rest) = take_answer(after)?
+				Ok(({ key, answer }, rest))
+			},
+		)
+
 	put_maybe : List(U64), Maybe -> List(U64)
 	put_maybe = |words, maybe|
 		match maybe {
@@ -225,7 +337,7 @@ Focus := [].{
 	put_verdict = |verdict| if (verdict) [1] else [0]
 
 	## Tag 17.
-	removal_words : Words -> Try(List(U64), [Malformed])
+	removal_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	removal_words = |c0| {
 		(kind, c1) = take(c0)?
 		(removal, c2) =
@@ -235,18 +347,14 @@ Focus := [].{
 				_ => Err(Malformed)
 			}?
 		(focused, c3) = take_maybe_window(c2)?
-		(removed_space, c4) = take_maybe(c3)?
-		(native_focus, c5) = take_maybe_window(c4)?
-		take_pair = |c| {
-			(from, after) = take_window(c)?
-			(to, rest) = take_window(after)?
-			Ok(({ from, to }, rest))
-		}
-		(successors, c6) = take_list(c5, take_pair)?
-		(inactive, c7) = take_list(c6, take_window)?
+		(removed_space, c4) = take_fact(c3, take_maybe)?
+		(native_focus, c5) = take_fact(c4, take_maybe_window)?
+		(successors, c6) = take_answers(c5, take_window, take_window)?
+		(inactive, c7) = take_answers(c6, take_window, take_flag)?
 		finished(c7)?
+		answer = removal_focus(removal, focused, removed_space, native_focus, successors, inactive)?
 		Ok(
-			match removal_focus(removal, focused, removed_space, native_focus, successors, inactive) {
+			match answer {
 				Unaffected => [0]
 				KeepNative(window) => put_window([1], window)
 				Refocus(space) => [2, space]
@@ -255,99 +363,127 @@ Focus := [].{
 	}
 
 	## Tag 18.
-	candidate_words : Words -> Try(List(U64), [Malformed])
+	candidate_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	candidate_words = |c0| {
 		(preferred, c1) = take_maybe(c0)?
-		(last_focused, c2) = take_maybe(c1)?
-		(in_workspace, c3) = take_list(c2, take)?
-		(visible, c4) = take_list(c3, take)?
+		(last_focused, c2) = take_fact(c1, take_maybe)?
+		(in_workspace, c3) = take_fact(c2, |c| take_list(c, take))?
+		(visible, c4) = take_answers(c3, take, take_flag)?
 		finished(c4)?
-		Ok(put_maybe([], focus_candidate(preferred, last_focused, in_workspace, visible)))
+		answer = focus_candidate(preferred, last_focused, in_workspace, visible)?
+		Ok(put_maybe([], answer))
 	}
 
 	## Tag 19.
-	hides_words : Words -> Try(List(U64), [Malformed])
+	hides_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	hides_words = |c0| {
 		(window, c1) = take(c0)?
 		(main, c2) = take_maybe(c1)?
 		(focused, c3) = take_maybe(c2)?
-		(in_inactive_workspace, c4) = take_flag(c3)?
+		(in_inactive_workspace, c4) = take_fact(c3, take_flag)?
 		finished(c4)?
-		Ok(put_verdict(hides_focus(window, main, focused, in_inactive_workspace)))
+		answer = hides_focus(window, main, focused, in_inactive_workspace)?
+		Ok(put_verdict(answer))
+	}
+
+	## A bundle's blacklisting: a flag (0 no bundle id, 1 one) and then whether it is listed.
+	take_listing : Words -> Taken([Listed(Bool), NoBundle])
+	take_listing = |c0| {
+		(has_bundle, c1) = take_flag(c0)?
+		if has_bundle {
+			(listed, c2) = take_flag(c1)?
+			Ok((Listed(listed), c2))
+		} else {
+			Ok((NoBundle, c1))
+		}
 	}
 
 	## Tag 20.
-	activation_words : Words -> Try(List(U64), [Malformed])
+	activation_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	activation_words = |c0| {
-		(standard, c1) = take_flag(c0)?
-		(unavailable, c2) = take_flag(c1)?
-		(space, c3) = take_maybe(c2)?
-		(workspace, c4) = take_maybe(c3)?
-		(active_workspace, c5) = take_maybe(c4)?
-		(pending_window, c6) = take_flag(c5)?
-		(mode_refusal, c7) = take_maybe(c6)?
-		(active_space_fullscreen, c8) = take_flag(c7)?
-		(unmanageable_source, c9) = take_maybe(c8)?
-		(has_bundle, c10) = take_flag(c9)?
-		(blacklisted, c11) =
-			if has_bundle {
-				(listed, rest) = take_flag(c10)?
-				(Listed(listed), rest)
-			} else {
-				(NoBundle, c10)
-			}
-		finished(c11)?
-		Ok(activation_follow({ standard, unavailable, space, workspace, active_workspace, pending_window, mode_refusal, active_space_fullscreen, unmanageable_source, blacklisted }))
+		(standard, c1) = take_fact(c0, take_flag)?
+		(unavailable, c2) = take_fact(c1, take_flag)?
+		(space, c3) = take_fact(c2, take_maybe)?
+		(workspace, c4) = take_fact(c3, take_maybe)?
+		(active_workspace, c5) = take_fact(c4, take_maybe)?
+		(pending_window, c6) = take_fact(c5, take_flag)?
+		(mode_refusal, c7) = take_fact(c6, take_maybe)?
+		(active_space_fullscreen, c8) = take_fact(c7, take_flag)?
+		(unmanageable_source, c9) = take_fact(c8, take_maybe)?
+		(blacklisted, c10) = take_fact(c9, take_listing)?
+		finished(c10)?
+		answer = activation_follow({ standard, unavailable, space, workspace, active_workspace, pending_window, mode_refusal, active_space_fullscreen, unmanageable_source, blacklisted })?
+		Ok(answer)
 	}
 
 	## Tag 21.
-	display_follow_words : Words -> Try(List(U64), [Malformed])
+	display_follow_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	display_follow_words = |c0| {
 		(focused_space, c1) = take_maybe(c0)?
 		(previous, c2) = take_maybe(c1)?
-		(active, c3) = take_list(c2, take)?
-		(on_known_display, c4) = take_list(c3, take)?
+		(active, c3) = take_answers(c2, take, take_flag)?
+		(on_known_display, c4) = take_answers(c3, take, take_flag)?
 		finished(c4)?
-		Ok(put_maybe([], display_to_follow(focused_space, previous, active, on_known_display)))
+		answer = display_to_follow(focused_space, previous, active, on_known_display)?
+		Ok(put_maybe([], answer))
 	}
 
-	## Tag 22. A layer is echoed as its word: 0 is an application window.
-	untracked_words : Words -> Try(List(U64), [Malformed])
+	## What is known of a window: a flag and then its layer (as its word) and app.
+	take_known : Words -> Taken([Known({ layer : U64, owner : U64 }), Unknown])
+	take_known = |c0| {
+		(has_known, c1) = take_flag(c0)?
+		if has_known {
+			(layer, c2) = take(c1)?
+			(owner, c3) = take(c2)?
+			Ok((Known({ layer, owner }), c3))
+		} else {
+			Ok((Unknown, c1))
+		}
+	}
+
+	## Whether to make the untracked window under the cursor key. Facts: 0 whether it is
+	## tracked, 1 what is known of it. A layer is echoed as its word: 0 is an application
+	## window.
+	untracked_focus : Maybe, Fact(Bool), Fact([Known({ layer : U64, owner : U64 }), Unknown]) -> Read(List(U64))
+	untracked_focus = |under_cursor, tracked, known|
+		match under_cursor {
+			Nothing => Ok([0])
+			Some(window) => {
+				is_tracked = ask(tracked, 0)?
+				if is_tracked {
+					Ok([0])
+				} else {
+					known_of = ask(known, 1)?
+					match known_of {
+						Unknown => Ok([0])
+						Known({ layer, owner }) => if (layer == 0) Ok([2, owner, window]) else Ok([1, layer, window])
+					}
+				}
+			}
+		}
+
+	## Tag 22.
+	untracked_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	untracked_words = |c0| {
 		(under_cursor, c1) = take_maybe(c0)?
-		(tracked, c2) = take_flag(c1)?
-		(has_known, c3) = take_flag(c2)?
-		(known, c4) =
-			if has_known {
-				(layer, after) = take(c3)?
-				(owner, rest) = take(after)?
-				(Known({ layer, owner }), rest)
-			} else {
-				(Unknown, c3)
-			}
-		finished(c4)?
-		Ok(
-			match under_cursor {
-				Nothing => [0]
-				Some(window) =>
-					if tracked {
-						[0]
-					} else {
-						match known {
-							Unknown => [0]
-							Known({ layer, owner }) => if (layer == 0) [2, owner, window] else [1, layer, window]
-						}
-					}
-			},
-		)
+		(tracked, c2) = take_fact(c1, take_flag)?
+		(known, c3) = take_fact(c2, take_known)?
+		finished(c3)?
+		answer = untracked_focus(under_cursor, tracked, known)?
+		Ok(answer)
 	}
 
+	## Whether to focus a Space's desktop. Fact: 0 whether its workspace is empty.
+	focuses_desktop : Bool, Fact(Bool) -> Read(Bool)
+	focuses_desktop = |active, workspace_empty| if active ask(workspace_empty, 0) else Ok(False)
+
 	## Tag 23.
-	desktop_words : Words -> Try(List(U64), [Malformed])
+	desktop_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	desktop_words = |c0| {
 		(active, c1) = take_flag(c0)?
-		(workspace_empty, c2) = take_flag(c1)?
+		(workspace_empty, c2) = take_fact(c1, take_flag)?
 		finished(c2)?
-		Ok(put_verdict(active and workspace_empty))
+		answer = focuses_desktop(active, workspace_empty)?
+		Ok(put_verdict(answer))
 	}
 }
