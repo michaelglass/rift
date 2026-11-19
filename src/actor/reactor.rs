@@ -4002,17 +4002,13 @@ impl Reactor {
                 let target = self.space_state.screens[target].space.unwrap();
                 workspaces[id].home = workspaces[id].home.with_space(target);
                 if let Some(activation) = workspaces.active_workspace_per_space.get_mut(&old)
-                    && activation.remembered.or(activation.current) == Some(id)
+                    && activation.remembered().or(activation.current()) == Some(id)
                 {
-                    activation.remembered = None;
+                    activation.forget_memory();
                     if workspaces[id].space == target {
                         workspaces.set_active_workspace(target, id);
                     } else {
-                        workspaces
-                            .active_workspace_per_space
-                            .entry(target)
-                            .or_default()
-                            .remembered = Some(id);
+                        workspaces.remember_on(target, id);
                     }
                 }
             }

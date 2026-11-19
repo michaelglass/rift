@@ -427,23 +427,173 @@ impl VirtualWorkspace {
     pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
 }
 
-/// Current ownership is never inferred from home intent. A departed display can
-/// remember its presentation without keeping a foreign workspace in its active slot.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct SpaceActivation {
-    pub current: Option<VirtualWorkspaceId>,
-    /// Navigation history; global mode can return to a workspace on another display.
-    pub previous: Option<VirtualWorkspaceId>,
-    pub remembered: Option<VirtualWorkspaceId>,
+/// What a native Space shows. Current ownership is never inferred from home intent: a
+/// departed display can remember its presentation without keeping a foreign workspace in its
+/// active slot, and show a fallback meanwhile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceActivation {
+    /// Showing `current`. `previous` is navigation history (global mode can return to a
+    /// workspace on another display), none yet if `None`.
+    Showing {
+        current: VirtualWorkspaceId,
+        previous: Option<VirtualWorkspaceId>,
+        remembered: Option<VirtualWorkspaceId>,
+    },
+    /// Showing nothing.
+    Vacant {
+        remembered: Option<VirtualWorkspaceId>,
+    },
+}
+// In both, `remembered` is the presentation a departed display takes back when that
+// workspace's ownership returns; none if `None`.
+
+impl Default for SpaceActivation {
+    fn default() -> Self { SpaceActivation::Vacant { remembered: None } }
 }
 
 impl SpaceActivation {
     fn showing(id: VirtualWorkspaceId) -> Self {
-        Self {
-            current: Some(id),
-            ..Self::default()
+        SpaceActivation::Showing {
+            current: id,
+            previous: None,
+            remembered: None,
         }
     }
+
+    pub fn current(&self) -> Option<VirtualWorkspaceId> {
+        match *self {
+            SpaceActivation::Showing { current, .. } => Some(current),
+            SpaceActivation::Vacant { .. } => None,
+        }
+    }
+
+    pub fn previous(&self) -> Option<VirtualWorkspaceId> {
+        match *self {
+            SpaceActivation::Showing { previous, .. } => previous,
+            SpaceActivation::Vacant { .. } => None,
+        }
+    }
+
+    pub fn remembered(&self) -> Option<VirtualWorkspaceId> {
+        match *self {
+            SpaceActivation::Showing { remembered, .. }
+            | SpaceActivation::Vacant { remembered } => remembered,
+        }
+    }
+
+    fn remembered_mut(&mut self) -> &mut Option<VirtualWorkspaceId> {
+        match self {
+            SpaceActivation::Showing { remembered, .. }
+            | SpaceActivation::Vacant { remembered } => remembered,
+        }
+    }
+
+    /// Shows `id`, the workspace shown until now becoming the previous one.
+    fn activate(&mut self, id: VirtualWorkspaceId) {
+        *self = match *self {
+            SpaceActivation::Showing { current, previous, remembered } if current == id => {
+                SpaceActivation::Showing { current, previous, remembered }
+            }
+            SpaceActivation::Showing { current, remembered, .. } => SpaceActivation::Showing {
+                current: id,
+                previous: Some(current),
+                remembered,
+            },
+            SpaceActivation::Vacant { remembered } => SpaceActivation::Showing {
+                current: id,
+                previous: None,
+                remembered,
+            },
+        };
+    }
+
+    /// Remembers `id`, to take it back when its ownership returns.
+    fn remember(&mut self, id: VirtualWorkspaceId) { *self.remembered_mut() = Some(id); }
+
+    /// Forgets the remembered presentation, whichever it is.
+    pub(crate) fn forget_memory(&mut self) { *self.remembered_mut() = None; }
+
+    /// Keeps only history and memory that `keep` accepts.
+    fn retain(&mut self, keep: impl Fn(VirtualWorkspaceId) -> bool) {
+        if let SpaceActivation::Showing { previous, .. } = self {
+            *previous = previous.filter(|&id| keep(id));
+        }
+        let remembered = self.remembered_mut();
+        *remembered = remembered.filter(|&id| keep(id));
+    }
+}
+
+/// A Space's activation as it is saved: three independent fields (and, older still, a pair).
+#[derive(Deserialize)]
+#[serde(rename = "SpaceActivation")]
+struct SavedActivation {
+    current: Option<VirtualWorkspaceId>,
+    previous: Option<VirtualWorkspaceId>,
+    remembered: Option<VirtualWorkspaceId>,
+}
+
+/// [`SavedActivation`] from an activation, for writing.
+#[derive(Serialize)]
+#[serde(rename = "SpaceActivation")]
+struct SavedActivationRef {
+    current: Option<VirtualWorkspaceId>,
+    previous: Option<VirtualWorkspaceId>,
+    remembered: Option<VirtualWorkspaceId>,
+}
+
+impl Serialize for SpaceActivation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SavedActivationRef {
+            current: self.current(),
+            previous: self.previous(),
+            remembered: self.remembered(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl SpaceActivation {
+    /// A saved activation, as a Space can hold it. History with nothing shown is dropped, with
+    /// one log line: it means a mid-operation state was saved.
+    fn from_saved(space: SpaceId, saved: SavedActivation) -> SpaceActivation {
+        match saved {
+            SavedActivation {
+                current: Some(current),
+                previous,
+                remembered,
+            } => SpaceActivation::Showing { current, previous, remembered },
+            SavedActivation {
+                current: None,
+                previous,
+                remembered,
+            } => {
+                if let Some(previous) = previous {
+                    warn!(
+                        space = space.get(),
+                        ?previous,
+                        "workspace-load: normalized: dropped navigation history on a Space showing nothing"
+                    );
+                }
+                SpaceActivation::Vacant { remembered }
+            }
+        }
+    }
+}
+
+/// History left on a Space that shows nothing: it never happens after an event, so tests fail
+/// on it, and a running Rift says so, drops it and goes on.
+fn dropped_history(space: SpaceId, previous: VirtualWorkspaceId) {
+    #[cfg(test)]
+    panic!(
+        "workspace-activation: dropped navigation history on space {} ({previous:?})",
+        space.get()
+    );
+    #[cfg(not(test))]
+    warn!(
+        space = space.get(),
+        ?previous,
+        "workspace-activation: dropped navigation history on a Space showing nothing"
+    );
 }
 
 fn deserialize_activations<'de, D: serde::Deserializer<'de>>(
@@ -452,16 +602,16 @@ fn deserialize_activations<'de, D: serde::Deserializer<'de>>(
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Snapshot {
-        Current(SpaceActivation),
+        Current(SavedActivation),
         Legacy(Option<VirtualWorkspaceId>, VirtualWorkspaceId),
     }
     Ok(HashMap::<SpaceId, Snapshot>::deserialize(deserializer)?
         .into_iter()
         .map(|(space, saved)| {
             let activation = match saved {
-                Snapshot::Current(activation) => activation,
-                Snapshot::Legacy(previous, current) => SpaceActivation {
-                    current: Some(current),
+                Snapshot::Current(saved) => SpaceActivation::from_saved(space, saved),
+                Snapshot::Legacy(previous, current) => SpaceActivation::Showing {
+                    current,
                     previous,
                     remembered: None,
                 },
@@ -701,9 +851,9 @@ impl WorkspaceStore {
         if reason == WorkspaceTransferReason::Explicit
             && let Some(home) = workspace.home.space()
             && let Some(activation) = self.active_workspace_per_space.get_mut(&home)
-            && activation.remembered == Some(id)
+            && activation.remembered() == Some(id)
         {
-            activation.remembered = None;
+            activation.forget_memory();
         }
         if source == target {
             if reason != WorkspaceTransferReason::Explicit {
@@ -717,8 +867,8 @@ impl WorkspaceStore {
         }
         if reason == WorkspaceTransferReason::DisplayDeparture {
             let activation = self.active_workspace_per_space.entry(source).or_default();
-            if activation.current == Some(id) && activation.remembered.is_none() {
-                activation.remembered = Some(id);
+            if activation.current() == Some(id) && activation.remembered().is_none() {
+                activation.remember(id);
             }
         }
         let workspace = &mut self[id];
@@ -733,10 +883,10 @@ impl WorkspaceStore {
             || self
                 .active_workspace_per_space
                 .get(&target)
-                .is_some_and(|activation| activation.remembered == Some(id))
+                .is_some_and(|activation| activation.remembered() == Some(id))
         {
             self.set_active_workspace(target, id);
-            self.active_workspace_per_space.get_mut(&target).unwrap().remembered = None;
+            self.active_workspace_per_space.get_mut(&target).unwrap().forget_memory();
         }
         self.repair_activation(source);
         self.repair_activation(target);
@@ -771,37 +921,69 @@ impl WorkspaceStore {
 
     pub(crate) fn migrate_legacy_activation(&mut self) {
         for (&space, activation) in &mut self.active_workspace_per_space {
-            if let Some(id) = activation.current
+            if let Some(id) = activation.current()
                 && self.workspaces.get(id).is_some_and(|workspace| {
                     workspace.space != space && workspace.home.space() == Some(space)
                 })
             {
-                activation.remembered = Some(id);
-                activation.current =
-                    self.order.iter().copied().find(|id| self.workspaces[*id].space == space);
+                // A Space showing a workspace that moved away remembers it and shows its own
+                // first one, if it has one.
+                let previous = activation.previous();
+                *activation = match self
+                    .order
+                    .iter()
+                    .copied()
+                    .find(|id| self.workspaces[*id].space == space)
+                {
+                    Some(current) => SpaceActivation::Showing {
+                        current,
+                        previous,
+                        remembered: Some(id),
+                    },
+                    None => {
+                        if let Some(previous) = previous {
+                            warn!(
+                                space = space.get(),
+                                ?previous,
+                                "workspace-load: normalized: dropped navigation history on a Space showing nothing"
+                            );
+                        }
+                        SpaceActivation::Vacant { remembered: Some(id) }
+                    }
+                };
             }
-            if activation.previous == activation.current {
-                activation.previous = None;
+            if let SpaceActivation::Showing { current, previous, .. } = activation
+                && *previous == Some(*current)
+            {
+                *previous = None;
             }
         }
     }
 
     fn repair_activation(&mut self, space: SpaceId) {
         let owned = |id| self.workspaces.get(id).is_some_and(|workspace| workspace.space == space);
-        let mut activation =
-            self.active_workspace_per_space.get(&space).copied().unwrap_or_default();
-        if !activation.current.is_some_and(owned) {
-            activation.current = activation
-                .previous
-                .filter(|&id| owned(id))
-                .or_else(|| self.workspaces_on(space).next());
-        }
-        activation.previous = activation.previous.filter(|&id| {
+        let activation = self.active_workspace_per_space.get(&space).copied().unwrap_or_default();
+        let (previous, remembered) = (activation.previous(), activation.remembered());
+        let current = activation
+            .current()
+            .filter(|&id| owned(id))
+            .or_else(|| previous.filter(|&id| owned(id)))
+            .or_else(|| self.workspaces_on(space).next());
+        let previous = previous.filter(|&id| {
             self.workspaces.contains_key(id)
-                && Some(id) != activation.current
+                && Some(id) != current
                 && (self.effective_mode() == WorkspaceMode::Global || owned(id))
         });
-        self.active_workspace_per_space.insert(space, activation);
+        let repaired = match current {
+            Some(current) => SpaceActivation::Showing { current, previous, remembered },
+            None => {
+                if let Some(previous) = previous {
+                    dropped_history(space, previous);
+                }
+                SpaceActivation::Vacant { remembered }
+            }
+        };
+        self.active_workspace_per_space.insert(space, repaired);
     }
 
     pub(crate) fn ensure_layouts_for_size(&mut self, space: SpaceId, size: CGSize) {
@@ -1187,13 +1369,13 @@ impl WorkspaceStore {
         }
         for (&space, activation) in &self.active_workspace_per_space {
             for (kind, id) in [
-                ("active", activation.current),
-                ("previous", activation.previous),
+                ("active", activation.current()),
+                ("previous", activation.previous()),
             ] {
                 if id.is_some_and(|id| {
                     !self.workspaces.contains_key(id)
                         || (kind == "active" && self.workspace_space(id) != Some(space))
-                        || (kind == "previous" && Some(id) == activation.current)
+                        || (kind == "previous" && Some(id) == activation.current())
                 }) {
                     return Err(format!(
                         "native space {} has an invalid {kind} workspace",
@@ -1201,7 +1383,7 @@ impl WorkspaceStore {
                     ));
                 }
             }
-            if activation.remembered.is_some_and(|id| !self.workspaces.contains_key(id)) {
+            if activation.remembered().is_some_and(|id| !self.workspaces.contains_key(id)) {
                 return Err(format!(
                     "native space {} remembers a missing workspace",
                     space.get()
@@ -1281,9 +1463,7 @@ impl WorkspaceStore {
         self.order.retain(|id| !removed.contains(id));
         self.active_workspace_per_space.remove(&space);
         for activation in self.active_workspace_per_space.values_mut() {
-            for slot in [&mut activation.previous, &mut activation.remembered] {
-                *slot = slot.filter(|id| !removed.contains(id));
-            }
+            activation.retain(|id| !removed.contains(&id));
         }
         removed
     }
@@ -1333,12 +1513,17 @@ impl WorkspaceStore {
         Ok(id)
     }
 
+    /// `space` remembers `id`, to take it back when its ownership returns.
+    pub(crate) fn remember_on(&mut self, space: SpaceId, id: VirtualWorkspaceId) {
+        self.active_workspace_per_space.entry(space).or_default().remember(id);
+    }
+
     pub fn last_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.active_workspace_per_space.get(&space)?.previous
+        self.active_workspace_per_space.get(&space)?.previous()
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.active_workspace_per_space.get(&space)?.current
+        self.active_workspace_per_space.get(&space)?.current()
     }
 
     pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
@@ -1360,8 +1545,12 @@ impl WorkspaceStore {
         if !self.set_active_workspace(target, workspace_id) {
             return false;
         }
-        if self.effective_mode() == WorkspaceMode::Global && source != target {
-            self.active_workspace_per_space.get_mut(&target).unwrap().previous = previous;
+        if self.effective_mode() == WorkspaceMode::Global
+            && source != target
+            && let Some(SpaceActivation::Showing { previous: history, .. }) =
+                self.active_workspace_per_space.get_mut(&target)
+        {
+            *history = previous;
         }
         true
     }
@@ -1380,10 +1569,7 @@ impl WorkspaceStore {
                 );
                 return false;
             }
-            let activation = self.active_workspace_per_space.entry(space).or_default();
-            if activation.current != Some(workspace_id) {
-                activation.previous = activation.current.replace(workspace_id);
-            }
+            self.active_workspace_per_space.entry(space).or_default().activate(workspace_id);
             true
         })
     }
@@ -2742,6 +2928,144 @@ mod tests {
                 "the saved form is unchanged"
             );
         }
+    }
+
+    #[test]
+    fn a_departed_display_shows_a_fallback_remembers_its_workspace_and_takes_it_back() {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            mode: WorkspaceMode::PerDisplay,
+            ..Default::default()
+        };
+        let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let (source, target) = (SpaceId::new(51), SpaceId::new(52));
+        let [shown, fallback] = [0, 1].map(|i| store.list_workspaces(source)[i].0);
+        store.list_workspaces(target);
+        store.set_active_workspace(source, shown);
+        // The display leaves; another workspace stays on its Space.
+        assert!(store.transfer_workspace(
+            shown,
+            target,
+            Some("other"),
+            WorkspaceTransferReason::DisplayDeparture
+        ));
+        assert_eq!(
+            store.active_workspace_per_space[&source],
+            SpaceActivation::Showing {
+                current: fallback,
+                previous: None,
+                remembered: Some(shown)
+            }
+        );
+        // It comes back and takes its workspace back.
+        assert!(store.transfer_workspace(
+            shown,
+            source,
+            Some("home"),
+            WorkspaceTransferReason::Restoration
+        ));
+        assert_eq!(store.active_workspace(source), Some(shown));
+        assert_eq!(store.active_workspace_per_space[&source].remembered(), None);
+        store.validate_persisted_topology().unwrap();
+    }
+
+    /// Collects the messages of the events logged while `run` runs on this thread.
+    fn logged(run: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        struct Collect(Arc<Mutex<Vec<String>>>);
+        struct Message<'a>(&'a mut String);
+        impl tracing::field::Visit for Message<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    *self.0 = format!("{value:?}");
+                }
+            }
+        }
+        impl tracing::Subscriber for Collect {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut message = String::new();
+                event.record(&mut Message(&mut message));
+                self.0.lock().unwrap().push(message);
+            }
+
+            fn enter(&self, _: &tracing::span::Id) {}
+
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(Collect(lines.clone()), run);
+        lines.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_saved_activation_with_history_and_nothing_shown_loads_vacant_and_says_so() {
+        let mut ids = SlotMap::<VirtualWorkspaceId, ()>::with_key();
+        let (previous, remembered) = (ids.insert(()), ids.insert(()));
+        let space = SpaceId::new(7);
+        let saved = |previous: Option<VirtualWorkspaceId>,
+                     remembered: Option<VirtualWorkspaceId>| {
+            SavedActivation {
+                current: None,
+                previous,
+                remembered,
+            }
+        };
+        let mut loaded = None;
+        let lines = logged(|| {
+            loaded = Some(SpaceActivation::from_saved(
+                space,
+                saved(Some(previous), Some(remembered)),
+            ))
+        });
+        assert_eq!(
+            loaded,
+            Some(SpaceActivation::Vacant { remembered: Some(remembered) })
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("workspace-load: normalized"), "{lines:?}");
+        // Without history, nothing to normalize and nothing said.
+        let lines = logged(|| {
+            loaded = Some(SpaceActivation::from_saved(space, saved(None, Some(remembered))))
+        });
+        assert_eq!(
+            loaded,
+            Some(SpaceActivation::Vacant { remembered: Some(remembered) })
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn a_saved_activation_showing_and_remembering_loads_as_it_was() {
+        let mut ids = SlotMap::<VirtualWorkspaceId, ()>::with_key();
+        let (current, previous, remembered) = (ids.insert(()), ids.insert(()), ids.insert(()));
+        let space = SpaceId::new(7);
+        let mut loaded = None;
+        let lines = logged(|| {
+            loaded = Some(SpaceActivation::from_saved(space, SavedActivation {
+                current: Some(current),
+                previous: Some(previous),
+                remembered: Some(remembered),
+            }))
+        });
+        assert_eq!(
+            loaded,
+            Some(SpaceActivation::Showing {
+                current,
+                previous: Some(previous),
+                remembered: Some(remembered)
+            })
+        );
+        assert!(lines.is_empty(), "{lines:?}");
     }
 
     #[test]

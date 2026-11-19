@@ -289,7 +289,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let loaded = LayoutEngine::deserialize_from_str(&file).unwrap();
     assert_eq!(loaded.workspaces.active_workspace(a), replacement);
     assert_eq!(
-        loaded.workspaces.active_workspace_per_space[&a].remembered,
+        loaded.workspaces.active_workspace_per_space[&a].remembered(),
         Some(moved)
     );
 

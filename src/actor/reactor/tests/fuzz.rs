@@ -137,6 +137,11 @@ enum Step {
     DestroyIdentity { w: usize },
     /// Window `w` leaves native fullscreen: the window server shows it on its space again.
     LeaveFullscreen { w: usize },
+    /// The last display is disconnected (if there is more than one, none is away, and no window
+    /// is held).
+    DisplayDeparts,
+    /// The display that left is reconnected, with its Space.
+    DisplayReturns,
 }
 
 impl Step {
@@ -171,6 +176,8 @@ impl Step {
             Step::DestroyIdentity { .. } => "destroy-identity",
             Step::LeaveFullscreen { .. } => "leave-fullscreen",
             Step::Sizing { .. } => "sizing",
+            Step::DisplayDeparts => "display-departs",
+            Step::DisplayReturns => "display-returns",
         }
     }
 }
@@ -196,7 +203,7 @@ impl Rng {
 fn generate(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng::new(seed);
     (0..len)
-        .map(|_| match rng.below(108) {
+        .map(|_| match rng.below(110) {
             0..9 => Step::DragStart {
                 w: rng.below(16),
                 dx: rng.delta(),
@@ -259,7 +266,9 @@ fn generate(seed: u64, len: usize) -> Vec<Step> {
             104 => Step::Rekey { w: rng.below(16) },
             105 => Step::EnterFullscreen { w: rng.below(16) },
             106 => Step::DestroyIdentity { w: rng.below(16) },
-            _ => Step::LeaveFullscreen { w: rng.below(16) },
+            107 => Step::LeaveFullscreen { w: rng.below(16) },
+            108 => Step::DisplayDeparts,
+            _ => Step::DisplayReturns,
         })
         .collect()
 }
@@ -348,6 +357,8 @@ struct Sim {
     reads: BTreeMap<WindowId, Read>,
     stale_reads: BTreeMap<WindowId, Read>,
     held: Option<Held>,
+    /// The display that left, and its Space, until it returns.
+    departed: Option<(CGRect, SpaceId)>,
     pending: Vec<Request>,
     /// The window whose frame this step reported somewhere new.
     moved: Option<WindowId>,
@@ -482,6 +493,7 @@ impl Sim {
             reads: BTreeMap::new(),
             stale_reads: BTreeMap::new(),
             held: None,
+            departed: None,
             pending: Vec::new(),
             moved: None,
             settled_before: BTreeMap::new(),
@@ -668,6 +680,24 @@ impl Sim {
     }
 
     fn held_window(&self) -> Option<WindowId> { self.held.as_ref().map(|held| held.window) }
+
+    /// The window server reports the displays now, each with its Space, and every window's
+    /// Space membership observed, so the snapshot commits; `changed` if the display set changed.
+    fn announce_displays(&mut self, changed: bool) {
+        let spaces: Vec<_> = self.spaces.iter().copied().map(Some).collect();
+        let display_space_ids = self
+            .spaces
+            .iter()
+            .enumerate()
+            .map(|(index, space)| (format!("test-display-{index}"), vec![*space]))
+            .collect();
+        self.reactor
+            .handle_event(space_state_event_with(self.screens.clone(), spaces, |state| {
+                state.display_set_changed = changed;
+                state.membership_complete = true;
+                state.display_space_ids = display_space_ids;
+            }));
+    }
 
     /// Where the user's pointer is, while they hold a window.
     fn pointer(&self) -> Option<CGPoint> {
@@ -974,6 +1004,25 @@ impl Sim {
                 let wid = self.pick(w);
                 if self.live.contains(&wid) {
                     _ = self.reactor.release_window(wid, FUZZ_OWNER);
+                }
+            }
+            Step::DisplayDeparts => {
+                // Not while the user holds a window: how macOS moves a held window and the
+                // pointer off a disconnected display is not modelled.
+                if self.screens.len() > 1 && self.departed.is_none() && self.held.is_none() {
+                    // The displays as they are, then without the last one.
+                    self.announce_displays(false);
+                    let screen = self.screens.pop().unwrap();
+                    let space = self.spaces.pop().unwrap();
+                    self.departed = Some((screen, space));
+                    self.announce_displays(true);
+                }
+            }
+            Step::DisplayReturns => {
+                if let Some((screen, space)) = self.departed.take() {
+                    self.screens.push(screen);
+                    self.spaces.push(space);
+                    self.announce_displays(true);
                 }
             }
             Step::ReorderDisplays => {
