@@ -100,12 +100,43 @@ ship.
    store answers from the core; its index and the record's assignment go). **W4d, the catalog
    and activation flip with the saved form written from the core, waits for #688 and goes with
    W6: no persistence change before #688.**
-3. **W5 fuzzer gap.** No fuzzer step reaches a DisplayDeparture transfer: in the test
-   reactor's global-mode setup a departure moves no workspace. Find the snapshot that drives
-   `plan_workspace_placements` to one, make a fuzzer step reach it, and re-measure activation
-   shapes after W5. The store-level literal test covers "a departure leaves a fallback shown".
-   (The remap path, a Space remapped onto one holding workspaces with a window and a claim on
-   them, is reached by a reactor test now; a remap skipping the core fails it.)
+3. **W5 fuzzer gap (in progress).** Why no departure transferred: the test reactor is
+   **per display**, not global (the earlier note was wrong), and `reconcile_workspace_placements`
+   returns early outside global mode. 45932e6e adds fuzzer setups (`Workspaces::PerDisplay |
+   Global | GlobalRuled`, the rule pinning workspace 2 to display 1), steps (`DesktopReplaced`
+   with its remap, `DisplayReturns { renumbered }`, `SwitchWorkspace`) and sim corrections
+   (stable display UUIDs; `DestroyIdentity` skips the held window); generation does not draw
+   them yet. With them drawn (6000 × 60) the fuzzer found four signatures, ruled:
+   - **A, fix as scoped D (next):** in global mode a display returning mid-drag carries the
+     held window with its workspace (`held-window-keeps-assignment`; shrunk: Global, 2
+     displays, DisplayDeparts, MoveToWorkspace, DragStart, DisplayReturns). At grip nothing
+     changes; only when a workspace transfer would carry the held window does it become a typed
+     held-and-unassigned ownership (Held) that app rules and admission leave alone; the drop
+     assigns it to the drop display's shown workspace, a let-go without a drop to its Space's
+     shown workspace (a named, tested rule). The transfer takes a split `Members { unheld, held
+     }` query. Held then goes into the Ownerships shadow, tripwire and Roc mirror (own commit).
+     Stop and ask if it needs #688's engine glue. Upstream candidate (main has the same
+     planner).
+   - **B, (ii):** a switch then a departure leaves a Space with history and nothing shown;
+     W2b's tripwire panics. Pre-W2b, the next activation cleared that history
+     (`previous = current.replace(id)`), so it was never read: drop it deliberately in the
+     transition into Vacant, a literal test pins that, saved files keep W2b's load
+     normalization, remove the `workspace-activation:` tripwire for that shape, check IPC for
+     `previous`. Lesson: W2b's shape measurement ran without a global-mode fuzzer; a shape
+     measurement only counts across every mode.
+   - **C1, fixed (8d1be68a):** a topology change Forgot parked windows, dropping a write in
+     flight sent earlier in the event; now Distrust.
+   - **C2, decision pending:** an animation stopped under a plain write's request id turns the
+     write in flight into Unknown (`animation_stopped`), and the arrange resends it (shrunk:
+     PerDisplay, animated, scrolling: ModifierDrag, Deliver, Cancel, DesktopReplaced).
+     Proposed: `Sync::InFlight` records its origin (core + Roc core), or the platform stops
+     animating a window the core wrote.
+   - Then the last fuzzer commit draws the new setups and steps (the full version is the
+     working state before 45932e6e trimmed it: `Setup::of` by `(seed / 8) % 4`, `generate`
+     over 112 cases) and adds the ignored `activation_shapes_across_the_fuzzer` measurement.
+   Shapes measured with them drawn (6000 × 60, after every step): showing, showing+previous,
+   vacant, vacant+remembered; never showing+remembered (covered by the store-level literal
+   test only; no natural step leaves a workspace behind on a departed Space).
 4. **Later:** W4 (flip catalog + activation to the core), W5 (topology into the core), W6
    (engine glue and persistence; collides with upstream #688, waits for it). BSP phase C waits
    for the soak; traditional trees wait for #688.
@@ -113,9 +144,8 @@ ship.
 ### Next steps
 
 Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34). W4b to W4d
-wait for #688 (open item 2). Now: the W5 fuzzer gap (open item 3): fuzzer steps that reach
-DisplayDeparture and the transfer paths of `plan_workspace_placements` /
-`reconcile_workspace_placements`, then the activation shapes re-measured.
+wait for #688 (open item 2). Now (open item 3): A, then B, C2 when ruled, then the fuzzer draws
+the new steps.
 
 ### Rulings that bind (the lead's and the owner's)
 
