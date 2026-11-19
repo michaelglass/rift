@@ -247,6 +247,27 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
 }
 
+/// A container query with every `node_id` renumbered by first appearance (depth first): two
+/// trees then serialise to the same bytes exactly when they agree in everything but the ids'
+/// values. (Test builds: the core's node ids are tags, rift's NodeId keys.)
+#[cfg(test)]
+pub(crate) fn normalized_container(
+    mut node: rift_protocol::ContainerTreeNode,
+) -> rift_protocol::ContainerTreeNode {
+    fn walk(node: &mut rift_protocol::ContainerTreeNode, seen: &mut Vec<u64>) {
+        let index = seen.iter().position(|id| *id == node.node_id).unwrap_or_else(|| {
+            seen.push(node.node_id);
+            seen.len() - 1
+        });
+        node.node_id = index as u64;
+        for child in &mut node.children {
+            walk(child, seen);
+        }
+    }
+    walk(&mut node, &mut Vec::new());
+    node
+}
+
 pub(super) fn node_slot(
     mut node: crate::model::tree::NodeId,
     root: crate::model::tree::NodeId,

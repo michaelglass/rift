@@ -1,5 +1,7 @@
 use objc2_core_foundation::CGRect;
 use rift_core::layout::traditional;
+#[cfg(test)]
+use rift_core::layout::traditional_tree;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use tracing::warn;
@@ -689,6 +691,405 @@ impl Drop for TraditionalLayoutSystem {
     }
 }
 
+/// The bodies of the queries as they read rift's NodeId trees: in test builds the core's read
+/// model, of the same trees converted, must answer the same.
+impl TraditionalLayoutSystem {
+    fn selected_window_from_tree(&self, layout: LayoutId) -> Option<WindowId> {
+        let selection = self.tree.data.selection.current_selection(self.root(layout));
+        if let Some(window) = self.window_at(selection).filter(|w| !self.inactive.contains(w)) {
+            return Some(window);
+        }
+        self.find_best_focus_target(selection)
+            .or_else(|| self.find_best_focus_target(self.root(layout)))
+            .map(|(_, window)| window)
+    }
+
+    fn all_windows_in_layout_from_tree(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.root(layout)
+            .traverse_preorder(&self.tree.map)
+            .filter_map(|node| self.tree.data.window.at(node))
+            .collect()
+    }
+
+    fn window_slot_from_tree(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        crate::layout_engine::systems::node_slot(
+            self.window_node(layout, window)?,
+            self.root(layout),
+            self.map(),
+        )
+    }
+
+    fn visible_windows_in_layout_from_tree(&self, layout: LayoutId) -> Vec<WindowId> {
+        let root = self.root(layout);
+        self.visible_windows_under_internal(root)
+    }
+
+    fn stack_members_from_tree(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+        let Some(parent) =
+            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
+        else {
+            return Vec::new();
+        };
+        if !self.layout(parent).is_group() {
+            return Vec::new();
+        }
+        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
+    }
+
+    fn visible_windows_under_selection_from_tree(&self, layout: LayoutId) -> Vec<WindowId> {
+        let selection = self.selection(layout);
+        self.visible_windows_under_internal(selection)
+    }
+
+    fn window_in_direction_from_tree(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+    ) -> Option<WindowId> {
+        self.window_in_direction_from(self.root(layout), direction)
+    }
+
+    fn contains_window_from_tree(&self, layout: LayoutId, wid: WindowId) -> bool {
+        self.tree.data.window.node_for(layout, wid).is_some()
+    }
+
+    fn has_any_fullscreen_node_from_tree(&self, layout: LayoutId) -> bool {
+        let root = self.root(layout);
+        let active = self.participating_nodes(root);
+        root.traverse_preorder(&self.tree.map).any(|node| {
+            (self.inactive.is_empty() || active.contains(&node))
+                && self.tree.data.layout.is_effectively_fullscreen(node)
+        })
+    }
+
+    fn selection_contains_window_from_tree(&self, layout: LayoutId, window: WindowId) -> bool {
+        let selection = self.selection(layout);
+        self.window_node(layout, window)
+            .is_some_and(|node| node.ancestors(self.map()).any(|ancestor| ancestor == selection))
+    }
+
+    fn draw_tree_from_tree(&self, layout: LayoutId) -> String {
+        let tree = self.get_ascii_tree_with_labels(self.root(layout), None);
+        let mut out = String::new();
+        ascii_tree::write_tree(&mut out, &tree).unwrap();
+        out
+    }
+
+    fn container_tree_from_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        self.container_tree_with_roles(layout, &HashMap::default())
+    }
+}
+
+/// A tree the core cannot hold, as this system (or a saved layout) has it.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum OldTraditionalTree {
+    NodeWithoutInfo,
+    /// A window node with children.
+    WindowWithChildren,
+    /// A container remembering a node that is not its child.
+    RemembersAStranger,
+    /// A size that is not finite.
+    Weight(f32),
+    /// A node flagged both fullscreen and fullscreen within gaps.
+    BothFullscreens,
+    /// A stack whose ungrouped kind is a stack.
+    UngroupsToAStack,
+}
+
+/// This system's trees converted into the core's, and the core's read model held to this
+/// system's answers (test builds; the operations and the flip follow).
+#[cfg(test)]
+impl TraditionalLayoutSystem {
+    fn left_out(&self) -> std::collections::BTreeSet<WindowId> {
+        self.inactive.iter().copied().collect()
+    }
+
+    fn core_layout(
+        &self,
+        layout: LayoutId,
+        tags: &mut rift_core::layout::bsp_tree::Tags,
+    ) -> Result<traditional_tree::Layout<WindowId>, OldTraditionalTree> {
+        let root = self.root(layout);
+        let info = self
+            .tree
+            .data
+            .layout
+            .info
+            .get(root)
+            .ok_or(OldTraditionalTree::NodeWithoutInfo)?;
+        Ok(traditional_tree::Layout {
+            root: traditional_tree::Root {
+                tag: tags.mint(),
+                kind: core_kind(info)?,
+                fill: core_fill(info)?,
+                children: self.core_children(root, tags)?,
+            },
+        })
+    }
+
+    fn core_children(
+        &self,
+        node: NodeId,
+        tags: &mut rift_core::layout::bsp_tree::Tags,
+    ) -> Result<Option<traditional_tree::Children<WindowId>>, OldTraditionalTree> {
+        let ids: Vec<NodeId> = node.children(self.map()).collect();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let mut children = Vec::with_capacity(ids.len());
+        for &id in &ids {
+            let info =
+                self.tree.data.layout.info.get(id).ok_or(OldTraditionalTree::NodeWithoutInfo)?;
+            children.push(traditional_tree::Child {
+                weight: traditional_tree::Weight::new(info.size)
+                    .ok_or(OldTraditionalTree::Weight(info.size))?,
+                node: self.core_node(id, tags)?,
+            });
+        }
+        let remembered = match self.tree.data.selection.memory_of(node) {
+            None => None,
+            Some((child, stops)) => Some((
+                ids.iter()
+                    .position(|id| *id == child)
+                    .ok_or(OldTraditionalTree::RemembersAStranger)?,
+                if stops {
+                    traditional_tree::Walk::Stops
+                } else {
+                    traditional_tree::Walk::Enters
+                },
+            )),
+        };
+        Ok(Some(match remembered {
+            Some((at, walk)) => {
+                let after = children.split_off(at + 1);
+                let at = children.pop().ok_or(OldTraditionalTree::RemembersAStranger)?;
+                traditional_tree::Children::Remembered {
+                    before: children,
+                    at: Box::new(at),
+                    after,
+                    walk,
+                }
+            }
+            None => {
+                let mut children = children.into_iter();
+                let Some(first) = children.next() else { return Ok(None) };
+                traditional_tree::Children::Unremembered {
+                    first: Box::new(first),
+                    rest: children.collect(),
+                }
+            }
+        }))
+    }
+
+    fn core_node(
+        &self,
+        node: NodeId,
+        tags: &mut rift_core::layout::bsp_tree::Tags,
+    ) -> Result<traditional_tree::Node<WindowId>, OldTraditionalTree> {
+        let info = self
+            .tree
+            .data
+            .layout
+            .info
+            .get(node)
+            .ok_or(OldTraditionalTree::NodeWithoutInfo)?;
+        if let Some(window) = self.window_at(node) {
+            if node.first_child(self.map()).is_some() {
+                return Err(OldTraditionalTree::WindowWithChildren);
+            }
+            return Ok(traditional_tree::Node::Window(traditional_tree::WindowLeaf {
+                tag: tags.mint(),
+                window,
+                fill: core_fill(info)?,
+            }));
+        }
+        let tag = tags.mint();
+        let children = self.core_children(node, tags)?;
+        Ok(traditional_tree::Node::Container(Box::new(
+            traditional_tree::Container {
+                tag,
+                kind: core_kind(info)?,
+                fill: core_fill(info)?,
+                children,
+            },
+        )))
+    }
+
+    /// The core's answer, for this system's trees converted, must be `answer`.
+    fn check_query<A: PartialEq + std::fmt::Debug>(
+        &self,
+        query: &str,
+        layout: LayoutId,
+        answer: A,
+        core: impl FnOnce(
+            &traditional_tree::Layout<WindowId>,
+            rift_core::layout::bsp_tree::Participation<WindowId>,
+        ) -> A,
+    ) {
+        let left_out = self.left_out();
+        let mut tags = rift_core::layout::bsp_tree::Tags::default();
+        let tree = self.core_layout(layout, &mut tags).unwrap_or_else(|problem| {
+            panic!(
+                "{query}: the core cannot hold this tree: {problem:?}\n{}",
+                self.draw_tree_from_tree(layout)
+            )
+        });
+        let core_answer = core(&tree, rift_core::layout::bsp_tree::Participation::of(&left_out));
+        assert_eq!(
+            answer,
+            core_answer,
+            "{query}: the core answers differently for\n{}",
+            self.draw_tree_from_tree(layout)
+        );
+    }
+}
+
+#[cfg(test)]
+fn core_kind(info: &LayoutInfo) -> Result<traditional_tree::Kind, OldTraditionalTree> {
+    let axis = |kind: LayoutKind| match kind {
+        LayoutKind::Horizontal | LayoutKind::HorizontalStack => {
+            traditional_tree::Orientation::Horizontal
+        }
+        LayoutKind::Vertical | LayoutKind::VerticalStack => traditional_tree::Orientation::Vertical,
+    };
+    Ok(match info.kind {
+        LayoutKind::Horizontal | LayoutKind::Vertical => {
+            traditional_tree::Kind::Axis(axis(info.kind))
+        }
+        LayoutKind::HorizontalStack | LayoutKind::VerticalStack => {
+            if info.last_ungrouped_kind.is_group() {
+                return Err(OldTraditionalTree::UngroupsToAStack);
+            }
+            traditional_tree::Kind::Stack {
+                along: axis(info.kind),
+                ungrouped: axis(info.last_ungrouped_kind),
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+fn core_fill(info: &LayoutInfo) -> Result<traditional_tree::Fill, OldTraditionalTree> {
+    Ok(match (info.is_fullscreen, info.is_fullscreen_within_gaps) {
+        (false, false) => traditional_tree::Fill::Tiled,
+        (true, false) => traditional_tree::Fill::Screen,
+        (false, true) => traditional_tree::Fill::WithinGaps,
+        (true, true) => return Err(OldTraditionalTree::BothFullscreens),
+    })
+}
+
+#[cfg(test)]
+fn core_direction(direction: Direction) -> rift_core::layout::bsp_tree::Direction {
+    match direction {
+        Direction::Left => rift_core::layout::bsp_tree::Direction::Left,
+        Direction::Right => rift_core::layout::bsp_tree::Direction::Right,
+        Direction::Up => rift_core::layout::bsp_tree::Direction::Up,
+        Direction::Down => rift_core::layout::bsp_tree::Direction::Down,
+    }
+}
+
+#[cfg(test)]
+fn layout_kind(kind: traditional_tree::Kind) -> LayoutKind {
+    use traditional_tree::{Kind, Orientation as O};
+    match kind {
+        Kind::Axis(O::Horizontal) => LayoutKind::Horizontal,
+        Kind::Axis(O::Vertical) => LayoutKind::Vertical,
+        Kind::Stack { along: O::Horizontal, .. } => LayoutKind::HorizontalStack,
+        Kind::Stack { along: O::Vertical, .. } => LayoutKind::VerticalStack,
+    }
+}
+
+/// The core's view as rift's draw_tree draws it (a node's id is its tag).
+#[cfg(test)]
+fn draw_view(view: &traditional_tree::View<WindowId>) -> String {
+    fn tree(view: &traditional_tree::View<WindowId>, root: bool) -> ascii_tree::Tree {
+        let status = if root {
+            ""
+        } else if view.entered {
+            "☒ "
+        } else {
+            "☐ "
+        };
+        let size = view.weight.map_or(0.0, traditional_tree::Weight::get);
+        let desc = format!("{status}NodeId({}v1)", view.tag.get());
+        match &view.kind {
+            traditional_tree::ViewKind::Window(window) => {
+                ascii_tree::Tree::Leaf(vec![format!("{desc} {window:?} [size {size}]")])
+            }
+            traditional_tree::ViewKind::Container { kind, children } => {
+                let total: f32 = children
+                    .iter()
+                    .map(|c| c.weight.map_or(0.0, traditional_tree::Weight::get).max(0.0))
+                    .sum();
+                let desc = format!("{desc} {:?} [size {size} total={total}]", layout_kind(*kind));
+                if children.is_empty() {
+                    ascii_tree::Tree::Leaf(vec![desc])
+                } else {
+                    ascii_tree::Tree::Node(desc, children.iter().map(|c| tree(c, false)).collect())
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    ascii_tree::write_tree(&mut out, &tree(view, true)).unwrap();
+    out
+}
+
+/// draw_tree's text with each node id renumbered by first appearance.
+#[cfg(test)]
+fn normalized_draw(text: &str) -> String {
+    let ids = regex::Regex::new(r"NodeId\(\d+v\d+\)").unwrap();
+    let mut seen: Vec<String> = Vec::new();
+    ids.replace_all(text, |found: &regex::Captures<'_>| {
+        let id = found[0].to_string();
+        let index = seen.iter().position(|s| *s == id).unwrap_or_else(|| {
+            seen.push(id.clone());
+            seen.len() - 1
+        });
+        format!("NodeId({index})")
+    })
+    .into_owned()
+}
+
+/// The core's view as rift's container_tree reports it (without master-stack roles).
+#[cfg(test)]
+fn container_view(view: &traditional_tree::View<WindowId>) -> rift_protocol::ContainerTreeNode {
+    let (is_fullscreen, is_fullscreen_within_gaps) = match view.fill {
+        traditional_tree::Fill::Tiled => (false, false),
+        traditional_tree::Fill::Screen => (true, false),
+        traditional_tree::Fill::WithinGaps => (false, true),
+    };
+    let (node_type, layout_kind, window_id, children) = match &view.kind {
+        traditional_tree::ViewKind::Window(window) => (
+            rift_protocol::ContainerNodeType::Window,
+            None,
+            Some((*window).into()),
+            Vec::new(),
+        ),
+        traditional_tree::ViewKind::Container { kind, children } => (
+            rift_protocol::ContainerNodeType::Container,
+            Some(layout_kind(*kind)),
+            None,
+            children.iter().map(container_view).collect(),
+        ),
+    };
+    rift_protocol::ContainerTreeNode {
+        node_id: view.tag.get(),
+        node_type,
+        frame: Default::default(),
+        layout_kind,
+        weight: view.weight.map(|w| f64::from(w.get())),
+        window_id,
+        is_selected: view.focused,
+        is_fullscreen,
+        is_fullscreen_within_gaps,
+        role: None,
+        pending_split: None,
+        children,
+    }
+}
+
 impl LayoutSystem for TraditionalLayoutSystem {
     fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
 
@@ -730,14 +1131,26 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
-        let tree = self.get_ascii_tree_with_labels(self.root(layout), None);
-        let mut out = String::new();
-        ascii_tree::write_tree(&mut out, &tree).unwrap();
-        out
+        let answer = self.draw_tree_from_tree(layout);
+        #[cfg(test)]
+        self.check_query("draw_tree", layout, normalized_draw(&answer), |tree, who| {
+            normalized_draw(&draw_view(&tree.view(who)))
+        });
+        answer
     }
 
     fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.container_tree_with_roles(layout, &HashMap::default())
+        let answer = self.container_tree_from_tree(layout);
+        #[cfg(test)]
+        self.check_query(
+            "container_tree",
+            layout,
+            crate::layout_engine::systems::normalized_container(answer.clone()),
+            |tree, who| {
+                crate::layout_engine::systems::normalized_container(container_view(&tree.view(who)))
+            },
+        );
+        answer
     }
 
     fn calculate_layout(
@@ -761,56 +1174,75 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        let selection = self.tree.data.selection.current_selection(self.root(layout));
-        if let Some(window) = self.window_at(selection).filter(|w| !self.inactive.contains(w)) {
-            return Some(window);
-        }
-        self.find_best_focus_target(selection)
-            .or_else(|| self.find_best_focus_target(self.root(layout)))
-            .map(|(_, window)| window)
+        let answer = self.selected_window_from_tree(layout);
+        #[cfg(test)]
+        self.check_query("selected_window", layout, answer.clone(), |tree, who| {
+            tree.projection(who).selected_window
+        });
+        answer
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
-        let selection = self.selection(layout);
-        self.window_node(layout, window)
-            .is_some_and(|node| node.ancestors(self.map()).any(|ancestor| ancestor == selection))
+        let answer = self.selection_contains_window_from_tree(layout, window);
+        #[cfg(test)]
+        self.check_query(
+            "selection_contains_window",
+            layout,
+            answer.clone(),
+            |tree, who| tree.focus_contains(window, who),
+        );
+        answer
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.root(layout)
-            .traverse_preorder(&self.tree.map)
-            .filter_map(|node| self.tree.data.window.at(node))
-            .collect()
+        let answer = self.all_windows_in_layout_from_tree(layout);
+        #[cfg(test)]
+        self.check_query("all_windows_in_layout", layout, answer.clone(), |tree, who| {
+            tree.projection(who).windows
+        });
+        answer
     }
 
     fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        crate::layout_engine::systems::node_slot(
-            self.window_node(layout, window)?,
-            self.root(layout),
-            self.map(),
-        )
+        let answer = self.window_slot_from_tree(layout, window);
+        #[cfg(test)]
+        self.check_query("window_slot", layout, answer.clone(), |tree, _| {
+            tree.slot(window)
+        });
+        answer
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        let root = self.root(layout);
-        self.visible_windows_under_internal(root)
+        let answer = self.visible_windows_in_layout_from_tree(layout);
+        #[cfg(test)]
+        self.check_query(
+            "visible_windows_in_layout",
+            layout,
+            answer.clone(),
+            |tree, who| tree.projection(who).visible,
+        );
+        answer
     }
 
     fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
-        let Some(parent) =
-            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
-        else {
-            return Vec::new();
-        };
-        if !self.layout(parent).is_group() {
-            return Vec::new();
-        }
-        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
+        let answer = self.stack_members_from_tree(layout, window);
+        #[cfg(test)]
+        self.check_query("stack_members", layout, answer.clone(), |tree, _| {
+            tree.stack_members(window)
+        });
+        answer
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-        let selection = self.selection(layout);
-        self.visible_windows_under_internal(selection)
+        let answer = self.visible_windows_under_selection_from_tree(layout);
+        #[cfg(test)]
+        self.check_query(
+            "visible_windows_under_selection",
+            layout,
+            answer.clone(),
+            |tree, who| tree.projection(who).under_focus,
+        );
+        answer
     }
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
@@ -868,7 +1300,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.window_in_direction_from(self.root(layout), direction)
+        let answer = self.window_in_direction_from_tree(layout, direction);
+        #[cfg(test)]
+        self.check_query("window_in_direction", layout, answer.clone(), |tree, who| {
+            tree.window_in_direction(core_direction(direction), who)
+        });
+        answer
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
@@ -981,7 +1418,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.tree.data.window.node_for(layout, wid).is_some()
+        let answer = self.contains_window_from_tree(layout, wid);
+        #[cfg(test)]
+        self.check_query("contains_window", layout, answer.clone(), |tree, _| {
+            tree.contains(wid)
+        });
+        answer
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
@@ -1111,12 +1553,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        let root = self.root(layout);
-        let active = self.participating_nodes(root);
-        root.traverse_preorder(&self.tree.map).any(|node| {
-            (self.inactive.is_empty() || active.contains(&node))
-                && self.tree.data.layout.is_effectively_fullscreen(node)
-        })
+        let answer = self.has_any_fullscreen_node_from_tree(layout);
+        #[cfg(test)]
+        self.check_query("has_any_fullscreen_node", layout, answer.clone(), |tree, who| {
+            tree.projection(who).fullscreen
+        });
+        answer
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
