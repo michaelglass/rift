@@ -116,6 +116,8 @@ pub(crate) enum GripRefused {
     NothingHeld,
     /// No entry holds the hand and it is not free: an entry holding it was dropped.
     HandLost,
+    /// The store has no record of this window: it does not make one up to hold.
+    Unknown(WindowId),
 }
 
 /// Every window's record, each in exactly one place: one map, one entry per window. The hand
@@ -272,12 +274,13 @@ impl Records {
 
     /// The core gripped `window`: its entry becomes the gripped one, pressed. Its transfer is
     /// discarded, not set aside: the user places this window now, and the release re-derives.
+    /// A window with no record is refused, not made up.
     fn grip(&mut self, window: WindowId) -> Result<(), GripRefused> {
         // Refused before the entry is touched: a loose window's record stays where it is.
         if self.free.is_none() {
             return Err(self.busy());
         }
-        let record = self.take(&window).map(|(record, _)| record).unwrap_or_default();
+        let (record, _) = self.take(&window).ok_or(GripRefused::Unknown(window))?;
         self.hold(window, record, Grip::Pressed)
     }
 
@@ -2052,11 +2055,17 @@ impl WindowStore {
 
     /// Effect `Ungrip`: the gripped record goes back among the loose ones. A drag's session is
     /// returned.
-    pub(crate) fn project_ungrip(&mut self, window: WindowId) -> Option<Session> {
+    /// Its record is pruned only once the whole step is projected ([`Self::prune_ungripped`]):
+    /// a re-press of the held window is an ungrip and a grip in one step, and the record must
+    /// still be there for the grip.
+    pub(crate) fn project_ungrip(&mut self) -> Option<Session> {
         let (_, session) = self.windows.let_go().expect("the core ungrips only a grip");
-        self.prune_window_record(window);
         session
     }
+
+    /// After a step's effects: prunes the record of a window the step ungripped, if it holds
+    /// nothing and the hand is not on it again.
+    pub(crate) fn prune_ungripped(&mut self, window: WindowId) { self.prune_window_record(window); }
 
     /// Effect `Regrip`: the grip moves with its window's new identity.
     pub(crate) fn project_regrip(
@@ -2709,6 +2718,40 @@ mod tests {
         assert_eq!(records.let_go().map(|(window, _)| window), Some(b));
         assert_eq!((records.gripped_window(), records.hands()), (None, 1));
         assert_eq!(records.regrip(a, b), Err(GripRefused::NothingHeld));
+    }
+
+    #[test]
+    fn the_store_grips_no_window_it_has_no_record_of() {
+        let (known, unknown) = (WindowId::new(7, 1), WindowId::new(7, 9));
+        let mut records = Records::default();
+        records.entry_or_default(known);
+        assert_eq!(records.grip(unknown), Err(GripRefused::Unknown(unknown)));
+        assert!(records.get(&unknown).is_none());
+        assert_eq!((records.gripped_window(), records.hands()), (None, 1));
+        assert_eq!(records.grip(known), Ok(()));
+    }
+
+    #[test]
+    fn pressing_the_held_window_again_keeps_its_record() {
+        // The core lets go and grips again in one step. A record with nothing else in it (no
+        // server id, workspace, state or claim) must not be pruned between the two.
+        let mut state = crate::model::RiftState::default();
+        let window = WindowId::new(4, 1);
+        state.windows.set_visibility(window, WindowVisibility::Visible);
+        let press = crate::actor::reactor::reconciler::CoreEvent::Press {
+            window: Some(window),
+            button: crate::model::drag::MouseButton::Left.into(),
+        };
+        state.step(press.clone());
+        state.step(press);
+        assert_eq!(state.windows.gripped(), Some(window));
+        assert_eq!(state.windows.window_ids_for_pid(4).collect::<Vec<_>>(), vec![
+            window
+        ]);
+        state.windows.debug_assert_invariants();
+        // Let go, and the empty record is pruned as before.
+        state.let_go();
+        assert!(state.windows.record(window).is_none());
     }
 
     #[test]

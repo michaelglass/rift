@@ -576,7 +576,7 @@ impl RiftState {
         for effect in effects {
             match *effect {
                 Effect::Ungrip { window, ref changed, .. } => {
-                    let session = self.windows.project_ungrip(window);
+                    let session = self.windows.project_ungrip();
                     ungripped = Some(Ungripped {
                         window,
                         session,
@@ -615,6 +615,9 @@ impl RiftState {
                 }
                 _ => {}
             }
+        }
+        if let Some(Ungripped { window, .. }) = &ungripped {
+            self.windows.prune_ungripped(*window);
         }
         debug_assert_eq!(
             self.windows.pointer(),
