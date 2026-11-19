@@ -2262,7 +2262,10 @@ impl Reactor {
                 return Ok(EventOutcome::no_change());
             }
             Event::DragCancel => {
-                return Ok(interaction_workflow::handle_cancel(&mut self.state));
+                return Ok(interaction_workflow::handle_cancel(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                ));
             }
             Event::ModifierMouseDown { button, point, action } => {
                 // A modifier press is a press: the window under it is pressed, and only that
@@ -4046,6 +4049,12 @@ impl Reactor {
                 }
             }
             let Some((target, reason)) = placement else { continue };
+            // The window under the user's hand stays where it is: it leaves the workspace's
+            // layout and the workspace, placed by nothing until the drop.
+            if let Some(held) = self.state.windows.held_member(id) {
+                self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(held.window()));
+                self.state.windows.leave_workspace_held(held);
+            }
             let screen = &self.space_state.screens[target];
             let target = screen.space.unwrap();
             let source = self.layout_manager.layout_engine.workspaces()[id].space;
@@ -4376,17 +4385,21 @@ impl Reactor {
             None => (None, None),
             Some(Ungripped { window, session: None, .. }) => (Some(window), None),
             Some(Ungripped {
-                window, session: Some(session), ..
-            }) => (None, Some((window, session))),
+                window,
+                session: Some(session),
+                placed,
+                ..
+            }) => (None, Some((window, session, placed))),
         };
         let drag_ended = dropped.is_some();
         let mut outcome = match dropped {
-            Some((window, commit)) => interaction_workflow::handle_mouse_up(
+            Some((window, commit, placed)) => interaction_workflow::handle_mouse_up(
                 &mut self.state,
                 &mut self.layout_manager,
                 &mut self.drag_manager,
                 window,
                 commit,
+                placed,
                 final_space,
             )?,
             None => EventOutcome::layout_changed(false),

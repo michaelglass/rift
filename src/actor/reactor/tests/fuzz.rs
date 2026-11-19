@@ -1357,9 +1357,11 @@ impl Sim {
                     format!("the user drags {wid:?} but rift's drag is now {current:?}"),
                 );
             }
-            // 3. The dragged window keeps its assignment until the drop.
+            // 3. The dragged window keeps its assignment until the drop, unless a workspace
+            // transfer would have carried it off: then it is placed by no workspace instead.
             let now = self.reactor.assigned_space_for_window_id(wid);
-            if now != held.assigned_at_start {
+            let left_unplaced = now.is_none() && self.reactor.state.windows.is_held_unplaced(wid);
+            if now != held.assigned_at_start && !left_unplaced {
                 let invariant = if held.command_during_drag {
                     "held-window-keeps-assignment (after a command)"
                 } else {
@@ -1553,10 +1555,12 @@ impl Sim {
             }
         }
         // 9. Every live window stays assigned to some space (a claimed one is its owner's, a
-        // native fullscreen one is in its fullscreen space).
+        // native fullscreen one is in its fullscreen space, a held one a transfer left is the
+        // drop's to place).
         for &wid in &self.live {
             if self.reactor.state.windows.claim(wid).is_none()
                 && !self.fullscreen.contains_key(&wid)
+                && !self.reactor.state.windows.is_held_unplaced(wid)
                 && self.reactor.assigned_space_for_window_id(wid).is_none()
             {
                 return fail(
@@ -2233,4 +2237,103 @@ fn a_topology_change_does_not_resend_a_parked_windows_unanswered_write() {
         Step::DisplayDeparts,
     ];
     assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}
+
+/// The global-mode case where a display returns while the user holds a window of a workspace
+/// that moves back with it: `(setup, steps up to the return)`.
+fn held_through_a_return(renumbered: bool) -> (Setup, Vec<Step>) {
+    let setup = Setup {
+        displays: 2,
+        animate: false,
+        scrolling: false,
+        workspaces: Workspaces::Global,
+    };
+    let steps = vec![
+        Step::DisplayDeparts,
+        Step::MoveToWorkspace { w: 11, k: 2 },
+        Step::DragStart { w: 1, dx: 80, dy: 47 },
+        Step::DisplayReturns { renumbered },
+    ];
+    (setup, steps)
+}
+
+/// A display returning mid-drag moves its workspaces back without the window the user holds:
+/// the window stays where it is, held and placed by no workspace, until the drop.
+#[test]
+fn a_display_returning_mid_drag_leaves_the_held_window_where_it_is() {
+    for renumbered in [false, true] {
+        let (setup, steps) = held_through_a_return(renumbered);
+        assert_eq!(execute(setup, &steps, &[]), Ok(()), "renumbered {renumbered}");
+        let mut sim = Sim::new(setup);
+        for &step in &steps {
+            let emitted = sim.run(step);
+            sim.pending.extend(emitted);
+        }
+        let held = sim.held_window().unwrap();
+        assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
+    }
+    let setup = Setup {
+        displays: 3,
+        animate: false,
+        scrolling: false,
+        workspaces: Workspaces::Global,
+    };
+    let steps = [
+        Step::DisplayDeparts,
+        Step::ForeignMove {
+            w: 5,
+            to: 0,
+            mouse: Mouse::Truth,
+        },
+        Step::DragStart { w: 5, dx: -107, dy: 69 },
+        Step::DisplayReturns { renumbered: false },
+    ];
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}
+
+/// The held window a workspace transfer left placed by no workspace: the drop assigns it to the
+/// shown workspace of the display it is dropped on; letting go without a drop assigns it to the
+/// shown workspace of the Space it is on.
+#[test]
+fn a_held_window_left_by_its_workspace_is_placed_by_the_drop_or_its_space() {
+    for end in [Step::MouseUp, Step::Cancel] {
+        let (setup, mut steps) = held_through_a_return(false);
+        steps.push(end);
+        assert_eq!(execute(setup, &steps, &[]), Ok(()), "{end:?}");
+        let mut sim = Sim::new(setup);
+        let mut held = None;
+        for &step in &steps {
+            held = held.or(sim.held_window());
+            let emitted = sim.run(step);
+            sim.pending.extend(emitted);
+        }
+        _ = sim.settle(steps.len());
+        let held = held.unwrap();
+        let wsid = sim.reactor.state.windows.server_id(held).unwrap();
+        let on = sim.reactor.state.windows.window_server_space(wsid).unwrap();
+        let shown = sim.reactor.layout_manager.layout_engine.workspaces().active_workspace(on);
+        assert!(shown.is_some(), "{end:?}");
+        assert_eq!(
+            sim.reactor.state.windows.workspace_for_window(held),
+            shown,
+            "{end:?}"
+        );
+    }
+}
+
+/// App rules applied mid-drag leave a held window placed by no workspace alone: only the drop
+/// places it.
+#[test]
+fn app_rules_mid_drag_leave_a_held_window_alone() {
+    let (setup, steps) = held_through_a_return(false);
+    let mut sim = Sim::new(setup);
+    for &step in &steps {
+        let emitted = sim.run(step);
+        sim.pending.extend(emitted);
+    }
+    let held = sim.held_window().unwrap();
+    assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
+    let info = sim.reactor.app_manager.apps[&held.pid].info.clone();
+    sim.reactor.process_windows_for_app_rules(vec![held], info, true);
+    assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
 }

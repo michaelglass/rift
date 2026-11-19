@@ -2371,6 +2371,7 @@ fn cross_display_drag_clears_source_floating_position() {
         &mut reactor.drag_manager,
         ungripped.window,
         ungripped.session.unwrap(),
+        ungripped.placed,
         Some(space2),
     )
     .unwrap();

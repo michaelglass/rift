@@ -542,6 +542,8 @@ pub(crate) struct Ungripped {
     pub(crate) session: Option<Session>,
     /// Windows whose model frame changed during the drag, to re-derive.
     pub(crate) changed: Vec<WindowId>,
+    /// Whether a workspace places the window, or nothing does (a transfer left it while held).
+    pub(crate) placed: crate::model::window_store::Placed,
 }
 
 /// What an animated layout pass decided: the animations, and the writes in their place.
@@ -577,10 +579,12 @@ impl RiftState {
             match *effect {
                 Effect::Ungrip { window, ref changed, .. } => {
                     let session = self.windows.project_ungrip();
+                    let placed = self.windows.release_held(window);
                     ungripped = Some(Ungripped {
                         window,
                         session,
                         changed: changed.clone(),
+                        placed,
                     });
                 }
                 Effect::Grip { window } => refused(self.windows.project_grip(window), effect),

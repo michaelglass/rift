@@ -401,6 +401,26 @@ enum Ownership {
     Assigned(VirtualWorkspaceId),
     /// Claimed by an external owner; the claim holds the workspace it is to return to.
     Claimed(WindowClaim),
+    /// Under the user's hand and placed by no workspace: a workspace transfer would have carried
+    /// it off while it was held. Nothing assigns it until the hand lets go: the drop places it.
+    Held,
+}
+
+/// The window the user holds, as one of a workspace's windows: what a transfer of that
+/// workspace must leave behind ([`WindowStore::held_member`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeldMember(WindowId);
+
+impl HeldMember {
+    pub(crate) fn window(self) -> WindowId { self.0 }
+}
+
+/// Whether a window the hand let go of is placed by a workspace, or by nothing (a workspace
+/// transfer left it while it was held): then whoever let go places it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placed {
+    ByWorkspace,
+    Unplaced,
 }
 
 impl WindowRecord {
@@ -409,14 +429,14 @@ impl WindowRecord {
     fn assignment(&self) -> Option<VirtualWorkspaceId> {
         match self.ownership {
             Ownership::Assigned(workspace) => Some(workspace),
-            Ownership::Unassigned | Ownership::Claimed(_) => None,
+            Ownership::Unassigned | Ownership::Claimed(_) | Ownership::Held => None,
         }
     }
 
     fn claim(&self) -> Option<WindowClaim> {
         match self.ownership {
             Ownership::Claimed(claim) => Some(claim),
-            Ownership::Unassigned | Ownership::Assigned(_) => None,
+            Ownership::Unassigned | Ownership::Assigned(_) | Ownership::Held => None,
         }
     }
 }
@@ -426,7 +446,8 @@ impl Ownership {
     fn core(self) -> CoreOwned {
         use rift_core::workspaces::{Destination, Owned};
         match self {
-            Ownership::Unassigned => Owned::Unowned,
+            // The core's ownerships learn Held in a later step; until then it is unowned there.
+            Ownership::Unassigned | Ownership::Held => Owned::Unowned,
             Ownership::Assigned(workspace) => {
                 Owned::Owner(rift_core::workspaces::Ownership::Assigned(workspace))
             }
@@ -770,7 +791,7 @@ impl WindowStore {
         let ownership = record.ownership;
         self.set_ownership(wid, Ownership::Unassigned);
         match ownership {
-            Ownership::Unassigned => {}
+            Ownership::Unassigned | Ownership::Held => {}
             Ownership::Assigned(workspace) => {
                 self.remove_window_from_workspace_index(wid, workspace)
             }
@@ -783,7 +804,7 @@ impl WindowStore {
     fn give_ownership(&mut self, wid: WindowId, ownership: Ownership) {
         self.set_ownership(wid, ownership);
         match ownership {
-            Ownership::Unassigned => {}
+            Ownership::Unassigned | Ownership::Held => {}
             Ownership::Assigned(workspace) => self.add_window_to_workspace_index(wid, workspace),
             Ownership::Claimed(claim) => self.claims.entry(claim.owner).or_default().push(wid),
         }
@@ -2072,6 +2093,19 @@ impl WindowStore {
         window_id: WindowId,
         assignment: VirtualWorkspaceId,
     ) -> Option<VirtualWorkspaceId> {
+        // A held window a workspace transfer left is placed only by the drop.
+        if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|record| record.ownership == Ownership::Held)
+        {
+            tracing::debug!(
+                ?window_id,
+                ?assignment,
+                "assignment refused: the window is held, unplaced"
+            );
+            return None;
+        }
         // A claimed window never enters the index; any placement updates its destination.
         if let Some(claim) = self.claim(window_id) {
             self.set_ownership(
@@ -2118,6 +2152,45 @@ impl WindowStore {
         windows
     }
 
+    /// The window the user holds, if `workspace_id` has it. Once it leaves
+    /// ([`Self::leave_workspace_held`]) it is in no workspace's windows: a transfer can't carry it.
+    pub(crate) fn held_member(&self, workspace_id: VirtualWorkspaceId) -> Option<HeldMember> {
+        self.windows
+            .gripped_window()
+            .filter(|&window| self.workspace_for_window(window) == Some(workspace_id))
+            .map(HeldMember)
+    }
+
+    /// The held window leaves its workspace, placed by nothing until the hand lets go.
+    pub(crate) fn leave_workspace_held(&mut self, held: HeldMember) {
+        let window = held.window();
+        self.windows.clear_transfer(&window);
+        self.take_assignment(window);
+        self.set_ownership(window, Ownership::Held);
+    }
+
+    /// Whether `window` is held and placed by no workspace (a transfer left it).
+    #[cfg(test)]
+    pub(crate) fn is_held_unplaced(&self, window: WindowId) -> bool {
+        self.windows
+            .get(&window)
+            .is_some_and(|record| record.ownership == Ownership::Held)
+    }
+
+    /// The hand let go of `window`: placed by nothing, it is unassigned now, for whoever let go
+    /// to place.
+    pub(crate) fn release_held(&mut self, window: WindowId) -> Placed {
+        match self.windows.get(&window).map(|record| record.ownership) {
+            Some(Ownership::Held) => {
+                self.set_ownership(window, Ownership::Unassigned);
+                Placed::Unplaced
+            }
+            Some(Ownership::Unassigned | Ownership::Assigned(_) | Ownership::Claimed(_)) | None => {
+                Placed::ByWorkspace
+            }
+        }
+    }
+
     pub fn workspace_window_count(&self, workspace_id: VirtualWorkspaceId) -> usize {
         self.workspace_windows.get(&workspace_id).map_or(0, HashSet::len)
     }
@@ -2157,6 +2230,8 @@ impl WindowStore {
         let from_ownership = self.take_ownership(from);
         let to_ownership = self.take_ownership(to);
         let ownership = match (from_ownership, to_ownership) {
+            // The window under the hand stays placed by nothing until it is let go.
+            (Ownership::Held, _) | (_, Ownership::Held) => Ownership::Held,
             (Ownership::Unassigned, kept) => kept,
             (Ownership::Assigned(workspace), Ownership::Unassigned | Ownership::Assigned(_)) => {
                 Ownership::Assigned(workspace)
@@ -2263,7 +2338,7 @@ impl WindowStore {
             session.forget_target(window_id);
         }
         match record.ownership {
-            Ownership::Unassigned => {}
+            Ownership::Unassigned | Ownership::Held => {}
             Ownership::Assigned(assignment) => {
                 self.remove_window_from_workspace_index(window_id, assignment)
             }

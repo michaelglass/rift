@@ -7,6 +7,7 @@ use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
 use crate::model::RiftState;
 use crate::model::drag::Session;
+use crate::model::window_store::Placed;
 use crate::sys::screen::SpaceId;
 
 pub fn build_drag_scene(
@@ -34,13 +35,53 @@ pub fn build_drag_scene(
     }
 }
 
-pub fn handle_cancel(state: &mut RiftState) -> EventOutcome {
-    let Some((window, cancelled)) = state
-        .let_go()
-        .and_then(|ungripped| Some((ungripped.window, ungripped.session?)))
+pub fn handle_cancel(state: &mut RiftState, layout: &mut LayoutManager) -> EventOutcome {
+    let Some(ungripped) = state.let_go() else {
+        return EventOutcome::no_change();
+    };
+    let window = ungripped.window;
+    let placed = match ungripped.placed {
+        Placed::ByWorkspace => EventOutcome::no_change(),
+        Placed::Unplaced => place_on_its_space(state, layout, window),
+    };
+    let Some(cancelled) = ungripped.session else {
+        return placed;
+    };
+    let mut outcome = cancelled_outcome(window, cancelled);
+    outcome.absorb(placed);
+    outcome
+}
+
+/// A let-go without a drop of a window a workspace transfer left while it was held: it joins
+/// the workspace shown on the Space it is on.
+fn place_on_its_space(
+    state: &mut RiftState,
+    layout: &mut LayoutManager,
+    window: WindowId,
+) -> EventOutcome {
+    let Some(space) = state
+        .windows
+        .server_id(window)
+        .and_then(|server_id| state.windows.window_server_space(server_id))
     else {
         return EventOutcome::no_change();
     };
+    let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space) else {
+        return EventOutcome::no_change();
+    };
+    if !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
+        &mut state.windows,
+        space,
+        window,
+        workspace,
+    ) {
+        warn!(?window, ?workspace, "failed to assign a let-go window");
+        return EventOutcome::no_change();
+    }
+    EventOutcome::layout_changed(false).with_layout_event(LayoutEvent::WindowAdded(space, window))
+}
+
+fn cancelled_outcome(window: WindowId, cancelled: Session) -> EventOutcome {
     let source = cancelled.source;
     match (cancelled.kind, source.tiled) {
         (DragKind::Modifier { .. }, true) => EventOutcome::layout_changed(false),
@@ -72,9 +113,12 @@ pub enum DropPlan {
 }
 
 /// The drop of `commit` released over `final_space`; `live` says whether a window is still
-/// there to drop onto.
+/// there to drop onto. A window no workspace places (a transfer left it while it was held) has
+/// no slot to stay in: it joins the drop display's shown workspace, as a window dropped from
+/// another display does.
 pub fn plan_drop(
     commit: &Session,
+    placed: Placed,
     final_space: Option<SpaceId>,
     admitted: bool,
     live: impl Fn(WindowId) -> bool,
@@ -84,7 +128,11 @@ pub fn plan_drop(
         .target()
         .map(|target| target.intent)
         .filter(|intent| final_space == Some(intent.space) && live(intent.window));
-    match (commit.source.origin_space == final_space, final_space, onto) {
+    let same_space = match placed {
+        Placed::ByWorkspace => commit.source.origin_space == final_space,
+        Placed::Unplaced => false,
+    };
+    match (same_space, final_space, onto) {
         (true, _, Some(intent)) => DropPlan::Within(intent),
         (true, _, None) => DropPlan::Stays,
         (false, Some(space), onto) if admitted => DropPlan::Across { space, onto },
@@ -100,17 +148,23 @@ pub fn handle_mouse_up(
     drag: &mut DragManager,
     window: WindowId,
     commit: Session,
+    placed: Placed,
     final_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
     let plan = plan_drop(
         &commit,
+        placed,
         final_space,
         state.windows.is_admitted(window),
         |target| state.windows.contains_window(target),
     );
     trace!(?window, ?plan, "drop");
-    let left = commit.source.origin_space.is_some();
+    // Whether the window leaves a slot in a layout (an unplaced one left its layout already).
+    let left = match placed {
+        Placed::ByWorkspace => commit.source.origin_space.is_some(),
+        Placed::Unplaced => false,
+    };
     let needs_layout = match plan {
         DropPlan::Stays => commit.source.tiled,
         DropPlan::Within(intent) => {
@@ -235,16 +289,22 @@ mod tests {
     fn a_drop_on_its_own_display_takes_the_previewed_tile_or_stays() {
         let live = |_| true;
         assert!(matches!(
-            plan_drop(&commit(Some(1)), Some(space(1)), true, live),
+            plan_drop(&commit(Some(1)), Placed::ByWorkspace, Some(space(1)), true, live),
             DropPlan::Within(intent) if intent.window == w(2)
         ));
         assert_eq!(
-            plan_drop(&commit(None), Some(space(1)), true, live),
+            plan_drop(&commit(None), Placed::ByWorkspace, Some(space(1)), true, live),
             DropPlan::Stays
         );
         // The previewed window went away: nothing to drop onto.
         assert_eq!(
-            plan_drop(&commit(Some(1)), Some(space(1)), true, |_| false),
+            plan_drop(
+                &commit(Some(1)),
+                Placed::ByWorkspace,
+                Some(space(1)),
+                true,
+                |_| false
+            ),
             DropPlan::Stays
         );
     }
@@ -253,16 +313,16 @@ mod tests {
     fn a_drop_on_another_display_goes_onto_its_previewed_tile_there_or_joins_it() {
         let live = |_| true;
         assert!(matches!(
-            plan_drop(&commit(Some(2)), Some(space(2)), true, live),
+            plan_drop(&commit(Some(2)), Placed::ByWorkspace, Some(space(2)), true, live),
             DropPlan::Across { space: to, onto: Some(intent) } if to == space(2) && intent.window == w(2)
         ));
         assert_eq!(
-            plan_drop(&commit(None), Some(space(2)), true, live),
+            plan_drop(&commit(None), Placed::ByWorkspace, Some(space(2)), true, live),
             DropPlan::Across { space: space(2), onto: None }
         );
         // A preview on a display the window did not end up on is no drop.
         assert_eq!(
-            plan_drop(&commit(Some(1)), Some(space(2)), true, live),
+            plan_drop(&commit(Some(1)), Placed::ByWorkspace, Some(space(2)), true, live),
             DropPlan::Across { space: space(2), onto: None }
         );
     }
@@ -270,9 +330,12 @@ mod tests {
     #[test]
     fn a_drop_off_every_space_or_of_an_unadmitted_window_only_leaves() {
         let live = |_| true;
-        assert_eq!(plan_drop(&commit(Some(1)), None, true, live), DropPlan::Leaves);
         assert_eq!(
-            plan_drop(&commit(None), Some(space(2)), false, live),
+            plan_drop(&commit(Some(1)), Placed::ByWorkspace, None, true, live),
+            DropPlan::Leaves
+        );
+        assert_eq!(
+            plan_drop(&commit(None), Placed::ByWorkspace, Some(space(2)), false, live),
             DropPlan::Leaves
         );
     }
