@@ -513,6 +513,12 @@ topology into the core; W6 last, after upstream #688: the engine glue and persis
   nothing shown: repair panics on it in tests and logs `workspace-activation:` in a running Rift;
   a saved file with it loads as `Vacant { remembered }` with one `workspace-load: normalized`
   line. A literal test covers a departure that leaves a fallback shown and the return.
+- 18144116 (W2c, held): the workspace SlotMap and the catalog order are one `Catalog` (private
+  fields; `insert` appends, `remove` takes a workspace out of both; lookups keep the SlotMap's
+  names, so the engine and persistence code #688 rewrites are untouched). The saved form is
+  unchanged; at load the order is parsed into the catalog, and an unknown, duplicate or missing
+  entry is refused with a typed `CatalogError`, as validation refused it before. A test loads a
+  store saved by the code before and writes it back byte for byte.
 - **Open item for W5:** no fuzzer step reaches DisplayDeparture. The new DisplayDeparts /
   DisplayReturns steps run (not while a window is held), but in the test reactor's global-mode
   setup a departure moves no workspace (the departed display's workspaces stay dormant on its
