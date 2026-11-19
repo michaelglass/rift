@@ -745,6 +745,17 @@ mod tests {
     }
 
     #[test]
+    fn swapping_a_stacked_window_with_itself_keeps_it_once_on_top() {
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        assert!(system.select_window(layout, w(2)));
+        system.join_selection_with_direction(layout, Direction::Down);
+        assert_eq!(system.stack_members(layout, w(2)), vec![w(3), w(2)]);
+        assert!(system.swap_windows(layout, w(3), w(3)));
+        assert_eq!(system.stack_members(layout, w(3)), vec![w(2), w(3)]);
+        assert_eq!(system.selected_window(layout), Some(w(3)));
+    }
+
+    #[test]
     fn removal_clears_legacy_duplicates_and_empty_roots() {
         let (mut system, layout) = tiled(&[1, 2, 3]);
         // Simulate duplicate membership from an older saved tree.
@@ -1380,7 +1391,10 @@ impl BspLayoutSystem {
             // A BSP stack has one active leaf window. Keep the dragged source active
             // while moving the target immediately behind it in stack order.
             stack.retain(|window| *window != a && *window != b);
-            stack.push(b);
+            // Swapping a window with itself brings it to the top, once.
+            if b != a {
+                stack.push(b);
+            }
             stack.push(a);
             if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
                 *window = Some(a);
