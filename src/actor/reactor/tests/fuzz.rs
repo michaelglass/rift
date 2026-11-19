@@ -2211,3 +2211,26 @@ fn a_rounding_app_settled_within_the_ack_tolerance_is_where_layout_wants_it() {
     ];
     assert_eq!(execute(Setup::plain(2), &steps, &[]), Ok(()));
 }
+
+/// A topology change while a parked window's write is unanswered: the core keeps the write,
+/// so the arrange after it does not send the same frame again over it.
+#[test]
+fn a_topology_change_does_not_resend_a_parked_windows_unanswered_write() {
+    let setup = Setup {
+        displays: 3,
+        animate: true,
+        scrolling: false,
+        workspaces: Workspaces::Global,
+    };
+    let steps = [
+        Step::MoveToWorkspace { w: 9, k: 1 },
+        Step::ForeignMove {
+            w: 14,
+            to: 2,
+            mouse: Mouse::ReportsUp,
+        },
+        Step::Tick,
+        Step::DisplayDeparts,
+    ];
+    assert_eq!(execute(setup, &steps, &[]), Ok(()));
+}

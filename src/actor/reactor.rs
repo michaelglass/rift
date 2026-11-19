@@ -1109,12 +1109,13 @@ impl Reactor {
             .state
             .windows
             .iter_windows()
-            .filter(|(wid, _)| self.hidden_assigned_space_for_window_id(*wid).is_some())
-            .map(|(wid, window)| (wid, window.info.sys_id))
+            .map(|(wid, _)| wid)
+            .filter(|&wid| self.hidden_assigned_space_for_window_id(wid).is_some())
             .collect();
-        for (wid, _) in hidden {
-            // Whatever a parked window answered before the topology changed no longer holds.
-            self.state.step(CoreEvent::Forget { window: wid });
+        // Whatever a parked window answered before the topology changed no longer holds. A
+        // write still with its app does: the core keeps it, and sends nothing equal over it.
+        if !hidden.is_empty() {
+            self.state.step(CoreEvent::Distrust { windows: hidden });
         }
     }
 
