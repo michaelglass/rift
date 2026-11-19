@@ -547,8 +547,17 @@ impl BspLayoutSystem {
             }
             self.stacks.remove(&node);
         }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node) {
+        // An emptied leaf fills nothing: it keeps no fullscreen flags (as filling one clears them).
+        if let Some(NodeKind::Leaf {
+            window,
+            fullscreen,
+            fullscreen_within_gaps,
+            ..
+        }) = self.kind.get_mut(node)
+        {
             *window = None;
+            *fullscreen = false;
+            *fullscreen_within_gaps = false;
         }
         let fallback = self.cleanup_after_removal(node);
         let selection = self.tree.data.selection.current_selection(self.layouts[layout].root);
@@ -717,6 +726,22 @@ mod tests {
             let frames = calculate_frames(&system, layout, size, &Default::default());
             assert_frame(&frames, survivor, (0.0, 0.0, size.width, size.height));
         }
+    }
+
+    #[test]
+    fn closing_the_last_window_while_fullscreen_leaves_an_empty_leaf_that_is_not_fullscreen() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.toggle_fullscreen_of_selection(layout);
+        system.remove_window(w(1));
+        assert_eq!(system.draw_tree(layout), "Leaf None\n");
+        let tree = system.container_tree(layout);
+        assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Placeholder);
+        assert!(
+            !tree.is_fullscreen && !tree.is_fullscreen_within_gaps,
+            "{tree:?}"
+        );
     }
 
     #[test]
