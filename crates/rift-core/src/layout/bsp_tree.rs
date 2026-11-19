@@ -1055,6 +1055,126 @@ impl<W: Copy + Ord + Debug> Layout<W> {
     }
 }
 
+/// Which splits a resize may move: those along one axis, or the nearest whichever its axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Along {
+    Horizontal,
+    Vertical,
+    Either,
+}
+
+/// A fill a leaf can be toggled into (and out of, back to tiled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fullscreen {
+    Screen,
+    WithinGaps,
+}
+
+impl<W: Copy + Ord + Debug> Layout<W> {
+    /// Toggles the focused leaf into `fullscreen` (out of the other) or back to tiled, if it
+    /// holds a window, and answers the window it shows.
+    pub fn toggle_fullscreen(
+        &mut self,
+        fullscreen: Fullscreen,
+        who: Participation<W>,
+    ) -> Option<W> {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let focus = self.focus(&nodes, &selection, who)?;
+        let at = self.root.leaf_under(&focus, who);
+        let shown = self.root.at(&at).shown(who);
+        let Node::Leaf(Leaf {
+            content: Content::Window { fill, .. } | Content::Stack { fill, .. },
+            ..
+        }) = self.root.at_mut(&at)
+        else {
+            return None;
+        };
+        let into = match fullscreen {
+            Fullscreen::Screen => Fill::Screen,
+            Fullscreen::WithinGaps => Fill::WithinGaps,
+        };
+        *fill = if *fill == into { Fill::Tiled } else { into };
+        shown
+    }
+
+    /// Every split's ratio becomes its first side's share of the tiles along its axis (a
+    /// subtree across the axis counts as one).
+    pub fn rebalance(&mut self) { rebalance(&mut self.root, Orientation::Horizontal); }
+
+    /// Flips the nearest split at or above the focus (the root's, with no focus) to the other
+    /// axis, unless nobody in the layout takes part (with someone left out).
+    pub fn toggle_orientation(&mut self, who: Participation<W>) {
+        let nodes = self.root.preorder();
+        if let Participation::Except(_) = who
+            && !nodes.iter().any(|(_, node)| node.holds_window() && node.shown(who).is_some())
+        {
+            return;
+        }
+        let selection = self.root.selection();
+        let mut at = self.focus(&nodes, &selection, who).unwrap_or_default();
+        loop {
+            if let Node::Split(split) = self.root.at_mut(&at) {
+                split.orientation = match split.orientation {
+                    Orientation::Horizontal => Orientation::Vertical,
+                    Orientation::Vertical => Orientation::Horizontal,
+                };
+                return;
+            }
+            if at.pop().is_none() {
+                return;
+            }
+        }
+    }
+
+    /// Moves the nearest split above the focus that `along` allows by half of `amount`, toward
+    /// growing the focus's side. A ratio that would not be a number is left as it was.
+    pub fn resize(&mut self, amount: f64, along: Along, who: Participation<W>) {
+        let nodes = self.root.preorder();
+        let selection = self.root.selection();
+        let Some(mut at) = self.focus(&nodes, &selection, who) else {
+            return;
+        };
+        while let Some(side) = at.pop() {
+            let Node::Split(split) = self.root.at_mut(&at) else {
+                continue;
+            };
+            let moves = match along {
+                Along::Horizontal => split.orientation == Orientation::Horizontal,
+                Along::Vertical => split.orientation == Orientation::Vertical,
+                Along::Either => true,
+            };
+            if moves {
+                let delta = (amount as f32) * 0.5;
+                let share = match side {
+                    Side::First => split.ratio.get() + delta,
+                    Side::Second => split.ratio.get() - delta,
+                };
+                if let Some(ratio) = Ratio::clamped(share) {
+                    split.ratio = ratio;
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Rebalances `node`'s splits; answers how many tiles it spans along `parent_axis`.
+fn rebalance<W>(node: &mut Node<W>, parent_axis: Orientation) -> usize {
+    let Node::Split(split) = node else { return 1 };
+    let first = rebalance(&mut split.first, split.orientation);
+    let second = rebalance(&mut split.second, split.orientation);
+    let span = first + second;
+    if let Some(ratio) = Ratio::clamped(first as f32 / span as f32) {
+        split.ratio = ratio;
+    }
+    if split.orientation == parent_axis {
+        span
+    } else {
+        1
+    }
+}
+
 /// A set of BSP layouts (keyed by the platform's layout id), the windows left out of them all,
 /// and where node tags come from.
 #[derive(Debug, Clone, PartialEq)]
@@ -1135,6 +1255,21 @@ impl<L: Copy + Ord, W: Copy + Ord + Debug> Layouts<L, W> {
 
     pub fn descend(&mut self, layout: L) -> bool {
         self.change(layout, |tree, who, _| tree.descend(who)).unwrap_or(false)
+    }
+
+    pub fn toggle_fullscreen(&mut self, layout: L, fullscreen: Fullscreen) -> Option<W> {
+        self.change(layout, |tree, who, _| tree.toggle_fullscreen(fullscreen, who))
+            .flatten()
+    }
+
+    pub fn rebalance(&mut self, layout: L) { self.change(layout, |tree, _, _| tree.rebalance()); }
+
+    pub fn toggle_orientation(&mut self, layout: L) {
+        self.change(layout, |tree, who, _| tree.toggle_orientation(who));
+    }
+
+    pub fn resize(&mut self, layout: L, amount: f64, along: Along) {
+        self.change(layout, |tree, who, _| tree.resize(amount, along, who));
     }
 
     pub fn move_focus(&mut self, layout: L, direction: Direction) -> Option<W> {

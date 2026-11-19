@@ -1360,6 +1360,130 @@ mod tests {
 
 /// The bodies of the operations the core shadows in test builds (see `shadowed`).
 impl BspLayoutSystem {
+    fn toggle_fullscreen_of_selection_unshadowed(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            let sel_leaf = self.descend_to_leaf(sel);
+            let active = self.participating_window(sel_leaf);
+            if let Some(NodeKind::Leaf {
+                window: Some(_),
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) = self.kind.get_mut(sel_leaf)
+            {
+                *fullscreen = !*fullscreen;
+                if *fullscreen {
+                    *fullscreen_within_gaps = false;
+                }
+                return active.into_iter().collect();
+            }
+        }
+        vec![]
+    }
+
+    fn toggle_fullscreen_within_gaps_of_selection_unshadowed(
+        &mut self,
+        layout: LayoutId,
+    ) -> Vec<WindowId> {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            let sel_leaf = self.descend_to_leaf(sel);
+            let active = self.participating_window(sel_leaf);
+            if let Some(NodeKind::Leaf {
+                window: Some(_),
+                fullscreen_within_gaps,
+                fullscreen,
+                ..
+            }) = self.kind.get_mut(sel_leaf)
+            {
+                *fullscreen_within_gaps = !*fullscreen_within_gaps;
+                if *fullscreen_within_gaps {
+                    *fullscreen = false;
+                }
+                return active.into_iter().collect();
+            }
+        }
+        vec![]
+    }
+
+    fn rebalance_unshadowed(&mut self, layout: LayoutId) {
+        if let Some(state) = self.layouts.get(layout).copied() {
+            self.rebalance_node(state.root, Orientation::Horizontal);
+        }
+    }
+
+    fn toggle_tile_orientation_unshadowed(&mut self, layout: LayoutId) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
+        let sel_snapshot = self.selection_of_layout(layout);
+
+        let start_node = if let Some(sel) = sel_snapshot {
+            sel
+        } else {
+            let Some(state) = self.layouts.get(layout) else {
+                return;
+            };
+            state.root
+        };
+
+        let mut node_opt = Some(start_node);
+        while let Some(node) = node_opt {
+            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(node) {
+                *orientation = match *orientation {
+                    Orientation::Horizontal => Orientation::Vertical,
+                    Orientation::Vertical => Orientation::Horizontal,
+                };
+                return;
+            }
+            node_opt = node.parent(&self.tree.map);
+        }
+
+        if let Some(state) = self.layouts.get_mut(layout) {
+            let root = state.root;
+            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(root) {
+                *orientation = match *orientation {
+                    Orientation::Horizontal => Orientation::Vertical,
+                    Orientation::Vertical => Orientation::Horizontal,
+                };
+            }
+        }
+    }
+
+    fn resize_selection_by_unshadowed(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    ) {
+        let sel_snapshot = self.selection_of_layout(layout);
+        let Some(mut node) = sel_snapshot else {
+            return;
+        };
+
+        while let Some(parent) = node.parent(&self.tree.map) {
+            if let Some(NodeKind::Split {
+                orientation: split_orientation,
+                ratio,
+            }) = self.kind.get_mut(parent)
+                && match orientation {
+                    ResizeOrientation::Horizontal => *split_orientation == Orientation::Horizontal,
+                    ResizeOrientation::Vertical => *split_orientation == Orientation::Vertical,
+                    ResizeOrientation::Smart => true,
+                }
+            {
+                let is_first = Some(node) == parent.first_child(&self.tree.map);
+                let delta = (amount as f32) * 0.5;
+                if is_first {
+                    *ratio = (*ratio + delta).clamp(0.05, 0.95);
+                } else {
+                    *ratio = (*ratio - delta).clamp(0.05, 0.95);
+                }
+                break;
+            }
+            node = parent;
+        }
+    }
+
     fn set_window_participation_unshadowed(
         &mut self,
         window: WindowId,
@@ -2283,45 +2407,39 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let sel_leaf = self.descend_to_leaf(sel);
-            let active = self.participating_window(sel_leaf);
-            if let Some(NodeKind::Leaf {
-                window: Some(_),
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            }) = self.kind.get_mut(sel_leaf)
-            {
-                *fullscreen = !*fullscreen;
-                if *fullscreen {
-                    *fullscreen_within_gaps = false;
-                }
-                return active.into_iter().collect();
-            }
-        }
-        vec![]
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "toggle_fullscreen",
+                Scope::One(layout),
+                |this| this.toggle_fullscreen_of_selection_unshadowed(layout),
+                |core| {
+                    core.toggle_fullscreen(layout, bsp_tree::Fullscreen::Screen)
+                        .into_iter()
+                        .collect()
+                },
+            )
+        };
+        #[cfg(not(test))]
+        self.toggle_fullscreen_of_selection_unshadowed(layout)
     }
 
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let sel_leaf = self.descend_to_leaf(sel);
-            let active = self.participating_window(sel_leaf);
-            if let Some(NodeKind::Leaf {
-                window: Some(_),
-                fullscreen_within_gaps,
-                fullscreen,
-                ..
-            }) = self.kind.get_mut(sel_leaf)
-            {
-                *fullscreen_within_gaps = !*fullscreen_within_gaps;
-                if *fullscreen_within_gaps {
-                    *fullscreen = false;
-                }
-                return active.into_iter().collect();
-            }
-        }
-        vec![]
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "toggle_fullscreen_within_gaps",
+                Scope::One(layout),
+                |this| this.toggle_fullscreen_within_gaps_of_selection_unshadowed(layout),
+                |core| {
+                    core.toggle_fullscreen(layout, bsp_tree::Fullscreen::WithinGaps)
+                        .into_iter()
+                        .collect()
+                },
+            )
+        };
+        #[cfg(not(test))]
+        self.toggle_fullscreen_within_gaps_of_selection_unshadowed(layout)
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
@@ -2445,77 +2563,50 @@ impl LayoutSystem for BspLayoutSystem {
         amount: f64,
         orientation: ResizeOrientation,
     ) {
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(mut node) = sel_snapshot else {
-            return;
+        #[cfg(test)]
+        return {
+            let along = match orientation {
+                ResizeOrientation::Horizontal => bsp_tree::Along::Horizontal,
+                ResizeOrientation::Vertical => bsp_tree::Along::Vertical,
+                ResizeOrientation::Smart => bsp_tree::Along::Either,
+            };
+            self.shadowed(
+                "resize_selection_by",
+                Scope::One(layout),
+                |this| this.resize_selection_by_unshadowed(layout, amount, orientation),
+                |core| core.resize(layout, amount, along),
+            )
         };
-
-        while let Some(parent) = node.parent(&self.tree.map) {
-            if let Some(NodeKind::Split {
-                orientation: split_orientation,
-                ratio,
-            }) = self.kind.get_mut(parent)
-                && match orientation {
-                    ResizeOrientation::Horizontal => *split_orientation == Orientation::Horizontal,
-                    ResizeOrientation::Vertical => *split_orientation == Orientation::Vertical,
-                    ResizeOrientation::Smart => true,
-                }
-            {
-                let is_first = Some(node) == parent.first_child(&self.tree.map);
-                let delta = (amount as f32) * 0.5;
-                if is_first {
-                    *ratio = (*ratio + delta).clamp(0.05, 0.95);
-                } else {
-                    *ratio = (*ratio - delta).clamp(0.05, 0.95);
-                }
-                break;
-            }
-            node = parent;
-        }
+        #[cfg(not(test))]
+        self.resize_selection_by_unshadowed(layout, amount, orientation)
     }
 
     fn rebalance(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get(layout).copied() {
-            self.rebalance_node(state.root, Orientation::Horizontal);
-        }
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "rebalance",
+                Scope::One(layout),
+                |this| this.rebalance_unshadowed(layout),
+                |core| core.rebalance(layout),
+            )
+        };
+        #[cfg(not(test))]
+        self.rebalance_unshadowed(layout)
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
-            return;
-        }
-        let sel_snapshot = self.selection_of_layout(layout);
-
-        let start_node = if let Some(sel) = sel_snapshot {
-            sel
-        } else {
-            let Some(state) = self.layouts.get(layout) else {
-                return;
-            };
-            state.root
+        #[cfg(test)]
+        return {
+            self.shadowed(
+                "toggle_tile_orientation",
+                Scope::One(layout),
+                |this| this.toggle_tile_orientation_unshadowed(layout),
+                |core| core.toggle_orientation(layout),
+            )
         };
-
-        let mut node_opt = Some(start_node);
-        while let Some(node) = node_opt {
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(node) {
-                *orientation = match *orientation {
-                    Orientation::Horizontal => Orientation::Vertical,
-                    Orientation::Vertical => Orientation::Horizontal,
-                };
-                return;
-            }
-            node_opt = node.parent(&self.tree.map);
-        }
-
-        if let Some(state) = self.layouts.get_mut(layout) {
-            let root = state.root;
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(root) {
-                *orientation = match *orientation {
-                    Orientation::Horizontal => Orientation::Vertical,
-                    Orientation::Vertical => Orientation::Horizontal,
-                };
-            }
-        }
+        #[cfg(not(test))]
+        self.toggle_tile_orientation_unshadowed(layout)
     }
 }
 
@@ -2907,11 +2998,15 @@ mod core_tree_differential {
         MoveFocus(Direction, bsp_tree::Direction),
         Rekey(u32, u32),
         Participate(u32, bool),
+        Fullscreen(bool),
+        Rebalance,
+        ToggleOrientation,
+        Resize(f64, ResizeOrientation),
     }
 
     fn step(rng: &mut Rng) -> Step {
         let window = |rng: &mut Rng| 1 + rng.below(u64::from(POOL)) as u32;
-        match rng.below(16) {
+        match rng.below(21) {
             0..=4 => Step::Add(window(rng)),
             5 | 6 => Step::Remove(window(rng)),
             7 | 8 => Step::Select(window(rng)),
@@ -2922,7 +3017,15 @@ mod core_tree_differential {
                 Step::MoveFocus(old, core)
             }
             14 => Step::Rekey(window(rng), window(rng)),
-            _ => Step::Participate(window(rng), rng.below(3) != 0),
+            15 => Step::Participate(window(rng), rng.below(3) != 0),
+            16 => Step::Fullscreen(rng.below(2) == 0),
+            17 => Step::Rebalance,
+            18 => Step::ToggleOrientation,
+            _ => Step::Resize((rng.below(41) as f64 - 20.0) / 20.0, match rng.below(3) {
+                0 => ResizeOrientation::Horizontal,
+                1 => ResizeOrientation::Vertical,
+                _ => ResizeOrientation::Smart,
+            }),
         }
     }
 
@@ -2975,6 +3078,38 @@ mod core_tree_differential {
             Step::Rekey(from, to) => {
                 old.replace_window(w(from), w(to));
                 core.rekey(w(from), w(to));
+            }
+            Step::Fullscreen(screen) => {
+                let (a, b) = if screen {
+                    (
+                        old.toggle_fullscreen_of_selection(layout),
+                        core.toggle_fullscreen(LAYOUT, bsp_tree::Fullscreen::Screen),
+                    )
+                } else {
+                    (
+                        old.toggle_fullscreen_within_gaps_of_selection(layout),
+                        core.toggle_fullscreen(LAYOUT, bsp_tree::Fullscreen::WithinGaps),
+                    )
+                };
+                if a != b.into_iter().collect::<Vec<_>>() {
+                    return differ("toggle_fullscreen", &a, &b);
+                }
+            }
+            Step::Rebalance => {
+                old.rebalance(layout);
+                core.rebalance(LAYOUT);
+            }
+            Step::ToggleOrientation => {
+                old.toggle_tile_orientation(layout);
+                core.toggle_orientation(LAYOUT);
+            }
+            Step::Resize(amount, orientation) => {
+                old.resize_selection_by(layout, amount, orientation);
+                core.resize(LAYOUT, amount, match orientation {
+                    ResizeOrientation::Horizontal => bsp_tree::Along::Horizontal,
+                    ResizeOrientation::Vertical => bsp_tree::Along::Vertical,
+                    ResizeOrientation::Smart => bsp_tree::Along::Either,
+                });
             }
             Step::Participate(i, takes_part) => {
                 let (a, b) = (
