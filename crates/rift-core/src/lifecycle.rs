@@ -322,11 +322,36 @@ pub enum Transition<W> {
     Suspended(W, Veto),
 }
 
-/// Every live window's admission facts. Admission is not stored: it is read off the facts, so
-/// it can never disagree with them.
+/// Every window with AX state: its admission facts, and whether that state is still valid.
+/// Admission is not stored: it is read off the facts, so it can never disagree with them.
 #[derive(Debug, Clone)]
 pub struct Lifecycle<W> {
-    windows: std::collections::BTreeMap<W, AdmissionFacts>,
+    windows: std::collections::BTreeMap<W, Presence>,
+}
+
+/// A window with AX state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    Live(AdmissionFacts),
+    /// Its AX element was invalidated (displays and sessions change under AX): rift keeps the
+    /// window, its facts and its place, but does not manage it until fresh AX evidence.
+    Invalidated(AdmissionFacts),
+}
+
+impl Presence {
+    fn facts(self) -> AdmissionFacts {
+        match self {
+            Presence::Live(facts) | Presence::Invalidated(facts) => facts,
+        }
+    }
+
+    /// The same presence with new facts.
+    fn with(self, facts: AdmissionFacts) -> Presence {
+        match self {
+            Presence::Live(_) => Presence::Live(facts),
+            Presence::Invalidated(_) => Presence::Invalidated(facts),
+        }
+    }
 }
 
 impl<W> Default for Lifecycle<W> {
@@ -386,10 +411,15 @@ impl<W: Copy + Ord> Lifecycle<W> {
             LifecycleEvent::Changed { window, change } => (window, Reading::Changed(change)),
             LifecycleEvent::Gone(window) => (window, Reading::Gone),
         };
-        let (after, change) = read(self.windows.get(&window).copied(), reading);
-        match after {
-            Some(facts) => self.windows.insert(window, facts),
-            None => self.windows.remove(&window),
+        let before = self.windows.get(&window).copied();
+        let (after, change) = read(before.map(Presence::facts), reading);
+        match (after, reading, before) {
+            // A fresh AX reading is valid AX state.
+            (Some(facts), Reading::Live(_), _) | (Some(facts), _, None) => {
+                self.windows.insert(window, Presence::Live(facts))
+            }
+            (Some(facts), _, Some(presence)) => self.windows.insert(window, presence.with(facts)),
+            (None, ..) => self.windows.remove(&window),
         };
         change.map(|change| match change {
             Change::Admitted => Transition::Admitted(window),
@@ -397,13 +427,51 @@ impl<W: Copy + Ord> Lifecycle<W> {
         })
     }
 
-    /// A live window's admission; `None` for a window with no AX state.
-    pub fn admission(&self, window: W) -> Option<Admission> {
-        self.windows.get(&window).copied().map(admission)
+    /// A window's admission by its facts, valid AX state or not; `None` for a window with no
+    /// AX state.
+    pub fn admission(&self, window: W) -> Option<Admission> { self.facts(window).map(admission) }
+
+    /// A window's facts; `None` for a window with no AX state.
+    pub fn facts(&self, window: W) -> Option<AdmissionFacts> {
+        self.windows.get(&window).copied().map(Presence::facts)
     }
 
-    /// A live window's facts; `None` for a window with no AX state.
-    pub fn facts(&self, window: W) -> Option<AdmissionFacts> { self.windows.get(&window).copied() }
+    /// Whether rift manages the window by its lifecycle: valid AX state and admitted.
+    pub fn manages(&self, window: W) -> bool {
+        matches!(self.windows.get(&window), Some(Presence::Live(facts)) if admission(*facts) == Admission::Admitted)
+    }
+
+    /// The window's AX element was invalidated; false for a window with no AX state.
+    pub fn invalidate(&mut self, window: W) -> bool {
+        let Some(presence) = self.windows.get_mut(&window) else {
+            return false;
+        };
+        *presence = Presence::Invalidated(presence.facts());
+        true
+    }
+
+    /// A positive AX observation: whether the window had been invalidated.
+    pub fn revalidate(&mut self, window: W) -> bool {
+        match self.windows.get_mut(&window) {
+            Some(presence @ Presence::Invalidated(_)) => {
+                *presence = Presence::Live(presence.facts());
+                true
+            }
+            Some(Presence::Live(_)) | None => false,
+        }
+    }
+
+    pub fn is_invalidated(&self, window: W) -> bool {
+        matches!(self.windows.get(&window), Some(Presence::Invalidated(_)))
+    }
+
+    /// `from`'s identity moved to `to`: an invalidation moves with it, to a window with AX
+    /// state.
+    pub fn carry_invalidation(&mut self, from: W, to: W) {
+        if self.revalidate(from) {
+            self.invalidate(to);
+        }
+    }
 
     /// The live windows.
     pub fn windows(&self) -> impl Iterator<Item = W> + '_ { self.windows.keys().copied() }
@@ -931,6 +999,50 @@ mod tests {
         );
         assert_eq!(lifecycle.admission(1), None);
         assert_eq!(lifecycle.windows().count(), 0);
+    }
+
+    #[test]
+    fn an_invalidated_window_keeps_its_facts_and_comes_back_on_fresh_ax() {
+        let facts = AdmissionFacts {
+            manageability: Manageability::Manageable,
+            rule: Rule::NoRule,
+            ax: AxKind::Ordinary,
+            native: NativeKind::Ordinary,
+            minimize: Minimize::Shown,
+        };
+        let mut lifecycle = Lifecycle::default();
+        // Only a window with AX state can lose it.
+        assert!(!lifecycle.invalidate(1_u32));
+        assert!(!lifecycle.is_invalidated(1));
+        lifecycle.step(LifecycleEvent::Live { window: 1, facts });
+        assert!(lifecycle.manages(1));
+        assert!(lifecycle.invalidate(1));
+        assert!(lifecycle.is_invalidated(1) && !lifecycle.manages(1));
+        // Its facts stay, and still change, while it is invalidated.
+        assert_eq!(lifecycle.admission(1), Some(Admission::Admitted));
+        lifecycle.step(LifecycleEvent::Changed {
+            window: 1,
+            change: FactChange::Rule(Rule::Manage),
+        });
+        assert_eq!(lifecycle.facts(1).map(|f| f.rule), Some(Rule::Manage));
+        // A positive AX observation brings it back, once.
+        assert!(lifecycle.revalidate(1));
+        assert!(!lifecycle.revalidate(1));
+        assert!(lifecycle.manages(1));
+        // So does a fresh AX reading.
+        lifecycle.invalidate(1);
+        lifecycle.step(LifecycleEvent::Live { window: 1, facts });
+        assert!(!lifecycle.is_invalidated(1));
+        // Moving to a new identity carries invalidation to a window with AX state.
+        lifecycle.invalidate(1);
+        lifecycle.step(LifecycleEvent::Live { window: 2, facts });
+        lifecycle.carry_invalidation(1, 2);
+        assert!(lifecycle.is_invalidated(2) && !lifecycle.is_invalidated(1));
+        lifecycle.carry_invalidation(2, 3);
+        assert!(!lifecycle.is_invalidated(3) && lifecycle.facts(3).is_none());
+        // Gone takes the invalidation with it.
+        lifecycle.step(LifecycleEvent::Gone(2));
+        assert!(!lifecycle.is_invalidated(2));
     }
 
     #[test]

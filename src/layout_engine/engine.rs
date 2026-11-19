@@ -4064,6 +4064,7 @@ mod tests {
                 true
             ));
             for &window in &windows {
+                store.insert_test_ax_state(window);
                 store.invalidate_ax_identity(window);
                 let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(window));
             }
@@ -4913,6 +4914,7 @@ mod tests {
         let frame = CGRect::new(CGPoint::new(80.0, 120.0), CGSize::new(640.0, 480.0));
         engine.store_floating_position(target, window, frame);
         for observed in [false, true] {
+            window_store.insert_test_ax_state(window);
             window_store.invalidate_ax_identity(window);
             let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowSuspended(window));
             assert!(window_store.is_temporarily_unavailable(window));
@@ -6710,6 +6712,7 @@ mod tests {
                 Some(expected)
             );
         }
+        window_store.insert_test_ax_state(wid);
         window_store.invalidate_ax_identity(wid);
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowSuspended(wid));
         assert!(engine.relocate_window_to_workspace(

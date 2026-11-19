@@ -385,8 +385,6 @@ pub struct WindowRecord {
     window_server_id: Option<WindowServerId>,
     workspace: Option<VirtualWorkspaceId>,
     visibility: WindowVisibility,
-    // AX invalidation retains ownership until fresh AX evidence or confirmed retirement.
-    ax_invalidated: bool,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
     claim: Option<WindowClaim>,
@@ -598,18 +596,14 @@ impl WindowStore {
 
     /// Rift manages a valid AX window when admission passes and no external owner holds it.
     pub(crate) fn is_admitted(&self, wid: WindowId) -> bool {
-        self.record(wid).is_some_and(|record| {
-            !record.ax_invalidated
-                && record.claim.is_none()
-                && record.state.is_some()
-                && self.lifecycle.admission(wid) == Some(Admission::Admitted)
-        })
+        self.record(wid)
+            .is_some_and(|record| record.claim.is_none() && self.lifecycle.manages(wid))
     }
 
     /// Rules and admission are reconciled only for windows Rift may manage.
     pub(crate) fn can_reconcile_admission(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|record| {
-            !record.ax_invalidated
+            !self.lifecycle.is_invalidated(wid)
                 && record.claim.is_none()
                 && record.state.as_ref().is_some_and(WindowState::can_reconcile_admission)
         })
@@ -704,24 +698,22 @@ impl WindowStore {
         admitted
     }
 
+    /// The window's AX element was invalidated: it keeps its ownership, facts and place until
+    /// fresh AX evidence or confirmed retirement. A window with no AX state has none to lose.
     pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) {
-        if let Some(record) = self.windows.get_mut(&wid) {
-            record.ax_invalidated = true;
-        }
+        self.lifecycle.invalidate(wid);
     }
 
     /// Only a fresh AX observation validates an invalidated identity.
     pub(crate) fn validate_ax_identity(&mut self, wid: WindowId) -> bool {
-        self.windows
-            .get_mut(&wid)
-            .is_some_and(|r| std::mem::take(&mut r.ax_invalidated))
+        self.lifecycle.revalidate(wid)
     }
 
     /// Live windows can lose heuristic admission as their AX/native metadata
     /// changes. Suspend their layout participation without forgetting ownership;
     /// only an explicit exclusion or retirement should discard that ownership.
     pub(crate) fn is_temporarily_unavailable(&self, wid: WindowId) -> bool {
-        self.record(wid).is_some_and(|r| r.ax_invalidated)
+        self.lifecycle.is_invalidated(wid)
             || self.window(wid).is_some_and(|w| {
                 w.info.is_minimized
                     || (self.rule(wid) != Some(Rule::Ignore) && !self.is_admitted_state(wid))
@@ -966,7 +958,7 @@ impl WindowStore {
                 let observation = observe(wsid, self.get_window_server_info(wsid));
                 if observation.suitable == Some(true)
                     && observation.ordered_in == Some(false)
-                    && !record.ax_invalidated
+                    && !self.lifecycle.is_invalidated(wid)
                 {
                     // AX omission can be caused by native ordering. After AX
                     // invalidation, omission plus ordering out confirms retirement;
@@ -1286,6 +1278,30 @@ impl WindowStore {
             .collect()
     }
 
+    /// Gives a window minimal AX state, manageable and under no rule, as a real window has
+    /// before macOS can invalidate its AX element (tests that build windows from layout events
+    /// alone).
+    #[cfg(test)]
+    pub(crate) fn insert_test_ax_state(&mut self, window: WindowId) {
+        let info = crate::sys::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: format!("{window:?}"),
+            frame: objc2_core_foundation::CGRect::ZERO,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+        self.insert_manageable_window(window, WindowState::from(info));
+    }
+
     /// Tracks a window's AX state as the heuristic's manageable window under no rule.
     #[cfg(test)]
     pub(crate) fn insert_manageable_window(&mut self, window_id: WindowId, window: WindowState) {
@@ -1319,7 +1335,6 @@ impl WindowStore {
         let retained_workspace = {
             let record = self.windows.entry_or_default(window_id);
             record.state = Some(window);
-            record.ax_invalidated = false;
             record.workspace
         };
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
@@ -1929,8 +1944,6 @@ impl WindowStore {
             None => return,
         };
 
-        let ax_invalidated = self.windows[&from].ax_invalidated;
-
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
         if let Some(assignment) = workspace {
@@ -1945,7 +1958,6 @@ impl WindowStore {
         if workspace.is_some() {
             target.workspace = workspace;
         }
-        target.ax_invalidated |= ax_invalidated;
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
         target.floating_display_geometry = geom;
@@ -1960,9 +1972,10 @@ impl WindowStore {
         let transfer = self.windows.transfer(&from);
         self.windows.set_transfer(&to, transfer);
 
+        // An invalidation moves with the identity, to a window with AX state.
+        self.lifecycle.carry_invalidation(from, to);
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
-            source.ax_invalidated = false;
             source.rule_floating = false;
             source.floating_display_geometry = None;
         }
@@ -3105,6 +3118,33 @@ mod tests {
 
         // Removing the window leaves neither side holding it.
         store.remove_window(wid);
+        assert_eq!(store.lifecycle_divergences(), vec![]);
+    }
+
+    #[test]
+    fn an_invalidated_window_is_unmanaged_until_fresh_ax_and_its_invalidation_moves_with_it() {
+        let (wid, tab) = (WindowId::new(5, 1), WindowId::new(5, 2));
+        let mut store = WindowStore::default();
+        // No AX state: nothing to invalidate.
+        store.invalidate_ax_identity(wid);
+        assert!(!store.is_temporarily_unavailable(wid));
+        store.insert_test_ax_state(wid);
+        assert!(store.is_admitted(wid) && store.can_reconcile_admission(wid));
+        store.invalidate_ax_identity(wid);
+        assert!(!store.is_admitted(wid) && !store.can_reconcile_admission(wid));
+        assert!(store.is_temporarily_unavailable(wid));
+        assert!(store.is_admitted_state(wid), "its facts still admit it");
+        assert!(store.validate_ax_identity(wid));
+        assert!(!store.validate_ax_identity(wid));
+        assert!(store.is_admitted(wid));
+        // A native tab taking over an invalidated window inherits the invalidation.
+        store.invalidate_ax_identity(wid);
+        store.insert_test_ax_state(tab);
+        store.transfer_persistent_window_metadata(wid, tab);
+        assert!(store.window(wid).is_some() && !store.is_temporarily_unavailable(wid));
+        assert!(store.is_temporarily_unavailable(tab) && !store.is_admitted(tab));
+        assert!(store.validate_ax_identity(tab));
+        assert!(store.is_admitted(tab));
         assert_eq!(store.lifecycle_divergences(), vec![]);
     }
 
