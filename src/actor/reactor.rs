@@ -72,6 +72,9 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
+use rift_core::topology::{
+    DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
+};
 use rift_core::{Initiative, InputClass};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
@@ -946,10 +949,14 @@ impl Reactor {
 
     fn apply_app_rules_for_activated_spaces(&mut self, activated: &[SpaceId]) {
         let windows_by_pid = app_rule_candidates(
-            &self.space_state.active_window_spaces,
+            self.space_state
+                .active_window_spaces
+                .iter()
+                .map(|(&wsid, &space)| (wsid, space)),
             activated,
             |wsid| self.state.windows.tracked_window_id(wsid),
             |wid| self.state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission),
+            |wid| wid.pid,
         );
 
         for (pid, window_ids) in windows_by_pid {
@@ -3641,18 +3648,21 @@ impl Reactor {
             space_state = topology_workflow::merge_space_deltas(pending, space_state);
         }
         let (invalidated_spaces, lost_local_desktops) =
-            match topology_workflow::admit_space_snapshot(
-                &self.space_state,
-                &space_state,
-                &self.mission_control_manager.mission_control_state,
+            match rift_core::topology::admit_space_snapshot(
+                &topology_workflow::displays(&self.space_state),
+                &topology_workflow::incoming(&space_state),
+                match self.mission_control_manager.mission_control_state {
+                    MissionControlState::Active => rift_core::topology::MissionControl::Open,
+                    MissionControlState::Inactive => rift_core::topology::MissionControl::Closed,
+                },
             ) {
-                topology_workflow::Admission::Hold(why) => {
+                rift_core::topology::Admission::Hold(why) => {
                     trace!(?why, revision = space_state.revision, "space snapshot held");
                     self.space_state.authoritative = false;
                     self.pending_space_change_manager.pending_space_change = Some(space_state);
                     return Ok(EventOutcome::default());
                 }
-                topology_workflow::Admission::Commit {
+                rift_core::topology::Admission::Commit {
                     invalidated,
                     lost_local_desktops,
                 } => (invalidated, lost_local_desktops),
@@ -6880,119 +6890,6 @@ enum Resolved {
         space: SpaceId,
         user: bool,
     },
-}
-
-/// The windows whose app rules an activation re-applies, by app: the tracked windows live on
-/// a Space that just became active whose admission can still be reconciled.
-fn app_rule_candidates(
-    window_spaces: &HashMap<WindowServerId, SpaceId>,
-    activated: &[SpaceId],
-    tracked: impl Fn(WindowServerId) -> Option<WindowId>,
-    reconcilable: impl Fn(WindowId) -> bool,
-) -> HashMap<pid_t, Vec<WindowId>> {
-    let mut by_app: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
-    for window in window_spaces
-        .iter()
-        .filter(|(_, space)| activated.contains(space))
-        .filter_map(|(&wsid, _)| tracked(wsid))
-        .filter(|&window| reconcilable(window))
-    {
-        by_app.entry(window.pid).or_default().push(window);
-    }
-    by_app
-}
-
-/// Where an app inventory finds a window, by what rift already knows of it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Standing {
-    /// It has a native fullscreen record, settled or pending.
-    RecoveringFullscreen,
-    /// Rift tracks no window with its window-server id.
-    Untracked,
-    /// Rift tracks it and has no fullscreen record for it.
-    Tracked,
-}
-
-/// The Space an app inventory takes a window to be on.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DiscoveredSpace {
-    /// Live on exactly one Space, a fullscreen one or a display's: also evidence of a
-    /// fullscreen entry or exit.
-    Observed(SpaceId),
-    /// Live on exactly one other Space.
-    Live(SpaceId),
-    /// Not live on exactly one Space: what rift resolves for it, if anything.
-    Fallback(Option<SpaceId>),
-}
-
-impl DiscoveredSpace {
-    fn native(self) -> Option<SpaceId> {
-        match self {
-            DiscoveredSpace::Observed(space) | DiscoveredSpace::Live(space) => Some(space),
-            DiscoveredSpace::Fallback(space) => space,
-        }
-    }
-
-    fn observation(self) -> Option<SpaceId> {
-        match self {
-            DiscoveredSpace::Observed(space) => Some(space),
-            DiscoveredSpace::Live(_) | DiscoveredSpace::Fallback(_) => None,
-        }
-    }
-}
-
-/// A tracked window resolves as usual. An untracked or recovering one is where it is live, if
-/// that is exactly one Space: several memberships are transitional, even if one is a user
-/// Space, and contradictory evidence must not complete a fullscreen exit. Failing that, an
-/// untracked window falls back to its recorded Space and a recovering one to none.
-fn discovered_space(
-    standing: Standing,
-    live: impl FnOnce() -> Vec<SpaceId>,
-    observable: impl Fn(SpaceId) -> bool,
-    recorded: impl FnOnce() -> Option<SpaceId>,
-    resolved: impl FnOnce() -> Option<SpaceId>,
-) -> DiscoveredSpace {
-    let one_live = || match live().as_slice() {
-        &[space] if observable(space) => Some(DiscoveredSpace::Observed(space)),
-        &[space] => Some(DiscoveredSpace::Live(space)),
-        _ => None,
-    };
-    match standing {
-        Standing::Tracked => DiscoveredSpace::Fallback(resolved()),
-        Standing::Untracked => one_live().unwrap_or_else(|| DiscoveredSpace::Fallback(recorded())),
-        Standing::RecoveringFullscreen => one_live().unwrap_or(DiscoveredSpace::Fallback(None)),
-    }
-}
-
-/// What an app inventory may do with a window it reports, for its discovery Space.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DiscoveryStanding {
-    /// It has a native fullscreen record: its fullscreen Space is not one to admit it on.
-    FullscreenRecorded,
-    /// Only an assignment holds it: that supplies ownership but cannot admit an AX window.
-    Placeholder,
-    /// Rift holds its AX window and no fullscreen record.
-    Admissible,
-}
-
-/// A reported window's authoritative Space (native, else assigned) and the Space discovery may
-/// admit it on: only an admissible window's, preferring its assignment, then its native Space,
-/// then where its frame is.
-fn discovery_spaces(
-    standing: DiscoveryStanding,
-    native: Option<SpaceId>,
-    assigned: Option<SpaceId>,
-    by_frame: impl FnOnce() -> Option<SpaceId>,
-) -> (Option<SpaceId>, Option<SpaceId>) {
-    let authoritative = native.or(assigned);
-    match standing {
-        DiscoveryStanding::FullscreenRecorded | DiscoveryStanding::Placeholder => {
-            (authoritative, None)
-        }
-        DiscoveryStanding::Admissible => {
-            (authoritative, assigned.or(authoritative).or_else(by_frame))
-        }
-    }
 }
 
 /// What a window missing from an authoritative snapshot of the active Spaces comes to.

@@ -22,6 +22,9 @@ use crate::layout::{Gaps, Size, Sizing, WindowConstraints, scrolling};
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
 use crate::reconciler::{Answer, Note, Reply, Want, Write};
+use crate::topology::{
+    self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
+};
 
 /// What a word stream that is not a well-formed event or effect list breaks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,6 +595,157 @@ pub fn encode_frames(frames: Vec<(WindowId, Rect)>) -> Vec<u64> {
         words.frame(frame);
     });
     words.0
+}
+
+/// A discovered window's Space question as words: tag 5, its standing (0 recovering, 1
+/// untracked, 2 tracked), its live Spaces, the observable Spaces, its recorded Space, its
+/// resolved Space.
+pub fn encode_discovered(question: topology::plain::Discovered) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(5);
+    words.word(match question.standing {
+        Standing::RecoveringFullscreen => 0,
+        Standing::Untracked => 1,
+        Standing::Tracked => 2,
+    });
+    words.list(question.live, Words::word);
+    words.list(question.observable, Words::word);
+    words.option(question.recorded, Words::word);
+    words.option(question.resolved, Words::word);
+    words.0
+}
+
+/// Where an app inventory finds a window, as words: 0 observed, 1 live (then the Space), or 2
+/// a fallback (then an option).
+pub fn encode_discovered_space(answer: DiscoveredSpace<u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    match answer {
+        DiscoveredSpace::Observed(space) => {
+            words.word(0);
+            words.word(space);
+        }
+        DiscoveredSpace::Live(space) => {
+            words.word(1);
+            words.word(space);
+        }
+        DiscoveredSpace::Fallback(space) => {
+            words.word(2);
+            words.option(space, Words::word);
+        }
+    }
+    words.0
+}
+
+/// A discovery Space question as words: tag 6, the standing (0 fullscreen recorded, 1
+/// placeholder, 2 admissible), the native, assigned and by-frame Spaces as options.
+pub fn encode_discovery(question: topology::plain::Discovery) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(6);
+    words.word(match question.standing {
+        DiscoveryStanding::FullscreenRecorded => 0,
+        DiscoveryStanding::Placeholder => 1,
+        DiscoveryStanding::Admissible => 2,
+    });
+    words.option(question.native, Words::word);
+    words.option(question.assigned, Words::word);
+    words.option(question.by_frame, Words::word);
+    words.0
+}
+
+/// A window's authoritative and discovery Spaces, as two options.
+pub fn encode_discovery_spaces(answer: (Option<u64>, Option<u64>)) -> Vec<u64> {
+    let mut words = Words::default();
+    words.option(answer.0, Words::word);
+    words.option(answer.1, Words::word);
+    words.0
+}
+
+/// A space snapshot admission as words: tag 7, Mission Control (0 closed, 1 open), the current
+/// displays, the incoming displays, its remaps, and its three flags (display set changed,
+/// forced refresh, membership complete). Displays are the screens' displays (options) and each
+/// display's Spaces.
+pub fn encode_admit(question: topology::plain::Admit) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(7);
+    words.word(match question.mission_control {
+        MissionControl::Closed => 0,
+        MissionControl::Open => 1,
+    });
+    words.displays(question.current);
+    let incoming = question.incoming;
+    words.displays(incoming.displays);
+    words.list(incoming.remaps, |words, (old, new)| {
+        words.word(old);
+        words.word(new);
+    });
+    words.flag(incoming.display_set_changed);
+    words.flag(incoming.force_refresh);
+    words.flag(incoming.membership_complete);
+    words.0
+}
+
+/// An admission as words: 0 and the hold (0 Mission Control, 1 membership incomplete), or 1
+/// and the invalidated Spaces and the lost local desktops.
+pub fn encode_admission(answer: Admission<u64>) -> Vec<u64> {
+    let mut words = Words::default();
+    match answer {
+        Admission::Hold(hold) => {
+            words.word(0);
+            words.word(match hold {
+                Hold::MissionControl => 0,
+                Hold::MembershipIncomplete => 1,
+            });
+        }
+        Admission::Commit {
+            invalidated,
+            lost_local_desktops,
+        } => {
+            words.word(1);
+            words.list(invalidated, Words::word);
+            words.list(lost_local_desktops, Words::word);
+        }
+    }
+    words.0
+}
+
+/// An app-rule candidates question as words: tag 8, the window Spaces (server id, Space), the
+/// activated Spaces, the tracked windows (server id, window), the reconcilable windows.
+pub fn encode_candidates(question: topology::plain::Candidates) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(8);
+    words.list(question.window_spaces, |words, (server, space)| {
+        words.word(server);
+        words.word(space);
+    });
+    words.list(question.activated, Words::word);
+    words.list(question.tracked, |words, (server, window)| {
+        words.word(server);
+        words.window(window);
+    });
+    words.list(question.reconcilable, Words::window);
+    words.0
+}
+
+/// App-rule candidates by app, as words: each app's pid (sign-extended) and its windows.
+pub fn encode_app_windows(answer: Vec<(i32, Vec<WindowId>)>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.list(answer, |words, (pid, windows)| {
+        words.word(i64::from(pid) as u64);
+        words.list(windows, Words::window);
+    });
+    words.0
+}
+
+impl Words {
+    fn displays(&mut self, displays: Displays<u64, u64>) {
+        self.list(displays.screens, |words, display| {
+            words.option(display, Words::word)
+        });
+        self.list(displays.spaces, |words, (display, spaces)| {
+            words.word(display);
+            words.list(spaces, Words::word);
+        });
+    }
 }
 
 /// One step of a trace (its event, then its effects), appended to `trace`.

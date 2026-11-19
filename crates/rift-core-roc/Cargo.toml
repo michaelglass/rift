@@ -29,6 +29,10 @@ name = "session"
 required-features = ["roc"]
 
 [[test]]
+name = "topology"
+required-features = ["roc"]
+
+[[test]]
 name = "measure"
 required-features = ["roc"]
 

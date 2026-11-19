@@ -11,6 +11,7 @@ pub mod layout;
 pub mod plain;
 pub mod pointer;
 pub mod reconciler;
+pub mod topology;
 
 use std::fmt::Debug;
 use std::hash::Hash;

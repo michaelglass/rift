@@ -9,6 +9,7 @@ import Bsp
 import Traditional
 import Scrolling
 import Floating
+import Topology
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -112,11 +113,12 @@ Model : {
 
 core = { init, step, tile }
 
-## Layout geometry: a shape's words (its layout system's tag first: 0 BSP, 1 traditional,
-## 2 a scrolling strip, 3 a settle question on a strip's placement, 4 a floating layout's
-## newcomers) in; out, a 0 and the answer's words (the frames; for a strip, where it placed
-## everything; for a settle question, where the camera settles; for newcomers, their first
-## frames), or a 1: the words were not a question it answers.
+## The model-free questions: layout geometry and the topology decisions. A question's words
+## (its tag first: 0 BSP, 1 traditional, 2 a scrolling strip, 3 a settle question on a strip's
+## placement, 4 a floating layout's newcomers; 5 to 8 the topology decisions, `Topology`) in;
+## out, a 0 and the answer's words (the frames; for a strip, where it placed everything; for a
+## settle question, where the camera settles; for newcomers, their first frames; for a topology
+## question, its answer), or a 1: the words were not a question it answers.
 tile : List(U64) -> List(U64)
 tile = |words|
 	match shape_answer(words) {
@@ -134,6 +136,10 @@ shape_answer = |words| {
 		2 => Scrolling.placed_words(cursor)
 		3 => Scrolling.settled_words(cursor)
 		4 => Floating.first_frames_words(cursor)
+		5 => Topology.discovered_words(cursor)
+		6 => Topology.discovery_words(cursor)
+		7 => Topology.admit_words(cursor)
+		8 => Topology.candidates_words(cursor)
 		_ => Err(Malformed)
 	}
 }
