@@ -72,7 +72,7 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
-use rift_core::focus::{Follow, Removal, RemovalFocus, Stay};
+use rift_core::focus::{Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
 use rift_core::lifecycle::{
     Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, WorkspaceMode,
 };
@@ -5872,44 +5872,36 @@ impl Reactor {
     }
 
     fn focus_untracked_window_under_cursor(&mut self) -> bool {
-        let Some(wsid) = self.window_server_id_under_cursor() else {
-            return false;
-        };
-        if self.state.windows.tracked_window_id(wsid).is_some() {
-            return false;
+        // The fallback exists for ordinary application windows intentionally outside Rift's
+        // model; system surfaces must never be made key because the pointer crossed them.
+        match rift_core::focus::untracked_focus(
+            self.window_server_id_under_cursor(),
+            |wsid| self.state.windows.tracked_window_id(wsid).is_some(),
+            |wsid| {
+                self.state
+                    .windows
+                    .get_window_server_info(wsid)
+                    .or_else(|| window_server::get_window(wsid))
+                    .map(|info| (info.layer, info.pid))
+            },
+        ) {
+            UntrackedFocus::Nothing => false,
+            UntrackedFocus::SystemSurface { layer, window: wsid } => {
+                trace!(?wsid, layer, "Skipping non-application surface under cursor");
+                false
+            }
+            UntrackedFocus::MakeKey(pid, wsid) => window_server::make_key_window(pid, wsid).is_ok(),
         }
-
-        let window_info = self
-            .state
-            .windows
-            .get_window_server_info(wsid)
-            .or_else(|| window_server::get_window(wsid));
-
-        let Some(info) = window_info else { return false };
-        // The untracked-window fallback exists for ordinary application
-        // windows that are intentionally outside Rift's model. Desktop,
-        // menu-bar, Dock, and other system surfaces use nonzero layers and
-        // must never be made key merely because the pointer crossed them.
-        if info.layer != 0 {
-            trace!(
-                ?wsid,
-                layer = info.layer,
-                "Skipping non-application surface under cursor"
-            );
-            return false;
-        }
-        window_server::make_key_window(info.pid, wsid).is_ok()
     }
 
     fn focus_desktop_if_active_workspace_empty(&mut self, space: SpaceId) -> bool {
-        if !self.is_space_active(space)
-            || !self
-                .layout_manager
+        if !rift_core::focus::focuses_desktop(self.is_space_active(space), || {
+            self.layout_manager
                 .layout_engine
                 .workspaces()
                 .windows_in_active_workspace(&self.state.windows, space)
                 .is_empty()
-        {
+        }) {
             return false;
         }
         let Some(screen) = self.space_state.screen_by_space(space) else {
@@ -6498,14 +6490,15 @@ impl Reactor {
     /// macOS moves its active display with the key window only later; until then the
     /// next command would act on the display move-node just carried the window off.
     fn follow_focused_window_to_its_display(&mut self, previous_space: Option<SpaceId>) {
-        let Some(space) = self
-            .layout_manager
-            .layout_engine
-            .focused_window()
-            .and_then(|window| self.assigned_space_for_window_id(window))
-            .filter(|space| Some(*space) != previous_space && self.is_space_active(*space))
-            .filter(|space| self.display_uuid_for_space(*space).is_some())
-        else {
+        let Some(space) = rift_core::focus::display_to_follow(
+            self.layout_manager
+                .layout_engine
+                .focused_window()
+                .and_then(|window| self.assigned_space_for_window_id(window)),
+            previous_space,
+            |space| self.is_space_active(space),
+            |space| self.display_uuid_for_space(space).is_some(),
+        ) else {
             return;
         };
         self.activate_display(space);

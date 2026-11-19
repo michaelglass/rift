@@ -182,6 +182,56 @@ pub fn activation_follow<F: ActivationFacts>(
     }
 }
 
+/// The display to activate after a command moved the focused window: its assigned Space, if
+/// that changed, is active and is on a known display. macOS moves its active display with the
+/// key window only later; until then the next command would act on the old display.
+pub fn display_to_follow<S: Copy + PartialEq>(
+    focused_space: Option<S>,
+    previous: Option<S>,
+    active: impl Fn(S) -> bool,
+    on_known_display: impl Fn(S) -> bool,
+) -> Option<S> {
+    focused_space
+        .filter(|&space| Some(space) != previous && active(space))
+        .filter(|&space| on_known_display(space))
+}
+
+/// What to do about the window under the cursor when the platform does not track it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UntrackedFocus<P, V> {
+    /// Nothing there, it is tracked, or nothing is known of it.
+    Nothing,
+    /// A system surface (desktop, menu bar, Dock: a nonzero layer), never made key merely
+    /// because the pointer crossed it.
+    SystemSurface { layer: i32, window: V },
+    /// An ordinary application window outside rift's model: make it key.
+    MakeKey(P, V),
+}
+
+/// Whether to make the untracked window under the cursor key: only an application window
+/// (layer 0). Its tracking is asked only if there is one, what is known of it (its layer and
+/// app) only if untracked.
+pub fn untracked_focus<P, V: Copy>(
+    under_cursor: Option<V>,
+    tracked: impl FnOnce(V) -> bool,
+    known: impl FnOnce(V) -> Option<(i32, P)>,
+) -> UntrackedFocus<P, V> {
+    let Some(window) = under_cursor.filter(|&window| !tracked(window)) else {
+        return UntrackedFocus::Nothing;
+    };
+    match known(window) {
+        None => UntrackedFocus::Nothing,
+        Some((0, app)) => UntrackedFocus::MakeKey(app, window),
+        Some((layer, _)) => UntrackedFocus::SystemSurface { layer, window },
+    }
+}
+
+/// Whether to focus a Space's desktop: it is active and its active workspace is empty (asked
+/// only then).
+pub fn focuses_desktop(active: bool, workspace_empty: impl FnOnce() -> bool) -> bool {
+    active && workspace_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +453,58 @@ mod tests {
             }),
             Follow::Stay(Stay::Blacklisted)
         );
+    }
+
+    #[test]
+    fn the_display_follows_a_focused_window_to_another_active_known_display() {
+        let active = |space: u64| space != 3;
+        let known = |space: u64| space != 4;
+        assert_eq!(display_to_follow(Some(2), Some(1), active, known), Some(2));
+        assert_eq!(display_to_follow(Some(2), None, active, known), Some(2));
+        assert_eq!(display_to_follow(Some(1), Some(1), active, known), None);
+        assert_eq!(display_to_follow(Some(3), Some(1), active, known), None);
+        assert_eq!(display_to_follow(Some(4), Some(1), active, known), None);
+        assert_eq!(display_to_follow(None, Some(1), active, known), None);
+    }
+
+    #[test]
+    fn only_an_untracked_application_window_under_the_cursor_is_made_key() {
+        use UntrackedFocus::{MakeKey, Nothing, SystemSurface};
+        assert_eq!(
+            untracked_focus(Some(5_u32), |_| false, |_| Some((0, 7_i32))),
+            MakeKey(7, 5)
+        );
+        assert_eq!(
+            untracked_focus(Some(5_u32), |_| false, |_| Some((25, 7_i32))),
+            SystemSurface { layer: 25, window: 5 }
+        );
+        assert_eq!(
+            untracked_focus(Some(5_u32), |_| false, |_| None::<(i32, i32)>),
+            Nothing
+        );
+        assert_eq!(
+            untracked_focus(
+                Some(5_u32),
+                |_| true,
+                |_| -> Option<(i32, i32)> { panic!("not asked") }
+            ),
+            Nothing
+        );
+        assert_eq!(
+            untracked_focus(
+                None::<u32>,
+                |_| panic!("not asked"),
+                |_| -> Option<(i32, i32)> { panic!("not asked") }
+            ),
+            Nothing
+        );
+    }
+
+    #[test]
+    fn the_desktop_takes_focus_on_an_active_space_with_an_empty_workspace() {
+        assert!(focuses_desktop(true, || true));
+        assert!(!focuses_desktop(true, || false));
+        assert!(!focuses_desktop(false, || panic!("not asked")));
     }
 
     #[test]
