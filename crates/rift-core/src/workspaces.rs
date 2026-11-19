@@ -312,6 +312,255 @@ pub fn orphans<W: Copy + Ord, K: Copy + PartialEq, O: Copy, S>(
         .collect()
 }
 
+/// Who takes a removed workspace's windows and claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Successor<K> {
+    /// This workspace: its windows are assigned to it, its claims return to it.
+    Into(K),
+    /// Nobody: its windows are unowned, its claims return nowhere.
+    Unassign,
+}
+
+/// A change to the workspaces, as the platform makes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspacesEvent<W, K, S, O> {
+    /// A workspace was created on a Space, at the end of the catalog.
+    Created { workspace: K, space: S },
+    /// A workspace was removed; its windows and claims go to the successor, and no Space's
+    /// history or memory names it any more.
+    Removed {
+        workspace: K,
+        successor: Successor<K>,
+    },
+    /// A workspace moved to another Space.
+    Moved { workspace: K, space: S },
+    /// What a Space shows now.
+    Activated { space: S, activation: Activation<K> },
+    /// A Space has no activation any more.
+    Cleared(S),
+    /// Who places a window now.
+    Owned { window: W, owned: Owned<K, O> },
+}
+
+/// Why the workspaces refused an event: each would leave something naming a workspace the
+/// catalog lacks, or a workspace twice. A refusal changes nothing; it is a bug in the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused<K, S> {
+    /// The workspace is in the catalog already.
+    Exists(K),
+    /// The event names a workspace the catalog lacks.
+    Unknown(K),
+    /// The workspace would succeed itself.
+    OwnSuccessor(K),
+    /// A Space still shows the workspace: clear or change what it shows first.
+    Shown { workspace: K, space: S },
+}
+
+/// The workspaces as the core keeps them: the catalog (each workspace once, with its Space, in
+/// catalog order), what each Space shows, and who places each window. Every workspace an
+/// activation or an ownership names is in the catalog: the step refuses anything else, and a
+/// removal hands its windows and claims on in the same step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspaces<W, K, S, O> {
+    catalog: Vec<(K, S)>,
+    activations: Vec<(S, Activation<K>)>,
+    owners: std::collections::BTreeMap<W, Ownership<K, O>>,
+    /// The windows assigned to each workspace, derived from `owners` by the step.
+    assigned: std::collections::BTreeMap<K, std::collections::BTreeSet<W>>,
+}
+
+impl<W, K, S, O> Default for Workspaces<W, K, S, O> {
+    fn default() -> Self {
+        Workspaces {
+            catalog: Vec::new(),
+            activations: Vec::new(),
+            owners: std::collections::BTreeMap::new(),
+            assigned: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K, S, O> {
+    pub fn step(&mut self, event: WorkspacesEvent<W, K, S, O>) -> Result<(), Refused<K, S>> {
+        self.admit(event)?;
+        self.apply(event);
+        Ok(())
+    }
+
+    fn known(&self, workspace: K) -> Result<(), Refused<K, S>> {
+        match self.catalog.iter().any(|(id, _)| *id == workspace) {
+            true => Ok(()),
+            false => Err(Refused::Unknown(workspace)),
+        }
+    }
+
+    fn admit(&self, event: WorkspacesEvent<W, K, S, O>) -> Result<(), Refused<K, S>> {
+        match event {
+            WorkspacesEvent::Created { workspace, .. } => match self.known(workspace) {
+                Ok(()) => Err(Refused::Exists(workspace)),
+                Err(_) => Ok(()),
+            },
+            WorkspacesEvent::Removed { workspace, successor } => {
+                self.known(workspace)?;
+                if let Successor::Into(heir) = successor {
+                    if heir == workspace {
+                        return Err(Refused::OwnSuccessor(workspace));
+                    }
+                    self.known(heir)?;
+                }
+                match self.activations.iter().find(|(_, activation)| {
+                    matches!(activation, Activation::Showing { current, .. } if *current == workspace)
+                }) {
+                    Some((space, _)) => Err(Refused::Shown { workspace, space: *space }),
+                    None => Ok(()),
+                }
+            }
+            WorkspacesEvent::Moved { workspace, .. } => self.known(workspace),
+            WorkspacesEvent::Activated { activation, .. } => {
+                let (current, previous, remembered) = match activation {
+                    Activation::Showing { current, previous, remembered } => {
+                        (Some(current), previous, remembered)
+                    }
+                    Activation::Vacant { remembered } => (None, None, remembered),
+                };
+                [current, previous, remembered]
+                    .into_iter()
+                    .flatten()
+                    .try_for_each(|workspace| self.known(workspace))
+            }
+            WorkspacesEvent::Cleared(_) => Ok(()),
+            WorkspacesEvent::Owned { owned, .. } => match owned {
+                Owned::Unowned
+                | Owned::Owner(Ownership::Claimed {
+                    destination: Destination::Nowhere,
+                    ..
+                }) => Ok(()),
+                Owned::Owner(Ownership::Assigned(workspace))
+                | Owned::Owner(Ownership::Claimed {
+                    destination: Destination::Returns(workspace),
+                    ..
+                }) => self.known(workspace),
+            },
+        }
+    }
+
+    fn apply(&mut self, event: WorkspacesEvent<W, K, S, O>) {
+        match event {
+            WorkspacesEvent::Created { workspace, space } => self.catalog.push((workspace, space)),
+            WorkspacesEvent::Removed { workspace, successor } => {
+                self.catalog.retain(|(id, _)| *id != workspace);
+                let heir = match successor {
+                    Successor::Into(heir) => Some(heir),
+                    Successor::Unassign => None,
+                };
+                let windows: Vec<W> = self.owners.keys().copied().collect();
+                for window in windows {
+                    let handed = match self.owners[&window] {
+                        Ownership::Assigned(id) if id == workspace => {
+                            Some(heir.map(Ownership::Assigned))
+                        }
+                        Ownership::Claimed {
+                            owner,
+                            destination: Destination::Returns(id),
+                        } if id == workspace => Some(Some(Ownership::Claimed {
+                            owner,
+                            destination: heir.map_or(Destination::Nowhere, Destination::Returns),
+                        })),
+                        Ownership::Assigned(_) | Ownership::Claimed { .. } => None,
+                    };
+                    if let Some(ownership) = handed {
+                        self.own(window, ownership);
+                    }
+                }
+                for (_, activation) in &mut self.activations {
+                    let forget = |id: Option<K>| id.filter(|id| *id != workspace);
+                    *activation = match *activation {
+                        Activation::Showing { current, previous, remembered } => {
+                            Activation::Showing {
+                                current,
+                                previous: forget(previous),
+                                remembered: forget(remembered),
+                            }
+                        }
+                        Activation::Vacant { remembered } => {
+                            Activation::Vacant { remembered: forget(remembered) }
+                        }
+                    };
+                }
+            }
+            WorkspacesEvent::Moved { workspace, space } => {
+                if let Some(entry) = self.catalog.iter_mut().find(|(id, _)| *id == workspace) {
+                    entry.1 = space;
+                }
+            }
+            WorkspacesEvent::Activated { space, activation } => {
+                match self.activations.iter_mut().find(|(on, _)| *on == space) {
+                    Some(entry) => entry.1 = activation,
+                    None => self.activations.push((space, activation)),
+                }
+            }
+            WorkspacesEvent::Cleared(space) => self.activations.retain(|(on, _)| *on != space),
+            WorkspacesEvent::Owned { window, owned } => self.own(window, match owned {
+                Owned::Unowned => None,
+                Owned::Owner(ownership) => Some(ownership),
+            }),
+        }
+    }
+
+    /// Gives a window its ownership (`None`: nobody's), keeping the derived index.
+    fn own(&mut self, window: W, ownership: Option<Ownership<K, O>>) {
+        if let Some(Ownership::Assigned(old)) = self.owners.get(&window).copied()
+            && let Some(windows) = self.assigned.get_mut(&old)
+        {
+            windows.remove(&window);
+            if windows.is_empty() {
+                self.assigned.remove(&old);
+            }
+        }
+        match ownership {
+            None => {
+                self.owners.remove(&window);
+            }
+            Some(ownership) => {
+                self.owners.insert(window, ownership);
+                if let Ownership::Assigned(workspace) = ownership {
+                    self.assigned.entry(workspace).or_default().insert(window);
+                }
+            }
+        }
+    }
+
+    /// Each workspace with its Space, in catalog order.
+    pub fn catalog(&self) -> &[(K, S)] { &self.catalog }
+
+    pub fn activation(&self, space: S) -> Option<Activation<K>> {
+        self.activations
+            .iter()
+            .find(|(on, _)| *on == space)
+            .map(|(_, activation)| *activation)
+    }
+
+    /// Every Space with an activation, in the order they first got one.
+    pub fn activations(&self) -> &[(S, Activation<K>)] { &self.activations }
+
+    pub fn owned(&self, window: W) -> Owned<K, O> {
+        match self.owners.get(&window) {
+            Some(ownership) => Owned::Owner(*ownership),
+            None => Owned::Unowned,
+        }
+    }
+
+    /// Every owned window and its ownership, in window order.
+    pub fn owners(&self) -> impl Iterator<Item = (W, Ownership<K, O>)> + '_ {
+        self.owners.iter().map(|(window, ownership)| (*window, *ownership))
+    }
+
+    /// The windows assigned to a workspace (not claimed ones), in window order.
+    pub fn windows_on(&self, workspace: K) -> impl Iterator<Item = W> + '_ {
+        self.assigned.get(&workspace).into_iter().flatten().copied()
+    }
+}
+
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
     use super::{
@@ -551,6 +800,159 @@ mod tests {
             });
         }
         assert_eq!(orphans(&ownerships, &topology), vec![(2, 2), (4, 3)]);
+    }
+
+    #[test]
+    fn the_joined_workspaces_refuse_what_would_name_a_missing_workspace() {
+        use WorkspacesEvent::{Activated, Cleared, Created, Moved, Owned as Own, Removed};
+        let mut workspaces = Workspaces::<u32, u32, u32, u32>::default();
+        let assigned = |workspace| Owned::Owner(Ownership::Assigned(workspace));
+        let claimed = |workspace| {
+            Owned::Owner(Ownership::Claimed {
+                owner: 7,
+                destination: Destination::Returns(workspace),
+            })
+        };
+        for event in [
+            Created { workspace: 1, space: 10 },
+            Created { workspace: 2, space: 10 },
+            Created { workspace: 3, space: 20 },
+            Own {
+                window: 100,
+                owned: assigned(2),
+            },
+            Own { window: 101, owned: claimed(2) },
+            Own {
+                window: 102,
+                owned: assigned(1),
+            },
+            Activated {
+                space: 10,
+                activation: Activation::Showing {
+                    current: 1,
+                    previous: Some(2),
+                    remembered: Some(2),
+                },
+            },
+        ] {
+            assert_eq!(workspaces.step(event), Ok(()), "{event:?}");
+        }
+        assert_eq!(workspaces.windows_on(2).collect::<Vec<_>>(), vec![100]);
+        assert_eq!(workspaces.windows_on(1).collect::<Vec<_>>(), vec![102]);
+
+        // Each refusal leaves everything as it was.
+        let before = workspaces.clone();
+        for (event, refused) in [
+            (Created { workspace: 1, space: 20 }, Refused::Exists(1)),
+            (
+                Own {
+                    window: 103,
+                    owned: assigned(9),
+                },
+                Refused::Unknown(9),
+            ),
+            (Own { window: 103, owned: claimed(9) }, Refused::Unknown(9)),
+            (Moved { workspace: 9, space: 10 }, Refused::Unknown(9)),
+            (
+                Removed {
+                    workspace: 9,
+                    successor: Successor::Unassign,
+                },
+                Refused::Unknown(9),
+            ),
+            (
+                Removed {
+                    workspace: 2,
+                    successor: Successor::Into(9),
+                },
+                Refused::Unknown(9),
+            ),
+            (
+                Removed {
+                    workspace: 2,
+                    successor: Successor::Into(2),
+                },
+                Refused::OwnSuccessor(2),
+            ),
+            (
+                Removed {
+                    workspace: 1,
+                    successor: Successor::Unassign,
+                },
+                Refused::Shown { workspace: 1, space: 10 },
+            ),
+            (
+                Activated {
+                    space: 20,
+                    activation: Activation::Vacant { remembered: Some(9) },
+                },
+                Refused::Unknown(9),
+            ),
+            (
+                Activated {
+                    space: 20,
+                    activation: Activation::Showing {
+                        current: 3,
+                        previous: Some(9),
+                        remembered: None,
+                    },
+                },
+                Refused::Unknown(9),
+            ),
+        ] {
+            assert_eq!(workspaces.step(event), Err(refused), "{event:?}");
+            assert_eq!(workspaces, before, "{event:?} changed something");
+        }
+
+        // A removal hands its windows and claims to the successor and leaves no history
+        // naming it, in the same step.
+        assert_eq!(
+            workspaces.step(Removed {
+                workspace: 2,
+                successor: Successor::Into(3)
+            }),
+            Ok(())
+        );
+        assert_eq!(workspaces.catalog(), &[(1, 10), (3, 20)]);
+        assert_eq!(workspaces.owned(100), assigned(3));
+        assert_eq!(workspaces.owned(101), claimed(3));
+        assert_eq!(workspaces.windows_on(3).collect::<Vec<_>>(), vec![100]);
+        assert_eq!(workspaces.windows_on(2).count(), 0);
+        assert_eq!(
+            workspaces.activation(10),
+            Some(Activation::Showing {
+                current: 1,
+                previous: None,
+                remembered: None
+            })
+        );
+        // Unassigned: windows are unowned, claims return nowhere.
+        assert_eq!(workspaces.step(Cleared(10)), Ok(()));
+        assert_eq!(
+            workspaces.step(Removed {
+                workspace: 3,
+                successor: Successor::Unassign
+            }),
+            Ok(())
+        );
+        assert_eq!(workspaces.owned(100), Owned::Unowned);
+        assert_eq!(
+            workspaces.owned(101),
+            Owned::Owner(Ownership::Claimed {
+                owner: 7,
+                destination: Destination::Nowhere
+            })
+        );
+        assert_eq!(workspaces.owned(102), assigned(1));
+        // Disowning moves a window out of the index.
+        assert_eq!(
+            workspaces.step(Own {
+                window: 102,
+                owned: Owned::Unowned
+            }),
+            Ok(())
+        );
+        assert_eq!(workspaces.windows_on(1).count(), 0);
     }
 
     #[test]
