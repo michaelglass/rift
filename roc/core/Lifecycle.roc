@@ -342,6 +342,109 @@ Lifecycle := [].{
 			.append(if (facts.minimized) 1 else 0)
 	}
 
+	## A window's presence after an event, and what the event came to (a read and its
+	## change, or whether it invalidated or revalidated), then whether rift manages it.
+	presence_step : [NoPresence, Live(Facts), Invalidated(Facts)], [Reading([Live(Facts), Changed({ fact : U64, value : U64 }), Gone]), Invalidate, Revalidate] -> Try(List(U64), [Malformed])
+	presence_step = |before, event| {
+		(after, outcome) =
+			match event {
+				Reading(reading) => {
+					known =
+						match before {
+							NoPresence => NoFacts
+							Live(facts) => Known(facts)
+							Invalidated(facts) => Known(facts)
+						}
+					(read_after, change) = read(known, reading)?
+					presence =
+						match read_after {
+							NoFacts => NoPresence
+							Known(facts) =>
+								match reading {
+									Live(_) => Live(facts)
+									Changed(_) =>
+										match before {
+											Invalidated(_) => Invalidated(facts)
+											Live(_) => Live(facts)
+											NoPresence => Live(facts)
+										}
+									Gone => Live(facts)
+								}
+						}
+					(presence, [0].concat(change))
+				}
+				Invalidate =>
+					match before {
+						NoPresence => (NoPresence, [1, 0])
+						Live(facts) => (Invalidated(facts), [1, 1])
+						Invalidated(facts) => (Invalidated(facts), [1, 1])
+					}
+				Revalidate =>
+					match before {
+						Invalidated(facts) => (Live(facts), [2, 1])
+						Live(facts) => (Live(facts), [2, 0])
+						NoPresence => (NoPresence, [2, 0])
+					}
+			}
+		manages_it =
+			match after {
+				Live(facts) =>
+					match admits(facts) {
+						Admitted => 1
+						Vetoed(_) => 0
+					}
+				Invalidated(_) => 0
+				NoPresence => 0
+			}
+		Ok(put_presence([], after).concat(outcome).append(manages_it))
+	}
+
+	put_presence : List(U64), [NoPresence, Live(Facts), Invalidated(Facts)] -> List(U64)
+	put_presence = |words, presence|
+		match presence {
+			NoPresence => words.append(0)
+			Live(facts) => put_facts(words.append(1), facts)
+			Invalidated(facts) => put_facts(words.append(2), facts)
+		}
+
+	take_reading : Words -> Taken([Live(Facts), Changed({ fact : U64, value : U64 }), Gone])
+	take_reading = |c0| {
+		(kind, c1) = take(c0)?
+		match kind {
+			0 => take_facts(c1).map_ok(|(facts, rest)| (Live(facts), rest))
+			1 => {
+				(fact, after) = take(c1)?
+				(value, rest) = take(after)?
+				Ok((Changed({ fact, value }), rest))
+			}
+			2 => Ok((Gone, c1))
+			_ => Err(Malformed)
+		}
+	}
+
+	## Tag 26.
+	presence_words : Words -> Try(List(U64), [Malformed])
+	presence_words = |c0| {
+		(presence_kind, c1) = take(c0)?
+		(before, c2) =
+			match presence_kind {
+				0 => Ok((NoPresence, c1))
+				1 => take_facts(c1).map_ok(|(facts, rest)| (Live(facts), rest))
+				2 => take_facts(c1).map_ok(|(facts, rest)| (Invalidated(facts), rest))
+				_ => Err(Malformed)
+			}?
+		(event_kind, c3) = take(c2)?
+		(event, c4) =
+			match event_kind {
+				0 => take_reading(c3).map_ok(|(reading, rest)| (Reading(reading), rest))
+				1 => Ok((Invalidate, c3))
+				2 => Ok((Revalidate, c3))
+				_ => Err(Malformed)
+			}?
+		finished(c4)?
+		presence_step(before, event)
+	}
+
 	## Tag 25.
 	reading_words : Words -> Try(List(U64), [Malformed])
 	reading_words = |c0| {

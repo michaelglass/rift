@@ -1113,29 +1113,67 @@ pub fn encode_reading(
     before: Option<lifecycle::AdmissionFacts>,
     reading: lifecycle::Reading,
 ) -> Vec<u64> {
-    use lifecycle::{FactChange, Reading};
     let mut words = Words::default();
     words.word(25);
     words.option(before, Words::admission_facts);
-    match reading {
-        Reading::Live(facts) => {
+    words.reading(reading);
+    words.0
+}
+
+/// Tag 26, a presence event: the presence before (0 none, 1 live, 2 invalidated, the last two
+/// then its facts), then the event: 0 a reading (as [`encode_reading`] writes it), 1 invalidate,
+/// 2 revalidate.
+pub fn encode_presence_event(
+    before: Option<lifecycle::Presence>,
+    event: lifecycle::PresenceEvent,
+) -> Vec<u64> {
+    use lifecycle::PresenceEvent;
+    let mut words = Words::default();
+    words.word(26);
+    words.presence(before);
+    match event {
+        PresenceEvent::Reading(reading) => {
             words.word(0);
-            words.admission_facts(facts);
+            words.reading(reading);
         }
-        Reading::Changed(change) => {
-            words.word(1);
-            let (fact, value) = match change {
-                FactChange::Manageability(m) => (0, manageability_word(m)),
-                FactChange::Rule(r) => (1, rule_word(r)),
-                FactChange::Ax(a) => (2, ax_word(a)),
-                FactChange::Native(n) => (3, native_word(n)),
-                FactChange::Minimize(m) => (4, minimize_word(m)),
-            };
-            words.word(fact);
-            words.word(value);
-        }
-        Reading::Gone => words.word(2),
+        PresenceEvent::Invalidate => words.word(1),
+        PresenceEvent::Revalidate => words.word(2),
     }
+    words.0
+}
+
+/// A presence event's result: the presence after, then the outcome (0 a read, then the change as
+/// [`encode_read`] writes it; 1 invalidated, then a flag; 2 revalidated, then a flag), then
+/// whether rift manages the window.
+pub fn encode_presence(
+    answer: (Option<lifecycle::Presence>, lifecycle::PresenceOutcome),
+) -> Vec<u64> {
+    use lifecycle::{Change, PresenceOutcome};
+    let (after, outcome) = answer;
+    let mut words = Words::default();
+    words.presence(after);
+    match outcome {
+        PresenceOutcome::Read(change) => {
+            words.word(0);
+            match change {
+                None => words.word(0),
+                Some(Change::Admitted) => words.word(1),
+                Some(Change::Suspended(why)) => {
+                    words.word(2);
+                    words.word(veto_word(why));
+                }
+            }
+        }
+        PresenceOutcome::Invalidated(did) => {
+            words.word(1);
+            words.flag(did);
+        }
+        PresenceOutcome::Revalidated(was) => {
+            words.word(2);
+            words.flag(was);
+        }
+    }
+    words.flag(lifecycle::manages(after));
     words.0
 }
 
@@ -1206,6 +1244,44 @@ fn veto_word(why: lifecycle::Veto) -> u64 {
 }
 
 impl Words {
+    fn reading(&mut self, reading: lifecycle::Reading) {
+        use lifecycle::{FactChange, Reading};
+        match reading {
+            Reading::Live(facts) => {
+                self.word(0);
+                self.admission_facts(facts);
+            }
+            Reading::Changed(change) => {
+                self.word(1);
+                let (fact, value) = match change {
+                    FactChange::Manageability(m) => (0, manageability_word(m)),
+                    FactChange::Rule(r) => (1, rule_word(r)),
+                    FactChange::Ax(a) => (2, ax_word(a)),
+                    FactChange::Native(n) => (3, native_word(n)),
+                    FactChange::Minimize(m) => (4, minimize_word(m)),
+                };
+                self.word(fact);
+                self.word(value);
+            }
+            Reading::Gone => self.word(2),
+        }
+    }
+
+    fn presence(&mut self, presence: Option<lifecycle::Presence>) {
+        use lifecycle::Presence;
+        match presence {
+            None => self.word(0),
+            Some(Presence::Live(facts)) => {
+                self.word(1);
+                self.admission_facts(facts);
+            }
+            Some(Presence::Invalidated(facts)) => {
+                self.word(2);
+                self.admission_facts(facts);
+            }
+        }
+    }
+
     fn admission_facts(&mut self, facts: lifecycle::AdmissionFacts) {
         self.word(manageability_word(facts.manageability));
         self.word(rule_word(facts.rule));

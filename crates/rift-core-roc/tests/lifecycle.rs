@@ -311,3 +311,79 @@ fn the_roc_core_reads_every_lifecycle_reading_as_the_rust_core_does() {
     assert_eq!(after.live(), before_count.live(), "Roc allocations left live");
     eprintln!("lifecycle: all {checked} lifecycle readings answered identically");
 }
+
+#[test]
+fn the_roc_core_steps_every_presence_event_as_the_rust_core_does() {
+    use rift_core::lifecycle::{
+        AdmissionFacts, AxKind, FactChange, Manageability, Minimize, NativeKind, Presence,
+        PresenceEvent, Reading, Rule,
+    };
+    let mut all_facts = Vec::new();
+    for manageability in [Manageability::Manageable, Manageability::Unmanageable] {
+        for rule in [Rule::NoRule, Rule::Manage, Rule::Ignore] {
+            for ax in [AxKind::Ordinary, AxKind::DialogWindow, AxKind::Transient] {
+                for native in [NativeKind::Ordinary, NativeKind::Transient] {
+                    for minimize in [Minimize::Shown, Minimize::Minimized] {
+                        all_facts.push(AdmissionFacts {
+                            manageability,
+                            rule,
+                            ax,
+                            native,
+                            minimize,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let changes = [
+        FactChange::Manageability(Manageability::Manageable),
+        FactChange::Manageability(Manageability::Unmanageable),
+        FactChange::Rule(Rule::NoRule),
+        FactChange::Rule(Rule::Manage),
+        FactChange::Rule(Rule::Ignore),
+        FactChange::Ax(AxKind::Ordinary),
+        FactChange::Ax(AxKind::DialogWindow),
+        FactChange::Ax(AxKind::Transient),
+        FactChange::Native(NativeKind::Ordinary),
+        FactChange::Native(NativeKind::Transient),
+        FactChange::Minimize(Minimize::Shown),
+        FactChange::Minimize(Minimize::Minimized),
+    ];
+    let events: Vec<PresenceEvent> = all_facts
+        .iter()
+        .copied()
+        .map(|facts| PresenceEvent::Reading(Reading::Live(facts)))
+        .chain(
+            changes
+                .into_iter()
+                .map(|change| PresenceEvent::Reading(Reading::Changed(change))),
+        )
+        .chain([
+            PresenceEvent::Reading(Reading::Gone),
+            PresenceEvent::Invalidate,
+            PresenceEvent::Revalidate,
+        ])
+        .collect();
+    let befores: Vec<Option<Presence>> = std::iter::once(None)
+        .chain(all_facts.iter().copied().map(|facts| Some(Presence::Live(facts))))
+        .chain(all_facts.iter().copied().map(|facts| Some(Presence::Invalidated(facts))))
+        .collect();
+    let before_count = AllocationCount::now();
+    let mut checked = 0;
+    for &before in &befores {
+        for &event in &events {
+            let rust = wire::encode_presence(rift_core::lifecycle::present(before, event));
+            assert_eq!(
+                tile_words(&wire::encode_presence_event(before, event)),
+                Ok(rust),
+                "{before:?} {event:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 145 * 87);
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before_count.live(), "Roc allocations left live");
+    eprintln!("lifecycle: all {checked} presence events answered identically");
+}

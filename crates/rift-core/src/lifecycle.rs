@@ -331,11 +331,73 @@ pub struct Lifecycle<W> {
 
 /// A window with AX state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Presence {
+pub enum Presence {
     Live(AdmissionFacts),
     /// Its AX element was invalidated (displays and sessions change under AX): rift keeps the
     /// window, its facts and its place, but does not manage it until fresh AX evidence.
     Invalidated(AdmissionFacts),
+}
+
+/// What happens to a window's presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceEvent {
+    /// A reading of its facts (see [`read`]).
+    Reading(Reading),
+    /// Its AX element was invalidated.
+    Invalidate,
+    /// A positive AX observation.
+    Revalidate,
+}
+
+/// What a presence event came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceOutcome {
+    /// The change in its admission by its facts.
+    Read(Option<Change>),
+    /// Whether there was AX state to invalidate.
+    Invalidated(bool),
+    /// Whether it had been invalidated.
+    Revalidated(bool),
+}
+
+/// A window's presence after `event` (none without AX state), and what the event came to.
+/// A fresh reading is valid AX state; a change keeps the presence; an invalidation needs AX
+/// state; a revalidation brings an invalidated window back.
+pub fn present(
+    before: Option<Presence>,
+    event: PresenceEvent,
+) -> (Option<Presence>, PresenceOutcome) {
+    match event {
+        PresenceEvent::Reading(reading) => {
+            let (after, change) = read(before.map(Presence::facts), reading);
+            let presence = match (after, reading, before) {
+                (Some(facts), Reading::Live(_), _) | (Some(facts), _, None) => {
+                    Some(Presence::Live(facts))
+                }
+                (Some(facts), _, Some(presence)) => Some(presence.with(facts)),
+                (None, ..) => None,
+            };
+            (presence, PresenceOutcome::Read(change))
+        }
+        PresenceEvent::Invalidate => match before {
+            Some(presence) => (
+                Some(Presence::Invalidated(presence.facts())),
+                PresenceOutcome::Invalidated(true),
+            ),
+            None => (None, PresenceOutcome::Invalidated(false)),
+        },
+        PresenceEvent::Revalidate => match before {
+            Some(Presence::Invalidated(facts)) => {
+                (Some(Presence::Live(facts)), PresenceOutcome::Revalidated(true))
+            }
+            live_or_none => (live_or_none, PresenceOutcome::Revalidated(false)),
+        },
+    }
+}
+
+/// Whether rift manages a window by its presence: valid AX state and admitted.
+pub fn manages(presence: Option<Presence>) -> bool {
+    matches!(presence, Some(Presence::Live(facts)) if admission(facts) == Admission::Admitted)
 }
 
 impl Presence {
@@ -411,15 +473,9 @@ impl<W: Copy + Ord> Lifecycle<W> {
             LifecycleEvent::Changed { window, change } => (window, Reading::Changed(change)),
             LifecycleEvent::Gone(window) => (window, Reading::Gone),
         };
-        let before = self.windows.get(&window).copied();
-        let (after, change) = read(before.map(Presence::facts), reading);
-        match (after, reading, before) {
-            // A fresh AX reading is valid AX state.
-            (Some(facts), Reading::Live(_), _) | (Some(facts), _, None) => {
-                self.windows.insert(window, Presence::Live(facts))
-            }
-            (Some(facts), _, Some(presence)) => self.windows.insert(window, presence.with(facts)),
-            (None, ..) => self.windows.remove(&window),
+        let change = match self.apply(window, PresenceEvent::Reading(reading)) {
+            PresenceOutcome::Read(change) => change,
+            PresenceOutcome::Invalidated(_) | PresenceOutcome::Revalidated(_) => None,
         };
         change.map(|change| match change {
             Change::Admitted => Transition::Admitted(window),
@@ -436,29 +492,26 @@ impl<W: Copy + Ord> Lifecycle<W> {
         self.windows.get(&window).copied().map(Presence::facts)
     }
 
-    /// Whether rift manages the window by its lifecycle: valid AX state and admitted.
-    pub fn manages(&self, window: W) -> bool {
-        matches!(self.windows.get(&window), Some(Presence::Live(facts)) if admission(*facts) == Admission::Admitted)
+    fn apply(&mut self, window: W, event: PresenceEvent) -> PresenceOutcome {
+        let (after, outcome) = present(self.windows.get(&window).copied(), event);
+        match after {
+            Some(presence) => self.windows.insert(window, presence),
+            None => self.windows.remove(&window),
+        };
+        outcome
     }
+
+    /// Whether rift manages the window by its lifecycle: valid AX state and admitted.
+    pub fn manages(&self, window: W) -> bool { manages(self.windows.get(&window).copied()) }
 
     /// The window's AX element was invalidated; false for a window with no AX state.
     pub fn invalidate(&mut self, window: W) -> bool {
-        let Some(presence) = self.windows.get_mut(&window) else {
-            return false;
-        };
-        *presence = Presence::Invalidated(presence.facts());
-        true
+        self.apply(window, PresenceEvent::Invalidate) == PresenceOutcome::Invalidated(true)
     }
 
     /// A positive AX observation: whether the window had been invalidated.
     pub fn revalidate(&mut self, window: W) -> bool {
-        match self.windows.get_mut(&window) {
-            Some(presence @ Presence::Invalidated(_)) => {
-                *presence = Presence::Live(presence.facts());
-                true
-            }
-            Some(Presence::Live(_)) | None => false,
-        }
+        self.apply(window, PresenceEvent::Revalidate) == PresenceOutcome::Revalidated(true)
     }
 
     pub fn is_invalidated(&self, window: W) -> bool {
