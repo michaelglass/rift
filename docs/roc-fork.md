@@ -84,10 +84,17 @@ ship.
    Into(K) | Unassign }` hands windows and claims on and drops the workspace from every Space's
    history and memory in the same step (the W4 obligation). Rulings: it lives in the window
    store (placement A); a refused event is a bug: `workspace-refused:` at **warn** in a running
-   Rift, a panic in tests. Projections stay platform-side, keyed by workspace: name, home, rule
+   Rift, a panic in tests. **W4b and W4c wait for #688 too** (ruled after W4a): the workspace
+   store's topology writers sit under about 100 call sites, many in engine glue #688 rewrites,
+   and a saved workspace store loads without a window store. Plumbing `&mut WindowStore` through
+   them (A1) would churn that glue twice. A shared `Rc<RefCell<Workspaces>>` handle in both
+   stores (A2) was rejected: an unlinked window store is a representable, meaningless state; the
+   one link call is a convention, not a type; and `RefCell` turns aliasing mistakes into runtime
+   panics. After #688 the joined value gets one real owner that lends `&mut` to both stores. W4a
+   stays done and held. Projections stay platform-side, keyed by workspace: name, home, rule
    standing, layout state; a claim's flags, original id and the claims-by-owner index (its order
    is observable, checked by the tripwire); native fullscreen records' workspace (a third
-   reference: the platform applies the same Successor, the tripwire checks it). Slices: W4b one
+   reference: the platform applies the same Successor, the tripwire checks it). Slices (all after #688, with W6): W4b one
    joined shadow (remap_space computes each deleted workspace's successor before removal and
    clears a shown Space before removing; tags 32 and 33 retire), W4c ownership flip (the window
    store answers from the core; its index and the record's assignment go). **W4d, the catalog
@@ -105,8 +112,10 @@ ship.
 
 ### Next steps
 
-Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34). Next: W4b,
-then W4c (see open item 2).
+Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34). W4b to W4d
+wait for #688 (open item 2). Now: the W5 fuzzer gap (open item 3): fuzzer steps that reach
+DisplayDeparture and the transfer paths of `plan_workspace_placements` /
+`reconcile_workspace_placements`, then the activation shapes re-measured.
 
 ### Rulings that bind (the lead's and the owner's)
 
