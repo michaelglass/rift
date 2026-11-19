@@ -66,6 +66,74 @@ pub(crate) fn analyze_space_snapshot(
     }
 }
 
+/// Why a space snapshot waits instead of being committed. It is kept, with its deltas, for
+/// the next admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hold {
+    /// Native Mission Control is open.
+    MissionControl,
+    /// Spaces went missing and membership is incomplete: retry exhaustion is not evidence of
+    /// ownership, so the logical model stays until membership is observable.
+    MembershipIncomplete,
+}
+
+/// Whether a space snapshot is committed now, and what it invalidates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Admission {
+    Hold(Hold),
+    Commit {
+        /// Spaces a display had that it no longer has (a remapped one is not lost).
+        invalidated: Vec<SpaceId>,
+        /// Of those, the ones gone from every display while the same single display stayed:
+        /// the native inventory also knows the owners of unvisited desktops.
+        lost_local_desktops: Vec<SpaceId>,
+    },
+}
+
+/// Admits `incoming` over the `current` snapshot. Only a display change or a forced refresh
+/// invalidates Spaces; a current-Space switch alone does not invalidate ownership.
+pub(crate) fn admit_space_snapshot(
+    current: &ForwardedSpaceState,
+    incoming: &ForwardedSpaceState,
+    mission_control: &MissionControlState,
+) -> Admission {
+    match mission_control {
+        MissionControlState::Active => return Admission::Hold(Hold::MissionControl),
+        MissionControlState::Inactive => {}
+    }
+    let sole_display = match (current.screens.as_slice(), incoming.screens.as_slice()) {
+        ([previous], [now]) if previous.display_uuid == now.display_uuid => now.display_uuid_opt(),
+        _ => None,
+    };
+    let mut invalidated = Vec::new();
+    let mut lost_local_desktops = Vec::new();
+    if incoming.display_set_changed || incoming.should_force_refresh_layout {
+        for (display, spaces) in &current.display_space_ids {
+            let now = incoming.display_space_ids.get(display);
+            for &space in spaces {
+                if now.is_some_and(|ids| ids.contains(&space))
+                    || incoming.space_remaps.iter().any(|(old, _)| *old == space)
+                {
+                    continue;
+                }
+                invalidated.push(space);
+                if sole_display == Some(display.as_str())
+                    && !incoming.display_space_ids.values().any(|ids| ids.contains(&space))
+                {
+                    lost_local_desktops.push(space);
+                }
+            }
+        }
+    }
+    if !incoming.membership_complete && !invalidated.is_empty() {
+        return Admission::Hold(Hold::MembershipIncomplete);
+    }
+    Admission::Commit {
+        invalidated,
+        lost_local_desktops,
+    }
+}
+
 /// Prepends an older sample's deltas to a newer one; geometry and membership stay the newer's.
 pub(crate) fn merge_space_deltas(
     mut older: ForwardedSpaceState,

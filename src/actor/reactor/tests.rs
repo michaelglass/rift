@@ -14583,3 +14583,71 @@ fn only_an_admissible_window_gets_a_discovery_space_and_it_prefers_the_assignmen
     );
     assert_eq!(discovery_spaces(Admissible, None, None, || None), (None, None));
 }
+
+#[test]
+fn a_space_snapshot_is_held_or_committed_with_the_spaces_it_invalidates() {
+    use topology_workflow::{Admission, Hold, admit_space_snapshot};
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let state = |screens: Vec<Option<SpaceId>>, displays: &[(&str, &[u64])]| {
+        let frames = vec![frame; screens.len()];
+        let mut state = forwarded_space_state(make_screen_snapshots(frames, screens));
+        state.display_space_ids = displays
+            .iter()
+            .map(|(display, spaces)| {
+                (
+                    display.to_string(),
+                    spaces.iter().copied().map(SpaceId::new).collect(),
+                )
+            })
+            .collect();
+        state.membership_complete = true;
+        state
+    };
+    let ids = |spaces: &[u64]| spaces.iter().copied().map(SpaceId::new).collect::<Vec<_>>();
+    let one = Some(SpaceId::new(1));
+    let current = state(vec![one], &[("test-display-0", &[1, 2, 3])]);
+    let commit = |invalidated: &[u64], lost: &[u64]| Admission::Commit {
+        invalidated: ids(invalidated),
+        lost_local_desktops: ids(lost),
+    };
+    let admit = |incoming: &ForwardedSpaceState, mission_control| {
+        admit_space_snapshot(&current, incoming, &mission_control)
+    };
+    let inactive = || MissionControlState::Inactive;
+
+    // Without a display change or a forced refresh, nothing is invalidated.
+    let quiet = state(vec![one], &[("test-display-0", &[1])]);
+    assert_eq!(admit(&quiet, inactive()), commit(&[], &[]));
+    // Mission Control holds any snapshot.
+    assert_eq!(
+        admit(&quiet, MissionControlState::Active),
+        Admission::Hold(Hold::MissionControl)
+    );
+
+    // Desktop 2 is gone from the sole display (3 was remapped, so it is not): invalidated,
+    // and lost, since no display has it.
+    let mut closed = state(vec![one], &[("test-display-0", &[1])]);
+    closed.display_set_changed = true;
+    closed.space_remaps = vec![(SpaceId::new(3), SpaceId::new(9))];
+    assert_eq!(admit(&closed, inactive()), commit(&[2], &[2]));
+    closed.should_force_refresh_layout = true;
+    closed.display_set_changed = false;
+    assert_eq!(admit(&closed, inactive()), commit(&[2], &[2]));
+    // Not while membership is incomplete: retry exhaustion is no evidence of ownership.
+    closed.membership_complete = false;
+    assert_eq!(
+        admit(&closed, inactive()),
+        Admission::Hold(Hold::MembershipIncomplete)
+    );
+
+    // On another display now: invalidated here, but not lost.
+    let mut moved = state(vec![one], &[("test-display-0", &[1, 3]), ("other", &[2])]);
+    moved.display_set_changed = true;
+    assert_eq!(admit(&moved, inactive()), commit(&[2], &[]));
+
+    // A display that is not the sole one, before and after, loses no local desktops.
+    let mut renamed = state(vec![one], &[("test-display-0", &[1])]);
+    renamed.screens[0].display_uuid = "another".into();
+    renamed.display_set_changed = true;
+    assert_eq!(admit(&renamed, inactive()), commit(&[2, 3], &[]));
+}

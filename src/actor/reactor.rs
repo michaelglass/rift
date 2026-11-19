@@ -3652,11 +3652,23 @@ impl Reactor {
             // Geometry and membership always come from the newest revision.
             space_state = topology_workflow::merge_space_deltas(pending, space_state);
         }
-        if self.is_native_mission_control_active() {
-            self.space_state.authoritative = false;
-            self.pending_space_change_manager.pending_space_change = Some(space_state);
-            return Ok(EventOutcome::default());
-        }
+        let (invalidated_spaces, lost_local_desktops) =
+            match topology_workflow::admit_space_snapshot(
+                &self.space_state,
+                &space_state,
+                &self.mission_control_manager.mission_control_state,
+            ) {
+                topology_workflow::Admission::Hold(why) => {
+                    trace!(?why, revision = space_state.revision, "space snapshot held");
+                    self.space_state.authoritative = false;
+                    self.pending_space_change_manager.pending_space_change = Some(space_state);
+                    return Ok(EventOutcome::default());
+                }
+                topology_workflow::Admission::Commit {
+                    invalidated,
+                    lost_local_desktops,
+                } => (invalidated, lost_local_desktops),
+            };
         let mut outcome = EventOutcome::window_membership_changed(false, true);
         let analysis = topology_workflow::analyze_space_snapshot(
             &self.space_state,
@@ -3665,45 +3677,6 @@ impl Reactor {
             self.activation_cfg(),
             &space_state,
         );
-        // Compare all native Spaces, including inactive ones. A current-Space
-        // switch alone does not invalidate ownership.
-        let sole_display = match (
-            self.space_state.screens.as_slice(),
-            space_state.screens.as_slice(),
-        ) {
-            ([previous], [current]) if previous.display_uuid == current.display_uuid => {
-                current.display_uuid_opt()
-            }
-            _ => None,
-        };
-        let mut invalidated_spaces = Vec::new();
-        let mut lost_local_desktops = Vec::new();
-        if space_state.display_set_changed || space_state.should_force_refresh_layout {
-            for (display, spaces) in &self.space_state.display_space_ids {
-                let current = space_state.display_space_ids.get(display);
-                for &space in spaces {
-                    if current.is_some_and(|ids| ids.contains(&space))
-                        || space_state.space_remaps.iter().any(|(old, _)| *old == space)
-                    {
-                        continue;
-                    }
-                    invalidated_spaces.push(space);
-                    // The native inventory also knows the owners of unvisited desktops.
-                    if sole_display == Some(display.as_str())
-                        && !space_state.display_space_ids.values().any(|ids| ids.contains(&space))
-                    {
-                        lost_local_desktops.push(space);
-                    }
-                }
-            }
-        }
-        if !space_state.membership_complete && !invalidated_spaces.is_empty() {
-            // Retry exhaustion is not evidence of ownership. SpacesActor owns paced
-            // resampling; retain the logical model until membership is observable.
-            self.space_state.authoritative = false;
-            self.pending_space_change_manager.pending_space_change = Some(space_state);
-            return Ok(EventOutcome::default());
-        }
         self.space_state.revision = space_state.revision;
         self.state.windows.accept_topology_revision(space_state.revision);
         self.space_state.authoritative = true;
