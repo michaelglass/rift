@@ -155,6 +155,23 @@ pub fn keeps_transient<Id: PartialEq, P: PartialEq>(
     }
 }
 
+/// Whether a window's assignment and the Space macOS has it on disagree (both known).
+pub fn misplaced<S: PartialEq>(assigned: Option<S>, native: Option<S>) -> bool {
+    matches!((assigned, native), (Some(assigned), Some(native)) if assigned != native)
+}
+
+/// Whether an app inventory that omits this window says nothing about it: it is on an inactive
+/// Space (its native Space, else its assignment's), or parked just offscreen on a non-active
+/// workspace. Such a window is not retired for being missing.
+pub fn out_of_inventory_view<S: Copy>(
+    native: Option<S>,
+    assigned: impl FnOnce() -> Option<S>,
+    active: impl Fn(S) -> bool,
+    parked: impl FnOnce() -> bool,
+) -> bool {
+    native.or_else(assigned).is_some_and(|space| !active(space)) || parked()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +293,33 @@ mod tests {
         // An app's end drops every entry of its windows.
         assert!(!keeps_transient(AppGone::<u32, i32>(7), 1, Native, 7));
         assert!(keeps_transient(AppGone::<u32, i32>(8), 1, Native, 7));
+    }
+
+    #[test]
+    fn a_window_is_misplaced_when_its_assignment_and_its_native_space_disagree() {
+        assert!(misplaced(Some(1), Some(2)));
+        assert!(!misplaced(Some(1), Some(1)));
+        assert!(!misplaced(None, Some(1)));
+        assert!(!misplaced(Some(1), None::<u64>));
+    }
+
+    #[test]
+    fn an_inventory_cannot_see_a_window_on_an_inactive_space_or_parked_offscreen() {
+        let active = |space: u64| space == 1;
+        let unparked = || false;
+        // Its native Space decides, else its assignment.
+        assert!(out_of_inventory_view(
+            Some(2),
+            || panic!("not asked"),
+            active,
+            unparked
+        ));
+        assert!(!out_of_inventory_view(Some(1), || Some(2), active, unparked));
+        assert!(out_of_inventory_view(None, || Some(2), active, unparked));
+        assert!(!out_of_inventory_view(None, || None, active, unparked));
+        // Parked offscreen on a non-active workspace, wherever it is.
+        assert!(out_of_inventory_view(Some(1), || None, active, || true));
+        assert!(out_of_inventory_view(None, || None, active, || true));
     }
 
     #[test]

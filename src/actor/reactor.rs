@@ -4532,7 +4532,7 @@ impl Reactor {
                 .record(wid)
                 .and_then(|record| record.window_server_id())
                 .and_then(|wsid| native_spaces[&wsid]);
-            assigned.is_some() && native.is_some() && assigned != native
+            rift_core::lifecycle::misplaced(assigned, native)
         }) {
             self.request_space_snapshot();
         }
@@ -4547,12 +4547,12 @@ impl Reactor {
                     .record(*wid)
                     .and_then(|record| record.window_server_id())
                     .and_then(|wsid| native_spaces[&wsid]);
-                native
-                    .or_else(|| self.assigned_space_for_window_id(*wid))
-                    .is_some_and(|space| !self.is_space_active(space))
-                    // Rift parks windows on non-active workspaces just offscreen.
-                    // An app inventory that omits one is not evidence that the window is gone.
-                    || self.hidden_assigned_space_for_window_id(*wid).is_some()
+                rift_core::lifecycle::out_of_inventory_view(
+                    native,
+                    || self.assigned_space_for_window_id(*wid),
+                    |space| self.is_space_active(space),
+                    || self.hidden_assigned_space_for_window_id(*wid).is_some(),
+                )
             })
             .collect();
         // A returned native identity protects its previous AX key until rekeying.
