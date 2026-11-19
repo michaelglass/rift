@@ -1112,6 +1112,16 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_tree_the_core_cannot_hold_is_a_named_load_error_not_a_panic() {
+        let (mut broken, layout) = tiled(&[]);
+        let root = broken.layouts[layout].root;
+        broken.stacks.insert(root, vec![w(1)]);
+        let saved = ron::to_string(&broken).unwrap();
+        let error = ron::from_str::<BspLayoutSystem>(&saved).unwrap_err().to_string();
+        assert!(error.contains("StackShowsNothing"), "{error}");
+    }
+
+    #[test]
     fn insertion_alternates_splits_and_navigation_follows_orientation() {
         let (mut system, layout) = tiled(&[1, 2]);
         assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));

@@ -199,8 +199,15 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         match LayoutEngine::load_for_startup_restore(path.clone()) {
             Ok(layout) => layout,
             Err(error) => {
+                // Loud and named, but never fatal: a layout that will not load (say, a BSP tree
+                // the core cannot hold) must not keep rift from starting.
+                tracing::error!(
+                    path = %path.display(),
+                    error = %format!("{error:#}"),
+                    "Could not restore the saved layout; starting with a fresh layout"
+                );
                 eprintln!(
-                    "Could not restore master file at {}; starting with a fresh layout: {error}",
+                    "Could not restore master file at {}; starting with a fresh layout: {error:#}",
                     path.display()
                 );
                 LayoutEngine::new(
