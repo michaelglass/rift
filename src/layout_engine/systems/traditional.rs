@@ -567,7 +567,14 @@ impl TraditionalLayoutSystem {
 
         let selection_stack_parent =
             selection_parent.filter(|&parent| self.layout(parent).is_stacked());
-        let target_stack_parent = target_parent.filter(|&parent| self.layout(parent).is_stacked());
+        // Joining toward a stack joins that stack, whether the target is one of its windows or
+        // the stack itself (a sibling of the selection).
+        let target_stack_parent =
+            target_parent.filter(|&parent| self.layout(parent).is_stacked()).or_else(|| {
+                Some(target).filter(|&target| {
+                    self.window_at(target).is_none() && self.layout(target).is_stacked()
+                })
+            });
 
         match (selection_stack_parent, target_stack_parent) {
             (Some(stack_parent), None) => {
@@ -3771,7 +3778,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "joining toward an adjacent stack does not grow it; fixed in the next commit"]
     fn joining_into_existing_stack_keeps_it_stacked() {
         use crate::common::config::StackDefaultOrientation;
 
@@ -3802,6 +3808,15 @@ mod tests {
             3,
             "expected the joined stack to grow instead of being replaced"
         );
+        // It joins at the end it came from, and stays selected.
+        assert_eq!(
+            stacked_container
+                .children(system.map())
+                .map(|child| system.window_at(child))
+                .collect::<Vec<_>>(),
+            vec![Some(w(1)), Some(w(2)), Some(w(3))]
+        );
+        assert_eq!(system.selected_window(layout), Some(w(3)));
     }
 
     #[test]
