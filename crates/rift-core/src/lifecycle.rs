@@ -322,6 +322,18 @@ pub enum Transition<W> {
     Suspended(W, Veto),
 }
 
+/// Two changes to one window's admission, one after the other, as one: from where the first
+/// started to where the second ended. Changes that cancel out are none.
+pub fn net<W>(first: Option<Transition<W>>, then: Option<Transition<W>>) -> Option<Transition<W>> {
+    match (first, then) {
+        (None, change) | (change, None) => change,
+        (Some(Transition::Admitted(_)), Some(Transition::Suspended(..)))
+        | (Some(Transition::Suspended(..)), Some(Transition::Admitted(_))) => None,
+        (Some(Transition::Admitted(_)), Some(later @ Transition::Admitted(_)))
+        | (Some(Transition::Suspended(..)), Some(later @ Transition::Suspended(..))) => Some(later),
+    }
+}
+
 /// Every window with AX state: its admission facts, and whether that state is still valid.
 /// Admission is not stored: it is read off the facts, so it can never disagree with them.
 #[derive(Debug, Clone)]
@@ -1434,6 +1446,24 @@ mod tests {
             }),
             Retirement::Keep(Keep::NoNativeIdentity)
         );
+    }
+
+    #[test]
+    fn two_admission_changes_net_to_the_change_from_the_first_ones_start_to_the_seconds_end() {
+        use Transition::{Admitted, Suspended};
+        let (min, rule) = (
+            Suspended(1_u32, Veto::Minimized),
+            Suspended(1_u32, Veto::RuleIgnores),
+        );
+        assert_eq!(net::<u32>(None, None), None);
+        assert_eq!(net(Some(Admitted(1_u32)), None), Some(Admitted(1)));
+        assert_eq!(net(None, Some(min)), Some(min));
+        // Cancelling out: no change.
+        assert_eq!(net(Some(Admitted(1)), Some(min)), None);
+        assert_eq!(net(Some(min), Some(Admitted(1))), None);
+        // Same direction twice (from a start and an end that differ): the later reason.
+        assert_eq!(net(Some(min), Some(rule)), Some(rule));
+        assert_eq!(net(Some(Admitted(1)), Some(Admitted(1))), Some(Admitted(1)));
     }
 
     #[test]

@@ -19,7 +19,6 @@ fn sync_existing_window_state(
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let ax_returned = state.windows.validate_ax_identity(wid);
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
-    let was_manageable = state.windows.is_admitted_state(wid);
 
     let is_minimized = info.is_minimized;
     let claimed = state.windows.is_claimed(wid);
@@ -33,7 +32,7 @@ fn sync_existing_window_state(
     // Preserve the observed frame and minimize transition until their handlers run.
     info.frame = existing.info.frame;
     info.is_minimized = was_minimized;
-    state.windows.replace_info(wid, info);
+    let reading = state.windows.replace_info(wid, info);
     // Where the inventory read it: a read like any other, news only if the core says so (a
     // read from before the app applied Rift's latest word is not).
     let valid_frame = frame.size.width != 0.0 || frame.size.height != 0.0;
@@ -55,17 +54,13 @@ fn sync_existing_window_state(
             window::handle_window_visibility_changed(state, wid, !is_minimized)?
         }
         _ => {
-            let is_admitted = utils::refresh_heuristic(state, wid)
-                .is_some_and(|transition| transition.is_admitted);
-            admission_changed = was_manageable != is_admitted;
-            if was_manageable && !is_admitted {
-                crate::actor::reactor::events::EventOutcome::default().with_layout_event(
-                    if state.windows.is_temporarily_unavailable(wid) {
-                        LayoutEvent::WindowSuspended(wid)
-                    } else {
-                        LayoutEvent::WindowRemoved(wid)
-                    },
-                )
+            // The fresh reading's roles and the heuristic, as one change to its admission.
+            let change = rift_core::lifecycle::net(reading, utils::refresh_heuristic(state, wid));
+            let is_admitted = state.windows.is_admitted_state(wid);
+            admission_changed = change.is_some();
+            if let Some(rift_core::lifecycle::Transition::Suspended(..)) = change {
+                crate::actor::reactor::events::EventOutcome::default()
+                    .with_layout_event(utils::layout_departure(state, wid))
             } else if is_admitted && !claimed && (admission_changed || ax_returned) {
                 // A restored window can become admissible only after the fresh AX
                 // snapshot arrives, while its owning workspace is still inactive.

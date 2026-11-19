@@ -3316,14 +3316,10 @@ impl Reactor {
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
         for info in ws_info {
             if let Some(wid) = self.state.observe_native_window(info)
-                && utils::refresh_heuristic(&mut self.state, wid)
-                    .is_some_and(|transition| transition.was_admitted && !transition.is_admitted)
+                && let Some(Transition::Suspended(..)) =
+                    utils::refresh_heuristic(&mut self.state, wid)
             {
-                self.send_layout_event(if self.state.windows.is_temporarily_unavailable(wid) {
-                    LayoutEvent::WindowSuspended(wid)
-                } else {
-                    LayoutEvent::WindowRemoved(wid)
-                });
+                self.send_layout_event(utils::layout_departure(&self.state, wid));
             }
         }
     }

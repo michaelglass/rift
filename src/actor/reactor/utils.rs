@@ -1,31 +1,35 @@
 use objc2_app_kit::NSNormalWindowLevel;
 
 use crate::actor::app::WindowId;
+use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::managers::LayoutManager;
 use crate::model::RiftState;
 use crate::sys::app::{WindowInfo, is_ax_transient, is_ibkr_desktop_dialog};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
 
-pub(crate) struct AdmissionTransition {
-    pub(crate) was_admitted: bool,
-    pub(crate) is_admitted: bool,
-}
-
+/// Re-runs the manageability heuristic for a window with AX state: the change it made to the
+/// window's admission, if any.
 pub(crate) fn refresh_heuristic(
     state: &mut RiftState,
     wid: WindowId,
-) -> Option<AdmissionTransition> {
+) -> Option<rift_core::lifecycle::Transition<WindowId>> {
     let window = state.windows.window(wid)?;
-    let was_admitted = state.windows.is_admitted_state(wid);
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
         state.windows.get_window_server_info(wsid)
     });
-    state.windows.set_manageable(wid, manageable);
-    Some(AdmissionTransition {
-        was_admitted,
-        is_admitted: state.windows.is_admitted_state(wid),
-    })
+    state.windows.set_manageable(wid, manageable)
+}
+
+/// How a window that lost admission leaves the layout: suspended while it is away for now,
+/// removed when nothing will bring it back.
+pub(crate) fn layout_departure(state: &RiftState, wid: WindowId) -> LayoutEvent {
+    match state.windows.availability(wid) {
+        crate::model::window_store::Availability::TemporarilyUnavailable => {
+            LayoutEvent::WindowSuspended(wid)
+        }
+        crate::model::window_store::Availability::Available => LayoutEvent::WindowRemoved(wid),
+    }
 }
 
 pub(crate) fn rejection_needs_removal(

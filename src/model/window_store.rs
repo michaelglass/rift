@@ -567,6 +567,15 @@ pub struct WindowStore {
     lifecycle: rift_core::lifecycle::Lifecycle<WindowId>,
 }
 
+/// Whether a window that leaves the layout is away for now or for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Availability {
+    /// It comes back (unminimized, revalidated, out of fullscreen): its slot is suspended.
+    TemporarilyUnavailable,
+    /// Nothing will bring it back: it is removed from the layout.
+    Available,
+}
+
 /// Where the store's AX snapshot of a window and the core's lifecycle disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LifecycleDivergence {
@@ -1297,12 +1306,29 @@ impl WindowStore {
     }
 
     /// A fresh AX reading of a window with AX state: its roles and minimized flag with it.
-    pub(crate) fn replace_info(&mut self, window: WindowId, info: crate::sys::app::WindowInfo) {
-        let Some(state) = self.window_mut(window) else { return };
+    pub(crate) fn replace_info(
+        &mut self,
+        window: WindowId,
+        info: crate::sys::app::WindowInfo,
+    ) -> Option<Transition<WindowId>> {
+        let state = self.window_mut(window)?;
         state.info = info;
         let (ax, minimize) = (state.ax_kind(), state.minimize());
-        self.tell_lifecycle(window, FactChange::Ax(ax));
-        self.tell_lifecycle(window, FactChange::Minimize(minimize));
+        let roles = self.tell_lifecycle(window, FactChange::Ax(ax));
+        rift_core::lifecycle::net(
+            roles,
+            self.tell_lifecycle(window, FactChange::Minimize(minimize)),
+        )
+    }
+
+    /// Whether a window is away for now (hidden, minimized, invalidated, in fullscreen, or
+    /// unadmitted but not excluded by a rule) or here to stay out of the layout.
+    pub(crate) fn availability(&self, wid: WindowId) -> Availability {
+        if self.is_temporarily_unavailable(wid) {
+            Availability::TemporarilyUnavailable
+        } else {
+            Availability::Available
+        }
     }
 
     fn tell_lifecycle(
