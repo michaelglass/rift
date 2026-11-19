@@ -945,24 +945,12 @@ impl Reactor {
     }
 
     fn apply_app_rules_for_activated_spaces(&mut self, activated: &[SpaceId]) {
-        let activated_set: HashSet<SpaceId> = activated.iter().copied().collect();
-        let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
-
-        for (&wsid, &space) in &self.space_state.active_window_spaces {
-            if !activated_set.contains(&space) {
-                continue;
-            }
-            let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
-                continue;
-            };
-            let Some(state) = self.state.windows.window(wid) else {
-                continue;
-            };
-            if !state.can_reconcile_admission() {
-                continue;
-            }
-            windows_by_pid.entry(wid.pid).or_default().push(wid);
-        }
+        let windows_by_pid = app_rule_candidates(
+            &self.space_state.active_window_spaces,
+            activated,
+            |wsid| self.state.windows.tracked_window_id(wsid),
+            |wid| self.state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission),
+        );
 
         for (pid, window_ids) in windows_by_pid {
             let Some(app_state) = self.app_manager.apps.get(&pid) else {
@@ -6892,6 +6880,26 @@ enum Resolved {
         space: SpaceId,
         user: bool,
     },
+}
+
+/// The windows whose app rules an activation re-applies, by app: the tracked windows live on
+/// a Space that just became active whose admission can still be reconciled.
+fn app_rule_candidates(
+    window_spaces: &HashMap<WindowServerId, SpaceId>,
+    activated: &[SpaceId],
+    tracked: impl Fn(WindowServerId) -> Option<WindowId>,
+    reconcilable: impl Fn(WindowId) -> bool,
+) -> HashMap<pid_t, Vec<WindowId>> {
+    let mut by_app: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
+    for window in window_spaces
+        .iter()
+        .filter(|(_, space)| activated.contains(space))
+        .filter_map(|(&wsid, _)| tracked(wsid))
+        .filter(|&window| reconcilable(window))
+    {
+        by_app.entry(window.pid).or_default().push(window);
+    }
+    by_app
 }
 
 /// Where an app inventory finds a window, by what rift already knows of it.

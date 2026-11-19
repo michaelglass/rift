@@ -14651,3 +14651,46 @@ fn a_space_snapshot_is_held_or_committed_with_the_spaces_it_invalidates() {
     renamed.display_set_changed = true;
     assert_eq!(admit(&renamed, inactive()), commit(&[2, 3], &[]));
 }
+
+#[test]
+fn an_activated_space_reapplies_app_rules_to_its_admissible_windows_by_app() {
+    let (activated, other) = (SpaceId::new(1), SpaceId::new(2));
+    let (a1, a2, b1, untracked, settled, elsewhere) = (
+        WindowId::new(10, 1),
+        WindowId::new(10, 2),
+        WindowId::new(20, 1),
+        WindowServerId::new(4),
+        WindowId::new(20, 5),
+        WindowId::new(30, 1),
+    );
+    let server = |window: WindowId| WindowServerId::new(window.pid as u32 * 100 + window.idx.get());
+    let windows = [a1, a2, b1, settled, elsewhere];
+    let on_spaces: HashMap<WindowServerId, SpaceId> = windows
+        .iter()
+        .map(|&window| {
+            (
+                server(window),
+                if window == elsewhere {
+                    other
+                } else {
+                    activated
+                },
+            )
+        })
+        .chain([(untracked, activated)])
+        .collect();
+    let tracked = |wsid: WindowServerId| windows.iter().copied().find(|&w| server(w) == wsid);
+    let candidates =
+        app_rule_candidates(&on_spaces, &[activated], tracked, |window| window != settled);
+    let mut sorted: Vec<_> = candidates
+        .into_iter()
+        .map(|(pid, mut windows)| {
+            windows.sort_by_key(|window| window.idx.get());
+            (pid, windows)
+        })
+        .collect();
+    sorted.sort_by_key(|(pid, _)| *pid);
+    // Untracked, not admissible, or on a Space that did not activate: no candidate.
+    assert_eq!(sorted, vec![(10, vec![a1, a2]), (20, vec![b1])]);
+    assert!(app_rule_candidates(&on_spaces, &[], tracked, |_| true).is_empty());
+}
