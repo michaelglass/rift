@@ -9,6 +9,111 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
+## Handover (2026-11-19): read this first
+
+Workspace: jj workspace `rift-roc` (not colocated; jj only), bookmark `experiment/roc-2`. Every
+commit below is on that line, in this order, after `ed797a2e` (the merge of upstream v0.8.5 +
+#695). Docs-only commits (`docs: roc-fork.md, …`) sit between them and are left out of the list.
+
+### Held commits, in play order
+
+"Rust" changes rift's behaviour-bearing code (always with no behaviour change); "Roc" adds a
+Roc mirror and its differential, inert unless the `roc-core` feature is on. Which of these
+already reached the owner's play line is the lead's record; the line is linear, so a play batch
+takes them in this order. Some commits marked Roc also refactor `crates/rift-core` (wire
+encoders, plain questions, a pure step a later Rust commit builds on), so skipping one can
+conflict; take the line in order unless the lead says otherwise.
+
+| Commit | Kind | What |
+|---|---|---|
+| 6027249e | Rust | traditional: adding a window a layout already holds changes nothing |
+| aba68bce | Rust | traditional: joining toward an adjacent stack joins it (upstream issue draft) |
+| 57426401 | Rust (tests only) | tests never read a window's Spaces or ordering from the live window server |
+| 91726e1b | Rust | step 3 #1: where an app inventory finds a window, pure |
+| e2757007 | Rust | step 3 #1: which Space discovery may admit a window on, pure |
+| f0fd51bd | Rust (tests only) | tests never read a Space's kind or a window's suitability live |
+| da3e5ab8 | Rust | window store: one map of entries, one hand (one held window, structurally) |
+| 4225e354 | Rust | step 3 #1: space snapshot admission, pure |
+| e38c5551 | Rust | step 3 #1: app-rule candidates on activation, pure |
+| 7a49c531 | Rust | window store: no grip on an unknown window; a re-press keeps the record |
+| 7938584b | Rust + Roc | #1's decisions move to `rift_core::topology`; Roc tags 5–8 (later Rust commits depend on the move) |
+| e5aeb256, 8d4f04bd, 968544ed, 9e5a8f6f, 15e3d902 | Rust | step 3 #2, window lifecycle decisions in `rift_core::lifecycle` |
+| 7a76eb0a | Roc | #2 mirror, tags 9–16 |
+| 1f24c75c, aec2fce0, fc6f3fc8, f887a6d4 | Rust | step 3 #3, focus decisions in `rift_core::focus` |
+| ac7017a4 | Roc | #3 mirror, tags 17–23 |
+| f0ea99d4 | Rust | L1: admission on typed facts |
+| cf5c2042 | Roc | L1 mirror, tag 24 |
+| 9715b121 | Rust | L2: lifecycle shadow + `lifecycle-divergence:` tripwire |
+| 7e9e980d | Roc + core refactor | L2: the lifecycle step as the pure `read`; tag 25 (L3 builds on the refactor) |
+| 5c2b0c50 | Rust | L3: the flip (admission facts live only in the core); held for the L2 soak |
+| c173c69f | Rust | L4: AX invalidation as presence |
+| fc3d474e | Roc + core refactor | L4: presence as the pure `present`; tag 26 |
+| 95606e2e | Rust | L5: a window's ownership is one value on its record |
+| 391ac12d | Rust | L6: retirement decided by the core |
+| b151281a | Roc | L6 mirror, tag 27 |
+| 8207d229 | Rust | no call site compares admission before/after; typed `Availability` |
+| 06b22687 | Roc | `net` mirror, tag 28 |
+| 1026e20a | Rust | W2a: `Home`, `RuleStanding` (saved form unchanged) |
+| 6f757581 | Rust | W2b: `SpaceActivation = Showing {..} \| Vacant {..}`; DisplayDeparts/Returns fuzzer steps |
+| 18144116 | Rust | W2c: one `Catalog` (saved form unchanged) |
+| 3fb35b51 | Rust | W1: workspace command decisions in `rift_core::workspaces` |
+| a9b59c3c | Roc | W1 mirror, tags 29–31 |
+| da583e7f | Rust | W3: workspaces core shadow + `workspace-divergence:` tripwire |
+
+Play-line tripwires (debug, target `rift_wm::actor::reactor`): `lifecycle-divergence:` (from
+L2), `workspace-divergence:` (from W3), `workspace-activation:` (W2b runtime drop),
+`workspace-load: normalized` (W2b load normalization, warn). L3 and later wait for the L2
+soak (zero `lifecycle-divergence:` lines on the owner's machine); the lead decides when they
+ship.
+
+### Open items
+
+1. **W3, window ownership.** `Ownership = Unassigned | Assigned(workspace) | Claimed(claim)` is
+   on the window record (L5) and not yet in the workspaces shadow.
+2. **`Topology::step` has no Roc mirror** (W3's new core logic).
+3. **W5 fuzzer gap.** No fuzzer step reaches a DisplayDeparture transfer: in the test
+   reactor's global-mode setup a departure moves no workspace. Find the snapshot that drives
+   `plan_workspace_placements` to one, make a fuzzer step reach it, and re-measure activation
+   shapes after W5. The store-level literal test covers "a departure leaves a fallback shown".
+4. **Later:** W4 (flip catalog + activation to the core), W5 (topology into the core), W6
+   (engine glue and persistence; collides with upstream #688, waits for it). BSP phase C waits
+   for the soak; traditional trees wait for #688.
+
+### Next steps
+
+(a) The Roc mirror of `Topology::step` (a model-free tag; exhaustive or 200k random
+differential; a planted bug proven caught). Then (b) W3b: window ownership in the workspaces
+shadow (the window store tells the core each ownership change; the tripwire compares). Send the
+lead a short plan before (b).
+
+### Rulings that bind (the lead's and the owner's)
+
+- **Design:** make impossible states impossible; parse, don't validate; no indices into
+  structures; non-empty types; validated newtypes; no bools or Options standing for meaning
+  (name the cases). A check a caller could do means the callee's type is too loose: move it to
+  the boundary. Logic in pure functions, effects a thin edge. Premature bug-fixing over
+  premature optimisation. Discard, never queue.
+- **Process:** test-first; each commit verified on its own (`cargo +nightly fmt --all
+  --check`, workspace tests, fuzzer `RIFT_FUZZ_CASES=2000 RIFT_FUZZ_STEPS=40 cargo test --lib
+  drag_invariants_hold_across_interleavings`, `cargo check --locked`; for Roc work also `cargo
+  test -p rift-core-roc --features roc` and the `roc-core` reactor tests). Prove each test
+  catches its fix with a planted mutation.
+- **No behaviour change** unless the lead approves one; a change visible to the user beyond
+  IPC needs the lead's go.
+- **Every differential needs a planted bug proven caught** (see Evidence); bias generators
+  toward the deciding facts.
+- **Saved files keep loading:** parse old forms at the load boundary into new types; an
+  impossible saved state is normalized with one `workspace-load: normalized` warn line (the
+  W2b ruling) or refused with a typed error where validation refused it before.
+- **Public-clean:** roc-2 is published (a copy, as `rearch/roc` on the owner's fork, linked
+  from upstream issue #697). No private paths or references in files or commit messages, no
+  session trailers; keep the `Co-Authored-By` line.
+- **Never install or push;** never open a PR or comment upstream. One clean commit per slice;
+  never `jj rebase`/`squash` to tidy history.
+- **Old-system bugs** found on the way: fix each in its own commit with a literal regression
+  test, and report it.
+- Report to the lead by message, short, decisions first.
+
 ## The boundary
 
 ```rust
