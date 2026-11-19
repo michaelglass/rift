@@ -535,6 +535,10 @@ as presence; L5 claims as presence; L6 retirement in the core.
   its invalidation. Invalidating a window with no AX state is nothing (it never had an AX
   element, or its fullscreen identity is already unavailable). Three engine tests gave AX state
   to windows built from layout events alone. The lifecycle line pauses here until the L2 soak.
+- fc3d474e (L4, Roc; not needed for play): presence steps through the pure `present` (presence
+  before + `PresenceEvent::Reading | Invalidate | Revalidate` → presence after +
+  `PresenceOutcome`; `manages`); tag 26; the differential checks all 12,615 pairs; a planted
+  bug fails it. (L3 added no core logic to mirror.)
 - A placeholder (a record with an assignment and no AX state: a restored layout's window not
   yet seen, a rule's pre-assignment, a fullscreen AX identity being replaced) has no facts in
   the core, so it can never be admitted; L4 names it as presence.
