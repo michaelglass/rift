@@ -10483,7 +10483,7 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     for window in [WindowId::new(1, 1), WindowId::new(2, 1)] {
         assert_eq!(reactor.state.windows.workspace_for_window(window), Some(ids[0]));
     }
-    assert_eq!(workspaces[ids[0]].home_space, Some(b));
+    assert_eq!(workspaces[ids[0]].home.space(), Some(b));
 
     // A later accepted sample identifies the external display's replacement.
     survivor.space = Some(replacement);
@@ -11303,7 +11303,10 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
         reactor.apply_event_outcome(outcome);
         let workspace = &reactor.layout_manager.layout_engine.workspaces()[pinned];
         assert_eq!(
-            (workspace.space, workspace.rule_overridden),
+            (
+                workspace.space,
+                (workspace.rule_standing == RuleStanding::Overridden)
+            ),
             (target, overridden)
         );
     }
@@ -11377,7 +11380,7 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
         workspace.space, b,
         "reconnecting a pin must preserve the explicit destination"
     );
-    assert!(workspace.rule_overridden);
+    assert!((workspace.rule_standing == RuleStanding::Overridden));
 
     let pin = reactor.config.virtual_workspaces.workspace_rules[0].clone();
     let layout = crate::common::config::WorkspaceLayoutRule {
@@ -11398,7 +11401,10 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
         reactor.handle_event(Event::ConfigUpdated(config));
         let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
         assert_eq!(
-            (workspace.space, workspace.rule_overridden),
+            (
+                workspace.space,
+                (workspace.rule_standing == RuleStanding::Overridden)
+            ),
             (target, overridden)
         );
         assert_eq!(workspace.layout_mode(), LayoutMode::Stack);
@@ -11409,7 +11415,13 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
         Some(vec!["test-display-1".into(), "offline-pin".into()]);
     reactor.handle_event(Event::ConfigUpdated(config));
     let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
-    assert_eq!((workspace.space, workspace.rule_overridden), (b, false));
+    assert_eq!(
+        (
+            workspace.space,
+            (workspace.rule_standing == RuleStanding::Overridden)
+        ),
+        (b, false)
+    );
 }
 
 #[test]

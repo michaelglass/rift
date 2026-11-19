@@ -156,25 +156,177 @@ pub enum WorkspaceError {
 /// workspace assignment is authoritative in `WindowStore`; the layout system
 /// here is only the arrangement for the windows currently projected into this
 /// workspace.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct VirtualWorkspace {
     pub name: String,
     pub space: SpaceId,
+    /// Where the workspace belongs when topology is not moving it.
+    pub home: Home,
+    /// Whether the workspace follows its display rule, if one matches.
+    pub rule_standing: RuleStanding,
+    last_focused: Option<WindowId>,
+    pub layout_system: LayoutSystemKind,
+    pub layout_mode: LayoutMode,
+    pub(crate) layout_state: WorkspaceLayoutState,
+}
+
+/// Where a workspace belongs when topology is not moving it: the Space (and the display it was
+/// on) it was created on or explicitly moved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Home {
+    /// Never placed: saved before homes were recorded.
+    Unplaced,
+    /// A Space, with no display preference (created where no workspace had one).
+    Space(SpaceId),
+    /// A Space on a display: created beside a workspace with that display preference, or moved
+    /// there explicitly.
+    OnDisplay { space: SpaceId, display: String },
+    /// A display preference with no Space, as older versions saved it.
+    DisplayOnly(String),
+}
+
+impl Home {
+    /// The home of a workspace placed on `space`, on `display` if it has one.
+    pub fn placed(space: SpaceId, display: Option<String>) -> Home {
+        match display {
+            Some(display) => Home::OnDisplay { space, display },
+            None => Home::Space(space),
+        }
+    }
+
+    /// From the saved form's two fields.
+    fn from_saved(space: Option<SpaceId>, display: Option<String>) -> Home {
+        match (space, display) {
+            (None, None) => Home::Unplaced,
+            (Some(space), display) => Home::placed(space, display),
+            (None, Some(display)) => Home::DisplayOnly(display),
+        }
+    }
+
+    pub fn space(&self) -> Option<SpaceId> {
+        match self {
+            Home::Space(space) | Home::OnDisplay { space, .. } => Some(*space),
+            Home::Unplaced | Home::DisplayOnly(_) => None,
+        }
+    }
+
+    pub fn display(&self) -> Option<&str> {
+        match self {
+            Home::OnDisplay { display, .. } | Home::DisplayOnly(display) => Some(display),
+            Home::Unplaced | Home::Space(_) => None,
+        }
+    }
+
+    /// The Space and display of a home on a display.
+    pub fn on_display(&self) -> Option<(SpaceId, &str)> {
+        match self {
+            Home::OnDisplay { space, display } => Some((*space, display)),
+            Home::Unplaced | Home::Space(_) | Home::DisplayOnly(_) => None,
+        }
+    }
+
+    /// The same home with no display preference.
+    #[cfg(test)]
+    pub fn without_display(&self) -> Home {
+        match self.space() {
+            Some(space) => Home::Space(space),
+            None => Home::Unplaced,
+        }
+    }
+
+    /// The same home on another Space (the display preference, if any, kept).
+    pub fn with_space(&self, space: SpaceId) -> Home {
+        Home::placed(space, self.display().map(str::to_owned))
+    }
+}
+
+/// Whether a workspace follows the display rule that matches it, if any. An explicit move away
+/// from the rule's display overrides it until the workspace returns there or the rule is
+/// (re)activated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RuleStanding {
+    #[default]
+    Followed,
+    Overridden,
+}
+
+/// A workspace as it is saved: the form every version has written, parsed into the workspace's
+/// types on load (`From<SavedWorkspace>`) and written back field for field.
+#[derive(Deserialize)]
+#[serde(rename = "VirtualWorkspace")]
+struct SavedWorkspace {
+    name: String,
+    space: SpaceId,
     #[serde(default)]
-    pub preferred_display: Option<String>,
+    preferred_display: Option<String>,
     #[serde(default)]
-    pub home_space: Option<SpaceId>,
-    /// An explicit move away from a display rule suspends that rule until the
-    /// workspace returns to the rule's display or the rule is (re)activated.
+    home_space: Option<SpaceId>,
     #[serde(default)]
-    pub rule_overridden: bool,
+    rule_overridden: bool,
     last_focused: Option<WindowId>,
     #[serde(default = "default_layout_system_kind")]
-    pub layout_system: LayoutSystemKind,
+    layout_system: LayoutSystemKind,
     #[serde(default)]
-    pub layout_mode: LayoutMode,
+    layout_mode: LayoutMode,
     #[serde(default)]
-    pub(crate) layout_state: WorkspaceLayoutState,
+    layout_state: WorkspaceLayoutState,
+}
+
+/// [`SavedWorkspace`] borrowed from a workspace, for writing.
+#[derive(Serialize)]
+#[serde(rename = "VirtualWorkspace")]
+struct SavedWorkspaceRef<'a> {
+    name: &'a String,
+    space: SpaceId,
+    preferred_display: Option<&'a str>,
+    home_space: Option<SpaceId>,
+    rule_overridden: bool,
+    last_focused: Option<WindowId>,
+    layout_system: &'a LayoutSystemKind,
+    layout_mode: LayoutMode,
+    layout_state: &'a WorkspaceLayoutState,
+}
+
+impl From<SavedWorkspace> for VirtualWorkspace {
+    fn from(saved: SavedWorkspace) -> Self {
+        VirtualWorkspace {
+            name: saved.name,
+            space: saved.space,
+            home: Home::from_saved(saved.home_space, saved.preferred_display),
+            rule_standing: if saved.rule_overridden {
+                RuleStanding::Overridden
+            } else {
+                RuleStanding::Followed
+            },
+            last_focused: saved.last_focused,
+            layout_system: saved.layout_system,
+            layout_mode: saved.layout_mode,
+            layout_state: saved.layout_state,
+        }
+    }
+}
+
+impl Serialize for VirtualWorkspace {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SavedWorkspaceRef {
+            name: &self.name,
+            space: self.space,
+            preferred_display: self.home.display(),
+            home_space: self.home.space(),
+            rule_overridden: self.rule_standing == RuleStanding::Overridden,
+            last_focused: self.last_focused,
+            layout_system: &self.layout_system,
+            layout_mode: self.layout_mode,
+            layout_state: &self.layout_state,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for VirtualWorkspace {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SavedWorkspace::deserialize(deserializer).map(VirtualWorkspace::from)
+    }
 }
 
 fn default_layout_system_kind() -> LayoutSystemKind {
@@ -187,9 +339,8 @@ impl VirtualWorkspace {
         Self {
             name,
             space,
-            preferred_display: None,
-            home_space: None,
-            rule_overridden: false,
+            home: Home::Unplaced,
+            rule_standing: RuleStanding::Followed,
             last_focused: None,
             layout_system,
             layout_mode: mode,
@@ -548,7 +699,7 @@ impl WorkspaceStore {
             return false;
         }
         if reason == WorkspaceTransferReason::Explicit
-            && let Some(home) = workspace.home_space
+            && let Some(home) = workspace.home.space()
             && let Some(activation) = self.active_workspace_per_space.get_mut(&home)
             && activation.remembered == Some(id)
         {
@@ -559,10 +710,9 @@ impl WorkspaceStore {
                 return false;
             }
             let workspace = &mut self[id];
-            let changed = workspace.home_space != Some(target)
-                || workspace.preferred_display.as_deref() != display;
-            workspace.home_space = Some(target);
-            workspace.preferred_display = display.map(str::to_owned);
+            let home = Home::placed(target, display.map(str::to_owned));
+            let changed = workspace.home != home;
+            workspace.home = home;
             return changed;
         }
         if reason == WorkspaceTransferReason::DisplayDeparture {
@@ -573,8 +723,7 @@ impl WorkspaceStore {
         }
         let workspace = &mut self[id];
         if reason == WorkspaceTransferReason::Explicit {
-            workspace.preferred_display = display.map(str::to_owned);
-            workspace.home_space = Some(target);
+            workspace.home = Home::placed(target, display.map(str::to_owned));
         }
         workspace.space = target;
         // Remembered presentation becomes active again only when ownership returns.
@@ -624,7 +773,7 @@ impl WorkspaceStore {
         for (&space, activation) in &mut self.active_workspace_per_space {
             if let Some(id) = activation.current
                 && self.workspaces.get(id).is_some_and(|workspace| {
-                    workspace.space != space && workspace.home_space == Some(space)
+                    workspace.space != space && workspace.home.space() == Some(space)
                 })
             {
                 activation.remembered = Some(id);
@@ -846,14 +995,15 @@ impl WorkspaceStore {
             .workspaces_on(space)
             .find_map(|id| self.workspaces[id].layout_state.active_size());
         let mut workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
-        workspace.preferred_display = self
-            .workspaces
-            .values()
-            .find(|workspace| {
-                workspace.home_space == Some(space) && workspace.preferred_display.is_some()
-            })
-            .and_then(|workspace| workspace.preferred_display.clone());
-        workspace.home_space = Some(space);
+        // Beside a workspace homed on this Space with a display preference, it shares it.
+        let display = self.workspaces.values().find_map(|workspace| {
+            workspace
+                .home
+                .on_display()
+                .filter(|(home, _)| *home == space)
+                .map(|(_, display)| display.to_owned())
+        });
+        workspace.home = Home::placed(space, display);
         if let Some(size) = size {
             workspace.ensure_layout_for_size(size);
         }
@@ -1081,8 +1231,8 @@ impl WorkspaceStore {
         new_space: SpaceId,
     ) -> Vec<VirtualWorkspaceId> {
         for workspace in self.workspaces.values_mut() {
-            if workspace.home_space == Some(old_space) {
-                workspace.home_space = Some(new_space);
+            if workspace.home.space() == Some(old_space) {
+                workspace.home = workspace.home.with_space(new_space);
             }
         }
         if old_space == new_space || !self.active_workspace_per_space.contains_key(&old_space) {
@@ -2013,7 +2163,7 @@ mod tests {
         let mut windows = WindowStore::default();
         let (old, fallback, new) = (SpaceId::new(41), SpaceId::new(42), SpaceId::new(43));
         let id = store.list_workspaces(old)[0].0;
-        store[id].home_space = Some(old);
+        store[id].home = store[id].home.with_space(old);
         store.list_workspaces(fallback);
         store.transfer_workspace(
             id,
@@ -2023,7 +2173,7 @@ mod tests {
         );
         let catalog: Vec<_> = store.catalog().collect();
         store.remap_space(&mut windows, old, new);
-        assert_eq!(store[id].home_space, Some(new));
+        assert_eq!(store[id].home.space(), Some(new));
         assert_eq!(store[id].space, fallback);
         store.transfer_workspace(id, new, Some("home"), WorkspaceTransferReason::Restoration);
         assert_eq!(store.active_workspace(new), Some(id));
@@ -2079,8 +2229,7 @@ mod tests {
         let window = WindowId::new(5, 1);
         store.assign_window_to_workspace(&mut windows, source, window, id);
         store[id].set_last_focused(Some(window));
-        store[id].preferred_display = Some("external".into());
-        store[id].home_space = Some(source);
+        store[id].home = Home::placed(source, Some("external".into()));
         let layout = store[id].active_layout();
         assert!(store.transfer_workspace(
             id,
@@ -2091,16 +2240,16 @@ mod tests {
         assert_eq!(windows.workspace_for_window(window).unwrap(), id);
         assert_eq!(store[id].active_layout(), layout);
         assert_eq!(store[id].last_focused(), Some(window));
-        assert_eq!(store[id].preferred_display.as_deref(), Some("external"));
-        assert_eq!(store[id].home_space, Some(source));
+        assert_eq!(store[id].home.display(), Some("external"));
+        assert_eq!(store[id].home.space(), Some(source));
         assert!(store.transfer_workspace(
             id,
             target,
             Some("builtin"),
             WorkspaceTransferReason::Explicit
         ));
-        assert_eq!(store[id].home_space, Some(target));
-        assert_eq!(store[id].preferred_display.as_deref(), Some("builtin"));
+        assert_eq!(store[id].home.space(), Some(target));
+        assert_eq!(store[id].home.display(), Some("builtin"));
         assert_eq!(store.active_workspace(target), Some(id));
         store.validate_persisted_topology().unwrap();
     }
@@ -2557,6 +2706,42 @@ mod tests {
         let expected_ws = workspaces.get(settings.default_workspace).unwrap().0;
 
         assert_eq!(manager.active_workspace(space), Some(expected_ws));
+    }
+
+    #[test]
+    fn workspaces_saved_before_typed_homes_load_into_them_and_save_unchanged() {
+        // Written by the code before Home and RuleStanding: every combination of the two home
+        // fields, and a rule override.
+        let saved = [
+            r#"(name:"Main",space:(2),preferred_display:None,home_space:None,rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Development",space:(2),preferred_display:None,home_space:Some((2)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Communication",space:(2),preferred_display:Some("display-uuid"),home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Utilities",space:(2),preferred_display:Some("legacy-display"),home_space:None,rule_overridden:true,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+        ];
+        let expected = [
+            (Home::Unplaced, RuleStanding::Followed),
+            (Home::Space(SpaceId::new(2)), RuleStanding::Followed),
+            (
+                Home::OnDisplay {
+                    space: SpaceId::new(3),
+                    display: "display-uuid".into(),
+                },
+                RuleStanding::Followed,
+            ),
+            (
+                Home::DisplayOnly("legacy-display".into()),
+                RuleStanding::Overridden,
+            ),
+        ];
+        for (saved, (home, standing)) in saved.into_iter().zip(expected) {
+            let workspace: VirtualWorkspace = ron::from_str(saved).unwrap();
+            assert_eq!((&workspace.home, workspace.rule_standing), (&home, standing));
+            assert_eq!(
+                ron::ser::to_string(&workspace).unwrap(),
+                saved,
+                "the saved form is unchanged"
+            );
+        }
     }
 
     #[test]

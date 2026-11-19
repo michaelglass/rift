@@ -727,7 +727,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let kept = ws(&engine, d, 0);
     engine.space_display_map.remove(&b);
     engine.workspaces.workspace_ids(b).iter().for_each(|id| {
-        engine.workspaces[*id].preferred_display = None;
+        engine.workspaces[*id].home = engine.workspaces[*id].home.without_display();
     });
     engine.display_last_space.insert("x".into(), a);
     engine.display_last_space.insert("y".into(), a);

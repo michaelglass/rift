@@ -108,6 +108,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
+use crate::model::virtual_workspace::RuleStanding;
 use crate::model::window_store::{NativeFullscreenTransition, Pointer};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -2593,7 +2594,7 @@ impl Reactor {
                 if !activated.is_empty() {
                     let workspaces = self.layout_manager.layout_engine.workspaces_mut();
                     for &id in &activated {
-                        workspaces[id].rule_overridden = false;
+                        workspaces[id].rule_standing = RuleStanding::Followed;
                     }
                     outcome.absorb(self.reconcile_workspace_placements(
                         &self.active_spaces.clone(),
@@ -2814,7 +2815,7 @@ impl Reactor {
                 let rule_override = self.rule_override(source_space, &target_screen);
                 if source_space == target_space {
                     if let Some((id, overridden)) = rule_override {
-                        self.layout_manager.layout_engine.workspaces_mut()[id].rule_overridden =
+                        self.layout_manager.layout_engine.workspaces_mut()[id].rule_standing =
                             overridden;
                     }
                     let response =
@@ -2863,7 +2864,7 @@ impl Reactor {
                 if let Some((id, overridden)) = rule_override {
                     let workspaces = self.layout_manager.layout_engine.workspaces_mut();
                     if workspaces[id].space == target_space {
-                        workspaces[id].rule_overridden = overridden;
+                        workspaces[id].rule_standing = overridden;
                     }
                 }
                 return outcome;
@@ -3997,9 +3998,9 @@ impl Reactor {
         for (id, rehome, placement) in placements {
             if let Some(target) = rehome {
                 let workspaces = self.layout_manager.layout_engine.workspaces_mut();
-                let old = workspaces[id].home_space.unwrap();
+                let old = workspaces[id].home.space().unwrap();
                 let target = self.space_state.screens[target].space.unwrap();
-                workspaces[id].home_space = Some(target);
+                workspaces[id].home = workspaces[id].home.with_space(target);
                 if let Some(activation) = workspaces.active_workspace_per_space.get_mut(&old)
                     && activation.remembered.or(activation.current) == Some(id)
                 {
@@ -6561,7 +6562,7 @@ impl Reactor {
         &self,
         source: SpaceId,
         target: &ScreenInfo,
-    ) -> Option<(crate::model::VirtualWorkspaceId, bool)> {
+    ) -> Option<(crate::model::VirtualWorkspaceId, RuleStanding)> {
         let workspaces = self.layout_manager.layout_engine.workspaces();
         let active = workspaces.active_workspace(source)?;
         let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
@@ -6570,10 +6571,13 @@ impl Reactor {
             &self.space_state.screens,
             |screen| screen.space.is_some_and(|space| self.active_spaces.contains(&space)),
         );
-        Some((
-            active,
-            preferred.is_none_or(|screen| screen.display_uuid != target.display_uuid),
-        ))
+        let standing = if preferred.is_none_or(|screen| screen.display_uuid != target.display_uuid)
+        {
+            RuleStanding::Overridden
+        } else {
+            RuleStanding::Followed
+        };
+        Some((active, standing))
     }
 
     /// The display `selector` names from `source`'s display (wrapping at the ends if `wrap`),
@@ -6761,10 +6765,7 @@ fn plan_workspace_placements(
                     return None;
                 }
                 let owner = engine.display_uuid_for_space(workspace.space);
-                let home = workspace
-                    .home_space
-                    .zip(workspace.preferred_display.as_deref())
-                    .filter(|_| pins_only.is_none());
+                let home = workspace.home.on_display().filter(|_| pins_only.is_none());
                 let native_owner =
                     space_state.display_space_ids.iter().find_map(|(display, spaces)| {
                         spaces.contains(&workspace.space).then_some(display.as_str())
@@ -6785,12 +6786,14 @@ fn plan_workspace_placements(
                     (screens[target].space == Some(space) || returned).then_some(target)
                 });
                 let rehome =
-                    home_target.filter(|&target| screens[target].space != workspace.home_space);
+                    home_target.filter(|&target| screens[target].space != workspace.home.space());
                 let ruled = engine
                     .workspaces()
                     .matching_rules(index, &workspace.name)
                     .find_map(|rule| rule.display.as_deref())
-                    .filter(|_| !workspace.rule_overridden && screens.len() > 1)
+                    .filter(|_| {
+                        workspace.rule_standing == RuleStanding::Followed && screens.len() > 1
+                    })
                     .and_then(|rule_display| {
                         *rule_targets.entry(rule_display).or_insert_with(|| {
                             crate::sys::screen::resolve_display_preference(

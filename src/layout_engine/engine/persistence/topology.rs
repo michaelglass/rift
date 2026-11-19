@@ -72,7 +72,7 @@ impl LayoutEngine {
             let display = self.display_uuid_for_space(space).map(str::to_owned).or_else(|| {
                 self.workspaces
                     .workspaces_on(space)
-                    .find_map(|id| self.workspaces[id].preferred_display.clone())
+                    .find_map(|id| self.workspaces[id].home.display().map(str::to_owned))
             });
             let live_display = display.as_ref().and_then(|display| {
                 current_spaces.iter().find(|(_, current, _)| current == display)

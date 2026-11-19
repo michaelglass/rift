@@ -1767,7 +1767,7 @@ impl LayoutEngine {
                 .workspaces
                 .workspaces
                 .values()
-                .any(|ws| ws.space == space && ws.preferred_display.is_none())
+                .any(|ws| ws.space == space && ws.home.display().is_none())
         {
             return;
         }
@@ -1778,9 +1778,9 @@ impl LayoutEngine {
                 .values_mut()
                 .filter(|workspace| workspace.space == space)
             {
-                if workspace.preferred_display.is_none() {
-                    workspace.preferred_display = Some(uuid.clone());
-                    workspace.home_space = Some(space);
+                if workspace.home.display().is_none() {
+                    workspace.home =
+                        crate::model::virtual_workspace::Home::placed(space, Some(uuid.clone()));
                 }
             }
             self.space_display_map.insert(space, Some(uuid.clone()));
