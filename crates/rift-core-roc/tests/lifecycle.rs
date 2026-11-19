@@ -387,3 +387,64 @@ fn the_roc_core_steps_every_presence_event_as_the_rust_core_does() {
     assert_eq!(after.live(), before_count.live(), "Roc allocations left live");
     eprintln!("lifecycle: all {checked} presence events answered identically");
 }
+
+#[test]
+fn the_roc_core_retires_windows_as_the_rust_core_does_for_every_combination_of_facts() {
+    use rift_core::lifecycle::{
+        AxValidity, FullscreenRecord, InventoryFacts, InventoryView, Minimize, NativeEvidence,
+        NativeIdentity, NativeLook, Ordering, Report, Suitability,
+    };
+    let before = AllocationCount::now();
+    let mut checked = 0;
+    for report in [Report::Reported, Report::Omitted] {
+        for view in [InventoryView::InView, InventoryView::OutOfView] {
+            for minimize in [None, Some(Minimize::Shown), Some(Minimize::Minimized)] {
+                for fullscreen in [FullscreenRecord::Recorded, FullscreenRecord::NotRecorded] {
+                    for identity in [NativeIdentity::Known(42_u64), NativeIdentity::Unknown] {
+                        for validity in [AxValidity::Valid, AxValidity::Invalidated] {
+                            for suitability in [
+                                None,
+                                Some(Suitability::Suitable),
+                                Some(Suitability::Unsuitable),
+                            ] {
+                                for ordering in
+                                    [None, Some(Ordering::OrderedIn), Some(Ordering::OrderedOut)]
+                                {
+                                    for look in [
+                                        None,
+                                        Some(NativeLook::Window),
+                                        Some(NativeLook::NotAWindow),
+                                    ] {
+                                        let facts = InventoryFacts {
+                                            report,
+                                            view,
+                                            minimize,
+                                            fullscreen,
+                                            identity,
+                                            validity,
+                                        };
+                                        let evidence =
+                                            NativeEvidence { suitability, ordering, look };
+                                        let rust = wire::encode_retirement(
+                                            rift_core::lifecycle::retirement(facts, |_| evidence),
+                                        );
+                                        assert_eq!(
+                                            tile_words(&wire::encode_inventory(facts, evidence)),
+                                            Ok(rust),
+                                            "{facts:?} {evidence:?}"
+                                        );
+                                        checked += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 2 * 2 * 3 * 2 * 2 * 2 * 27);
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("lifecycle: all {checked} retirement fact combinations answered identically");
+}

@@ -1301,6 +1301,88 @@ pub fn encode_window_admission(answer: lifecycle::Admission) -> Vec<u64> {
     }
 }
 
+/// Tag 27, an inventory's retirement question: report (0 reported, 1 omitted), view (0 in, 1
+/// out), minimize (an option: 0 shown, 1 minimized; none without AX state), fullscreen record
+/// (0 recorded, 1 not), the native identity (an option of its word), validity (0 valid, 1
+/// invalidated), then the evidence: suitability (an option: 0 suitable, 1 not), ordering (an
+/// option: 0 in, 1 out), look (an option: 0 a window, 1 not).
+pub fn encode_inventory(
+    facts: lifecycle::InventoryFacts<u64>,
+    evidence: lifecycle::NativeEvidence,
+) -> Vec<u64> {
+    use lifecycle::{
+        AxValidity, FullscreenRecord, InventoryView, NativeIdentity, NativeLook, Ordering, Report,
+        Suitability,
+    };
+    let mut words = Words::default();
+    words.word(27);
+    words.word(match facts.report {
+        Report::Reported => 0,
+        Report::Omitted => 1,
+    });
+    words.word(match facts.view {
+        InventoryView::InView => 0,
+        InventoryView::OutOfView => 1,
+    });
+    words.option(facts.minimize, |words, minimize| {
+        words.word(minimize_word(minimize))
+    });
+    words.word(match facts.fullscreen {
+        FullscreenRecord::Recorded => 0,
+        FullscreenRecord::NotRecorded => 1,
+    });
+    words.option(
+        match facts.identity {
+            NativeIdentity::Known(id) => Some(id),
+            NativeIdentity::Unknown => None,
+        },
+        Words::word,
+    );
+    words.word(match facts.validity {
+        AxValidity::Valid => 0,
+        AxValidity::Invalidated => 1,
+    });
+    words.option(evidence.suitability, |words, suitability| {
+        words.word(match suitability {
+            Suitability::Suitable => 0,
+            Suitability::Unsuitable => 1,
+        })
+    });
+    words.option(evidence.ordering, |words, ordering| {
+        words.word(match ordering {
+            Ordering::OrderedIn => 0,
+            Ordering::OrderedOut => 1,
+        })
+    });
+    words.option(evidence.look, |words, look| {
+        words.word(match look {
+            NativeLook::Window => 0,
+            NativeLook::NotAWindow => 1,
+        })
+    });
+    words.0
+}
+
+/// A retirement as words: 0 retire, or 1 and why it is kept (0 reported, 1 out of view, 2 no
+/// AX state, 3 minimized, 4 fullscreen, 5 no native identity, 6 native ordering, 7 no negative
+/// evidence).
+pub fn encode_retirement(answer: lifecycle::Retirement) -> Vec<u64> {
+    use lifecycle::{Keep, Retirement};
+    match answer {
+        Retirement::Retire => vec![0],
+        Retirement::Keep(why) => vec![1, match why {
+            Keep::Reported => 0,
+            Keep::OutOfView => 1,
+            Keep::NoAxState => 2,
+            Keep::Minimized => 3,
+            Keep::Fullscreen => 4,
+            Keep::NoNativeIdentity => 5,
+            Keep::NativeOrdering => 6,
+            Keep::NoNegativeEvidence => 7,
+        }],
+    }
+}
+
 /// One step of a trace (its event, then its effects), appended to `trace`.
 pub fn record_step(trace: &mut Vec<u64>, event: Event<Plain>, effects: Vec<Effect<Plain>>) {
     trace.extend(encode_event(event));

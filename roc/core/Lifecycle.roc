@@ -445,6 +445,96 @@ Lifecycle := [].{
 		presence_step(before, event)
 	}
 
+	## Whether an inventory retires a window: 0 retire, or 1 and why it keeps it.
+	retirement : { reported : Bool, out_of_view : Bool, minimize : [Shown, Minimized, NoAxState], fullscreen : Bool, identified : Bool, invalidated : Bool, suitable : [Yes, No, Unknown], ordered_in : [Yes, No, Unknown], not_a_window : [Yes, No, Unknown] } -> List(U64)
+	retirement = |facts|
+		if facts.reported {
+			[1, 0]
+		} else if facts.out_of_view {
+			[1, 1]
+		} else {
+			match facts.minimize {
+				NoAxState => [1, 2]
+				Minimized => [1, 3]
+				Shown =>
+					if facts.fullscreen {
+						[1, 4]
+					} else if !facts.identified {
+						[1, 5]
+					} else {
+						suitable = facts.suitable == Yes
+						unsuitable = facts.suitable == No
+						ordered_out = facts.ordered_in == No
+						if suitable and ordered_out and !facts.invalidated {
+							[1, 6]
+						} else if unsuitable or ordered_out or facts.not_a_window == Yes {
+							[0]
+						} else {
+							[1, 7]
+						}
+					}
+			}
+		}
+
+	take_tri : Words -> Taken([Yes, No, Unknown])
+	take_tri = |c0| {
+		(known, c1) = take_flag(c0)?
+		if known {
+			(word, c2) = take(c1)?
+			match word {
+				0 => Ok((Yes, c2))
+				1 => Ok((No, c2))
+				_ => Err(Malformed)
+			}
+		} else {
+			Ok((Unknown, c1))
+		}
+	}
+
+	## Tag 27. (Suitability and the window look are written 0 for yes; ordering 0 for in.)
+	inventory_words : Words -> Try(List(U64), [Malformed])
+	inventory_words = |c0| {
+		(report, c1) = take(c0)?
+		(view, c2) = take(c1)?
+		(has_minimize, c3) = take_flag(c2)?
+		(minimize, c4) =
+			if has_minimize {
+				(word, rest) = take(c3)?
+				minimized = binary(word)?
+				(if (minimized) Minimized else Shown, rest)
+			} else {
+				(NoAxState, c3)
+			}
+		(fullscreen_word, c5) = take(c4)?
+		(has_identity, after_flag) = take_flag(c5)?
+		(identified, c6) =
+			if has_identity {
+				(_, rest) = take(after_flag)?
+				(True, rest)
+			} else {
+				(False, after_flag)
+			}
+		(validity, c7) = take(c6)?
+		(suitable, c8) = take_tri(c7)?
+		(ordered_in, c9) = take_tri(c8)?
+		(look, c10) = take_tri(c9)?
+		finished(c10)?
+		reported = !(binary(report)?)
+		out_of_view = binary(view)?
+		fullscreen = !(binary(fullscreen_word)?)
+		invalidated = binary(validity)?
+		Ok(retirement({ reported, out_of_view, minimize, fullscreen, identified, invalidated, suitable, ordered_in, not_a_window: invert(look) }))
+	}
+
+	## A window look read as "a window?" (0 yes) becomes "not a window?".
+	invert : [Yes, No, Unknown] -> [Yes, No, Unknown]
+	invert = |answer|
+		match answer {
+			Yes => No
+			No => Yes
+			Unknown => Unknown
+		}
+
 	## Tag 25.
 	reading_words : Words -> Try(List(U64), [Malformed])
 	reading_words = |c0| {
