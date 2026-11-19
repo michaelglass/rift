@@ -1703,9 +1703,10 @@ impl Words {
     }
 
     /// 0 assigned: the workspace; 1 claimed: the owner, then the destination (0 nowhere; 1
-    /// returns, then the workspace).
+    /// returns, then the workspace); 2 held, placed by no workspace.
     fn ownership(&mut self, ownership: workspaces::Ownership<u64, u64>) {
         match ownership {
+            workspaces::Ownership::Held => self.word(2),
             workspaces::Ownership::Assigned(workspace) => {
                 self.word(0);
                 self.word(workspace);

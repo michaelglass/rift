@@ -446,8 +446,8 @@ impl Ownership {
     fn core(self) -> CoreOwned {
         use rift_core::workspaces::{Destination, Owned};
         match self {
-            // The core's ownerships learn Held in a later step; until then it is unowned there.
-            Ownership::Unassigned | Ownership::Held => Owned::Unowned,
+            Ownership::Unassigned => Owned::Unowned,
+            Ownership::Held => Owned::Owner(rift_core::workspaces::Ownership::Held),
             Ownership::Assigned(workspace) => {
                 Owned::Owner(rift_core::workspaces::Ownership::Assigned(workspace))
             }

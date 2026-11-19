@@ -34,8 +34,9 @@ Topology : { catalog : List({ workspace : U64, space : U64 }), activations : Lis
 ## Where a claimed window returns to when its claim ends.
 Destination : [Returns(U64), Nowhere]
 
-## Who places a window, when somebody does: a workspace, or an external owner.
-Ownership : [Assigned(U64), Claimed({ owner : U64, destination : Destination })]
+## Who places a window, when somebody does: a workspace, an external owner, or (held under the
+## user's hand, a workspace transfer having left it) nobody until the drop.
+Ownership : [Assigned(U64), Claimed({ owner : U64, destination : Destination }), Held]
 
 ## Who places each window, in window order; a window without an entry is unowned.
 Ownerships : List({ window : U64, ownership : Ownership })
@@ -236,6 +237,7 @@ Workspaces := [].{
 					Assigned(workspace) => Names(workspace)
 					Claimed({ destination: Returns(workspace), .. }) => Names(workspace)
 					Claimed({ destination: Nowhere, .. }) => NamesNone
+					Held => NamesNone
 				}
 			match named {
 				Names(workspace) if !catalog.contains(workspace) => {
@@ -311,6 +313,7 @@ Workspaces := [].{
 					Owner(Assigned(workspace)) => first_unknown(joined, [workspace])
 					Owner(Claimed({ destination: Returns(workspace), .. })) => first_unknown(joined, [workspace])
 					Owner(Claimed({ destination: Nowhere, .. })) => Accepted
+					Owner(Held) => Accepted
 				}
 		}
 
@@ -573,6 +576,7 @@ Workspaces := [].{
 					Ok((Claimed({ owner, destination: Nowhere }), c3))
 				}
 			}
+			2 => Ok((Held, c1))
 			_ => Err(Malformed)
 		}
 	}
@@ -580,6 +584,7 @@ Workspaces := [].{
 	put_ownership : List(U64), Ownership -> List(U64)
 	put_ownership = |words, ownership|
 		match ownership {
+			Held => words.append(2)
 			Assigned(workspace) => words.append(0).append(workspace)
 			Claimed({ owner, destination: Returns(workspace) }) => words.append(1).append(owner).append(1).append(workspace)
 			Claimed({ owner, destination: Nowhere }) => words.append(1).append(owner).append(0)

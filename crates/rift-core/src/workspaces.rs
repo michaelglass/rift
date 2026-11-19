@@ -223,6 +223,9 @@ pub enum Ownership<K, O> {
         owner: O,
         destination: Destination<K>,
     },
+    /// Under the user's hand and placed by no workspace (a workspace transfer would have
+    /// carried it off); the drop places it.
+    Held,
 }
 
 /// Where a claimed window returns to when its claim ends.
@@ -306,7 +309,8 @@ pub fn orphans<W: Copy + Ord, K: Copy + PartialEq, O: Copy, S>(
             Ownership::Claimed {
                 destination: Destination::Nowhere,
                 ..
-            } => None,
+            }
+            | Ownership::Held => None,
         })
         .filter(|(_, workspace)| !topology.catalog.iter().any(|(id, _)| id == workspace))
         .collect()
@@ -431,10 +435,13 @@ impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K
             WorkspacesEvent::Cleared(_) => Ok(()),
             WorkspacesEvent::Owned { owned, .. } => match owned {
                 Owned::Unowned
-                | Owned::Owner(Ownership::Claimed {
-                    destination: Destination::Nowhere,
-                    ..
-                }) => Ok(()),
+                | Owned::Owner(
+                    Ownership::Claimed {
+                        destination: Destination::Nowhere,
+                        ..
+                    }
+                    | Ownership::Held,
+                ) => Ok(()),
                 Owned::Owner(Ownership::Assigned(workspace))
                 | Owned::Owner(Ownership::Claimed {
                     destination: Destination::Returns(workspace),
@@ -466,7 +473,9 @@ impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K
                             owner,
                             destination: heir.map_or(Destination::Nowhere, Destination::Returns),
                         })),
-                        Ownership::Assigned(_) | Ownership::Claimed { .. } => None,
+                        Ownership::Assigned(_) | Ownership::Claimed { .. } | Ownership::Held => {
+                            None
+                        }
                     };
                     if let Some(ownership) = handed {
                         self.own(window, ownership);
@@ -815,6 +824,7 @@ mod tests {
                 owner: 7,
                 destination: Destination::Nowhere,
             }),
+            (6, Ownership::Held),
         ] {
             ownerships.step(OwnershipEvent::Owned {
                 window,
@@ -966,6 +976,31 @@ mod tests {
             })
         );
         assert_eq!(workspaces.owned(102), assigned(1));
+        // A held window names no workspace: admitted, and no removal touches it.
+        assert_eq!(
+            workspaces.step(Own {
+                window: 104,
+                owned: Owned::Owner(Ownership::Held)
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            workspaces.step(Removed {
+                workspace: 1,
+                successor: Successor::Unassign
+            }),
+            Ok(())
+        );
+        assert_eq!(workspaces.owned(104), Owned::Owner(Ownership::Held));
+        assert_eq!(workspaces.owned(102), Owned::Unowned);
+        assert_eq!(workspaces.step(Created { workspace: 1, space: 10 }), Ok(()));
+        assert_eq!(
+            workspaces.step(Own {
+                window: 102,
+                owned: assigned(1)
+            }),
+            Ok(())
+        );
         // Disowning moves a window out of the index.
         assert_eq!(
             workspaces.step(Own {

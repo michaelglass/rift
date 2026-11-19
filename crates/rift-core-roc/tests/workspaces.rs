@@ -223,7 +223,8 @@ fn the_roc_core_steps_ownership_and_finds_orphans_as_the_rust_core_does() {
                 let window = 1 + rng.below(8);
                 let owned = match rng.below(100) {
                     0..20 => Owned::Unowned,
-                    20..65 => Owned::Owner(Ownership::Assigned(1 + rng.below(5))),
+                    20..30 => Owned::Owner(Ownership::Held),
+                    30..65 => Owned::Owner(Ownership::Assigned(1 + rng.below(5))),
                     _ => Owned::Owner(Ownership::Claimed {
                         owner: 100 + rng.below(3),
                         destination: if rng.chance(70) {
@@ -296,7 +297,8 @@ fn the_roc_core_steps_the_joined_workspaces_as_the_rust_core_does() {
                     window: 1 + rng.below(8),
                     owned: match rng.below(100) {
                         0..15 => Owned::Unowned,
-                        15..65 => Owned::Owner(Ownership::Assigned(known(rng, &created))),
+                        15..25 => Owned::Owner(Ownership::Held),
+                        25..65 => Owned::Owner(Ownership::Assigned(known(rng, &created))),
                         _ => Owned::Owner(Ownership::Claimed {
                             owner: 100 + rng.below(3),
                             destination: if rng.chance(70) {
