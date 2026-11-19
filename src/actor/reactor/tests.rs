@@ -14484,3 +14484,70 @@ fn a_resizable_window_keeps_its_reported_minimum_when_tiled_only_under_respect_m
         }
     }
 }
+
+#[test]
+fn a_discovered_windows_native_space_is_its_one_live_space_or_a_fallback_by_its_standing() {
+    let (display, full, other, recorded) = (
+        SpaceId::new(1),
+        SpaceId::new(9),
+        SpaceId::new(5),
+        SpaceId::new(7),
+    );
+    let observable = |space| space == display || space == full;
+    let decide = |standing, live: Vec<SpaceId>| {
+        discovered_space(
+            standing,
+            || live,
+            observable,
+            || Some(recorded),
+            || panic!("only a tracked window is resolved"),
+        )
+    };
+    use DiscoveredSpace::{Fallback, Live, Observed};
+    use Standing::{RecoveringFullscreen, Tracked, Untracked};
+    // A tracked window resolves as usual; its live Spaces are not asked.
+    assert_eq!(
+        discovered_space(
+            Tracked,
+            || panic!("a tracked window's live Spaces are not asked"),
+            observable,
+            || panic!("nor its recorded Space"),
+            || Some(other),
+        ),
+        Fallback(Some(other))
+    );
+    for standing in [Untracked, RecoveringFullscreen] {
+        // One live Space that is fullscreen or a display's is also an observation.
+        assert_eq!(decide(standing, vec![display]), Observed(display));
+        assert_eq!(decide(standing, vec![full]), Observed(full));
+        assert_eq!(decide(standing, vec![other]), Live(other));
+    }
+    // Several memberships are transitional: an untracked window falls back to its recorded
+    // Space, a recovering one to none (contradictory evidence is no completed exit).
+    assert_eq!(decide(Untracked, vec![display, full]), Fallback(Some(recorded)));
+    assert_eq!(decide(Untracked, vec![]), Fallback(Some(recorded)));
+    let recovering = |live: Vec<SpaceId>| {
+        discovered_space(
+            RecoveringFullscreen,
+            || live,
+            observable,
+            || panic!("a recovering window's recorded Space is not asked"),
+            || panic!("nor is it resolved"),
+        )
+    };
+    assert_eq!(recovering(vec![display, full]), Fallback(None));
+    assert_eq!(recovering(vec![]), Fallback(None));
+    // What the inventory uses: the native Space, and the observation if there is one.
+    assert_eq!(
+        (Observed(full).native(), Observed(full).observation()),
+        (Some(full), Some(full))
+    );
+    assert_eq!(
+        (Live(other).native(), Live(other).observation()),
+        (Some(other), None)
+    );
+    assert_eq!(
+        (Fallback(None).native(), Fallback(None).observation()),
+        (None, None)
+    );
+}
