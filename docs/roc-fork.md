@@ -552,6 +552,11 @@ as presence; L5 claims as presence; L6 retirement in the core.
   2,592 combinations.
 - b151281a (L6, Roc): tag 27; the differential checks all 2,592 combinations; a planted bug
   fails it.
+- 8207d229 (held): no call site compares admission before and after. `refresh_heuristic` and
+  `replace_info` return the core's `Transition`; `rift_core::lifecycle::net` composes two in a
+  row (the inventory path's fresh roles and heuristic as one change); suspended vs removed is
+  chosen from a typed `Availability` in `utils::layout_departure`. `AdmissionTransition` goes.
+- 06b22687 (Roc): `net`, tag 28; the differential checks all 49 pairs; a planted bug fails it.
 - A placeholder (a record with an assignment and no AX state: a restored layout's window not
   yet seen, a rule's pre-assignment, a fullscreen AX identity being replaced) has no facts in
   the core, so it can never be admitted; L4 names it as presence.
