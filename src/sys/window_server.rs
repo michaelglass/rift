@@ -444,14 +444,19 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
     spaces_cf.len() > 1
 }
 
+/// In tests, only what a test set: fixture ids are real windows' ids on the test machine too.
+#[cfg(test)]
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
-    #[cfg(test)]
-    if let Some(override_spaces) =
-        TEST_WINDOW_SPACES_OVERRIDE.with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
-    {
-        return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
-    }
+    TEST_WINDOW_SPACES_OVERRIDE
+        .with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(crate::sys::screen::SpaceId::new)
+        .collect()
+}
 
+#[cfg(not(test))]
+pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -484,14 +489,15 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
         .or_else(|| spaces.into_iter().next())
 }
 
+/// In tests, only what a test set (see `window_spaces`).
+#[cfg(test)]
 pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
-    #[cfg(test)]
-    if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
+    TEST_WINDOW_ORDERED_IN_OVERRIDE
         .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
-    {
-        return Some(ordered);
-    }
+}
 
+#[cfg(not(test))]
+pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
     {
@@ -1087,6 +1093,17 @@ mod tests {
                 super::native_window_is_transient(SLSWindowTags::from_bits_retain(bits), parent),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn tests_never_read_a_windows_spaces_or_ordering_from_the_live_window_server() {
+        // Fixtures use small window ids that real windows on the test machine also have; a test
+        // that sets no override must see an unknown window, not whatever this Mac shows.
+        for id in 1..=4096 {
+            let id = WindowServerId::new(id);
+            assert_eq!(super::window_spaces(id), Vec::new(), "{id:?}");
+            assert_eq!(super::window_ordered_in(id), None, "{id:?}");
         }
     }
 
