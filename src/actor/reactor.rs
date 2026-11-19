@@ -5979,32 +5979,29 @@ impl Reactor {
                 )
         };
 
-        if let Some(wid) = preferred.filter(|wid| is_visible_in_space(*wid)) {
-            return Some(wid);
-        }
-
-        if let Some(wid) =
-            self.last_focused_window_in_space(space).filter(|wid| is_visible_in_space(*wid))
-        {
-            return Some(wid);
-        }
-
-        self.layout_manager
-            .layout_engine
-            .workspaces()
-            .windows_in_active_workspace(&self.state.windows, space)
-            .into_iter()
-            .find(|wid| is_visible_in_space(*wid))
+        rift_core::focus::focus_candidate(
+            preferred,
+            || self.last_focused_window_in_space(space),
+            || {
+                self.layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&self.state.windows, space)
+            },
+            is_visible_in_space,
+        )
     }
 
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
         // Membership refreshes also observe unfocused windows on inactive
         // workspaces. Only hidden focus needs a replacement; otherwise this
         // would activate that display's selection and warp the cursor back.
-        if (self.main_window() == Some(window_id)
-            || self.layout_manager.layout_engine.focused_window() == Some(window_id))
-            && self.window_in_non_active_workspace(space, window_id)
-        {
+        if rift_core::focus::hides_focus(
+            window_id,
+            self.main_window(),
+            self.layout_manager.layout_engine.focused_window(),
+            || self.window_in_non_active_workspace(space, window_id),
+        ) {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
     }

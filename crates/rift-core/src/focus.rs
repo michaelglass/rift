@@ -61,12 +61,68 @@ pub fn removal_focus<W: Copy + PartialEq, S: Copy, P: Copy + PartialEq>(
     }
 }
 
+/// The window to focus in a Space's active workspace: the preferred one, else the last
+/// focused, else the first of the workspace's windows, whichever is visible there first. The
+/// history is asked only without a visible preferred window, the workspace only after that.
+pub fn focus_candidate<W: Copy>(
+    preferred: Option<W>,
+    last_focused: impl FnOnce() -> Option<W>,
+    in_workspace: impl FnOnce() -> Vec<W>,
+    visible: impl Fn(W) -> bool,
+) -> Option<W> {
+    preferred
+        .filter(|&window| visible(window))
+        .or_else(|| last_focused().filter(|&window| visible(window)))
+        .or_else(|| in_workspace().into_iter().find(|&window| visible(window)))
+}
+
+/// Whether focus is hidden: `window`, the main or the focused window, is in a workspace that is
+/// not its Space's active one (asked only then). Only hidden focus needs a replacement: a
+/// membership refresh also sees unfocused windows on inactive workspaces.
+pub fn hides_focus<W: Copy + PartialEq>(
+    window: W,
+    main: Option<W>,
+    focused: Option<W>,
+    in_inactive_workspace: impl FnOnce() -> bool,
+) -> bool {
+    (main == Some(window) || focused == Some(window)) && in_inactive_workspace()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A window is (app, index).
     type W = (u32, u32);
+
+    #[test]
+    fn focus_goes_to_the_preferred_then_the_last_focused_then_the_first_visible_window() {
+        let visible = |window: u32| window % 2 == 0;
+        let none = || None;
+        let nothing = Vec::new;
+        assert_eq!(
+            focus_candidate(Some(2), || panic!("not asked"), || panic!("not asked"), visible),
+            Some(2)
+        );
+        assert_eq!(
+            focus_candidate(Some(1), || Some(4), || panic!("not asked"), visible),
+            Some(4)
+        );
+        assert_eq!(
+            focus_candidate(Some(1), || Some(3), || vec![5, 6, 8], visible),
+            Some(6)
+        );
+        assert_eq!(focus_candidate(None, none, || vec![1, 3], visible), None);
+        assert_eq!(focus_candidate(None, none, nothing, visible), None);
+    }
+
+    #[test]
+    fn hidden_focus_is_the_main_or_focused_window_in_an_inactive_workspace() {
+        assert!(hides_focus(1, Some(1), None, || true));
+        assert!(hides_focus(1, None, Some(1), || true));
+        assert!(!hides_focus(1, Some(1), Some(1), || false));
+        assert!(!hides_focus(1, Some(2), Some(3), || panic!("not asked")));
+    }
 
     #[test]
     fn a_removal_refocuses_only_when_it_takes_focus_and_keeps_a_sibling_macos_focused() {
