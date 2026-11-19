@@ -62,6 +62,10 @@ conflict; take the line in order unless the lead says otherwise.
 | cce4745b | Roc + core refactor | `Topology::step` mirror, tag 32 |
 | b536fbb8 | Rust | W3b: window ownership in a core shadow (`Ownerships`, held by the window store) + orphans, on the `workspace-divergence:` tripwire |
 | e4ce0ba8 | Roc + core refactor | `Ownerships::step` + `orphans` mirror, tag 33 |
+| 8a8709e8, 275fe2f6 | docs | remap gap logged, then closed |
+| eb466e5d | Rust (tests only) | reactor test: a Space remapped onto one holding workspaces takes its windows and claims along |
+| 202c536c | Rust | W4a: the joined `Workspaces` (catalog, activations, ownership; refusals; Removed carries its Successor) |
+| 7300b552 | Roc + core refactor | W4a mirror, tag 34 |
 
 Play-line tripwires (debug, target `rift_wm::actor::reactor`): `lifecycle-divergence:` (from
 L2), `workspace-divergence:` (from W3), `workspace-activation:` (W2b runtime drop),
@@ -73,9 +77,22 @@ ship.
 
 1. **W3b's shadow** is `rift_core::workspaces::Ownerships`, held by the window store and
    written only through `set_ownership`; it joins `Topology` at W4.
-2. **W4 obligation.** While ownership and the catalog are separate values, a window assigned
-   to a workspace that no longer exists is not ruled out by the types. When W4 joins them, a
-   workspace's removal must reassign or unassign its windows in the same step.
+2. **W4, the flip (plan approved).** The joined `rift_core::workspaces::Workspaces` (W4a,
+   202c536c) holds the catalog, activations and ownership; its step refuses (typed `Refused`, no
+   change) a workspace created twice, anything naming a workspace the catalog lacks, a workspace
+   succeeding itself, and removing a workspace a Space still shows; `Removed { successor:
+   Into(K) | Unassign }` hands windows and claims on and drops the workspace from every Space's
+   history and memory in the same step (the W4 obligation). Rulings: it lives in the window
+   store (placement A); a refused event is a bug: `workspace-refused:` at **warn** in a running
+   Rift, a panic in tests. Projections stay platform-side, keyed by workspace: name, home, rule
+   standing, layout state; a claim's flags, original id and the claims-by-owner index (its order
+   is observable, checked by the tripwire); native fullscreen records' workspace (a third
+   reference: the platform applies the same Successor, the tripwire checks it). Slices: W4b one
+   joined shadow (remap_space computes each deleted workspace's successor before removal and
+   clears a shown Space before removing; tags 32 and 33 retire), W4c ownership flip (the window
+   store answers from the core; its index and the record's assignment go). **W4d, the catalog
+   and activation flip with the saved form written from the core, waits for #688 and goes with
+   W6: no persistence change before #688.**
 3. **W5 fuzzer gap.** No fuzzer step reaches a DisplayDeparture transfer: in the test
    reactor's global-mode setup a departure moves no workspace. Find the snapshot that drives
    `plan_workspace_placements` to one, make a fuzzer step reach it, and re-measure activation
@@ -88,9 +105,8 @@ ship.
 
 ### Next steps
 
-Done: the Roc mirror of `Topology::step` (tag 32), W3b (ownership shadow + orphans on the
-tripwire) and its Roc mirror (tag 33). Next is the lead's call: W4 (flip catalog + activation,
-and join ownership, to the core) or the W5 fuzzer gaps.
+Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34). Next: W4b,
+then W4c (see open item 2).
 
 ### Rulings that bind (the lead's and the owner's)
 
@@ -246,7 +262,8 @@ counts only under the `respect_min_size` app rule).
 - `roc/core/Workspaces.roc`: the workspace decisions (`rift_core::workspaces`: reachability,
   stepping, selectors, navigation history), tags 29 to 31, the topology's step (the
   topology an empty one becomes after a run of events), tag 32, and window ownership's step
-  with its orphans against a catalog, tag 33. Held to the Rust by
+  with its orphans against a catalog, tag 33, and the joined workspaces' step (each event's
+  outcome and the workspaces a run leaves), tag 34. Held to the Rust by
   `tests/workspaces.rs`; not on rift's path.
 - `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
   `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
