@@ -535,6 +535,44 @@ Lifecycle := [].{
 			Unknown => Unknown
 		}
 
+	## Two admission changes in a row as one: from the first's start to the second's end.
+	net : [NoChange, Admitted, Suspended(U64)], [NoChange, Admitted, Suspended(U64)] -> [NoChange, Admitted, Suspended(U64)]
+	net = |first, later|
+		match (first, later) {
+			(NoChange, change) => change
+			(change, NoChange) => change
+			(Admitted, Suspended(_)) => NoChange
+			(Suspended(_), Admitted) => NoChange
+			(Admitted, Admitted) => Admitted
+			(Suspended(_), Suspended(why)) => Suspended(why)
+		}
+
+	take_change : Words -> Taken([NoChange, Admitted, Suspended(U64)])
+	take_change = |c0| {
+		(kind, c1) = take(c0)?
+		match kind {
+			0 => Ok((NoChange, c1))
+			1 => Ok((Admitted, c1))
+			2 => take(c1).map_ok(|(why, rest)| (Suspended(why), rest))
+			_ => Err(Malformed)
+		}
+	}
+
+	## Tag 28.
+	net_words : Words -> Try(List(U64), [Malformed])
+	net_words = |c0| {
+		(first, c1) = take_change(c0)?
+		(later, c2) = take_change(c1)?
+		finished(c2)?
+		Ok(
+			match net(first, later) {
+				NoChange => [0]
+				Admitted => [1]
+				Suspended(why) => [2, why]
+			},
+		)
+	}
+
 	## Tag 25.
 	reading_words : Words -> Try(List(U64), [Malformed])
 	reading_words = |c0| {

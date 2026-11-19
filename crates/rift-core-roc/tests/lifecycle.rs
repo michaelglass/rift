@@ -448,3 +448,38 @@ fn the_roc_core_retires_windows_as_the_rust_core_does_for_every_combination_of_f
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("lifecycle: all {checked} retirement fact combinations answered identically");
 }
+
+#[test]
+fn the_roc_core_nets_every_pair_of_admission_changes_as_the_rust_core_does() {
+    use rift_core::lifecycle::{Transition, Veto};
+    let changes: Vec<Option<Transition<u64>>> = [None, Some(Transition::Admitted(7))]
+        .into_iter()
+        .chain(
+            [
+                Veto::NativeTransient,
+                Veto::Minimized,
+                Veto::AxTransient,
+                Veto::RuleIgnores,
+                Veto::Unmanageable,
+            ]
+            .map(|why| Some(Transition::Suspended(7, why))),
+        )
+        .collect();
+    let before = AllocationCount::now();
+    let mut checked = 0;
+    for &first in &changes {
+        for &then in &changes {
+            let rust = wire::encode_net_change(rift_core::lifecycle::net(first, then));
+            assert_eq!(
+                tile_words(&wire::encode_net(first, then)),
+                Ok(rust),
+                "{first:?} {then:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 49);
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("lifecycle: all {checked} pairs of admission changes answered identically");
+}

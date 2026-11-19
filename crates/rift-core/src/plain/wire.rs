@@ -1383,6 +1383,40 @@ pub fn encode_retirement(answer: lifecycle::Retirement) -> Vec<u64> {
     }
 }
 
+/// Tag 28, two admission changes in a row: each an option (0 none; 1 admitted; 2 suspended, then
+/// the veto's word). The window is not on the wire: [`lifecycle::net`] does not read it.
+pub fn encode_net(
+    first: Option<lifecycle::Transition<u64>>,
+    then: Option<lifecycle::Transition<u64>>,
+) -> Vec<u64> {
+    let mut words = Words::default();
+    words.word(28);
+    words.transition(first);
+    words.transition(then);
+    words.0
+}
+
+/// A net admission change, as one of [`encode_net`]'s options.
+pub fn encode_net_change(answer: Option<lifecycle::Transition<u64>>) -> Vec<u64> {
+    let mut words = Words::default();
+    words.transition(answer);
+    words.0
+}
+
+impl Words {
+    fn transition(&mut self, change: Option<lifecycle::Transition<u64>>) {
+        use lifecycle::Transition;
+        match change {
+            None => self.word(0),
+            Some(Transition::Admitted(_)) => self.word(1),
+            Some(Transition::Suspended(_, why)) => {
+                self.word(2);
+                self.word(veto_word(why));
+            }
+        }
+    }
+}
+
 /// One step of a trace (its event, then its effects), appended to `trace`.
 pub fn record_step(trace: &mut Vec<u64>, event: Event<Plain>, effects: Vec<Effect<Plain>>) {
     trace.extend(encode_event(event));
