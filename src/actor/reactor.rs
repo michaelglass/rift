@@ -72,7 +72,7 @@ use managers::{LayoutManager, OwedWarp};
 use objc2_core_foundation::{CGPoint, CGRect};
 use reconciler::{Reply, Ungripped};
 pub use replay::{Record, replay};
-use rift_core::lifecycle::{NewWindow, RuleRun, WorkspaceMode};
+use rift_core::lifecycle::{Departure, NewWindow, RuleRun, TransientOrigin, WorkspaceMode};
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
@@ -5335,35 +5335,38 @@ impl Reactor {
             return;
         };
         let was_admitted = window.is_admitted();
-        window.native_transient = window.info.sys_id.is_some_and(|id| {
-            self.transient_focus
-                .windows
-                .get(&id)
-                .is_some_and(|t| t.native && t.pid == wid.pid)
-        }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
+        let entry = window
+            .info
+            .sys_id
+            .and_then(|id| self.transient_focus.windows.get(&id))
+            .map(|t| (transient_origin(t.native), t.pid));
+        window.native_transient = rift_core::lifecycle::is_native_transient(entry, wid.pid, || {
+            crate::sys::app::is_ibkr_desktop_dialog(&window.info)
+        });
         if was_admitted && !window.is_admitted() {
             self.send_layout_event(LayoutEvent::WindowSuspended(wid));
         }
     }
 
     fn observe_transient_lifecycle(&mut self, event: &Event) {
-        match *event {
-            Event::WindowDestroyed(wid) => {
-                let id = self.state.windows.record(wid).and_then(|w| w.window_server_id());
-                self.transient_focus.windows.retain(|key, t| t.native || Some(*key) != id);
-            }
-            Event::WindowClosed(id) => {
-                self.transient_focus.windows.remove(&id);
+        let departure = match *event {
+            Event::WindowDestroyed(wid) => Departure::Destroyed(
+                self.state.windows.record(wid).and_then(|w| w.window_server_id()),
+            ),
+            Event::WindowClosed(id) => Departure::Closed(id),
+            Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
+                Departure::AppGone(pid)
             }
             Event::WindowServerHidden(id) | Event::WindowServerUnhidden(id) => {
                 self.transient_focus
                     .visibility(id, matches!(event, Event::WindowServerUnhidden(_)));
+                return;
             }
-            Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
-                self.transient_focus.windows.retain(|_, t| t.pid != pid);
-            }
-            _ => {}
-        }
+            _ => return,
+        };
+        self.transient_focus.windows.retain(|&id, t| {
+            rift_core::lifecycle::keeps_transient(departure, id, transient_origin(t.native), t.pid)
+        });
     }
 
     fn transient_blocks_mouse_focus(&self) -> bool {
@@ -6900,6 +6903,15 @@ enum Resolved {
         space: SpaceId,
         user: bool,
     },
+}
+
+/// Where a transient entry's evidence came from.
+fn transient_origin(native: bool) -> TransientOrigin {
+    if native {
+        TransientOrigin::Native
+    } else {
+        TransientOrigin::Heuristic
+    }
 }
 
 /// What a window missing from an authoritative snapshot of the active Spaces comes to.

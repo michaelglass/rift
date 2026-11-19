@@ -108,6 +108,53 @@ pub fn pointer_display_target<S: Copy + PartialEq, T>(
     }
 }
 
+/// Where the evidence that a window is transient (a popover, a sheet, a panel) came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransientOrigin {
+    /// The window server's own tags: final.
+    Native,
+    /// The accessibility heuristic, which a rule can override.
+    Heuristic,
+}
+
+/// Whether `owner`'s window is a native transient, from its transient entry (none for a window
+/// with no window-server id or no entry): native evidence for the same app, unless the window
+/// is exempt (asked only then).
+pub fn is_native_transient<P: PartialEq>(
+    entry: Option<(TransientOrigin, P)>,
+    owner: P,
+    exempt: impl FnOnce() -> bool,
+) -> bool {
+    matches!(entry, Some((TransientOrigin::Native, pid)) if pid == owner) && !exempt()
+}
+
+/// A window lifecycle event, as the transient entries hear of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Departure<Id, P> {
+    /// An AX window was destroyed, with its window-server id if it had one: its heuristic
+    /// entry goes; native evidence stays until the window server says so.
+    Destroyed(Option<Id>),
+    /// The window server closed the window.
+    Closed(Id),
+    /// The app is gone, and every entry of its windows.
+    AppGone(P),
+}
+
+/// Whether the transient entry for window `id`, of `owner` and from `origin`, survives
+/// `departure`.
+pub fn keeps_transient<Id: PartialEq, P: PartialEq>(
+    departure: Departure<Id, P>,
+    id: Id,
+    origin: TransientOrigin,
+    owner: P,
+) -> bool {
+    match departure {
+        Departure::Destroyed(gone) => origin == TransientOrigin::Native || gone != Some(id),
+        Departure::Closed(gone) => gone != id,
+        Departure::AppGone(pid) => pid != owner,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +244,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_window_is_a_native_transient_on_native_evidence_for_its_own_app_unless_exempt() {
+        use TransientOrigin::{Heuristic, Native};
+        let not_exempt = || false;
+        assert!(is_native_transient(Some((Native, 7)), 7, not_exempt));
+        assert!(!is_native_transient(Some((Native, 8)), 7, || panic!(
+            "not asked"
+        )));
+        assert!(!is_native_transient(Some((Heuristic, 7)), 7, || panic!(
+            "not asked"
+        )));
+        assert!(!is_native_transient(None, 7, || panic!("not asked")));
+        assert!(!is_native_transient(Some((Native, 7)), 7, || true));
+    }
+
+    #[test]
+    fn a_transient_entry_goes_with_its_window_or_its_app() {
+        use Departure::{AppGone, Closed, Destroyed};
+        use TransientOrigin::{Heuristic, Native};
+        // An AX destruction drops the heuristic entry for that id only.
+        assert!(!keeps_transient(Destroyed(Some(1)), 1, Heuristic, 7));
+        assert!(keeps_transient(Destroyed(Some(1)), 1, Native, 7));
+        assert!(keeps_transient(Destroyed(Some(1)), 2, Heuristic, 7));
+        assert!(keeps_transient(Destroyed::<u32, i32>(None), 1, Heuristic, 7));
+        // A window-server close drops its entry, native or not.
+        assert!(!keeps_transient(Closed::<u32, i32>(1), 1, Native, 7));
+        assert!(keeps_transient(Closed::<u32, i32>(1), 2, Native, 7));
+        // An app's end drops every entry of its windows.
+        assert!(!keeps_transient(AppGone::<u32, i32>(7), 1, Native, 7));
+        assert!(keeps_transient(AppGone::<u32, i32>(8), 1, Native, 7));
     }
 
     #[test]
