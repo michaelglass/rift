@@ -244,8 +244,19 @@ wire encode and decode.
 - **Tests read the live window server (fixed, 57426401).** In test builds `window_spaces` and
   `window_ordered_in` fell through to SkyLight without an override; fixture ids are real window
   ids too, so after a restart two reactor tests failed on every revision back to a9d2a909. Test
-  builds now answer from the override alone. Still live in test builds, not yet seen to bite:
-  `space_is_user` (inside `window_space`), `app_window_suitability`.
+  builds now answer from the override alone. The remaining two followed in f0fd51bd.
+- **Tests read the live window server, the rest (fixed, f0fd51bd).** `space_is_user` and
+  `space_is_fullscreen` now read a Space's kind off its id in test builds, by the convention
+  `actor::spaces` uses (below 0x400000000 a user desktop, 0x400000000..0x800000000
+  fullscreen); `app_window_suitability` answers as macOS does for a window that does not exist.
+- **One held window, by construction (da3e5ab8).** The window store's records are one map of
+  `Entry::Loose { record, transfer } | Gripped { record, grip, hand }`: a window is in one
+  place and a held one has no transfer. The store mints one `Hand` (neither `Clone` nor
+  `Copy`), which gripping moves into the entry, so a second held window would need a second
+  hand. Entries leave the map in one place (`take`), which returns a held entry's hand. Grip
+  effects the store can't apply come back as `GripRefused`: logged in a running Rift, a panic
+  in tests. A property test drives random pointer, re-key, removal and transfer sequences
+  through the core. The Roc core is unchanged (its `Grip` was already one value).
 - **Floating, a known cost.** 0.42 µs per layout of one to six newcomers in Roc (best of 5
   over 200,000); the parity runs 200,000 random layouts bit-identical.
 - **Scrolling, a known cost.** 4.4 µs per strip in Roc (best of 5 over 200,000 random strips;
@@ -404,7 +415,15 @@ Done (Rust; the Roc mirror follows the Rust side):
   (`DiscoveryStanding::FullscreenRecorded | Placeholder | Admissible`), out of
   `discovery_spaces_for_window`.
 
-Next in #1: SpaceStateChanged admission and commit, then the `set_active_spaces*` family.
+- 4225e354: whether a space snapshot is held or committed and what it invalidates,
+  `admit_space_snapshot` (`events/space.rs`; `Admission::Hold(MissionControl |
+  MembershipIncomplete) | Commit { invalidated, lost_local_desktops }`), out of
+  `handle_authoritative_space_snapshot`.
+- e38c5551: which windows an activated Space re-applies app rules to, `app_rule_candidates`,
+  out of `apply_app_rules_for_activated_spaces`. (Computing the active set was already pure,
+  `SpaceActivationPolicy::compute_active_spaces`; whether it changed is one set comparison.)
+
+Next: the Roc mirror of #1, then #2 (window lifecycle).
 
 ## Roadmap: to "the reactor is only an applier"
 
