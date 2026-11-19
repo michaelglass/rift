@@ -484,7 +484,27 @@ Done (Rust; the Roc mirror follows the Rust side):
   removal questions now lean on those cases, and the bug fails it. A planted bug must also
   compile: an unused variable is a warning, and warnings fail the Roc build.
 
-Step 3 is done (the input mode table was already pure). Next: the lead's call.
+Step 3 is done (the input mode table was already pure).
+
+## Window lifecycle as core events
+
+The lead's ruling: move window lifecycle (then workspaces and spaces) into the core as events;
+as each piece becomes core events, the Roc core decides it behind `roc-core`, shadowed by the
+Rust. Plan: facts parsed at the boundary (`Manageability`, `Rule`, `AxKind`, `NativeKind`,
+`Minimize`); presence `Placeholder | Live(facts) | Invalidated(facts) | Claimed { owner, held }`;
+admission never stored, a function of the facts; `Admitted` / `Suspended` effects only on a
+transition. Rules out: a claimed window with a workspace in the index, an invalidated record
+with no AX state, an admitted minimized or native-transient window, a rule override without a
+rule, a suspension for a window that was not admitted. Slices: L1 admission as a pure core
+function; L2 the core holds facts and presence in shadow (a tripwire compares admission on every
+step); L3 the flip (the store's facts become a projection of core effects); L4 AX invalidation
+as presence; L5 claims as presence; L6 retirement in the core.
+
+- f0ea99d4 (L1): `rift_core::lifecycle::admission` on `AdmissionFacts` → `Admitted |
+  Vetoed(Veto)`; `WindowState::is_admitted_with_override` builds the facts and asks. Held to
+  the old boolean rule over all 96 combinations of the loose facts.
+- cf5c2042 (L1, Roc): tag 24; the differential checks all 72 combinations of typed facts;
+  a planted bug in the Roc dialog-window rule fails it.
 
 ## Roadmap: to "the reactor is only an applier"
 
