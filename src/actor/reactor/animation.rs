@@ -562,7 +562,13 @@ impl Reactor {
                 .get_mut(identity.workspace)
                 && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
             {
-                system.commit_presented_viewport(identity.layout, &state.viewport);
+                // A camera can end before its viewport arrives: one whose windows were all
+                // written instead of presented ends at once.
+                if state.active {
+                    system.commit_presented_viewport(identity.layout, &state.viewport);
+                } else {
+                    system.commit_ended_viewport(identity.layout, &state.viewport);
+                }
             }
             for &wid in &camera.windows {
                 let frame = if let Some(control) = &control {
