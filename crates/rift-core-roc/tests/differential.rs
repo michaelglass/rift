@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use rift_core::RustCore;
 use rift_core::plain::{Plain, wire};
-use rift_core_roc::{AllocationCount, RocCore, RocError, tile_words};
+use rift_core_roc::{AllocationCount, RocCore, RocError};
 
 fn traces() -> Vec<(String, Vec<u64>)> {
     let dir = std::env::var("RIFT_TRACE_DIR")
@@ -104,9 +104,6 @@ fn words_that_are_not_an_event_or_a_shape_are_rejected_and_change_nothing() {
     }
     // Nothing was decided on a rejection: the cores still agree.
     assert_eq!(roc.step(seen.clone()).map_err(|_| ()), Ok(rust.step(seen)));
-    for words in [vec![], vec![7], vec![0, 0]] {
-        assert_eq!(tile_words(&words), Err(RocError::Rejected), "{words:?}");
-    }
     drop(roc);
     assert_eq!(
         AllocationCount::now().live(),

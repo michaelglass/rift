@@ -1,14 +1,6 @@
 ## Decisions about virtual workspaces (`rift_core::workspaces`): which workspace a command
 ## reaches and where stepping goes. Workspaces, Spaces and names are one word each.
 
-import Wire exposing [finished, put_list, take, take_flag, take_list]
-
-## Words being read, and where.
-Words : { words : List(U64), at : U64 }
-
-## A value read and where the rest starts, or the words were malformed.
-Taken(a) : Try((a, Words), [Malformed])
-
 ## Where a command is given: the acting Space, and the Spaces visible now.
 Context : { space : U64, visible : List(U64) }
 
@@ -77,35 +69,40 @@ Workspaces := [].{
 			on == context.space
 		}
 
-	## Where a step from `current` lands, as an option's words.
-	step : Bool, List({ id : U64, space : U64 }), Context, U64, Bool, Bool, Bool, List(U64) -> List(U64)
+	## Where a step from `current` lands, if anywhere.
+	step : Bool, List({ id : U64, space : U64 }), Context, U64, Bool, Bool, Bool, List(U64) -> Maybe
 	step = |global, catalog, context, current, backwards, skip, stop, with_windows| {
 		reachable = |entry| eligible(global, context, entry.space)
 		if !catalog.any(|entry| entry.id == current and reachable(entry)) {
-			[0]
+			Nothing
 		} else {
 			counts = |id| if (skip) with_windows.contains(id) else True
+			unset = |maybe|
+				match maybe {
+					Nothing => True
+					Some(_) => False
+				}
 			ordered = if (backwards) reversed(catalog) else catalog
 			var $crossed = False
-			var $wrapped = [0]
-			var $found = [0]
+			var $wrapped = Nothing
+			var $found = Nothing
 			var $done = False
 			for entry in ordered {
 				if $done or !reachable(entry) {
 					{}
 				} else if entry.id == current {
 					$crossed = True
-					if $wrapped == [0] and counts(entry.id) {
-						$wrapped = [1, entry.id]
+					if unset($wrapped) and counts(entry.id) {
+						$wrapped = Some(entry.id)
 					} else {
 						{}
 					}
 				} else if counts(entry.id) {
 					if $crossed {
-						$found = [1, entry.id]
+						$found = Some(entry.id)
 						$done = True
-					} else if $wrapped == [0] {
-						$wrapped = [1, entry.id]
+					} else if unset($wrapped) {
+						$wrapped = Some(entry.id)
 					} else {
 						{}
 					}
@@ -113,7 +110,7 @@ Workspaces := [].{
 					{}
 				}
 			}
-			if $done $found else if (stop) [0] else $wrapped
+			if $done $found else if (stop) Nothing else $wrapped
 		}
 	}
 
@@ -127,8 +124,8 @@ Workspaces := [].{
 		$out
 	}
 
-	## The workspace a selector names in scope, if reachable, as an option of (id, Space).
-	resolve : Bool, List({ id : U64, space : U64, name : U64 }), Context, [Index(U64), Name(U64)] -> List(U64)
+	## The workspace a selector names in scope and its Space, if reachable.
+	resolve : Bool, List({ id : U64, space : U64, name : U64 }), Context, [Index(U64), Name(U64)] -> [Reached({ workspace : U64, space : U64 }), Unreached]
 	resolve = |global, scope, context, selector| {
 		named =
 			match selector {
@@ -149,8 +146,8 @@ Workspaces := [].{
 				}
 			}
 		match named {
-			Found(entry) => if (eligible(global, context, entry.space)) [1, entry.id, entry.space] else [0]
-			Missing => [0]
+			Found(entry) => if (eligible(global, context, entry.space)) Reached({ workspace: entry.id, space: entry.space }) else Unreached
+			Missing => Unreached
 		}
 	}
 
@@ -390,224 +387,27 @@ Workspaces := [].{
 
 	# The wire.
 
-	take_mode : Words -> Taken(Bool)
-	take_mode = |c0| {
-		(word, c1) = take(c0)?
-		match word {
-			0 => Ok((False, c1))
-			1 => Ok((True, c1))
-			_ => Err(Malformed)
-		}
-	}
-
-	take_binary : Words -> Taken(Bool)
-	take_binary = |c0| take_mode(c0)
-
-	take_context : Words -> Taken(Context)
-	take_context = |c0| {
-		(space, c1) = take(c0)?
-		(visible, c2) = take_list(c1, take)?
-		Ok(({ space, visible }, c2))
-	}
-
-	## Tag 29.
-	step_words : Words -> Try(List(U64), [Malformed])
-	step_words = |c0| {
-		take_entry = |c| {
-			(id, after) = take(c)?
-			(space, rest) = take(after)?
-			Ok(({ id, space }, rest))
-		}
-		(global, c1) = take_mode(c0)?
-		(catalog, c2) = take_list(c1, take_entry)?
-		(context, c3) = take_context(c2)?
-		(current, c4) = take(c3)?
-		(backwards, c5) = take_binary(c4)?
-		(skip, c6) = take_binary(c5)?
-		(stop, c7) = take_binary(c6)?
-		(with_windows, c8) = take_list(c7, take)?
-		finished(c8)?
-		Ok(step(global, catalog, context, current, backwards, skip, stop, with_windows))
-	}
-
-	## Tag 30.
-	resolve_words : Words -> Try(List(U64), [Malformed])
-	resolve_words = |c0| {
-		take_entry = |c| {
-			(id, a) = take(c)?
-			(space, b) = take(a)?
-			(name, rest) = take(b)?
-			Ok(({ id, space, name }, rest))
-		}
-		(global, c1) = take_mode(c0)?
-		(scope, c2) = take_list(c1, take_entry)?
-		(context, c3) = take_context(c2)?
-		(kind, c4) = take(c3)?
-		(value, c5) = take(c4)?
-		selector =
-			match kind {
-				0 => Ok(Index(value))
-				1 => Ok(Name(value))
-				_ => Err(Malformed)
-			}?
-		finished(c5)?
-		Ok(resolve(global, scope, context, selector))
-	}
-
-	## Tag 31.
-	previous_words : Words -> Try(List(U64), [Malformed])
-	previous_words = |c0| {
-		(global, c1) = take_mode(c0)?
-		(context, c2) = take_context(c1)?
-		(last, c3) = take_maybe(c2)?
-		(on, c4) = take_maybe(c3)?
-		finished(c4)?
-		Ok(
-			match last {
-				Some(id) =>
-					match on {
-						Some(space) => if (eligible(global, context, space)) [1, id, space] else [0]
-						Nothing => [0]
-					}
-				Nothing => [0]
-			},
-		)
-	}
-
-	take_maybe : Words -> Taken(Maybe)
-	take_maybe = |c0| {
-		(present, c1) = take_flag(c0)?
-		if present {
-			(word, c2) = take(c1)?
-			Ok((Some(word), c2))
-		} else {
-			Ok((Nothing, c1))
-		}
-	}
-
-	take_activation : Words -> Taken(Activation)
-	take_activation = |c0| {
-		(kind, c1) = take(c0)?
-		match kind {
-			0 => {
-				(current, c2) = take(c1)?
-				(previous, c3) = take_maybe(c2)?
-				(remembered, c4) = take_maybe(c3)?
-				Ok((Showing({ current, previous, remembered }), c4))
-			}
-			1 => {
-				(remembered, c2) = take_maybe(c1)?
-				Ok((Vacant(remembered), c2))
-			}
-			_ => Err(Malformed)
-		}
-	}
-
-	take_topology_event : Words -> Taken(TopologyEvent)
-	take_topology_event = |c0| {
-		(kind, c1) = take(c0)?
-		match kind {
-			0 => {
-				(workspace, c2) = take(c1)?
-				(space, c3) = take(c2)?
-				Ok((Created({ workspace, space }), c3))
-			}
-			1 => {
-				(workspace, c2) = take(c1)?
-				Ok((Removed(workspace), c2))
-			}
-			2 => {
-				(workspace, c2) = take(c1)?
-				(space, c3) = take(c2)?
-				Ok((Moved({ workspace, space }), c3))
-			}
-			3 => {
-				(space, c2) = take(c1)?
-				(activation, c3) = take_activation(c2)?
-				Ok((Activated({ space, activation }), c3))
-			}
-			4 => {
-				(space, c2) = take(c1)?
-				Ok((Cleared(space), c2))
-			}
-			_ => Err(Malformed)
-		}
-	}
-
-	put_maybe : List(U64), Maybe -> List(U64)
-	put_maybe = |words, maybe|
-		match maybe {
-			Some(word) => words.append(1).append(word)
-			Nothing => words.append(0)
-		}
-
-	put_activation : List(U64), Activation -> List(U64)
-	put_activation = |words, activation|
-		match activation {
-			Showing(shown) => put_maybe(put_maybe(words.append(0).append(shown.current), shown.previous), shown.remembered)
-			Vacant(remembered) => put_maybe(words.append(1), remembered)
-		}
-
-	## Tag 32: the topology an empty one becomes after the events.
-	topology_words : Words -> Try(List(U64), [Malformed])
-	topology_words = |c0| {
-		(events, c1) = take_list(c0, take_topology_event)?
-		finished(c1)?
-		topology = events.fold({ catalog: [], activations: [] }, topology_step)
-		with_catalog = put_list([], topology.catalog, |words, entry| words.append(entry.workspace).append(entry.space))
-		Ok(put_list(with_catalog, topology.activations, |words, entry| put_activation(words.append(entry.space), entry.activation)))
-	}
-
-	take_ownership : Words -> Taken(Ownership)
-	take_ownership = |c0| {
-		(kind, c1) = take(c0)?
-		match kind {
-			0 => {
-				(workspace, c2) = take(c1)?
-				Ok((Assigned(workspace), c2))
-			}
-			1 => {
-				(owner, c2) = take(c1)?
-				(returns, c3) = take_flag(c2)?
-				if returns {
-					(workspace, c4) = take(c3)?
-					Ok((Claimed({ owner, destination: Returns(workspace) }), c4))
-				} else {
-					Ok((Claimed({ owner, destination: Nowhere }), c3))
+	## The workspace navigation history points at and its Space, if it is on a Space and
+	## reachable.
+	previous : Bool, Context, Maybe, Maybe -> [Reached({ workspace : U64, space : U64 }), Unreached]
+	previous = |global, context, last, on|
+		match last {
+			Some(id) =>
+				match on {
+					Some(space) => if (eligible(global, context, space)) Reached({ workspace: id, space }) else Unreached
+					Nothing => Unreached
 				}
-			}
-			2 => Ok((Held, c1))
-			_ => Err(Malformed)
-		}
-	}
-
-	put_ownership : List(U64), Ownership -> List(U64)
-	put_ownership = |words, ownership|
-		match ownership {
-			Held => words.append(2)
-			Assigned(workspace) => words.append(0).append(workspace)
-			Claimed({ owner, destination: Returns(workspace) }) => words.append(1).append(owner).append(1).append(workspace)
-			Claimed({ owner, destination: Nowhere }) => words.append(1).append(owner).append(0)
+			Nothing => Unreached
 		}
 
-	## Tag 33: the ownerships an empty one becomes after the events, and their orphans
-	## against the catalog.
-	ownership_words : Words -> Try(List(U64), [Malformed])
-	ownership_words = |c0| {
-		take_event = |c| {
-			(window, after) = take(c)?
-			(owned, rest) = take_flag(after)?
-			if owned {
-				(ownership, end) = take_ownership(rest)?
-				Ok(({ window, owned: Owner(ownership) }, end))
-			} else {
-				Ok(({ window, owned: Unowned }, rest))
-			}
-		}
-		(events, c1) = take_list(c0, take_event)?
-		(catalog, c2) = take_list(c1, take)?
-		finished(c2)?
-		ownerships = events.fold(
+	## The topology an empty one becomes after `events`.
+	topology_after : List(TopologyEvent) -> Topology
+	topology_after = |events| events.fold({ catalog: [], activations: [] }, topology_step)
+
+	## The ownerships an empty one becomes after `events`, and their orphans against `catalog`.
+	ownership_after : List({ window : U64, owned : [Unowned, Owner(Ownership)] }), List(U64) -> { owners : Ownerships, orphans : List({ window : U64, workspace : U64 }) }
+	ownership_after = |events, catalog| {
+		owners = events.fold(
 			[],
 			|acc, event|
 				match event.owned {
@@ -615,87 +415,28 @@ Workspaces := [].{
 					Owner(ownership) => own(acc, event.window, ownership)
 				},
 		)
-		with_owners = put_list([], ownerships, |words, entry| put_ownership(words.append(entry.window), entry.ownership))
-		Ok(put_list(with_owners, orphans(ownerships, catalog), |words, orphan| words.append(orphan.window).append(orphan.workspace)))
+		{ owners, orphans: orphans(owners, catalog) }
 	}
 
-	take_joined_event : Words -> Taken(JoinedEvent)
-	take_joined_event = |c0| {
-		(kind, c1) = take(c0)?
-		match kind {
-			0 => {
-				(workspace, c2) = take(c1)?
-				(space, c3) = take(c2)?
-				Ok((Created({ workspace, space }), c3))
-			}
-			1 => {
-				(workspace, c2) = take(c1)?
-				(into, c3) = take_flag(c2)?
-				if into {
-					(heir, c4) = take(c3)?
-					Ok((Removed({ workspace, successor: Into(heir) }), c4))
-				} else {
-					Ok((Removed({ workspace, successor: Unassign }), c3))
-				}
-			}
-			2 => {
-				(workspace, c2) = take(c1)?
-				(space, c3) = take(c2)?
-				Ok((Moved({ workspace, space }), c3))
-			}
-			3 => {
-				(space, c2) = take(c1)?
-				(activation, c3) = take_activation(c2)?
-				Ok((Activated({ space, activation }), c3))
-			}
-			4 => {
-				(space, c2) = take(c1)?
-				Ok((Cleared(space), c2))
-			}
-			5 => {
-				(window, c2) = take(c1)?
-				(owned, c3) = take_flag(c2)?
-				if owned {
-					(ownership, c4) = take_ownership(c3)?
-					Ok((Owned({ window, owned: Owner(ownership) }), c4))
-				} else {
-					Ok((Owned({ window, owned: Unowned }), c3))
-				}
-			}
-			_ => Err(Malformed)
-		}
-	}
-
-	put_outcome : List(U64), Outcome -> List(U64)
-	put_outcome = |words, outcome|
-		match outcome {
-			Accepted => words.append(0)
-			Exists(workspace) => words.append(1).append(workspace)
-			Unknown(workspace) => words.append(2).append(workspace)
-			OwnSuccessor(workspace) => words.append(3).append(workspace)
-			Shown(shown) => words.append(4).append(shown.workspace).append(shown.space)
-		}
-
-	## Tag 34: what each event of a run met from empty joined workspaces, and the workspaces
-	## they leave, with each catalogued workspace's assigned windows.
-	joined_words : Words -> Try(List(U64), [Malformed])
-	joined_words = |c0| {
-		(events, c1) = take_list(c0, take_joined_event)?
-		finished(c1)?
+	## What each event of a run met from empty workspaces, and the workspaces it leaves.
+	joined_after : List(JoinedEvent) -> { outcomes : List(Outcome), catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }), owners : Ownerships, windows : List({ workspace : U64, windows : List(U64) }) }
+	joined_after = |events| {
 		(joined, outcomes) = events.fold(
 			({ catalog: [], activations: [], owners: [] }, []),
 			|(state, met), event| {
 				outcome = admit(state, event)
 				match outcome {
 					Accepted => (apply(state, event), met.append(outcome))
-					_ => (state, met.append(outcome))
+					Exists(_) | Unknown(_) | OwnSuccessor(_) | Shown(_) => (state, met.append(outcome))
 				}
 			},
 		)
-		w1 = put_list([], outcomes, put_outcome)
-		w2 = put_list(w1, joined.catalog, |words, entry| words.append(entry.workspace).append(entry.space))
-		w3 = put_list(w2, joined.activations, |words, entry| put_activation(words.append(entry.space), entry.activation))
-		w4 = put_list(w3, joined.owners, |words, entry| put_ownership(words.append(entry.window), entry.ownership))
-		Ok(put_list(w4, joined.catalog, |words, entry| put_list(words, windows_on(joined, entry.workspace), |ws, window| ws.append(window))))
+		{
+			outcomes,
+			catalog: joined.catalog,
+			activations: joined.activations,
+			owners: joined.owners,
+			windows: joined.catalog.map(|entry| { workspace: entry.workspace, windows: windows_on(joined, entry.workspace) }),
+		}
 	}
 }

@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use rift_core::plain::{Answers, Fact, Unasked};
-use rift_core_roc::{AllocationCount, RocError, tile_words};
+use rift_core_roc::AllocationCount;
 
 /// A source of chances, the test's random generator.
 pub trait Coin {
@@ -20,57 +20,13 @@ pub fn rust<A>(answer: Result<A, Unasked>, encode: impl FnOnce(A) -> Vec<u64>) -
     answer.map(encode).map_err(|unasked| unasked.fact)
 }
 
-pub fn roc(question: &[u64]) -> Answered {
-    match tile_words(question) {
-        Ok(words) => Ok(words),
-        Err(RocError::Unasked { fact }) => Err(fact),
-        Err(error) => panic!("no answer to {question:?}: {error:?}"),
-    }
-}
-
 /// Runs random questions through both cores, twice: on full facts (every fact asked, as the
 /// decision's own differential has always run), then with facts left unasked at random, where
 /// both cores must read the same facts in the same order: the same answer, or the same first
 /// fact read that the question does not carry. `ask` makes a question with `Blank`'s facts and
-/// returns its words and the Rust core's answer. `RIFT_<GROUP>_CASES` sets the cases per pass.
-pub fn differential<R: Coin>(
-    group: &str,
-    name: &str,
-    mut rng: R,
-    mut ask: impl FnMut(&mut R, Blank) -> (Vec<u64>, Answered),
-) {
-    let cases: u64 = std::env::var(format!("RIFT_{}_CASES", group.to_uppercase()))
-        .map_or(20_000, |n| n.parse().unwrap());
-    let before = AllocationCount::now();
-    let mut unasked = 0;
-    for blank in [Blank::Full, Blank::Some] {
-        for case in 0..cases {
-            let (question, rust) = ask(&mut rng, blank);
-            if let Blank::Full = blank {
-                assert!(
-                    rust.is_ok(),
-                    "case {case}: {name} on full facts read a missing one"
-                );
-            }
-            unasked += u64::from(rust.is_err());
-            assert_eq!(
-                roc(&question),
-                rust,
-                "case {case} ({blank:?}): {name} {question:?}"
-            );
-        }
-    }
-    let after = AllocationCount::now();
-    assert_eq!(after.live(), before.live(), "Roc allocations left live");
-    eprintln!(
-        "{group}: {cases} {name} questions on full facts and {cases} with facts unasked answered \
-         identically ({unasked} read an unasked fact)"
-    );
-}
-
-/// [`differential`] on typed calls: `ask` makes a question with `Blank`'s facts and returns it
-/// (for the failure message), the Roc core's answer and the Rust core's, each as words (so
-/// they are compared bit for bit) or the first fact read that the question does not carry.
+/// returns it (for the failure message), the Roc core's answer and the Rust core's, each as
+/// words (so they are compared bit for bit) or the first fact read that the question does not
+/// carry. `RIFT_<GROUP>_CASES` sets the cases per pass.
 pub fn typed<R: Coin>(
     group: &str,
     name: &str,

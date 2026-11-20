@@ -404,4 +404,88 @@ Boundary := [].{
 	Retirement := [Retire, Keep(Keep)]
 
 	RetirementAnswer := [Decided(Retirement), Unasked(U64)]
+
+	# Workspaces (`rift_core::workspaces`).
+
+	## Where a workspace command is given: the acting Space, and the Spaces visible now.
+	Context := { space : U64, visible : List(U64) }
+
+	CatalogEntry := { id : U64, space : U64 }
+
+	## Which way stepping goes.
+	Way := [Next, Previous]
+
+	SkipEmpty := [Skip, Keep]
+
+	Wrapping := [Wrap, Stop]
+
+	StepQuestion := { mode : WorkspaceMode, catalog : List(CatalogEntry), context : Context, current : U64, way : Way, skip_empty : SkipEmpty, wrapping : Wrapping, with_windows : List(U64) }
+
+	ScopeEntry := { id : U64, space : U64, name : U64 }
+
+	## How a command names a workspace: its place in the scope, or its name.
+	Selector := [Index(U64), Name(U64)]
+
+	ResolveQuestion := { mode : WorkspaceMode, scope : List(ScopeEntry), context : Context, selector : Selector }
+
+	## A workspace and its Space.
+	WorkspaceSpace := { workspace : U64, space : U64 }
+
+	## The workspace a command reaches and its Space, if any.
+	Reached := [Reached(WorkspaceSpace), Unreached]
+
+	PreviousQuestion := { mode : WorkspaceMode, context : Context, last : MaybeWord, on : MaybeWord }
+
+	Showing := { current : U64, previous : MaybeWord, remembered : MaybeWord }
+
+	## What a native Space shows.
+	Activation := [Showing(Showing), Vacant(MaybeWord)]
+
+	SpaceActivation := { space : U64, activation : Activation }
+
+	TopologyEvent := [Created(WorkspaceSpace), Removed(U64), Moved(WorkspaceSpace), Activated(SpaceActivation), Cleared(U64)]
+
+	TopologyQuestion := { events : List(TopologyEvent) }
+
+	## A topology: its catalog, and what each Space shows.
+	TopologyView := { catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
+
+	## Where a claimed window returns to when its claim ends.
+	Destination := [Returns(U64), Nowhere]
+
+	Claim := { owner : U64, destination : Destination }
+
+	## Who places a window.
+	Ownership := [Assigned(U64), Claimed(Claim), Held]
+
+	WindowOwnership := { window : U64, ownership : Ownership }
+
+	Owned := [Unowned, Owner(Ownership)]
+
+	OwnershipEvent := { window : U64, owned : Owned }
+
+	OwnershipQuestion := { events : List(OwnershipEvent), catalog : List(U64) }
+
+	## A window owned by a workspace the catalog lacks.
+	Orphan := { window : U64, workspace : U64 }
+
+	OwnershipView := { owners : List(WindowOwnership), orphans : List(Orphan) }
+
+	## Who takes a removed workspace's windows and claims.
+	Successor := [Into(U64), Unassign]
+
+	WorkspaceRemoved := { workspace : U64, successor : Successor }
+
+	JoinedEvent := [Created(WorkspaceSpace), Removed(WorkspaceRemoved), Moved(WorkspaceSpace), Activated(SpaceActivation), Cleared(U64), Owned(OwnershipEvent)]
+
+	JoinedQuestion := { events : List(JoinedEvent) }
+
+	## What an event met: accepted, or why it was refused.
+	Outcome := [Accepted, Exists(U64), Unknown(U64), OwnSuccessor(U64), Shown(WorkspaceSpace)]
+
+	WorkspaceWindows := { workspace : U64, windows : List(U64) }
+
+	## A run's outcomes and the joined workspaces it leaves: catalog, activations, owners, and
+	## each catalogued workspace's assigned windows, in catalog order.
+	JoinedView := { outcomes : List(Outcome), catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
 }

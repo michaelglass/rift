@@ -179,24 +179,6 @@ pub(crate) fn check<Q: std::fmt::Debug, A: PartialEq + std::fmt::Debug>(
     }
 }
 
-/// [`check`] for the questions still asked on words: `question` is a tagged question's words
-/// (`rift_core::plain::wire`), whose Rust answer encodes to `rust`.
-#[cfg(feature = "roc-core")]
-pub(crate) fn check_words(what: &str, facts: &[&str], question: &[u64], rust: &[u64]) {
-    match rift_core_roc::tile_words(question) {
-        Ok(roc) if roc == rust => {}
-        Err(rift_core_roc::RocError::Unasked { fact }) => {
-            let fact = usize::try_from(fact).ok().and_then(|fact| facts.get(fact));
-            unasked(
-                what,
-                fact.copied().unwrap_or("(not one of its facts)"),
-                &question,
-            )
-        }
-        roc => diverged(what, &question, &rust, &roc),
-    }
-}
-
 /// The Roc core read a fact the Rust decision did not ask: they decide in different orders.
 #[cfg(feature = "roc-core")]
 fn unasked(what: &str, fact: &str, question: &impl std::fmt::Debug) {
@@ -235,10 +217,10 @@ fn diverged(
 mod tests {
     use rift_core::focus::plain::Desktop;
     use rift_core::lifecycle::WorkspaceMode;
-    use rift_core::plain::{Fact, wire};
+    use rift_core::plain::Fact;
     use rift_core::workspaces::plain::PreviousQuestion;
 
-    use super::{check, check_words};
+    use super::check;
 
     fn question() -> PreviousQuestion {
         PreviousQuestion {
@@ -253,21 +235,17 @@ mod tests {
     #[test]
     fn an_answer_both_cores_give_passes() {
         let question = question();
-        let rust = wire::encode_target(question.answer());
-        check_words("previous", &[], &wire::encode_previous(question), &rust);
+        let roc = Ok(rift_core_roc::workspaces::previous(question.clone()));
+        check("previous", &[], &question, &question.answer(), roc);
     }
 
     #[test]
     #[should_panic(expected = "roc-divergence: previous")]
     fn a_different_answer_is_a_divergence() {
         let question = question();
-        let wrong = wire::encode_target(None);
-        check_words("previous", &[], &wire::encode_previous(question), &wrong);
+        let roc = Ok(rift_core_roc::workspaces::previous(question.clone()));
+        check("previous", &[], &question, &None, roc);
     }
-
-    #[test]
-    #[should_panic(expected = "roc-divergence: malformed")]
-    fn no_answer_is_a_divergence() { check_words("malformed", &[], &[29], &[0]); }
 
     #[test]
     #[should_panic(

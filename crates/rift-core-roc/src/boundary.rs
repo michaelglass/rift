@@ -25,6 +25,10 @@ use rift_core::plain::{Answers, Fact, Rect, Unasked, WindowId};
 use rift_core::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
 };
+use rift_core::workspaces::{
+    self, Destination, Owned, Ownership, OwnershipEvent, Refused, Selector, SkipEmpty, Step,
+    Successor, TopologyEvent, WorkspacesEvent, Wrapping,
+};
 
 use crate::abi;
 
@@ -1797,4 +1801,454 @@ pub(crate) fn retirement_answer(
                 }),
         }
     )
+}
+
+// Workspaces.
+
+fn workspace_mode(mode: WorkspaceMode) -> abi::BoundaryWorkspaceMode {
+    match mode {
+        WorkspaceMode::PerDisplay => abi::BoundaryWorkspaceMode::PerDisplay,
+        WorkspaceMode::Global => abi::BoundaryWorkspaceMode::Global,
+    }
+}
+
+fn context(space: u64, visible: Vec<u64>, host: &abi::RocHost) -> abi::BoundaryContext {
+    abi::BoundaryContext {
+        space,
+        visible: list(&visible, host),
+    }
+}
+
+pub(crate) fn step_question(
+    question: workspaces::plain::StepQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryStepQuestion {
+    let catalog: Vec<_> = question
+        .catalog
+        .into_iter()
+        .map(|(id, space)| abi::BoundaryCatalogEntry { id, space })
+        .collect();
+    abi::BoundaryStepQuestion {
+        mode: workspace_mode(question.mode),
+        catalog: list(&catalog, host),
+        context: context(question.space, question.visible, host),
+        current: question.current,
+        way: match question.way {
+            Step::Next => abi::BoundaryWay::Next,
+            Step::Previous => abi::BoundaryWay::Previous,
+        },
+        skip_empty: match question.skip_empty {
+            SkipEmpty::Skip => abi::BoundarySkipEmpty::Skip,
+            SkipEmpty::Keep => abi::BoundarySkipEmpty::Keep,
+        },
+        wrapping: match question.wrapping {
+            Wrapping::Wrap => abi::BoundaryWrapping::Wrap,
+            Wrapping::Stop => abi::BoundaryWrapping::Stop,
+        },
+        with_windows: list(&question.with_windows, host),
+    }
+}
+
+pub(crate) fn from_word(word: abi::BoundaryMaybeWord) -> Option<u64> { from_maybe_word(word) }
+
+pub(crate) fn resolve_question(
+    question: workspaces::plain::ResolveQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryResolveQuestion {
+    use abi::BoundarySelectorTag as Tag;
+    let scope: Vec<_> = question
+        .scope
+        .into_iter()
+        .map(|(id, space, name)| abi::BoundaryScopeEntry { id, space, name })
+        .collect();
+    abi::BoundaryResolveQuestion {
+        mode: workspace_mode(question.mode),
+        scope: list(&scope, host),
+        context: context(question.space, question.visible, host),
+        selector: match question.selector {
+            Selector::Index(index) => {
+                union!(
+                    BoundarySelector,
+                    BoundarySelectorPayload.index(index as u64),
+                    Tag::Index
+                )
+            }
+            Selector::Name(name) => {
+                union!(BoundarySelector, BoundarySelectorPayload.name(name), Tag::Name)
+            }
+        },
+    }
+}
+
+pub(crate) fn previous_question(
+    question: workspaces::plain::PreviousQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryPreviousQuestion {
+    abi::BoundaryPreviousQuestion {
+        mode: workspace_mode(question.mode),
+        context: context(question.space, question.visible, host),
+        last: maybe_word(question.last),
+        on: maybe_word(question.on),
+    }
+}
+
+pub(crate) fn from_reached(reached: abi::BoundaryReached) -> Option<(u64, u64)> {
+    use abi::BoundaryReachedTag as Tag;
+    match reached.tag {
+        Tag::Reached => {
+            // SAFETY: the tag says the payload is the workspace and its Space.
+            let at = unsafe { reached.borrow_payload_reached_unchecked() };
+            Some((at.workspace, at.space))
+        }
+        Tag::Unreached => None,
+    }
+}
+
+fn activation(activation: workspaces::Activation<u64>) -> abi::BoundaryActivation {
+    use abi::BoundaryActivationTag as Tag;
+    match activation {
+        workspaces::Activation::Showing { current, previous, remembered } => union!(
+            BoundaryActivation,
+            BoundaryActivationPayload.showing(abi::BoundaryShowing {
+                current,
+                previous: maybe_word(previous),
+                remembered: maybe_word(remembered),
+            }),
+            Tag::Showing
+        ),
+        workspaces::Activation::Vacant { remembered } => {
+            union!(
+                BoundaryActivation,
+                BoundaryActivationPayload.vacant(maybe_word(remembered)),
+                Tag::Vacant
+            )
+        }
+    }
+}
+
+fn from_activation(activation: abi::BoundaryActivation) -> workspaces::Activation<u64> {
+    use abi::BoundaryActivationTag as Tag;
+    match activation.tag {
+        Tag::Showing => {
+            // SAFETY: the tag says the payload is what the Space shows.
+            let showing = unsafe { activation.borrow_payload_showing_unchecked() };
+            workspaces::Activation::Showing {
+                current: showing.current,
+                previous: from_maybe_word(showing.previous),
+                remembered: from_maybe_word(showing.remembered),
+            }
+        }
+        Tag::Vacant => workspaces::Activation::Vacant {
+            // SAFETY: the tag says the payload is the remembered workspace.
+            remembered: from_maybe_word(unsafe { *activation.borrow_payload_vacant_unchecked() }),
+        },
+    }
+}
+
+fn workspace_space(workspace: u64, space: u64) -> abi::BoundaryWorkspaceSpace {
+    abi::BoundaryWorkspaceSpace { workspace, space }
+}
+
+fn space_activation(space: u64, at: workspaces::Activation<u64>) -> abi::BoundarySpaceActivation {
+    abi::BoundarySpaceActivation {
+        space,
+        activation: activation(at),
+    }
+}
+
+pub(crate) fn topology_question(
+    question: workspaces::plain::TopologyQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryTopologyQuestion {
+    use abi::BoundaryTopologyEventTag as Tag;
+    let events: Vec<_> = question
+        .events
+        .into_iter()
+        .map(|event| match event {
+            TopologyEvent::Created { workspace, space } => union!(
+                BoundaryTopologyEvent,
+                BoundaryTopologyEventPayload.created(workspace_space(workspace, space)),
+                Tag::Created
+            ),
+            TopologyEvent::Removed(workspace) => {
+                union!(
+                    BoundaryTopologyEvent,
+                    BoundaryTopologyEventPayload.removed(workspace),
+                    Tag::Removed
+                )
+            }
+            TopologyEvent::Moved { workspace, space } => union!(
+                BoundaryTopologyEvent,
+                BoundaryTopologyEventPayload.moved(workspace_space(workspace, space)),
+                Tag::Moved
+            ),
+            TopologyEvent::Activated { space, activation: at } => union!(
+                BoundaryTopologyEvent,
+                BoundaryTopologyEventPayload.activated(space_activation(space, at)),
+                Tag::Activated
+            ),
+            TopologyEvent::Cleared(space) => {
+                union!(
+                    BoundaryTopologyEvent,
+                    BoundaryTopologyEventPayload.cleared(space),
+                    Tag::Cleared
+                )
+            }
+        })
+        .collect();
+    abi::BoundaryTopologyQuestion { events: list(&events, host) }
+}
+
+fn from_catalog(catalog: &abi::RocListWith<abi::BoundaryWorkspaceSpace, false>) -> Vec<(u64, u64)> {
+    catalog.as_slice().iter().map(|entry| (entry.workspace, entry.space)).collect()
+}
+
+fn from_activations(
+    activations: &abi::RocListWith<abi::BoundarySpaceActivation, false>,
+) -> Vec<(u64, workspaces::Activation<u64>)> {
+    activations
+        .as_slice()
+        .iter()
+        .map(|entry| (entry.space, from_activation(entry.activation)))
+        .collect()
+}
+
+/// The topology Roc answered, read out and released.
+pub(crate) fn from_topology(
+    answer: abi::BoundaryTopologyView,
+    host: &abi::RocHost,
+) -> crate::workspaces::TopologyView {
+    let view = crate::workspaces::TopologyView {
+        catalog: from_catalog(&answer.catalog),
+        activations: from_activations(&answer.activations),
+    };
+    // SAFETY: the view is Roc's answer, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    view
+}
+
+fn ownership(ownership: Ownership<u64, u64>) -> abi::BoundaryOwnership {
+    use abi::{BoundaryDestinationTag as Destination_, BoundaryOwnershipTag as Tag};
+    match ownership {
+        Ownership::Held => union!(BoundaryOwnership, BoundaryOwnershipPayload.held, Tag::Held),
+        Ownership::Assigned(workspace) => {
+            union!(
+                BoundaryOwnership,
+                BoundaryOwnershipPayload.assigned(workspace),
+                Tag::Assigned
+            )
+        }
+        Ownership::Claimed { owner, destination } => union!(
+            BoundaryOwnership,
+            BoundaryOwnershipPayload.claimed(abi::BoundaryClaim {
+                owner,
+                destination: match destination {
+                    Destination::Nowhere => union!(
+                        BoundaryDestination,
+                        BoundaryDestinationPayload.nowhere,
+                        Destination_::Nowhere
+                    ),
+                    Destination::Returns(workspace) => union!(
+                        BoundaryDestination,
+                        BoundaryDestinationPayload.returns(workspace),
+                        Destination_::Returns
+                    ),
+                },
+            }),
+            Tag::Claimed
+        ),
+    }
+}
+
+fn from_ownership(ownership: abi::BoundaryOwnership) -> Ownership<u64, u64> {
+    use abi::{BoundaryDestinationTag as Destination_, BoundaryOwnershipTag as Tag};
+    match ownership.tag {
+        Tag::Held => Ownership::Held,
+        // SAFETY: the tag says the payload is the workspace.
+        Tag::Assigned => {
+            Ownership::Assigned(unsafe { *ownership.borrow_payload_assigned_unchecked() })
+        }
+        Tag::Claimed => {
+            // SAFETY: the tag says the payload is the claim.
+            let claim = unsafe { ownership.borrow_payload_claimed_unchecked() };
+            Ownership::Claimed {
+                owner: claim.owner,
+                destination: match claim.destination.tag {
+                    Destination_::Nowhere => Destination::Nowhere,
+                    // SAFETY: the tag says the payload is the workspace.
+                    Destination_::Returns => Destination::Returns(unsafe {
+                        *claim.destination.borrow_payload_returns_unchecked()
+                    }),
+                },
+            }
+        }
+    }
+}
+
+fn owned(window: u64, owned: Owned<u64, u64>) -> abi::BoundaryOwnershipEvent {
+    use abi::BoundaryOwnedTag as Tag;
+    abi::BoundaryOwnershipEvent {
+        window,
+        owned: match owned {
+            Owned::Unowned => union!(BoundaryOwned, BoundaryOwnedPayload.unowned, Tag::Unowned),
+            Owned::Owner(owner) => union!(
+                BoundaryOwned,
+                BoundaryOwnedPayload.owner(ownership(owner)),
+                Tag::Owner
+            ),
+        },
+    }
+}
+
+fn from_owners(
+    owners: &abi::RocListWith<abi::BoundaryWindowOwnership, false>,
+) -> Vec<(u64, Ownership<u64, u64>)> {
+    owners
+        .as_slice()
+        .iter()
+        .map(|entry| (entry.window, from_ownership(entry.ownership)))
+        .collect()
+}
+
+pub(crate) fn ownership_question(
+    question: workspaces::plain::OwnershipQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryOwnershipQuestion {
+    let events: Vec<_> = question
+        .events
+        .into_iter()
+        .map(|OwnershipEvent::Owned { window, owned: who }| owned(window, who))
+        .collect();
+    abi::BoundaryOwnershipQuestion {
+        events: list(&events, host),
+        catalog: list(&question.catalog, host),
+    }
+}
+
+/// The ownerships Roc answered, read out and released.
+pub(crate) fn from_ownerships(
+    answer: abi::BoundaryOwnershipView,
+    host: &abi::RocHost,
+) -> crate::workspaces::OwnershipView {
+    let view = crate::workspaces::OwnershipView {
+        owners: from_owners(&answer.owners),
+        orphans: answer
+            .orphans
+            .as_slice()
+            .iter()
+            .map(|orphan| (orphan.window, orphan.workspace))
+            .collect(),
+    };
+    // SAFETY: the view is Roc's answer, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    view
+}
+
+pub(crate) fn joined_question(
+    question: workspaces::plain::WorkspacesQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryJoinedQuestion {
+    use abi::{BoundaryJoinedEventTag as Tag, BoundarySuccessorTag as Heir};
+    let events: Vec<_> = question
+        .events
+        .into_iter()
+        .map(|event| match event {
+            WorkspacesEvent::Created { workspace, space } => union!(
+                BoundaryJoinedEvent,
+                BoundaryJoinedEventPayload.created(workspace_space(workspace, space)),
+                Tag::Created
+            ),
+            WorkspacesEvent::Removed { workspace, successor } => union!(
+                BoundaryJoinedEvent,
+                BoundaryJoinedEventPayload.removed(abi::BoundaryWorkspaceRemoved {
+                    workspace,
+                    successor: match successor {
+                        Successor::Unassign => union!(
+                            BoundarySuccessor,
+                            BoundarySuccessorPayload.unassign,
+                            Heir::Unassign
+                        ),
+                        Successor::Into(heir) => union!(
+                            BoundarySuccessor,
+                            BoundarySuccessorPayload.into(heir),
+                            Heir::Into
+                        ),
+                    },
+                }),
+                Tag::Removed
+            ),
+            WorkspacesEvent::Moved { workspace, space } => union!(
+                BoundaryJoinedEvent,
+                BoundaryJoinedEventPayload.moved(workspace_space(workspace, space)),
+                Tag::Moved
+            ),
+            WorkspacesEvent::Activated { space, activation: at } => union!(
+                BoundaryJoinedEvent,
+                BoundaryJoinedEventPayload.activated(space_activation(space, at)),
+                Tag::Activated
+            ),
+            WorkspacesEvent::Cleared(space) => {
+                union!(
+                    BoundaryJoinedEvent,
+                    BoundaryJoinedEventPayload.cleared(space),
+                    Tag::Cleared
+                )
+            }
+            WorkspacesEvent::Owned { window, owned: who } => {
+                union!(
+                    BoundaryJoinedEvent,
+                    BoundaryJoinedEventPayload.owned(owned(window, who)),
+                    Tag::Owned
+                )
+            }
+        })
+        .collect();
+    abi::BoundaryJoinedQuestion { events: list(&events, host) }
+}
+
+/// The joined workspaces Roc answered, read out and released.
+pub(crate) fn from_joined(
+    answer: abi::BoundaryJoinedView,
+    host: &abi::RocHost,
+) -> crate::workspaces::JoinedView {
+    use abi::BoundaryOutcomeTag as Tag;
+    let view = crate::workspaces::JoinedView {
+        outcomes: answer
+            .outcomes
+            .as_slice()
+            .iter()
+            .map(|outcome| match outcome.tag {
+                Tag::Accepted => Ok(()),
+                // SAFETY (each arm): the tag says what the payload is.
+                Tag::Exists => Err(Refused::Exists(unsafe {
+                    *outcome.borrow_payload_exists_unchecked()
+                })),
+                Tag::Unknown => Err(Refused::Unknown(unsafe {
+                    *outcome.borrow_payload_unknown_unchecked()
+                })),
+                Tag::OwnSuccessor => Err(Refused::OwnSuccessor(unsafe {
+                    *outcome.borrow_payload_own_successor_unchecked()
+                })),
+                Tag::Shown => {
+                    let at = unsafe { outcome.borrow_payload_shown_unchecked() };
+                    Err(Refused::Shown {
+                        workspace: at.workspace,
+                        space: at.space,
+                    })
+                }
+            })
+            .collect(),
+        catalog: from_catalog(&answer.catalog),
+        activations: from_activations(&answer.activations),
+        owners: from_owners(&answer.owners),
+        windows: answer
+            .windows
+            .as_slice()
+            .iter()
+            .map(|entry| entry.windows.as_slice().to_vec())
+            .collect(),
+    };
+    // SAFETY: the view is Roc's answer, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    view
 }

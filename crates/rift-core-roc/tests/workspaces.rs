@@ -9,7 +9,6 @@
 //! that every refusal is met.
 
 use rift_core::lifecycle::WorkspaceMode;
-use rift_core::plain::wire;
 use rift_core::workspaces::plain::{
     OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
     WorkspacesQuestion,
@@ -18,7 +17,8 @@ use rift_core::workspaces::{
     Activation, Destination, Owned, Ownership, OwnershipEvent, Selector, SkipEmpty, Step,
     Successor, TopologyEvent, WorkspacesEvent, Wrapping,
 };
-use rift_core_roc::{AllocationCount, tile_words};
+use rift_core_roc::AllocationCount;
+use rift_core_roc::workspaces::{JoinedView, OwnershipView, TopologyView};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -60,17 +60,19 @@ impl Rng {
     }
 }
 
-fn differential(name: &str, seed: u64, mut ask: impl FnMut(&mut Rng) -> (Vec<u64>, Vec<u64>)) {
+/// Runs random questions through both cores; `ask` makes one and returns it (for the failure
+/// message), the Roc core's answer and the Rust core's.
+fn differential<A: PartialEq + std::fmt::Debug>(
+    name: &str,
+    seed: u64,
+    mut ask: impl FnMut(&mut Rng) -> (String, A, A),
+) {
     let cases: u64 = std::env::var("RIFT_WORKSPACES_CASES").map_or(20_000, |n| n.parse().unwrap());
     let mut rng = Rng(seed);
     let before = AllocationCount::now();
     for case in 0..cases {
-        let (question, rust) = ask(&mut rng);
-        assert_eq!(
-            tile_words(&question),
-            Ok(rust),
-            "case {case}: {name} {question:?}"
-        );
+        let (question, roc, rust) = ask(&mut rng);
+        assert_eq!(roc, rust, "case {case}: {name} {question}");
     }
     let after = AllocationCount::now();
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
@@ -113,8 +115,8 @@ fn the_roc_core_steps_through_workspaces_as_the_rust_core_does() {
             catalog,
         };
         // A step answers an option of one workspace.
-        let rust = wire::encode_maybe_space(question.answer());
-        (wire::encode_step(question), rust)
+        let roc = rift_core_roc::workspaces::step(question.clone());
+        (format!("{question:?}"), roc, question.answer())
     });
 }
 
@@ -141,8 +143,8 @@ fn the_roc_core_resolves_selectors_as_the_rust_core_does() {
             },
             scope,
         };
-        let rust = wire::encode_target(question.answer());
-        (wire::encode_resolve(question), rust)
+        let roc = rift_core_roc::workspaces::resolve(question.clone());
+        (format!("{question:?}"), roc, question.answer())
     });
 }
 
@@ -160,8 +162,8 @@ fn the_roc_core_follows_navigation_history_as_the_rust_core_does() {
             last: rng.chance(80).then(|| 1 + rng.below(6)),
             on: rng.chance(85).then(|| rng.space()),
         };
-        let rust = wire::encode_target(question.answer());
-        (wire::encode_previous(question), rust)
+        let roc = rift_core_roc::workspaces::previous(question.clone());
+        (format!("{question:?}"), roc, question.answer())
     });
 }
 
@@ -210,8 +212,13 @@ fn the_roc_core_steps_the_topology_as_the_rust_core_does() {
             events.push(event);
         }
         let question = TopologyQuestion { events };
-        let rust = wire::encode_topology(&question.answer());
-        (wire::encode_topology_steps(question), rust)
+        let topology = question.answer();
+        let rust = TopologyView {
+            catalog: topology.catalog().to_vec(),
+            activations: topology.activations().to_vec(),
+        };
+        let roc = rift_core_roc::workspaces::topology(question.clone());
+        (format!("{question:?}"), roc, rust)
     });
 }
 
@@ -242,8 +249,12 @@ fn the_roc_core_steps_ownership_and_finds_orphans_as_the_rust_core_does() {
             catalog: (1..=5).filter(|_| rng.chance(70)).collect(),
         };
         let (ownerships, orphans) = question.answer();
-        let rust = wire::encode_ownerships(&ownerships, orphans);
-        (wire::encode_ownership_steps(question), rust)
+        let rust = OwnershipView {
+            owners: ownerships.owners().collect(),
+            orphans,
+        };
+        let roc = rift_core_roc::workspaces::ownership(question.clone());
+        (format!("{question:?}"), roc, rust)
     });
 }
 
@@ -313,7 +324,19 @@ fn the_roc_core_steps_the_joined_workspaces_as_the_rust_core_does() {
             events.push(event);
         }
         let question = WorkspacesQuestion { events };
-        let rust = wire::encode_workspaces(question.answer());
-        (wire::encode_workspaces_steps(question), rust)
+        let (outcomes, workspaces) = question.answer();
+        let rust = JoinedView {
+            outcomes,
+            catalog: workspaces.catalog().to_vec(),
+            activations: workspaces.activations().to_vec(),
+            owners: workspaces.owners().collect(),
+            windows: workspaces
+                .catalog()
+                .iter()
+                .map(|&(workspace, _)| workspaces.windows_on(workspace).collect())
+                .collect(),
+        };
+        let roc = rift_core_roc::workspaces::joined(question.clone());
+        (format!("{question:?}"), roc, rust)
     });
 }

@@ -284,18 +284,6 @@ impl RocCore {
     }
 }
 
-/// Layout geometry on words: a shape's words (its layout system's tag first) in, its frames'
-/// words out, or why there are none. Pure: no model.
-pub fn tile_words(shape: &[u64]) -> Result<Vec<u64>, RocError> {
-    let host = host();
-    // Roc takes ownership of the shape's list and releases it.
-    let shape = unsafe { abi::RocListWith::from_slice(shape, &host) };
-    let frames = unsafe { abi::roc_tile(shape) };
-    let words = answer(frames.as_slice()).map(<[u64]>::to_vec);
-    unsafe { frames.decref(&host) };
-    words
-}
-
 /// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core. (Typed
 /// all the way, it cannot fail; the `Result` stays for its callers until they are next touched.)
 pub fn tile_bsp(shape: Bsp<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
@@ -532,6 +520,79 @@ pub mod lifecycle {
         boundary::retirement_answer(unsafe {
             abi::roc_inventory_retirement(boundary::inventory_question(question))
         })
+    }
+}
+
+/// The workspace decisions and steps (`rift_core::workspaces`) decided by the Roc core. The
+/// steps answer with what a run leaves, as views of the Rust core's state.
+pub mod workspaces {
+    use rift_core::workspaces::plain::{
+        OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
+        WorkspacesQuestion,
+    };
+    use rift_core::workspaces::{Activation, Ownership, Refused};
+
+    use crate::{abi, boundary, host};
+
+    /// A topology: its catalog (workspace, Space) and what each Space shows, in its own orders.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TopologyView {
+        pub catalog: Vec<(u64, u64)>,
+        pub activations: Vec<(u64, Activation<u64>)>,
+    }
+
+    /// Ownerships: each owned window and its ownership in window order, and the orphans.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct OwnershipView {
+        pub owners: Vec<(u64, Ownership<u64, u64>)>,
+        pub orphans: Vec<(u64, u64)>,
+    }
+
+    /// What each event of a run met, and the joined workspaces it leaves: catalog,
+    /// activations, owners, and each catalogued workspace's assigned windows in catalog order.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct JoinedView {
+        pub outcomes: Vec<Result<(), Refused<u64, u64>>>,
+        pub catalog: Vec<(u64, u64)>,
+        pub activations: Vec<(u64, Activation<u64>)>,
+        pub owners: Vec<(u64, Ownership<u64, u64>)>,
+        pub windows: Vec<Vec<u64>>,
+    }
+
+    pub fn step(question: StepQuestion) -> Option<u64> {
+        let host = host();
+        let question = boundary::step_question(question, &host);
+        boundary::from_word(unsafe { abi::roc_workspace_step(question) })
+    }
+
+    pub fn resolve(question: ResolveQuestion) -> Option<(u64, u64)> {
+        let host = host();
+        let question = boundary::resolve_question(question, &host);
+        boundary::from_reached(unsafe { abi::roc_workspace_resolve(question) })
+    }
+
+    pub fn previous(question: PreviousQuestion) -> Option<(u64, u64)> {
+        let host = host();
+        let question = boundary::previous_question(question, &host);
+        boundary::from_reached(unsafe { abi::roc_workspace_previous(question) })
+    }
+
+    pub fn topology(question: TopologyQuestion) -> TopologyView {
+        let host = host();
+        let question = boundary::topology_question(question, &host);
+        boundary::from_topology(unsafe { abi::roc_topology_steps(question) }, &host)
+    }
+
+    pub fn ownership(question: OwnershipQuestion) -> OwnershipView {
+        let host = host();
+        let question = boundary::ownership_question(question, &host);
+        boundary::from_ownerships(unsafe { abi::roc_ownership_steps(question) }, &host)
+    }
+
+    pub fn joined(question: WorkspacesQuestion) -> JoinedView {
+        let host = host();
+        let question = boundary::joined_question(question, &host);
+        boundary::from_joined(unsafe { abi::roc_joined_steps(question) }, &host)
     }
 }
 

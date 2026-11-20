@@ -5,7 +5,7 @@
 app [core] { pf: platform "../platform/main.roc" }
 
 import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
-import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission]
+import pf.Boundary exposing [MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView]
 import Bsp
 import Traditional
 import Scrolling
@@ -118,7 +118,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, tile, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement }
+core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -258,38 +258,50 @@ lifecycle_net = |q| Lifecycle.net(q.first, q.then)
 inventory_retirement : InventoryQuestion -> RetirementAnswer
 inventory_retirement = |q| decision_of(Lifecycle.retirement(q.facts, q.evidence))
 
-## The model-free questions still on words (the others are typed entries above). A question's
-## words (its tag first: 29 to 31 the workspace decisions, 32 the workspaces' topology after
-## its events, 33 window ownership after its events and its orphans, 34 the joined workspaces
-## after a run of events, `Workspaces`) in; out, a 0 and the answer's words, or a 1: the words
-## were not a question it answers, or a 2 and a fact's place among its question's facts: the
-## decision read that fact, which the platform's run of it never asked.
-tile : List(U64) -> List(U64)
-tile = |words|
-	match shape_answer(words) {
-		Ok(answer) => [0].concat(answer)
-		# Not a shape: one explicit rejection.
-		Err(Malformed) => [1]
-		# A decision read a fact the platform's run of it never asked: which one.
-		Err(Unasked(fact)) => [2, fact]
+# The workspace questions, typed (`Boundary`).
+
+## Whether workspaces map onto displays one set across them (global) or per display.
+global : [PerDisplay, Global] -> Bool
+global = |mode|
+	match mode {
+		Global => True
+		PerDisplay => False
 	}
 
-shape_answer : List(U64) -> Try(List(U64), [Malformed, Unasked(U64)])
-shape_answer = |words| {
-	(system, cursor) = take({ words, at: 0 })?
-	match system {
-		29 => Workspaces.step_words(cursor)
-		30 => Workspaces.resolve_words(cursor)
-		31 => Workspaces.previous_words(cursor)
-		32 => Workspaces.topology_words(cursor)
-		33 => Workspaces.ownership_words(cursor)
-		34 => Workspaces.joined_words(cursor)
-		_ => Err(Malformed)
-	}
+workspace_step : StepQuestion -> MaybeWord
+workspace_step = |q| {
+	backwards =
+		match q.way {
+			Previous => True
+			Next => False
+		}
+	skip =
+		match q.skip_empty {
+			Skip => True
+			Keep => False
+		}
+	stop =
+		match q.wrapping {
+			Stop => True
+			Wrap => False
+		}
+	Workspaces.step(global(q.mode), q.catalog, q.context, q.current, backwards, skip, stop, q.with_windows)
 }
 
-put_frames : List((WindowId, Rect)) -> List(U64)
-put_frames = |frames| put_list([], frames, |out, (window, frame)| put_rect(put_window(out, window), frame))
+workspace_resolve : ResolveQuestion -> Reached
+workspace_resolve = |q| Workspaces.resolve(global(q.mode), q.scope, q.context, q.selector)
+
+workspace_previous : PreviousQuestion -> Reached
+workspace_previous = |q| Workspaces.previous(global(q.mode), q.context, q.last, q.on)
+
+topology_steps : TopologyQuestion -> TopologyView
+topology_steps = |q| Workspaces.topology_after(q.events)
+
+ownership_steps : OwnershipQuestion -> OwnershipView
+ownership_steps = |q| Workspaces.ownership_after(q.events, q.catalog)
+
+joined_steps : JoinedQuestion -> JoinedView
+joined_steps = |q| Workspaces.joined_after(q.events)
 
 init : {} -> Model
 init = |{}| {

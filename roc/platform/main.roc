@@ -1,7 +1,7 @@
 ## Rift's core platform: the host (Rust) owns the event loop and every effect; the app is a
-## pure step function and pure model-free questions. The layout questions cross as the typed
-## values of `Boundary`; events, effects and the other questions still cross as words
-## (`rift_core::plain::wire`), which the app parses into its own types. The model is opaque to
+## pure step function and pure model-free questions. The questions cross as the typed values
+## of `Boundary`; events and effects still cross as words (`rift_core::plain::wire`), which the
+## app parses into its own types. The model is opaque to
 ## the host: it holds a `Box(Model)` it can neither read nor free, and hands it back on every
 ## step.
 platform ""
@@ -9,7 +9,6 @@ platform ""
 		[Model : model] for core : {
 			init : {} -> model,
 			step : model, List(U64) -> { model : model, effects : List(U64) },
-			tile : List(U64) -> List(U64),
 			bsp : BspShape -> List(Frame),
 			traditional : TraditionalShape -> List(Frame),
 			strip : Strip -> Placed,
@@ -39,6 +38,12 @@ platform ""
 			lifecycle_presence : PresenceQuestion -> PresenceAnswer,
 			lifecycle_net : NetQuestion -> Change,
 			inventory_retirement : InventoryQuestion -> RetirementAnswer,
+			workspace_step : StepQuestion -> MaybeWord,
+			workspace_resolve : ResolveQuestion -> Reached,
+			workspace_previous : PreviousQuestion -> Reached,
+			topology_steps : TopologyQuestion -> TopologyView,
+			ownership_steps : OwnershipQuestion -> OwnershipView,
+			joined_steps : JoinedQuestion -> JoinedView,
 		}
 	}
 	exposes [Boundary]
@@ -47,7 +52,6 @@ platform ""
 		"roc_init": init_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
-		"roc_tile": tile_for_host,
 		"roc_bsp": bsp_for_host,
 		"roc_traditional": traditional_for_host,
 		"roc_strip": strip_for_host,
@@ -77,6 +81,12 @@ platform ""
 		"roc_lifecycle_presence": lifecycle_presence_for_host,
 		"roc_lifecycle_net": lifecycle_net_for_host,
 		"roc_inventory_retirement": inventory_retirement_for_host,
+		"roc_workspace_step": workspace_step_for_host,
+		"roc_workspace_resolve": workspace_resolve_for_host,
+		"roc_workspace_previous": workspace_previous_for_host,
+		"roc_topology_steps": topology_steps_for_host,
+		"roc_ownership_steps": ownership_steps_for_host,
+		"roc_joined_steps": joined_steps_for_host,
 	}
 	targets: {
 		arm64mac: {
@@ -85,7 +95,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -97,10 +107,6 @@ step_for_host = |boxed, event| {
 	stepped = (core.step)(Box.unbox(boxed), event)
 	{ model: Box.box(stepped.model), effects: stepped.effects }
 }
-
-## The model-free questions still on words: a question's words in, its answer's words out.
-tile_for_host : List(U64) -> List(U64)
-tile_for_host = |shape| (core.tile)(shape)
 
 ## The host cannot release a `Box(Model)`: only Roc knows the model's layout.
 release_model_for_host : Box(Model) -> {}
@@ -221,3 +227,27 @@ lifecycle_net_for_host = |question| (core.lifecycle_net)(question)
 ## Whether an inventory retires a window.
 inventory_retirement_for_host : InventoryQuestion -> RetirementAnswer
 inventory_retirement_for_host = |question| (core.inventory_retirement)(question)
+
+## Where stepping through the workspaces lands.
+workspace_step_for_host : StepQuestion -> MaybeWord
+workspace_step_for_host = |question| (core.workspace_step)(question)
+
+## The workspace a selector names, if reachable.
+workspace_resolve_for_host : ResolveQuestion -> Reached
+workspace_resolve_for_host = |question| (core.workspace_resolve)(question)
+
+## The workspace navigation history points at, if reachable.
+workspace_previous_for_host : PreviousQuestion -> Reached
+workspace_previous_for_host = |question| (core.workspace_previous)(question)
+
+## The topology an empty one becomes after a run of events.
+topology_steps_for_host : TopologyQuestion -> TopologyView
+topology_steps_for_host = |question| (core.topology_steps)(question)
+
+## The ownerships an empty one becomes after a run of events, and their orphans.
+ownership_steps_for_host : OwnershipQuestion -> OwnershipView
+ownership_steps_for_host = |question| (core.ownership_steps)(question)
+
+## What each event of a run met, and the joined workspaces it leaves.
+joined_steps_for_host : JoinedQuestion -> JoinedView
+joined_steps_for_host = |question| (core.joined_steps)(question)
