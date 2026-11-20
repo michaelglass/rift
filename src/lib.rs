@@ -7,5 +7,6 @@ pub mod ipc;
 pub mod layout_engine;
 pub mod model;
 pub(crate) mod roc_path;
+pub(crate) mod roc_twin;
 pub mod sys;
 pub mod ui;

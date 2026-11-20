@@ -195,7 +195,7 @@ fn unasked(what: &str, fact: &str, question: &impl std::fmt::Debug) {
 
 /// The Roc core and its Rust shadow disagree on `what`.
 #[cfg(feature = "roc-core")]
-fn diverged(
+pub(crate) fn diverged(
     what: &str,
     question: &impl std::fmt::Debug,
     rust: &impl std::fmt::Debug,

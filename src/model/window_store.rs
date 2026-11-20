@@ -598,7 +598,7 @@ pub struct WindowStore {
     claims: HashMap<ClaimOwner, Vec<WindowId>>,
     /// The core's lifecycle, in shadow: every live window's admission facts, told each change
     /// the store makes. [`Self::lifecycle_divergences`] holds the two to agreeing.
-    lifecycle: rift_core::lifecycle::Lifecycle<WindowId>,
+    lifecycle: crate::roc_twin::TwinnedLifecycle,
     /// The core's ownerships, in shadow: who places each window, told every ownership change
     /// (only [`Self::set_ownership`] writes one). [`Self::ownership_divergences`] holds the two
     /// to agreeing.
