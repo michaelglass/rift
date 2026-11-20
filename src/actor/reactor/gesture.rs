@@ -1109,4 +1109,53 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_camera_whose_windows_are_all_cancelled_leaves_the_viewport_at_its_target() {
+        let (mut r, ctx, _control, motion) = setup_options_threshold(false, false, false, 0.25);
+        r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(true);
+        let (workspace, layout) = {
+            let s = r.viewport_gesture.as_ref().unwrap();
+            (s.workspace, s.layout)
+        };
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+        else {
+            panic!("scrolling")
+        };
+        let initial: Vec<_> =
+            crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                .collect();
+        let windows: Vec<_> = initial.iter().map(|(wid, _)| *wid).collect();
+        r.add_test_app(1);
+        for (wid, frame) in initial {
+            r.insert_test_window_state(wid, frame, None, true);
+        }
+        r.start_gesture_presentation();
+        motion.publish(sample(1, 300.0, 100));
+        r.gesture_tick();
+        r.gesture_event(Lifecycle::End {
+            sample: sample(1, 300.0, 100),
+            cancelled: false,
+        });
+        // The released viewport animates towards where it snaps.
+        r.start_gesture_presentation();
+        let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
+        camera.sample(Instant::now() + Duration::from_millis(20));
+        let target = camera.presentation.snapshot(Instant::now()).target;
+        assert_ne!(camera.presentation.offset(), target, "still on its way");
+
+        // Every window the camera presents is written instead, so the camera ends before
+        // the viewport arrives. Nothing is left to advance it, so it is at its target.
+        r.cancel_window_presentations(windows);
+        assert!(!r.presentations.contains_key(&ctx.space));
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+        else {
+            panic!("scrolling")
+        };
+        let (presentation, _) = system.presentation(layout).unwrap();
+        assert!(!presentation.animated(), "the viewport is left animating");
+        assert_eq!(presentation.offset(), target);
+    }
 }
