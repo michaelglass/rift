@@ -162,3 +162,54 @@ fn the_cores_answer_a_write_alike_at_the_edge_of_the_ack_tolerance() {
     );
     eprintln!("differential: {checked} steps at the ack tolerance's edge identical");
 }
+
+/// Re-records the committed traces' effects through the current Rust core, keeping every event:
+/// for a reviewed behaviour change of the core. Each changed step must be one the change
+/// explains (`explained`); anything else stops it. Run explicitly:
+/// `cargo test -p rift-core-roc --features roc --test differential rerecord -- --ignored`.
+#[test]
+#[ignore]
+fn rerecord_the_committed_traces_effects() {
+    use rift_core::{Answer, Effect, Event, Reply};
+    // A refused answer now also takes the model to the app's frame: the recorded effects gain
+    // `Seen { window, frame: got }` right after `Replied { Answered(Refused) }`.
+    let explained = |event: &Event<Plain>, old: &[Effect<Plain>], new: &[Effect<Plain>]| {
+        let Event::Observe { window, frame, .. } = *event else {
+            return false;
+        };
+        let mut expected = old.to_vec();
+        match expected.iter().position(|effect| {
+            *effect
+                == Effect::Replied {
+                    window,
+                    reply: Reply::Answered(Answer::Refused),
+                }
+        }) {
+            Some(at) => expected.insert(at + 1, Effect::Seen { window, frame }),
+            None => return false,
+        }
+        expected == new
+    };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("traces");
+    let (mut changed, mut steps) = (0, 0);
+    for (name, words) in traces() {
+        let trace = wire::decode_trace(&words).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let mut rust = RustCore::<Plain>::default();
+        let mut out = Vec::new();
+        for (index, (event, recorded)) in trace.into_iter().enumerate() {
+            let now = rust.step(event.clone());
+            if now != recorded {
+                assert!(
+                    explained(&event, &recorded, &now),
+                    "{name} step {index}: a change the reviewed one does not explain\n  {event:?}\n  was {recorded:?}\n  now {now:?}"
+                );
+                changed += 1;
+            }
+            steps += 1;
+            wire::record_step(&mut out, event, now);
+        }
+        let bytes: Vec<u8> = out.iter().flat_map(|word| word.to_le_bytes()).collect();
+        std::fs::write(dir.join(&name), bytes).unwrap();
+    }
+    eprintln!("re-recorded: {changed} of {steps} steps changed, each one the reviewed change");
+}

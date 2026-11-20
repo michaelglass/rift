@@ -1241,8 +1241,18 @@ decide = |model, event| {
 
 					NoNews | InTransit | Acked | Refused => observed
 				}
-			(sent, fx) = all_written(noted, released)
-			(sent, [Replied({ window, reply })].concat(fx))
+			# The app answered with a frame of its own: the model takes the window to be where the
+			# app has it. The desire stays refused, so it is not asked for again.
+			(seen_model, seen_fx) =
+				match reply {
+					Refused => {
+						(at_got, fx) = see_fx(noted, window, read.frame)
+						(at_got, [fx])
+					}
+					NoNews | InTransit | Acked | Foreign => (noted, [])
+				}
+			(sent, fx) = all_written(seen_model, released)
+			(sent, [Replied({ window, reply })].concat(seen_fx).concat(fx))
 		}
 
 		Tick({ now, request }) => {

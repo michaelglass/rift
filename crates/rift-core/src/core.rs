@@ -10,7 +10,7 @@
 
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Phase, Pointer, Release, Ungrip};
-use crate::reconciler::{Note, Planned, Reconciler, Reply, Stamp, Verdict, Want, Write};
+use crate::reconciler::{Answer, Note, Planned, Reconciler, Reply, Stamp, Verdict, Want, Write};
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
 /// per batch the platform sends: an app, and whether its writes are held to scrolling bounds).
@@ -409,6 +409,12 @@ impl<K: Kinds> RustCore<K> {
                     changed.push(window);
                 }
                 let mut effects = vec![Effect::Replied { window, reply }];
+                // The app answered with a frame of its own: the model takes the window to be
+                // where the app has it (neighbours and the projection build on it). The desire
+                // stays refused, so it is not asked for again.
+                if reply == Reply::Answered(Answer::Refused) {
+                    effects.push(self.see(window, frame));
+                }
                 effects.extend(released.into_iter().flat_map(|write| self.written(write)));
                 effects
             }
@@ -547,6 +553,64 @@ mod tests {
                 request: RequestId(1),
             }],
         }
+    }
+
+    #[test]
+    fn a_refused_write_leaves_the_model_where_the_app_put_the_window() {
+        // The app answers Rift's write with a frame of its own (it would not take that size):
+        // the model takes the window to be where the app has it, not where Rift asked, so
+        // neighbours and the projection build on the real frame. The desire stays refused:
+        // asking for it again writes nothing.
+        let mut core = RustCore::<Plain>::default();
+        core.step(Event::Seen { window: W, frame: at(0.) });
+        let target = Rect {
+            x: 20.,
+            y: 20.,
+            w: 620.,
+            h: 500.,
+        };
+        let got = Rect { w: 700., ..target };
+        core.step(Event::Arrange {
+            now: Nanos(1),
+            want: Want::Arrange,
+            desires: vec![Desire {
+                window: W,
+                frame: target,
+                request: RequestId(1),
+            }],
+        });
+        let effects = core.step(Event::Observe {
+            now: Nanos(2),
+            request: RequestId(2),
+            window: W,
+            frame: got,
+            as_of: Some(RequestId(1)),
+        });
+        assert!(
+            effects.contains(&Effect::Replied {
+                window: W,
+                reply: crate::Reply::Answered(crate::Answer::Refused)
+            }),
+            "{effects:?}"
+        );
+        assert!(
+            effects.contains(&Effect::Seen { window: W, frame: got }),
+            "{effects:?}"
+        );
+        assert_eq!(core.seen(W), Some(got));
+        let again = core.step(Event::Arrange {
+            now: Nanos(3),
+            want: Want::Arrange,
+            desires: vec![Desire {
+                window: W,
+                frame: target,
+                request: RequestId(3),
+            }],
+        });
+        assert!(
+            !again.iter().any(|effect| matches!(effect, Effect::Plan(_) | Effect::Write(_))),
+            "the refused desire was written again: {again:?}"
+        );
     }
 
     #[test]
