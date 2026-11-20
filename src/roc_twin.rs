@@ -12,8 +12,11 @@
 use std::ops::Deref;
 
 use rift_core::lifecycle::{Lifecycle, LifecycleEvent, Transition};
+use rift_core::workspaces::{OwnershipEvent, Ownerships};
 
 use crate::actor::app::WindowId;
+use crate::model::VirtualWorkspaceId;
+use crate::model::window_store::ClaimOwner;
 
 /// How often a running Rift compares a twin's whole state with its Rust machine's, in steps.
 /// A view costs time in the number of windows (measured in release, lifecycle: 0.15 µs at 10
@@ -133,5 +136,95 @@ impl TwinnedLifecycle {
                 diverged("lifecycle windows", question, &rust, &roc);
             }
         }
+    }
+}
+
+/// Who places each window (a workspace, a claim, or the user's hand), with its Roc twin under
+/// `roc-core`.
+#[derive(Default)]
+pub(crate) struct TwinnedOwnerships {
+    rust: Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner>,
+    #[cfg(feature = "roc-core")]
+    twin: OwnershipsTwin,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct OwnershipsTwin {
+    roc: rift_core_roc::RocOwnerships,
+    steps: u64,
+}
+
+impl std::fmt::Debug for TwinnedOwnerships {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
+}
+
+impl Deref for TwinnedOwnerships {
+    type Target = Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner>;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl TwinnedOwnerships {
+    /// As [`Ownerships::step`]. The step answers nothing, so what both must agree on after it
+    /// is who places the window now; and, when due, every owner.
+    pub(crate) fn step(&mut self, event: OwnershipEvent<WindowId, VirtualWorkspaceId, ClaimOwner>) {
+        self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::Owned;
+
+            use crate::roc_path::{Word, diverged};
+            let OwnershipEvent::Owned { window, owned } = event;
+            let plain = OwnershipEvent::Owned {
+                window: window.word(),
+                owned: match owned {
+                    Owned::Unowned => Owned::Unowned,
+                    Owned::Owner(ownership) => Owned::Owner(plain_ownership(ownership)),
+                },
+            };
+            let roc = self.twin.roc.step(plain);
+            let rust = match self.rust.owned(window) {
+                Owned::Unowned => Owned::Unowned,
+                Owned::Owner(ownership) => Owned::Owner(plain_ownership(ownership)),
+            };
+            if rust != roc {
+                diverged("ownerships step", &plain, &rust, &roc);
+            }
+            self.twin.steps += 1;
+            if cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+                let mut rust: Vec<_> = self
+                    .rust
+                    .owners()
+                    .map(|(window, ownership)| (window.word(), plain_ownership(ownership)))
+                    .collect();
+                rust.sort_by_key(|&(window, _)| window);
+                let roc = self.twin.roc.view();
+                if rust != roc {
+                    diverged("ownerships owners", &plain, &rust, &roc);
+                }
+            }
+        }
+    }
+}
+
+/// An ownership with its workspaces and owner as words.
+#[cfg(feature = "roc-core")]
+fn plain_ownership(
+    ownership: rift_core::workspaces::Ownership<VirtualWorkspaceId, ClaimOwner>,
+) -> rift_core::workspaces::Ownership<u64, u64> {
+    use rift_core::workspaces::{Destination, Ownership};
+
+    use crate::roc_path::Word;
+    match ownership {
+        Ownership::Assigned(workspace) => Ownership::Assigned(workspace.word()),
+        Ownership::Claimed { owner, destination } => Ownership::Claimed {
+            owner: owner.word(),
+            destination: match destination {
+                Destination::Returns(workspace) => Destination::Returns(workspace.word()),
+                Destination::Nowhere => Destination::Nowhere,
+            },
+        },
+        Ownership::Held => Ownership::Held,
     }
 }

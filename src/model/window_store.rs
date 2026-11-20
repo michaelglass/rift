@@ -602,7 +602,7 @@ pub struct WindowStore {
     /// The core's ownerships, in shadow: who places each window, told every ownership change
     /// (only [`Self::set_ownership`] writes one). [`Self::ownership_divergences`] holds the two
     /// to agreeing.
-    ownerships: rift_core::workspaces::Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner>,
+    ownerships: crate::roc_twin::TwinnedOwnerships,
 }
 
 /// Whether a window that leaves the layout is away for now or for good.

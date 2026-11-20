@@ -125,6 +125,11 @@ impl Word for crate::model::VirtualWorkspaceId {
 }
 
 #[cfg(feature = "roc-core")]
+impl Word for crate::model::window_store::ClaimOwner {
+    fn word(self) -> u64 { u64::from(self.0) }
+}
+
+#[cfg(feature = "roc-core")]
 impl Word for crate::sys::window_server::WindowServerId {
     fn word(self) -> u64 { u64::from(self.0) }
 }
