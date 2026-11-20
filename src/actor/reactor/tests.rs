@@ -2667,6 +2667,21 @@ fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_wor
 }
 
 #[test]
+fn discovery_never_admits_a_window_only_an_assignment_holds() {
+    // An assignment can arrive before the window's AX record (a restore, a transfer): it
+    // supplies the window's Space but no Space to admit it on, even where its frame would be.
+    let (mut reactor, _, _, space, _, _) = reactor_with_window_on_space1();
+    let placeholder = WindowId::new(4242, 1);
+    let workspace = reactor.test_workspace_ids(space)[0];
+    assert!(reactor.assign_test_window_to_workspace(space, placeholder, workspace));
+    assert!(!reactor.state.windows.contains_window(placeholder));
+    assert_eq!(
+        reactor.discovery_spaces_for_window(placeholder, None),
+        (Some(space), None)
+    );
+}
+
+#[test]
 fn inventory_reuses_one_native_resolution_for_existing_and_replacement_ax_identity() {
     for replacement in [false, true] {
         let (mut reactor, wid, wsid, space, _, _) = reactor_with_window_on_space1();

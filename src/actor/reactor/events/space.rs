@@ -91,6 +91,59 @@ pub(crate) fn incoming(state: &ForwardedSpaceState) -> Incoming<&str, SpaceId> {
     }
 }
 
+/// An admission as the Roc core's question: Spaces as their words, each display as the place
+/// it first appears in this question (the answer names only Spaces, so a display needs only
+/// to be told apart from the others).
+#[cfg(feature = "roc-core")]
+pub(crate) fn plain_admit(
+    current: &Displays<&str, SpaceId>,
+    incoming: &Incoming<&str, SpaceId>,
+    mission_control: rift_core::topology::MissionControl,
+) -> rift_core::topology::plain::Admit {
+    use crate::roc_path::Word;
+    /// The place `display` first appears among `names`.
+    fn name(names: &mut Vec<String>, display: &str) -> u64 {
+        match names.iter().position(|named| named == display) {
+            Some(place) => place as u64,
+            None => {
+                names.push(display.to_owned());
+                (names.len() - 1) as u64
+            }
+        }
+    }
+    let mut names = Vec::new();
+    let mut plain = |displays: &Displays<&str, SpaceId>| Displays {
+        screens: displays
+            .screens
+            .iter()
+            .map(|screen| screen.map(|display| name(&mut names, display)))
+            .collect(),
+        spaces: displays
+            .spaces
+            .iter()
+            .map(|(display, spaces)| {
+                (
+                    name(&mut names, display),
+                    spaces.iter().map(|&space| space.word()).collect(),
+                )
+            })
+            .collect(),
+    };
+    let current = plain(current);
+    let displays = plain(&incoming.displays);
+    rift_core::topology::plain::Admit {
+        mission_control,
+        current,
+        incoming: Incoming {
+            displays,
+            remaps: incoming.remaps.iter().map(|&(old, new)| (old.word(), new.word())).collect(),
+            display_set_changed: incoming.display_set_changed,
+            force_refresh: incoming.force_refresh,
+            membership_complete: incoming.membership_complete,
+        },
+    }
+}
+
 /// Prepends an older sample's deltas to a newer one; geometry and membership stay the newer's.
 pub(crate) fn merge_space_deltas(
     mut older: ForwardedSpaceState,

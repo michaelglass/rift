@@ -958,16 +958,48 @@ impl Reactor {
     }
 
     fn apply_app_rules_for_activated_spaces(&mut self, activated: &[SpaceId]) {
+        let (tracked, reconcilable) = (AskedAbout::new(), AskedAbout::new());
         let windows_by_pid = app_rule_candidates(
             self.space_state
                 .active_window_spaces
                 .iter()
                 .map(|(&wsid, &space)| (wsid, space)),
             activated,
-            |wsid| self.state.windows.tracked_window_id(wsid),
-            |wid| self.state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission),
+            |wsid| tracked.ask(wsid, |wsid| self.state.windows.tracked_window_id(wsid)),
+            |wid| {
+                reconcilable.ask(wid, |wid| {
+                    self.state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
+                })
+            },
             |wid| wid.pid,
         );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::topology::plain::Candidates;
+
+            use crate::roc_path::window;
+            let question = Candidates {
+                window_spaces: self
+                    .space_state
+                    .active_window_spaces
+                    .iter()
+                    .map(|(&wsid, &space)| (wsid.word(), space.word()))
+                    .collect(),
+                activated: activated.iter().map(|&space| space.word()).collect(),
+                tracked: tracked.answers(Word::word, |wid| wid.map(window)),
+                reconcilable: reconcilable.answers(window, |open| open),
+            };
+            let answer = windows_by_pid
+                .iter()
+                .map(|(pid, windows)| (*pid, windows.iter().map(|&wid| window(wid)).collect()))
+                .collect();
+            crate::roc_path::check(
+                "app_rule_candidates",
+                Candidates::FACTS,
+                &wire::encode_candidates(question),
+                &wire::encode_app_windows(answer),
+            );
+        }
 
         for (pid, window_ids) in windows_by_pid {
             let Some(app_state) = self.app_manager.apps.get(&pid) else {
@@ -3712,26 +3744,54 @@ impl Reactor {
             // Geometry and membership always come from the newest revision.
             space_state = topology_workflow::merge_space_deltas(pending, space_state);
         }
-        let (invalidated_spaces, lost_local_desktops) =
-            match rift_core::topology::admit_space_snapshot(
-                &topology_workflow::displays(&self.space_state),
-                &topology_workflow::incoming(&space_state),
-                match self.mission_control_manager.mission_control_state {
-                    MissionControlState::Active => rift_core::topology::MissionControl::Open,
-                    MissionControlState::Inactive => rift_core::topology::MissionControl::Closed,
-                },
-            ) {
+        let (current, incoming) = (
+            topology_workflow::displays(&self.space_state),
+            topology_workflow::incoming(&space_state),
+        );
+        let mission_control = match self.mission_control_manager.mission_control_state {
+            MissionControlState::Active => rift_core::topology::MissionControl::Open,
+            MissionControlState::Inactive => rift_core::topology::MissionControl::Closed,
+        };
+        let admission =
+            rift_core::topology::admit_space_snapshot(&current, &incoming, mission_control);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::topology::plain::Admit;
+            let question = topology_workflow::plain_admit(&current, &incoming, mission_control);
+            let answer = match &admission {
                 rift_core::topology::Admission::Hold(why) => {
-                    trace!(?why, revision = space_state.revision, "space snapshot held");
-                    self.space_state.authoritative = false;
-                    self.pending_space_change_manager.pending_space_change = Some(space_state);
-                    return Ok(EventOutcome::default());
+                    rift_core::topology::Admission::Hold(*why)
                 }
                 rift_core::topology::Admission::Commit {
                     invalidated,
                     lost_local_desktops,
-                } => (invalidated, lost_local_desktops),
+                } => rift_core::topology::Admission::Commit {
+                    invalidated: invalidated.iter().map(|&space| space.word()).collect(),
+                    lost_local_desktops: lost_local_desktops
+                        .iter()
+                        .map(|&space| space.word())
+                        .collect(),
+                },
             };
+            crate::roc_path::check(
+                "admit_space_snapshot",
+                Admit::FACTS,
+                &wire::encode_admit(question),
+                &wire::encode_admission(answer),
+            );
+        }
+        let (invalidated_spaces, lost_local_desktops) = match admission {
+            rift_core::topology::Admission::Hold(why) => {
+                trace!(?why, revision = space_state.revision, "space snapshot held");
+                self.space_state.authoritative = false;
+                self.pending_space_change_manager.pending_space_change = Some(space_state);
+                return Ok(EventOutcome::default());
+            }
+            rift_core::topology::Admission::Commit {
+                invalidated,
+                lost_local_desktops,
+            } => (invalidated, lost_local_desktops),
+        };
         let mut outcome = EventOutcome::window_membership_changed(false, true);
         let analysis = topology_workflow::analyze_space_snapshot(
             &self.space_state,
@@ -4574,20 +4634,49 @@ impl Reactor {
                 } else {
                     Standing::Tracked
                 };
+                let (live, observable, recorded, resolved) =
+                    (Asked::new(), AskedAbout::new(), Asked::new(), Asked::new());
                 let discovered = discovered_space(
                     standing,
-                    || native::Native::window_spaces(&self.native, wsid),
+                    || live.ask(|| native::Native::window_spaces(&self.native, wsid)),
                     |space| {
-                        self.is_fullscreen_space(space)
-                            || self
-                                .space_state
-                                .display_space_ids
-                                .values()
-                                .any(|spaces| spaces.contains(&space))
+                        observable.ask(space, |space| {
+                            self.is_fullscreen_space(space)
+                                || self
+                                    .space_state
+                                    .display_space_ids
+                                    .values()
+                                    .any(|spaces| spaces.contains(&space))
+                        })
                     },
-                    || self.state.windows.window_server_space(wsid),
-                    || self.resolve_native_space(wsid, None),
+                    || recorded.ask(|| self.state.windows.window_server_space(wsid)),
+                    || resolved.ask(|| self.resolve_native_space(wsid, None)),
                 );
+                #[cfg(feature = "roc-core")]
+                {
+                    use rift_core::topology::DiscoveredSpace;
+                    use rift_core::topology::plain::Discovered;
+                    let question = Discovered {
+                        standing,
+                        live: live.fact(|spaces| spaces.into_iter().map(Word::word).collect()),
+                        observable: observable.answers(Word::word, |seen| seen),
+                        recorded: recorded.fact(|space| space.map(Word::word)),
+                        resolved: resolved.fact(|space| space.map(Word::word)),
+                    };
+                    let answer = match discovered {
+                        DiscoveredSpace::Observed(space) => DiscoveredSpace::Observed(space.word()),
+                        DiscoveredSpace::Live(space) => DiscoveredSpace::Live(space.word()),
+                        DiscoveredSpace::Fallback(space) => {
+                            DiscoveredSpace::Fallback(space.map(Word::word))
+                        }
+                    };
+                    crate::roc_path::check(
+                        "discovered_space",
+                        Discovered::FACTS,
+                        &wire::encode_discovered(question),
+                        &wire::encode_discovered_space(answer),
+                    );
+                }
                 if let Some(space) = discovered.observation() {
                     fullscreen_observations.insert(wsid, space);
                 }
@@ -5091,13 +5180,40 @@ impl Reactor {
         } else {
             DiscoveryStanding::Admissible
         };
-        discovery_spaces(standing, native, self.assigned_space_for_window_id(wid), || {
-            let window = self.state.windows.window(wid)?;
-            self.best_space_for_frame(&window.frame_monotonic()).filter(|space| {
-                self.is_space_active(*space)
-                    || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
+        let assigned = self.assigned_space_for_window_id(wid);
+        let by_frame = Asked::new();
+        let spaces = discovery_spaces(standing, native, assigned, || {
+            by_frame.ask(|| {
+                let window = self.state.windows.window(wid)?;
+                self.best_space_for_frame(&window.frame_monotonic()).filter(|space| {
+                    self.is_space_active(*space)
+                        || !window
+                            .info
+                            .sys_id
+                            .is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
+                })
             })
-        })
+        });
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::topology::plain::Discovery;
+            let question = Discovery {
+                standing,
+                native: native.map(Word::word),
+                assigned: assigned.map(Word::word),
+                by_frame: by_frame.fact(|space| space.map(Word::word)),
+            };
+            crate::roc_path::check(
+                "discovery_spaces",
+                Discovery::FACTS,
+                &wire::encode_discovery(question),
+                &wire::encode_discovery_spaces((
+                    spaces.0.map(Word::word),
+                    spaces.1.map(Word::word),
+                )),
+            );
+        }
+        spaces
     }
 
     pub(crate) fn geometry_space_for_window(
