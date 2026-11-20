@@ -12,11 +12,12 @@
 use std::ops::Deref;
 
 use rift_core::lifecycle::{Lifecycle, LifecycleEvent, Transition};
-use rift_core::workspaces::{OwnershipEvent, Ownerships};
+use rift_core::workspaces::{OwnershipEvent, Ownerships, Topology, TopologyEvent};
 
 use crate::actor::app::WindowId;
 use crate::model::VirtualWorkspaceId;
 use crate::model::window_store::ClaimOwner;
+use crate::sys::screen::SpaceId;
 
 /// How often a running Rift compares a twin's whole state with its Rust machine's, in steps.
 /// A view costs time in the number of windows (measured in release, lifecycle: 0.15 µs at 10
@@ -226,5 +227,87 @@ fn plain_ownership(
             },
         },
         Ownership::Held => Ownership::Held,
+    }
+}
+
+/// The workspaces' topology (the catalog and what each Space shows), with its Roc twin under
+/// `roc-core`. Its step answers nothing, so what it comes to is the topology itself, compared
+/// after every step, in a running Rift too: it changes only as workspaces are created, moved,
+/// removed and switched, and both views together cost about 0.5 µs (measured in release, at
+/// 5 to 100 workspaces).
+#[derive(Default)]
+pub(crate) struct TwinnedTopology {
+    rust: Topology<VirtualWorkspaceId, SpaceId>,
+    #[cfg(feature = "roc-core")]
+    roc: rift_core_roc::RocTopology,
+}
+
+impl std::fmt::Debug for TwinnedTopology {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
+}
+
+impl Deref for TwinnedTopology {
+    type Target = Topology<VirtualWorkspaceId, SpaceId>;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl TwinnedTopology {
+    /// As [`Topology::step`].
+    pub(crate) fn step(&mut self, event: TopologyEvent<VirtualWorkspaceId, SpaceId>) {
+        self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::Activation;
+            use rift_core_roc::workspaces::TopologyView;
+
+            use crate::roc_path::{Word, diverged};
+            let word = |workspace: Option<VirtualWorkspaceId>| workspace.map(Word::word);
+            let activation = |activation: Activation<VirtualWorkspaceId>| match activation {
+                Activation::Showing { current, previous, remembered } => Activation::Showing {
+                    current: current.word(),
+                    previous: word(previous),
+                    remembered: word(remembered),
+                },
+                Activation::Vacant { remembered } => {
+                    Activation::Vacant { remembered: word(remembered) }
+                }
+            };
+            let plain = match event {
+                TopologyEvent::Created { workspace, space } => TopologyEvent::Created {
+                    workspace: workspace.word(),
+                    space: space.word(),
+                },
+                TopologyEvent::Removed(workspace) => TopologyEvent::Removed(workspace.word()),
+                TopologyEvent::Moved { workspace, space } => TopologyEvent::Moved {
+                    workspace: workspace.word(),
+                    space: space.word(),
+                },
+                TopologyEvent::Activated { space, activation: shown } => TopologyEvent::Activated {
+                    space: space.word(),
+                    activation: activation(shown),
+                },
+                TopologyEvent::Cleared(space) => TopologyEvent::Cleared(space.word()),
+            };
+            self.roc.step(plain);
+            let rust = TopologyView {
+                catalog: self
+                    .rust
+                    .catalog()
+                    .iter()
+                    .map(|&(workspace, space)| (workspace.word(), space.word()))
+                    .collect(),
+                activations: self
+                    .rust
+                    .activations()
+                    .iter()
+                    .map(|&(space, shown)| (space.word(), activation(shown)))
+                    .collect(),
+            };
+            let roc = self.roc.view();
+            if rust != roc {
+                diverged("topology", &plain, &rust, &roc);
+            }
+        }
     }
 }

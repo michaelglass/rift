@@ -655,7 +655,7 @@ pub struct WorkspaceStore {
     pub layout_settings: LayoutSettings,
     /// The core's topology, in shadow: the catalog and the activations, told every change
     /// (`workspace_divergences` holds the two to agreeing).
-    shadow: rift_core::workspaces::Topology<VirtualWorkspaceId, SpaceId>,
+    shadow: crate::roc_twin::TwinnedTopology,
 }
 
 /// Where the store's workspace topology and the core's shadow disagree.
