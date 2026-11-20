@@ -31,6 +31,10 @@ pub(crate) struct WorkspaceContext<'a> {
 }
 
 /// A workspace context as the core reads it.
+#[cfg(feature = "roc-core")]
+use crate::roc_path::Word;
+use crate::roc_path::{Asked, AskedAbout};
+
 fn core_context(context: WorkspaceContext<'_>) -> rift_core::workspaces::Context<'_, SpaceId> {
     rift_core::workspaces::Context {
         space: context.space,
@@ -996,18 +1000,46 @@ impl WorkspaceStore {
     }
 
     fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
-        rift_core::workspaces::eligible(self.core_mode(), core_context(context), self[id].space)
+        let on = self[id].space;
+        let eligible = rift_core::workspaces::eligible(self.core_mode(), core_context(context), on);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::plain::EligibleQuestion;
+            let question = EligibleQuestion {
+                mode: self.core_mode(),
+                space: context.space.word(),
+                visible: context.visible.iter().map(|&space| space.word()).collect(),
+                on: on.word(),
+            };
+            let roc = Ok(rift_core_roc::workspaces::eligible(question.clone()));
+            crate::roc_path::check("eligible", EligibleQuestion::FACTS, &question, &eligible, roc);
+        }
+        eligible
     }
 
     /// Navigation history, validated like any target. Unreachable history is kept.
     pub(crate) fn previous_target(&self, context: WorkspaceContext<'_>) -> Option<WorkspaceTarget> {
-        rift_core::workspaces::previous(
-            self.core_mode(),
-            core_context(context),
-            self.last_workspace(context.space),
-            |id| self.workspaces.get(id).map(|workspace| workspace.space),
-        )
-        .map(|(id, space)| WorkspaceTarget { id, space })
+        let last = self.last_workspace(context.space);
+        let on = Asked::new();
+        let previous =
+            rift_core::workspaces::previous(self.core_mode(), core_context(context), last, |id| {
+                on.ask(|| self.workspaces.get(id).map(|workspace| workspace.space))
+            });
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::plain::PreviousQuestion;
+            let question = PreviousQuestion {
+                mode: self.core_mode(),
+                space: context.space.word(),
+                visible: context.visible.iter().map(|&space| space.word()).collect(),
+                last: last.map(Word::word),
+                on: on.fact(|space| space.map(Word::word)),
+            };
+            let roc = rift_core_roc::workspaces::previous(question.clone());
+            let rust = previous.map(|(id, space)| (id.word(), space.word()));
+            crate::roc_path::check("previous", PreviousQuestion::FACTS, &question, &rust, roc);
+        }
+        previous.map(|(id, space)| WorkspaceTarget { id, space })
     }
 
     pub(crate) fn resolve_workspace<'a>(
@@ -1024,8 +1056,46 @@ impl WorkspaceStore {
             WorkspaceSelector::Index(index) => rift_core::workspaces::Selector::Index(*index),
             WorkspaceSelector::Name(name) => rift_core::workspaces::Selector::Name(name.as_str()),
         };
-        rift_core::workspaces::resolve(self.core_mode(), &scope, core_context(context), &selector)
-            .map(|(id, space)| WorkspaceTarget { id, space })
+        let resolved = rift_core::workspaces::resolve(
+            self.core_mode(),
+            &scope,
+            core_context(context),
+            &selector,
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::Selector;
+            use rift_core::workspaces::plain::ResolveQuestion;
+            // A name is the place it first appears in this question: the answer names no
+            // name, so a name need only be told apart from the others.
+            fn word(names: &mut Vec<String>, name: &str) -> u64 {
+                match names.iter().position(|named| named == name) {
+                    Some(place) => place as u64,
+                    None => {
+                        names.push(name.to_owned());
+                        (names.len() - 1) as u64
+                    }
+                }
+            }
+            let mut names = Vec::new();
+            let question = ResolveQuestion {
+                mode: self.core_mode(),
+                scope: scope
+                    .iter()
+                    .map(|&(id, space, name)| (id.word(), space.word(), word(&mut names, name)))
+                    .collect(),
+                space: context.space.word(),
+                visible: context.visible.iter().map(|&space| space.word()).collect(),
+                selector: match selector {
+                    Selector::Index(index) => Selector::Index(index),
+                    Selector::Name(name) => Selector::Name(word(&mut names, name)),
+                },
+            };
+            let roc = Ok(rift_core_roc::workspaces::resolve(question.clone()));
+            let rust = resolved.map(|(id, space)| (id.word(), space.word()));
+            crate::roc_path::check("resolve", ResolveQuestion::FACTS, &question, &rust, roc);
+        }
+        resolved.map(|(id, space)| WorkspaceTarget { id, space })
     }
 
     pub(crate) fn workspace_index(&self, space: SpaceId, id: VirtualWorkspaceId) -> Option<usize> {
@@ -1952,24 +2022,47 @@ impl WorkspaceStore {
         };
         let catalog: Vec<_> =
             self.workspaces.order().iter().map(|&id| (id, self[id].space)).collect();
-        rift_core::workspaces::step(
+        let context = context.into();
+        let skip_empty = if skip_empty == Some(true) {
+            SkipEmpty::Skip
+        } else {
+            SkipEmpty::Keep
+        };
+        let wrapping = if self.settings.prevent_wrapping {
+            Wrapping::Stop
+        } else {
+            Wrapping::Wrap
+        };
+        let has_windows = AskedAbout::new();
+        let stepped = rift_core::workspaces::step(
             self.core_mode(),
             &catalog,
-            core_context(context.into()),
+            core_context(context),
             current,
             way,
-            if skip_empty == Some(true) {
-                SkipEmpty::Skip
-            } else {
-                SkipEmpty::Keep
-            },
-            if self.settings.prevent_wrapping {
-                Wrapping::Stop
-            } else {
-                Wrapping::Wrap
-            },
-            |id| window_store.workspace_window_count(id) != 0,
-        )
+            skip_empty,
+            wrapping,
+            |id| has_windows.ask(id, |id| window_store.workspace_window_count(id) != 0),
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::plain::StepQuestion;
+            let question = StepQuestion {
+                mode: self.core_mode(),
+                catalog: catalog.iter().map(|&(id, space)| (id.word(), space.word())).collect(),
+                space: context.space.word(),
+                visible: context.visible.iter().map(|&space| space.word()).collect(),
+                current: current.word(),
+                way,
+                skip_empty,
+                wrapping,
+                has_windows: has_windows.answers(Word::word, |has| has),
+            };
+            let roc = rift_core_roc::workspaces::step(question.clone());
+            let rust = stepped.map(Word::word);
+            crate::roc_path::check("step", StepQuestion::FACTS, &question, &rust, roc);
+        }
+        stepped
     }
 
     pub fn assign_window_to_workspace(
