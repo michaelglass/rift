@@ -183,20 +183,38 @@ pub fn handle_mouse_up(
                 state.windows.observe_native_space(server_id, space, true);
             }
             let workspace = layout.layout_engine.workspaces().active_workspace(space);
-            // Onto the previewed tile of the destination's active workspace, in one step: the
-            // layout the preview was computed against is the one the window joins.
-            let dropped = onto.zip(workspace).is_some_and(|(intent, workspace)| {
-                layout.layout_engine.relocate_window_with_drop(
-                    &mut state.windows,
-                    &crate::layout_engine::WorkspaceDropRequest {
-                        window,
-                        workspace,
-                        target: Some((intent.window, intent.action)),
-                        frame: None,
-                    },
-                )
-            });
-            outcome.drop_haptic = dropped && drag.haptics_enabled;
+            let floating = layout.layout_engine.is_window_floating(window);
+            let dropped = if floating {
+                // A floating window stays floating there, at the frame it was released at
+                // (its position on the source display is forgotten).
+                workspace.is_some_and(|workspace| {
+                    layout.layout_engine.relocate_window_with_drop(
+                        &mut state.windows,
+                        &crate::layout_engine::WorkspaceDropRequest {
+                            window,
+                            workspace,
+                            target: None,
+                            frame: Some(commit.source.last_frame),
+                        },
+                    )
+                })
+            } else {
+                // Onto the previewed tile of the destination's active workspace, in one step:
+                // the layout the preview was computed against is the one the window joins.
+                onto.zip(workspace).is_some_and(|(intent, workspace)| {
+                    layout.layout_engine.relocate_window_with_drop(
+                        &mut state.windows,
+                        &crate::layout_engine::WorkspaceDropRequest {
+                            window,
+                            workspace,
+                            target: Some((intent.window, intent.action)),
+                            frame: None,
+                        },
+                    )
+                })
+            };
+            // The haptic marks a drop onto a tile.
+            outcome.drop_haptic = dropped && !floating && drag.haptics_enabled;
             if !dropped {
                 if left {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));

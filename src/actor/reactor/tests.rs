@@ -14,6 +14,57 @@ use crate::sys::geometry::{Round, SameAs};
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
+    for floating in [false, true] {
+        let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
+            reactor_with_window_on_space1_two_displays();
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+        let source = reactor.state.windows.workspace_for_window(wid).unwrap();
+        if floating {
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+            reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+            reactor.layout_manager.layout_engine.store_floating_position(
+                source,
+                wid,
+                initial_frame,
+            );
+        }
+        let released = CGRect::new(
+            CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
+            initial_frame.size,
+        );
+        // (roc-2: the press is its own event, then the frame change.)
+        let now = reactor.state.windows.window(wid).unwrap().frame_monotonic();
+        reactor.handle_event(Event::PointerPressed { point: now.mid() });
+        assert_eq!(
+            reactor.state.windows.pointer(),
+            crate::model::window_store::Pointer::Pressing(wid),
+            "floating {floating}: the press is on the window"
+        );
+        reactor.handle_event(Event::WindowFrameChanged(wid, released, None, Requested(false)));
+        assert!(reactor.user_is_dragging());
+        reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+        assert!(!reactor.user_is_dragging());
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+
+        let engine = &reactor.layout_manager.layout_engine;
+        let workspaces = engine.workspaces();
+        let source_layout = workspaces.active_layout(space1, source).unwrap();
+        let (target, target_layout) = workspaces.active_layout_for_space(space2).unwrap();
+        assert!(!workspaces[source].layout_system.contains_window(source_layout, wid));
+        assert_eq!(
+            workspaces[target].layout_system.contains_window(target_layout, wid),
+            !floating
+        );
+        assert_eq!(engine.is_window_floating(wid), floating);
+        if floating {
+            assert_eq!(engine.get_floating_position(source, wid), None);
+            assert_eq!(engine.get_floating_position(target, wid), Some(released));
+        }
+    }
+}
+
+#[test]
 fn a_frame_write_that_failed_is_written_again_at_the_next_arrange() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
