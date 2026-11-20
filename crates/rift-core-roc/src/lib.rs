@@ -1,10 +1,11 @@
 //! Rift's core written in Roc, stepped like `rift_core::RustCore`.
 //!
 //! The Roc app (`roc/core`) is linked in as a static archive built by `build.rs`. This crate is
-//! its host: it supplies Roc's allocator and crash hooks, and [`RocCore`] steps it. Events go in
-//! and effects come out as words (`rift_core::plain::wire`); the glue for the platform's
-//! boundary is generated at build time (`build.rs`, from the pinned nightly and `ROC_SRC`). The effect words are copied out of Roc
-//! memory and released at once, so the platform never holds a Roc allocation.
+//! its host: it supplies Roc's allocator and crash hooks, and [`RocCore`] steps it. Everything
+//! crosses as the platform's typed values (`roc/platform/Boundary.roc`), converted in one module
+//! (`boundary`); the glue is generated at build time (`build.rs`, from the pinned nightly and
+//! `ROC_SRC`). What Roc answers is read out and released at once, so the platform never holds a
+//! Roc allocation.
 //!
 //! Empty without the `roc` feature, so rift's workspace builds without the Roc nightly.
 #![cfg(feature = "roc")]
@@ -40,8 +41,7 @@ use rift_core::layout::bsp::Bsp;
 use rift_core::layout::floating::{Floating, Newcomer};
 use rift_core::layout::scrolling::{Placed, Settle, Settled, Strip};
 use rift_core::layout::traditional::Traditional;
-use rift_core::plain::wire::WireError;
-use rift_core::plain::{Plain, Rect, WindowId, wire};
+use rift_core::plain::{Plain, Rect, WindowId};
 use rift_core::{Effect, Event};
 
 #[cfg(feature = "count-allocations")]
@@ -167,57 +167,17 @@ fn host() -> abi::RocHost {
 // The core.
 
 /// The Roc core. Holds the model's box, which only Roc can read or free; it is moved through
-/// every step and never shared, so Roc can update it in place. The boundary's word buffers are
-/// the host's and kept across steps: the event list Roc reads, the event's encoding and the
-/// effects' copy are allocated once and grow as needed, never per step.
+/// every step and never shared, so Roc can update it in place.
 pub struct RocCore {
     model: abi::RocBox,
     host: abi::RocHost,
-    input: Input,
-    words: Vec<u64>,
-    effects: Vec<u64>,
 }
 
-/// The event list handed to Roc, reused across steps. The host keeps its own reference, so
-/// when Roc releases the list after a step it is still the host's, never freed or written in
-/// place by Roc.
-struct Input {
-    list: abi::RocListWith<u64, false>,
-    /// Elements the list's allocation holds (0: no allocation yet).
-    capacity: usize,
-}
-
-impl Input {
-    /// The list, holding `event`, with a reference for Roc to release.
-    fn holding(&mut self, event: &[u64], host: &abi::RocHost) -> abi::RocListWith<u64, false> {
-        if event.len() > self.capacity {
-            self.release(host);
-            let capacity = event.len().max(64);
-            self.list = unsafe { abi::RocListWith::allocate(capacity, host) };
-            self.capacity = capacity;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(event.as_ptr(), self.list.elements, event.len());
-        }
-        self.list.length = event.len();
-        unsafe { self.list.incref(1) };
-        self.list
-    }
-
-    fn release(&mut self, host: &abi::RocHost) {
-        if self.capacity > 0 {
-            unsafe { self.list.decref(host) };
-            self.list = abi::RocListWith::empty();
-            self.capacity = 0;
-        }
-    }
-}
-
-// SAFETY: the model's box and the input list are owned by this `RocCore` alone: Roc keeps no
-// reference to them between steps and nothing else holds one, so moving the core to another
-// thread (rift builds its reactor on one thread and runs it on another) moves the only owner.
-// Roc's refcounts are not atomic, so the core is not `Sync`: one thread steps it at a time,
-// which `&mut self` on `step` already requires.
+// SAFETY: the model's box is owned by this `RocCore` alone: Roc keeps no reference to it
+// between steps and nothing else holds one, so moving the core to another thread (rift builds
+// its reactor on one thread and runs it on another) moves the only owner. Roc's refcounts are
+// not atomic, so the core is not `Sync`: one thread steps it at a time, which `&mut self` on
+// `step` already requires.
 unsafe impl Send for RocCore {}
 
 impl Default for RocCore {
@@ -225,62 +185,22 @@ impl Default for RocCore {
         RocCore {
             model: unsafe { abi::roc_init() },
             host: host(),
-            input: Input {
-                list: abi::RocListWith::empty(),
-                capacity: 0,
-            },
-            words: Vec::new(),
-            effects: Vec::new(),
         }
     }
 }
 
-/// Why the Roc core gave no answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RocError {
-    /// The Roc core rejected the words it was handed: they were not an event (or a shape).
-    Rejected,
-    /// The Roc core answered with words this side cannot read.
-    Unreadable(WireError),
-    /// The decision read a fact its question does not carry (the platform's run of it never
-    /// asked it): the fact's place among the question's facts.
-    Unasked { fact: u64 },
-}
-
-/// The words after Roc's verdict word: 0 and an answer, 1, a rejection, or 2 and the fact a
-/// decision read that its question does not carry.
-fn answer(words: &[u64]) -> Result<&[u64], RocError> {
-    match words.split_first() {
-        Some((0, answer)) => Ok(answer),
-        Some((1, [])) => Err(RocError::Rejected),
-        Some((2, &[fact])) => Err(RocError::Unasked { fact }),
-        Some((&word, _)) => Err(RocError::Unreadable(WireError::Unknown { at: 0, word })),
-        None => Err(RocError::Unreadable(WireError::Truncated)),
-    }
-}
+/// Why the Roc core gave no answer: it always answers, so there is no such value. (The layout
+/// functions keep a `Result` for their callers until those are next changed.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RocError {}
 
 impl RocCore {
-    /// One step on words: an event's words in, the effect list's words out (valid until the
-    /// next step), or why there are none.
-    pub fn step_words(&mut self, event: &[u64]) -> Result<&[u64], RocError> {
-        let list = self.input.holding(event, &self.host);
-        let stepped = unsafe { abi::roc_step(self.model, list) };
+    /// One step, as `RustCore::step`: the event in, its effects out.
+    pub fn step(&mut self, event: Event<Plain>) -> Vec<Effect<Plain>> {
+        let event = boundary::event(event, &self.host);
+        let stepped = unsafe { abi::roc_step(self.model, event) };
         self.model = stepped.model;
-        self.effects.clear();
-        self.effects.extend_from_slice(stepped.effects.as_slice());
-        unsafe { stepped.effects.decref(&self.host) };
-        answer(&self.effects)
-    }
-
-    /// One step, as `RustCore::step`.
-    pub fn step(&mut self, event: Event<Plain>) -> Result<Vec<Effect<Plain>>, RocError> {
-        let mut words = std::mem::take(&mut self.words);
-        wire::encode_event_into(&mut words, event);
-        let effects = self
-            .step_words(&words)
-            .and_then(|words| wire::decode_effects(words).map_err(RocError::Unreadable));
-        self.words = words;
-        effects
+        boundary::effects(stepped.effects, &self.host)
     }
 }
 
@@ -597,8 +517,5 @@ pub mod workspaces {
 }
 
 impl Drop for RocCore {
-    fn drop(&mut self) {
-        self.input.release(&self.host);
-        unsafe { abi::roc_release_model(self.model) }
-    }
+    fn drop(&mut self) { unsafe { abi::roc_release_model(self.model) } }
 }

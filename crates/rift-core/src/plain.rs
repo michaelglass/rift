@@ -126,6 +126,25 @@ impl Reading {
     }
 }
 
+impl Write<Plain> {
+    /// A write a foreign core (the Roc one) decided, as it said it: the parse of its effect.
+    /// The platform's own writes are only ever the core's.
+    pub fn foreign(window: WindowId, frame: Rect, request: RequestId) -> Self {
+        Write::new(window, frame, request)
+    }
+}
+
+impl Plan<Plain> {
+    /// A plan a foreign core (the Roc one) decided, as it said it: the parse of its effect.
+    pub fn foreign(
+        request: RequestId,
+        positions: Vec<Write<Plain>>,
+        frames: Vec<Write<Plain>>,
+    ) -> Self {
+        Plan { request, positions, frames }
+    }
+}
+
 fn within(a: f64, tolerance: f64, b: f64) -> bool { (a - b).abs() < tolerance }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

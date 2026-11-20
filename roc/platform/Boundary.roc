@@ -4,7 +4,7 @@
 Boundary := [].{
 	## One step's result: the model's box and the effects. Generic in the model, so the
 	## platform's model variable stays out of a nominal type.
-	Stepped(model) := { model : Box(model), effects : List(U64) }
+	Stepped(model) := { model : Box(model), effects : List(Effect) }
 
 	# Shared geometry (`rift_core::plain`, `rift_core::layout`).
 
@@ -488,4 +488,112 @@ Boundary := [].{
 	## A run's outcomes and the joined workspaces it leaves: catalog, activations, owners, and
 	## each catalogued workspace's assigned windows, in catalog order.
 	JoinedView := { outcomes : List(Outcome), catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
+
+	# The core's events and effects (`rift_core::Event`, `rift_core::Effect`).
+
+	Button := [Left, Right]
+
+	## What a press lands on: a window, or none.
+	PressOn := [OnWindow(WindowId), OnNothing]
+
+	Press := { on : PressOn, button : Button }
+
+	## A release: of a button, or one the platform missed.
+	ReleaseOf := [ButtonUp(Button), Missed]
+
+	Rekey := { from : WindowId, to : WindowId }
+
+	## A window seen at a frame.
+	Sighting := { window : WindowId, frame : Rect }
+
+	Want := [Arrange, ArrangePositions]
+
+	Desire := { window : WindowId, frame : Rect, request : U32 }
+
+	ArrangeOf := { now : U64, want : Want, desires : List(Desire) }
+
+	AnimateOf := { now : U64, desires : List(Desire) }
+
+	## A time and a request (an animation's end, a tick).
+	Stamp := { now : U64, request : U32 }
+
+	## Where a stopped animation left its window, if it published a frame.
+	StoppedAt := [StoppedAt(Rect), NotPublished]
+
+	AnimationStop := { window : WindowId, request : U32, at : StoppedAt }
+
+	FollowOf := { request : U32, window : WindowId, frame : Rect }
+
+	## The request an observed frame answers, if the platform stamped it.
+	AsOf := [AsOf(U32), Unstamped]
+
+	Observation := { now : U64, request : U32, window : WindowId, frame : Rect, as_of : AsOf }
+
+	SentOutsideOf := { window : WindowId, request : U32 }
+
+	Event := [
+		Press(Press),
+		Drag(WindowId),
+		## A button came up (`Release`, renamed: a tag named `Release` collides with the glue's
+		## own `<Type>Release` helpers).
+		Released(ReleaseOf),
+		LetGo,
+		Gone(WindowId),
+		Rekeyed(Rekey),
+		Seen(Sighting),
+		Ceded(WindowId),
+		Unseen(WindowId),
+		Distrust(List(WindowId)),
+		Arrange(ArrangeOf),
+		Animate(AnimateOf),
+		AnimationEnded(Stamp),
+		AnimationStopped(AnimationStop),
+		Follow(FollowOf),
+		Observe(Observation),
+		Tick(Stamp),
+		Forget(WindowId),
+		SentOutside(SentOutsideOf),
+	]
+
+	## A frame written to a window under a request.
+	WriteEffect := { window : WindowId, frame : Rect, request : U32 }
+
+	AnimateEffect := { window : WindowId, from : Rect, to : Rect, request : U32 }
+
+	PendingTarget := [Target(Rect), NoTarget]
+
+	PendingEffect := { window : WindowId, target : PendingTarget }
+
+	PlanEffect := { request : U32, positions : List(WriteEffect), frames : List(WriteEffect) }
+
+	Reply := [NoNews, InTransit, Acked, Refused, Foreign]
+
+	ReplyEffect := { window : WindowId, reply : Reply }
+
+	NoteKind := [Discarded, TimedOut]
+
+	NoteEffect := { window : WindowId, note : NoteKind }
+
+	## The timer: armed for a time, or not.
+	Armed := [Armed(U64), Disarmed]
+
+	UngripWhy := [Released, LetGo, Gone]
+
+	UngripEffect := { window : WindowId, why : UngripWhy, changed : List(WindowId) }
+
+	Effect := [
+		Write(WriteEffect),
+		Animate(AnimateEffect),
+		Pending(PendingEffect),
+		Plan(PlanEffect),
+		Queued(WindowId),
+		Seen(Sighting),
+		Replied(ReplyEffect),
+		Note(NoteEffect),
+		Timer(Armed),
+		Grip(WindowId),
+		DragBegan(WindowId),
+		Ungrip(UngripEffect),
+		Regrip(Rekey),
+	]
 }

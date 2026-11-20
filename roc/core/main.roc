@@ -1,11 +1,10 @@
 ## Rift's core in Roc: the frame reconciler and the user's grip, as one pure step. Events arrive
-## and effects leave as words (`rift_core::plain::wire`); they are parsed into the types below at
-## the boundary. It mirrors `rift_core::RustCore` decision for decision; the differential test
-## holds it to that.
+## and effects leave as the platform's typed values (`Boundary.Event`, `Boundary.Effect`), which
+## the types below mirror. It mirrors `rift_core::RustCore` decision for decision; the
+## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
-import pf.Boundary exposing [MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView]
 import Bsp
 import Traditional
 import Scrolling
@@ -19,39 +18,15 @@ WindowId : { pid : I32, idx : U32 }
 
 Rect : { x : F64, y : F64, w : F64, h : F64 }
 
-## Words being read, and where.
-Words : { words : List(U64), at : U64 }
-
-## A value read and where the rest starts, or the words were malformed.
-Taken(a) : Try((a, Words), [Malformed])
-
 Desire : { window : WindowId, frame : Rect, request : U32 }
 
 WriteFx : { window : WindowId, frame : Rect, request : U32 }
 
 Button : [Left, Right]
 
-Event : [
-	Press({ on : [OnWindow(WindowId), OnNothing], button : Button }),
-	Drag(WindowId),
-	Release([ButtonUp(Button), Missed]),
-	LetGo,
-	Gone(WindowId),
-	Rekeyed({ from : WindowId, to : WindowId }),
-	Seen({ window : WindowId, frame : Rect }),
-	Ceded(WindowId),
-	Unseen(WindowId),
-	Distrust(List(WindowId)),
-	Arrange({ now : U64, want : [Arrange, ArrangePositions], desires : List(Desire) }),
-	Animate({ now : U64, desires : List(Desire) }),
-	AnimationEnded({ now : U64, request : U32 }),
-	AnimationStopped({ window : WindowId, request : U32, at : [StoppedAt(Rect), NotPublished] }),
-	Follow({ request : U32, window : WindowId, frame : Rect }),
-	Observe({ now : U64, request : U32, window : WindowId, frame : Rect, as_of : [AsOf(U32), Unstamped] }),
-	Tick({ now : U64, request : U32 }),
-	Forget(WindowId),
-	SentOutside({ window : WindowId, request : U32 }),
-]
+## An event is the platform's (`Boundary.Event`): taking the platform's own type, not one of
+## the same shape, is what keeps this nightly's `roc build` from hanging on the step.
+
 
 Reply : [NoNews, InTransit, Acked, Refused, Foreign]
 
@@ -1092,7 +1067,7 @@ decide = |model, event| {
 				Held({ window: pressed, button, phase }) =>
 					match phase {
 						Pressed =>
-							if pressed == window {
+							if same_window(pressed, window) {
 								({ ..model, grip: Held({ window, button, phase: Dragging([]) }) }, [DragBegan(window)])
 							} else {
 								(model, [])
@@ -1104,14 +1079,14 @@ decide = |model, event| {
 				Idle => (model, [])
 			}
 
-		Release(up) => {
+		Released(up) => {
 			ends =
 				match grip {
 					Idle => False
 					Held({ button, .. }) =>
 						match up {
 							Missed => True
-							ButtonUp(released) => released == button
+							ButtonUp(released) => same_button(released, button)
 						}
 				}
 			if (ends) ungrip(model, Released) else (model, [])
@@ -1221,268 +1196,37 @@ dedup = |windows| {
 
 ## Decisions first, then the notes taken while deciding, then the pending frames that changed,
 ## then the timer if its deadline moved.
-step : Model, List(U64) -> { model : Model, effects : List(U64) }
-step = |model0, words|
-	match parse_event(words) {
-		Ok(event) => {
-			(decided, decisions) = decide({ ..model0, notes: [], touched: [] }, event)
-			pending =
-				dedup(decided.touched).map(
-					|window| {
-						target =
-							match decided.windows.get(window) {
-								Ok(record) => pending_of(record.sync)
-								# Removed this step: nothing is pending for it.
-								Err(_) => NoTarget
-							}
-						Pending({ window, target })
-					},
-				)
-			(pruned, next) = next_deadline(decided)
-			timer = if (next == pruned.armed) [] else [Timer(next)]
-			effects = decisions.concat(pruned.notes).concat(pending).concat(timer)
-			{ model: { ..pruned, armed: next, notes: [], touched: [] }, effects: [0].concat(put_effects(effects)) }
-		}
+## Whether two windows are the same one. The platform's named types have no `==` (it is a
+## method a nominal type would define), so a window from an event is compared by its fields.
+same_window : WindowId, WindowId -> Bool
+same_window = |a, b| a.pid == b.pid and a.idx == b.idx
 
-		# Not an event: one explicit rejection, the model untouched.
-		Err(Malformed) => { model: model0, effects: [1] }
+## Whether two buttons are the same one (a button from an event is the platform's named type).
+same_button : Button, Button -> Bool
+same_button = |a, b|
+	match (a, b) {
+		(Left, Left) => True
+		(Right, Right) => True
+		(Left, Right) | (Right, Left) => False
 	}
 
-# ---------------------------------------------------------------------------------------------
-# The wire: words in, words out (the layout is `rift_core::plain::wire`'s).
-
-take_desire : Words -> Taken(Desire)
-take_desire = |cursor| {
-	(window, c1) = take_window(cursor)?
-	(frame, c2) = take_rect(c1)?
-	(request, c3) = take_u32(c2)?
-	Ok(({ window, frame, request }, c3))
-}
-
-take_button : Words -> Taken(Button)
-take_button = |cursor| {
-	(word, rest) = take(cursor)?
-	match word {
-		0 => Ok((Left, rest))
-		1 => Ok((Right, rest))
-		_ => Err(Malformed)
-	}
-}
-
-## The event `words` hold, all of them: anything else is `Malformed`.
-parse_event : List(U64) -> Try(Event, [Malformed])
-parse_event = |words| {
-	(event, rest) = take_event({ words, at: 0 })?
-	finished(rest)?
-	Ok(event)
-}
-
-take_event : Words -> Taken(Event)
-take_event = |c0| {
-	(tag, c) = take(c0)?
-	match tag {
-		0 => {
-			(flag, c1) = take_flag(c)?
-			if flag {
-				(window, c2) = take_window(c1)?
-				(button, c3) = take_button(c2)?
-				Ok((Press({ on: OnWindow(window), button }), c3))
-			} else {
-				(button, c2) = take_button(c1)?
-				Ok((Press({ on: OnNothing, button }), c2))
-			}
-		}
-
-		1 => {
-			(window, c1) = take_window(c)?
-			Ok((Drag(window), c1))
-		}
-
-		2 => {
-			(word, c1) = take(c)?
-			match word {
-				0 => Ok((Release(ButtonUp(Left)), c1))
-				1 => Ok((Release(ButtonUp(Right)), c1))
-				2 => Ok((Release(Missed), c1))
-				_ => Err(Malformed)
-			}
-		}
-
-		3 => Ok((LetGo, c))
-		4 => {
-			(window, c1) = take_window(c)?
-			Ok((Gone(window), c1))
-		}
-
-		5 => {
-			(from, c1) = take_window(c)?
-			(to, c2) = take_window(c1)?
-			Ok((Rekeyed({ from, to }), c2))
-		}
-
-		6 => {
-			(window, c1) = take_window(c)?
-			(frame, c2) = take_rect(c1)?
-			Ok((Seen({ window, frame }), c2))
-		}
-
-		7 => {
-			(window, c1) = take_window(c)?
-			Ok((Ceded(window), c1))
-		}
-
-		8 => {
-			(window, c1) = take_window(c)?
-			Ok((Unseen(window), c1))
-		}
-
-		9 => {
-			(windows, c1) = take_list(c, take_window)?
-			Ok((Distrust(windows), c1))
-		}
-
-		10 => {
-			(now, c1) = take(c)?
-			(how, c2) = take(c1)?
-			(desires, c3) = take_list(c2, take_desire)?
-			match how {
-				0 => Ok((Arrange({ now, want: Arrange, desires }), c3))
-				1 => Ok((Arrange({ now, want: ArrangePositions, desires }), c3))
-				_ => Err(Malformed)
-			}
-		}
-
-		11 => {
-			(now, c1) = take(c)?
-			(desires, c2) = take_list(c1, take_desire)?
-			Ok((Animate({ now, desires }), c2))
-		}
-
-		12 => {
-			(now, c1) = take(c)?
-			(request, c2) = take_u32(c1)?
-			Ok((AnimationEnded({ now, request }), c2))
-		}
-
-		13 => {
-			(window, c1) = take_window(c)?
-			(request, c2) = take_u32(c1)?
-			(published, c3) = take_flag(c2)?
-			if published {
-				(frame, c4) = take_rect(c3)?
-				Ok((AnimationStopped({ window, request, at: StoppedAt(frame) }), c4))
-			} else {
-				Ok((AnimationStopped({ window, request, at: NotPublished }), c3))
-			}
-		}
-
-		14 => {
-			(request, c1) = take_u32(c)?
-			(window, c2) = take_window(c1)?
-			(frame, c3) = take_rect(c2)?
-			Ok((Follow({ request, window, frame }), c3))
-		}
-
-		15 => {
-			(now, c1) = take(c)?
-			(request, c2) = take_u32(c1)?
-			(window, c3) = take_window(c2)?
-			(frame, c4) = take_rect(c3)?
-			(stamped, c5) = take_flag(c4)?
-			if stamped {
-				(as_of, c6) = take_u32(c5)?
-				Ok((Observe({ now, request, window, frame, as_of: AsOf(as_of) }), c6))
-			} else {
-				Ok((Observe({ now, request, window, frame, as_of: Unstamped }), c5))
-			}
-		}
-
-		16 => {
-			(now, c1) = take(c)?
-			(request, c2) = take_u32(c1)?
-			Ok((Tick({ now, request }), c2))
-		}
-
-		17 => {
-			(window, c1) = take_window(c)?
-			Ok((Forget(window), c1))
-		}
-
-		18 => {
-			(window, c1) = take_window(c)?
-			(request, c2) = take_u32(c1)?
-			Ok((SentOutside({ window, request }), c2))
-		}
-
-		_ => Err(Malformed)
-	}
-}
-
-put_request : List(U64), U32 -> List(U64)
-put_request = |words, request| words.append(request.to_u64())
-
-put_write : List(U64), WriteFx -> List(U64)
-put_write = |words, write| put_request(put_rect(put_window(words, write.window), write.frame), write.request)
-
-reply_code : Reply -> U64
-reply_code = |reply|
-	match reply {
-		NoNews => 0
-		InTransit => 1
-		Acked => 2
-		Refused => 3
-		Foreign => 4
-	}
-
-put_effect : List(U64), Effect -> List(U64)
-put_effect = |words, effect|
-	match effect {
-		Write(write) => put_write(words.append(0), write)
-		Animate({ window, from, to, request }) => put_request(put_rect(put_rect(put_window(words.append(1), window), from), to), request)
-		Pending({ window, target }) => {
-			at = put_window(words.append(2), window)
-			match target {
-				Target(frame) => put_rect(at.append(1), frame)
-				NoTarget => at.append(0)
-			}
-		}
-
-		Plan({ request, positions, frames }) => put_list(put_list(put_request(words.append(3), request), positions, put_write), frames, put_write)
-		Queued(window) => put_window(words.append(4), window)
-		Seen({ window, frame }) => put_rect(put_window(words.append(5), window), frame)
-		Replied({ window, reply }) => put_window(words.append(6), window).append(reply_code(reply))
-		Note({ window, note: what }) =>
-			match what {
-				Discarded => put_window(words.append(7), window).append(0)
-				TimedOut => put_window(words.append(7), window).append(1)
-			}
-
-		Timer(armed) =>
-			match armed {
-				Armed(at) => words.append(8).append(1).append(at)
-				Disarmed => words.append(8).append(0)
-			}
-
-		Grip(window) => put_window(words.append(9), window)
-		DragBegan(window) => put_window(words.append(10), window)
-		Ungrip({ window, why, changed }) => {
-			code =
-				match why {
-					Released => 0
-					LetGo => 1
-					Gone => 2
-				}
-			put_list(put_window(words.append(11), window).append(code), changed, put_window)
-		}
-
-		Regrip({ from, to }) => put_window(put_window(words.append(12), from), to)
-	}
-
-put_effects : List(Effect) -> List(U64)
-put_effects = |effects| {
-	var $words = [effects.len()]
-	for effect in effects {
-		$words = put_effect($words, effect)
-	}
-	$words
+step : Model, Event -> { model : Model, effects : List(Effect) }
+step = |model0, event| {
+	(decided, decisions) = decide({ ..model0, notes: [], touched: [] }, event)
+	pending =
+		dedup(decided.touched).map(
+			|window| {
+				target =
+					match decided.windows.get(window) {
+						Ok(record) => pending_of(record.sync)
+						# Removed this step: nothing is pending for it.
+						Err(_) => NoTarget
+					}
+				Pending({ window, target })
+			},
+		)
+	(pruned, next) = next_deadline(decided)
+	timer = if (next == pruned.armed) [] else [Timer(next)]
+	effects = decisions.concat(pruned.notes).concat(pending).concat(timer)
+	{ model: { ..pruned, armed: next, notes: [], touched: [] }, effects }
 }

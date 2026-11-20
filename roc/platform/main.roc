@@ -1,14 +1,13 @@
 ## Rift's core platform: the host (Rust) owns the event loop and every effect; the app is a
-## pure step function and pure model-free questions. The questions cross as the typed values
-## of `Boundary`; events and effects still cross as words (`rift_core::plain::wire`), which the
-## app parses into its own types. The model is opaque to
+## pure step function and pure model-free questions. Everything crosses as the typed values of
+## `Boundary`. The model is opaque to
 ## the host: it holds a `Box(Model)` it can neither read nor free, and hands it back on every
 ## step.
 platform ""
 	requires {
 		[Model : model] for core : {
 			init : {} -> model,
-			step : model, List(U64) -> { model : model, effects : List(U64) },
+			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
 			traditional : TraditionalShape -> List(Frame),
 			strip : Strip -> Placed,
@@ -95,14 +94,14 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
 
-## One step: an event's words in, the effect list's words out. The box is unboxed and boxed
-## again so the model stays unique: the host keeps no reference to the old one.
-step_for_host : Box(Model), List(U64) -> Stepped(Model)
+## One step: an event in, its effects out. The box is unboxed and boxed again so the model
+## stays unique: the host keeps no reference to the old one.
+step_for_host : Box(Model), Event -> Stepped(Model)
 step_for_host = |boxed, event| {
 	stepped = (core.step)(Box.unbox(boxed), event)
 	{ model: Box.box(stepped.model), effects: stepped.effects }

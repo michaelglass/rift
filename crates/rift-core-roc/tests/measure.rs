@@ -1,9 +1,9 @@
 //! Rough measurements of the Roc core against the Rust core. Run in release, explicitly:
 //! `cargo test --release --features roc --test measure -- --ignored --nocapture`.
 //!
-//! Latency is per step. For Roc it is shown twice: on words (what crosses the boundary: the Roc
-//! app parses the event and writes the effects) and as `RocCore::step` (the Rust side's wire
-//! encode and decode added). The scaling run grows the number of windows the model tracks: if
+//! Latency is per step, for Roc as `RocCore::step` (the event's and effects' conversion to and
+//! from the typed boundary included). The scaling run grows the number of windows the model
+//! tracks: if
 //! Roc lost the model's uniqueness it would copy the whole model every step, and the per-step
 //! time would grow with the window count.
 
@@ -50,11 +50,11 @@ fn time<T>(items: &[T], mut step: impl FnMut(&T)) -> Vec<Duration> {
         .collect()
 }
 
-/// Every side over the same sessions, each session on a fresh core (its clock starts at 0).
+/// Both cores over the same sessions, each session on a fresh core (its clock starts at 0).
+/// The Roc step includes the event's and effects' conversion to and from the typed boundary.
 fn compare(sessions: &[Vec<Event<Plain>>]) {
     let steps: usize = sessions.iter().map(Vec::len).sum();
     let mut rust_samples = Vec::with_capacity(steps);
-    let mut word_samples = Vec::with_capacity(steps);
     let mut step_samples = Vec::with_capacity(steps);
     let (mut allocated, mut live_during) = (0, 0);
     let before = AllocationCount::now();
@@ -63,25 +63,17 @@ fn compare(sessions: &[Vec<Event<Plain>>]) {
         rust_samples.extend(time(events, |event| {
             std::hint::black_box(rust.step(event.clone()));
         }));
-        let words: Vec<Vec<u64>> =
-            events.iter().map(|event| wire::encode_event(event.clone())).collect();
         let start = AllocationCount::now();
         let mut roc = RocCore::default();
-        word_samples.extend(time(&words, |words| {
-            std::hint::black_box(roc.step_words(words).expect("an event"));
+        step_samples.extend(time(events, |event| {
+            std::hint::black_box(roc.step(event.clone()));
         }));
         let during = AllocationCount::now();
         allocated += during.allocated - start.allocated;
         live_during = live_during.max(during.live() - start.live());
-        drop(roc);
-        let mut roc = RocCore::default();
-        step_samples.extend(time(events, |event| {
-            std::hint::black_box(roc.step(event.clone()).expect("an event"));
-        }));
     }
     let after = AllocationCount::now();
     show("rust", &stats(rust_samples));
-    show("roc words", &stats(word_samples));
     show("roc step", &stats(step_samples));
     eprintln!(
         "  roc allocations: {:.2} per step, at most {live_during} live in a session, {} after \
@@ -204,7 +196,7 @@ fn a_million_steps_leave_nothing_behind() {
     let mut live = Vec::new();
     for chunk in events.chunks(100_000) {
         for event in chunk {
-            std::hint::black_box(roc.step(event.clone()).expect("an event"));
+            std::hint::black_box(roc.step(event.clone()));
         }
         live.push(AllocationCount::now().live() - before.live());
     }

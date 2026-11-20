@@ -21,13 +21,16 @@ use rift_core::lifecycle::{
     PresenceOutcome, Reading, Report, Retirement, Rule, RuleRun, Suitability, TransientOrigin,
     Veto, WorkspaceMode,
 };
-use rift_core::plain::{Answers, Fact, Rect, Unasked, WindowId};
+use rift_core::plain::{Answers, Fact, Nanos, Plain, Rect, RequestId, Unasked, WindowId};
 use rift_core::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
 };
 use rift_core::workspaces::{
     self, Destination, Owned, Ownership, OwnershipEvent, Refused, Selector, SkipEmpty, Step,
     Successor, TopologyEvent, WorkspacesEvent, Wrapping,
+};
+use rift_core::{
+    Answer, Button, Desire, Effect, Event, Note, Plan, Release, Reply, Ungrip, Want, Write,
 };
 
 use crate::abi;
@@ -2251,4 +2254,333 @@ pub(crate) fn from_joined(
     // SAFETY: the view is Roc's answer, owned here and read in full above.
     unsafe { answer.decref(host) };
     view
+}
+
+// The core's events and effects.
+
+fn button(button: Button) -> abi::BoundaryButton {
+    match button {
+        Button::Left => abi::BoundaryButton::Left,
+        Button::Right => abi::BoundaryButton::Right,
+    }
+}
+
+fn desires(
+    desires: Vec<Desire<Plain>>,
+    host: &abi::RocHost,
+) -> abi::RocListWith<abi::BoundaryDesire, false> {
+    let desires: Vec<_> = desires
+        .into_iter()
+        .map(|desire| abi::BoundaryDesire {
+            window: window(desire.window),
+            frame: rect(desire.frame),
+            request: desire.request.0,
+        })
+        .collect();
+    list(&desires, host)
+}
+
+fn sighting(id: WindowId, frame: Rect) -> abi::BoundarySighting {
+    abi::BoundarySighting {
+        window: window(id),
+        frame: rect(frame),
+    }
+}
+
+fn stamp(now: Nanos, request: RequestId) -> abi::BoundaryStamp {
+    abi::BoundaryStamp { now: now.0, request: request.0 }
+}
+
+pub(crate) fn event(event: Event<Plain>, host: &abi::RocHost) -> abi::BoundaryEvent {
+    use abi::{
+        BoundaryAsOfTag as AsOf, BoundaryEventTag as Tag, BoundaryPressOnTag as On,
+        BoundaryReleaseOfTag as Up, BoundaryStoppedAtTag as At,
+    };
+    match event {
+        Event::Press { window: on, button: pressed } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.press(abi::BoundaryPress {
+                on: match on {
+                    Some(id) => union!(
+                        BoundaryPressOn,
+                        BoundaryPressOnPayload.on_window(window(id)),
+                        On::OnWindow
+                    ),
+                    None =>
+                        union!(BoundaryPressOn, BoundaryPressOnPayload.on_nothing, On::OnNothing),
+                },
+                button: button(pressed),
+            }),
+            Tag::Press
+        ),
+        Event::Drag { window: id } => {
+            union!(BoundaryEvent, BoundaryEventPayload.drag(window(id)), Tag::Drag)
+        }
+        Event::Release(up) => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.released(match up {
+                Release::Button(released) => union!(
+                    BoundaryReleaseOf,
+                    BoundaryReleaseOfPayload.button_up(button(released)),
+                    Up::ButtonUp
+                ),
+                Release::Missed =>
+                    union!(BoundaryReleaseOf, BoundaryReleaseOfPayload.missed, Up::Missed),
+            }),
+            Tag::Released
+        ),
+        Event::LetGo => union!(BoundaryEvent, BoundaryEventPayload.let_go, Tag::LetGo),
+        Event::Gone { window: id } => {
+            union!(BoundaryEvent, BoundaryEventPayload.gone(window(id)), Tag::Gone)
+        }
+        Event::Rekeyed { from, to } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.rekeyed(abi::BoundaryRekey {
+                from: window(from),
+                to: window(to)
+            }),
+            Tag::Rekeyed
+        ),
+        Event::Seen { window: id, frame } => {
+            union!(
+                BoundaryEvent,
+                BoundaryEventPayload.seen(sighting(id, frame)),
+                Tag::Seen
+            )
+        }
+        Event::Ceded { window: id } => {
+            union!(BoundaryEvent, BoundaryEventPayload.ceded(window(id)), Tag::Ceded)
+        }
+        Event::Unseen { window: id } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.unseen(window(id)),
+            Tag::Unseen
+        ),
+        Event::Distrust { windows } => {
+            let windows: Vec<_> = windows.into_iter().map(window).collect();
+            union!(
+                BoundaryEvent,
+                BoundaryEventPayload.distrust(list(&windows, host)),
+                Tag::Distrust
+            )
+        }
+        Event::Arrange { now, want, desires: wanted } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.arrange(abi::BoundaryArrangeOf {
+                now: now.0,
+                want: match want {
+                    Want::Arrange => abi::BoundaryWant::Arrange,
+                    Want::ArrangePositions => abi::BoundaryWant::ArrangePositions,
+                },
+                desires: desires(wanted, host),
+            }),
+            Tag::Arrange
+        ),
+        Event::Animate { now, desires: wanted } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.animate(abi::BoundaryAnimateOf {
+                now: now.0,
+                desires: desires(wanted, host)
+            }),
+            Tag::Animate
+        ),
+        Event::AnimationEnded { now, request } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.animation_ended(stamp(now, request)),
+            Tag::AnimationEnded
+        ),
+        Event::AnimationStopped { window: id, request, at } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.animation_stopped(abi::BoundaryAnimationStop {
+                window: window(id),
+                request: request.0,
+                at: match at {
+                    Some(frame) => union!(
+                        BoundaryStoppedAt,
+                        BoundaryStoppedAtPayload.stopped_at(rect(frame)),
+                        At::StoppedAt
+                    ),
+                    None => union!(
+                        BoundaryStoppedAt,
+                        BoundaryStoppedAtPayload.not_published,
+                        At::NotPublished
+                    ),
+                },
+            }),
+            Tag::AnimationStopped
+        ),
+        Event::Follow { request, window: id, frame } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.follow(abi::BoundaryFollowOf {
+                request: request.0,
+                window: window(id),
+                frame: rect(frame)
+            }),
+            Tag::Follow
+        ),
+        Event::Observe {
+            now,
+            request,
+            window: id,
+            frame,
+            as_of,
+        } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.observe(abi::BoundaryObservation {
+                now: now.0,
+                request: request.0,
+                window: window(id),
+                frame: rect(frame),
+                as_of: match as_of {
+                    Some(stamped) =>
+                        union!(BoundaryAsOf, BoundaryAsOfPayload.as_of(stamped.0), AsOf::AsOf),
+                    None => union!(BoundaryAsOf, BoundaryAsOfPayload.unstamped, AsOf::Unstamped),
+                },
+            }),
+            Tag::Observe
+        ),
+        Event::Tick { now, request } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.tick(stamp(now, request)),
+            Tag::Tick
+        ),
+        Event::Forget { window: id } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.forget(window(id)),
+            Tag::Forget
+        ),
+        Event::SentOutside { window: id, request } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.sent_outside(abi::BoundarySentOutsideOf {
+                window: window(id),
+                request: request.0
+            }),
+            Tag::SentOutside
+        ),
+    }
+}
+
+fn from_write(write: &abi::BoundaryWriteEffect) -> Write<Plain> {
+    Write::foreign(
+        from_window(write.window),
+        from_rect(write.frame),
+        RequestId(write.request),
+    )
+}
+
+fn from_effect(effect: &abi::BoundaryEffect) -> Effect<Plain> {
+    use abi::BoundaryEffectTag as Tag;
+    // SAFETY (each arm): the tag says what the payload is.
+    unsafe {
+        match effect.tag {
+            Tag::Write => Effect::Write(from_write(effect.borrow_payload_write_unchecked())),
+            Tag::Animate => {
+                let animate = effect.borrow_payload_animate_unchecked();
+                Effect::Animate {
+                    window: from_window(animate.window),
+                    from: from_rect(animate.from),
+                    to: from_rect(animate.to),
+                    request: RequestId(animate.request),
+                }
+            }
+            Tag::Pending => {
+                let pending = effect.borrow_payload_pending_unchecked();
+                Effect::Pending {
+                    window: from_window(pending.window),
+                    target: match pending.target.tag {
+                        abi::BoundaryPendingTargetTag::Target => {
+                            Some(from_rect(*pending.target.borrow_payload_target_unchecked()))
+                        }
+                        abi::BoundaryPendingTargetTag::NoTarget => None,
+                    },
+                }
+            }
+            Tag::Plan => {
+                let plan = effect.borrow_payload_plan_unchecked();
+                Effect::Plan(Plan::foreign(
+                    RequestId(plan.request),
+                    plan.positions.as_slice().iter().map(from_write).collect(),
+                    plan.frames.as_slice().iter().map(from_write).collect(),
+                ))
+            }
+            Tag::Queued => Effect::Queued {
+                window: from_window(*effect.borrow_payload_queued_unchecked()),
+            },
+            Tag::Seen => {
+                let seen = effect.borrow_payload_seen_unchecked();
+                Effect::Seen {
+                    window: from_window(seen.window),
+                    frame: from_rect(seen.frame),
+                }
+            }
+            Tag::Replied => {
+                let replied = effect.borrow_payload_replied_unchecked();
+                Effect::Replied {
+                    window: from_window(replied.window),
+                    reply: match replied.reply {
+                        abi::BoundaryReply::NoNews => Reply::NoNews,
+                        abi::BoundaryReply::InTransit => Reply::InTransit,
+                        abi::BoundaryReply::Acked => Reply::Answered(Answer::Acked),
+                        abi::BoundaryReply::Refused => Reply::Answered(Answer::Refused),
+                        abi::BoundaryReply::Foreign => Reply::Foreign,
+                    },
+                }
+            }
+            Tag::Note => {
+                let noted = effect.borrow_payload_note_unchecked();
+                Effect::Note {
+                    window: from_window(noted.window),
+                    note: match noted.note {
+                        abi::BoundaryNoteKind::Discarded => Note::Discarded,
+                        abi::BoundaryNoteKind::TimedOut => Note::TimedOut,
+                    },
+                }
+            }
+            Tag::Timer => {
+                let armed = effect.borrow_payload_timer_unchecked();
+                Effect::Timer(match armed.tag {
+                    abi::BoundaryArmedTag::Armed => {
+                        Some(Nanos(*armed.borrow_payload_armed_unchecked()))
+                    }
+                    abi::BoundaryArmedTag::Disarmed => None,
+                })
+            }
+            Tag::Grip => Effect::Grip {
+                window: from_window(*effect.borrow_payload_grip_unchecked()),
+            },
+            Tag::DragBegan => Effect::DragBegan {
+                window: from_window(*effect.borrow_payload_drag_began_unchecked()),
+            },
+            Tag::Ungrip => {
+                let ungrip = effect.borrow_payload_ungrip_unchecked();
+                Effect::Ungrip {
+                    window: from_window(ungrip.window),
+                    why: match ungrip.why {
+                        abi::BoundaryUngripWhy::Released => Ungrip::Released,
+                        abi::BoundaryUngripWhy::LetGo => Ungrip::LetGo,
+                        abi::BoundaryUngripWhy::Gone => Ungrip::Gone,
+                    },
+                    changed: ungrip.changed.as_slice().iter().copied().map(from_window).collect(),
+                }
+            }
+            Tag::Regrip => {
+                let regrip = effect.borrow_payload_regrip_unchecked();
+                Effect::Regrip {
+                    from: from_window(regrip.from),
+                    to: from_window(regrip.to),
+                }
+            }
+        }
+    }
+}
+
+/// The effects Roc decided, read out and released.
+pub(crate) fn effects(
+    effects: abi::RocList<abi::BoundaryEffect>,
+    host: &abi::RocHost,
+) -> Vec<Effect<Plain>> {
+    let decided = effects.as_slice().iter().map(from_effect).collect();
+    // SAFETY: the list is Roc's answer, owned here and read in full above.
+    unsafe { abi::decref_list_of_boundary_effect(effects, host) };
+    decided
 }
