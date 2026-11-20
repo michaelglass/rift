@@ -337,6 +337,10 @@ pub enum Event {
         Option<TransactionId>,
         Requested,
     ),
+    /// The app actor could not deliver the frame written to the window under the transaction
+    /// (its AX call failed, or the write was dropped for a stale authority): it never reached
+    /// the app.
+    WindowFrameWriteFailed(WindowId, TransactionId),
     WindowTitleChanged(WindowId, String),
     MenuOpened(pid_t),
     MenuClosed(pid_t),
@@ -1484,6 +1488,7 @@ impl Reactor {
         match event {
             Event::DragMotion(..) => {}
             Event::WindowFrameChanged(..)
+            | Event::WindowFrameWriteFailed(..)
             | Event::PointerPressed { .. }
             | Event::PointerReleased(_)
             | Event::MouseMoved(..) => {
@@ -2222,6 +2227,16 @@ impl Reactor {
                 let mut outcome = self.observe_frame(wid, new_frame, as_of)?;
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
+            }
+            Event::WindowFrameWriteFailed(wid, failed) => {
+                // The write never reached the app: the core counts the failure, and the next
+                // arrange writes the frame again (given up after three in a row). A desire
+                // waiting behind it goes out now.
+                let request = self.state.tx.next_id();
+                if let Some(write) = self.state.write_failed(request, wid, failed) {
+                    self.send_arranged(write);
+                }
+                return Ok(EventOutcome::no_change());
             }
             Event::WindowTitleChanged(wid, new_title) => {
                 if self.config.settings.ui.stack_line.enabled
@@ -7700,6 +7715,7 @@ fn commits(event: &Event) -> bool {
     !matches!(
         event,
         Event::WindowFrameChanged(_, _, _, Requested(true))
+            | Event::WindowFrameWriteFailed(..)
             | Event::WindowTitleChanged(..)
             | Event::MenuOpened(_)
             | Event::MenuClosed(_)

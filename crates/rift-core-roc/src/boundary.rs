@@ -2474,6 +2474,21 @@ pub(crate) fn event(event: Event<Plain>, host: &abi::RocHost) -> abi::BoundaryEv
             }),
             Tag::SentOutside
         ),
+        Event::WriteFailed {
+            now,
+            request,
+            window: id,
+            failed,
+        } => union!(
+            BoundaryEvent,
+            BoundaryEventPayload.write_failed(abi::BoundaryWriteFailure {
+                now: now.0,
+                request: request.0,
+                window: window(id),
+                failed: failed.0
+            }),
+            Tag::WriteFailed
+        ),
     }
 }
 
@@ -2550,6 +2565,7 @@ fn from_effect(effect: &abi::BoundaryEffect) -> Effect<Plain> {
                     note: match noted.note {
                         abi::BoundaryNoteKind::Discarded => Note::Discarded,
                         abi::BoundaryNoteKind::TimedOut => Note::TimedOut,
+                        abi::BoundaryNoteKind::GaveUp => Note::GaveUp,
                     },
                 }
             }

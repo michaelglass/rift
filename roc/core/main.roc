@@ -39,7 +39,7 @@ Effect : [
 	Queued(WindowId),
 	Seen({ window : WindowId, frame : Rect }),
 	Replied({ window : WindowId, reply : Reply }),
-	Note({ window : WindowId, note : [Discarded, TimedOut] }),
+	Note({ window : WindowId, note : [Discarded, TimedOut, GaveUp] }),
 	Timer(Armed),
 	Grip(WindowId),
 	DragBegan(WindowId),
@@ -56,8 +56,12 @@ Before : [AckedBefore(Rect), UnknownBefore]
 ## A desire waiting behind the write in flight: the latest, or none.
 Waiting : [Waiting(Rect), NoneWaiting]
 
+## How many deliveries of one desire failed in a row; a third gives it up, so there is no third.
+Failures : [Once, Twice]
+
 ## Where a write in flight came from: only an ended animation's can be stopped by the platform.
-Origin : [Written, AnimationEnded]
+## A retry is Rift writing a frame again after `Failures` deliveries of it failed.
+Origin : [Written, AnimationEnded, Retry(Failures)]
 
 ## Where one window stands between what Rift asked of its app and what the app answered.
 Sync : [
@@ -66,6 +70,10 @@ Sync : [
 	InFlight({ target : Rect, deadline : U64, queued : Waiting, request : U32, before : Before, origin : Origin }),
 	Animating({ target : Rect, request : U32 }),
 	Refused({ wanted : Rect, got : Rect, request : U32 }),
+
+	## The write under `request` asking for `wanted` never reached the app, `failures` times in
+	## a row for this desire; the next desire for `wanted` writes it again.
+	Failed({ wanted : Rect, failures : Failures, request : U32, before : Before }),
 
 	## Rift moves the window outside the core (a gesture's camera) under `request`, which the
 	## platform reported; `at` is where the app last reported it.
@@ -429,6 +437,7 @@ last_of = |sync|
 		InFlight({ request, .. }) => Sent(request)
 		Animating({ request, .. }) => Sent(request)
 		Refused({ request, .. }) => Sent(request)
+		Failed({ request, .. }) => Sent(request)
 		Outside({ request, .. }) => Sent(request)
 	}
 
@@ -438,6 +447,7 @@ pending_of = |sync|
 		InFlight({ target, .. }) => Target(target)
 		Animating({ target, .. }) => Target(target)
 		Refused({ wanted, .. }) => Target(wanted)
+		Failed({ wanted, .. }) => Target(wanted)
 		Settled(_) => NoTarget
 		Unknown(_) => NoTarget
 		Outside(_) => NoTarget
@@ -451,6 +461,7 @@ before_of = |sync|
 		Refused({ got, .. }) => AckedBefore(got)
 		Unknown(_) => UnknownBefore
 		InFlight({ before, .. }) => before
+		Failed({ before, .. }) => before
 		Outside({ at, .. }) => AckedBefore(at)
 	}
 
@@ -496,6 +507,7 @@ rekey = |model, from, to| {
 							InFlight(_) => Unknown(last_of(sync))
 							Animating(_) => Unknown(last_of(sync))
 							Refused(_) => Unknown(last_of(sync))
+							Failed(_) => Unknown(last_of(sync))
 							Outside(_) => Unknown(last_of(sync))
 						}
 					{ ..model, windows: model.windows.insert(to, { seen, sync: kept }), touched: model.touched.append(to) }
@@ -506,7 +518,7 @@ rekey = |model, from, to| {
 	remove(moved, from)
 }
 
-note : Model, WindowId, [Discarded, TimedOut] -> Model
+note : Model, WindowId, [Discarded, TimedOut, GaveUp] -> Model
 note = |model, window, what| { ..model, notes: model.notes.append(Note({ window, note: what })) }
 
 distrust : Model, WindowId -> Model
@@ -516,15 +528,15 @@ distrust = |model, window|
 		Ok(record) =>
 			match record.sync {
 				InFlight(flight) => set(model, window, InFlight({ ..flight, before: UnknownBefore }))
-				Settled(_) | Refused(_) | Unknown(_) | Animating(_) | Outside(_) => set(model, window, Unknown(last_of(record.sync)))
+				Settled(_) | Refused(_) | Failed(_) | Unknown(_) | Animating(_) | Outside(_) => set(model, window, Unknown(last_of(record.sync)))
 			}
 	}
 
-send : Model, U64, U32, WindowId, Rect, Before -> (Model, WriteFx)
-send = |model, now, request, window, frame, before| {
+send : Model, U64, U32, WindowId, Rect, Before, Origin -> (Model, WriteFx)
+send = |model, now, request, window, frame, before, origin| {
 	deadline = now + write_deadline_ns
 	queued_up = { ..model, deadlines: model.deadlines.append({ deadline, window }) }
-	sent = set(queued_up, window, InFlight({ target: frame, deadline, queued: NoneWaiting, request, before, origin: Written }))
+	sent = set(queued_up, window, InFlight({ target: frame, deadline, queued: NoneWaiting, request, before, origin }))
 	(sent, { window, frame, request })
 }
 
@@ -556,7 +568,7 @@ want = |model0, now, request, window, desired, whose|
 							(model0, sync0)
 						}
 
-					Settled(_) | Refused(_) | Unknown(_) | Animating(_) | Outside(_) => (model0, sync0)
+					Settled(_) | Refused(_) | Failed(_) | Unknown(_) | Animating(_) | Outside(_) => (model0, sync0)
 				}
 			match whose {
 				# Discarded, not queued: the release re-derives the window's frame.
@@ -569,7 +581,7 @@ want = |model0, now, request, window, desired, whose|
 want_from : Model, U64, U32, WindowId, Rect, Rect, Sync -> (Model, Verdict)
 want_from = |model, now, request, window, desired, known, sync| {
 	write = |{}| {
-		(sent, fx) = send(model, now, request, window, desired, before_of(sync))
+		(sent, fx) = send(model, now, request, window, desired, before_of(sync), Written)
 		(sent, Send(fx))
 	}
 	match sync {
@@ -594,6 +606,15 @@ want_from = |model, now, request, window, desired, known, sync| {
 				write({})
 			}
 
+		# A delivery of it failed: written again, the failures counted.
+		Failed({ wanted, failures, before, .. }) =>
+			if same_as(desired, wanted) {
+				(sent, fx) = send(model, now, request, window, desired, before, Retry(failures))
+				(sent, Send(fx))
+			} else {
+				write({})
+			}
+
 		# As near as an answer to this very desire would be (a terminal rounds to whole cells).
 		Settled({ acked, .. }) => if (answers(desired, acked)) (model, Nothing) else write({})
 		Animating({ target, .. }) => if (same_as(desired, target)) (model, Nothing) else write({})
@@ -613,7 +634,7 @@ release = |model, now, request, window, next, whose, after|
 	match whose {
 		User => (note(model, window, Discarded), [])
 		Rift => {
-			(sent, fx) = send(model, now, request, window, next, before_of(after))
+			(sent, fx) = send(model, now, request, window, next, before_of(after), Written)
 			(sent, [fx])
 		}
 	}
@@ -685,8 +706,9 @@ answer = |model, read, whose, latest, sync, placed| {
 		# One of Rift's frames sent outside the core: where the app has the window, the frames
 		# still coming.
 		Outside({ request, .. }) => (set(model, window, Outside({ request, at: frame })), InTransit, [])
-		# The answer to a write Rift stopped waiting for: news like any report.
-		Settled(_) | Unknown(_) | Refused(_) => placed({})
+		# The answer to a write Rift stopped waiting for, or to one whose delivery failed: news
+		# like any report.
+		Settled(_) | Unknown(_) | Refused(_) | Failed(_) => placed({})
 	}
 }
 
@@ -700,7 +722,9 @@ place = |model, window, sync, frame, known, hand| {
 				# A refusal stands while the window stays where the model has it, and so do
 				# Rift's frames sent outside the core.
 				Refused(_) | Outside(_) => (model, NoNews)
-				Settled(_) | Unknown(_) | InFlight(_) | Animating(_) => settled(NoNews)
+				# A failed write landed after all, or the app reports the window where the model
+				# has it: settled there.
+				Settled(_) | Unknown(_) | Failed(_) | InFlight(_) | Animating(_) => settled(NoNews)
 			}
 		} else {
 			settled(Foreign)
@@ -729,7 +753,7 @@ place = |model, window, sync, frame, known, hand| {
 				User => news({})
 			}
 
-		Settled(_) | Refused(_) | Unknown(_) | Outside(_) => news({})
+		Settled(_) | Refused(_) | Failed(_) | Unknown(_) | Outside(_) => news({})
 	}
 }
 
@@ -746,7 +770,7 @@ waiting = |model, entry|
 						NotWaiting
 					}
 
-				Settled(_) | Refused(_) | Unknown(_) | Animating(_) | Outside(_) => NotWaiting
+				Settled(_) | Refused(_) | Failed(_) | Unknown(_) | Animating(_) | Outside(_) => NotWaiting
 			}
 
 		Err(_) => NotWaiting
@@ -826,8 +850,9 @@ animate_one = |model, now, request, window, desired, whose|
 			# Where the window is taken to be: what is pending for it, else where the model sees it.
 			already =
 				match sync {
-					# A write is with the app, or where the app has the window is unknown: written.
-					InFlight(_) | Unknown(_) => Written
+					# A write is with the app, or where the app has the window is unknown: written. A
+					# delivery that failed is written again, as a write.
+					InFlight(_) | Unknown(_) | Failed(_) => Written
 					Animating({ target, .. }) => if (same_as(target, desired)) There else NotThere
 					Refused({ wanted, .. }) => if (same_as(wanted, desired)) There else NotThere
 					Settled(_) => if (answers(desired, known)) There else NotThere
@@ -872,7 +897,7 @@ animation_ended = |model0, now, request| {
 			|(_, record)|
 				match record.sync {
 					Animating({ request: sent, .. }) => sent == request
-					Settled(_) | Refused(_) | Unknown(_) | InFlight(_) | Outside(_) => False
+					Settled(_) | Refused(_) | Failed(_) | Unknown(_) | InFlight(_) | Outside(_) => False
 				},
 		).sort_with(|(a, _), (b, _)| window_order(a, b))
 	deadline = now + write_deadline_ns
@@ -884,7 +909,7 @@ animation_ended = |model0, now, request| {
 				$model = set(queued_up, window, InFlight({ target, deadline, queued: NoneWaiting, request, before: UnknownBefore, origin: AnimationEnded }))
 			}
 
-			Settled(_) | Refused(_) | Unknown(_) | InFlight(_) | Outside(_) => {}
+			Settled(_) | Refused(_) | Failed(_) | Unknown(_) | InFlight(_) | Outside(_) => {}
 		}
 	}
 	$model
@@ -903,8 +928,9 @@ animation_stopped = |model, window, request|
 					if (sent == request) set(model, window, Unknown(Sent(request))) else model
 
 				InFlight({ origin: Written, .. }) => model
+				InFlight({ origin: Retry(_), .. }) => model
 
-				Settled(_) | Refused(_) | Unknown(_) | Outside(_) => model
+				Settled(_) | Refused(_) | Failed(_) | Unknown(_) | Outside(_) => model
 			}
 	}
 
@@ -917,6 +943,10 @@ forget_sync = |model, window|
 			match sync {
 				Settled({ acked, .. }) => (model, AckedAt(acked))
 				Refused({ got, .. }) => (set(model, window, Settled({ acked: got, last: last_of(sync) })), AckedAt(got))
+				Failed({ before: AckedBefore(got), .. }) => (set(model, window, Settled({ acked: got, last: last_of(sync) })), AckedAt(got))
+				# A failed write never reached the app, but where it had the window before is not
+				# known either.
+				Failed({ before: UnknownBefore, .. }) => (set(model, window, Unknown(last_of(sync))), NotAcked)
 				InFlight(_) | Animating(_) | Unknown(_) | Outside(_) => (set(model, window, Unknown(last_of(sync))), NotAcked)
 			}
 	}
@@ -1001,7 +1031,7 @@ cede = |model, window|
 						NoneWaiting => (model, [])
 					}
 
-				Settled(_) | Unknown(_) | Animating(_) | Refused(_) | Outside(_) => forget(model, window)
+				Settled(_) | Unknown(_) | Animating(_) | Refused(_) | Failed(_) | Outside(_) => forget(model, window)
 			}
 
 		Err(_) => forget(model, window)
@@ -1129,6 +1159,52 @@ animate = |model0, now, desires| {
 	}
 	($model, $effects)
 }
+
+## The platform could not deliver the write to `window` sent under `failed`: it never reached
+## the app. The write in flight under that request becomes `Failed`, so the next desire for its
+## frame writes it again; a third failure in a row gives the desire up as refused (noted). What
+## waited behind it goes out under `request`. A failure of any other write changes nothing.
+failed_write : Model, U64, U32, WindowId, U32, [Rift, User] -> (Model, [StaleFailure, WillRetry, GivenUp(Before)], List(WriteFx))
+failed_write = |model, now, request, window, failed, whose|
+	match model.windows.get(window) {
+		Err(_) => (model, StaleFailure, [])
+		Ok(record) =>
+			match record.sync {
+				InFlight(flight) =>
+					if flight.request != failed {
+						(model, StaleFailure, [])
+					} else {
+						next =
+							match flight.origin {
+								Written => RetryAs(Once)
+								AnimationEnded => RetryAs(Once)
+								Retry(Once) => RetryAs(Twice)
+								Retry(Twice) => GiveUp
+							}
+						(failure, after, noted) =
+							match next {
+								RetryAs(failures) => (WillRetry, Failed({ wanted: flight.target, failures, request: flight.request, before: flight.before }), model)
+								GiveUp => {
+									given_up =
+										match flight.before {
+											AckedBefore(got) => Refused({ wanted: flight.target, got, request: flight.request })
+											UnknownBefore => Unknown(Sent(flight.request))
+										}
+									(GivenUp(flight.before), given_up, note(model, window, GaveUp))
+								}
+							}
+						answered = set(noted, window, after)
+						(released, writes) =
+							match flight.queued {
+								Waiting(desire) => release(answered, now, request, window, desire, whose, after)
+								NoneWaiting => (answered, [])
+							}
+						(released, failure, writes)
+					}
+
+				Settled(_) | Refused(_) | Failed(_) | Unknown(_) | Animating(_) | Outside(_) => (model, StaleFailure, [])
+			}
+	}
 
 decide : Model, Event -> (Model, List(Effect))
 decide = |model, event| {
@@ -1258,6 +1334,22 @@ decide = |model, event| {
 		Tick({ now, request }) => {
 			(expired, released) = expire(model, now, request, grip)
 			all_written(expired, released)
+		}
+
+		WriteFailed({ now, request, window, failed }) => {
+			(after, failure, released) = failed_write(model, now, request, window, failed, owner(grip, window))
+			# Given up: the frame Rift asked for never reached the app, so the model takes the
+			# window to be where the app last acknowledged it, if that is known.
+			(seen_model, seen_fx) =
+				match failure {
+					GivenUp(AckedBefore(got)) => {
+						(at_got, fx) = see_fx(after, window, got)
+						(at_got, [fx])
+					}
+					GivenUp(UnknownBefore) | WillRetry | StaleFailure => (after, [])
+				}
+			(sent, fx) = all_written(seen_model, released)
+			(sent, seen_fx.concat(fx))
 		}
 
 		Forget(window) => forget(model, window)

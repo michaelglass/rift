@@ -608,6 +608,10 @@ Boundary := [].{
 
 	SentOutsideOf := { window : WindowId, request : U32 }
 
+	## The platform could not deliver the write sent under `failed`; a desire waiting behind it
+	## goes out under `request`.
+	WriteFailure := { now : U64, request : U32, window : WindowId, failed : U32 }
+
 	Event := [
 		Press(Press),
 		Drag(WindowId),
@@ -630,6 +634,7 @@ Boundary := [].{
 		Tick(Stamp),
 		Forget(WindowId),
 		SentOutside(SentOutsideOf),
+		WriteFailed(WriteFailure),
 	]
 
 	## A frame written to a window under a request.
@@ -647,7 +652,7 @@ Boundary := [].{
 
 	ReplyEffect := { window : WindowId, reply : Reply }
 
-	NoteKind := [Discarded, TimedOut]
+	NoteKind := [Discarded, TimedOut, GaveUp]
 
 	NoteEffect := { window : WindowId, note : NoteKind }
 

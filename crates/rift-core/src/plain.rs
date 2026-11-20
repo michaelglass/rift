@@ -246,6 +246,12 @@ impl<K: Kinds> Event<K> {
                 frame: to.frame(frame),
                 as_of: as_of.map(|request| to.request(request)),
             },
+            Event::WriteFailed { now, request, window, failed } => Event::WriteFailed {
+                now: to.time(now),
+                request: to.request(request),
+                window: w(window),
+                failed: to.request(failed),
+            },
             Event::Tick { now, request } => Event::Tick {
                 now: to.time(now),
                 request: to.request(request),

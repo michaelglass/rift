@@ -14,6 +14,38 @@ use crate::sys::geometry::{Round, SameAs};
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn a_frame_write_that_failed_is_written_again_at_the_next_arrange() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let _ = apps.requests();
+    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.1 });
+    // The arrange's writes, left unanswered.
+    let writes = |requests: Vec<Request>| -> Vec<(WindowId, CGRect, TransactionId)> {
+        requests
+            .into_iter()
+            .flat_map(|request| match request {
+                Request::SetWindowFrames(frames, txid, ..) => frames
+                    .into_iter()
+                    .map(|(window, frame)| (window, frame, txid))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    };
+    let sent = writes(apps.requests());
+    let &(window, frame, txid) = sent.first().expect("the resize writes a window");
+    reactor.handle_event(Event::WindowFrameWriteFailed(window, txid));
+    reactor.update_layout_or_warn_with(false, false, None, "test");
+    let again = writes(apps.requests());
+    assert!(
+        again.iter().any(|&(w, f, _)| w == window && f.same_as(frame)),
+        "the failed write to {window:?} was not written again: {again:?}"
+    );
+}
+
+#[test]
 fn a_window_created_during_a_drag_is_tiled_at_the_release_not_before() {
     // #698: "defer tiling newly detached windows until release". A browser tab torn off during
     // a drag is a window created mid-drag: nothing is laid out for it while the user drags, and

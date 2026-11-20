@@ -696,6 +696,18 @@ impl RiftState {
         (reply, released)
     }
 
+    /// The app actor could not deliver the write to `window` sent under `failed`. Returns the
+    /// desire that waited behind it, which goes out under `request`.
+    pub(crate) fn write_failed(
+        &mut self,
+        request: TransactionId,
+        window: WindowId,
+        failed: TransactionId,
+    ) -> Option<Write> {
+        let now = self.core.clock.now();
+        writes(self.step(Event::WriteFailed { now, request, window, failed })).next()
+    }
+
     /// Stops waiting for writes past their deadline; returns what waited behind them, which
     /// goes out under `request`.
     pub(crate) fn expire(&mut self, request: TransactionId) -> Vec<Write> {

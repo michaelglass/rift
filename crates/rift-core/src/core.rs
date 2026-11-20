@@ -10,7 +10,9 @@
 
 use crate::Kinds;
 use crate::pointer::{Button, Grip, Phase, Pointer, Release, Ungrip};
-use crate::reconciler::{Answer, Note, Planned, Reconciler, Reply, Stamp, Verdict, Want, Write};
+use crate::reconciler::{
+    Answer, Before, Failure, Note, Planned, Reconciler, Reply, Stamp, Verdict, Want, Write,
+};
 
 /// One window's place in an arrange pass, and the request its write would go out under (one
 /// per batch the platform sends: an app, and whether its writes are held to scrolling bounds).
@@ -108,6 +110,15 @@ pub enum Event<K: Kinds> {
     },
     /// The deadline timer fired.
     Tick { now: K::Time, request: K::Request },
+    /// The platform could not deliver the write sent to `window` under `failed` (its AX call
+    /// failed, or the write was dropped for a stale authority): it never reached the app, so
+    /// it is not an answer. A desire waiting behind it goes out under `request`.
+    WriteFailed {
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        failed: K::Request,
+    },
     /// Something outside the core (an animation, a topology change) took `window`'s frame, or
     /// the window is gone: nothing is outstanding.
     Forget { window: K::Window },
@@ -418,6 +429,21 @@ impl<K: Kinds> RustCore<K> {
                 effects.extend(released.into_iter().flat_map(|write| self.written(write)));
                 effects
             }
+            Event::WriteFailed { now, request, window, failed } => {
+                let owner = pointer.owner(window);
+                let (failure, released) =
+                    self.reconciler.failed(now, request, window, failed, owner);
+                // Given up: the frame Rift asked for never reached the app, so the model takes
+                // the window to be where the app last acknowledged it, if that is known.
+                let mut effects = match failure {
+                    Failure::GaveUp(Before::Acked(got)) => vec![self.see(window, got)],
+                    Failure::GaveUp(Before::Unknown) | Failure::Retrying | Failure::Stale => {
+                        Vec::new()
+                    }
+                };
+                effects.extend(released.into_iter().flat_map(|write| self.written(write)));
+                effects
+            }
             Event::Tick { now, request } => {
                 let released = self.reconciler.expire(now, request, pointer);
                 released.into_iter().flat_map(|write| self.written(write)).collect()
@@ -611,6 +637,87 @@ mod tests {
             !again.iter().any(|effect| matches!(effect, Effect::Plan(_) | Effect::Write(_))),
             "the refused desire was written again: {again:?}"
         );
+    }
+
+    /// The frames a step's effects write `W` (moves and resizes alike).
+    fn writes_to_w(effects: &[Effect<Plain>]) -> Vec<Rect> {
+        effects
+            .iter()
+            .flat_map(|effect| match effect {
+                Effect::Plan(plan) => plan
+                    .positions()
+                    .iter()
+                    .chain(plan.frames())
+                    .filter(|write| write.window() == W)
+                    .map(|write| write.frame())
+                    .collect(),
+                Effect::Write(write) if write.window() == W => vec![write.frame()],
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Layout's pass wanting `W` at `desired` at `now`, its write under `request`.
+    fn arrange(now: u64, desired: Rect, request: u32) -> Event<Plain> {
+        Event::Arrange {
+            now: Nanos(now),
+            want: Want::Arrange,
+            desires: vec![Desire {
+                window: W,
+                frame: desired,
+                request: RequestId(request),
+            }],
+        }
+    }
+
+    /// The platform could not deliver the write sent under `failed` (an AX error): it never
+    /// reached the app.
+    fn failed(now: u64, failed: u32) -> Event<Plain> {
+        Event::WriteFailed {
+            now: Nanos(now),
+            request: RequestId(1000 + failed),
+            window: W,
+            failed: RequestId(failed),
+        }
+    }
+
+    #[test]
+    fn a_write_that_failed_is_written_again_at_the_next_arrange() {
+        let mut core = RustCore::<Plain>::default();
+        core.step(Event::Seen { window: W, frame: at(0.) });
+        assert_eq!(writes_to_w(&core.step(arrange(1, at(10.), 1))), vec![at(10.)]);
+        core.step(failed(2, 1));
+        assert_eq!(
+            writes_to_w(&core.step(arrange(3, at(10.), 2))),
+            vec![at(10.)],
+            "the failed write was not written again"
+        );
+    }
+
+    #[test]
+    fn a_write_that_fails_three_times_is_given_up_as_refused() {
+        let mut core = RustCore::<Plain>::default();
+        core.step(Event::Seen { window: W, frame: at(0.) });
+        assert_eq!(writes_to_w(&core.step(arrange(1, at(10.), 1))), vec![at(10.)]);
+        core.step(failed(2, 1));
+        assert_eq!(writes_to_w(&core.step(arrange(3, at(10.), 2))), vec![at(10.)]);
+        core.step(failed(4, 2));
+        assert_eq!(writes_to_w(&core.step(arrange(5, at(10.), 3))), vec![at(10.)]);
+        let third = core.step(failed(6, 3));
+        assert!(
+            third.contains(&Effect::Note {
+                window: W,
+                note: crate::Note::GaveUp
+            }),
+            "{third:?}"
+        );
+        assert_eq!(
+            writes_to_w(&core.step(arrange(7, at(10.), 4))),
+            Vec::<Rect>::new(),
+            "a desire that failed three times was written a fourth time"
+        );
+        // A new, different desire is written (once).
+        assert_eq!(writes_to_w(&core.step(arrange(8, at(20.), 5))), vec![at(20.)]);
     }
 
     #[test]

@@ -213,3 +213,124 @@ fn rerecord_the_committed_traces_effects() {
     }
     eprintln!("re-recorded: {changed} of {steps} steps changed, each one the reviewed change");
 }
+
+/// Writes whose delivery fails, on random runs: arranges toward two targets (a desire queued
+/// behind a write in flight among them), failures of the latest write or an older one, answers
+/// that ack or refuse, ticks past the deadline, and distrust. Both cores must decide the same
+/// effects at every step, bit for bit. The committed traces have no failed writes.
+#[test]
+fn the_cores_retry_and_give_up_failed_writes_alike() {
+    use rift_core::plain::{Nanos, Rect, RequestId, WindowId};
+    use rift_core::reconciler::WRITE_DEADLINE;
+    use rift_core::{Desire, Event, Want};
+    let window = WindowId { pid: 7, idx: 1 };
+    let frames = [
+        Rect { x: 0., y: 0., w: 400., h: 300. },
+        Rect {
+            x: 100.,
+            y: 0.,
+            w: 400.,
+            h: 300.,
+        },
+        Rect {
+            x: 200.,
+            y: 0.,
+            w: 500.,
+            h: 300.,
+        },
+    ];
+    let deadline = u64::try_from(WRITE_DEADLINE.as_nanos()).unwrap();
+    let mut seed = 0xFA11_ED00_0000_0039u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let before = AllocationCount::now();
+    let (mut steps, mut failures, mut given_up) = (0, 0, 0);
+    for run in 0..2000 {
+        let mut rust = RustCore::<Plain>::default();
+        let mut roc = RocCore::default();
+        let (mut now, mut request) = (1u64, 1u32);
+        let mut sent: Vec<u32> = Vec::new();
+        let mut events = vec![Event::Seen { window, frame: frames[0] }];
+        for _ in 0..30 {
+            now += 1 + next() % 40;
+            request += 1;
+            let pick = next() % 10;
+            events.push(match pick {
+                0..=3 => {
+                    sent.push(request);
+                    Event::Arrange {
+                        now: Nanos(now),
+                        want: Want::Arrange,
+                        desires: vec![Desire {
+                            window,
+                            frame: frames[1 + (next() % 2) as usize],
+                            request: RequestId(request),
+                        }],
+                    }
+                }
+                4..=6 if !sent.is_empty() => {
+                    // Mostly the latest write's failure; now and then an older one's.
+                    let failed = if next() % 4 == 0 {
+                        sent[(next() % sent.len() as u64) as usize]
+                    } else {
+                        *sent.last().unwrap()
+                    };
+                    failures += 1;
+                    Event::WriteFailed {
+                        now: Nanos(now),
+                        request: RequestId(request),
+                        window,
+                        failed: RequestId(failed),
+                    }
+                }
+                7 if !sent.is_empty() => Event::Observe {
+                    now: Nanos(now),
+                    request: RequestId(request),
+                    window,
+                    frame: frames[(next() % 3) as usize],
+                    as_of: Some(RequestId(*sent.last().unwrap())),
+                },
+                8 => {
+                    now += deadline;
+                    Event::Tick {
+                        now: Nanos(now),
+                        request: RequestId(request),
+                    }
+                }
+                _ => Event::Distrust { windows: vec![window] },
+            });
+        }
+        for (index, event) in events.into_iter().enumerate() {
+            let from_rust = rust.step(event.clone());
+            let from_roc = roc.step(event.clone());
+            assert_eq!(
+                wire::encode_effects(from_roc.clone()),
+                wire::encode_effects(from_rust.clone()),
+                "run {run} step {index}: {event:?}\n  roc:  {from_roc:?}\n  rust: {from_rust:?}"
+            );
+            given_up += from_rust
+                .iter()
+                .filter(|effect| {
+                    matches!(effect, rift_core::Effect::Note {
+                        note: rift_core::Note::GaveUp,
+                        ..
+                    })
+                })
+                .count();
+            steps += 1;
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    assert!(given_up > 0, "no run gave a desire up");
+    eprintln!(
+        "differential: {steps} steps with {failures} failed writes ({given_up} given up) identical"
+    );
+}

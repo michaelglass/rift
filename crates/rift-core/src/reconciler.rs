@@ -116,6 +116,16 @@ pub enum Sync<K: Kinds> {
         got: K::Frame,
         request: Sent<K::Request>,
     },
+    /// The write sent under `request` asking for `wanted` never reached the app (the platform
+    /// reported it failed), `failures` times in a row for this desire. The next desire for
+    /// `wanted` is written again; a different one is written afresh. `before` is what the app
+    /// had acknowledged.
+    Failed {
+        wanted: K::Frame,
+        failures: Failures,
+        request: Sent<K::Request>,
+        before: Before<K>,
+    },
     /// Rift moves the window outside the core (a gesture's camera), its frames going out under
     /// `request`, which the platform reported: a read stamped with it is Rift's own. `at` is
     /// where the app last reported the window (where the model had it, until a report).
@@ -131,6 +141,48 @@ pub enum Sync<K: Kinds> {
 pub enum Origin {
     Written,
     AnimationEnded,
+    /// Rift wrote the frame again after `failures` deliveries of it failed in a row.
+    Retry {
+        failures: Failures,
+    },
+}
+
+/// How many deliveries of one desire failed in a row. A third failure gives the desire up, so
+/// there is no third value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failures {
+    Once,
+    Twice,
+}
+
+/// What a reported delivery failure came to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Failure<K: Kinds> {
+    /// Not the write in flight (an older one): nothing changes.
+    Stale,
+    /// The next desire for its frame writes it again.
+    Retrying,
+    /// The third failure in a row: the desire is given up as refused. The app has the window
+    /// where it last acknowledged it, if Rift knows where that is.
+    GaveUp(Before<K>),
+}
+
+/// What one more failed delivery of a desire comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterFailure {
+    Retry(Failures),
+    GiveUp,
+}
+
+impl Failures {
+    /// One more failure on top of `before` (none, for a first write).
+    fn after(before: Option<Failures>) -> AfterFailure {
+        match before {
+            None => AfterFailure::Retry(Failures::Once),
+            Some(Failures::Once) => AfterFailure::Retry(Failures::Twice),
+            Some(Failures::Twice) => AfterFailure::GiveUp,
+        }
+    }
 }
 
 /// What the app had acknowledged when a write was sent: where a write it never answers leaves
@@ -203,6 +255,9 @@ pub enum Note {
     Discarded,
     /// An app did not answer a write in time.
     TimedOut,
+    /// A write to the window could not be delivered three times in a row (its app's AX kept
+    /// failing): Rift stops asking for that frame, as for a refusal.
+    GaveUp,
 }
 
 fn answers<K: Kinds>(target: K::Frame, frame: K::Frame) -> bool {
@@ -250,7 +305,7 @@ impl<K: Kinds> Sync<K> {
     fn pending(self) -> Option<K::Frame> {
         match self {
             Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
-            Sync::Refused { wanted, .. } => Some(wanted),
+            Sync::Refused { wanted, .. } | Sync::Failed { wanted, .. } => Some(wanted),
             Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Outside { .. } => None,
         }
     }
@@ -262,6 +317,7 @@ impl<K: Kinds> Sync<K> {
             Sync::InFlight { request, .. }
             | Sync::Animating { request, .. }
             | Sync::Refused { request, .. }
+            | Sync::Failed { request, .. }
             | Sync::Outside { request, .. } => Some(request),
         }
     }
@@ -337,6 +393,7 @@ impl<K: Kinds> Reconciler<K> {
                 Sync::InFlight { .. }
                 | Sync::Animating { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Outside { .. } => Sync::Unknown { last: sync.last() },
             };
             self.windows.insert(to, Record { seen, sync });
@@ -369,6 +426,7 @@ impl<K: Kinds> Reconciler<K> {
             Some(
                 sync @ (Sync::Settled { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Unknown { .. }
                 | Sync::Animating { .. }
                 | Sync::Outside { .. }),
@@ -385,7 +443,7 @@ impl<K: Kinds> Reconciler<K> {
             | Sync::Outside { at: acked, .. } => Before::Acked(acked),
             Sync::Refused { got, .. } => Before::Acked(got),
             Sync::Unknown { .. } => Before::Unknown,
-            Sync::InFlight { before, .. } => before,
+            Sync::InFlight { before, .. } | Sync::Failed { before, .. } => before,
         }
     }
 
@@ -396,6 +454,7 @@ impl<K: Kinds> Reconciler<K> {
         window: K::Window,
         frame: K::Frame,
         before: Before<K>,
+        origin: Origin,
     ) -> Write<K> {
         let deadline = K::after(now, WRITE_DEADLINE);
         self.deadlines.push_back((deadline, window));
@@ -405,7 +464,7 @@ impl<K: Kinds> Reconciler<K> {
             queued: None,
             request: Sent(request),
             before,
-            origin: Origin::Written,
+            origin,
         });
         Write { window, frame, request }
     }
@@ -492,6 +551,11 @@ impl<K: Kinds> Reconciler<K> {
             {
                 Verdict::Nothing
             }
+            // A delivery of it failed: written again, the failures counted.
+            Sync::Failed { wanted, failures, before, .. } if K::same_as(desired, wanted) => {
+                let origin = Origin::Retry { failures };
+                Verdict::Send(self.send(now, request, window, desired, before, origin))
+            }
             // An animation is taking it there.
             Sync::Animating { target, .. } if K::same_as(desired, target) => Verdict::Nothing,
             // A refused window is where the model has it (a timed-out write's `got` is only what
@@ -500,11 +564,74 @@ impl<K: Kinds> Reconciler<K> {
             Sync::Settled { .. }
             | Sync::Refused { .. }
             | Sync::Unknown { .. }
+            | Sync::Failed { .. }
             | Sync::Animating { .. }
-            | Sync::Outside { .. } => {
-                Verdict::Send(self.send(now, request, window, desired, Self::before(sync)))
-            }
+            | Sync::Outside { .. } => Verdict::Send(self.send(
+                now,
+                request,
+                window,
+                desired,
+                Self::before(sync),
+                Origin::Written,
+            )),
         }
+    }
+
+    /// The platform could not deliver the write to `window` sent under `failed`: it never
+    /// reached the app. The write in flight under that request becomes [`Sync::Failed`], so the
+    /// next desire for its frame is written again; a third failure in a row gives the desire
+    /// up as refused (noted). What waited behind it goes out under `request` now. A failure of
+    /// any other write (an older one) changes nothing.
+    pub fn failed(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        failed: K::Request,
+        owner: Owner,
+    ) -> (Failure<K>, Option<Write<K>>) {
+        let Some(Sync::InFlight {
+            target,
+            queued,
+            request: sent,
+            before,
+            origin,
+            ..
+        }) = self.sync(window)
+        else {
+            return (Failure::Stale, None);
+        };
+        if sent != Sent(failed) {
+            return (Failure::Stale, None);
+        }
+        let so_far = match origin {
+            Origin::Retry { failures } => Some(failures),
+            Origin::Written | Origin::AnimationEnded => None,
+        };
+        let (failure, after) = match Failures::after(so_far) {
+            AfterFailure::Retry(failures) => (Failure::Retrying, Sync::Failed {
+                wanted: target,
+                failures,
+                request: sent,
+                before,
+            }),
+            AfterFailure::GiveUp => {
+                self.notes.push((window, Note::GaveUp));
+                let after = match before {
+                    Before::Acked(got) => Sync::Refused {
+                        wanted: target,
+                        got,
+                        request: sent,
+                    },
+                    Before::Unknown => Sync::Unknown { last: Some(sent) },
+                };
+                (Failure::GaveUp(before), after)
+            }
+        };
+        self.set(window, after);
+        let released =
+            queued.and_then(|next| self.release(now, request, window, next, owner, after));
+        (failure, released)
     }
 
     /// A write to `window` is with its app: what was queued behind it is dropped, the write
@@ -537,6 +664,7 @@ impl<K: Kinds> Reconciler<K> {
                 | Sync::Unknown { .. }
                 | Sync::Animating { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Outside { .. },
             )
             | None => false,
@@ -581,7 +709,9 @@ impl<K: Kinds> Reconciler<K> {
         after: Sync<K>,
     ) -> Option<Write<K>> {
         match owner {
-            Owner::Rift => Some(self.send(now, request, window, next, Self::before(after))),
+            Owner::Rift => {
+                Some(self.send(now, request, window, next, Self::before(after), Origin::Written))
+            }
             Owner::User => {
                 self.notes.push((window, Note::Discarded));
                 None
@@ -647,8 +777,12 @@ impl<K: Kinds> Reconciler<K> {
                     self.set(window, Sync::Outside { request: sent, at: frame });
                     return (Reply::InTransit, None);
                 }
-                // The answer to a write Rift stopped waiting for: news like any report.
-                Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Refused { .. } => {}
+                // The answer to a write Rift stopped waiting for, or to one whose delivery
+                // failed: news like any report.
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. } => {}
             },
             // A stamp the core never heard of (newer than anything sent this window), or none:
             // not Rift's, so placed by its geometry like any report.
@@ -692,6 +826,7 @@ impl<K: Kinds> Reconciler<K> {
                 Sync::InFlight { .. }
                 | Sync::Settled { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Unknown { .. }
                 | Sync::Outside { .. },
                 Holder::User | Holder::Nobody,
@@ -706,8 +841,11 @@ impl<K: Kinds> Reconciler<K> {
                         // A refusal stands while the window stays where the model has it, and
                         // so do Rift's frames sent outside the core.
                         Sync::Refused { .. } | Sync::Outside { .. } => {}
+                        // A failed write landed after all, or the app reports the window where
+                        // the model has it: settled there.
                         Sync::Settled { .. }
                         | Sync::Unknown { .. }
+                        | Sync::Failed { .. }
                         | Sync::InFlight { .. }
                         | Sync::Animating { .. } => self.set(window, settled),
                     }
@@ -758,6 +896,7 @@ impl<K: Kinds> Reconciler<K> {
             | Sync::Settled { .. }
             | Sync::Refused { .. }
             | Sync::Unknown { .. }
+            | Sync::Failed { .. }
             | Sync::Animating { .. }
             | Sync::Outside { .. } => None,
         }
@@ -818,8 +957,9 @@ impl<K: Kinds> Reconciler<K> {
         let already = match sync {
             // A write is with the app: the desire goes after it, as a write. Where the app has
             // the window is unknown: the desire is written, once, so that what the app makes of
-            // it (a refusal, say) is known (an animation may never land).
-            Sync::InFlight { .. } | Sync::Unknown { .. } => {
+            // it (a refusal, say) is known (an animation may never land). A delivery that
+            // failed is written again, as a write.
+            Sync::InFlight { .. } | Sync::Unknown { .. } | Sync::Failed { .. } => {
                 return Planned::Verdict(self.want(now, request, window, desired, owner));
             }
             Sync::Animating { target, .. } => K::same_as(target, desired),
@@ -854,6 +994,7 @@ impl<K: Kinds> Reconciler<K> {
                 | Sync::Unknown { .. }
                 | Sync::InFlight { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Outside { .. } => None,
             })
             .collect();
@@ -895,6 +1036,7 @@ impl<K: Kinds> Reconciler<K> {
                 | Sync::InFlight { .. }
                 | Sync::Settled { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Unknown { .. }
                 | Sync::Outside { .. },
             )
@@ -912,11 +1054,14 @@ impl<K: Kinds> Reconciler<K> {
         let last = sync.last();
         match sync {
             Sync::Settled { acked, .. } => Some(acked),
-            Sync::Refused { got, .. } => {
+            Sync::Refused { got, .. } | Sync::Failed { before: Before::Acked(got), .. } => {
                 self.set(window, Sync::Settled { acked: got, last });
                 Some(got)
             }
-            Sync::InFlight { .. }
+            // A failed write never reached the app, but where the app had the window before it
+            // is not known either.
+            Sync::Failed { before: Before::Unknown, .. }
+            | Sync::InFlight { .. }
             | Sync::Animating { .. }
             | Sync::Unknown { .. }
             | Sync::Outside { .. } => {

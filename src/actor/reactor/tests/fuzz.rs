@@ -836,6 +836,7 @@ impl Sim {
                 Sync::Settled { .. }
                 | Sync::Unknown { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Outside { .. } => None,
             })
             .collect();
@@ -847,6 +848,7 @@ impl Sim {
                 Sync::Unknown { .. }
                 | Sync::InFlight { .. }
                 | Sync::Refused { .. }
+                | Sync::Failed { .. }
                 | Sync::Animating { .. }
                 | Sync::Outside { .. } => None,
             })
@@ -1504,6 +1506,7 @@ impl Sim {
                 | Some(
                     Sync::Settled { .. }
                     | Sync::Refused { .. }
+                    | Sync::Failed { .. }
                     | Sync::Unknown { .. }
                     | Sync::Animating { .. }
                     | Sync::Outside { .. },
@@ -1650,8 +1653,10 @@ impl Sim {
                 }
                 let sync = self.reactor.state.core.sync(wid);
                 let observed = self.os_frame(wid);
+                // A refused window stays where its app put it; one whose write failed waits for
+                // the next arrange to write it again.
                 let refused = match sync {
-                    Some(Sync::Refused { .. }) => true,
+                    Some(Sync::Refused { .. } | Sync::Failed { .. }) => true,
                     None
                     | Some(
                         Sync::Settled { .. }

@@ -193,6 +193,13 @@ impl Words {
                 self.window(window);
                 self.request(request);
             }
+            Event::WriteFailed { now, request, window, failed } => {
+                self.word(19);
+                self.word(now.0);
+                self.request(request);
+                self.window(window);
+                self.request(failed);
+            }
         }
     }
 
@@ -756,6 +763,12 @@ impl Reader<'_> {
                 window: self.window()?,
                 request: self.request()?,
             },
+            19 => Event::WriteFailed {
+                now: self.time()?,
+                request: self.request()?,
+                window: self.window()?,
+                failed: self.request()?,
+            },
             word => return self.unknown(word),
         })
     }
@@ -799,6 +812,7 @@ impl Reader<'_> {
                 note: match self.word()? {
                     0 => Note::Discarded,
                     1 => Note::TimedOut,
+                    2 => Note::GaveUp,
                     word => return self.unknown(word),
                 },
             },
@@ -960,6 +974,12 @@ mod tests {
                 window: V,
                 request: RequestId(9),
             },
+            Event::WriteFailed {
+                now: Nanos(4),
+                request: R,
+                window: W,
+                failed: RequestId(3),
+            },
         ];
         for event in events {
             assert_eq!(decode_event(&encode_event(event.clone())), Ok(event));
@@ -1017,6 +1037,7 @@ mod tests {
                 window: W,
                 note: Note::TimedOut,
             },
+            Effect::Note { window: W, note: Note::GaveUp },
             Effect::Timer(Some(Nanos(9))),
             Effect::Timer(None),
             Effect::Grip { window: W },

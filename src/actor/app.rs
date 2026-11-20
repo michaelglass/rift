@@ -1608,8 +1608,16 @@ impl State {
                 });
             }
             Request::SetWindowFrames(frames, txid, mode, _, _) => {
-                for (wid, desired) in frames {
+                // A frame that never reaches its app is reported failed, so the core writes it
+                // again at the next arrange (and gives it up after three failures in a row)
+                // instead of waiting for an answer that will not come.
+                let windows: Vec<WindowId> = frames.iter().map(|&(wid, _)| wid).collect();
+                for (at, (wid, desired)) in frames.into_iter().enumerate() {
                     if !authority.is_current() {
+                        // Dropped for a stale authority: none of the rest go out either.
+                        for &unsent in &windows[at..] {
+                            self.send_event(Event::WindowFrameWriteFailed(unsent, txid));
+                        }
                         break;
                     }
                     let (elem, hint) = match self.window_mut(wid) {
@@ -1620,12 +1628,20 @@ impl State {
                         }
                         Err(err) => match err {
                             AxError::Ax(code) => {
+                                // An invalid element: the window is gone, reported as such.
                                 if self.handle_ax_error(wid, &code) {
                                     continue;
                                 }
+                                // The batch stops here: this frame and the rest never go out.
+                                for &unsent in &windows[at..] {
+                                    self.send_event(Event::WindowFrameWriteFailed(unsent, txid));
+                                }
                                 return Err(AxError::Ax(code));
                             }
-                            AxError::NotFound => continue,
+                            AxError::NotFound => {
+                                self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                                continue;
+                            }
                         },
                     };
 
@@ -1642,12 +1658,22 @@ impl State {
                             || self.hold_batch_eui(eui),
                         )
                     });
-                    let frame = match self.handle_ax_result(wid, result)? {
-                        Some(frame) => {
+                    if result.is_err() {
+                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                    }
+                    let frame = match self.handle_ax_result(wid, result) {
+                        Ok(Some(frame)) => {
                             self.window_mut(wid)?.last_known_frame = frame;
                             frame
                         }
-                        None => continue,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            // The batch stops here: the rest never go out.
+                            for &unsent in &windows[at + 1..] {
+                                self.send_event(Event::WindowFrameWriteFailed(unsent, txid));
+                            }
+                            return Err(error);
+                        }
                     };
 
                     self.send_event(Event::WindowFrameChanged(
