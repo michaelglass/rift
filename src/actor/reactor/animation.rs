@@ -13,7 +13,7 @@ use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::scrolling::{
-    CameraSpring, PresentedViewport, ViewportPresentation,
+    CameraSpring, PresentedViewport, ScrollingLayoutSystem, SettledViewport, ViewportPresentation,
 };
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
 use crate::model::tx_store::WindowTxStore;
@@ -195,10 +195,36 @@ pub(super) struct ViewportHandle {
 
 #[derive(Debug)]
 pub(super) struct PresentedCamera {
-    viewport: PresentedViewport,
+    phase: CameraPhase,
     gesture: Option<(f64, Duration)>,
-    active: bool,
     stopped: bool,
+}
+
+/// A running camera publishes the viewport it is presenting; an ended one only a settled
+/// viewport, so committing it can't leave an animation that nothing advances.
+#[derive(Debug)]
+enum CameraPhase {
+    Running(PresentedViewport),
+    Ended(SettledViewport),
+}
+
+impl PresentedCamera {
+    fn new(viewport: PresentedViewport) -> Self {
+        Self {
+            phase: CameraPhase::Running(viewport),
+            gesture: None,
+            stopped: false,
+        }
+    }
+
+    pub(super) fn active(&self) -> bool { matches!(self.phase, CameraPhase::Running(_)) }
+
+    fn commit(&self, system: &mut ScrollingLayoutSystem, layout: LayoutId) {
+        match &self.phase {
+            CameraPhase::Running(viewport) => system.commit_presented_viewport(layout, viewport),
+            CameraPhase::Ended(viewport) => system.commit_settled_viewport(layout, viewport),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -401,9 +427,12 @@ impl CameraAnimation {
 
     fn publish_state(&self, now: Instant) {
         let mut state = self.state.lock();
-        state.viewport = self.presentation.snapshot(now);
+        state.phase = if self.active {
+            CameraPhase::Running(self.presentation.snapshot(now))
+        } else {
+            CameraPhase::Ended(self.presentation.settled(now))
+        };
         state.gesture = self.gesture.as_ref().map(|(_, _, total, time)| (*total, *time));
-        state.active = self.active;
     }
 
     fn replace(&mut self, mut previous: Option<Self>) {
@@ -562,7 +591,7 @@ impl Reactor {
                 .get_mut(identity.workspace)
                 && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
             {
-                system.commit_presented_viewport(identity.layout, &state.viewport);
+                state.commit(system, identity.layout);
             }
             for &wid in &camera.windows {
                 let frame = if let Some(control) = &control {
@@ -588,7 +617,7 @@ impl Reactor {
                 session.applied = total;
                 session.timestamp = time;
             }
-            if !state.active {
+            if !state.active() {
                 completed.push(*space);
             }
         }
@@ -728,12 +757,7 @@ impl Reactor {
             presentation.finish();
         }
         let identity = CameraIdentity { space, workspace, layout };
-        let state = Arc::new(Mutex::new(PresentedCamera {
-            viewport: presentation.snapshot(now),
-            gesture: None,
-            active: true,
-            stopped: false,
-        }));
+        let state = Arc::new(Mutex::new(PresentedCamera::new(presentation.snapshot(now))));
         let mut next = CameraAnimation {
             presentation,
             movement: None,
@@ -1908,12 +1932,9 @@ mod tests {
                            native: &[(WindowId, CGRect)],
                            control: &PresenterControl| {
             let (presentation, frames) = system.presentation(layout).unwrap();
-            let state = Arc::new(Mutex::new(PresentedCamera {
-                viewport: presentation.snapshot(Instant::now()),
-                gesture: None,
-                active: true,
-                stopped: false,
-            }));
+            let state = Arc::new(Mutex::new(PresentedCamera::new(
+                presentation.snapshot(Instant::now()),
+            )));
             CameraAnimation {
                 presentation,
                 movement: None,
@@ -1975,7 +1996,7 @@ mod tests {
             "focus changes must still animate"
         );
         manager.tick_at(started + Duration::from_secs(2));
-        system.commit_presented_viewport(layout, &state.lock().viewport);
+        state.lock().commit(&mut system, layout);
         manager.publish_frames(&mut control, false);
         manager.retire();
         assert!(manager.motions.is_empty());
@@ -2083,7 +2104,7 @@ mod tests {
 
         // Unequal widths: move the first of three columns past its neighbor.
         next.sample(Instant::now() + Duration::from_secs(2));
-        system.commit_presented_viewport(layout, &next.state.lock().viewport);
+        next.state.lock().commit(&mut system, layout);
         system
             .edit(layout, crate::layout_engine::systems::LayoutEdit::Resize {
                 amount: -0.4,
@@ -2104,7 +2125,7 @@ mod tests {
         let mut old = make_camera(&system, &before, &PresenterControl::default());
         old.replace(None);
         old.sample(Instant::now() + Duration::from_secs(2));
-        system.commit_presented_viewport(layout, &old.state.lock().viewport);
+        old.state.lock().commit(&mut system, layout);
         let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
         assert!(
             system
@@ -2134,7 +2155,7 @@ mod tests {
 
         // Removing a preceding column rebases an in-flight camera. Preserve
         // both its position in the new coordinates and its ongoing velocity.
-        system.commit_presented_viewport(layout, &next.state.lock().viewport);
+        next.state.lock().commit(&mut system, layout);
         system.update(crate::layout_engine::systems::WindowChange::Remove(
             WindowId::new(1, 3),
         ));
@@ -2207,12 +2228,9 @@ mod tests {
                 layout,
             },
             events: None,
-            state: Arc::new(Mutex::new(PresentedCamera {
-                viewport: system.presentation(layout).unwrap().0.snapshot(now),
-                gesture: None,
-                active: true,
-                stopped: false,
-            })),
+            state: Arc::new(Mutex::new(PresentedCamera::new(
+                system.presentation(layout).unwrap().0.snapshot(now),
+            ))),
             display: 1,
             animate: false,
             scale: 2.0,
@@ -2365,15 +2383,15 @@ mod tests {
         let (events, mut events_rx) = crate::actor::channel();
         camera.events = Some(events);
         let state = camera.state.clone();
-        state.lock().active = true;
+        state.lock().phase = CameraPhase::Running(camera.presentation.snapshot(Instant::now()));
         let runner = std::thread::spawn(move || AnimationManager::run(commands_rx));
         sender.send(Message::Camera(Box::new(camera))).unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
-        while state.lock().active && Instant::now() < deadline {
+        while state.lock().active() && Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(
-            !state.lock().active,
+            !state.lock().active(),
             "completion cannot depend on another reactor event"
         );
         assert_eq!(sender.control.lock().frames[&wid].1, expected_final);
@@ -2512,10 +2530,10 @@ mod tests {
             }
             let runner = std::thread::spawn(move || AnimationManager::run(receiver));
             let deadline = Instant::now() + Duration::from_secs(2);
-            while state.lock().active && Instant::now() < deadline {
+            while state.lock().active() && Instant::now() < deadline {
                 std::thread::yield_now();
             }
-            assert!(!state.lock().active, "destination camera must run after Stop");
+            assert!(!state.lock().active(), "destination camera must run after Stop");
             let control = reactor.animation_tx.as_ref().unwrap().control.lock();
             assert!(!control.cancelled.contains(&wid));
             assert!(control.frames[&wid].1.origin.y < screens[target].max().y);

@@ -283,6 +283,14 @@ pub(crate) struct ViewportPresentation {
 /// Rendered scalar state, read only at semantic boundaries. Motion samples stay
 /// shared so release keeps the exact touchpad velocity history without cloning
 /// a camera or copying history on each display refresh.
+/// A camera's viewport once nothing drives it any more: at rest, or held by a gesture. It has
+/// no animating form, so a camera that ended can't leave its layout animating.
+#[derive(Debug)]
+pub(crate) enum SettledViewport {
+    At(f64),
+    Gesture(PresentedViewport),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PresentedViewport {
     pub offset: f64,
@@ -297,6 +305,16 @@ impl ViewportPresentation {
     pub fn offset(&self) -> f64 { self.viewport.start_offset() }
 
     pub fn gesturing(&self) -> bool { matches!(self.viewport, Viewport::Gesture(_)) }
+
+    /// Where the viewport ends up if nothing advances it from `now`: at its target, or, for a
+    /// gesture, where the hand is.
+    pub fn settled(&self, now: Instant) -> SettledViewport {
+        if self.gesturing() {
+            SettledViewport::Gesture(self.snapshot(now))
+        } else {
+            SettledViewport::At(self.target())
+        }
+    }
 
     pub fn animated(&self) -> bool { matches!(self.viewport, Viewport::Animation(_)) }
 
@@ -1461,6 +1479,17 @@ impl ScrollingLayoutSystem {
             })
             .collect();
         Some((camera, frames))
+    }
+
+    pub(crate) fn commit_settled_viewport(&mut self, layout: LayoutId, v: &SettledViewport) {
+        match v {
+            SettledViewport::Gesture(p) => self.commit_presented_viewport(layout, p),
+            SettledViewport::At(offset) => {
+                if let Some(state) = self.layouts.get_mut(layout) {
+                    state.camera.viewport = Viewport::Static(*offset);
+                }
+            }
+        }
     }
 
     pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
