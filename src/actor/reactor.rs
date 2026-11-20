@@ -76,8 +76,6 @@ use rift_core::focus::{ActivationFacts, Follow, Removal, RemovalFocus, Stay, Unt
 use rift_core::lifecycle::{
     Departure, NewWindow, OnTitleChange, RuleRun, TransientOrigin, Transition, WorkspaceMode,
 };
-#[cfg(feature = "roc-core")]
-use rift_core::plain::wire;
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
@@ -3738,11 +3736,13 @@ impl Reactor {
                 active: active.answers(Word::word, |active| active),
                 reconcilable: reconcilable.fact(|open| open),
             };
-            crate::roc_path::check_words(
+            let roc = rift_core_roc::lifecycle::reapplies_on_title_change(question.clone());
+            crate::roc_path::check(
                 "reapplies_on_title_change",
                 TitleChange::FACTS,
-                &wire::encode_title_change(question),
-                &wire::encode_verdict(reapplies),
+                &question,
+                &reapplies,
+                roc,
             );
         }
         if !reapplies {
@@ -4719,12 +4719,8 @@ impl Reactor {
                     assigned: assigned.map(Word::word),
                     native: native.map(Word::word),
                 };
-                crate::roc_path::check_words(
-                    "misplaced",
-                    Misplaced::FACTS,
-                    &wire::encode_misplaced(question),
-                    &wire::encode_verdict(misplaced),
-                );
+                let roc = Ok(rift_core_roc::lifecycle::misplaced(question));
+                crate::roc_path::check("misplaced", Misplaced::FACTS, &question, &misplaced, roc);
             }
             misplaced
         }) {
@@ -4757,11 +4753,13 @@ impl Reactor {
                         active: active.answers(Word::word, |active| active),
                         parked: parked.fact(|parked| parked),
                     };
-                    crate::roc_path::check_words(
+                    let roc = rift_core_roc::lifecycle::out_of_inventory_view(question.clone());
+                    crate::roc_path::check(
                         "out_of_inventory_view",
                         OutOfView::FACTS,
-                        &wire::encode_out_of_view(question),
-                        &wire::encode_verdict(out_of_view),
+                        &question,
+                        &out_of_view,
+                        roc,
                     );
                 }
                 out_of_view
@@ -5588,11 +5586,13 @@ impl Reactor {
                 owner: wid.pid.word(),
                 exempt: exempt.fact(|exempt| exempt),
             };
-            crate::roc_path::check_words(
+            let roc = rift_core_roc::lifecycle::is_native_transient(question.clone());
+            crate::roc_path::check(
                 "is_native_transient",
                 NativeTransient::FACTS,
-                &wire::encode_native_transient(question),
-                &wire::encode_verdict(transient),
+                &question,
+                &transient,
+                roc,
             );
         }
         if let Some(Transition::Suspended(..)) =
@@ -5634,11 +5634,13 @@ impl Reactor {
                     origin,
                     owner: t.pid.word(),
                 };
-                crate::roc_path::check_words(
+                let roc = Ok(rift_core_roc::lifecycle::keeps_transient(question));
+                crate::roc_path::check(
                     "keeps_transient",
                     KeepsTransient::FACTS,
-                    &wire::encode_keeps_transient(question),
-                    &wire::encode_verdict(keeps),
+                    &question,
+                    &keeps,
+                    roc,
                 );
             }
             keeps
@@ -5770,16 +5772,12 @@ impl Reactor {
                 spaces: spaces.answers(Word::word, |space| space.map(Word::word)),
                 active: active.answers(Word::word, |active| active),
             };
-            let answer = targets
+            let answer: Vec<(u64, Vec<u64>)> = targets
                 .iter()
                 .map(|(space, wids)| (space.word(), wids.iter().map(|&wid| wid.word()).collect()))
                 .collect();
-            crate::roc_path::check_words(
-                "rule_targets",
-                RuleTargets::FACTS,
-                &wire::encode_rule_targets_question(question),
-                &wire::encode_rule_targets(answer),
-            );
+            let roc = rift_core_roc::lifecycle::rule_targets(question.clone());
+            crate::roc_path::check("rule_targets", RuleTargets::FACTS, &question, &answer, roc);
         }
 
         let visible: Vec<_> = self.iter_active_spaces().collect();
@@ -5835,11 +5833,13 @@ impl Reactor {
                                 unavailable: outcome.unavailable,
                             },
                         };
-                        crate::roc_path::check_words(
+                        let roc = Ok(rift_core_roc::lifecycle::rule_refreshes_layout(question));
+                        crate::roc_path::check(
                             "rule_refreshes_layout",
                             RuleRefresh::FACTS,
-                            &wire::encode_rule_refresh(question),
-                            &wire::encode_verdict(refreshes),
+                            &question,
+                            &refreshes,
+                            roc,
                         );
                     }
                     if refreshes {
@@ -6933,11 +6933,13 @@ impl Reactor {
                 window: plain_window,
                 rule_names_workspace: names_workspace.fact(|names| names),
             };
-            crate::roc_path::check_words(
+            let roc = rift_core_roc::lifecycle::pointer_display_target(question.clone());
+            crate::roc_path::check(
                 "pointer_display_target",
                 PointerTarget::FACTS,
-                &wire::encode_pointer_target(question),
-                &wire::encode_maybe_space(target.map(Word::word)),
+                &question,
+                &target.map(Word::word),
+                roc,
             );
         }
         let Some(target) = target else {

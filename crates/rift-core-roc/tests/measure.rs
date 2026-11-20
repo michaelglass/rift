@@ -219,7 +219,7 @@ fn a_million_steps_leave_nothing_behind() {
 }
 
 /// Times one model-free question two ways: the Rust answer alone, and the Roc core's answer
-/// (`roc`: asked through its typed entry, or on words for a question not yet typed), each as
+/// (`roc`, asked through its typed entry), each as
 /// words; the Roc time is what `roc_path::check` adds on rift's path, the question's
 /// conversion included.
 fn question<Q: Clone>(
@@ -247,9 +247,6 @@ fn question<Q: Clone>(
     show("rust", &stats(rust_only));
     show("roc", &stats(roc_only));
 }
-
-/// The Roc core's answer to a question still on words.
-fn on_words(words: Vec<u64>) -> Vec<u64> { rift_core_roc::tile_words(&words).expect("an answer") }
 
 /// The hot focus questions S1 puts on rift's path (`focus_candidate` on every focus pass,
 /// `untracked_focus` on layout responses), at the sizes a workspace reaches.
@@ -367,7 +364,11 @@ fn measure_lifecycle_questions() {
         "is_native_transient",
         &native,
         |q| wire::encode_verdict(q.answer().expect("the facts it asks")),
-        |q| on_words(wire::encode_native_transient(q)),
+        |q| {
+            wire::encode_verdict(
+                rift_core_roc::lifecycle::is_native_transient(q).expect("the facts it asks"),
+            )
+        },
     );
     let keeps = vec![
         KeepsTransient {
@@ -393,7 +394,7 @@ fn measure_lifecycle_questions() {
         "keeps_transient",
         &keeps,
         |q| wire::encode_verdict(q.answer()),
-        |q| on_words(wire::encode_keeps_transient(q)),
+        |q| wire::encode_verdict(rift_core_roc::lifecycle::keeps_transient(q)),
     );
     let facts = |report| InventoryFacts {
         report,
@@ -423,6 +424,10 @@ fn measure_lifecycle_questions() {
         "retirement",
         &inventories,
         |q| wire::encode_retirement(q.answer().expect("the facts it asks")),
-        |q| on_words(wire::encode_inventory(q)),
+        |q| {
+            wire::encode_retirement(
+                rift_core_roc::lifecycle::retirement(q).expect("the facts it asks"),
+            )
+        },
     );
 }

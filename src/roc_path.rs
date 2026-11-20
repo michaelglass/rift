@@ -135,15 +135,16 @@ impl Word for crate::actor::app::pid_t {
     fn word(self) -> u64 { i64::from(self) as u64 }
 }
 
-/// An admission change as the plain questions carry it (its window as a word).
+/// An admission change without its window, as `net`'s question carries it (`net` does not
+/// read the window).
 #[cfg(feature = "roc-core")]
-pub(crate) fn transition(
+pub(crate) fn window_free(
     change: Option<rift_core::lifecycle::Transition<crate::actor::app::WindowId>>,
-) -> Option<rift_core::lifecycle::Transition<u64>> {
-    use rift_core::lifecycle::Transition;
+) -> Option<rift_core::lifecycle::Change> {
+    use rift_core::lifecycle::{Change, Transition};
     change.map(|change| match change {
-        Transition::Admitted(window) => Transition::Admitted(window.word()),
-        Transition::Suspended(window, why) => Transition::Suspended(window.word(), why),
+        Transition::Admitted(_) => Change::Admitted,
+        Transition::Suspended(_, why) => Change::Suspended(why),
     })
 }
 

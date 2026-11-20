@@ -1184,8 +1184,6 @@ impl WindowStore {
                 });
                 #[cfg(feature = "roc-core")]
                 {
-                    use rift_core::plain::wire;
-
                     use crate::roc_path::Word;
                     let question = rift_core::lifecycle::plain::Inventory {
                         facts: InventoryFacts {
@@ -1201,11 +1199,13 @@ impl WindowStore {
                         },
                         evidence: asked.fact(|evidence| evidence),
                     };
-                    crate::roc_path::check_words(
+                    let roc = rift_core_roc::lifecycle::retirement(question);
+                    crate::roc_path::check(
                         "retirement",
                         rift_core::lifecycle::plain::Inventory::FACTS,
-                        &wire::encode_inventory(question),
-                        &wire::encode_retirement(verdict),
+                        &question,
+                        &verdict,
+                        roc,
                     );
                 }
                 (verdict == Retirement::Retire).then_some((wid, wsid))
@@ -1445,15 +1445,10 @@ impl WindowStore {
         let change = rift_core::lifecycle::net(roles, minimized);
         #[cfg(feature = "roc-core")]
         {
-            use rift_core::plain::wire;
-
-            use crate::roc_path::transition;
-            crate::roc_path::check_words(
-                "net",
-                &[],
-                &wire::encode_net(transition(roles), transition(minimized)),
-                &wire::encode_net_change(transition(change)),
-            );
+            use crate::roc_path::window_free;
+            let question = (window_free(roles), window_free(minimized));
+            let roc = Ok(rift_core_roc::lifecycle::net(question.0, question.1));
+            crate::roc_path::check("net", &[], &question, &window_free(change), roc);
         }
         change
     }
@@ -1496,13 +1491,8 @@ impl WindowStore {
         let admission = rift_core::lifecycle::admission(facts);
         #[cfg(feature = "roc-core")]
         {
-            use rift_core::plain::wire;
-            crate::roc_path::check_words(
-                "admission",
-                &[],
-                &wire::encode_admission_facts(facts),
-                &wire::encode_window_admission(admission),
-            );
+            let roc = Ok(rift_core_roc::lifecycle::admission(facts));
+            crate::roc_path::check("admission", &[], &facts, &admission, roc);
         }
         Some(admission == Admission::Admitted)
     }

@@ -26,6 +26,19 @@ platform ""
 			discovery_spaces : DiscoveryQuestion -> DiscoveryAnswer,
 			admit_space_snapshot : AdmitQuestion -> Admission,
 			app_rule_candidates : CandidatesQuestion -> CandidatesAnswer,
+			rule_targets : RuleTargetsQuestion -> RuleTargetsAnswer,
+			rule_refreshes_layout : RuleRefreshQuestion -> Bool,
+			pointer_display_target : PointerTargetQuestion -> SpaceAnswer,
+			is_native_transient : NativeTransientQuestion -> VerdictAnswer,
+			keeps_transient : KeepsTransientQuestion -> Bool,
+			misplaced : MisplacedQuestion -> Bool,
+			out_of_inventory_view : OutOfViewQuestion -> VerdictAnswer,
+			reapplies_on_title_change : TitleChangeQuestion -> VerdictAnswer,
+			window_admission : AdmissionFacts -> WindowAdmission,
+			lifecycle_read : ReadQuestion -> ReadAnswer,
+			lifecycle_presence : PresenceQuestion -> PresenceAnswer,
+			lifecycle_net : NetQuestion -> Change,
+			inventory_retirement : InventoryQuestion -> RetirementAnswer,
 		}
 	}
 	exposes [Boundary]
@@ -51,6 +64,19 @@ platform ""
 		"roc_discovery_spaces": discovery_spaces_for_host,
 		"roc_admit_space_snapshot": admit_space_snapshot_for_host,
 		"roc_app_rule_candidates": app_rule_candidates_for_host,
+		"roc_rule_targets": rule_targets_for_host,
+		"roc_rule_refreshes_layout": rule_refreshes_layout_for_host,
+		"roc_pointer_display_target": pointer_display_target_for_host,
+		"roc_is_native_transient": is_native_transient_for_host,
+		"roc_keeps_transient": keeps_transient_for_host,
+		"roc_misplaced": misplaced_for_host,
+		"roc_out_of_inventory_view": out_of_inventory_view_for_host,
+		"roc_reapplies_on_title_change": reapplies_on_title_change_for_host,
+		"roc_window_admission": window_admission_for_host,
+		"roc_lifecycle_read": lifecycle_read_for_host,
+		"roc_lifecycle_presence": lifecycle_presence_for_host,
+		"roc_lifecycle_net": lifecycle_net_for_host,
+		"roc_inventory_retirement": inventory_retirement_for_host,
 	}
 	targets: {
 		arm64mac: {
@@ -59,7 +85,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -143,3 +169,55 @@ admit_space_snapshot_for_host = |question| (core.admit_space_snapshot)(question)
 ## The windows an activation re-applies app rules to, by app.
 app_rule_candidates_for_host : CandidatesQuestion -> CandidatesAnswer
 app_rule_candidates_for_host = |question| (core.app_rule_candidates)(question)
+
+## The windows app rules run over, by Space.
+rule_targets_for_host : RuleTargetsQuestion -> RuleTargetsAnswer
+rule_targets_for_host = |question| (core.rule_targets)(question)
+
+## Whether the layout hears of a window after its app rules ran.
+rule_refreshes_layout_for_host : RuleRefreshQuestion -> Bool
+rule_refreshes_layout_for_host = |question| (core.rule_refreshes_layout)(question)
+
+## The Space a new window moves to.
+pointer_display_target_for_host : PointerTargetQuestion -> SpaceAnswer
+pointer_display_target_for_host = |question| (core.pointer_display_target)(question)
+
+## Whether a window is a native transient.
+is_native_transient_for_host : NativeTransientQuestion -> VerdictAnswer
+is_native_transient_for_host = |question| (core.is_native_transient)(question)
+
+## Whether a transient entry survives a departure.
+keeps_transient_for_host : KeepsTransientQuestion -> Bool
+keeps_transient_for_host = |question| (core.keeps_transient)(question)
+
+## Whether a window's assignment and its native Space disagree.
+misplaced_for_host : MisplacedQuestion -> Bool
+misplaced_for_host = |question| (core.misplaced)(question)
+
+## Whether an inventory that omits a window says nothing about it.
+out_of_inventory_view_for_host : OutOfViewQuestion -> VerdictAnswer
+out_of_inventory_view_for_host = |question| (core.out_of_inventory_view)(question)
+
+## Whether a title change re-applies a window's app rules.
+reapplies_on_title_change_for_host : TitleChangeQuestion -> VerdictAnswer
+reapplies_on_title_change_for_host = |question| (core.reapplies_on_title_change)(question)
+
+## Whether rift manages a window, by its facts.
+window_admission_for_host : AdmissionFacts -> WindowAdmission
+window_admission_for_host = |question| (core.window_admission)(question)
+
+## A window's facts after a reading, and the change in its admission.
+lifecycle_read_for_host : ReadQuestion -> ReadAnswer
+lifecycle_read_for_host = |question| (core.lifecycle_read)(question)
+
+## A window's presence after an event, and what the event came to.
+lifecycle_presence_for_host : PresenceQuestion -> PresenceAnswer
+lifecycle_presence_for_host = |question| (core.lifecycle_presence)(question)
+
+## Two admission changes in a row, as one.
+lifecycle_net_for_host : NetQuestion -> Change
+lifecycle_net_for_host = |question| (core.lifecycle_net)(question)
+
+## Whether an inventory retires a window.
+inventory_retirement_for_host : InventoryQuestion -> RetirementAnswer
+inventory_retirement_for_host = |question| (core.inventory_retirement)(question)

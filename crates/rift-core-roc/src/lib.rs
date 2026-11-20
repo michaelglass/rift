@@ -432,6 +432,109 @@ pub mod topology {
     }
 }
 
+/// The lifecycle decisions (`rift_core::lifecycle`) decided by the Roc core.
+pub mod lifecycle {
+    use rift_core::lifecycle::plain::{
+        Inventory, KeepsTransient, Misplaced, NativeTransient, OutOfView, PointerTarget,
+        RuleRefresh, RuleTargets, TitleChange,
+    };
+    use rift_core::lifecycle::{
+        Admission, AdmissionFacts, Change, Presence, PresenceEvent, PresenceOutcome, Reading,
+        Retirement,
+    };
+    use rift_core::plain::Unasked;
+
+    use crate::{abi, boundary, host};
+
+    pub fn rule_targets(question: RuleTargets) -> Result<Vec<(u64, Vec<u64>)>, Unasked> {
+        let host = host();
+        let question = boundary::rule_targets_question(question, &host);
+        boundary::rule_targets_answer(unsafe { abi::roc_rule_targets(question) }, &host)
+    }
+
+    /// It asks for no fact.
+    pub fn rule_refreshes_layout(question: RuleRefresh) -> bool {
+        unsafe { abi::roc_rule_refreshes_layout(boundary::rule_refresh_question(question)) }
+    }
+
+    pub fn pointer_display_target(question: PointerTarget) -> Result<Option<u64>, Unasked> {
+        let host = host();
+        let question = boundary::pointer_target_question(question, &host);
+        boundary::space_answer(unsafe { abi::roc_pointer_display_target(question) })
+    }
+
+    pub fn is_native_transient(question: NativeTransient) -> Result<bool, Unasked> {
+        let host = host();
+        let question = boundary::native_transient_question(question, &host);
+        boundary::verdict_answer(unsafe { abi::roc_is_native_transient(question) })
+    }
+
+    /// It asks for no fact.
+    pub fn keeps_transient(question: KeepsTransient) -> bool {
+        unsafe { abi::roc_keeps_transient(boundary::keeps_transient_question(question)) }
+    }
+
+    /// It asks for no fact.
+    pub fn misplaced(question: Misplaced) -> bool {
+        unsafe { abi::roc_misplaced(boundary::misplaced_question(question)) }
+    }
+
+    pub fn out_of_inventory_view(question: OutOfView) -> Result<bool, Unasked> {
+        let host = host();
+        let question = boundary::out_of_view_question(question, &host);
+        boundary::verdict_answer(unsafe { abi::roc_out_of_inventory_view(question) })
+    }
+
+    pub fn reapplies_on_title_change(question: TitleChange) -> Result<bool, Unasked> {
+        let host = host();
+        let question = boundary::title_change_question(question, &host);
+        boundary::verdict_answer(unsafe { abi::roc_reapplies_on_title_change(question) })
+    }
+
+    /// Whether rift manages a window, by its facts. It asks for no fact.
+    pub fn admission(facts: AdmissionFacts) -> Admission {
+        boundary::from_window_admission(unsafe {
+            abi::roc_window_admission(boundary::admission_facts(facts))
+        })
+    }
+
+    /// A window's facts after `reading`, and the change in its admission, as `read` decides.
+    pub fn read(
+        before: Option<AdmissionFacts>,
+        reading: Reading,
+    ) -> (Option<AdmissionFacts>, Option<Change>) {
+        boundary::from_read(unsafe {
+            abi::roc_lifecycle_read(boundary::read_question(before, reading))
+        })
+    }
+
+    /// A window's presence after `event`, what the event came to, and whether rift manages it
+    /// then, as `present` and `manages` decide.
+    pub fn present(
+        before: Option<Presence>,
+        event: PresenceEvent,
+    ) -> (Option<Presence>, PresenceOutcome, bool) {
+        boundary::from_presence_answer(unsafe {
+            abi::roc_lifecycle_presence(boundary::presence_question(before, event))
+        })
+    }
+
+    /// Two admission changes in a row, as one (`net`, which does not read the window).
+    pub fn net(first: Option<Change>, then: Option<Change>) -> Option<Change> {
+        let question = abi::BoundaryNetQuestion {
+            first: boundary::change(first),
+            then: boundary::change(then),
+        };
+        boundary::from_change(unsafe { abi::roc_lifecycle_net(question) })
+    }
+
+    pub fn retirement(question: Inventory) -> Result<Retirement, Unasked> {
+        boundary::retirement_answer(unsafe {
+            abi::roc_inventory_retirement(boundary::inventory_question(question))
+        })
+    }
+}
+
 impl Drop for RocCore {
     fn drop(&mut self) {
         self.input.release(&self.host);

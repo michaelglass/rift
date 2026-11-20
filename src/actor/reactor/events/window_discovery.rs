@@ -59,15 +59,10 @@ fn sync_existing_window_state(
             let change = rift_core::lifecycle::net(reading, heuristic);
             #[cfg(feature = "roc-core")]
             {
-                use rift_core::plain::wire;
-
-                use crate::roc_path::transition;
-                crate::roc_path::check_words(
-                    "net",
-                    &[],
-                    &wire::encode_net(transition(reading), transition(heuristic)),
-                    &wire::encode_net_change(transition(change)),
-                );
+                use crate::roc_path::window_free;
+                let question = (window_free(reading), window_free(heuristic));
+                let roc = Ok(rift_core_roc::lifecycle::net(question.0, question.1));
+                crate::roc_path::check("net", &[], &question, &window_free(change), roc);
             }
             let is_admitted = state.windows.is_admitted_state(wid);
             admission_changed = change.is_some();

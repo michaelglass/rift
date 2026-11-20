@@ -11,9 +11,9 @@ use rift_core::lifecycle::{
 };
 mod facts;
 
-use facts::{Coin, differential, roc, rust};
+use facts::{Coin, rust, typed};
 use rift_core::plain::{Fact, wire};
-use rift_core_roc::{AllocationCount, tile_words};
+use rift_core_roc::AllocationCount;
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -68,7 +68,7 @@ impl Coin for Rng {
 
 #[test]
 fn the_roc_core_picks_app_rule_targets_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "rule-targets",
         Rng(0x7A26_E750_0000_0009),
@@ -89,15 +89,19 @@ fn the_roc_core_picks_app_rule_targets_as_the_rust_core_does() {
                 windows,
                 run,
             };
+            let roc = rust(
+                rift_core_roc::lifecycle::rule_targets(question.clone()),
+                wire::encode_rule_targets,
+            );
             let rust = rust(question.answer(), wire::encode_rule_targets);
-            (wire::encode_rule_targets_question(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_decides_whether_the_layout_hears_of_a_window_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "rule-refresh",
         Rng(0x2EF2_E540_0000_0010),
@@ -114,15 +118,18 @@ fn the_roc_core_decides_whether_the_layout_hears_of_a_window_as_the_rust_core_do
                 },
             };
             let _ = blank;
+            let roc = Ok(wire::encode_verdict(
+                rift_core_roc::lifecycle::rule_refreshes_layout(question),
+            ));
             let rust = Ok(wire::encode_verdict(question.answer()));
-            (wire::encode_rule_refresh(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_places_a_new_window_on_the_pointers_display_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "pointer-target",
         Rng(0x9014_7E2D_0000_0011),
@@ -149,15 +156,19 @@ fn the_roc_core_places_a_new_window_on_the_pointers_display_as_the_rust_core_doe
                 window,
                 rule_names_workspace: blank.fact(rng, rule_names_workspace),
             };
+            let roc = rust(
+                rift_core_roc::lifecycle::pointer_display_target(question.clone()),
+                wire::encode_maybe_space,
+            );
             let rust = rust(question.answer(), wire::encode_maybe_space);
-            (wire::encode_pointer_target(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_finds_native_transients_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "native-transient",
         Rng(0x7EA2_5157_0000_0012),
@@ -170,15 +181,19 @@ fn the_roc_core_finds_native_transients_as_the_rust_core_does() {
                 owner,
                 exempt: blank.fact(rng, exempt),
             };
+            let roc = rust(
+                rift_core_roc::lifecycle::is_native_transient(question.clone()),
+                wire::encode_verdict,
+            );
             let rust = rust(question.answer(), wire::encode_verdict);
-            (wire::encode_native_transient(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_keeps_transient_entries_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "keeps-transient",
         Rng(0x6EE9_5000_0000_0013),
@@ -194,15 +209,18 @@ fn the_roc_core_keeps_transient_entries_as_the_rust_core_does() {
                 owner: rng.id(),
             };
             let _ = blank;
+            let roc = Ok(wire::encode_verdict(rift_core_roc::lifecycle::keeps_transient(
+                question,
+            )));
             let rust = Ok(wire::encode_verdict(question.answer()));
-            (wire::encode_keeps_transient(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_finds_misplaced_windows_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "misplaced",
         Rng(0x0315_91AC_ED00_0014),
@@ -212,15 +230,18 @@ fn the_roc_core_finds_misplaced_windows_as_the_rust_core_does() {
                 native: rng.maybe(),
             };
             let _ = blank;
+            let roc = Ok(wire::encode_verdict(rift_core_roc::lifecycle::misplaced(
+                question,
+            )));
             let rust = Ok(wire::encode_verdict(question.answer()));
-            (wire::encode_misplaced(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_knows_what_an_inventory_cannot_see_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "out-of-view",
         Rng(0x0070_F713_0000_0015),
@@ -235,15 +256,19 @@ fn the_roc_core_knows_what_an_inventory_cannot_see_as_the_rust_core_does() {
                 active: blank.answers(rng, native.or(assigned), |space| active.contains(&space)),
                 parked: blank.fact(rng, parked),
             };
+            let roc = rust(
+                rift_core_roc::lifecycle::out_of_inventory_view(question.clone()),
+                wire::encode_verdict,
+            );
             let rust = rust(question.answer(), wire::encode_verdict);
-            (wire::encode_out_of_view(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_reapplies_rules_on_a_title_change_as_the_rust_core_does() {
-    differential(
+    typed(
         "lifecycle",
         "title-change",
         Rng(0x7171_EC4A_0000_0016),
@@ -262,8 +287,12 @@ fn the_roc_core_reapplies_rules_on_a_title_change_as_the_rust_core_does() {
                 active: blank.answers(rng, space, |space| active.contains(&space)),
                 reconcilable: blank.fact(rng, reconcilable),
             };
+            let roc = rust(
+                rift_core_roc::lifecycle::reapplies_on_title_change(question.clone()),
+                wire::encode_verdict,
+            );
             let rust = rust(question.answer(), wire::encode_verdict);
-            (wire::encode_title_change(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
@@ -288,8 +317,10 @@ fn the_roc_core_admits_windows_as_the_rust_core_does_for_every_combination_of_fa
                         let rust =
                             wire::encode_window_admission(rift_core::lifecycle::admission(facts));
                         assert_eq!(
-                            tile_words(&wire::encode_admission_facts(facts)),
-                            Ok(rust),
+                            wire::encode_window_admission(rift_core_roc::lifecycle::admission(
+                                facts
+                            )),
+                            rust,
                             "{facts:?}"
                         );
                         checked += 1;
@@ -356,8 +387,8 @@ fn the_roc_core_reads_every_lifecycle_reading_as_the_rust_core_does() {
         for &reading in &readings {
             let rust = wire::encode_read(rift_core::lifecycle::read(before, reading));
             assert_eq!(
-                tile_words(&wire::encode_reading(before, reading)),
-                Ok(rust),
+                wire::encode_read(rift_core_roc::lifecycle::read(before, reading)),
+                rust,
                 "{before:?} {reading:?}"
             );
             checked += 1;
@@ -430,10 +461,11 @@ fn the_roc_core_steps_every_presence_event_as_the_rust_core_does() {
     let mut checked = 0;
     for &before in &befores {
         for &event in &events {
-            let rust = wire::encode_presence(rift_core::lifecycle::present(before, event));
+            let (after, outcome) = rift_core::lifecycle::present(before, event);
+            let rust = (after, outcome, rift_core::lifecycle::manages(after));
             assert_eq!(
-                tile_words(&wire::encode_presence_event(before, event)),
-                Ok(rust),
+                rift_core_roc::lifecycle::present(before, event),
+                rust,
                 "{before:?} {event:?}"
             );
             checked += 1;
@@ -486,13 +518,13 @@ fn the_roc_core_retires_windows_as_the_rust_core_does_for_every_combination_of_f
                                         // point, or neither does.
                                         for evidence in [Fact::Asked(evidence), Fact::Unasked] {
                                             let question = Inventory { facts, evidence };
-                                            let rust =
-                                                rust(question.answer(), wire::encode_retirement);
-                                            assert_eq!(
-                                                roc(&wire::encode_inventory(question)),
-                                                rust,
-                                                "{question:?}"
+                                            let roc = rust(
+                                                rift_core_roc::lifecycle::retirement(question),
+                                                wire::encode_retirement,
                                             );
+                                            let expected =
+                                                rust(question.answer(), wire::encode_retirement);
+                                            assert_eq!(roc, expected, "{question:?}");
                                             checked += 1;
                                         }
                                     }
@@ -530,10 +562,10 @@ fn the_roc_core_nets_every_pair_of_admission_changes_as_the_rust_core_does() {
     let mut checked = 0;
     for &first in &changes {
         for &then in &changes {
-            let rust = wire::encode_net_change(rift_core::lifecycle::net(first, then));
+            let rust = change(rift_core::lifecycle::net(first, then));
             assert_eq!(
-                tile_words(&wire::encode_net(first, then)),
-                Ok(rust),
+                rift_core_roc::lifecycle::net(change(first), change(then)),
+                rust,
                 "{first:?} {then:?}"
             );
             checked += 1;
@@ -543,4 +575,15 @@ fn the_roc_core_nets_every_pair_of_admission_changes_as_the_rust_core_does() {
     let after = AllocationCount::now();
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("lifecycle: all {checked} pairs of admission changes answered identically");
+}
+
+/// An admission change without its window (`net` does not read it).
+fn change(
+    transition: Option<rift_core::lifecycle::Transition<u64>>,
+) -> Option<rift_core::lifecycle::Change> {
+    use rift_core::lifecycle::{Change, Transition};
+    transition.map(|transition| match transition {
+        Transition::Admitted(_) => Change::Admitted,
+        Transition::Suspended(_, why) => Change::Suspended(why),
+    })
 }

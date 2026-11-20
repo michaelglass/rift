@@ -271,4 +271,137 @@ Boundary := [].{
 	AppWindows := { pid : I32, windows : List(WindowId) }
 
 	CandidatesAnswer := [Decided(List(AppWindows)), Unasked(U64)]
+
+	# Lifecycle (`rift_core::lifecycle`).
+
+	## Why app rules run over some windows.
+	RuleRun := [Admission, Reapply]
+
+	## A Space or none asked about a word.
+	WordSpace := { key : U64, answer : MaybeSpace }
+
+	RuleTargetsQuestion := { windows : List(U64), run : RuleRun, reconcilable : List(WordBool), spaces : List(WordSpace), active : List(WordBool) }
+
+	## A Space's windows.
+	SpaceWindows := { space : U64, windows : List(U64) }
+
+	RuleTargetsAnswer := [Decided(List(SpaceWindows)), Unasked(U64)]
+
+	RuleOutcome := { workspace_before : MaybeSpace, workspace : U64, floating_before : Bool, floating : Bool, was_ignored : Bool, unavailable : Bool }
+
+	RuleRefreshQuestion := { run : RuleRun, outcome : RuleOutcome }
+
+	WorkspaceMode := [PerDisplay, Global]
+
+	## A window that just opened, as placement sees it.
+	NewWindow := [Untracked, NotStandard, Standard]
+
+	PointerTargetQuestion := { mode : WorkspaceMode, opened_on : U64, pointer : FactSpace, active : List(WordBool), window : NewWindow, rule_names_workspace : FactBool }
+
+	## A Space or none, decided.
+	SpaceAnswer := [Decided(MaybeSpace), Unasked(U64)]
+
+	## Where a transient entry's evidence came from.
+	Origin := [Native, Heuristic]
+
+	EntryOf := { origin : Origin, pid : U64 }
+
+	TransientEntry := [Entry(EntryOf), NoEntry]
+
+	NativeTransientQuestion := { entry : TransientEntry, owner : U64, exempt : FactBool }
+
+	## A window lifecycle event, as the transient entries hear of it.
+	Departure := [Destroyed(MaybeSpace), Closed(U64), AppGone(U64)]
+
+	KeepsTransientQuestion := { departure : Departure, id : U64, origin : Origin, owner : U64 }
+
+	MisplacedQuestion := { assigned : MaybeSpace, native : MaybeSpace }
+
+	OutOfViewQuestion := { native : MaybeSpace, assigned : FactSpace, active : List(WordBool), parked : FactBool }
+
+	OnTitleChange := [Reapply, Ignore]
+
+	TitleChangeQuestion := { configured : OnTitleChange, space : FactSpace, active : List(WordBool), reconcilable : FactBool }
+
+	Manageability := [Manageable, Unmanageable]
+
+	## What an app rule says about managing the window.
+	Rule := [NoRule, Manage, Ignore]
+
+	AxKind := [Ordinary, DialogWindow, Transient]
+
+	NativeKind := [Ordinary, Transient]
+
+	Minimize := [Shown, Minimized]
+
+	AdmissionFacts := { manageability : Manageability, rule : Rule, ax : AxKind, native : NativeKind, minimize : Minimize }
+
+	## Why a window is not admitted.
+	Veto := [NativeTransient, Minimized, AxTransient, RuleIgnores, Unmanageable]
+
+	WindowAdmission := [Admitted, Vetoed(Veto)]
+
+	## One admission fact, changed.
+	FactChange := [Manageability(Manageability), Rule(Rule), Ax(AxKind), Native(NativeKind), Minimize(Minimize)]
+
+	Reading := [Live(AdmissionFacts), Changed(FactChange), Gone]
+
+	## A window's facts, or none without AX state.
+	KnownFacts := [Known(AdmissionFacts), NoFacts]
+
+	ReadQuestion := { before : KnownFacts, reading : Reading }
+
+	## A change in whether rift manages a window.
+	Change := [NoChange, Admitted, Suspended(Veto)]
+
+	ReadAnswer := { after : KnownFacts, change : Change }
+
+	Presence := [NoPresence, Live(AdmissionFacts), Invalidated(AdmissionFacts)]
+
+	PresenceEvent := [Reading(Reading), Invalidate, Revalidate]
+
+	PresenceQuestion := { before : Presence, event : PresenceEvent }
+
+	PresenceOutcome := [Read(Change), Invalidated(Bool), Revalidated(Bool)]
+
+	PresenceAnswer := { after : Presence, outcome : PresenceOutcome, manages : Bool }
+
+	## Two admission changes in a row.
+	NetQuestion := { first : Change, then : Change }
+
+	Report := [Reported, Omitted]
+
+	InventoryView := [InView, OutOfView]
+
+	## A window's minimize state, or none without AX state.
+	InventoryMinimize := [Shown, Minimized, NoAxState]
+
+	FullscreenRecord := [Recorded, NotRecorded]
+
+	NativeIdentity := [Known(U64), Unknown]
+
+	AxValidity := [Valid, Invalidated]
+
+	InventoryFacts := { report : Report, view : InventoryView, minimize : InventoryMinimize, fullscreen : FullscreenRecord, identity : NativeIdentity, validity : AxValidity }
+
+	## The window server's type for a window, if it says.
+	Suitability := [Suitable, Unsuitable, SuitabilityUnknown]
+
+	Ordering := [OrderedIn, OrderedOut, OrderingUnknown]
+
+	## Whether the window server's record looks like a window, if it says.
+	Look := [AWindow, NotAWindow, LookUnknown]
+
+	NativeEvidence := { suitability : Suitability, ordering : Ordering, look : Look }
+
+	FactEvidence := [Asked(NativeEvidence), Unasked]
+
+	InventoryQuestion := { facts : InventoryFacts, evidence : FactEvidence }
+
+	## Why an inventory leaves a window alone.
+	Keep := [Reported, OutOfView, NoAxState, Minimized, Fullscreen, NoNativeIdentity, NativeOrdering, NoNegativeEvidence]
+
+	Retirement := [Retire, Keep(Keep)]
+
+	RetirementAnswer := [Decided(Retirement), Unasked(U64)]
 }

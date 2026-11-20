@@ -5,7 +5,7 @@
 app [core] { pf: platform "../platform/main.roc" }
 
 import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
-import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion]
+import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission]
 import Bsp
 import Traditional
 import Scrolling
@@ -118,7 +118,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, tile, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates }
+core = { init, step, tile, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -200,16 +200,70 @@ admit_space_snapshot = |q| {
 app_rule_candidates : CandidatesQuestion -> CandidatesAnswer
 app_rule_candidates = |q| decision_of(Topology.candidates(q.window_spaces, q.activated, q.tracked, q.reconcilable))
 
-## The model-free questions still on words (the layouts are typed entries above). A question's
-## words (its tag first: 9 to 16 the lifecycle
-## decisions, `Lifecycle`; 24 a window's admission, 25 a
-## lifecycle reading, 26 a presence event, 27 an inventory's retirement question, 28 two
-## admission changes in a row, `Lifecycle`; 29 to 31 the workspace decisions, 32 the
-## workspaces' topology after its events, 33 window ownership after its events and its
-## orphans, 34 the joined workspaces after a run of events, `Workspaces`) in; out, a 0 and the
-## answer's words, or a 1: the words were not a question it answers, or a 2 and a fact's place
-## among its question's facts: the decision read that fact, which the platform's run of it
-## never asked.
+# The lifecycle questions, typed (`Boundary`).
+
+rule_targets : RuleTargetsQuestion -> RuleTargetsAnswer
+rule_targets = |q| decision_of(Lifecycle.rule_targets(q.windows, q.run, q.reconcilable, q.spaces, q.active))
+
+rule_refreshes_layout : RuleRefreshQuestion -> Bool
+rule_refreshes_layout = |q| Lifecycle.rule_refreshes_layout(q.run, q.outcome)
+
+pointer_display_target : PointerTargetQuestion -> SpaceAnswer
+pointer_display_target = |q| {
+	global =
+		match q.mode {
+			Global => True
+			PerDisplay => False
+		}
+	decision_of(Lifecycle.pointer_display_target(global, q.opened_on, q.pointer, q.active, q.window, q.rule_names_workspace))
+}
+
+is_native_transient : NativeTransientQuestion -> VerdictAnswer
+is_native_transient = |q| decision_of(Lifecycle.is_native_transient(q.entry, q.owner, q.exempt))
+
+keeps_transient : KeepsTransientQuestion -> Bool
+keeps_transient = |q| Lifecycle.keeps_transient(q.departure, q.id, q.origin, q.owner)
+
+misplaced : MisplacedQuestion -> Bool
+misplaced = |q| Lifecycle.misplaced(q.assigned, q.native)
+
+out_of_inventory_view : OutOfViewQuestion -> VerdictAnswer
+out_of_inventory_view = |q| decision_of(Lifecycle.out_of_inventory_view(q.native, q.assigned, q.active, q.parked))
+
+reapplies_on_title_change : TitleChangeQuestion -> VerdictAnswer
+reapplies_on_title_change = |q| {
+	configured =
+		match q.configured {
+			Reapply => True
+			Ignore => False
+		}
+	decision_of(Lifecycle.reapplies_on_title_change(configured, q.space, q.active, q.reconcilable))
+}
+
+window_admission : AdmissionFacts -> WindowAdmission
+window_admission = |q| Lifecycle.admits(q)
+
+lifecycle_read : ReadQuestion -> ReadAnswer
+lifecycle_read = |q| {
+	(after, change) = Lifecycle.read(q.before, q.reading)
+	{ after, change }
+}
+
+lifecycle_presence : PresenceQuestion -> PresenceAnswer
+lifecycle_presence = |q| Lifecycle.presence_step(q.before, q.event)
+
+lifecycle_net : NetQuestion -> Change
+lifecycle_net = |q| Lifecycle.net(q.first, q.then)
+
+inventory_retirement : InventoryQuestion -> RetirementAnswer
+inventory_retirement = |q| decision_of(Lifecycle.retirement(q.facts, q.evidence))
+
+## The model-free questions still on words (the others are typed entries above). A question's
+## words (its tag first: 29 to 31 the workspace decisions, 32 the workspaces' topology after
+## its events, 33 window ownership after its events and its orphans, 34 the joined workspaces
+## after a run of events, `Workspaces`) in; out, a 0 and the answer's words, or a 1: the words
+## were not a question it answers, or a 2 and a fact's place among its question's facts: the
+## decision read that fact, which the platform's run of it never asked.
 tile : List(U64) -> List(U64)
 tile = |words|
 	match shape_answer(words) {
@@ -224,19 +278,6 @@ shape_answer : List(U64) -> Try(List(U64), [Malformed, Unasked(U64)])
 shape_answer = |words| {
 	(system, cursor) = take({ words, at: 0 })?
 	match system {
-		9 => Lifecycle.rule_targets_words(cursor)
-		10 => Lifecycle.rule_refresh_words(cursor)
-		11 => Lifecycle.pointer_target_words(cursor)
-		12 => Lifecycle.native_transient_words(cursor)
-		13 => Lifecycle.keeps_transient_words(cursor)
-		14 => Lifecycle.misplaced_words(cursor)
-		15 => Lifecycle.out_of_view_words(cursor)
-		16 => Lifecycle.title_change_words(cursor)
-		24 => Lifecycle.admission_words(cursor)
-		25 => Lifecycle.reading_words(cursor)
-		26 => Lifecycle.presence_words(cursor)
-		27 => Lifecycle.inventory_words(cursor)
-		28 => Lifecycle.net_words(cursor)
 		29 => Workspaces.step_words(cursor)
 		30 => Workspaces.resolve_words(cursor)
 		31 => Workspaces.previous_words(cursor)
