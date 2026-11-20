@@ -218,44 +218,38 @@ fn a_million_steps_leave_nothing_behind() {
     );
 }
 
-/// Times one model-free question three ways: the Rust answer alone, the Rust answer and its
-/// words (what `roc_path::check` compares), and the Roc core's answer to the question's words
-/// (`tile_words`, the call `roc_path::check` adds on rift's path).
+/// Times one model-free question two ways: the Rust answer alone, and the Roc core's answer
+/// (`roc`: asked through its typed entry, or on words for a question not yet typed), each as
+/// words; the Roc time is what `roc_path::check` adds on rift's path, the question's
+/// conversion included.
 fn question<Q: Clone>(
     label: &str,
     questions: &[Q],
     rust: impl Fn(&Q) -> Vec<u64>,
-    words: impl Fn(Q) -> Vec<u64>,
+    roc: impl Fn(Q) -> Vec<u64>,
 ) {
-    let encoded: Vec<Vec<u64>> = questions.iter().cloned().map(&words).collect();
-    for (question, words) in questions.iter().zip(&encoded) {
+    for question in questions {
         assert_eq!(
-            rift_core_roc::tile_words(words).as_ref(),
-            Ok(&rust(question)),
+            roc(question.clone()),
+            rust(question),
             "{label}: the cores disagree"
         );
     }
     let rounds = 200_000 / questions.len();
-    let repeat = |items: &[Q]| -> Vec<Q> {
-        items.iter().cycle().take(rounds * items.len()).cloned().collect()
-    };
-    let all = repeat(questions);
+    let all: Vec<Q> = questions.iter().cycle().take(rounds * questions.len()).cloned().collect();
     let rust_only = time(&all, |question| {
         std::hint::black_box(rust(question));
     });
-    let with_words = time(&all, |question| {
-        std::hint::black_box((rust(question), words(question.clone())));
-    });
-    let all_words: Vec<Vec<u64>> =
-        encoded.iter().cycle().take(rounds * encoded.len()).cloned().collect();
-    let roc = time(&all_words, |words| {
-        std::hint::black_box(rift_core_roc::tile_words(words).expect("an answer"));
+    let roc_only = time(&all, |question| {
+        std::hint::black_box(roc(question.clone()));
     });
     eprintln!("{label}:");
     show("rust", &stats(rust_only));
-    show("+ words", &stats(with_words));
-    show("roc", &stats(roc));
+    show("roc", &stats(roc_only));
 }
+
+/// The Roc core's answer to a question still on words.
+fn on_words(words: Vec<u64>) -> Vec<u64> { rift_core_roc::tile_words(&words).expect("an answer") }
 
 /// The hot focus questions S1 puts on rift's path (`focus_candidate` on every focus pass,
 /// `untracked_focus` on layout responses), at the sizes a workspace reaches.
@@ -298,7 +292,11 @@ fn measure_focus_questions() {
             &format!("focus_candidate, {windows} windows"),
             &candidates,
             |q| wire::encode_maybe_space(q.answer().expect("full facts")),
-            wire::encode_candidate,
+            |q| {
+                wire::encode_maybe_space(
+                    rift_core_roc::focus::focus_candidate(q).expect("the facts it asks"),
+                )
+            },
         );
     }
     let untracked = vec![
@@ -327,7 +325,11 @@ fn measure_focus_questions() {
         "untracked_focus",
         &untracked,
         |q| wire::encode_untracked_focus(q.answer().expect("full facts")),
-        wire::encode_untracked,
+        |q| {
+            wire::encode_untracked_focus(
+                rift_core_roc::focus::untracked_focus(q).expect("the facts it asks"),
+            )
+        },
     );
 }
 
@@ -365,7 +367,7 @@ fn measure_lifecycle_questions() {
         "is_native_transient",
         &native,
         |q| wire::encode_verdict(q.answer().expect("the facts it asks")),
-        wire::encode_native_transient,
+        |q| on_words(wire::encode_native_transient(q)),
     );
     let keeps = vec![
         KeepsTransient {
@@ -391,7 +393,7 @@ fn measure_lifecycle_questions() {
         "keeps_transient",
         &keeps,
         |q| wire::encode_verdict(q.answer()),
-        wire::encode_keeps_transient,
+        |q| on_words(wire::encode_keeps_transient(q)),
     );
     let facts = |report| InventoryFacts {
         report,
@@ -421,6 +423,6 @@ fn measure_lifecycle_questions() {
         "retirement",
         &inventories,
         |q| wire::encode_retirement(q.answer().expect("the facts it asks")),
-        wire::encode_inventory,
+        |q| on_words(wire::encode_inventory(q)),
     );
 }

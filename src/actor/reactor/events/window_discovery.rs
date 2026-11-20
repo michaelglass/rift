@@ -62,7 +62,7 @@ fn sync_existing_window_state(
                 use rift_core::plain::wire;
 
                 use crate::roc_path::transition;
-                crate::roc_path::check(
+                crate::roc_path::check_words(
                     "net",
                     &[],
                     &wire::encode_net(transition(reading), transition(heuristic)),

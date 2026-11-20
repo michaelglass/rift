@@ -8,7 +8,7 @@ use rift_core::focus::plain::{
 };
 mod facts;
 
-use facts::{Coin, differential, rust};
+use facts::{Coin, rust, typed};
 use rift_core::plain::{WindowId, wire};
 
 /// xorshift64*: deterministic, no dependency.
@@ -55,7 +55,7 @@ impl Coin for Rng {
 
 #[test]
 fn the_roc_core_decides_what_a_removal_does_to_focus_as_the_rust_core_does() {
-    differential("focus", "removal", Rng(0x2E40_7A10_0000_0017), |rng, blank| {
+    typed("focus", "removal", Rng(0x2E40_7A10_0000_0017), |rng, blank| {
         // Lean on the cases that decide: the removal takes the focused window, macOS's key
         // window is that window or a sibling of the same app, and successors start from it.
         let focused = rng.window();
@@ -104,14 +104,18 @@ fn the_roc_core_decides_what_a_removal_does_to_focus_as_the_rust_core_does() {
             successors,
             inactive: blank.answers(rng, candidates, |window| hidden.contains(&window)),
         };
+        let roc = rust(
+            rift_core_roc::focus::removal_focus(question.clone()),
+            wire::encode_removal_focus,
+        );
         let rust = rust(question.answer(), wire::encode_removal_focus);
-        (wire::encode_removal_question(question), rust)
+        (format!("{question:?}"), roc, rust)
     });
 }
 
 #[test]
 fn the_roc_core_picks_the_window_to_focus_as_the_rust_core_does() {
-    differential("focus", "candidate", Rng(0xCA4D_1DA7_E000_0018), |rng, blank| {
+    typed("focus", "candidate", Rng(0xCA4D_1DA7_E000_0018), |rng, blank| {
         let preferred = rng.maybe();
         let last_focused = rng.maybe();
         let in_workspace = rng.ids(5);
@@ -127,14 +131,18 @@ fn the_roc_core_picks_the_window_to_focus_as_the_rust_core_does() {
             in_workspace: blank.fact(rng, in_workspace),
             visible: blank.answers(rng, windows, |window| shown.contains(&window)),
         };
+        let roc = rust(
+            rift_core_roc::focus::focus_candidate(question.clone()),
+            wire::encode_maybe_space,
+        );
         let rust = rust(question.answer(), wire::encode_maybe_space);
-        (wire::encode_candidate(question), rust)
+        (format!("{question:?}"), roc, rust)
     });
 }
 
 #[test]
 fn the_roc_core_finds_hidden_focus_as_the_rust_core_does() {
-    differential("focus", "hides", Rng(0x41DE_5F0C_0000_0019), |rng, blank| {
+    typed("focus", "hides", Rng(0x41DE_5F0C_0000_0019), |rng, blank| {
         let in_inactive_workspace = rng.chance(50);
         let question = Hides {
             window: rng.id(),
@@ -142,14 +150,18 @@ fn the_roc_core_finds_hidden_focus_as_the_rust_core_does() {
             focused: rng.maybe(),
             in_inactive_workspace: blank.fact(rng, in_inactive_workspace),
         };
+        let roc = rust(
+            rift_core_roc::focus::hides_focus(question.clone()),
+            wire::encode_verdict,
+        );
         let rust = rust(question.answer(), wire::encode_verdict);
-        (wire::encode_hides(question), rust)
+        (format!("{question:?}"), roc, rust)
     });
 }
 
 #[test]
 fn the_roc_core_follows_activations_as_the_rust_core_does() {
-    differential(
+    typed(
         "focus",
         "activation",
         Rng(0xAC71_FA7E_0000_0020),
@@ -176,15 +188,19 @@ fn the_roc_core_follows_activations_as_the_rust_core_does() {
                 unmanageable_source: blank.fact(rng, unmanageable_source),
                 blacklisted: blank.fact(rng, blacklisted),
             };
+            let roc = rust(
+                rift_core_roc::focus::activation_follow(question.clone()),
+                wire::encode_follow,
+            );
             let rust = rust(question.answer(), wire::encode_follow);
-            (wire::encode_activation(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_picks_the_display_to_follow_as_the_rust_core_does() {
-    differential(
+    typed(
         "focus",
         "display-follow",
         Rng(0xD15F_0110_0000_0021),
@@ -199,15 +215,19 @@ fn the_roc_core_picks_the_display_to_follow_as_the_rust_core_does() {
                 on_known_display: blank
                     .answers(rng, focused_space, |space| on_known_display.contains(&space)),
             };
+            let roc = rust(
+                rift_core_roc::focus::display_to_follow(question.clone()),
+                wire::encode_maybe_space,
+            );
             let rust = rust(question.answer(), wire::encode_maybe_space);
-            (wire::encode_display_follow(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_decides_about_an_untracked_window_under_the_cursor_as_the_rust_core_does() {
-    differential("focus", "untracked", Rng(0x0174_ACED_0000_0022), |rng, blank| {
+    typed("focus", "untracked", Rng(0x0174_ACED_0000_0022), |rng, blank| {
         let under_cursor = rng.maybe();
         let tracked = rng.chance(30);
         let known = rng.chance(80).then(|| {
@@ -219,20 +239,28 @@ fn the_roc_core_decides_about_an_untracked_window_under_the_cursor_as_the_rust_c
             tracked: blank.fact(rng, tracked),
             known: blank.fact(rng, known),
         };
+        let roc = rust(
+            rift_core_roc::focus::untracked_focus(question.clone()),
+            wire::encode_untracked_focus,
+        );
         let rust = rust(question.answer(), wire::encode_untracked_focus);
-        (wire::encode_untracked(question), rust)
+        (format!("{question:?}"), roc, rust)
     });
 }
 
 #[test]
 fn the_roc_core_focuses_a_desktop_as_the_rust_core_does() {
-    differential("focus", "desktop", Rng(0xDE5C_7000_0000_0023), |rng, blank| {
+    typed("focus", "desktop", Rng(0xDE5C_7000_0000_0023), |rng, blank| {
         let workspace_empty = rng.chance(50);
         let question = Desktop {
             active: rng.chance(50),
             workspace_empty: blank.fact(rng, workspace_empty),
         };
+        let roc = rust(
+            rift_core_roc::focus::focuses_desktop(question.clone()),
+            wire::encode_verdict,
+        );
         let rust = rust(question.answer(), wire::encode_verdict);
-        (wire::encode_desktop(question), rust)
+        (format!("{question:?}"), roc, rust)
     });
 }

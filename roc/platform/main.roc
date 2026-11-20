@@ -15,6 +15,13 @@ platform ""
 			strip : Strip -> Placed,
 			settle : SettleQuestion -> Settled,
 			floating : FloatingQuestion -> List(Rect),
+			removal_focus : RemovalQuestion -> RemovalAnswer,
+			focus_candidate : CandidateQuestion -> WordAnswer,
+			hides_focus : HidesQuestion -> VerdictAnswer,
+			activation_follow : ActivationQuestion -> FollowAnswer,
+			display_to_follow : DisplayFollowQuestion -> WordAnswer,
+			untracked_focus : UntrackedQuestion -> UntrackedAnswer,
+			focuses_desktop : DesktopQuestion -> VerdictAnswer,
 		}
 	}
 	exposes [Boundary]
@@ -29,6 +36,13 @@ platform ""
 		"roc_strip": strip_for_host,
 		"roc_settle": settle_for_host,
 		"roc_floating": floating_for_host,
+		"roc_removal_focus": removal_focus_for_host,
+		"roc_focus_candidate": focus_candidate_for_host,
+		"roc_hides_focus": hides_focus_for_host,
+		"roc_activation_follow": activation_follow_for_host,
+		"roc_display_to_follow": display_to_follow_for_host,
+		"roc_untracked_focus": untracked_focus_for_host,
+		"roc_focuses_desktop": focuses_desktop_for_host,
 	}
 	targets: {
 		arm64mac: {
@@ -37,7 +51,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -77,3 +91,31 @@ settle_for_host = |question| (core.settle)(question)
 ## A floating layout's newcomers' first frames.
 floating_for_host : FloatingQuestion -> List(Rect)
 floating_for_host = |question| (core.floating)(question)
+
+## What a removal does to focus.
+removal_focus_for_host : RemovalQuestion -> RemovalAnswer
+removal_focus_for_host = |question| (core.removal_focus)(question)
+
+## The window to focus in a Space's active workspace.
+focus_candidate_for_host : CandidateQuestion -> WordAnswer
+focus_candidate_for_host = |question| (core.focus_candidate)(question)
+
+## Whether focus is hidden in an inactive workspace.
+hides_focus_for_host : HidesQuestion -> VerdictAnswer
+hides_focus_for_host = |question| (core.hides_focus)(question)
+
+## Whether an activation follows its window, and where.
+activation_follow_for_host : ActivationQuestion -> FollowAnswer
+activation_follow_for_host = |question| (core.activation_follow)(question)
+
+## The display to activate after a command moved the focused window.
+display_to_follow_for_host : DisplayFollowQuestion -> WordAnswer
+display_to_follow_for_host = |question| (core.display_to_follow)(question)
+
+## What to do about the untracked window under the cursor.
+untracked_focus_for_host : UntrackedQuestion -> UntrackedAnswer
+untracked_focus_for_host = |question| (core.untracked_focus)(question)
+
+## Whether to focus a Space's desktop.
+focuses_desktop_for_host : DesktopQuestion -> VerdictAnswer
+focuses_desktop_for_host = |question| (core.focuses_desktop)(question)

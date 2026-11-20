@@ -342,6 +342,62 @@ pub fn first_frames(floating: Floating, windows: Vec<Newcomer>) -> Result<Vec<Re
     Ok(boundary::rects(unsafe { abi::roc_floating(question) }, &host))
 }
 
+/// The focus decisions (`rift_core::focus`) decided by the Roc core, on the facts their
+/// questions carry: the decision, or the first fact it read that its question does not carry.
+pub mod focus {
+    use rift_core::focus::plain::{
+        Activation, Candidate, Desktop, DisplayFollow, Hides, RemovalQuestion, Untracked,
+    };
+    use rift_core::focus::{Follow, RemovalFocus, UntrackedFocus};
+    use rift_core::plain::{Unasked, WindowId};
+
+    use crate::{abi, boundary, host};
+
+    pub fn removal_focus(
+        question: RemovalQuestion,
+    ) -> Result<RemovalFocus<WindowId, u64>, Unasked> {
+        let host = host();
+        let question = boundary::removal_question(question, &host);
+        boundary::removal_answer(unsafe { abi::roc_removal_focus(question) })
+    }
+
+    pub fn focus_candidate(question: Candidate) -> Result<Option<u64>, Unasked> {
+        let host = host();
+        let question = boundary::candidate_question(question, &host);
+        boundary::word_answer(unsafe { abi::roc_focus_candidate(question) })
+    }
+
+    pub fn hides_focus(question: Hides) -> Result<bool, Unasked> {
+        let host = host();
+        let question = boundary::hides_question(question, &host);
+        boundary::verdict_answer(unsafe { abi::roc_hides_focus(question) })
+    }
+
+    pub fn activation_follow(question: Activation) -> Result<Follow<u64, u64, u64, u64>, Unasked> {
+        let host = host();
+        let question = boundary::activation_question(question, &host);
+        boundary::follow_answer(unsafe { abi::roc_activation_follow(question) })
+    }
+
+    pub fn display_to_follow(question: DisplayFollow) -> Result<Option<u64>, Unasked> {
+        let host = host();
+        let question = boundary::display_follow_question(question, &host);
+        boundary::word_answer(unsafe { abi::roc_display_to_follow(question) })
+    }
+
+    pub fn untracked_focus(question: Untracked) -> Result<UntrackedFocus<u64, u64>, Unasked> {
+        let host = host();
+        let question = boundary::untracked_question(question, &host);
+        boundary::untracked_answer(unsafe { abi::roc_untracked_focus(question) })
+    }
+
+    pub fn focuses_desktop(question: Desktop) -> Result<bool, Unasked> {
+        let host = host();
+        let question = boundary::desktop_question(question, &host);
+        boundary::verdict_answer(unsafe { abi::roc_focuses_desktop(question) })
+    }
+}
+
 impl Drop for RocCore {
     fn drop(&mut self) {
         self.input.release(&self.host);

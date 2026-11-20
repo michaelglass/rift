@@ -156,25 +156,49 @@ pub(crate) fn window(window: crate::actor::app::WindowId) -> rift_core::plain::W
     }
 }
 
-/// Asks the Roc core `question` (a tagged question's words, `rift_core::plain::wire`), whose
-/// Rust answer encodes to `rust`, and reports a disagreement. `what` names the decision and
-/// `facts` its question's facts (the question type's `FACTS`): the question carries only the
-/// facts the Rust decision asked, so a Roc decision reading any other is a divergence too.
+/// Holds the Roc core's answer to `question`, asked through its typed entry, to the Rust
+/// answer, and reports a disagreement. `what` names the decision and `facts` its question's
+/// facts (the question type's `FACTS`): the question carries only the facts the Rust decision
+/// asked, so a Roc decision reading any other is a divergence too.
 #[cfg(feature = "roc-core")]
-pub(crate) fn check(what: &str, facts: &[&str], question: &[u64], rust: &[u64]) {
+pub(crate) fn check<Q: std::fmt::Debug, A: PartialEq + std::fmt::Debug>(
+    what: &str,
+    facts: &[&str],
+    question: &Q,
+    rust: &A,
+    roc: Result<A, rift_core::plain::Unasked>,
+) {
+    match roc {
+        Ok(roc) if roc == *rust => {}
+        Err(rift_core::plain::Unasked { fact }) => {
+            let fact = usize::try_from(fact).ok().and_then(|fact| facts.get(fact));
+            unasked(what, fact.copied().unwrap_or("(not one of its facts)"), question)
+        }
+        Ok(roc) => diverged(what, question, rust, &roc),
+    }
+}
+
+/// [`check`] for the questions still asked on words: `question` is a tagged question's words
+/// (`rift_core::plain::wire`), whose Rust answer encodes to `rust`.
+#[cfg(feature = "roc-core")]
+pub(crate) fn check_words(what: &str, facts: &[&str], question: &[u64], rust: &[u64]) {
     match rift_core_roc::tile_words(question) {
         Ok(roc) if roc == rust => {}
         Err(rift_core_roc::RocError::Unasked { fact }) => {
             let fact = usize::try_from(fact).ok().and_then(|fact| facts.get(fact));
-            unasked(what, fact.copied().unwrap_or("(not one of its facts)"), question)
+            unasked(
+                what,
+                fact.copied().unwrap_or("(not one of its facts)"),
+                &question,
+            )
         }
-        roc => diverged(what, question, rust, &roc),
+        roc => diverged(what, &question, &rust, &roc),
     }
 }
 
 /// The Roc core read a fact the Rust decision did not ask: they decide in different orders.
 #[cfg(feature = "roc-core")]
-fn unasked(what: &str, fact: &str, question: &[u64]) {
+fn unasked(what: &str, fact: &str, question: &impl std::fmt::Debug) {
     #[cfg(test)]
     panic!("roc-divergence: {what} read a fact Rust didn't ask: {fact} {question:?}");
     #[cfg(not(test))]
@@ -190,9 +214,9 @@ fn unasked(what: &str, fact: &str, question: &[u64]) {
 #[cfg(feature = "roc-core")]
 fn diverged(
     what: &str,
-    question: &[u64],
-    rust: &[u64],
-    roc: &Result<Vec<u64>, rift_core_roc::RocError>,
+    question: &impl std::fmt::Debug,
+    rust: &impl std::fmt::Debug,
+    roc: &impl std::fmt::Debug,
 ) {
     #[cfg(test)]
     panic!("roc-divergence: {what} {question:?}: rust {rust:?}, roc {roc:?}");
@@ -213,7 +237,7 @@ mod tests {
     use rift_core::plain::{Fact, wire};
     use rift_core::workspaces::plain::PreviousQuestion;
 
-    use super::check;
+    use super::{check, check_words};
 
     fn question() -> PreviousQuestion {
         PreviousQuestion {
@@ -229,7 +253,7 @@ mod tests {
     fn an_answer_both_cores_give_passes() {
         let question = question();
         let rust = wire::encode_target(question.answer());
-        check("previous", &[], &wire::encode_previous(question), &rust);
+        check_words("previous", &[], &wire::encode_previous(question), &rust);
     }
 
     #[test]
@@ -237,12 +261,12 @@ mod tests {
     fn a_different_answer_is_a_divergence() {
         let question = question();
         let wrong = wire::encode_target(None);
-        check("previous", &[], &wire::encode_previous(question), &wrong);
+        check_words("previous", &[], &wire::encode_previous(question), &wrong);
     }
 
     #[test]
     #[should_panic(expected = "roc-divergence: malformed")]
-    fn no_answer_is_a_divergence() { check("malformed", &[], &[29], &[0]); }
+    fn no_answer_is_a_divergence() { check_words("malformed", &[], &[29], &[0]); }
 
     #[test]
     #[should_panic(
@@ -255,11 +279,7 @@ mod tests {
             active: true,
             workspace_empty: Fact::Unasked,
         };
-        check(
-            "focuses_desktop",
-            Desktop::FACTS,
-            &wire::encode_desktop(question),
-            &wire::encode_verdict(false),
-        );
+        let roc = rift_core_roc::focus::focuses_desktop(question);
+        check("focuses_desktop", Desktop::FACTS, &question, &false, roc);
     }
 }

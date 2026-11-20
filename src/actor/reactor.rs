@@ -993,7 +993,7 @@ impl Reactor {
                 .iter()
                 .map(|(pid, windows)| (*pid, windows.iter().map(|&wid| window(wid)).collect()))
                 .collect();
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "app_rule_candidates",
                 Candidates::FACTS,
                 &wire::encode_candidates(question),
@@ -3736,7 +3736,7 @@ impl Reactor {
                 active: active.answers(Word::word, |active| active),
                 reconcilable: reconcilable.fact(|open| open),
             };
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "reapplies_on_title_change",
                 TitleChange::FACTS,
                 &wire::encode_title_change(question),
@@ -3793,7 +3793,7 @@ impl Reactor {
                         .collect(),
                 },
             };
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "admit_space_snapshot",
                 Admit::FACTS,
                 &wire::encode_admit(question),
@@ -4690,7 +4690,7 @@ impl Reactor {
                             DiscoveredSpace::Fallback(space.map(Word::word))
                         }
                     };
-                    crate::roc_path::check(
+                    crate::roc_path::check_words(
                         "discovered_space",
                         Discovered::FACTS,
                         &wire::encode_discovered(question),
@@ -4719,7 +4719,7 @@ impl Reactor {
                     assigned: assigned.map(Word::word),
                     native: native.map(Word::word),
                 };
-                crate::roc_path::check(
+                crate::roc_path::check_words(
                     "misplaced",
                     Misplaced::FACTS,
                     &wire::encode_misplaced(question),
@@ -4757,7 +4757,7 @@ impl Reactor {
                         active: active.answers(Word::word, |active| active),
                         parked: parked.fact(|parked| parked),
                     };
-                    crate::roc_path::check(
+                    crate::roc_path::check_words(
                         "out_of_inventory_view",
                         OutOfView::FACTS,
                         &wire::encode_out_of_view(question),
@@ -5256,7 +5256,7 @@ impl Reactor {
                 assigned: assigned.map(Word::word),
                 by_frame: by_frame.fact(|space| space.map(Word::word)),
             };
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "discovery_spaces",
                 Discovery::FACTS,
                 &wire::encode_discovery(question),
@@ -5589,7 +5589,7 @@ impl Reactor {
                 owner: wid.pid.word(),
                 exempt: exempt.fact(|exempt| exempt),
             };
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "is_native_transient",
                 NativeTransient::FACTS,
                 &wire::encode_native_transient(question),
@@ -5635,7 +5635,7 @@ impl Reactor {
                     origin,
                     owner: t.pid.word(),
                 };
-                crate::roc_path::check(
+                crate::roc_path::check_words(
                     "keeps_transient",
                     KeepsTransient::FACTS,
                     &wire::encode_keeps_transient(question),
@@ -5775,7 +5775,7 @@ impl Reactor {
                 .iter()
                 .map(|(space, wids)| (space.word(), wids.iter().map(|&wid| wid.word()).collect()))
                 .collect();
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "rule_targets",
                 RuleTargets::FACTS,
                 &wire::encode_rule_targets_question(question),
@@ -5836,7 +5836,7 @@ impl Reactor {
                                 unavailable: outcome.unavailable,
                             },
                         };
-                        crate::roc_path::check(
+                        crate::roc_path::check_words(
                             "rule_refreshes_layout",
                             RuleRefresh::FACTS,
                             &wire::encode_rule_refresh(question),
@@ -5925,12 +5925,8 @@ impl Reactor {
                     Stay::Blacklisted => Stay::Blacklisted,
                 }),
             };
-            crate::roc_path::check(
-                "activation_follow",
-                Activation::FACTS,
-                &wire::encode_activation(question),
-                &wire::encode_follow(answer),
-            );
+            let roc = rift_core_roc::focus::activation_follow(question.clone());
+            crate::roc_path::check("activation_follow", Activation::FACTS, &question, &answer, roc);
         }
         match follow {
             Follow::To(space, workspace) => Some((space, workspace)),
@@ -6256,12 +6252,8 @@ impl Reactor {
                     UntrackedFocus::MakeKey(pid.word(), window.word())
                 }
             };
-            crate::roc_path::check(
-                "untracked_focus",
-                Untracked::FACTS,
-                &wire::encode_untracked(question),
-                &wire::encode_untracked_focus(answer),
-            );
+            let roc = rift_core_roc::focus::untracked_focus(question.clone());
+            crate::roc_path::check("untracked_focus", Untracked::FACTS, &question, &answer, roc);
         }
         match decision {
             UntrackedFocus::Nothing => false,
@@ -6292,12 +6284,8 @@ impl Reactor {
                 active,
                 workspace_empty: workspace_empty.fact(|empty| empty),
             };
-            crate::roc_path::check(
-                "focuses_desktop",
-                Desktop::FACTS,
-                &wire::encode_desktop(question),
-                &wire::encode_verdict(focuses),
-            );
+            let roc = rift_core_roc::focus::focuses_desktop(question.clone());
+            crate::roc_path::check("focuses_desktop", Desktop::FACTS, &question, &focuses, roc);
         }
         if !focuses {
             return false;
@@ -6383,11 +6371,13 @@ impl Reactor {
                     .fact(|windows| windows.into_iter().map(Word::word).collect()),
                 visible: visible.answers(Word::word, |shown| shown),
             };
+            let roc = rift_core_roc::focus::focus_candidate(question.clone());
             crate::roc_path::check(
                 "focus_candidate",
                 Candidate::FACTS,
-                &wire::encode_candidate(question),
-                &wire::encode_maybe_space(candidate.map(Word::word)),
+                &question,
+                &candidate.map(Word::word),
+                roc,
             );
         }
         candidate
@@ -6414,12 +6404,8 @@ impl Reactor {
                 focused: focused.map(Word::word),
                 in_inactive_workspace: in_inactive_workspace.fact(|inactive| inactive),
             };
-            crate::roc_path::check(
-                "hides_focus",
-                Hides::FACTS,
-                &wire::encode_hides(question),
-                &wire::encode_verdict(hides),
-            );
+            let roc = rift_core_roc::focus::hides_focus(question.clone());
+            crate::roc_path::check("hides_focus", Hides::FACTS, &question, &hides, roc);
         }
         if hides {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
@@ -6506,11 +6492,13 @@ impl Reactor {
                 RemovalFocus::KeepNative(successor) => RemovalFocus::KeepNative(window(successor)),
                 RemovalFocus::Refocus(space) => RemovalFocus::Refocus(space.word()),
             };
+            let roc = rift_core_roc::focus::removal_focus(question.clone());
             crate::roc_path::check(
                 "removal_focus",
                 RemovalQuestion::FACTS,
-                &wire::encode_removal_question(question),
-                &wire::encode_removal_focus(answer),
+                &question,
+                &answer,
+                roc,
             );
         }
         match decision {
@@ -6946,7 +6934,7 @@ impl Reactor {
                 window: plain_window,
                 rule_names_workspace: names_workspace.fact(|names| names),
             };
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "pointer_display_target",
                 PointerTarget::FACTS,
                 &wire::encode_pointer_target(question),
@@ -7024,11 +7012,13 @@ impl Reactor {
                 active: active.answers(Word::word, |active| active),
                 on_known_display: on_known_display.answers(Word::word, |known| known),
             };
+            let roc = rift_core_roc::focus::display_to_follow(question.clone());
             crate::roc_path::check(
                 "display_to_follow",
                 DisplayFollow::FACTS,
-                &wire::encode_display_follow(question),
-                &wire::encode_maybe_space(follow.map(Word::word)),
+                &question,
+                &follow.map(Word::word),
+                roc,
             );
         }
         let Some(space) = follow else {

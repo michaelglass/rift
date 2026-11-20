@@ -6,6 +6,7 @@
 
 use std::mem::ManuallyDrop;
 
+use rift_core::focus::{self, Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -13,7 +14,7 @@ use rift_core::layout::scrolling::{
 };
 use rift_core::layout::traditional::{self, Traditional};
 use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
-use rift_core::plain::{Rect, WindowId};
+use rift_core::plain::{Answers, Fact, Rect, Unasked, WindowId};
 
 use crate::abi;
 
@@ -596,5 +597,367 @@ pub(crate) fn floating_question(
         screen: rect(floating.screen),
         spread: floating.spread,
         windows: list(&windows, host),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Model-free questions: facts, answers about keys, and decisions.
+
+fn maybe_word(word: Option<u64>) -> abi::BoundaryMaybeWord {
+    use abi::BoundaryMaybeWordTag as Tag;
+    match word {
+        Some(word) => union!(BoundaryMaybeWord, BoundaryMaybeWordPayload.some(word), Tag::Some),
+        None => union!(BoundaryMaybeWord, BoundaryMaybeWordPayload.nothing, Tag::Nothing),
+    }
+}
+
+fn maybe_window(id: Option<WindowId>) -> abi::BoundaryMaybeWindow {
+    use abi::BoundaryMaybeWindowTag as Tag;
+    match id {
+        Some(id) => union!(
+            BoundaryMaybeWindow,
+            BoundaryMaybeWindowPayload.some_window(window(id)),
+            Tag::SomeWindow
+        ),
+        None => union!(
+            BoundaryMaybeWindow,
+            BoundaryMaybeWindowPayload.no_window,
+            Tag::NoWindow
+        ),
+    }
+}
+
+/// A fact of a given payload type, built by its own function from the payload's conversion.
+macro_rules! fact {
+    ($name:ident, $from:ty, $ty:ident, $payload:ident, $tag:ident, |$value:ident, $host:ident| $convert:expr) => {
+        fn $name(fact: Fact<$from>, $host: &abi::RocHost) -> abi::$ty {
+            let _ = $host;
+            match fact {
+                Fact::Asked($value) => union!($ty, $payload.asked($convert), abi::$tag::Asked),
+                Fact::Unasked => union!($ty, $payload.unasked, abi::$tag::Unasked),
+            }
+        }
+    };
+}
+
+fact!(
+    fact_bool,
+    bool,
+    BoundaryFactBool,
+    BoundaryFactBoolPayload,
+    BoundaryFactBoolTag,
+    |v, host| v
+);
+fact!(
+    fact_word,
+    Option<u64>,
+    BoundaryFactWord,
+    BoundaryFactWordPayload,
+    BoundaryFactWordTag,
+    |v, host| maybe_word(v)
+);
+fact!(
+    fact_window,
+    Option<WindowId>,
+    BoundaryFactWindow,
+    BoundaryFactWindowPayload,
+    BoundaryFactWindowTag,
+    |v, host| maybe_window(v)
+);
+fact!(
+    fact_words,
+    Vec<u64>,
+    BoundaryFactWords,
+    BoundaryFactWordsPayload,
+    BoundaryFactWordsTag,
+    |v, host| list(&v, host)
+);
+fact!(
+    fact_listing,
+    Option<bool>,
+    BoundaryFactListing,
+    BoundaryFactListingPayload,
+    BoundaryFactListingTag,
+    |v, host| listing(v)
+);
+fact!(
+    fact_known,
+    Option<(i32, u64)>,
+    BoundaryFactKnown,
+    BoundaryFactKnownPayload,
+    BoundaryFactKnownTag,
+    |v, host| known(v)
+);
+
+fn word_bools(
+    answers: Answers<u64, bool>,
+    host: &abi::RocHost,
+) -> abi::RocListWith<abi::BoundaryWordBool, false> {
+    let answers: Vec<_> = answers
+        .0
+        .into_iter()
+        .map(|(key, answer)| abi::BoundaryWordBool { key, answer })
+        .collect();
+    list(&answers, host)
+}
+
+fn window_bools(
+    answers: Answers<WindowId, bool>,
+    host: &abi::RocHost,
+) -> abi::RocListWith<abi::BoundaryWindowBool, false> {
+    let answers: Vec<_> = answers
+        .0
+        .into_iter()
+        .map(|(key, answer)| abi::BoundaryWindowBool { key: window(key), answer })
+        .collect();
+    list(&answers, host)
+}
+
+fn window_windows(
+    answers: Answers<WindowId, WindowId>,
+    host: &abi::RocHost,
+) -> abi::RocListWith<abi::BoundaryWindowWindow, false> {
+    let answers: Vec<_> = answers
+        .0
+        .into_iter()
+        .map(|(key, answer)| abi::BoundaryWindowWindow {
+            key: window(key),
+            answer: window(answer),
+        })
+        .collect();
+    list(&answers, host)
+}
+
+fn from_maybe_word(word: abi::BoundaryMaybeWord) -> Option<u64> {
+    use abi::BoundaryMaybeWordTag as Tag;
+    match word.tag {
+        // SAFETY: the tag says the payload is a word.
+        Tag::Some => Some(unsafe { *word.borrow_payload_some_unchecked() }),
+        Tag::Nothing => None,
+    }
+}
+
+/// A decision, or the fact it read that its question does not carry: each answer union's tag
+/// matched, its payload read.
+macro_rules! decision {
+    ($answer:expr, $tag:ident, |$decided:ident| $convert:expr) => {{
+        let answer = $answer;
+        match answer.tag {
+            abi::$tag::Decided => {
+                // SAFETY: the tag says the payload is the decision.
+                let $decided = unsafe { answer.borrow_payload_decided_unchecked() };
+                Ok($convert)
+            }
+            // SAFETY: the tag says the payload is the fact's place.
+            abi::$tag::Unasked => Err(Unasked {
+                fact: unsafe { *answer.borrow_payload_unasked_unchecked() },
+            }),
+        }
+    }};
+}
+
+// Focus.
+
+pub(crate) fn removal_question(
+    question: focus::plain::RemovalQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryRemovalQuestion {
+    use abi::BoundaryRemovalTag as Tag;
+    abi::BoundaryRemovalQuestion {
+        removal: match question.removal {
+            Removal::AppClosed(pid) => union!(
+                BoundaryRemoval,
+                BoundaryRemovalPayload.app_closed(pid),
+                Tag::AppClosed
+            ),
+            Removal::WindowRemoved(id) => union!(
+                BoundaryRemoval,
+                BoundaryRemovalPayload.window_removed(window(id)),
+                Tag::WindowRemoved
+            ),
+        },
+        focused: maybe_window(question.focused),
+        removed_space: fact_word(question.removed_space, host),
+        native_focus: fact_window(question.native_focus, host),
+        successors: window_windows(question.successors, host),
+        inactive: window_bools(question.inactive, host),
+    }
+}
+
+pub(crate) fn removal_answer(
+    answer: abi::BoundaryRemovalAnswer,
+) -> Result<RemovalFocus<WindowId, u64>, Unasked> {
+    use abi::BoundaryRemovalFocusTag as Tag;
+    decision!(answer, BoundaryRemovalAnswerTag, |focus| match focus.tag {
+        Tag::Unaffected => RemovalFocus::Unaffected,
+        // SAFETY: the tag says the payload is the successor.
+        Tag::KeepNative => RemovalFocus::KeepNative(from_window(unsafe {
+            *focus.borrow_payload_keep_native_unchecked()
+        })),
+        // SAFETY: the tag says the payload is the Space.
+        Tag::Refocus => RemovalFocus::Refocus(unsafe { *focus.borrow_payload_refocus_unchecked() }),
+    })
+}
+
+pub(crate) fn candidate_question(
+    question: focus::plain::Candidate,
+    host: &abi::RocHost,
+) -> abi::BoundaryCandidateQuestion {
+    abi::BoundaryCandidateQuestion {
+        preferred: maybe_word(question.preferred),
+        last_focused: fact_word(question.last_focused, host),
+        in_workspace: fact_words(question.in_workspace, host),
+        visible: word_bools(question.visible, host),
+    }
+}
+
+pub(crate) fn word_answer(answer: abi::BoundaryWordAnswer) -> Result<Option<u64>, Unasked> {
+    decision!(answer, BoundaryWordAnswerTag, |word| from_maybe_word(*word))
+}
+
+pub(crate) fn verdict_answer(answer: abi::BoundaryVerdictAnswer) -> Result<bool, Unasked> {
+    decision!(answer, BoundaryVerdictAnswerTag, |verdict| *verdict)
+}
+
+pub(crate) fn hides_question(
+    question: focus::plain::Hides,
+    host: &abi::RocHost,
+) -> abi::BoundaryHidesQuestion {
+    abi::BoundaryHidesQuestion {
+        window: question.window,
+        main: maybe_word(question.main),
+        focused: maybe_word(question.focused),
+        in_inactive_workspace: fact_bool(question.in_inactive_workspace, host),
+    }
+}
+
+fn listing(listed: Option<bool>) -> abi::BoundaryListing {
+    use abi::BoundaryListingTag as Tag;
+    match listed {
+        Some(listed) => union!(
+            BoundaryListing,
+            BoundaryListingPayload.listed(listed),
+            Tag::Listed
+        ),
+        None => union!(BoundaryListing, BoundaryListingPayload.no_bundle, Tag::NoBundle),
+    }
+}
+
+pub(crate) fn activation_question(
+    question: focus::plain::Activation,
+    host: &abi::RocHost,
+) -> abi::BoundaryActivationQuestion {
+    abi::BoundaryActivationQuestion {
+        standard: fact_bool(question.standard, host),
+        unavailable: fact_bool(question.unavailable, host),
+        space: fact_word(question.space, host),
+        workspace: fact_word(question.workspace, host),
+        active_workspace: fact_word(question.active_workspace, host),
+        pending_window: fact_bool(question.pending_window, host),
+        mode_refusal: fact_word(question.mode_refusal, host),
+        active_space_fullscreen: fact_bool(question.active_space_fullscreen, host),
+        unmanageable_source: fact_word(question.unmanageable_source, host),
+        blacklisted: fact_listing(question.blacklisted, host),
+    }
+}
+
+pub(crate) fn follow_answer(
+    answer: abi::BoundaryFollowAnswer,
+) -> Result<Follow<u64, u64, u64, u64>, Unasked> {
+    use abi::{BoundaryFollowTag as Tag, BoundaryStayTag as Why};
+    decision!(answer, BoundaryFollowAnswerTag, |follow| match follow.tag {
+        Tag::To => {
+            // SAFETY: the tag says the payload is the Space and workspace.
+            let to = unsafe { follow.borrow_payload_to_unchecked() };
+            Follow::To(to.space, to.workspace)
+        }
+        Tag::Stay => {
+            // SAFETY: the tag says the payload is the reason.
+            let why = unsafe { follow.borrow_payload_stay_unchecked() };
+            Follow::Stay(match why.tag {
+                Why::NotStandard => Stay::NotStandard,
+                Why::Unavailable => Stay::Unavailable,
+                Why::NoSpace => Stay::NoSpace,
+                Why::NoWorkspace => Stay::NoWorkspace,
+                Why::AlreadyActive => Stay::AlreadyActive,
+                Why::PendingWindow => Stay::PendingWindow,
+                // SAFETY: the tag says the payload is the mode's word.
+                Why::Mode => Stay::Mode(unsafe { *why.borrow_payload_mode_unchecked() }),
+                Why::FullscreenActive => Stay::FullscreenActive,
+                // SAFETY: the tag says the payload is the window-server id.
+                Why::Unmanageable => {
+                    Stay::Unmanageable(unsafe { *why.borrow_payload_unmanageable_unchecked() })
+                }
+                Why::NoBundleId => Stay::NoBundleId,
+                Why::Blacklisted => Stay::Blacklisted,
+            })
+        }
+    })
+}
+
+pub(crate) fn display_follow_question(
+    question: focus::plain::DisplayFollow,
+    host: &abi::RocHost,
+) -> abi::BoundaryDisplayFollowQuestion {
+    abi::BoundaryDisplayFollowQuestion {
+        focused_space: maybe_word(question.focused_space),
+        previous: maybe_word(question.previous),
+        active: word_bools(question.active, host),
+        on_known_display: word_bools(question.on_known_display, host),
+    }
+}
+
+fn known(known: Option<(i32, u64)>) -> abi::BoundaryKnown {
+    use abi::BoundaryKnownTag as Tag;
+    match known {
+        Some((layer, owner)) => union!(
+            BoundaryKnown,
+            BoundaryKnownPayload.known(abi::BoundaryKnownWindow { layer, owner }),
+            Tag::Known
+        ),
+        None => union!(BoundaryKnown, BoundaryKnownPayload.unknown, Tag::Unknown),
+    }
+}
+
+pub(crate) fn untracked_question(
+    question: focus::plain::Untracked,
+    host: &abi::RocHost,
+) -> abi::BoundaryUntrackedQuestion {
+    abi::BoundaryUntrackedQuestion {
+        under_cursor: maybe_word(question.under_cursor),
+        tracked: fact_bool(question.tracked, host),
+        known: fact_known(question.known, host),
+    }
+}
+
+pub(crate) fn untracked_answer(
+    answer: abi::BoundaryUntrackedAnswer,
+) -> Result<UntrackedFocus<u64, u64>, Unasked> {
+    use abi::BoundaryUntrackedFocusTag as Tag;
+    decision!(answer, BoundaryUntrackedAnswerTag, |focus| match focus.tag {
+        Tag::Nothing => UntrackedFocus::Nothing,
+        Tag::SystemSurface => {
+            // SAFETY: the tag says the payload is the surface.
+            let surface = unsafe { focus.borrow_payload_system_surface_unchecked() };
+            UntrackedFocus::SystemSurface {
+                layer: surface.layer,
+                window: surface.window,
+            }
+        }
+        Tag::MakeKey => {
+            // SAFETY: the tag says the payload is the window and its app.
+            let key = unsafe { focus.borrow_payload_make_key_unchecked() };
+            UntrackedFocus::MakeKey(key.owner, key.window)
+        }
+    })
+}
+
+pub(crate) fn desktop_question(
+    question: focus::plain::Desktop,
+    host: &abi::RocHost,
+) -> abi::BoundaryDesktopQuestion {
+    abi::BoundaryDesktopQuestion {
+        active: question.active,
+        workspace_empty: fact_bool(question.workspace_empty, host),
     }
 }

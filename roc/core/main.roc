@@ -5,7 +5,7 @@
 app [core] { pf: platform "../platform/main.roc" }
 
 import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
-import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion]
+import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer]
 import Bsp
 import Traditional
 import Scrolling
@@ -118,7 +118,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, tile, bsp, traditional, strip, settle, floating }
+core = { init, step, tile, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -143,9 +143,41 @@ settle = |question| Scrolling.settle(question.placed, question.view, question.pr
 floating : FloatingQuestion -> List(Rect)
 floating = |question| Floating.first_frames(question.screen, question.spread, question.windows)
 
+# The focus questions, typed (`Boundary`): each decision on its question's facts, or the
+# first fact it read that the question does not carry.
+
+## A decision, or the first fact it read that its question does not carry.
+decision_of : Try(a, [Unasked(U64)]) -> [Decided(a), Unasked(U64)]
+decision_of = |read|
+	match read {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
+
+removal_focus : RemovalQuestion -> RemovalAnswer
+removal_focus = |q| decision_of(Focus.removal_focus(q.removal, q.focused, q.removed_space, q.native_focus, q.successors, q.inactive))
+
+focus_candidate : CandidateQuestion -> WordAnswer
+focus_candidate = |q| decision_of(Focus.focus_candidate(q.preferred, q.last_focused, q.in_workspace, q.visible))
+
+hides_focus : HidesQuestion -> VerdictAnswer
+hides_focus = |q| decision_of(Focus.hides_focus(q.window, q.main, q.focused, q.in_inactive_workspace))
+
+activation_follow : ActivationQuestion -> FollowAnswer
+activation_follow = |q| decision_of(Focus.activation_follow(q))
+
+display_to_follow : DisplayFollowQuestion -> WordAnswer
+display_to_follow = |q| decision_of(Focus.display_to_follow(q.focused_space, q.previous, q.active, q.on_known_display))
+
+untracked_focus : UntrackedQuestion -> UntrackedAnswer
+untracked_focus = |q| decision_of(Focus.untracked_focus(q.under_cursor, q.tracked, q.known))
+
+focuses_desktop : DesktopQuestion -> VerdictAnswer
+focuses_desktop = |q| decision_of(Focus.focuses_desktop(q.active, q.workspace_empty))
+
 ## The model-free questions still on words (the layouts are typed entries above). A question's
 ## words (its tag first: 5 to 8 the topology decisions, `Topology`; 9 to 16 the lifecycle
-## decisions, `Lifecycle`; 17 to 23 the focus decisions, `Focus`; 24 a window's admission, 25 a
+## decisions, `Lifecycle`; 24 a window's admission, 25 a
 ## lifecycle reading, 26 a presence event, 27 an inventory's retirement question, 28 two
 ## admission changes in a row, `Lifecycle`; 29 to 31 the workspace decisions, 32 the
 ## workspaces' topology after its events, 33 window ownership after its events and its
@@ -179,13 +211,6 @@ shape_answer = |words| {
 		14 => Lifecycle.misplaced_words(cursor)
 		15 => Lifecycle.out_of_view_words(cursor)
 		16 => Lifecycle.title_change_words(cursor)
-		17 => Focus.removal_words(cursor)
-		18 => Focus.candidate_words(cursor)
-		19 => Focus.hides_words(cursor)
-		20 => Focus.activation_words(cursor)
-		21 => Focus.display_follow_words(cursor)
-		22 => Focus.untracked_words(cursor)
-		23 => Focus.desktop_words(cursor)
 		24 => Lifecycle.admission_words(cursor)
 		25 => Lifecycle.reading_words(cursor)
 		26 => Lifecycle.presence_words(cursor)

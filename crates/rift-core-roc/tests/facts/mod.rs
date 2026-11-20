@@ -2,6 +2,9 @@
 //! run through both cores: on full facts, and with facts left unasked, where both cores must
 //! read the same facts in the same order.
 
+// Shared by several test crates, each using part of it.
+#![allow(dead_code)]
+
 use rift_core::plain::{Answers, Fact, Unasked};
 use rift_core_roc::{AllocationCount, RocError, tile_words};
 
@@ -55,6 +58,40 @@ pub fn differential<R: Coin>(
                 rust,
                 "case {case} ({blank:?}): {name} {question:?}"
             );
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!(
+        "{group}: {cases} {name} questions on full facts and {cases} with facts unasked answered \
+         identically ({unasked} read an unasked fact)"
+    );
+}
+
+/// [`differential`] on typed calls: `ask` makes a question with `Blank`'s facts and returns it
+/// (for the failure message), the Roc core's answer and the Rust core's, each as words (so
+/// they are compared bit for bit) or the first fact read that the question does not carry.
+pub fn typed<R: Coin>(
+    group: &str,
+    name: &str,
+    mut rng: R,
+    mut ask: impl FnMut(&mut R, Blank) -> (String, Answered, Answered),
+) {
+    let cases: u64 = std::env::var(format!("RIFT_{}_CASES", group.to_uppercase()))
+        .map_or(20_000, |n| n.parse().unwrap());
+    let before = AllocationCount::now();
+    let mut unasked = 0;
+    for blank in [Blank::Full, Blank::Some] {
+        for case in 0..cases {
+            let (question, roc, rust) = ask(&mut rng, blank);
+            if let Blank::Full = blank {
+                assert!(
+                    rust.is_ok(),
+                    "case {case}: {name} on full facts read a missing one"
+                );
+            }
+            unasked += u64::from(rust.is_err());
+            assert_eq!(roc, rust, "case {case} ({blank:?}): {name} {question}");
         }
     }
     let after = AllocationCount::now();

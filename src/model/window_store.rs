@@ -1201,7 +1201,7 @@ impl WindowStore {
                         },
                         evidence: asked.fact(|evidence| evidence),
                     };
-                    crate::roc_path::check(
+                    crate::roc_path::check_words(
                         "retirement",
                         rift_core::lifecycle::plain::Inventory::FACTS,
                         &wire::encode_inventory(question),
@@ -1448,7 +1448,7 @@ impl WindowStore {
             use rift_core::plain::wire;
 
             use crate::roc_path::transition;
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "net",
                 &[],
                 &wire::encode_net(transition(roles), transition(minimized)),
@@ -1497,7 +1497,7 @@ impl WindowStore {
         #[cfg(feature = "roc-core")]
         {
             use rift_core::plain::wire;
-            crate::roc_path::check(
+            crate::roc_path::check_words(
                 "admission",
                 &[],
                 &wire::encode_admission_facts(facts),

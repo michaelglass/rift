@@ -120,4 +120,92 @@ Boundary := [].{
 
 	## Newcomers to a floating layout on `screen`, spread or not.
 	FloatingQuestion := { screen : Rect, spread : Bool, windows : List(Newcomer) }
+
+	# Model-free questions, shared shapes. A fact is what the platform's run of the decision
+	# answered, or that it never asked it (`rift_core::plain::Fact`), one named type per
+	# payload; a fact asked about keys is a list of key and answer (`Answers`). An answer is
+	# the decision, or the first fact it read that its question does not carry.
+
+	## A word (a Space, a workspace, a window-server id), or none.
+	MaybeWord := [Some(U64), Nothing]
+
+	## A window, or none.
+	MaybeWindow := [SomeWindow(WindowId), NoWindow]
+
+	FactBool := [Asked(Bool), Unasked]
+
+	## A fact of a word or none.
+	FactWord := [Asked(MaybeWord), Unasked]
+
+	## A fact of a window or none.
+	FactWindow := [Asked(MaybeWindow), Unasked]
+
+	## A fact of a list of words.
+	FactWords := [Asked(List(U64)), Unasked]
+
+	## A yes or no asked about a word.
+	WordBool := { key : U64, answer : Bool }
+
+	## A yes or no asked about a window.
+	WindowBool := { key : WindowId, answer : Bool }
+
+	## A window asked about a window.
+	WindowWindow := { key : WindowId, answer : WindowId }
+
+	## A word or none, decided.
+	WordAnswer := [Decided(MaybeWord), Unasked(U64)]
+
+	## A yes or no, decided.
+	VerdictAnswer := [Decided(Bool), Unasked(U64)]
+
+	# Focus (`rift_core::focus`).
+
+	Removal := [AppClosed(I32), WindowRemoved(WindowId)]
+
+	RemovalQuestion := { removal : Removal, focused : MaybeWindow, removed_space : FactWord, native_focus : FactWindow, successors : List(WindowWindow), inactive : List(WindowBool) }
+
+	RemovalFocus := [Unaffected, KeepNative(WindowId), Refocus(U64)]
+
+	RemovalAnswer := [Decided(RemovalFocus), Unasked(U64)]
+
+	CandidateQuestion := { preferred : MaybeWord, last_focused : FactWord, in_workspace : FactWords, visible : List(WordBool) }
+
+	HidesQuestion := { window : U64, main : MaybeWord, focused : MaybeWord, in_inactive_workspace : FactBool }
+
+	## Whether an app is blacklisted for auto-focus; no bundle id, no listing.
+	Listing := [Listed(Bool), NoBundle]
+
+	FactListing := [Asked(Listing), Unasked]
+
+	ActivationQuestion := { standard : FactBool, unavailable : FactBool, space : FactWord, workspace : FactWord, active_workspace : FactWord, pending_window : FactBool, mode_refusal : FactWord, active_space_fullscreen : FactBool, unmanageable_source : FactWord, blacklisted : FactListing }
+
+	FollowTo := { space : U64, workspace : U64 }
+
+	## Why an activation does not follow its window.
+	Stay := [NotStandard, Unavailable, NoSpace, NoWorkspace, AlreadyActive, PendingWindow, Mode(U64), FullscreenActive, Unmanageable(U64), NoBundleId, Blacklisted]
+
+	Follow := [To(FollowTo), Stay(Stay)]
+
+	FollowAnswer := [Decided(Follow), Unasked(U64)]
+
+	DisplayFollowQuestion := { focused_space : MaybeWord, previous : MaybeWord, active : List(WordBool), on_known_display : List(WordBool) }
+
+	## What is known of a window: its layer and its app.
+	KnownWindow := { layer : I32, owner : U64 }
+
+	Known := [Known(KnownWindow), Unknown]
+
+	FactKnown := [Asked(Known), Unasked]
+
+	UntrackedQuestion := { under_cursor : MaybeWord, tracked : FactBool, known : FactKnown }
+
+	Surface := { layer : I32, window : U64 }
+
+	KeyWindow := { owner : U64, window : U64 }
+
+	UntrackedFocus := [Nothing, SystemSurface(Surface), MakeKey(KeyWindow)]
+
+	UntrackedAnswer := [Decided(UntrackedFocus), Unasked(U64)]
+
+	DesktopQuestion := { active : Bool, workspace_empty : FactBool }
 }
