@@ -2228,6 +2228,20 @@ mod tests {
     }
 
     #[test]
+    fn releases_are_subscribed_before_event_processing_starts() {
+        let (input, _, _) = input();
+        // Startup: the pointer features are not live yet.
+        assert!(!input.startup.get().pointer());
+        let release_mask =
+            (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        assert_eq!(
+            input.desired_event_mask() & release_mask,
+            release_mask,
+            "mouse releases are not in the event mask during the startup window"
+        );
+    }
+
+    #[test]
     fn mask_tracks_mouse_feature_enablement() {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());

@@ -14,6 +14,77 @@ use crate::sys::geometry::{Round, SameAs};
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn a_window_created_during_a_drag_is_tiled_at_the_release_not_before() {
+    // #698: "defer tiling newly detached windows until release". A browser tab torn off during
+    // a drag is a window created mid-drag: nothing is laid out for it while the user drags, and
+    // the release tiles it with no further event.
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let held = WindowId::new(7, 1);
+    let frame = reactor.state.windows.window(held).unwrap().frame_monotonic();
+    reactor.handle_event(Event::PointerPressed { point: frame.mid() });
+    let dragged = CGRect::new(
+        CGPoint::new(frame.origin.x + 40., frame.origin.y + 20.),
+        frame.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        held,
+        dragged,
+        Some(apps.windows[&held].last_seen_txid),
+        Requested(false),
+    ));
+    assert!(reactor.user_is_dragging());
+    let _ = apps.requests();
+
+    let detached = WindowId::new(7, 3);
+    let mut info = make_window(3);
+    info.frame.origin = CGPoint::new(300., 300.);
+    reactor.handle_event(Event::WindowCreated(detached, info, None));
+    let written = |requests: &[Request], wid: WindowId| {
+        requests.iter().any(|request| {
+            matches!(request, Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(w, _)| *w == wid))
+        })
+    };
+    let during = apps.requests();
+    assert!(!written(&during, detached), "tiled mid-drag: {during:?}");
+    assert!(reactor.user_is_dragging());
+
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert!(!reactor.user_is_dragging());
+    let at_release = apps.requests();
+    assert!(
+        written(&at_release, detached),
+        "the release did not tile the window created during the drag: {at_release:?}"
+    );
+}
+
+#[test]
+fn a_window_created_without_a_drag_is_tiled_at_once() {
+    // The control for the test above: the same window, created with nobody dragging.
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let _ = apps.requests();
+    let created = WindowId::new(7, 3);
+    let mut info = make_window(3);
+    info.frame.origin = CGPoint::new(300., 300.);
+    reactor.handle_event(Event::WindowCreated(created, info, None));
+    let requests = apps.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, Request::SetWindowFrames(frames, ..)
+            if frames.iter().any(|(w, _)| *w == created))),
+        "{requests:?}"
+    );
+}
+
+#[test]
 fn startup_ready_waits_for_queryable_authoritative_space_and_fires_once() {
     let mut reactor = test_reactor_with_workspace_count(9);
     reactor.config.settings.default_disable = true;
@@ -13130,6 +13201,59 @@ fn other_window_moves_during_a_modifier_drag(
         Requested(false),
     ));
     (reactor, held, other, space1)
+}
+
+#[test]
+fn another_window_moving_does_not_take_over_a_native_drag() {
+    // The user title-bar drags the first window, so the button is down for every frame change
+    // reported meanwhile, including the second window's own move onto the other display.
+    let (mut apps, mut reactor) = test_context();
+    let screen1 = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
+    let (held, other) = (WindowId::new(7, 1), WindowId::new(7, 2));
+    let held_frame = reactor.state.windows.window(held).unwrap().frame_monotonic();
+    let dragged = CGRect::new(
+        CGPoint::new(held_frame.origin.x + 40., held_frame.origin.y + 20.),
+        held_frame.size,
+    );
+    reactor.handle_event(Event::PointerPressed {
+        point: CGPoint::new(held_frame.origin.x + 20., held_frame.origin.y + 10.),
+    });
+    reactor.handle_event(Event::WindowFrameChanged(
+        held,
+        dragged,
+        Some(apps.windows[&held].last_seen_txid),
+        Requested(false),
+    ));
+    assert!(reactor.state.windows.drag_on(held).is_some());
+    let _ = apps.requests();
+
+    let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic();
+    let on_display2 = CGRect::new(CGPoint::new(1100., other_frame.origin.y), other_frame.size);
+    reactor.handle_event(Event::WindowFrameChanged(
+        other,
+        on_display2,
+        Some(apps.windows[&other].last_seen_txid),
+        Requested(false),
+    ));
+    assert!(
+        reactor.state.windows.drag_on(held).is_some(),
+        "the user's native drag was replaced"
+    );
+    assert!(reactor.state.windows.drag_on(other).is_none());
+
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(other),
+        Some(space1),
+        "the undragged window was dropped as if the user had dragged it"
+    );
 }
 
 #[test]
