@@ -1590,13 +1590,14 @@ impl WorkspaceStore {
             }));
         }
 
-        let (workspace, floating, position, size, focus) =
-            rule_decision.map_or((None, false, None, None, false), |decision| {
+        let (workspace, floating, position, size, respect_min_size, focus) =
+            rule_decision.map_or((None, false, None, None, false, false), |decision| {
                 (
                     decision.workspace,
                     decision.floating,
                     decision.position,
                     decision.size,
+                    decision.respect_min_size,
                     decision.focus,
                 )
             });
@@ -1639,6 +1640,7 @@ impl WorkspaceStore {
             floating,
             position,
             size,
+            respect_min_size,
             focus,
             was_rule_floating,
         }))
@@ -2458,6 +2460,7 @@ mod tests {
             floating: false,
             position: None,
             size: None,
+            respect_min_size: false,
             focus: false,
             manage: Some(false),
             app_name: None,

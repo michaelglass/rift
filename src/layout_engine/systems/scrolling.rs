@@ -427,7 +427,7 @@ impl Geometry {
                 .get(wid)
                 .copied()
                 .unwrap_or(WindowLayoutConstraints {
-                    is_resizable: true,
+                    sizing: super::Sizing::Resizable,
                     ..Default::default()
                 })
                 .normalized()

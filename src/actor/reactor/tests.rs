@@ -37,6 +37,52 @@ fn active_container_tree(reactor: &Reactor, space: SpaceId) -> rift_protocol::Co
     reactor.query_layout_state(Some(space.get()), None).unwrap().container_tree
 }
 
+/// A window's slot: its frame in the model.
+fn slot(reactor: &Reactor, wid: WindowId) -> CGRect {
+    reactor.state.windows.window(wid).unwrap().frame_monotonic
+}
+
+#[test]
+fn a_resizable_window_keeps_its_reported_minimum_when_tiled_only_under_respect_min_size() {
+    // WhatsApp: resizable, but unusable below the minimum it reports. Traditional tiling treats
+    // a resizable window's minimum as advisory unless an app rule asks to respect it.
+    for respect_min_size in [false, true] {
+        let settings = crate::common::config::VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp2".into()),
+                respect_min_size,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (mut apps, mut reactor) =
+            (Apps::new(), test_reactor_with_workspace_settings(&settings));
+        reactor.config.virtual_workspaces = settings;
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        let mut constrained = make_window(1);
+        constrained.is_resizable = true;
+        constrained.min_size = Some(CGSize::new(700., 400.));
+        apps.make_app_and_settle(&mut reactor, 2, vec![constrained]);
+        apps.simulate_until_quiet(&mut reactor);
+
+        let width = |wid| slot(&reactor, wid).size.width;
+        let (whatsapp, other) = (WindowId::new(2, 1), WindowId::new(1, 1));
+        if respect_min_size {
+            assert_eq!(width(whatsapp), 700., "its minimum holds under the rule");
+            assert_eq!(width(other), 300.);
+        } else {
+            assert_eq!(
+                width(whatsapp),
+                500.,
+                "an advisory minimum is ignored in traditional"
+            );
+            assert_eq!(width(other), 500.);
+        }
+    }
+}
+
 #[test]
 fn startup_ready_waits_for_queryable_authoritative_space_and_fires_once() {
     let mut reactor = test_reactor_with_workspace_count(9);
@@ -6514,6 +6560,7 @@ fn fullscreen_startup_fixture(
             floating: false,
             position: None,
             size: None,
+            respect_min_size: false,
             focus: false,
             manage: Some(true),
             app_name: None,
