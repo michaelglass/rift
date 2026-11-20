@@ -193,8 +193,14 @@ boundary typed.**
   `PresenceOutcome::Invalidated(bool)` / `Revalidated(bool)` carry them; the twin maps the
   bools to the tags to compare.
 
-**Next:** the ownerships' step grows with the windows (a list rebuilt per change; 641 ns at
-100 windows, 7 us at 1000) and would be flat on a `Dict`, the lead's call. The joined
+- Who places each window is a `Dict` keyed by window in Roc (the questions' and the twin's
+  alike), so **a window with two owners cannot be built**: there is no duplicate entry to
+  plant, which is why the ownerships' plants are a held window misreported and owners left out
+  of the view. Views sort by window (`Workspaces.in_order`) where a stable order is needed.
+  The step is flat: 160-200 ns at 10 to 1000 windows (a sorted list rebuilt per change was
+  153 ns, 641 ns, 7 us at 10, 100, 1000).
+
+**Next:** the joined
 Workspaces twin replaces the three after #688 (W4b/c). No call site is in `layout_engine/`;
 keep it that way.
 
@@ -391,8 +397,8 @@ counts only under the `respect_min_size` app rule).
 ### Measured
 
 **Twins (2026-11-20, release), per step / whole view:** lifecycle 75 ns at 10 to 1000
-windows / 0.15, 0.36, 3 us at 10, 100, 1000; ownerships 153 ns, 641 ns, 7 us at 10, 100,
-1000 / 0.1 to 0.7 us; topology 210-300 ns at 5 to 100 workspaces / about 0.25 us. Rust's
+windows / 0.15, 0.36, 3 us at 10, 100, 1000; ownerships 160-200 ns at 10 to 1000 windows (on a
+`Dict`; on a list it was 153 ns, 641 ns, 7 us at 10, 100, 1000) / 0.1 to 0.7 us; topology 210-300 ns at 5 to 100 workspaces / about 0.25 us. Rust's
 steps are 20-81 ns.
 
 **Typed boundary (2026-11-20, release):** `RocCore::step` with the event's and effects'

@@ -32,8 +32,9 @@ Destination : [Returns(U64), Nowhere]
 ## user's hand, a workspace transfer having left it) nobody until the drop.
 Ownership : [Assigned(U64), Claimed({ owner : U64, destination : Destination }), Held]
 
-## Who places each window, in window order; a window without an entry is unowned.
-Ownerships : List({ window : U64, ownership : Ownership })
+## Who places each window, keyed by window, so no window has two owners; a window without
+## an entry is unowned. Views give them in window order (`in_order`).
+Ownerships : Dict(U64, Ownership)
 
 ## The workspaces joined: the catalog, what each Space shows, and who places each window.
 ## Every workspace an activation or an ownership names is in the catalog.
@@ -231,38 +232,21 @@ Workspaces := [].{
 			Cleared(space) => { ..topology, activations: topology.activations.keep_if(|entry| entry.space != space) }
 		}
 
-	## The ownerships after a window's new owner: replaced in place, or put in window order.
-	own : Ownerships, U64, Ownership -> Ownerships
-	own = |ownerships, window, ownership| {
-		var $out = []
-		var $placing = Placing
-		for entry in ownerships {
-			match $placing {
-				Placing if entry.window == window => {
-					$out = $out.append({ window, ownership })
-					$placing = Placed
-				}
-				Placing if entry.window > window => {
-					$out = $out.append({ window, ownership }).append(entry)
-					$placing = Placed
-				}
-				_ => {
-					$out = $out.append(entry)
-				}
-			}
-		}
-		match $placing {
-			Placing => $out.append({ window, ownership })
-			Placed => $out
-		}
-	}
+	## Every owned window and its ownership, in window order: the order every view and answer
+	## gives them in.
+	in_order : Ownerships -> List({ window : U64, ownership : Ownership })
+	in_order = |ownerships|
+		ownerships
+			.to_list()
+			.sort_with(|(a, _), (b, _)| if a < b Before else if a > b After else Same)
+			.map(|(window, ownership)| { window, ownership })
 
 	## Each owned window naming a workspace the catalog lacks (assigned, or a claim's
 	## destination), with that workspace, in window order.
 	orphans : Ownerships, List(U64) -> List({ window : U64, workspace : U64 })
 	orphans = |ownerships, catalog| {
 		var $out = []
-		for entry in ownerships {
+		for entry in in_order(ownerships) {
 			named =
 				match entry.ownership {
 					Assigned(workspace) => Names(workspace)
@@ -362,27 +346,27 @@ Workspaces := [].{
 			Cleared(space) => topology(Cleared(space))
 			Owned(owned) =>
 				match owned.owned {
-					Unowned => { ..joined, owners: joined.owners.keep_if(|entry| entry.window != owned.window) }
-					Owner(ownership) => { ..joined, owners: own(joined.owners, owned.window, ownership) }
+					Unowned => { ..joined, owners: joined.owners.remove(owned.window) }
+					Owner(ownership) => { ..joined, owners: joined.owners.insert(owned.window, ownership) }
 				}
 			Removed(removed) => {
 				gone = removed.workspace
-				var $owners = []
-				for entry in joined.owners {
-					match (entry.ownership, removed.successor) {
+				var $owners = joined.owners
+				for (window, ownership) in joined.owners.to_list() {
+					match (ownership, removed.successor) {
 						(Assigned(id), Into(heir)) if id == gone => {
-							$owners = $owners.append({ window: entry.window, ownership: Assigned(heir) })
+							$owners = $owners.insert(window, Assigned(heir))
 						}
-						(Assigned(id), Unassign) if id == gone => {}
+						(Assigned(id), Unassign) if id == gone => {
+							$owners = $owners.remove(window)
+						}
 						(Claimed({ owner, destination: Returns(id) }), Into(heir)) if id == gone => {
-							$owners = $owners.append({ window: entry.window, ownership: Claimed({ owner, destination: Returns(heir) }) })
+							$owners = $owners.insert(window, Claimed({ owner, destination: Returns(heir) }))
 						}
 						(Claimed({ owner, destination: Returns(id) }), Unassign) if id == gone => {
-							$owners = $owners.append({ window: entry.window, ownership: Claimed({ owner, destination: Nowhere }) })
+							$owners = $owners.insert(window, Claimed({ owner, destination: Nowhere }))
 						}
-						_ => {
-							$owners = $owners.append(entry)
-						}
+						_ => {}
 					}
 				}
 				forget = |maybe|
@@ -408,7 +392,7 @@ Workspaces := [].{
 	windows_on : Joined, U64 -> List(U64)
 	windows_on = |joined, workspace| {
 		var $windows = []
-		for entry in joined.owners {
+		for entry in in_order(joined.owners) {
 			match entry.ownership {
 				Assigned(id) if id == workspace => {
 					$windows = $windows.append(entry.window)
@@ -441,39 +425,33 @@ Workspaces := [].{
 	topology_after = |events| events.fold({ catalog: [], activations: [] }, topology_step)
 
 	## The ownerships an empty one becomes after `events`, and their orphans against `catalog`.
-	ownership_after : List({ window : U64, owned : [Unowned, Owner(Ownership)] }), List(U64) -> { owners : Ownerships, orphans : List({ window : U64, workspace : U64 }) }
+	ownership_after : List({ window : U64, owned : [Unowned, Owner(Ownership)] }), List(U64) -> { owners : List({ window : U64, ownership : Ownership }), orphans : List({ window : U64, workspace : U64 }) }
 	ownership_after = |events, catalog| {
-		owners = events.fold([], |acc, event| ownership_step(acc, event.window, event.owned))
-		{ owners, orphans: orphans(owners, catalog) }
+		owners = events.fold(Dict.empty(), |acc, event| ownership_step(acc, event.window, event.owned))
+		{ owners: in_order(owners), orphans: orphans(owners, catalog) }
 	}
 
 	## The ownerships after a window's new owner, or after nobody places it any more.
 	ownership_step : Ownerships, U64, [Unowned, Owner(Ownership)] -> Ownerships
 	ownership_step = |ownerships, window, owned|
 		match owned {
-			Unowned => ownerships.keep_if(|entry| entry.window != window)
-			Owner(ownership) => own(ownerships, window, ownership)
+			Unowned => ownerships.remove(window)
+			Owner(ownership) => ownerships.insert(window, ownership)
 		}
 
 	## Who places `window`, or that nobody does.
 	owned_in : Ownerships, U64 -> [Unowned, Owner(Ownership)]
-	owned_in = |ownerships, window| {
-		var $owned = Unowned
-		for entry in ownerships {
-			if entry.window == window {
-				$owned = Owner(entry.ownership)
-			} else {
-				{}
-			}
+	owned_in = |ownerships, window|
+		match ownerships.get(window) {
+			Ok(ownership) => Owner(ownership)
+			Err(_) => Unowned
 		}
-		$owned
-	}
 
 	## What each event of a run met from empty workspaces, and the workspaces it leaves.
-	joined_after : List(JoinedEvent) -> { outcomes : List(Outcome), catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }), owners : Ownerships, windows : List({ workspace : U64, windows : List(U64) }) }
+	joined_after : List(JoinedEvent) -> { outcomes : List(Outcome), catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }), owners : List({ window : U64, ownership : Ownership }), windows : List({ workspace : U64, windows : List(U64) }) }
 	joined_after = |events| {
 		(joined, outcomes) = events.fold(
-			({ catalog: [], activations: [], owners: [] }, []),
+			({ catalog: [], activations: [], owners: Dict.empty() }, []),
 			|(state, met), event| {
 				outcome = admit(state, event)
 				match outcome {
@@ -486,7 +464,7 @@ Workspaces := [].{
 			outcomes,
 			catalog: joined.catalog,
 			activations: joined.activations,
-			owners: joined.owners,
+			owners: in_order(joined.owners),
 			windows: joined.catalog.map(|entry| { workspace: entry.workspace, windows: windows_on(joined, entry.workspace) }),
 		}
 	}

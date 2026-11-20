@@ -85,9 +85,9 @@ Windows : Dict(U64, [Live(WindowFacts), Invalidated(WindowFacts)])
 ## What admission reads of a window (`Lifecycle.Facts`).
 WindowFacts : { manageability : [Manageable, Unmanageable], rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native : [Ordinary, Transient], minimize : [Shown, Minimized] }
 
-## Who places each window, kept between events, in window order (`Workspaces.Ownerships`,
-## written out: the platform needs the name here).
-Owners : List({ window : U64, ownership : [Assigned(U64), Claimed({ owner : U64, destination : [Returns(U64), Nowhere] }), Held] })
+## Who places each window, kept between events, keyed by window, so no window has two owners
+## (`Workspaces.Ownerships`, written out: the platform needs the name here).
+Owners : Dict(U64, [Assigned(U64), Claimed({ owner : U64, destination : [Returns(U64), Nowhere] }), Held])
 
 ## The workspaces' topology kept between events: the catalog, in catalog order, and what each
 ## Space shows, in the order the Spaces first got an activation (`Workspaces.Topology`, written
@@ -271,7 +271,7 @@ lifecycle_view = |windows| { model: windows, windows: Lifecycle.windows_view(win
 
 ## Who places each window, kept between events: nobody, at first.
 ownerships_init : {} -> Owners
-ownerships_init = |{}| []
+ownerships_init = |{}| Dict.empty()
 
 ## A window's new owner, or that nobody places it.
 ownerships_step : Owners, OwnershipEvent -> { model : Owners, owned : Owned }
@@ -282,7 +282,7 @@ ownerships_step = |owners, event| {
 
 ## Every owned window.
 ownerships_view : Owners -> { model : Owners, owners : List(WindowOwnership) }
-ownerships_view = |owners| { model: owners, owners }
+ownerships_view = |owners| { model: owners, owners: Workspaces.in_order(owners) }
 
 ## The workspaces' topology kept between events: no workspaces and no activations, at first.
 topology_init : {} -> Places
