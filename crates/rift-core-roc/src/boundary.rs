@@ -1980,43 +1980,43 @@ pub(crate) fn topology_question(
     question: workspaces::plain::TopologyQuestion,
     host: &abi::RocHost,
 ) -> abi::BoundaryTopologyQuestion {
-    use abi::BoundaryTopologyEventTag as Tag;
-    let events: Vec<_> = question
-        .events
-        .into_iter()
-        .map(|event| match event {
-            TopologyEvent::Created { workspace, space } => union!(
-                BoundaryTopologyEvent,
-                BoundaryTopologyEventPayload.created(workspace_space(workspace, space)),
-                Tag::Created
-            ),
-            TopologyEvent::Removed(workspace) => {
-                union!(
-                    BoundaryTopologyEvent,
-                    BoundaryTopologyEventPayload.removed(workspace),
-                    Tag::Removed
-                )
-            }
-            TopologyEvent::Moved { workspace, space } => union!(
-                BoundaryTopologyEvent,
-                BoundaryTopologyEventPayload.moved(workspace_space(workspace, space)),
-                Tag::Moved
-            ),
-            TopologyEvent::Activated { space, activation: at } => union!(
-                BoundaryTopologyEvent,
-                BoundaryTopologyEventPayload.activated(space_activation(space, at)),
-                Tag::Activated
-            ),
-            TopologyEvent::Cleared(space) => {
-                union!(
-                    BoundaryTopologyEvent,
-                    BoundaryTopologyEventPayload.cleared(space),
-                    Tag::Cleared
-                )
-            }
-        })
-        .collect();
+    let events: Vec<_> = question.events.into_iter().map(topology_event).collect();
     abi::BoundaryTopologyQuestion { events: list(&events, host) }
+}
+
+fn topology_event(event: TopologyEvent<u64, u64>) -> abi::BoundaryTopologyEvent {
+    use abi::BoundaryTopologyEventTag as Tag;
+    match event {
+        TopologyEvent::Created { workspace, space } => union!(
+            BoundaryTopologyEvent,
+            BoundaryTopologyEventPayload.created(workspace_space(workspace, space)),
+            Tag::Created
+        ),
+        TopologyEvent::Removed(workspace) => {
+            union!(
+                BoundaryTopologyEvent,
+                BoundaryTopologyEventPayload.removed(workspace),
+                Tag::Removed
+            )
+        }
+        TopologyEvent::Moved { workspace, space } => union!(
+            BoundaryTopologyEvent,
+            BoundaryTopologyEventPayload.moved(workspace_space(workspace, space)),
+            Tag::Moved
+        ),
+        TopologyEvent::Activated { space, activation: at } => union!(
+            BoundaryTopologyEvent,
+            BoundaryTopologyEventPayload.activated(space_activation(space, at)),
+            Tag::Activated
+        ),
+        TopologyEvent::Cleared(space) => {
+            union!(
+                BoundaryTopologyEvent,
+                BoundaryTopologyEventPayload.cleared(space),
+                Tag::Cleared
+            )
+        }
+    }
 }
 
 fn from_catalog(catalog: &abi::RocListWith<abi::BoundaryWorkspaceSpace, false>) -> Vec<(u64, u64)> {
@@ -2724,5 +2724,45 @@ fn from_owned(owned: abi::BoundaryOwned) -> Owned<u64, u64> {
         Tag::Owner => Owned::Owner(from_ownership(unsafe {
             *owned.borrow_payload_owner_unchecked()
         })),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The workspaces' topology, kept between events.
+
+/// The topology's box, which only Roc can read or free; only the `roc_topology_*` entries make
+/// and take one (see [`LifecycleBox`]). Dropping it releases the topology.
+pub(crate) struct TopologyBox(abi::RocBox);
+
+impl TopologyBox {
+    pub(crate) fn empty() -> TopologyBox { TopologyBox(unsafe { abi::roc_topology_init() }) }
+
+    /// A change to the topology.
+    pub(crate) fn step(&mut self, event: TopologyEvent<u64, u64>) {
+        // SAFETY: the box is this topology's, moved into the step; its successor replaces it.
+        self.0 = unsafe { abi::roc_topology_step(self.0, topology_event(event)) };
+    }
+
+    /// The catalog and every Space's activation.
+    pub(crate) fn view(&mut self, host: &abi::RocHost) -> crate::workspaces::TopologyView {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_topology_view(self.0) };
+        self.0 = viewed.model;
+        let view = crate::workspaces::TopologyView {
+            catalog: from_catalog(&viewed.catalog),
+            activations: from_activations(&viewed.activations),
+        };
+        unsafe {
+            viewed.catalog.decref(host);
+            viewed.activations.decref(host);
+        }
+        view
+    }
+}
+
+impl Drop for TopologyBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this topology's and is never used again.
+        unsafe { abi::roc_topology_release(self.0) }
     }
 }

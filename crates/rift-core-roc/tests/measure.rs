@@ -587,3 +587,72 @@ fn measure_ownerships_twin() {
         show("roc view", &stats(roc_views));
     }
 }
+
+/// The workspaces' topology kept between events, Rust against the Roc twin: per change
+/// (activations as workspaces switch, moves between Spaces) on a catalog of `workspaces` over
+/// 3 Spaces; and reading the catalog and activations back.
+#[test]
+#[ignore]
+fn measure_topology_twin() {
+    use rift_core::workspaces::{Activation, Topology, TopologyEvent};
+    use rift_core_roc::RocTopology;
+    for workspaces in [5u64, 20, 100] {
+        let mut seed = 0xD1B5_4A32_D192_ED03u64 ^ workspaces;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let events: Vec<TopologyEvent<u64, u64>> = (0..20_000)
+            .map(|_| match next() % 4 {
+                0 => TopologyEvent::Moved {
+                    workspace: 1 + next() % workspaces,
+                    space: 1 + next() % 3,
+                },
+                _ => TopologyEvent::Activated {
+                    space: 1 + next() % 3,
+                    activation: Activation::Showing {
+                        current: 1 + next() % workspaces,
+                        previous: Some(1 + next() % workspaces),
+                        remembered: None,
+                    },
+                },
+            })
+            .collect();
+        let mut rust = Topology::<u64, u64>::default();
+        let mut roc = RocTopology::default();
+        for workspace in 1..=workspaces {
+            let event = TopologyEvent::Created {
+                workspace,
+                space: 1 + workspace % 3,
+            };
+            rust.step(event);
+            roc.step(event);
+        }
+        let rust_times = time(&events, |&event| {
+            rust.step(event);
+            std::hint::black_box(&rust);
+        });
+        let before = AllocationCount::now();
+        let roc_times = time(&events, |&event| {
+            roc.step(event);
+        });
+        let allocated = AllocationCount::now().allocated - before.allocated;
+        let views: Vec<()> = vec![(); 200];
+        let rust_views = time(&views, |_| {
+            std::hint::black_box((rust.catalog().to_vec(), rust.activations().to_vec()));
+        });
+        let roc_views = time(&views, |_| {
+            std::hint::black_box(roc.view());
+        });
+        eprintln!(
+            "topology twin, {workspaces} workspaces ({:.2} Roc allocations per step):",
+            allocated as f64 / events.len() as f64
+        );
+        show("rust", &stats(rust_times));
+        show("roc", &stats(roc_times));
+        show("rust view", &stats(rust_views));
+        show("roc view", &stats(roc_views));
+    }
+}

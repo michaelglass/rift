@@ -474,6 +474,9 @@ Boundary := [].{
 	## A topology: its catalog, and what each Space shows.
 	TopologyView := { catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
 
+	## The topology, unchanged, and what it holds: the catalog and every Space's activation.
+	TopologyViewed(model) := { model : Box(model), catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
+
 	## Where a claimed window returns to when its claim ends.
 	Destination := [Returns(U64), Nowhere]
 

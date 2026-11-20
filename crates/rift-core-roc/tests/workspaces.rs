@@ -451,3 +451,70 @@ fn the_roc_ownerships_keep_owners_between_events_as_the_rust_ones_do() {
         "workspaces: {steps} kept-ownership steps identical ({held} held), owners compared after each"
     );
 }
+
+/// The workspaces' topology, kept between events: the Roc twin and the Rust topology take the
+/// same runs of workspaces created, removed and moved (known and unknown ones) and Spaces
+/// activated and cleared, each run on one persistent model. After every change both must hold
+/// the same catalog and activations, in the same orders.
+#[test]
+fn the_roc_topology_keeps_workspaces_between_events_as_the_rust_one_does() {
+    use rift_core::workspaces::{Activation, Topology, TopologyEvent};
+    use rift_core_roc::RocTopology;
+    let mut rng = Rng(0x70B0_1000_0000_0038);
+    let before = AllocationCount::now();
+    let mut steps = 0;
+    for run in 0..400 {
+        let mut rust = Topology::<u64, u64>::default();
+        let mut roc = RocTopology::default();
+        let mut created = 0;
+        for step in 0..60 {
+            let maybe = |rng: &mut Rng| rng.chance(50).then(|| 1 + rng.below(8));
+            let event = match rng.below(10) {
+                0..=2 => {
+                    created += 1;
+                    // Now and then a workspace id the catalog already has.
+                    let workspace = if rng.chance(10) {
+                        1 + rng.below(created)
+                    } else {
+                        created
+                    };
+                    TopologyEvent::Created { workspace, space: rng.space() }
+                }
+                3 => TopologyEvent::Removed(1 + rng.below(created + 2)),
+                4 | 5 => TopologyEvent::Moved {
+                    workspace: 1 + rng.below(created + 2),
+                    space: rng.space(),
+                },
+                6..=8 => TopologyEvent::Activated {
+                    space: rng.space(),
+                    activation: if rng.chance(75) {
+                        Activation::Showing {
+                            current: 1 + rng.below(8),
+                            previous: maybe(&mut rng),
+                            remembered: maybe(&mut rng),
+                        }
+                    } else {
+                        Activation::Vacant { remembered: maybe(&mut rng) }
+                    },
+                },
+                _ => TopologyEvent::Cleared(rng.space()),
+            };
+            rust.step(event);
+            roc.step(event);
+            let expected = TopologyView {
+                catalog: rust.catalog().to_vec(),
+                activations: rust.activations().to_vec(),
+            };
+            assert_eq!(roc.view(), expected, "run {run} step {step}: after {event:?}");
+            steps += 1;
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    eprintln!(
+        "workspaces: {steps} kept-topology steps identical, catalog and activations compared after each"
+    );
+}

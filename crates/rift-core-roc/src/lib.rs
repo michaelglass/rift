@@ -273,6 +273,36 @@ impl RocOwnerships {
     }
 }
 
+/// The workspaces' topology (`rift_core::workspaces::Topology`) kept in Roc between events:
+/// the catalog and what each Space shows. Stepped beside the Rust topology, it must keep the
+/// same catalog and activations.
+pub struct RocTopology {
+    places: boundary::TopologyBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocTopology {}
+
+impl Default for RocTopology {
+    fn default() -> Self {
+        RocTopology {
+            places: boundary::TopologyBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocTopology {
+    /// As `Topology::step`.
+    pub fn step(&mut self, event: rift_core::workspaces::TopologyEvent<u64, u64>) {
+        self.places.step(event)
+    }
+
+    /// As `Topology::catalog` and `Topology::activations`.
+    pub fn view(&mut self) -> workspaces::TopologyView { self.places.view(&self.host) }
+}
+
 /// Why the Roc core gave no answer: it always answers, so there is no such value. (The layout
 /// functions keep a `Result` for their callers until those are next changed.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
