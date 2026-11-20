@@ -3,8 +3,8 @@
 //! types (a Space, a window, a window-server id, a display) and asks for a fact only when the
 //! decision needs it, so the platform's queries stay lazy.
 //!
-//! [`plain`] holds each decision as a question on plain data, which crosses to the Roc core as
-//! words (`plain::wire`, tags 5 to 8 of the model-free entry).
+//! [`plain`] holds each decision as a question on plain data, which the Roc core is asked
+//! through its typed entries (`roc/platform/Boundary.roc`).
 
 /// Where an app inventory finds a window, by what the platform already knows of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

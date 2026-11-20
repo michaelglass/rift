@@ -1,17 +1,11 @@
 ## A floating layout's first frames (`rift_core::layout::floating`): where a window goes the
 ## first time the layout places it.
 
-import Geometry exposing [fixed_for_axis, max, max_for_axis, min, normalized, reported_min, take_constraints]
+import Geometry exposing [fixed_for_axis, max, max_for_axis, min, normalized, reported_min]
 
 WindowId : { pid : I32, idx : U32 }
 
 Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## Words being read, and where.
-Words : { words : List(U64), at : U64 }
-
-## A value read and where the rest starts, or the words were malformed.
-Taken(a) : Try((a, Words), [Malformed])
 
 ## A size an app reported, as rift parsed it: each axis finite and not negative.
 Size : { width : F64, height : F64 }

@@ -1,7 +1,7 @@
 //! The core on plain data: what a foreign core (Roc) sees, and what a recorded trace holds.
 //! Every type here is a fixed-width integer, a float, or a record of them. [`Translate`] takes
 //! the core's events and effects from the platform's types to these; [`wire`] puts them into
-//! words and back (the Roc core's boundary, and the trace file format).
+//! words and back (the trace file format, and the differentials' bit-for-bit comparisons).
 
 use std::ops::Add;
 use std::time::Duration;

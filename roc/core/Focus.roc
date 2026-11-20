@@ -3,7 +3,7 @@
 ## Questions on plain data; Spaces, workspaces, window-server ids, modes and apps are one word
 ## each, and a window with an app is a WindowId (its app is its pid).
 
-import Wire exposing [ask, ask_window, ask_word]
+import Asking exposing [ask, ask_window, ask_word]
 
 WindowId : { pid : I32, idx : U32 }
 

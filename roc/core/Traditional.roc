@@ -3,17 +3,11 @@
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
 import pf.Boundary exposing [TraditionalNode]
-import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, take_constraints, tiled_min, tiling_area]
+import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, tiled_min, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
 
 Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## Words being read, and where.
-Words : { words : List(U64), at : U64 }
-
-## A value read and where the rest starts, or the words were malformed.
-Taken(a) : Try((a, Words), [Malformed])
 
 ## A size an app reported, as rift parsed it: each axis finite and not negative.
 Size : { width : F64, height : F64 }

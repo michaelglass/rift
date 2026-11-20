@@ -1,17 +1,9 @@
 ## Layout geometry every system shares (`rift_core::layout` and `layout::axis`), bit for bit
 ## with the Rust: the float helpers are Rust's (`f64::round`, `max`, `min`, `sum`), not Roc's.
 
-import Wire exposing [take, take_float]
-
 WindowId : { pid : I32, idx : U32 }
 
 Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## Words being read, and where.
-Words : { words : List(U64), at : U64 }
-
-## A value read and where the rest starts, or the words were malformed.
-Taken(a) : Try((a, Words), [Malformed])
 
 ## A size an app reported, as rift parsed it: each axis finite and not negative.
 Size : { width : F64, height : F64 }
@@ -508,42 +500,5 @@ Geometry := [].{
 					},
 			)
 		settled
-	}
-
-	take_constraints : Words -> Taken(WindowConstraints)
-	take_constraints = |c0| {
-		(tag, c1) = take(c0)?
-		(size, c2) = take_size(c1)?
-		sizing =
-			match tag {
-				0 => Ok(Fixed(size))
-				1 => Ok(Resizable(size))
-				2 => Ok(ResizableAtLeastMin(size))
-				_ => Err(Malformed)
-			}?
-		(locked_width, c3) = take_float(c2)?
-		(locked_height, c4) = take_float(c3)?
-		(max_width, c5) = take_float(c4)?
-		(max_height, c6) = take_float(c5)?
-		Ok(({ sizing, locked_width, locked_height, max_width, max_height }, c6))
-	}
-
-	## A size as rift parsed it: an axis that is not finite, or negative, is malformed.
-	take_size : Words -> Taken(Size)
-	take_size = |c0| {
-		(width, c1) = take_axis(c0)?
-		(height, c2) = take_axis(c1)?
-		Ok(({ width, height }, c2))
-	}
-
-	take_axis : Words -> Taken(F64)
-	take_axis = |c0| {
-		(value, c1) = take_float(c0)?
-		if F64.is_finite(value) and value >= 0.0 {
-			# As Rust's Size::reported: -0 is 0.
-			Ok((max(value, 0.0), c1))
-		} else {
-			Err(Malformed)
-		}
 	}
 }

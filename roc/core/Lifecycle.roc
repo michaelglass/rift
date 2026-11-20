@@ -1,9 +1,9 @@
 ## Decisions about a window's life (`rift_core::lifecycle`): app rules, placement, transients,
 ## what an inventory says about the windows it omits. Questions on plain data: a decision's
-## facts are what the platform's run of it asked (`Wire.Fact`), read in the same order;
+## facts are what the platform's run of it asked (`Asking.Fact`), read in the same order;
 ## windows, Spaces, window-server ids and apps are one word each.
 
-import Wire exposing [ask, ask_word]
+import Asking exposing [ask, ask_word]
 
 ## A Space, or none.
 MaybeSpace : [Space(U64), NoSpace]

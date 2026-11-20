@@ -1,17 +1,11 @@
 ## A scrolling layout's strip (`rift_core::layout::scrolling`): columns side by side in world
 ## space, each column's windows in rows sharing its height, and the camera's resting points.
 
-import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, solve, take_constraints]
+import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, solve]
 
 WindowId : { pid : I32, idx : U32 }
 
 Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## Words being read, and where.
-Words : { words : List(U64), at : U64 }
-
-## A value read and where the rest starts, or the words were malformed.
-Taken(a) : Try((a, Words), [Malformed])
 
 ## A size an app reported, as rift parsed it: each axis finite and not negative.
 Size : { width : F64, height : F64 }

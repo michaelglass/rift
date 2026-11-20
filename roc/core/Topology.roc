@@ -1,8 +1,8 @@
 ## Decisions about Spaces and the windows on them (`rift_core::topology`), as questions on plain
-## data: a decision's facts are what the platform's run of it asked (`Wire.Fact`), read in the
+## data: a decision's facts are what the platform's run of it asked (`Asking.Fact`), read in the
 ## same order. Spaces, window-server ids and displays are one word each.
 
-import Wire exposing [ask, ask_window, ask_word]
+import Asking exposing [ask, ask_window, ask_word]
 
 WindowId : { pid : I32, idx : U32 }
 
