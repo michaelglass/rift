@@ -200,6 +200,22 @@ boundary typed.**
   The step is flat: 160-200 ns at 10 to 1000 windows (a sorted list rebuilt per change was
   153 ns, 641 ns, 7 us at 10, 100, 1000).
 
+**Upstream #688 / #700 (2026-11-20).** Upstream main rewrote the layout systems (#688, with
+#698's drag and reconciliation fixes) and the reactor's event flow (#700). Merging it into this
+line is three parts, each the lead's ruling:
+- (a) layout: upstream's systems. Built as its own tested line, `experiment/upstream-layout`
+  on upstream main, with what main still lacks re-landed red-first: keep-constraints, the
+  scrolling camera that ends before arriving, and `respect_min_size` (the owner's config uses
+  it). There `Sizing` is a tag (Fixed | Resizable | ResizableAtLeastMin) beside upstream's
+  min/max/locked numbers, not the core's variants that carry the minimum. Dead with (a): BSP
+  phase B and the core's BSP trees, the traditional core shadow, and the traditional fixes
+  (still bugs upstream; their tests are kept).
+- (b) the event flow and (c) reconciliation and drag: (b) and the lifecycle flip wait for
+  upstream PR #702 (window admission centralised in the reactor, with flags); (c) keeps the core
+  reconciler and grip.
+- **Upstream PR #678 (feat/respect-min-size) is based on pre-#688 code.** That branch is the
+  owner's to decide about; nothing here touches it.
+
 **Next:** the joined
 Workspaces twin replaces the three after #688 (W4b/c). No call site is in `layout_engine/`;
 keep it that way.
