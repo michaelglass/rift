@@ -5,7 +5,7 @@
 app [core] { pf: platform "../platform/main.roc" }
 
 import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
-import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer]
+import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion]
 import Bsp
 import Traditional
 import Scrolling
@@ -118,7 +118,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, tile, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop }
+core = { init, step, tile, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -175,8 +175,33 @@ untracked_focus = |q| decision_of(Focus.untracked_focus(q.under_cursor, q.tracke
 focuses_desktop : DesktopQuestion -> VerdictAnswer
 focuses_desktop = |q| decision_of(Focus.focuses_desktop(q.active, q.workspace_empty))
 
+# The topology questions, typed (`Boundary`).
+
+discovered_space : DiscoveredQuestion -> DiscoveredAnswer
+discovered_space = |q| decision_of(Topology.discovered_space(q.standing, q.live, q.observable, q.recorded, q.resolved))
+
+discovery_spaces : DiscoveryQuestion -> DiscoveryAnswer
+discovery_spaces = |q|
+	match Topology.discovery_spaces(q.standing, q.native, q.assigned, q.by_frame) {
+		Ok((authoritative, discovery)) => Decided({ authoritative, discovery })
+		Err(Unasked(fact)) => Unasked(fact)
+	}
+
+admit_space_snapshot : AdmitQuestion -> Admission
+admit_space_snapshot = |q| {
+	open =
+		match q.mission_control {
+			Open => True
+			Closed => False
+		}
+	Topology.admit(open, q.current, q.incoming)
+}
+
+app_rule_candidates : CandidatesQuestion -> CandidatesAnswer
+app_rule_candidates = |q| decision_of(Topology.candidates(q.window_spaces, q.activated, q.tracked, q.reconcilable))
+
 ## The model-free questions still on words (the layouts are typed entries above). A question's
-## words (its tag first: 5 to 8 the topology decisions, `Topology`; 9 to 16 the lifecycle
+## words (its tag first: 9 to 16 the lifecycle
 ## decisions, `Lifecycle`; 24 a window's admission, 25 a
 ## lifecycle reading, 26 a presence event, 27 an inventory's retirement question, 28 two
 ## admission changes in a row, `Lifecycle`; 29 to 31 the workspace decisions, 32 the
@@ -199,10 +224,6 @@ shape_answer : List(U64) -> Try(List(U64), [Malformed, Unasked(U64)])
 shape_answer = |words| {
 	(system, cursor) = take({ words, at: 0 })?
 	match system {
-		5 => Topology.discovered_words(cursor)
-		6 => Topology.discovery_words(cursor)
-		7 => Topology.admit_words(cursor)
-		8 => Topology.candidates_words(cursor)
 		9 => Lifecycle.rule_targets_words(cursor)
 		10 => Lifecycle.rule_refresh_words(cursor)
 		11 => Lifecycle.pointer_target_words(cursor)

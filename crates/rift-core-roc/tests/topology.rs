@@ -5,7 +5,7 @@
 
 mod facts;
 
-use facts::{Coin, differential, rust};
+use facts::{Coin, rust, typed};
 use rift_core::plain::{WindowId, wire};
 use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery};
 use rift_core::topology::{DiscoveryStanding, Displays, Incoming, MissionControl, Standing};
@@ -61,7 +61,7 @@ impl Coin for Rng {
 
 #[test]
 fn the_roc_core_finds_a_discovered_windows_space_as_the_rust_core_does() {
-    differential(
+    typed(
         "topology",
         "discovered-space",
         Rng(0xD15C_0BE7_ED5A_ACE5),
@@ -82,15 +82,19 @@ fn the_roc_core_finds_a_discovered_windows_space_as_the_rust_core_does() {
                 recorded: blank.fact(rng, recorded),
                 resolved: blank.fact(rng, resolved),
             };
+            let roc = rust(
+                rift_core_roc::topology::discovered_space(question.clone()),
+                wire::encode_discovered_space,
+            );
             let rust = rust(question.answer(), wire::encode_discovered_space);
-            (wire::encode_discovered(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
 
 #[test]
 fn the_roc_core_gives_a_reported_window_its_discovery_space_as_the_rust_core_does() {
-    differential(
+    typed(
         "topology",
         "discovery-spaces",
         Rng(0x0D15_C0FE_5A5A_1234),
@@ -106,8 +110,12 @@ fn the_roc_core_gives_a_reported_window_its_discovery_space_as_the_rust_core_doe
                 assigned: rng.maybe(),
                 by_frame: blank.fact(rng, by_frame),
             };
+            let roc = rust(
+                rift_core_roc::topology::discovery_spaces(question.clone()),
+                wire::encode_discovery_spaces,
+            );
             let rust = rust(question.answer(), wire::encode_discovery_spaces);
-            (wire::encode_discovery(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }
@@ -115,7 +123,7 @@ fn the_roc_core_gives_a_reported_window_its_discovery_space_as_the_rust_core_doe
 #[test]
 fn the_roc_core_admits_a_space_snapshot_as_the_rust_core_does() {
     // It asks for no fact: both passes run on the whole question.
-    differential("topology", "admission", Rng(0xAD31_75A9_5407_0001), |rng, _| {
+    typed("topology", "admission", Rng(0xAD31_75A9_5407_0001), |rng, _| {
         let question = Admit {
             mission_control: if rng.chance(10) {
                 MissionControl::Open
@@ -131,14 +139,17 @@ fn the_roc_core_admits_a_space_snapshot_as_the_rust_core_does() {
                 membership_complete: rng.chance(60),
             },
         };
+        let roc = Ok(wire::encode_admission(
+            rift_core_roc::topology::admit_space_snapshot(question.clone()),
+        ));
         let rust = Ok(wire::encode_admission(question.answer()));
-        (wire::encode_admit(question), rust)
+        (format!("{question:?}"), roc, rust)
     });
 }
 
 #[test]
 fn the_roc_core_picks_app_rule_candidates_as_the_rust_core_does() {
-    differential(
+    typed(
         "topology",
         "app-rule-candidates",
         Rng(0xCA4D_1DA7_E500_0042),
@@ -163,8 +174,12 @@ fn the_roc_core_picks_app_rule_candidates_as_the_rust_core_does() {
                 reconcilable: blank.answers(rng, windows, |window| reconcilable.contains(&window)),
                 window_spaces,
             };
+            let roc = rust(
+                rift_core_roc::topology::app_rule_candidates(question.clone()),
+                wire::encode_app_windows,
+            );
             let rust = rust(question.answer(), wire::encode_app_windows);
-            (wire::encode_candidates(question), rust)
+            (format!("{question:?}"), roc, rust)
         },
     );
 }

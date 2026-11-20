@@ -208,4 +208,67 @@ Boundary := [].{
 	UntrackedAnswer := [Decided(UntrackedFocus), Unasked(U64)]
 
 	DesktopQuestion := { active : Bool, workspace_empty : FactBool }
+
+	# Topology (`rift_core::topology`).
+
+	## A Space, or none.
+	MaybeSpace := [Space(U64), NoSpace]
+
+	FactSpace := [Asked(MaybeSpace), Unasked]
+
+	## Where an app inventory finds a window, by what the platform already knows of it.
+	Standing := [RecoveringFullscreen, Untracked, Tracked]
+
+	DiscoveredQuestion := { standing : Standing, live : FactWords, observable : List(WordBool), recorded : FactSpace, resolved : FactSpace }
+
+	## The Space an app inventory takes a window to be on.
+	DiscoveredSpace := [Observed(U64), Live(U64), Fallback(MaybeSpace)]
+
+	DiscoveredAnswer := [Decided(DiscoveredSpace), Unasked(U64)]
+
+	DiscoveryStanding := [FullscreenRecorded, Placeholder, Admissible]
+
+	DiscoveryQuestion := { standing : DiscoveryStanding, native : MaybeSpace, assigned : MaybeSpace, by_frame : FactSpace }
+
+	## A reported window's authoritative Space and the Space discovery may admit it on.
+	DiscoverySpaces := { authoritative : MaybeSpace, discovery : MaybeSpace }
+
+	DiscoveryAnswer := [Decided(DiscoverySpaces), Unasked(U64)]
+
+	## A screen's display, or none for a display with no id (each display a word).
+	Screen := [Display(U64), Unnamed]
+
+	DisplaySpaces := { display : U64, spaces : List(U64) }
+
+	Displays := { screens : List(Screen), spaces : List(DisplaySpaces) }
+
+	## A Space macOS renumbered.
+	Remap := { old : U64, new : U64 }
+
+	Incoming := { displays : Displays, remaps : List(Remap), display_set_changed : Bool, force_refresh : Bool, membership_complete : Bool }
+
+	MissionControl := [Open, Closed]
+
+	AdmitQuestion := { mission_control : MissionControl, current : Displays, incoming : Incoming }
+
+	## Why a snapshot waits.
+	Hold := [MissionControl, MembershipIncomplete]
+
+	Commit := { invalidated : List(U64), lost : List(U64) }
+
+	Admission := [Hold(Hold), Commit(Commit)]
+
+	ServerSpace := { server : U64, space : U64 }
+
+	## The window a window-server id is tracked as, if any.
+	TrackedWindow := [Tracked(WindowId), NotTracked]
+
+	WordTracked := { key : U64, answer : TrackedWindow }
+
+	CandidatesQuestion := { window_spaces : List(ServerSpace), activated : List(U64), tracked : List(WordTracked), reconcilable : List(WindowBool) }
+
+	## An app's windows.
+	AppWindows := { pid : I32, windows : List(WindowId) }
+
+	CandidatesAnswer := [Decided(List(AppWindows)), Unasked(U64)]
 }

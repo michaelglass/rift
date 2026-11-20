@@ -398,6 +398,40 @@ pub mod focus {
     }
 }
 
+/// The topology decisions (`rift_core::topology`) decided by the Roc core.
+pub mod topology {
+    use rift_core::plain::{Unasked, WindowId};
+    use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery};
+    use rift_core::topology::{Admission, DiscoveredSpace};
+
+    use crate::{abi, boundary, host};
+
+    pub fn discovered_space(question: Discovered) -> Result<DiscoveredSpace<u64>, Unasked> {
+        let host = host();
+        let question = boundary::discovered_question(question, &host);
+        boundary::discovered_answer(unsafe { abi::roc_discovered_space(question) })
+    }
+
+    pub fn discovery_spaces(question: Discovery) -> Result<(Option<u64>, Option<u64>), Unasked> {
+        let host = host();
+        let question = boundary::discovery_question(question, &host);
+        boundary::discovery_answer(unsafe { abi::roc_discovery_spaces(question) })
+    }
+
+    /// It asks for no fact.
+    pub fn admit_space_snapshot(question: Admit) -> Admission<u64> {
+        let host = host();
+        let question = boundary::admit_question(question, &host);
+        boundary::from_admission(unsafe { abi::roc_admit_space_snapshot(question) }, &host)
+    }
+
+    pub fn app_rule_candidates(question: Candidates) -> Result<Vec<(i32, Vec<WindowId>)>, Unasked> {
+        let host = host();
+        let question = boundary::candidates_question(question, &host);
+        boundary::candidates_answer(unsafe { abi::roc_app_rule_candidates(question) }, &host)
+    }
+}
+
 impl Drop for RocCore {
     fn drop(&mut self) {
         self.input.release(&self.host);

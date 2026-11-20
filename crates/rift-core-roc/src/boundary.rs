@@ -15,6 +15,9 @@ use rift_core::layout::scrolling::{
 use rift_core::layout::traditional::{self, Traditional};
 use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
 use rift_core::plain::{Answers, Fact, Rect, Unasked, WindowId};
+use rift_core::topology::{
+    self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
+};
 
 use crate::abi;
 
@@ -960,4 +963,237 @@ pub(crate) fn desktop_question(
         active: question.active,
         workspace_empty: fact_bool(question.workspace_empty, host),
     }
+}
+
+// Topology.
+
+fn maybe_space(space: Option<u64>) -> abi::BoundaryMaybeSpace {
+    use abi::BoundaryMaybeSpaceTag as Tag;
+    match space {
+        Some(space) => union!(
+            BoundaryMaybeSpace,
+            BoundaryMaybeSpacePayload.space(space),
+            Tag::Space
+        ),
+        None => union!(
+            BoundaryMaybeSpace,
+            BoundaryMaybeSpacePayload.no_space,
+            Tag::NoSpace
+        ),
+    }
+}
+
+fn from_maybe_space(space: abi::BoundaryMaybeSpace) -> Option<u64> {
+    use abi::BoundaryMaybeSpaceTag as Tag;
+    match space.tag {
+        // SAFETY: the tag says the payload is the Space.
+        Tag::Space => Some(unsafe { *space.borrow_payload_space_unchecked() }),
+        Tag::NoSpace => None,
+    }
+}
+
+fact!(
+    fact_space,
+    Option<u64>,
+    BoundaryFactSpace,
+    BoundaryFactSpacePayload,
+    BoundaryFactSpaceTag,
+    |v, host| maybe_space(v)
+);
+
+pub(crate) fn discovered_question(
+    question: topology::plain::Discovered,
+    host: &abi::RocHost,
+) -> abi::BoundaryDiscoveredQuestion {
+    abi::BoundaryDiscoveredQuestion {
+        standing: match question.standing {
+            Standing::RecoveringFullscreen => abi::BoundaryStanding::RecoveringFullscreen,
+            Standing::Untracked => abi::BoundaryStanding::Untracked,
+            Standing::Tracked => abi::BoundaryStanding::Tracked,
+        },
+        live: fact_words(question.live, host),
+        observable: word_bools(question.observable, host),
+        recorded: fact_space(question.recorded, host),
+        resolved: fact_space(question.resolved, host),
+    }
+}
+
+pub(crate) fn discovered_answer(
+    answer: abi::BoundaryDiscoveredAnswer,
+) -> Result<DiscoveredSpace<u64>, Unasked> {
+    use abi::BoundaryDiscoveredSpaceTag as Tag;
+    decision!(answer, BoundaryDiscoveredAnswerTag, |found| match found.tag {
+        // SAFETY: the tag says the payload is the Space.
+        Tag::Observed =>
+            DiscoveredSpace::Observed(unsafe { *found.borrow_payload_observed_unchecked() }),
+        // SAFETY: the tag says the payload is the Space.
+        Tag::Live => DiscoveredSpace::Live(unsafe { *found.borrow_payload_live_unchecked() }),
+        // SAFETY: the tag says the payload is the fallback.
+        Tag::Fallback => DiscoveredSpace::Fallback(from_maybe_space(unsafe {
+            *found.borrow_payload_fallback_unchecked()
+        })),
+    })
+}
+
+pub(crate) fn discovery_question(
+    question: topology::plain::Discovery,
+    host: &abi::RocHost,
+) -> abi::BoundaryDiscoveryQuestion {
+    abi::BoundaryDiscoveryQuestion {
+        standing: match question.standing {
+            DiscoveryStanding::FullscreenRecorded => {
+                abi::BoundaryDiscoveryStanding::FullscreenRecorded
+            }
+            DiscoveryStanding::Placeholder => abi::BoundaryDiscoveryStanding::Placeholder,
+            DiscoveryStanding::Admissible => abi::BoundaryDiscoveryStanding::Admissible,
+        },
+        native: maybe_space(question.native),
+        assigned: maybe_space(question.assigned),
+        by_frame: fact_space(question.by_frame, host),
+    }
+}
+
+pub(crate) fn discovery_answer(
+    answer: abi::BoundaryDiscoveryAnswer,
+) -> Result<(Option<u64>, Option<u64>), Unasked> {
+    decision!(answer, BoundaryDiscoveryAnswerTag, |spaces| (
+        from_maybe_space(spaces.authoritative),
+        from_maybe_space(spaces.discovery)
+    ))
+}
+
+fn displays(displays: Displays<u64, u64>, host: &abi::RocHost) -> abi::BoundaryDisplays {
+    use abi::BoundaryScreenTag as Tag;
+    let screens: Vec<_> = displays
+        .screens
+        .into_iter()
+        .map(|screen| match screen {
+            Some(display) => union!(
+                BoundaryScreen,
+                BoundaryScreenPayload.display(display),
+                Tag::Display
+            ),
+            None => union!(BoundaryScreen, BoundaryScreenPayload.unnamed, Tag::Unnamed),
+        })
+        .collect();
+    let spaces: Vec<_> = displays
+        .spaces
+        .into_iter()
+        .map(|(display, spaces)| abi::BoundaryDisplaySpaces {
+            display,
+            spaces: list(&spaces, host),
+        })
+        .collect();
+    abi::BoundaryDisplays {
+        screens: list(&screens, host),
+        spaces: list(&spaces, host),
+    }
+}
+
+pub(crate) fn admit_question(
+    question: topology::plain::Admit,
+    host: &abi::RocHost,
+) -> abi::BoundaryAdmitQuestion {
+    let incoming = question.incoming;
+    let remaps: Vec<_> = incoming
+        .remaps
+        .into_iter()
+        .map(|(old, new)| abi::BoundaryRemap { old, new })
+        .collect();
+    abi::BoundaryAdmitQuestion {
+        mission_control: match question.mission_control {
+            MissionControl::Open => abi::BoundaryMissionControl::Open,
+            MissionControl::Closed => abi::BoundaryMissionControl::Closed,
+        },
+        current: displays(question.current, host),
+        incoming: abi::BoundaryIncoming {
+            displays: displays(incoming.displays, host),
+            remaps: list(&remaps, host),
+            display_set_changed: incoming.display_set_changed,
+            force_refresh: incoming.force_refresh,
+            membership_complete: incoming.membership_complete,
+        },
+    }
+}
+
+/// The admission Roc answered, read out and released.
+pub(crate) fn from_admission(
+    answer: abi::BoundaryAdmission,
+    host: &abi::RocHost,
+) -> Admission<u64> {
+    use abi::BoundaryAdmissionTag as Tag;
+    let admission = match answer.tag {
+        // SAFETY: the tag says the payload is why it holds.
+        Tag::Hold => Admission::Hold(match unsafe { *answer.borrow_payload_hold_unchecked() } {
+            abi::BoundaryHold::MissionControl => Hold::MissionControl,
+            abi::BoundaryHold::MembershipIncomplete => Hold::MembershipIncomplete,
+        }),
+        Tag::Commit => {
+            // SAFETY: the tag says the payload is the commit.
+            let commit = unsafe { answer.borrow_payload_commit_unchecked() };
+            Admission::Commit {
+                invalidated: commit.invalidated.as_slice().to_vec(),
+                lost_local_desktops: commit.lost.as_slice().to_vec(),
+            }
+        }
+    };
+    // SAFETY: the admission is Roc's answer, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    admission
+}
+
+pub(crate) fn candidates_question(
+    question: topology::plain::Candidates,
+    host: &abi::RocHost,
+) -> abi::BoundaryCandidatesQuestion {
+    use abi::BoundaryTrackedWindowTag as Tag;
+    let window_spaces: Vec<_> = question
+        .window_spaces
+        .into_iter()
+        .map(|(server, space)| abi::BoundaryServerSpace { server, space })
+        .collect();
+    let tracked: Vec<_> = question
+        .tracked
+        .0
+        .into_iter()
+        .map(|(key, answer)| abi::BoundaryWordTracked {
+            key,
+            answer: match answer {
+                Some(id) => union!(
+                    BoundaryTrackedWindow,
+                    BoundaryTrackedWindowPayload.tracked(window(id)),
+                    Tag::Tracked
+                ),
+                None => union!(
+                    BoundaryTrackedWindow,
+                    BoundaryTrackedWindowPayload.not_tracked,
+                    Tag::NotTracked
+                ),
+            },
+        })
+        .collect();
+    abi::BoundaryCandidatesQuestion {
+        window_spaces: list(&window_spaces, host),
+        activated: list(&question.activated, host),
+        tracked: list(&tracked, host),
+        reconcilable: window_bools(question.reconcilable, host),
+    }
+}
+
+/// The candidates Roc answered, read out and released.
+pub(crate) fn candidates_answer(
+    answer: abi::BoundaryCandidatesAnswer,
+    host: &abi::RocHost,
+) -> Result<Vec<(i32, Vec<WindowId>)>, Unasked> {
+    let candidates = decision!(answer, BoundaryCandidatesAnswerTag, |apps| apps
+        .as_slice()
+        .iter()
+        .map(|app| (
+            app.pid,
+            app.windows.as_slice().iter().copied().map(from_window).collect()
+        ))
+        .collect());
+    // SAFETY: the answer is Roc's, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    candidates
 }

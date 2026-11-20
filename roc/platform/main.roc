@@ -22,6 +22,10 @@ platform ""
 			display_to_follow : DisplayFollowQuestion -> WordAnswer,
 			untracked_focus : UntrackedQuestion -> UntrackedAnswer,
 			focuses_desktop : DesktopQuestion -> VerdictAnswer,
+			discovered_space : DiscoveredQuestion -> DiscoveredAnswer,
+			discovery_spaces : DiscoveryQuestion -> DiscoveryAnswer,
+			admit_space_snapshot : AdmitQuestion -> Admission,
+			app_rule_candidates : CandidatesQuestion -> CandidatesAnswer,
 		}
 	}
 	exposes [Boundary]
@@ -43,6 +47,10 @@ platform ""
 		"roc_display_to_follow": display_to_follow_for_host,
 		"roc_untracked_focus": untracked_focus_for_host,
 		"roc_focuses_desktop": focuses_desktop_for_host,
+		"roc_discovered_space": discovered_space_for_host,
+		"roc_discovery_spaces": discovery_spaces_for_host,
+		"roc_admit_space_snapshot": admit_space_snapshot_for_host,
+		"roc_app_rule_candidates": app_rule_candidates_for_host,
 	}
 	targets: {
 		arm64mac: {
@@ -51,7 +59,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -119,3 +127,19 @@ untracked_focus_for_host = |question| (core.untracked_focus)(question)
 ## Whether to focus a Space's desktop.
 focuses_desktop_for_host : DesktopQuestion -> VerdictAnswer
 focuses_desktop_for_host = |question| (core.focuses_desktop)(question)
+
+## Where an app inventory finds a window.
+discovered_space_for_host : DiscoveredQuestion -> DiscoveredAnswer
+discovered_space_for_host = |question| (core.discovered_space)(question)
+
+## A reported window's authoritative and discovery Spaces.
+discovery_spaces_for_host : DiscoveryQuestion -> DiscoveryAnswer
+discovery_spaces_for_host = |question| (core.discovery_spaces)(question)
+
+## Whether a space snapshot is committed, and what it invalidates.
+admit_space_snapshot_for_host : AdmitQuestion -> Admission
+admit_space_snapshot_for_host = |question| (core.admit_space_snapshot)(question)
+
+## The windows an activation re-applies app rules to, by app.
+app_rule_candidates_for_host : CandidatesQuestion -> CandidatesAnswer
+app_rule_candidates_for_host = |question| (core.app_rule_candidates)(question)

@@ -989,15 +989,17 @@ impl Reactor {
                 tracked: tracked.answers(Word::word, |wid| wid.map(window)),
                 reconcilable: reconcilable.answers(window, |open| open),
             };
-            let answer = windows_by_pid
+            let answer: Vec<(i32, Vec<rift_core::plain::WindowId>)> = windows_by_pid
                 .iter()
                 .map(|(pid, windows)| (*pid, windows.iter().map(|&wid| window(wid)).collect()))
                 .collect();
-            crate::roc_path::check_words(
+            let roc = rift_core_roc::topology::app_rule_candidates(question.clone());
+            crate::roc_path::check(
                 "app_rule_candidates",
                 Candidates::FACTS,
-                &wire::encode_candidates(question),
-                &wire::encode_app_windows(answer),
+                &question,
+                &answer,
+                roc,
             );
         }
 
@@ -3793,12 +3795,8 @@ impl Reactor {
                         .collect(),
                 },
             };
-            crate::roc_path::check_words(
-                "admit_space_snapshot",
-                Admit::FACTS,
-                &wire::encode_admit(question),
-                &wire::encode_admission(answer),
-            );
+            let roc = Ok(rift_core_roc::topology::admit_space_snapshot(question.clone()));
+            crate::roc_path::check("admit_space_snapshot", Admit::FACTS, &question, &answer, roc);
         }
         let (invalidated_spaces, lost_local_desktops) = match admission {
             rift_core::topology::Admission::Hold(why) => {
@@ -4690,11 +4688,13 @@ impl Reactor {
                             DiscoveredSpace::Fallback(space.map(Word::word))
                         }
                     };
-                    crate::roc_path::check_words(
+                    let roc = rift_core_roc::topology::discovered_space(question.clone());
+                    crate::roc_path::check(
                         "discovered_space",
                         Discovered::FACTS,
-                        &wire::encode_discovered(question),
-                        &wire::encode_discovered_space(answer),
+                        &question,
+                        &answer,
+                        roc,
                     );
                 }
                 if let Some(space) = discovered.observation() {
@@ -5256,14 +5256,13 @@ impl Reactor {
                 assigned: assigned.map(Word::word),
                 by_frame: by_frame.fact(|space| space.map(Word::word)),
             };
-            crate::roc_path::check_words(
+            let roc = rift_core_roc::topology::discovery_spaces(question.clone());
+            crate::roc_path::check(
                 "discovery_spaces",
                 Discovery::FACTS,
-                &wire::encode_discovery(question),
-                &wire::encode_discovery_spaces((
-                    spaces.0.map(Word::word),
-                    spaces.1.map(Word::word),
-                )),
+                &question,
+                &(spaces.0.map(Word::word), spaces.1.map(Word::word)),
+                roc,
             );
         }
         spaces
