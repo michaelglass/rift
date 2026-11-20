@@ -153,7 +153,7 @@ pub enum Initiative {
 }
 
 /// Whether Rift may take `initiative` with the pointer doing what it does: the pointer's row of
-/// the mode table (rift's `Mode` for the pointer axis delegates here). Stated per pointer state
+/// the mode table (`modes::Modes::verdict` asks it for the pointer axis). Stated per pointer state
 /// for every initiative, with no wildcard.
 pub fn may<W>(initiative: Initiative, pointer: Pointer<W>) -> bool {
     use Initiative::*;

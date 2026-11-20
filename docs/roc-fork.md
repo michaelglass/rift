@@ -711,7 +711,7 @@ fuzzer and bug history:
    `auto_switch_to_window_workspace`, `focus_untracked_window_under_cursor`. History: #677,
    raise_manager and Mission Control, #661 twice.
 
-Not in the list: the input mode table, already pure (`src/actor/reactor/modes.rs`).
+Not in the list: the input mode table, already pure; now the core's (`rift_core::modes`).
 
 Done (Rust; the Roc mirror follows the Rust side):
 

@@ -12,12 +12,12 @@ the facts as they are then; it does not replay what it refused.
 
 ## Representation
 
-`src/actor/reactor/modes.rs`. Modes overlap, so the active state is a **product of independent
-axes**, one enum per axis, not a set of flags. Each axis implements `Mode::admits` as an
-exhaustive match over (initiative, variant) with no wildcard: a new initiative or a new mode
-does not compile until its row is written. `Modes::refusal` asks every axis and returns the first
-that refuses ("deny if any active mode denies"). `Reactor::modes()` builds `Modes` from the facts
-each time it is asked; it is never stored, so it cannot drift from them. State that only one
+`crates/rift-core/src/modes.rs`, the core's. Modes overlap, so the active state is a **product
+of independent axes**, one enum per axis, not a set of flags. Each axis's rule is an exhaustive
+match over (initiative, variant) with no wildcard: a new initiative or a new mode does not
+compile until its row is written. `Modes::verdict` asks every axis and answers `Admitted` or the
+first axis that refuses ("deny if any active mode denies"). `Reactor::modes()` builds `Modes` from
+the facts each time it is asked; it is never stored, so it cannot drift from them. State that only one
 mode needs lives inside that mode's variant (`MenuState::Open(pid)`,
 `WorkspaceSwitchState::Active(origin)`, `Overview::Open { bounds, buttons }`).
 

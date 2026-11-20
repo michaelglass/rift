@@ -11,7 +11,6 @@ mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
-mod modes;
 mod native;
 use native::Native;
 mod native_tabs;
@@ -79,7 +78,7 @@ use rift_core::lifecycle::{
 use rift_core::topology::{
     DiscoveryStanding, Standing, app_rule_candidates, discovered_space, discovery_spaces,
 };
-use rift_core::{Initiative, InputClass};
+use rift_core::{Initiative, InputClass, modes};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -1156,16 +1155,25 @@ impl Reactor {
         }
     }
 
-    /// Whether Rift may do `initiative` right now: whether every mode it is in admits it
-    /// (`modes::Mode`). A question about one window asks the store about that window instead.
-    fn may(&self, initiative: Initiative) -> bool { self.modes().refusal(initiative).is_none() }
+    /// Whether Rift may do `initiative` right now: whether every mode it is in admits it (the
+    /// core's mode table, `rift_core::modes`). A question about one window asks the store about
+    /// that window instead.
+    fn may(&self, initiative: Initiative) -> bool {
+        self.modes().verdict(initiative) == modes::Verdict::Admitted
+    }
 
     /// The modes Rift is in, read from the facts now.
-    fn modes(&self) -> modes::Modes {
+    fn modes(&self) -> modes::Modes<WindowId> {
         modes::Modes {
             pointer: self.state.windows.pointer(),
-            menu: self.menu_manager.menu_state.clone(),
-            native_mission_control: self.mission_control_manager.mission_control_state.clone(),
+            menu: match self.menu_manager.menu_state {
+                MenuState::Open(_) => modes::Menu::Open,
+                MenuState::Closed => modes::Menu::Closed,
+            },
+            mission_control: match self.mission_control_manager.mission_control_state {
+                MissionControlState::Active => modes::MissionControl::Active,
+                MissionControlState::Inactive => modes::MissionControl::Inactive,
+            },
             modal: if self.transient_blocks_mouse_focus() {
                 modes::Modal::Frontmost
             } else {
@@ -1205,7 +1213,7 @@ impl Reactor {
     /// Whether the modes admit input of `class`. Refused input is discarded with one log line.
     fn admit(&self, class: InputClass, input: &dyn std::fmt::Debug) -> bool {
         let modes = self.modes();
-        let Some(mode) = modes.refusal(Initiative::UserInput(class)) else {
+        let modes::Verdict::Refused(mode) = modes.verdict(Initiative::UserInput(class)) else {
             return true;
         };
         match class {
@@ -7447,10 +7455,10 @@ impl ActivationFacts for ActivationQuery<'_> {
     }
 
     fn mode_refusal(&self) -> Option<String> {
-        self.reactor
-            .modes()
-            .refusal(Initiative::FollowActivation)
-            .map(|mode| format!("{mode:?}"))
+        match self.reactor.modes().verdict(Initiative::FollowActivation) {
+            modes::Verdict::Refused(axis) => Some(format!("{axis:?}")),
+            modes::Verdict::Admitted => None,
+        }
     }
 
     fn active_space_fullscreen(&self) -> bool {
