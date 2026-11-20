@@ -328,6 +328,21 @@ impl RocTopology {
     }
 }
 
+/// The mode table (`rift_core::modes`), answered by the Roc core.
+pub mod modes {
+    use rift_core::Initiative;
+    use rift_core::modes::{Modes, Verdict};
+
+    use crate::{abi, boundary};
+
+    /// As `Modes::verdict`: admitted, or the first axis that refuses. It asks for no fact.
+    pub fn verdict(modes: Modes<u64>, initiative: Initiative) -> Verdict<u64> {
+        boundary::from_mode_verdict(unsafe {
+            abi::roc_mode_verdict(boundary::modes_question(modes, initiative))
+        })
+    }
+}
+
 /// Why the Roc core gave no answer: it always answers, so there is no such value. (The layout
 /// functions keep a `Result` for their callers until those are next changed.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

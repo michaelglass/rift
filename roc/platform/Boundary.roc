@@ -369,6 +369,40 @@ Boundary := [].{
 	## Two admission changes in a row.
 	NetQuestion := { first : Change, then : Change }
 
+	## The mode table's question: an initiative, and the modes Rift is in.
+	InputClass := [Steering, Arranging, Inert, Hover]
+
+	Initiative := [UserInput(InputClass), Arrange, RetireWindows, SwitchWorkspaceFocus, WarpFocus, FollowActivation]
+
+	## What the pointer is doing with windows.
+	PointerNow := [Idle, Pressing(U64), Dragging(U64)]
+
+	MenuNow := [Closed, Open]
+
+	MissionControlNow := [Inactive, Active]
+
+	ModalNow := [Clear, Frontmost]
+
+	ViewportNow := [Free, Gesturing]
+
+	FocusClaimNow := [Free, PausesHover]
+
+	UserSpacesNow := [Shown, None]
+
+	WakeNow := [UserPresent, AwaitingInput]
+
+	WorkspaceSwitchNow := [Idle, Switching]
+
+	TopologyNow := [Settled, Unsettled]
+
+	ModesQuestion := { initiative : Initiative, pointer : PointerNow, menu : MenuNow, mission_control : MissionControlNow, modal : ModalNow, viewport : ViewportNow, focus_claim : FocusClaimNow, user_spaces : UserSpacesNow, wake : WakeNow, workspace_switch : WorkspaceSwitchNow, topology : TopologyNow }
+
+	## The axis that refused.
+	RefusingAxis := [Pointer(PointerNow), Menu, MissionControl, Modal, Viewport, FocusClaim, UserSpaces, Wake, WorkspaceSwitch, Topology]
+
+	## Admitted, or the first axis that refuses.
+	ModeVerdict := [Admitted, Refused(RefusingAxis)]
+
 	## The lifecycle kept between events: a reading of one window's facts.
 	LifecycleEvent := { window : U64, reading : Reading }
 

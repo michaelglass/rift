@@ -2820,3 +2820,165 @@ impl Drop for TopologyBox {
         unsafe { abi::roc_topology_release(self.0) }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The mode table.
+
+fn pointer_now(pointer: rift_core::Pointer<u64>) -> abi::BoundaryPointerNow {
+    use abi::BoundaryPointerNowTag as Tag;
+    match pointer {
+        rift_core::Pointer::Idle => {
+            union!(BoundaryPointerNow, BoundaryPointerNowPayload.idle, Tag::Idle)
+        }
+        rift_core::Pointer::Pressing(window) => union!(
+            BoundaryPointerNow,
+            BoundaryPointerNowPayload.pressing(window),
+            Tag::Pressing
+        ),
+        rift_core::Pointer::Dragging(window) => union!(
+            BoundaryPointerNow,
+            BoundaryPointerNowPayload.dragging(window),
+            Tag::Dragging
+        ),
+    }
+}
+
+fn from_pointer_now(pointer: abi::BoundaryPointerNow) -> rift_core::Pointer<u64> {
+    use abi::BoundaryPointerNowTag as Tag;
+    match pointer.tag {
+        Tag::Idle => rift_core::Pointer::Idle,
+        // SAFETY: the tag says the payload is the window.
+        Tag::Pressing => {
+            rift_core::Pointer::Pressing(unsafe { *pointer.borrow_payload_pressing_unchecked() })
+        }
+        // SAFETY: the tag says the payload is the window.
+        Tag::Dragging => {
+            rift_core::Pointer::Dragging(unsafe { *pointer.borrow_payload_dragging_unchecked() })
+        }
+    }
+}
+
+fn initiative(initiative: rift_core::Initiative) -> abi::BoundaryInitiative {
+    use abi::BoundaryInitiativeTag as Tag;
+    use rift_core::{Initiative, InputClass};
+    match initiative {
+        Initiative::UserInput(class) => union!(
+            BoundaryInitiative,
+            BoundaryInitiativePayload.user_input(match class {
+                InputClass::Steering => abi::BoundaryInputClass::Steering,
+                InputClass::Arranging => abi::BoundaryInputClass::Arranging,
+                InputClass::Inert => abi::BoundaryInputClass::Inert,
+                InputClass::Hover => abi::BoundaryInputClass::Hover,
+            }),
+            Tag::UserInput
+        ),
+        Initiative::Arrange => {
+            union!(
+                BoundaryInitiative,
+                BoundaryInitiativePayload.arrange,
+                Tag::Arrange
+            )
+        }
+        Initiative::RetireWindows => union!(
+            BoundaryInitiative,
+            BoundaryInitiativePayload.retire_windows,
+            Tag::RetireWindows
+        ),
+        Initiative::SwitchWorkspaceFocus => union!(
+            BoundaryInitiative,
+            BoundaryInitiativePayload.switch_workspace_focus,
+            Tag::SwitchWorkspaceFocus
+        ),
+        Initiative::WarpFocus => {
+            union!(
+                BoundaryInitiative,
+                BoundaryInitiativePayload.warp_focus,
+                Tag::WarpFocus
+            )
+        }
+        Initiative::FollowActivation => union!(
+            BoundaryInitiative,
+            BoundaryInitiativePayload.follow_activation,
+            Tag::FollowActivation
+        ),
+    }
+}
+
+pub(crate) fn modes_question(
+    modes: rift_core::modes::Modes<u64>,
+    asked: rift_core::Initiative,
+) -> abi::BoundaryModesQuestion {
+    use rift_core::modes::{
+        FocusClaim, Menu, MissionControl, Modal, Topology, UserSpaces, Viewport, Wake,
+        WorkspaceSwitch,
+    };
+    abi::BoundaryModesQuestion {
+        initiative: initiative(asked),
+        pointer: pointer_now(modes.pointer),
+        menu: match modes.menu {
+            Menu::Closed => abi::BoundaryMenuNow::Closed,
+            Menu::Open => abi::BoundaryMenuNow::Open,
+        },
+        mission_control: match modes.mission_control {
+            MissionControl::Inactive => abi::BoundaryMissionControlNow::Inactive,
+            MissionControl::Active => abi::BoundaryMissionControlNow::Active,
+        },
+        modal: match modes.modal {
+            Modal::Clear => abi::BoundaryModalNow::Clear,
+            Modal::Frontmost => abi::BoundaryModalNow::Frontmost,
+        },
+        viewport: match modes.viewport {
+            Viewport::Free => abi::BoundaryViewportNow::Free,
+            Viewport::Gesturing => abi::BoundaryViewportNow::Gesturing,
+        },
+        focus_claim: match modes.focus_claim {
+            FocusClaim::Free => abi::BoundaryFocusClaimNow::Free,
+            FocusClaim::PausesHover => abi::BoundaryFocusClaimNow::PausesHover,
+        },
+        user_spaces: match modes.user_spaces {
+            UserSpaces::Shown => abi::BoundaryUserSpacesNow::Shown,
+            UserSpaces::None => abi::BoundaryUserSpacesNow::None,
+        },
+        wake: match modes.wake {
+            Wake::UserPresent => abi::BoundaryWakeNow::UserPresent,
+            Wake::AwaitingInput => abi::BoundaryWakeNow::AwaitingInput,
+        },
+        workspace_switch: match modes.workspace_switch {
+            WorkspaceSwitch::Idle => abi::BoundaryWorkspaceSwitchNow::Idle,
+            WorkspaceSwitch::Switching => abi::BoundaryWorkspaceSwitchNow::Switching,
+        },
+        topology: match modes.topology {
+            Topology::Settled => abi::BoundaryTopologyNow::Settled,
+            Topology::Unsettled => abi::BoundaryTopologyNow::Unsettled,
+        },
+    }
+}
+
+pub(crate) fn from_mode_verdict(
+    verdict: abi::BoundaryModeVerdict,
+) -> rift_core::modes::Verdict<u64> {
+    use abi::{BoundaryModeVerdictTag as Tag, BoundaryRefusingAxisTag as AxisTag};
+    use rift_core::modes::{Axis, Verdict};
+    match verdict.tag {
+        Tag::Admitted => Verdict::Admitted,
+        Tag::Refused => {
+            // SAFETY: the tag says the payload is the refusing axis.
+            let axis = unsafe { *verdict.borrow_payload_refused_unchecked() };
+            Verdict::Refused(match axis.tag {
+                // SAFETY: the tag says the payload is the pointer.
+                AxisTag::Pointer => Axis::Pointer(from_pointer_now(unsafe {
+                    *axis.borrow_payload_pointer_unchecked()
+                })),
+                AxisTag::Menu => Axis::Menu,
+                AxisTag::MissionControl => Axis::MissionControl,
+                AxisTag::Modal => Axis::Modal,
+                AxisTag::Viewport => Axis::Viewport,
+                AxisTag::FocusClaim => Axis::FocusClaim,
+                AxisTag::UserSpaces => Axis::UserSpaces,
+                AxisTag::Wake => Axis::Wake,
+                AxisTag::WorkspaceSwitch => Axis::WorkspaceSwitch,
+                AxisTag::Topology => Axis::Topology,
+            })
+        }
+    }
+}
