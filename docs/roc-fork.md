@@ -174,9 +174,20 @@ boundary typed.**
 - The reconciler's ack tolerance has a literal differential at its edge (the committed traces
   alone let 1.5 to 2.5 through).
 
-**Now: a stateful Roc platform entry (plan sent, waiting for the lead)** so Lifecycle,
-Ownerships and Topology live in Roc between events, each a twin stepped beside its Rust owner;
-the joined Workspaces after #688. No call site is in `layout_engine/`; keep it that way.
+- The state machines kept between events have Roc twins on rift's path (`src/roc_twin.rs`):
+  one platform, one archive, a model each (`requires` takes several model variables; the
+  spike showed it), each box a type of its own on the Rust side. The lifecycle (19b8c59c,
+  872e9fd0), the ownerships (02bda0d7, c6446dfe), the topology (fc1050e9, 215cb864). A twinned
+  machine reads as its Rust machine (`Deref`) and only its own methods change it, so no change
+  reaches the Rust machine without the twin. Outcomes are compared every step; the whole state
+  every step in tests, and in a running Rift every 32nd step (lifecycle, ownerships:
+  `VIEW_EVERY`) or every step (the topology, which is small and changes rarely). Each has a
+  differential on persistent models and planted bugs caught by the regular checks.
+
+**Next:** the ownerships' step grows with the windows (a list rebuilt per change; 641 ns at
+100 windows, 7 us at 1000) and would be flat on a `Dict`, the lead's call. The joined
+Workspaces twin replaces the three after #688 (W4b/c). No call site is in `layout_engine/`;
+keep it that way.
 
 ### Rulings that bind (the lead's and the owner's)
 
@@ -328,6 +339,10 @@ counts only under the `respect_min_size` app rule).
   `max`/`min` as arm64's `fmaxnm`/`fminnm` (+0 beats -0 for max), `sum` from -0.
 - `roc/core/Topology.roc`, `Lifecycle.roc`, `Focus.roc`, `Workspaces.roc`: the decisions, each
   reading its facts through `Asking.roc` (a fact, or that it was not asked, read in order).
+- The machines kept between events: the platform requires `Windows` (the lifecycle), `Owners`
+  (who places each window) and `Places` (the topology) beside `Model`, each with
+  `roc_<machine>_init`, `_step` (and the lifecycle's `_invalidate`, `_revalidate`), `_view`
+  and `_release`; a step unboxes and boxes again, as the core's does, so each stays unique.
 - Pinned nightly: `roc/NIGHTLY`. The glue is generated on every build of the Roc core, from
   `RustGlue.roc` in a roc-lang/roc checkout at the same commit (`ROC_SRC`); about 24,000
   generated lines, never committed.
@@ -365,6 +380,11 @@ counts only under the `respect_min_size` app rule).
   reactor tests under `roc-core` (shadowed). The fuzzer should drive them.
 
 ### Measured
+
+**Twins (2026-11-20, release), per step / whole view:** lifecycle 75 ns at 10 to 1000
+windows / 0.15, 0.36, 3 us at 10, 100, 1000; ownerships 153 ns, 641 ns, 7 us at 10, 100,
+1000 / 0.1 to 0.7 us; topology 210-300 ns at 5 to 100 workspaces / about 0.25 us. Rust's
+steps are 20-81 ns.
 
 **Typed boundary (2026-11-20, release):** `RocCore::step` with the event's and effects'
 conversions, 480-510 ns per step (p50 about 290 ns) against the Rust core's 120 ns, 3.5 Roc
