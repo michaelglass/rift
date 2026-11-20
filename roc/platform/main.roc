@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model] for core : {
+		[Model : model, Windows : windows] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -44,12 +44,23 @@ platform ""
 			topology_steps : TopologyQuestion -> TopologyView,
 			ownership_steps : OwnershipQuestion -> OwnershipView,
 			joined_steps : JoinedQuestion -> JoinedView,
+			lifecycle_init : {} -> windows,
+			lifecycle_step : windows, LifecycleEvent -> { model : windows, change : Change },
+			lifecycle_invalidate : windows, U64 -> { model : windows, happened : Bool },
+			lifecycle_revalidate : windows, U64 -> { model : windows, happened : Bool },
+			lifecycle_view : windows -> { model : windows, windows : List(PresentWindow) },
 		}
 	}
 	exposes [Boundary]
 	packages {}
 	provides {
 		"roc_init": init_for_host,
+		"roc_lifecycle_init": lifecycle_init_for_host,
+		"roc_lifecycle_step": lifecycle_step_for_host,
+		"roc_lifecycle_invalidate": lifecycle_invalidate_for_host,
+		"roc_lifecycle_revalidate": lifecycle_revalidate_for_host,
+		"roc_lifecycle_view": lifecycle_view_for_host,
+		"roc_lifecycle_release": lifecycle_release_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
 		"roc_bsp": bsp_for_host,
@@ -96,7 +107,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleToggled, LifecycleViewed]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -256,3 +267,41 @@ joined_steps_for_host = |question| (core.joined_steps)(question)
 ## Whether a workspace on a Space is reachable from where a command is given.
 workspace_eligible_for_host : EligibleQuestion -> Bool
 workspace_eligible_for_host = |question| (core.workspace_eligible)(question)
+
+## The lifecycle kept between events (`rift_core::lifecycle::Lifecycle`), empty. Like the
+## core's model, it crosses only as a box, unboxed and boxed again on every step so it stays
+## unique.
+lifecycle_init_for_host : {} -> Box(Windows)
+lifecycle_init_for_host = |{}| Box.box((core.lifecycle_init)({}))
+
+## A reading of one window's facts, and the change in its admission.
+lifecycle_step_for_host : Box(Windows), LifecycleEvent -> LifecycleStepped(Windows)
+lifecycle_step_for_host = |boxed, event| {
+	stepped = (core.lifecycle_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), change: stepped.change }
+}
+
+## A window's AX element invalidated: whether it had AX state.
+lifecycle_invalidate_for_host : Box(Windows), U64 -> LifecycleToggled(Windows)
+lifecycle_invalidate_for_host = |boxed, window| {
+	stepped = (core.lifecycle_invalidate)(Box.unbox(boxed), window)
+	{ model: Box.box(stepped.model), happened: stepped.happened }
+}
+
+## A positive AX observation of a window: whether it had been invalidated.
+lifecycle_revalidate_for_host : Box(Windows), U64 -> LifecycleToggled(Windows)
+lifecycle_revalidate_for_host = |boxed, window| {
+	stepped = (core.lifecycle_revalidate)(Box.unbox(boxed), window)
+	{ model: Box.box(stepped.model), happened: stepped.happened }
+}
+
+## Every window with AX state, and the lifecycle back unchanged.
+lifecycle_view_for_host : Box(Windows) -> LifecycleViewed(Windows)
+lifecycle_view_for_host = |boxed| {
+	viewed = (core.lifecycle_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), windows: viewed.windows }
+}
+
+## The host cannot release a `Box(Windows)`: only Roc knows its layout.
+lifecycle_release_for_host : Box(Windows) -> {}
+lifecycle_release_for_host = |_| {}

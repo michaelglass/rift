@@ -587,3 +587,123 @@ fn change(
         Transition::Suspended(_, why) => Change::Suspended(why),
     })
 }
+
+/// The lifecycle kept between events: the Roc twin and the Rust lifecycle take the same runs
+/// of readings, invalidations, revalidations and carried invalidations on a few windows (so
+/// they come and go and collide), each run on one persistent model. Every operation must come
+/// to the same thing and leave the same windows in the same presences.
+#[test]
+fn the_roc_lifecycle_keeps_windows_between_events_as_the_rust_one_does() {
+    use rift_core::lifecycle::{
+        AdmissionFacts, AxKind, Change, FactChange, Lifecycle, LifecycleEvent, Manageability,
+        Minimize, NativeKind, Rule, Transition,
+    };
+    use rift_core_roc::RocLifecycle;
+    fn facts(rng: &mut Rng) -> AdmissionFacts {
+        AdmissionFacts {
+            manageability: if rng.chance(85) {
+                Manageability::Manageable
+            } else {
+                Manageability::Unmanageable
+            },
+            rule: [Rule::NoRule, Rule::NoRule, Rule::Manage, Rule::Ignore][rng.below(4) as usize],
+            ax: [
+                AxKind::Ordinary,
+                AxKind::Ordinary,
+                AxKind::DialogWindow,
+                AxKind::Transient,
+            ][rng.below(4) as usize],
+            native: if rng.chance(85) {
+                NativeKind::Ordinary
+            } else {
+                NativeKind::Transient
+            },
+            minimize: if rng.chance(80) {
+                Minimize::Shown
+            } else {
+                Minimize::Minimized
+            },
+        }
+    }
+    fn change(rng: &mut Rng) -> FactChange {
+        let facts = facts(rng);
+        match rng.below(5) {
+            0 => FactChange::Manageability(facts.manageability),
+            1 => FactChange::Rule(facts.rule),
+            2 => FactChange::Ax(facts.ax),
+            3 => FactChange::Native(facts.native),
+            _ => FactChange::Minimize(facts.minimize),
+        }
+    }
+    let as_change = |transition: Option<Transition<u64>>| {
+        transition.map(|transition| match transition {
+            Transition::Admitted(_) => Change::Admitted,
+            Transition::Suspended(_, why) => Change::Suspended(why),
+        })
+    };
+    let mut rng = Rng(0x11FE_C7C1_E000_0036);
+    let before = AllocationCount::now();
+    let mut steps = 0;
+    for run in 0..400 {
+        let mut rust = Lifecycle::<u64>::default();
+        let mut roc = RocLifecycle::default();
+        for step in 0..60 {
+            let window = 1 + rng.below(6);
+            let what = match rng.below(10) {
+                0..=2 => {
+                    let event = LifecycleEvent::Live { window, facts: facts(&mut rng) };
+                    let expected = as_change(rust.step(event));
+                    assert_eq!(roc.step(event), expected, "run {run} step {step}: {event:?}");
+                    format!("{event:?}")
+                }
+                3..=5 => {
+                    let event = LifecycleEvent::Changed {
+                        window,
+                        change: change(&mut rng),
+                    };
+                    let expected = as_change(rust.step(event));
+                    assert_eq!(roc.step(event), expected, "run {run} step {step}: {event:?}");
+                    format!("{event:?}")
+                }
+                6 => {
+                    let event = LifecycleEvent::Gone(window);
+                    let expected = as_change(rust.step(event));
+                    assert_eq!(roc.step(event), expected, "run {run} step {step}: {event:?}");
+                    format!("{event:?}")
+                }
+                7 => {
+                    let expected = rust.invalidate(window);
+                    assert_eq!(roc.invalidate(window), expected, "run {run} step {step}");
+                    format!("invalidate {window}")
+                }
+                8 => {
+                    let expected = rust.revalidate(window);
+                    assert_eq!(roc.revalidate(window), expected, "run {run} step {step}");
+                    format!("revalidate {window}")
+                }
+                _ => {
+                    // `carry_invalidation`, as the Rust lifecycle does it.
+                    let to = 1 + rng.below(6);
+                    rust.carry_invalidation(window, to);
+                    if roc.revalidate(window) {
+                        roc.invalidate(to);
+                    }
+                    format!("carry {window} to {to}")
+                }
+            };
+            let expected: Vec<_> = rust.presences().collect();
+            assert_eq!(
+                roc.view(),
+                expected,
+                "run {run} step {step}: windows after {what}"
+            );
+            steps += 1;
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    eprintln!("lifecycle: {steps} kept-lifecycle steps identical, windows compared after each");
+}

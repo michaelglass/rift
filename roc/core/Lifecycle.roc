@@ -41,6 +41,9 @@ Change : [NoChange, Admitted, Suspended(Veto)]
 ## A window's presence: none, live, or kept with its AX element invalidated.
 Presence : [NoPresence, Live(Facts), Invalidated(Facts)]
 
+## A window with AX state: valid, or invalidated (kept, with its facts, but not managed).
+Present : [Live(Facts), Invalidated(Facts)]
+
 ## What an inventory knows of a window it is reconciled against.
 InventoryFacts : { report : [Reported, Omitted], view : [InView, OutOfView], minimize : [Shown, Minimized, NoAxState], fullscreen : [Recorded, NotRecorded], identity : [Known(U64), Unknown], validity : [Valid, Invalidated] }
 
@@ -348,42 +351,17 @@ Lifecycle := [].{
 		(after, outcome) =
 			match event {
 				Reading(reading) => {
-					known =
-						match before {
-							NoPresence => NoFacts
-							Live(facts) => Known(facts)
-							Invalidated(facts) => Known(facts)
-						}
-					(read_after, change) = read(known, reading)
-					presence =
-						match read_after {
-							NoFacts => NoPresence
-							Known(facts) =>
-								match reading {
-									Live(_) => Live(facts)
-									Changed(_) =>
-										match before {
-											Invalidated(_) => Invalidated(facts)
-											Live(_) => Live(facts)
-											NoPresence => Live(facts)
-										}
-									Gone => Live(facts)
-								}
-						}
+					(presence, change) = presence_read(before, reading)
 					(presence, Read(change))
 				}
-				Invalidate =>
-					match before {
-						NoPresence => (NoPresence, Invalidated(False))
-						Live(facts) => (Invalidated(facts), Invalidated(True))
-						Invalidated(facts) => (Invalidated(facts), Invalidated(True))
-					}
-				Revalidate =>
-					match before {
-						Invalidated(facts) => (Live(facts), Revalidated(True))
-						Live(facts) => (Live(facts), Revalidated(False))
-						NoPresence => (NoPresence, Revalidated(False))
-					}
+				Invalidate => {
+					(presence, happened) = presence_invalidate(before)
+					(presence, Invalidated(happened))
+				}
+				Revalidate => {
+					(presence, happened) = presence_revalidate(before)
+					(presence, Revalidated(happened))
+				}
 			}
 		manages =
 			match after {
@@ -397,6 +375,104 @@ Lifecycle := [].{
 			}
 		{ after, outcome, manages }
 	}
+
+	## A window's presence after a reading of its facts, and the change in its admission: a
+	## fresh reading is valid AX state, a change keeps the presence.
+	presence_read : Presence, Reading -> (Presence, Change)
+	presence_read = |before, reading| {
+		known =
+			match before {
+				NoPresence => NoFacts
+				Live(facts) => Known(facts)
+				Invalidated(facts) => Known(facts)
+			}
+		(read_after, change) = read(known, reading)
+		presence =
+			match read_after {
+				NoFacts => NoPresence
+				Known(facts) =>
+					match reading {
+						Live(_) => Live(facts)
+						Changed(_) =>
+							match before {
+								Invalidated(_) => Invalidated(facts)
+								Live(_) => Live(facts)
+								NoPresence => Live(facts)
+							}
+						Gone => Live(facts)
+					}
+			}
+		(presence, change)
+	}
+
+	## A window's presence after its AX element was invalidated, and whether it had AX state
+	## to invalidate.
+	presence_invalidate : Presence -> (Presence, Bool)
+	presence_invalidate = |before|
+		match before {
+			NoPresence => (NoPresence, False)
+			Live(facts) => (Invalidated(facts), True)
+			Invalidated(facts) => (Invalidated(facts), True)
+		}
+
+	## A window's presence after a positive AX observation, and whether it had been
+	## invalidated.
+	presence_revalidate : Presence -> (Presence, Bool)
+	presence_revalidate = |before|
+		match before {
+			Invalidated(facts) => (Live(facts), True)
+			Live(facts) => (Live(facts), False)
+			NoPresence => (NoPresence, False)
+		}
+
+	## The lifecycle of every window (`rift_core::lifecycle::Lifecycle`), kept between events:
+	## each window with AX state and its presence. A window without AX state has no entry.
+	windows_empty : {} -> Dict(U64, Present)
+	windows_empty = |{}| Dict.empty()
+
+	## A reading of `window`'s facts: the windows after it, and the change in its admission.
+	windows_read : Dict(U64, Present), U64, Reading -> (Dict(U64, Present), Change)
+	windows_read = |windows, window, reading| {
+		(after, change) = presence_read(presence_in(windows, window), reading)
+		(with_presence(windows, window, after), change)
+	}
+
+	## `window`'s AX element was invalidated: the windows after, and whether it had AX state.
+	windows_invalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), Bool)
+	windows_invalidate = |windows, window| {
+		(after, happened) = presence_invalidate(presence_in(windows, window))
+		(with_presence(windows, window, after), happened)
+	}
+
+	## A positive AX observation of `window`: the windows after, and whether it had been
+	## invalidated.
+	windows_revalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), Bool)
+	windows_revalidate = |windows, window| {
+		(after, happened) = presence_revalidate(presence_in(windows, window))
+		(with_presence(windows, window, after), happened)
+	}
+
+	## Every window with AX state and its presence.
+	windows_view : Dict(U64, Present) -> List({ window : U64, presence : Present })
+	windows_view = |windows| windows.to_list().map(|(window, presence)| { window, presence })
+
+	## `window`'s presence, none without an entry.
+	presence_in : Dict(U64, Present), U64 -> Presence
+	presence_in = |windows, window|
+		match windows.get(window) {
+			Ok(Live(facts)) => Live(facts)
+			Ok(Invalidated(facts)) => Invalidated(facts)
+			Err(_) => NoPresence
+		}
+
+	## The windows with `window` at `presence`: no presence is no entry.
+	with_presence : Dict(U64, Present), U64, Presence -> Dict(U64, Present)
+	with_presence = |windows, window, presence|
+		match presence {
+			NoPresence => windows.remove(window)
+			Live(facts) => windows.insert(window, Live(facts))
+			Invalidated(facts) => windows.insert(window, Invalidated(facts))
+		}
 
 	## Two admission changes in a row, as one: from where the first started to where the
 	## second ended; changes that cancel out are none.

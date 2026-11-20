@@ -540,6 +540,11 @@ impl<W: Copy + Ord> Lifecycle<W> {
 
     /// The live windows.
     pub fn windows(&self) -> impl Iterator<Item = W> + '_ { self.windows.keys().copied() }
+
+    /// Every window with AX state and its presence, in window order.
+    pub fn presences(&self) -> impl Iterator<Item = (W, Presence)> + '_ {
+        self.windows.iter().map(|(&window, &presence)| (window, presence))
+    }
 }
 
 /// Whether an app inventory reported a window.

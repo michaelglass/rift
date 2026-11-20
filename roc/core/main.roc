@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow]
 import Bsp
 import Traditional
 import Scrolling
@@ -78,6 +78,13 @@ Grip : [Idle, Held({ window : WindowId, button : Button, phase : [Pressed, Dragg
 
 Armed : [Armed(U64), Disarmed]
 
+## The lifecycle kept between events: every window with AX state and its presence (valid, or
+## invalidated), by window. `Lifecycle.Present`, written out: the platform needs the name here.
+Windows : Dict(U64, [Live(WindowFacts), Invalidated(WindowFacts)])
+
+## What admission reads of a window (`Lifecycle.Facts`).
+WindowFacts : { manageability : [Manageable, Unmanageable], rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native : [Ordinary, Transient], minimize : [Shown, Minimized] }
+
 Model : {
 	windows : Dict(WindowId, Record),
 
@@ -93,7 +100,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible }
+core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -223,6 +230,35 @@ lifecycle_read = |q| {
 	(after, change) = Lifecycle.read(q.before, q.reading)
 	{ after, change }
 }
+
+## The lifecycle kept between events: every window with AX state, empty at first.
+lifecycle_init : {} -> Windows
+lifecycle_init = |{}| Lifecycle.windows_empty({})
+
+## A reading of one window's facts.
+lifecycle_step : Windows, LifecycleEvent -> { model : Windows, change : Change }
+lifecycle_step = |windows, event| {
+	(model, change) = Lifecycle.windows_read(windows, event.window, event.reading)
+	{ model, change }
+}
+
+## A window's AX element invalidated.
+lifecycle_invalidate : Windows, U64 -> { model : Windows, happened : Bool }
+lifecycle_invalidate = |windows, window| {
+	(model, happened) = Lifecycle.windows_invalidate(windows, window)
+	{ model, happened }
+}
+
+## A positive AX observation of a window.
+lifecycle_revalidate : Windows, U64 -> { model : Windows, happened : Bool }
+lifecycle_revalidate = |windows, window| {
+	(model, happened) = Lifecycle.windows_revalidate(windows, window)
+	{ model, happened }
+}
+
+## Every window with AX state.
+lifecycle_view : Windows -> { model : Windows, windows : List(PresentWindow) }
+lifecycle_view = |windows| { model: windows, windows: Lifecycle.windows_view(windows) }
 
 lifecycle_presence : PresenceQuestion -> PresenceAnswer
 lifecycle_presence = |q| Lifecycle.presence_step(q.before, q.event)

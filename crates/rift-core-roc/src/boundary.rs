@@ -2601,3 +2601,81 @@ pub(crate) fn effects(
     unsafe { abi::decref_list_of_boundary_effect(effects, host) };
     decided
 }
+
+// ---------------------------------------------------------------------------------------------
+// The lifecycle kept between events.
+
+/// The lifecycle's box, which only Roc can read or free. Only the `roc_lifecycle_*` entries
+/// make and take one, so another machine's box can never reach a lifecycle step: every
+/// machine's box is a `RocBox` to the glue, and this type tells them apart. Dropping it
+/// releases the lifecycle.
+pub(crate) struct LifecycleBox(abi::RocBox);
+
+impl LifecycleBox {
+    pub(crate) fn empty() -> LifecycleBox { LifecycleBox(unsafe { abi::roc_lifecycle_init() }) }
+
+    /// A reading of `window`'s facts: the change in its admission.
+    pub(crate) fn read(&mut self, window: u64, reading: Reading) -> Option<Change> {
+        let event = abi::BoundaryLifecycleEvent {
+            window,
+            reading: self::reading(reading),
+        };
+        // SAFETY: the box is this lifecycle's, moved into the step; its successor replaces it.
+        let stepped = unsafe { abi::roc_lifecycle_step(self.0, event) };
+        self.0 = stepped.model;
+        from_change(stepped.change)
+    }
+
+    /// `window`'s AX element invalidated: whether it had AX state.
+    pub(crate) fn invalidate(&mut self, window: u64) -> bool {
+        // SAFETY: as in `read`.
+        let toggled = unsafe { abi::roc_lifecycle_invalidate(self.0, window) };
+        self.0 = toggled.model;
+        toggled.happened
+    }
+
+    /// A positive AX observation of `window`: whether it had been invalidated.
+    pub(crate) fn revalidate(&mut self, window: u64) -> bool {
+        // SAFETY: as in `read`.
+        let toggled = unsafe { abi::roc_lifecycle_revalidate(self.0, window) };
+        self.0 = toggled.model;
+        toggled.happened
+    }
+
+    /// Every window with AX state and its presence, in window order.
+    pub(crate) fn view(&mut self, host: &abi::RocHost) -> Vec<(u64, Presence)> {
+        // SAFETY: as in `read`; the list is Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_lifecycle_view(self.0) };
+        self.0 = viewed.model;
+        let mut windows: Vec<(u64, Presence)> = viewed
+            .windows
+            .as_slice()
+            .iter()
+            .map(|entry| (entry.window, from_present(entry.presence)))
+            .collect();
+        unsafe { viewed.windows.decref(host) };
+        windows.sort_by_key(|&(window, _)| window);
+        windows
+    }
+}
+
+impl Drop for LifecycleBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this lifecycle's and is never used again.
+        unsafe { abi::roc_lifecycle_release(self.0) }
+    }
+}
+
+fn from_present(presence: abi::BoundaryPresent) -> Presence {
+    use abi::BoundaryPresentTag as Tag;
+    match presence.tag {
+        // SAFETY: the tag says the payload is the facts.
+        Tag::Live => Presence::Live(from_admission_facts(unsafe {
+            *presence.borrow_payload_live_unchecked()
+        })),
+        // SAFETY: the tag says the payload is the facts.
+        Tag::Invalidated => Presence::Invalidated(from_admission_facts(unsafe {
+            *presence.borrow_payload_invalidated_unchecked()
+        })),
+    }
+}

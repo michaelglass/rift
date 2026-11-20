@@ -369,6 +369,24 @@ Boundary := [].{
 	## Two admission changes in a row.
 	NetQuestion := { first : Change, then : Change }
 
+	## The lifecycle kept between events: a reading of one window's facts.
+	LifecycleEvent := { window : U64, reading : Reading }
+
+	## A window with AX state: valid, or invalidated.
+	Present := [Live(AdmissionFacts), Invalidated(AdmissionFacts)]
+
+	## A window with AX state and its presence.
+	PresentWindow := { window : U64, presence : Present }
+
+	## The lifecycle after a reading, and the change in the window's admission.
+	LifecycleStepped(model) := { model : Box(model), change : Change }
+
+	## The lifecycle after an invalidation or revalidation, and whether it happened.
+	LifecycleToggled(model) := { model : Box(model), happened : Bool }
+
+	## The lifecycle, unchanged, and every window with AX state.
+	LifecycleViewed(model) := { model : Box(model), windows : List(PresentWindow) }
+
 	Report := [Reported, Omitted]
 
 	InventoryView := [InView, OutOfView]

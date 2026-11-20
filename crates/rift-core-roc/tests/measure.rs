@@ -423,3 +423,98 @@ fn measure_lifecycle_questions() {
         },
     );
 }
+
+/// The lifecycle kept between events, Rust against the Roc twin: per step on AX-style events
+/// (fact changes, fresh readings, invalidations and revalidations of tracked windows), after
+/// filling it with `windows` windows; and the cost of reading every window back (the view the
+/// twin is compared by).
+#[test]
+#[ignore]
+fn measure_lifecycle_twin() {
+    use rift_core::lifecycle::{
+        AdmissionFacts, AxKind, FactChange, Lifecycle, LifecycleEvent, Manageability, Minimize,
+        NativeKind, Rule,
+    };
+    use rift_core_roc::RocLifecycle;
+    #[derive(Clone, Copy)]
+    enum Op {
+        Step(LifecycleEvent<u64>),
+        Invalidate(u64),
+        Revalidate(u64),
+    }
+    let facts = AdmissionFacts {
+        manageability: Manageability::Manageable,
+        rule: Rule::NoRule,
+        ax: AxKind::Ordinary,
+        native: NativeKind::Ordinary,
+        minimize: Minimize::Shown,
+    };
+    for windows in [10u64, 100, 1000] {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ windows;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let ops: Vec<Op> = (0..20_000)
+            .map(|_| {
+                let window = 1 + next() % windows;
+                match next() % 8 {
+                    0 | 1 => Op::Step(LifecycleEvent::Changed {
+                        window,
+                        change: FactChange::Minimize(if next() % 2 == 0 {
+                            Minimize::Shown
+                        } else {
+                            Minimize::Minimized
+                        }),
+                    }),
+                    2 | 3 => Op::Step(LifecycleEvent::Changed {
+                        window,
+                        change: FactChange::Ax(AxKind::Ordinary),
+                    }),
+                    4 | 5 => Op::Step(LifecycleEvent::Live { window, facts }),
+                    6 => Op::Invalidate(window),
+                    _ => Op::Revalidate(window),
+                }
+            })
+            .collect();
+        let mut rust = Lifecycle::<u64>::default();
+        let mut roc = RocLifecycle::default();
+        for window in 1..=windows {
+            rust.step(LifecycleEvent::Live { window, facts });
+            roc.step(LifecycleEvent::Live { window, facts });
+        }
+        let rust_times = time(&ops, |&op| {
+            std::hint::black_box(match op {
+                Op::Step(event) => rust.step(event).is_some(),
+                Op::Invalidate(window) => rust.invalidate(window),
+                Op::Revalidate(window) => rust.revalidate(window),
+            });
+        });
+        let before = AllocationCount::now();
+        let roc_times = time(&ops, |&op| {
+            std::hint::black_box(match op {
+                Op::Step(event) => roc.step(event).is_some(),
+                Op::Invalidate(window) => roc.invalidate(window),
+                Op::Revalidate(window) => roc.revalidate(window),
+            });
+        });
+        let allocated = AllocationCount::now().allocated - before.allocated;
+        let views: Vec<()> = vec![(); 200];
+        let rust_views = time(&views, |_| {
+            std::hint::black_box(rust.presences().collect::<Vec<_>>());
+        });
+        let roc_views = time(&views, |_| {
+            std::hint::black_box(roc.view());
+        });
+        eprintln!(
+            "lifecycle twin, {windows} windows ({:.2} Roc allocations per step):",
+            allocated as f64 / ops.len() as f64
+        );
+        show("rust", &stats(rust_times));
+        show("roc", &stats(roc_times));
+        show("rust view", &stats(rust_views));
+        show("roc view", &stats(roc_views));
+    }
+}

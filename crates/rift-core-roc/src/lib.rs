@@ -189,6 +189,54 @@ impl Default for RocCore {
     }
 }
 
+/// The lifecycle of every window (`rift_core::lifecycle::Lifecycle`) kept in Roc between
+/// events: each window with AX state and its presence. Stepped beside the Rust lifecycle, it
+/// must make the same changes and keep the same windows.
+pub struct RocLifecycle {
+    windows: boundary::LifecycleBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`: the box has one owner, this lifecycle, and Roc keeps no reference
+// to it between steps; `&mut self` on every step keeps it to one thread at a time.
+unsafe impl Send for RocLifecycle {}
+
+impl Default for RocLifecycle {
+    fn default() -> Self {
+        RocLifecycle {
+            windows: boundary::LifecycleBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocLifecycle {
+    /// As `Lifecycle::step`: the change the event makes to its window's admission, if any.
+    pub fn step(
+        &mut self,
+        event: rift_core::lifecycle::LifecycleEvent<u64>,
+    ) -> Option<rift_core::lifecycle::Change> {
+        use rift_core::lifecycle::{LifecycleEvent, Reading};
+        let (window, reading) = match event {
+            LifecycleEvent::Live { window, facts } => (window, Reading::Live(facts)),
+            LifecycleEvent::Changed { window, change } => (window, Reading::Changed(change)),
+            LifecycleEvent::Gone(window) => (window, Reading::Gone),
+        };
+        self.windows.read(window, reading)
+    }
+
+    /// As `Lifecycle::invalidate`.
+    pub fn invalidate(&mut self, window: u64) -> bool { self.windows.invalidate(window) }
+
+    /// As `Lifecycle::revalidate`.
+    pub fn revalidate(&mut self, window: u64) -> bool { self.windows.revalidate(window) }
+
+    /// As `Lifecycle::presences`: every window with AX state and its presence, in window order.
+    pub fn view(&mut self) -> Vec<(u64, rift_core::lifecycle::Presence)> {
+        self.windows.view(&self.host)
+    }
+}
+
 /// Why the Roc core gave no answer: it always answers, so there is no such value. (The layout
 /// functions keep a `Result` for their callers until those are next changed.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
