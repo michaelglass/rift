@@ -628,8 +628,8 @@ pub fn encode_frames(frames: Vec<(WindowId, Rect)>) -> Vec<u64> {
 }
 
 /// A discovered window's Space question as words: tag 5, its standing (0 recovering, 1
-/// untracked, 2 tracked), its live Spaces, the observable Spaces, its recorded Space, its
-/// resolved Space.
+/// untracked, 2 tracked), then its facts: its live Spaces (a fact of a list), whether a Space is
+/// observable (answers), its recorded Space and its resolved Space (facts of options).
 pub fn encode_discovered(question: topology::plain::Discovered) -> Vec<u64> {
     let mut words = Words::default();
     words.word(5);
@@ -638,10 +638,14 @@ pub fn encode_discovered(question: topology::plain::Discovered) -> Vec<u64> {
         Standing::Untracked => 1,
         Standing::Tracked => 2,
     });
-    words.list(question.live, Words::word);
-    words.list(question.observable, Words::word);
-    words.option(question.recorded, Words::word);
-    words.option(question.resolved, Words::word);
+    words.fact(question.live, |words, live| words.list(live, Words::word));
+    words.answers(question.observable, Words::word, Words::flag);
+    words.fact(question.recorded, |words, space| {
+        words.option(space, Words::word)
+    });
+    words.fact(question.resolved, |words, space| {
+        words.option(space, Words::word)
+    });
     words.0
 }
 
@@ -667,7 +671,8 @@ pub fn encode_discovered_space(answer: DiscoveredSpace<u64>) -> Vec<u64> {
 }
 
 /// A discovery Space question as words: tag 6, the standing (0 fullscreen recorded, 1
-/// placeholder, 2 admissible), the native, assigned and by-frame Spaces as options.
+/// placeholder, 2 admissible), the native and assigned Spaces as options, then its fact: the
+/// by-frame Space (a fact of an option).
 pub fn encode_discovery(question: topology::plain::Discovery) -> Vec<u64> {
     let mut words = Words::default();
     words.word(6);
@@ -678,7 +683,9 @@ pub fn encode_discovery(question: topology::plain::Discovery) -> Vec<u64> {
     });
     words.option(question.native, Words::word);
     words.option(question.assigned, Words::word);
-    words.option(question.by_frame, Words::word);
+    words.fact(question.by_frame, |words, space| {
+        words.option(space, Words::word)
+    });
     words.0
 }
 
@@ -739,7 +746,8 @@ pub fn encode_admission(answer: Admission<u64>) -> Vec<u64> {
 }
 
 /// An app-rule candidates question as words: tag 8, the window Spaces (server id, Space), the
-/// activated Spaces, the tracked windows (server id, window), the reconcilable windows.
+/// activated Spaces, then its facts: the window a server id is tracked as (answers of an
+/// option), whether a window is reconcilable (answers).
 pub fn encode_candidates(question: topology::plain::Candidates) -> Vec<u64> {
     let mut words = Words::default();
     words.word(8);
@@ -748,11 +756,10 @@ pub fn encode_candidates(question: topology::plain::Candidates) -> Vec<u64> {
         words.word(space);
     });
     words.list(question.activated, Words::word);
-    words.list(question.tracked, |words, (server, window)| {
-        words.word(server);
-        words.window(window);
+    words.answers(question.tracked, Words::word, |words, window| {
+        words.option(window, Words::window)
     });
-    words.list(question.reconcilable, Words::window);
+    words.answers(question.reconcilable, Words::window, Words::flag);
     words.0
 }
 

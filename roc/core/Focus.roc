@@ -3,7 +3,7 @@
 ## Questions on plain data; Spaces, workspaces, window-server ids, modes and apps are one word
 ## each, and a window with an app is a WindowId (its app is its pid).
 
-import Wire exposing [finished, put_window, take, take_flag, take_list, take_window]
+import Wire exposing [ask, ask_window, ask_word, finished, put_window, take, take_answers, take_fact, take_flag, take_list, take_window]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -30,40 +30,6 @@ Answers(k, v) : List({ key : k, answer : v })
 Read(a) : Try(a, [Unasked(U64)])
 
 Focus := [].{
-
-	## The `fact`-th fact's answer.
-	ask : Fact(a), U64 -> Read(a)
-	ask = |given, fact|
-		match given {
-			Asked(answer) => Ok(answer)
-			Unasked => Err(Unasked(fact))
-		}
-
-	## The `fact`-th fact's answer for a window.
-	ask_window : Answers(WindowId, v), WindowId, U64 -> Read(v)
-	ask_window = |answers, key, fact| {
-		var $found = Err(Unasked(fact))
-		for entry in answers {
-			match $found {
-				Err(Unasked(_)) => if (entry.key == key) { $found = Ok(entry.answer) } else {}
-				Ok(_) => {}
-			}
-		}
-		$found
-	}
-
-	## The `fact`-th fact's answer for a word.
-	ask_word : Answers(U64, v), U64, U64 -> Read(v)
-	ask_word = |answers, key, fact| {
-		var $found = Err(Unasked(fact))
-		for entry in answers {
-			match $found {
-				Err(Unasked(_)) => if (entry.key == key) { $found = Ok(entry.answer) } else {}
-				Ok(_) => {}
-			}
-		}
-		$found
-	}
 
 	## What a removal does to focus. Facts: 0 the removed window's Space, 1 macOS's key window, 2
 	## the successor a native window is tracked as, 3 whether a successor is in an inactive
@@ -301,30 +267,6 @@ Focus := [].{
 			Ok((word.to_i32_wrap(), c1))
 		}
 	}
-
-	## A fact: a flag (0 unasked, 1 asked) and then its answer.
-	take_fact : Words, (Words -> Taken(a)) -> Taken(Fact(a))
-	take_fact = |c0, take_answer| {
-		(asked, c1) = take_flag(c0)?
-		if asked {
-			(answer, c2) = take_answer(c1)?
-			Ok((Asked(answer), c2))
-		} else {
-			Ok((Unasked, c1))
-		}
-	}
-
-	## Answers: a list of (key, answer).
-	take_answers : Words, (Words -> Taken(k)), (Words -> Taken(v)) -> Taken(Answers(k, v))
-	take_answers = |c0, take_key, take_answer|
-		take_list(
-			c0,
-			|c| {
-				(key, after) = take_key(c)?
-				(answer, rest) = take_answer(after)?
-				Ok(({ key, answer }, rest))
-			},
-		)
 
 	put_maybe : List(U64), Maybe -> List(U64)
 	put_maybe = |words, maybe|

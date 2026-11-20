@@ -3,10 +3,12 @@
 //! empty and repeated Spaces, Spaces that are both live and observable, displays with no id,
 //! remaps of Spaces that stayed, windows tracked twice or not at all.
 
+mod facts;
+
+use facts::{Coin, differential, rust};
 use rift_core::plain::{WindowId, wire};
 use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery};
 use rift_core::topology::{DiscoveryStanding, Displays, Incoming, MissionControl, Standing};
-use rift_core_roc::{AllocationCount, tile_words};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -53,62 +55,67 @@ impl Rng {
     }
 }
 
-/// Runs `cases` random questions through both cores; `ask` makes one and returns its words
-/// and the Rust core's answer as words.
-fn differential(name: &str, seed: u64, mut ask: impl FnMut(&mut Rng) -> (Vec<u64>, Vec<u64>)) {
-    let cases: u64 = std::env::var("RIFT_TOPOLOGY_CASES").map_or(20_000, |n| n.parse().unwrap());
-    let mut rng = Rng(seed);
-    let before = AllocationCount::now();
-    for case in 0..cases {
-        let (question, rust) = ask(&mut rng);
-        let roc = tile_words(&question);
-        assert_eq!(roc, Ok(rust), "case {case}: {name} {question:?}");
-    }
-    let after = AllocationCount::now();
-    assert_eq!(after.live(), before.live(), "Roc allocations left live");
-    eprintln!("topology: {cases} {name} questions answered identically");
+impl Coin for Rng {
+    fn chance(&mut self, percent: u64) -> bool { Rng::chance(self, percent) }
 }
 
 #[test]
 fn the_roc_core_finds_a_discovered_windows_space_as_the_rust_core_does() {
-    differential("discovered-space", 0xD15C_0BE7_ED5A_ACE5, |rng| {
-        let question = Discovered {
-            standing: [
+    differential(
+        "topology",
+        "discovered-space",
+        Rng(0xD15C_0BE7_ED5A_ACE5),
+        |rng, blank| {
+            let standing = [
                 Standing::RecoveringFullscreen,
                 Standing::Untracked,
                 Standing::Tracked,
-            ][rng.below(3) as usize],
-            live: rng.ids(3),
-            observable: rng.ids(3),
-            recorded: rng.maybe(),
-            resolved: rng.maybe(),
-        };
-        let rust = wire::encode_discovered_space(question.answer());
-        (wire::encode_discovered(question), rust)
-    });
+            ][rng.below(3) as usize];
+            let live = rng.ids(3);
+            let observable = rng.ids(3);
+            let (recorded, resolved) = (rng.maybe(), rng.maybe());
+            let question = Discovered {
+                standing,
+                observable: blank
+                    .answers(rng, live.iter().copied(), |space| observable.contains(&space)),
+                live: blank.fact(rng, live),
+                recorded: blank.fact(rng, recorded),
+                resolved: blank.fact(rng, resolved),
+            };
+            let rust = rust(question.answer(), wire::encode_discovered_space);
+            (wire::encode_discovered(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_gives_a_reported_window_its_discovery_space_as_the_rust_core_does() {
-    differential("discovery-spaces", 0x0D15_C0FE_5A5A_1234, |rng| {
-        let question = Discovery {
-            standing: [
-                DiscoveryStanding::FullscreenRecorded,
-                DiscoveryStanding::Placeholder,
-                DiscoveryStanding::Admissible,
-            ][rng.below(3) as usize],
-            native: rng.maybe(),
-            assigned: rng.maybe(),
-            by_frame: rng.maybe(),
-        };
-        let rust = wire::encode_discovery_spaces(question.answer());
-        (wire::encode_discovery(question), rust)
-    });
+    differential(
+        "topology",
+        "discovery-spaces",
+        Rng(0x0D15_C0FE_5A5A_1234),
+        |rng, blank| {
+            let by_frame = rng.maybe();
+            let question = Discovery {
+                standing: [
+                    DiscoveryStanding::FullscreenRecorded,
+                    DiscoveryStanding::Placeholder,
+                    DiscoveryStanding::Admissible,
+                ][rng.below(3) as usize],
+                native: rng.maybe(),
+                assigned: rng.maybe(),
+                by_frame: blank.fact(rng, by_frame),
+            };
+            let rust = rust(question.answer(), wire::encode_discovery_spaces);
+            (wire::encode_discovery(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_admits_a_space_snapshot_as_the_rust_core_does() {
-    differential("admission", 0xAD31_75A9_5407_0001, |rng| {
+    // It asks for no fact: both passes run on the whole question.
+    differential("topology", "admission", Rng(0xAD31_75A9_5407_0001), |rng, _| {
         let question = Admit {
             mission_control: if rng.chance(10) {
                 MissionControl::Open
@@ -124,21 +131,40 @@ fn the_roc_core_admits_a_space_snapshot_as_the_rust_core_does() {
                 membership_complete: rng.chance(60),
             },
         };
-        let rust = wire::encode_admission(question.answer());
+        let rust = Ok(wire::encode_admission(question.answer()));
         (wire::encode_admit(question), rust)
     });
 }
 
 #[test]
 fn the_roc_core_picks_app_rule_candidates_as_the_rust_core_does() {
-    differential("app-rule-candidates", 0xCA4D_1DA7_E500_0042, |rng| {
-        let question = Candidates {
-            window_spaces: (0..rng.below(7)).map(|_| (rng.id(), rng.id())).collect(),
-            activated: rng.ids(3),
-            tracked: (0..rng.below(7)).map(|_| (rng.id(), rng.window())).collect(),
-            reconcilable: (0..rng.below(5)).map(|_| rng.window()).collect(),
-        };
-        let rust = wire::encode_app_windows(question.answer());
-        (wire::encode_candidates(question), rust)
-    });
+    differential(
+        "topology",
+        "app-rule-candidates",
+        Rng(0xCA4D_1DA7_E500_0042),
+        |rng, blank| {
+            let window_spaces: Vec<(u64, u64)> =
+                (0..rng.below(7)).map(|_| (rng.id(), rng.id())).collect();
+            // A window-server id is tracked as the first listed window, or not at all.
+            let listed: Vec<(u64, WindowId)> =
+                (0..rng.below(7)).map(|_| (rng.id(), rng.window())).collect();
+            let tracked = |server: u64| {
+                listed.iter().find(|(id, _)| *id == server).map(|(_, window)| *window)
+            };
+            let reconcilable: Vec<WindowId> = (0..rng.below(5)).map(|_| rng.window()).collect();
+            let windows: Vec<WindowId> = listed.iter().map(|(_, window)| *window).collect();
+            let question = Candidates {
+                activated: rng.ids(3),
+                tracked: blank.answers(
+                    rng,
+                    window_spaces.iter().map(|(server, _)| *server),
+                    tracked,
+                ),
+                reconcilable: blank.answers(rng, windows, |window| reconcilable.contains(&window)),
+                window_spaces,
+            };
+            let rust = rust(question.answer(), wire::encode_app_windows);
+            (wire::encode_candidates(question), rust)
+        },
+    );
 }

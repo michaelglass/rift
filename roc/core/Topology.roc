@@ -1,8 +1,8 @@
 ## Decisions about Spaces and the windows on them (`rift_core::topology`), as questions on plain
-## data: every fact a decision may ask for is in its question. Spaces, window-server ids and
-## displays are one word each.
+## data: a decision's facts are what the platform's run of it asked (`Wire.Fact`), read in the
+## same order. Spaces, window-server ids and displays are one word each.
 
-import Wire exposing [finished, put_list, put_window, take, take_flag, take_list, take_window]
+import Wire exposing [ask, ask_window, ask_word, finished, put_list, put_window, take, take_answers, take_fact, take_flag, take_list, take_window]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -39,41 +39,73 @@ Incoming : {
 	membership_complete : Bool,
 }
 
+## A fact the platform's run of the decision answered, or one it never asked.
+Fact(a) : [Asked(a), Unasked]
+
+## A fact asked about keys: each key asked and its answer.
+Answers(k, v) : List({ key : k, answer : v })
+
+## What a decision decided, or the first fact it read that its question does not carry.
+Read(a) : Try(a, [Unasked(U64)])
+
 Admission : [Hold([MissionControl, MembershipIncomplete]), Commit({ invalidated : List(U64), lost : List(U64) })]
 
 Topology := [].{
 
 	## A tracked window resolves as usual. An untracked or recovering one is where it is live,
 	## if that is exactly one Space: several memberships are transitional. Failing that, an
-	## untracked window falls back to its recorded Space and a recovering one to none.
-	discovered_space : Standing, List(U64), List(U64), MaybeSpace, MaybeSpace -> DiscoveredSpace
+	## untracked window falls back to its recorded Space and a recovering one to none. Facts: 0
+	## its live Spaces, 1 whether a Space is observable, 2 its recorded Space, 3 its resolved
+	## Space.
+	discovered_space : Standing, Fact(List(U64)), Answers(U64, Bool), Fact(MaybeSpace), Fact(MaybeSpace) -> Read(DiscoveredSpace)
 	discovered_space = |standing, live, observable, recorded, resolved| {
-		one_live =
-			match live {
-				[space] => if (observable.contains(space)) Observed(space) else Live(space)
-				_ => Fallback(NoSpace)
-			}
-		match standing {
-			Tracked => Fallback(resolved)
-			Untracked =>
-				match one_live {
-					Fallback(_) => Fallback(recorded)
-					found => found
+		one_live = |{}| {
+			spaces = ask(live, 0)?
+			match spaces {
+				[space] => {
+					seen = ask_word(observable, space, 1)?
+					if seen Ok(Observed(space)) else Ok(Live(space))
 				}
-			RecoveringFullscreen => one_live
+				_ => Ok(Fallback(NoSpace))
+			}
+		}
+		match standing {
+			Tracked => {
+				space = ask(resolved, 3)?
+				Ok(Fallback(space))
+			}
+			Untracked => {
+				found = one_live({})?
+				match found {
+					Fallback(_) => {
+						space = ask(recorded, 2)?
+						Ok(Fallback(space))
+					}
+					Observed(space) => Ok(Observed(space))
+					Live(space) => Ok(Live(space))
+				}
+			}
+			RecoveringFullscreen => one_live({})
 		}
 	}
 
 	## A reported window's authoritative Space (native, else assigned) and the Space discovery
 	## may admit it on: only an admissible window's, preferring its assignment, then its native
-	## Space, then where its frame is.
-	discovery_spaces : DiscoveryStanding, MaybeSpace, MaybeSpace, MaybeSpace -> (MaybeSpace, MaybeSpace)
+	## Space, then where its frame is. Fact: 0 where its frame is.
+	discovery_spaces : DiscoveryStanding, MaybeSpace, MaybeSpace, Fact(MaybeSpace) -> Read((MaybeSpace, MaybeSpace))
 	discovery_spaces = |standing, native, assigned, by_frame| {
 		authoritative = or_space(native, assigned)
 		match standing {
-			FullscreenRecorded => (authoritative, NoSpace)
-			Placeholder => (authoritative, NoSpace)
-			Admissible => (authoritative, or_space(or_space(assigned, authoritative), by_frame))
+			FullscreenRecorded => Ok((authoritative, NoSpace))
+			Placeholder => Ok((authoritative, NoSpace))
+			Admissible =>
+				match or_space(assigned, authoritative) {
+					Space(space) => Ok((authoritative, Space(space)))
+					NoSpace => {
+						framed = ask(by_frame, 0)?
+						Ok((authoritative, framed))
+					}
+				}
 		}
 	}
 
@@ -156,38 +188,36 @@ Topology := [].{
 
 	## The windows whose app rules an activation re-applies, by app in the order its first
 	## window is seen: the tracked windows live on an activated Space whose admission can still
-	## be reconciled.
-	candidates : List({ server : U64, space : U64 }), List(U64), List({ server : U64, window : WindowId }), List(WindowId) -> List({ pid : I32, windows : List(WindowId) })
+	## be reconciled. Facts: 0 the window a window-server id is tracked as, 1 whether a
+	## window's admission can be reconciled.
+	candidates : List({ server : U64, space : U64 }), List(U64), Answers(U64, [Tracked(WindowId), NotTracked]), Answers(WindowId, Bool) -> Read(List({ pid : I32, windows : List(WindowId) }))
 	candidates = |window_spaces, activated, tracked, reconcilable| {
-		var $by_app = []
+		var $by_app = Ok([])
 		for entry in window_spaces {
-			if activated.contains(entry.space) {
-				match tracked_window(tracked, entry.server) {
-					Tracked(window) =>
-						if reconcilable.contains(window) {
-							$by_app = add_to_app($by_app, window)
-						} else {
-							{}
-						}
-					NotTracked => {}
-				}
-			} else {
-				{}
+			match $by_app {
+				Ok(by_app) =>
+					if activated.contains(entry.space) {
+						$by_app = add_candidate(by_app, entry.server, tracked, reconcilable)
+					} else {
+						{}
+					}
+				Err(_) => {}
 			}
 		}
 		$by_app
 	}
 
-	tracked_window : List({ server : U64, window : WindowId }), U64 -> [Tracked(WindowId), NotTracked]
-	tracked_window = |tracked, server| {
-		var $found = NotTracked
-		for entry in tracked {
-			match $found {
-				NotTracked => if (entry.server == server) { $found = Tracked(entry.window) } else {}
-				Tracked(_) => {}
+	## Adds the window a window-server id is tracked as, if its admission can be reconciled.
+	add_candidate : List({ pid : I32, windows : List(WindowId) }), U64, Answers(U64, [Tracked(WindowId), NotTracked]), Answers(WindowId, Bool) -> Read(List({ pid : I32, windows : List(WindowId) }))
+	add_candidate = |by_app, server, tracked, reconcilable| {
+		window_of = ask_word(tracked, server, 0)?
+		match window_of {
+			Tracked(window) => {
+				open = ask_window(reconcilable, window, 1)?
+				if open Ok(add_to_app(by_app, window)) else Ok(by_app)
 			}
+			NotTracked => Ok(by_app)
 		}
-		$found
 	}
 
 	add_to_app : List({ pid : I32, windows : List(WindowId) }), WindowId -> List({ pid : I32, windows : List(WindowId) })
@@ -247,7 +277,7 @@ Topology := [].{
 	}
 
 	## Tag 5: where an app inventory finds a window.
-	discovered_words : Words -> Try(List(U64), [Malformed])
+	discovered_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	discovered_words = |c0| {
 		(standing_word, c1) = take(c0)?
 		standing =
@@ -257,13 +287,14 @@ Topology := [].{
 				2 => Ok(Tracked)
 				_ => Err(Malformed)
 			}?
-		(live, c2) = take_list(c1, take)?
-		(observable, c3) = take_list(c2, take)?
-		(recorded, c4) = take_space(c3)?
-		(resolved, c5) = take_space(c4)?
+		(live, c2) = take_fact(c1, |c| take_list(c, take))?
+		(observable, c3) = take_answers(c2, take, take_flag)?
+		(recorded, c4) = take_fact(c3, take_space)?
+		(resolved, c5) = take_fact(c4, take_space)?
 		finished(c5)?
+		answer = discovered_space(standing, live, observable, recorded, resolved)?
 		Ok(
-			match discovered_space(standing, live, observable, recorded, resolved) {
+			match answer {
 				Observed(space) => [0, space]
 				Live(space) => [1, space]
 				Fallback(space) => put_space([2], space)
@@ -272,7 +303,7 @@ Topology := [].{
 	}
 
 	## Tag 6: a reported window's authoritative and discovery Spaces.
-	discovery_words : Words -> Try(List(U64), [Malformed])
+	discovery_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	discovery_words = |c0| {
 		(standing_word, c1) = take(c0)?
 		standing =
@@ -284,9 +315,9 @@ Topology := [].{
 			}?
 		(native, c2) = take_space(c1)?
 		(assigned, c3) = take_space(c2)?
-		(by_frame, c4) = take_space(c3)?
+		(by_frame, c4) = take_fact(c3, take_space)?
 		finished(c4)?
-		(authoritative, discovery) = discovery_spaces(standing, native, assigned, by_frame)
+		(authoritative, discovery) = discovery_spaces(standing, native, assigned, by_frame)?
 		Ok(put_space(put_space([], authoritative), discovery))
 	}
 
@@ -323,7 +354,7 @@ Topology := [].{
 	}
 
 	## Tag 8: the windows an activation re-applies app rules to, by app.
-	candidates_words : Words -> Try(List(U64), [Malformed])
+	candidates_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	candidates_words = |c0| {
 		take_pair = |c| {
 			(server, after) = take(c)?
@@ -331,19 +362,24 @@ Topology := [].{
 			Ok(({ server, space }, rest))
 		}
 		take_tracked = |c| {
-			(server, after) = take(c)?
-			(window, rest) = take_window(after)?
-			Ok(({ server, window }, rest))
+			(present, after) = take_flag(c)?
+			if present {
+				(window, rest) = take_window(after)?
+				Ok((Tracked(window), rest))
+			} else {
+				Ok((NotTracked, after))
+			}
 		}
 		(window_spaces, c1) = take_list(c0, take_pair)?
 		(activated, c2) = take_list(c1, take)?
-		(tracked, c3) = take_list(c2, take_tracked)?
-		(reconcilable, c4) = take_list(c3, take_window)?
+		(tracked, c3) = take_answers(c2, take, take_tracked)?
+		(reconcilable, c4) = take_answers(c3, take_window, take_flag)?
 		finished(c4)?
+		by_app = candidates(window_spaces, activated, tracked, reconcilable)?
 		Ok(
 			put_list(
 				[],
-				candidates(window_spaces, activated, tracked, reconcilable),
+				by_app,
 				|w, group| put_list(w.append(group.pid.to_i64().to_u64_wrap()), group.windows, put_window),
 			),
 		)

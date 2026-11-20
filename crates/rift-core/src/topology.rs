@@ -228,53 +228,66 @@ pub fn app_rule_candidates<V, S: PartialEq, W: Copy, P: Copy + PartialEq>(
     by_app
 }
 
-/// Each decision as a question on plain data: every fact it may ask for is in the question.
-/// Spaces, window-server ids and displays are one word each.
+/// Each decision as a question on plain data. Its arguments are plain values; every fact it
+/// asks for is a [`Fact`] (or, asked about a key, [`Answers`]): what the platform answered, or
+/// that the platform's run of the decision never asked it. Each question names its facts in
+/// `FACTS`, in the order the wire carries them; an answer that read a fact the question does not
+/// carry is [`Unasked`]. Spaces, window-server ids and displays are one word each.
 pub mod plain {
     use super::{
         Admission, DiscoveredSpace, DiscoveryStanding, Displays, Incoming, MissionControl, Standing,
     };
-    use crate::plain::WindowId;
+    use crate::plain::{Answers, Fact, Reading, Unasked, WindowId};
 
-    /// [`super::discovered_space`]: the window's Spaces, and which Spaces are fullscreen or a
-    /// display's.
+    /// [`super::discovered_space`]: the window's Spaces, whether a Space is fullscreen or a
+    /// display's, its recorded Space and what the platform resolves for it.
     #[derive(Debug, Clone, PartialEq)]
     pub struct Discovered {
         pub standing: Standing,
-        pub live: Vec<u64>,
-        pub observable: Vec<u64>,
-        pub recorded: Option<u64>,
-        pub resolved: Option<u64>,
+        pub live: Fact<Vec<u64>>,
+        pub observable: Answers<u64, bool>,
+        pub recorded: Fact<Option<u64>>,
+        pub resolved: Fact<Option<u64>>,
     }
 
     impl Discovered {
-        pub fn answer(&self) -> DiscoveredSpace<u64> {
-            super::discovered_space(
+        pub const FACTS: &[&str] = &["live", "observable", "recorded", "resolved"];
+
+        pub fn answer(&self) -> Result<DiscoveredSpace<u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::discovered_space(
                 self.standing,
-                || self.live.clone(),
-                |space| self.observable.contains(&space),
-                || self.recorded,
-                || self.resolved,
-            )
+                || reading.fact(&self.live, 0, Vec::new()),
+                |space| reading.about(&self.observable, &space, 1, false),
+                || reading.fact(&self.recorded, 2, None),
+                || reading.fact(&self.resolved, 3, None),
+            );
+            reading.answer(answer)
         }
     }
 
-    /// [`super::discovery_spaces`].
+    /// [`super::discovery_spaces`]: where the window's frame is.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Discovery {
         pub standing: DiscoveryStanding,
         pub native: Option<u64>,
         pub assigned: Option<u64>,
-        pub by_frame: Option<u64>,
+        pub by_frame: Fact<Option<u64>>,
     }
 
     impl Discovery {
-        pub fn answer(&self) -> (Option<u64>, Option<u64>) {
-            super::discovery_spaces(self.standing, self.native, self.assigned, || self.by_frame)
+        pub const FACTS: &[&str] = &["by_frame"];
+
+        pub fn answer(&self) -> Result<(Option<u64>, Option<u64>), Unasked> {
+            let reading = Reading::new();
+            let answer = super::discovery_spaces(self.standing, self.native, self.assigned, || {
+                reading.fact(&self.by_frame, 0, None)
+            });
+            reading.answer(answer)
         }
     }
 
-    /// [`super::admit_space_snapshot`].
+    /// [`super::admit_space_snapshot`]: it asks for no fact.
     #[derive(Debug, Clone, PartialEq)]
     pub struct Admit {
         pub mission_control: MissionControl,
@@ -283,32 +296,36 @@ pub mod plain {
     }
 
     impl Admit {
+        pub const FACTS: &[&str] = &[];
+
         pub fn answer(&self) -> Admission<u64> {
             super::admit_space_snapshot(&self.current, &self.incoming, self.mission_control)
         }
     }
 
-    /// [`super::app_rule_candidates`]: the tracked windows by window-server id, and the
-    /// windows whose admission can still be reconciled; a window's app is its pid.
+    /// [`super::app_rule_candidates`]: the window a window-server id is tracked as (if any),
+    /// and whether a window's admission can still be reconciled; a window's app is its pid.
     #[derive(Debug, Clone, PartialEq)]
     pub struct Candidates {
         pub window_spaces: Vec<(u64, u64)>,
         pub activated: Vec<u64>,
-        pub tracked: Vec<(u64, WindowId)>,
-        pub reconcilable: Vec<WindowId>,
+        pub tracked: Answers<u64, Option<WindowId>>,
+        pub reconcilable: Answers<WindowId, bool>,
     }
 
     impl Candidates {
-        pub fn answer(&self) -> Vec<(i32, Vec<WindowId>)> {
-            super::app_rule_candidates(
+        pub const FACTS: &[&str] = &["tracked", "reconcilable"];
+
+        pub fn answer(&self) -> Result<Vec<(i32, Vec<WindowId>)>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::app_rule_candidates(
                 self.window_spaces.iter().copied(),
                 &self.activated,
-                |server| {
-                    self.tracked.iter().find(|(id, _)| *id == server).map(|(_, window)| *window)
-                },
-                |window| self.reconcilable.contains(&window),
+                |server| reading.about(&self.tracked, &server, 0, None),
+                |window| reading.about(&self.reconcilable, &window, 1, false),
                 |window| window.pid,
-            )
+            );
+            reading.answer(answer)
         }
     }
 }
