@@ -82,6 +82,11 @@ ship.
 
 ### Open items
 
+0. **Candidate simplification (not done):** `reapplies_on_title_change`'s check that the
+   window's Space is active is mirrored by `rule_targets`, which drops windows on inactive
+   Spaces; ignoring it in the Rust decision changes nothing visible (S3 found it; the reactor
+   test `a_title_change_reapplies_rules_only_on_an_active_space` reaches the branch).
+
 1. **W3b's shadow** is `rift_core::workspaces::Ownerships`, held by the window store and
    written only through `set_ownership`; it joins `Topology` at W4.
 2. **W4, the flip (plan approved).** The joined `rift_core::workspaces::Workspaces` (W4a,
@@ -539,6 +544,12 @@ notes called several of these friction; they are Roc's design, and the core foll
 
 ### Design we follow
 
+- **Same-shaped nominal types do not unify** (langref `types.md`, "Nominal Types" and
+  "Structural-Nominal Compatibility"): a structural value passes where a nominal type is
+  expected, but two nominals of the same shape are different types. So the core modules use
+  the platform's recursive nominals (`Boundary.BspNode`, `Boundary.TraditionalNode`) directly,
+  and nothing is copied between nominal and structural records in Roc.
+
 - **No `Option`, no null.** Failures are `Try`, absence is a descriptive tag union (mini
   tutorial, "`Try`": "Roc does not have `null`, `nil`, `undefined`, or anything similar").
   The core says what absence means: `Last : [Sent(U32), NeverSent]`, `Waiting : [Waiting(Rect),
@@ -582,10 +593,38 @@ notes called several of these friction; they are Roc's design, and the core foll
   rounding out (`Geometry.round`) to stay bit-identical.
 - **`F64.max` / `F64.min`** are `if a > b then a else b` (`Builtin.roc`): NaN and signed-zero
   behaviour is not specified; the geometry writes out arm64's `fmaxnm`/`fminnm`.
-- **Glue and packaging** (only the three boundary functions use it now): structural records
-  are named by hash, the generated Rust is not clean under Rust 2024
-  (`unsafe_op_in_unsafe_fn`, allowed on the module), and the nightly tarball has no glue specs
-  (`roc/glue.sh` takes `ROC_SRC`).
+- **Glue and packaging.** The glue is generated at build time (`crates/rift-core-roc/build.rs`,
+  into `OUT_DIR`, never committed) from `RustGlue.roc` in a roc-lang/roc checkout (`ROC_SRC`; the
+  nightly tarball has none). The generated file is a module (inner `//!` docs and `#![...]`
+  attributes), so the build script turns those lines into plain comments for `include!`, and
+  the crate allows the generator's lints (`unsafe_op_in_unsafe_fn`, `unexpected_cfgs`, ...) on
+  the module. The glue's default `make_roc_host` allocators prefix their own header, so the
+  host keeps its own allocator hooks (mixing the two crashed in `free`).
+- **Glue names.** An anonymous record is named by hash (`AnonStruct<hex>`); an inline union by
+  its tags (`NothingOrSome`), and a collision, or a generic nominal's instances (`Fact(a)`), by
+  a number (`AskedOrUnaskedType24`, `TypesFactType26`) that shifts as other types come and go.
+  Workaround: every boundary type is a named nominal in `roc/platform/Boundary.roc`, one per
+  payload, and the build fails on `AnonStruct<hex>` or `...Type<digits>` in the glue.
+- **Glue bug: a single-tag union with several values** (`[Stepped(Box(model), List(U64))]`) is
+  described by its first value only: the glue declared `roc_step` as returning just the box.
+  Cause: `src/glue/platform/TypeTable.roc:89`, `single_variant_payload`, keeps only
+  `List.first(tag.payload)`, and `RustGlue.roc:159` emits that. Unfixed on main and unreported
+  (2026-11-20). Workaround and guard: such values are a named record, and the build fails on a
+  platform union with one tag carrying several values.
+- **`roc check` hangs** on a nominal type in a platform module that mentions the platform's
+  `Model` variable, when the platform has no `import` (minimal repro, the lead's); ours imports
+  `Boundary`, and `Stepped(model)` is generic in the model anyway. Closest upstream: open issue
+  #13263 (aliases built on `requires`' Model are not checked as Model), whose workaround is the
+  same type parameter. On a nightly bump, also check #13249 (an `--opt=dev` SIGTRAP when a
+  platform closure captures a Model-typed callback; closed).
+- **`roc build` hung** (`roc check` passing) on an entry rebuilding tuples out of a nominal
+  record's fields (the settle question's placement); giving the core's own type the record
+  shape removed the hang. Not reduced further.
+- **Recursive types at the boundary.** Recursion through a `List` is a plain `RocList`; direct
+  recursion (BSP's `One(BspNode) | Two(BspNode, BspNode)`, a traditional `Child`) comes out as
+  raw `*mut T` Roc boxes, boxed at each level the glue names. The host allocates them with
+  `allocate_box`, whose header depends on whether the payload holds refcounted values (the
+  glue's own `decref` for each field says which); a wrong header crashes the differential.
 
 ### Worked well
 
