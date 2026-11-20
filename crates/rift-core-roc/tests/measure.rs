@@ -330,3 +330,91 @@ fn measure_focus_questions() {
         wire::encode_untracked,
     );
 }
+
+/// The hot lifecycle questions S3 puts on rift's path: `is_native_transient` and
+/// `keeps_transient` (every event touching a window's transient entry) and `retirement` (every
+/// window an inventory is reconciled against).
+#[test]
+#[ignore]
+fn measure_lifecycle_questions() {
+    use rift_core::lifecycle::plain::{KeepsTransient, NativeTransient};
+    use rift_core::lifecycle::{
+        AxValidity, Departure, FullscreenRecord, InventoryFacts, InventoryView, Minimize,
+        NativeEvidence, NativeIdentity, NativeLook, Ordering, Report, Suitability, TransientOrigin,
+        retirement,
+    };
+
+    let native = vec![
+        NativeTransient {
+            entry: None,
+            owner: 7,
+            exempt: false,
+        },
+        NativeTransient {
+            entry: Some((TransientOrigin::Native, 7)),
+            owner: 7,
+            exempt: false,
+        },
+        NativeTransient {
+            entry: Some((TransientOrigin::Heuristic, 7)),
+            owner: 7,
+            exempt: true,
+        },
+    ];
+    question(
+        "is_native_transient",
+        &native,
+        |q| wire::encode_verdict(q.answer()),
+        wire::encode_native_transient,
+    );
+    let keeps = vec![
+        KeepsTransient {
+            departure: Departure::Destroyed(Some(40)),
+            id: 40,
+            origin: TransientOrigin::Heuristic,
+            owner: 7,
+        },
+        KeepsTransient {
+            departure: Departure::Closed(41),
+            id: 40,
+            origin: TransientOrigin::Native,
+            owner: 7,
+        },
+        KeepsTransient {
+            departure: Departure::AppGone(7),
+            id: 40,
+            origin: TransientOrigin::Native,
+            owner: 7,
+        },
+    ];
+    question(
+        "keeps_transient",
+        &keeps,
+        |q| wire::encode_verdict(q.answer()),
+        wire::encode_keeps_transient,
+    );
+    let facts = |report| InventoryFacts {
+        report,
+        view: InventoryView::InView,
+        minimize: Some(Minimize::Shown),
+        fullscreen: FullscreenRecord::NotRecorded,
+        identity: NativeIdentity::Known(40),
+        validity: AxValidity::Valid,
+    };
+    let evidence = NativeEvidence {
+        suitability: Some(Suitability::Suitable),
+        ordering: Some(Ordering::OrderedIn),
+        look: Some(NativeLook::Window),
+    };
+    // Reported (kept at once), and omitted with the evidence asked.
+    let inventories = vec![
+        (facts(Report::Reported), evidence),
+        (facts(Report::Omitted), evidence),
+    ];
+    question(
+        "retirement",
+        &inventories,
+        |(facts, evidence)| wire::encode_retirement(retirement(*facts, |_| *evidence)),
+        |(facts, evidence)| wire::encode_inventory(facts, evidence),
+    );
+}
