@@ -98,6 +98,17 @@ pub enum Holder {
     Nobody,
 }
 
+impl<W> Pointer<W> {
+    /// The same pointer, its window named by `f`.
+    pub fn map<V>(self, f: impl FnOnce(W) -> V) -> Pointer<V> {
+        match self {
+            Pointer::Idle => Pointer::Idle,
+            Pointer::Pressing(window) => Pointer::Pressing(f(window)),
+            Pointer::Dragging(window) => Pointer::Dragging(f(window)),
+        }
+    }
+}
+
 impl<W: PartialEq + Copy> Pointer<W> {
     /// Whose `window`'s frame is: the user's while their hand is on it, and every window's
     /// while they drag one.

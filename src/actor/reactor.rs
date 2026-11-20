@@ -1159,7 +1159,23 @@ impl Reactor {
     /// core's mode table, `rift_core::modes`). A question about one window asks the store about
     /// that window instead.
     fn may(&self, initiative: Initiative) -> bool {
-        self.modes().verdict(initiative) == modes::Verdict::Admitted
+        self.verdict(initiative) == modes::Verdict::Admitted
+    }
+
+    /// The mode table's verdict on `initiative` now. Under `roc-core` the Roc core is asked the
+    /// same question and must give the same verdict (the Rust one stands).
+    fn verdict(&self, initiative: Initiative) -> modes::Verdict<WindowId> {
+        let now = self.modes();
+        let verdict = now.verdict(initiative);
+        #[cfg(feature = "roc-core")]
+        {
+            use crate::roc_path::Word;
+            let question = now.map(Word::word);
+            let roc = Ok(rift_core_roc::modes::verdict(question, initiative));
+            let rust = verdict.map(Word::word);
+            crate::roc_path::check("mode verdict", &[], &(question, initiative), &rust, roc);
+        }
+        verdict
     }
 
     /// The modes Rift is in, read from the facts now.
@@ -1212,8 +1228,7 @@ impl Reactor {
 
     /// Whether the modes admit input of `class`. Refused input is discarded with one log line.
     fn admit(&self, class: InputClass, input: &dyn std::fmt::Debug) -> bool {
-        let modes = self.modes();
-        let modes::Verdict::Refused(mode) = modes.verdict(Initiative::UserInput(class)) else {
+        let modes::Verdict::Refused(mode) = self.verdict(Initiative::UserInput(class)) else {
             return true;
         };
         match class {
@@ -7455,7 +7470,7 @@ impl ActivationFacts for ActivationQuery<'_> {
     }
 
     fn mode_refusal(&self) -> Option<String> {
-        match self.reactor.modes().verdict(Initiative::FollowActivation) {
+        match self.reactor.verdict(Initiative::FollowActivation) {
             modes::Verdict::Refused(axis) => Some(format!("{axis:?}")),
             modes::Verdict::Admitted => None,
         }

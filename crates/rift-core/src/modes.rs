@@ -117,6 +117,45 @@ pub enum Verdict<W> {
     Refused(Axis<W>),
 }
 
+impl<W> Modes<W> {
+    /// The same modes, the pointer's window named by `f`.
+    pub fn map<V>(self, f: impl FnOnce(W) -> V) -> Modes<V> {
+        Modes {
+            pointer: self.pointer.map(f),
+            menu: self.menu,
+            mission_control: self.mission_control,
+            modal: self.modal,
+            viewport: self.viewport,
+            focus_claim: self.focus_claim,
+            user_spaces: self.user_spaces,
+            wake: self.wake,
+            workspace_switch: self.workspace_switch,
+            topology: self.topology,
+        }
+    }
+}
+
+impl<W> Verdict<W> {
+    /// The same verdict, a refusing pointer's window named by `f`.
+    pub fn map<V>(self, f: impl FnOnce(W) -> V) -> Verdict<V> {
+        match self {
+            Verdict::Admitted => Verdict::Admitted,
+            Verdict::Refused(axis) => Verdict::Refused(match axis {
+                Axis::Pointer(pointer) => Axis::Pointer(pointer.map(f)),
+                Axis::Menu => Axis::Menu,
+                Axis::MissionControl => Axis::MissionControl,
+                Axis::Modal => Axis::Modal,
+                Axis::Viewport => Axis::Viewport,
+                Axis::FocusClaim => Axis::FocusClaim,
+                Axis::UserSpaces => Axis::UserSpaces,
+                Axis::Wake => Axis::Wake,
+                Axis::WorkspaceSwitch => Axis::WorkspaceSwitch,
+                Axis::Topology => Axis::Topology,
+            }),
+        }
+    }
+}
+
 impl<W: Copy> Modes<W> {
     /// The table's verdict on `initiative`: the first axis, in the table's order, that refuses
     /// it.

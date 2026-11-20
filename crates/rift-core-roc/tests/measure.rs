@@ -660,3 +660,79 @@ fn measure_topology_twin() {
         show("roc view", &stats(roc_views));
     }
 }
+
+/// The mode table's verdict, Rust against Roc, over a spread of states and initiatives (hover
+/// is asked at mouse rate while the pointer moves).
+#[test]
+#[ignore]
+fn measure_mode_verdict() {
+    use rift_core::Pointer;
+    use rift_core::modes::{
+        FocusClaim, INITIATIVES, Menu, MissionControl, Modal, Modes, Topology, UserSpaces,
+        Viewport, Wake, WorkspaceSwitch,
+    };
+    let questions: Vec<_> = (0u32..512)
+        .flat_map(|bits| {
+            let on = |i: u32| bits & (1 << i) != 0;
+            let modes = Modes {
+                pointer: if on(0) {
+                    Pointer::Dragging(3)
+                } else {
+                    Pointer::Idle
+                },
+                menu: if on(1) { Menu::Open } else { Menu::Closed },
+                mission_control: if on(2) {
+                    MissionControl::Active
+                } else {
+                    MissionControl::Inactive
+                },
+                modal: if on(3) {
+                    Modal::Frontmost
+                } else {
+                    Modal::Clear
+                },
+                viewport: if on(4) {
+                    Viewport::Gesturing
+                } else {
+                    Viewport::Free
+                },
+                focus_claim: if on(5) {
+                    FocusClaim::PausesHover
+                } else {
+                    FocusClaim::Free
+                },
+                user_spaces: UserSpaces::Shown,
+                wake: if on(6) {
+                    Wake::AwaitingInput
+                } else {
+                    Wake::UserPresent
+                },
+                workspace_switch: if on(7) {
+                    WorkspaceSwitch::Switching
+                } else {
+                    WorkspaceSwitch::Idle
+                },
+                topology: if on(8) {
+                    Topology::Unsettled
+                } else {
+                    Topology::Settled
+                },
+            };
+            INITIATIVES.into_iter().map(move |initiative| (modes, initiative))
+        })
+        .collect();
+    let rust = time(&questions, |&(modes, initiative)| {
+        std::hint::black_box(modes.verdict(initiative));
+    });
+    let before = AllocationCount::now();
+    let roc = time(&questions, |&(modes, initiative)| {
+        std::hint::black_box(rift_core_roc::modes::verdict(modes, initiative));
+    });
+    let allocated = AllocationCount::now().allocated - before.allocated;
+    eprintln!(
+        "mode verdict ({} questions, {allocated} Roc allocations):",
+        questions.len()
+    );
+    show("rust", &stats(rust));
+    show("roc", &stats(roc));
+}
