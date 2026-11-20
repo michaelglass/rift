@@ -149,31 +149,32 @@ ship.
 Done: tags 32 and 33, W3b, the remap reactor test, W4a and its Roc mirror (tag 34), the W5
 fuzzer gap and its four fixes (open item 3). W4b to W4d wait for #688 (open item 2).
 
-**Now: the Roc mirrors on rift's path under `roc-core` (plan approved).** Model-free decisions:
-each call site asks the Roc core the question it just answered in Rust and compares the words
-(`src/roc_path.rs::check`, S0 = 096c37ae): equal, the Rust answer stands (bit for bit the Roc
-core's decision; decoders come when a Rust side is retired); different or no answer, tests panic
-`roc-divergence:`, a running Rift warns `roc-divergence:` and keeps the Rust answer. Each site
-gets a `#[cfg(feature = "roc-core")]` block building its plain question with the existing
-`rift_core::*::plain` builders (ids to `u64` beside `Plainly`). Slices, each its own commit,
-gated by the roc-core reactor tests and the fuzzer under roc-core; **measure each hot question
-in `crates/rift-core-roc/tests/measure.rs` before wiring it and report the numbers**:
-- S1 focus, 7 sites in reactor.rs: activation_follow, untracked_focus (hot: layout responses),
-  focuses_desktop, focus_candidate (hot), hides_focus, removal_focus, display_to_follow. S1 also
-  removes `roc_path`'s temporary `expect(dead_code)`.
-- S2 topology, 4 in reactor.rs: app_rule_candidates, admit_space_snapshot, discovered_space,
-  discovery_spaces.
-- S3 lifecycle free functions, about 11: reactor.rs reapplies_on_title_change, misplaced,
-  out_of_inventory_view, is_native_transient and keeps_transient (hot: every event),
-  rule_targets, rule_refreshes_layout, pointer_display_target; window_discovery.rs net;
-  window_store.rs retirement (hot: inventory observations), net, admission.
-- S4 workspaces, 4 inside virtual_workspace.rs's VWM methods (engine.rs only calls the
-  wrappers, so #688's ground is untouched): eligible, previous, resolve, step.
-- Then a plan for a **stateful Roc platform entry** (glue regeneration if needed) so
-  Lifecycle, Topology, Ownerships and the joined Workspaces can live in Roc between events;
-  whatever only matters after W4b/c waits for #688.
-No call site is in `layout_engine/`; keep it that way (engine glue, persistence and layout
-systems are #688's).
+**Done (2026-11-20): the Roc mirrors on rift's path under `roc-core`, S1 to S3, then the
+boundary typed.**
+- Each call site asks the Roc core the question it just answered in Rust and compares the
+  answers (`src/roc_path.rs::check`): equal, the Rust answer stands; different, or the Roc
+  decision read a fact the Rust one did not ask, tests panic `roc-divergence:` and a running
+  Rift warns it and keeps the Rust answer.
+- A question carries exactly the facts the Rust decision asked: each fact is a
+  `rift_core::plain::Fact` (`Asked(answer) | Unasked`, or `Answers` about keys), recorded at the
+  site through `roc_path::Asked` / `AskedAbout` (zero-sized without `roc-core`). The Roc
+  decisions read facts lazily in the Rust order; reading an unasked one is a divergence by
+  name. The differentials run each decision on full facts and with facts left unasked at
+  random (`tests/facts`).
+- S1 focus (7 sites, 9b058515), S2 topology (4, 57746016), S3 lifecycle (12, 51723ea1), each
+  with one planted bug per decision proven caught (new reactor tests where a branch had no
+  coverage: a display mid-change, a placeholder window, a title change on an inactive Space,
+  a reading that admits and suspends).
+- The boundary is typed (owner's decision, after S3): every entry takes and returns named
+  `Boundary.roc` types, the glue generated at build time; the word codec is only the trace
+  format (1b1acb1d, 1c733288, c98b1eb1, 1260394b, 99d903a6, 53098cb3, 1f0069d4, cf9f84d0).
+
+**Now: S4 workspaces on the typed entries**, 4 sites inside virtual_workspace.rs's VWM
+methods (engine.rs only calls the wrappers, so #688's ground is untouched): eligible (needs an
+entry of its own), previous, resolve, step; facts first where the decision asks lazily (step's
+windows, previous's Space). Then a plan for a **stateful Roc platform entry** so Lifecycle,
+Topology, Ownerships and the joined Workspaces can live in Roc between events; whatever only
+matters after W4b/c waits for #688. No call site is in `layout_engine/`; keep it that way.
 
 ### Rulings that bind (the lead's and the owner's)
 
@@ -295,52 +296,39 @@ counts only under the `respect_min_size` app rule).
 
 ## The Roc side
 
-- `roc/platform/main.roc`: requires `core : { init : {} -> model, step : model, List(U64) -> {
-  model, effects : List(U64) } }`; provides `roc_init`, `roc_step`, `roc_release_model`; target
-  `arm64mac: { inputs: [app], output: Archive }`. The model crosses only as `Box(Model)`.
-- `roc/core/main.roc` (~1,260 lines, ~330 of them the wire codec): `RustCore` ported decision for
-  decision. State inside the variants, `Option`s as small tag unions (`Last : [Sent(U32),
-  NeverSent]`, `Waiting : [Waiting(Rect), NoneWaiting]`), every match naming its variants. The
-  app parses the event's words into its own `Event` union at the start of `step` and writes the
-  effects' words at the end.
-- `crates/rift-core-roc`: a member of rift's workspace (cargo makes every path dependency inside
-  it one, `exclude` or not) but **empty unless its `roc` feature is on**, so rift's own build
-  never needs the Roc nightly (`ROC=/nonexistent cargo test --workspace` passes). With `roc`,
-  `build.rs` runs `roc build` and links the archive; `RocCore::step_words` steps on words,
-  `RocCore::step` adds the wire; the allocator hooks count allocations; `roc_crashed` aborts.
-- In rift, `--features roc-core` (which turns on `rift-core-roc/roc`) makes the reactor's core
-  `Shadowed`: the Roc core decides (the event translated to plain data, across as words, its
-  effects translated back), the Rust core steps the same event beside it, and the two must
-  decide identical effects or rift stops. `Plainly` is the one translation both ways.
-- `roc/core/Traditional.roc`: the traditional geometry (stack and master-stack layouts are
-  traditional trees); `roc/core/Geometry.roc`: what the systems share (Rust's float helpers,
-  constraints, the tiling area, the axis solver). A shape's words start with its system's tag
-  (0 BSP, 1 traditional) and `main.roc`'s `tile` dispatches on it.
-- `roc/core/Topology.roc`: the topology decisions (`rift_core::topology`: where an inventory
-  finds a window, which Space discovery may admit it on, a space snapshot's admission, the
-  windows an activation re-applies app rules to), as questions on plain data behind the
-  model-free entry (tags 5 to 8). Held to the Rust by `tests/topology.rs`; not on rift's path.
-- `roc/core/Lifecycle.roc`: the lifecycle decisions (`rift_core::lifecycle`: app-rule targets
-  and refreshes, a new window's display, native transients, inventory omissions, title-change
-  re-application), tags 9 to 16. Held to the Rust by `tests/lifecycle.rs`; not on rift's path.
-- `roc/core/Focus.roc`: the focus decisions (`rift_core::focus`: a removal's effect on focus,
-  the window to focus, hidden focus, following an activation, the fallbacks), tags 17 to 23.
-  Held to the Rust by `tests/focus.rs`; not on rift's path.
-- `roc/core/Workspaces.roc`: the workspace decisions (`rift_core::workspaces`: reachability,
-  stepping, selectors, navigation history), tags 29 to 31, the topology's step (the
-  topology an empty one becomes after a run of events), tag 32, and window ownership's step
-  with its orphans against a catalog, tag 33, and the joined workspaces' step (each event's
-  outcome and the workspaces a run leaves), tag 34. Held to the Rust by
-  `tests/workspaces.rs`; not on rift's path.
-- `roc/core/Bsp.roc`: the BSP geometry, behind the platform's second, model-free entry
-  `tile : List(U64) -> List(U64)` (a shape's words in, the frames' words out); under `roc-core`
-  rift's `layout_engine::tile_bsp` takes its frames and asserts the Rust core's are the same.
-  Bit for bit means Rust's float semantics written out: `f64::round` (half away from zero,
-  keeping a zero's sign; Roc's own is `floor(x + 0.5)`), `max`/`min` as arm64's
-  `fmaxnm`/`fminnm` (+0 beats -0 for max), `sum` from -0. `roc/core/Wire.roc` holds the word
-  primitives both modules use.
-- Pinned nightly: `roc/NIGHTLY`. After a bump, run `roc/glue.sh`. The glue is now 1,469 generated
-  lines (it was 4,020 with typed events and effects) and only three functions use it.
+- `roc/platform/main.roc` and `roc/platform/Boundary.roc`: the platform requires `core` with
+  `init`, `step : model, Event -> { model, effects : List(Effect) }` and one typed function per
+  model-free question (the five layouts, the focus, topology, lifecycle and workspace
+  decisions); it provides `roc_init`, `roc_step`, `roc_release_model` and a `roc_<question>`
+  per question, each with its own answer type (a fact-bearing question answers `[Decided(..),
+  Unasked(U64)]`). Every record and union that crosses is a named nominal in `Boundary.roc`,
+  mirroring the Rust core's type of the same meaning. Target `arm64mac: { inputs: [app],
+  output: Archive }`; the model crosses only as `Box(Model)`.
+- `roc/core/main.roc`: `RustCore` ported decision for decision, stepping on the platform's
+  `Event` and deciding its `Effect`s. State inside the variants, `Option`s as small tag unions,
+  every match naming its variants. The entries for the model-free questions hand their typed
+  questions to the modules below.
+- `crates/rift-core-roc`: empty unless its `roc` feature is on, so rift's own build never needs
+  the Roc nightly. With `roc`, `build.rs` runs `roc build`, generates the glue (`roc glue`,
+  `ROC_SRC`) into `OUT_DIR`, checks it (no hash- or number-named type, no single-tag union with
+  several values) and states how long both took. `src/boundary.rs` is the one place Rust values
+  become the glue's types and back (every unsafe operation on Roc memory is there; each boxed
+  type has its own allocation helper). `RocCore::step` steps the core; `focus`, `topology`,
+  `lifecycle` and `workspaces` ask the questions; the allocator hooks count allocations.
+- In rift, `--features roc-core` makes the reactor's core `Shadowed` (the Roc core decides,
+  the Rust core steps beside it, and they must decide identical effects), puts the Roc layouts
+  under `layout_engine::core_geometry`, and puts the focus, topology and lifecycle decisions on
+  `roc_path::check`. `Plainly` is the one translation of the reactor's events both ways.
+- `roc/core/Geometry.roc`, `Bsp.roc`, `Traditional.roc`, `Scrolling.roc`, `Floating.roc`: the
+  geometry; the recursive nodes are the platform's (`Boundary.BspNode`,
+  `Boundary.TraditionalNode`). Bit for bit means Rust's float semantics written out:
+  `f64::round` (half away from zero, keeping a zero's sign; Roc's own is `floor(x + 0.5)`),
+  `max`/`min` as arm64's `fmaxnm`/`fminnm` (+0 beats -0 for max), `sum` from -0.
+- `roc/core/Topology.roc`, `Lifecycle.roc`, `Focus.roc`, `Workspaces.roc`: the decisions, each
+  reading its facts through `Asking.roc` (a fact, or that it was not asked, read in order).
+- Pinned nightly: `roc/NIGHTLY`. The glue is generated on every build of the Roc core, from
+  `RustGlue.roc` in a roc-lang/roc checkout at the same commit (`ROC_SRC`); about 24,000
+  generated lines, never committed.
 
 ## Evidence
 
@@ -375,6 +363,13 @@ counts only under the `respect_min_size` app rule).
   reactor tests under `roc-core` (shadowed). The fuzzer should drive them.
 
 ### Measured
+
+**Typed boundary (2026-11-20, release):** `RocCore::step` with the event's and effects'
+conversions, 480-510 ns per step (p50 about 290 ns) against the Rust core's 120 ns, 3.5 Roc
+allocations per step, flat from 10 to 2000 windows, none live afterwards (on words it was
+680-970 ns and 4.6). Model-free questions on rift's path: `focus_candidate` over 10 windows
+121 ns, `untracked_focus` 23 ns, `is_native_transient` 92 ns, `keeps_transient` 96 ns,
+`retirement` 139 ns. The tables below are the word era's.
 
 `tests/measure.rs` (`cargo test --release -p rift-core-roc --features roc --test measure --
 --ignored --nocapture`), release, M-series laptop. "Roc words" is the step across the
@@ -620,6 +615,15 @@ notes called several of these friction; they are Roc's design, and the core foll
 - **`roc build` hung** (`roc check` passing) on an entry rebuilding tuples out of a nominal
   record's fields (the settle question's placement); giving the core's own type the record
   shape removed the hang. Not reduced further.
+- **A tag named `Release`** gives a per-variant alias (`BoundaryEventRelease`) that collides
+  with the glue's own `<Type>Release` helper struct; the event's tag is `Released` at the
+  boundary.
+- **Nominal types have no `==`** (equality is a method a nominal type would define), so a
+  value of a platform type that reaches a comparison (a window or button from an event, stored
+  in the model) is compared by its fields or by matching.
+- **`roc build` hung again** on the step taking the platform's `Event` into a core-declared
+  `Event` of the same shape; the core using the platform's `Event` itself removed it (as the
+  layouts use the platform's recursive nodes).
 - **Recursive types at the boundary.** Recursion through a `List` is a plain `RocList`; direct
   recursion (BSP's `One(BspNode) | Two(BspNode, BspNode)`, a traditional `Child`) comes out as
   raw `*mut T` Roc boxes, boxed at each level the glue names. The host allocates them with
