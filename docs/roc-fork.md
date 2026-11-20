@@ -216,9 +216,34 @@ line is three parts, each the lead's ruling:
 - **Upstream PR #678 (feat/respect-min-size) is based on pre-#688 code.** That branch is the
   owner's to decide about; nothing here touches it.
 
-**Next:** the joined
-Workspaces twin replaces the three after #688 (W4b/c). No call site is in `layout_engine/`;
-keep it that way.
+- (c) reconciliation and drag, against upstream #698's behaviours (2026-11-20). Already ours,
+  held by tests (76091292): the drag owns its window, releases at startup, a window created
+  mid-drag tiled at the release, superseded and redundant writes skipped. Changed by the lead's
+  rulings:
+  - 7 (5c3fbea9): a refused write leaves the model at the app's frame (`Seen { got }`); the
+    desire stays Refused, not asked again.
+  - 8 (10428f8c): `WriteFailed { window, failed }`, a write that never reached its app (the app
+    actor reports a stale authority, a failed `set_frame`, a missing window, the rest of an
+    aborted batch). `Sync::Failed` with `Failures = Once | Twice`: rewritten at the next
+    arrange, given up as refused at the third (Note::GaveUp), the model then back at what the
+    app last acknowledged. A timeout is unchanged.
+  - 9 (8a12614e): a floating window dropped on another display stays floating there, at its
+    release frame.
+- The mode table is the core's (`rift_core::modes`, 76f180a7), mirrored in Roc exhaustively
+  (24af76b4) and on rift's path (bc0a0dc2).
+- **Re-recording the committed traces.** A reviewed behaviour change of the core changes the
+  effects the traces recorded. `rerecord_the_committed_traces_effects` (ignored, in
+  `tests/differential.rs`) keeps every event and re-records the effects through the Rust core,
+  refusing any changed step the reviewed change does not explain (its `explained` closure is
+  rewritten for each change). Regenerating the corpus from today's fuzzer is not the same thing:
+  that records different runs.
+
+**Next:** (b), the reactor's event flow on upstream #700, and the lifecycle flip and the
+MainWindowTracker twin wait for upstream PR #702 (window admission centralised in the reactor,
+which also changes the main-window tracker); if #702 has not merged by 2026-11-23, (b) goes on
+#700's structure without it. Then the reactor predicates, then W4b–d (the joined Workspaces twin
+replaces the three). The core_geometry flip on the new layout trees comes after (b). No call
+site is in `layout_engine/`; keep it that way.
 
 ### Rulings that bind (the lead's and the owner's)
 
