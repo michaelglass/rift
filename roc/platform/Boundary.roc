@@ -495,6 +495,12 @@ Boundary := [].{
 
 	OwnershipView := { owners : List(WindowOwnership), orphans : List(Orphan) }
 
+	## The ownerships after a change, and who places the changed window now.
+	OwnershipsStepped(model) := { model : Box(model), owned : Owned }
+
+	## The ownerships, unchanged, and every owned window.
+	OwnershipsViewed(model) := { model : Box(model), owners : List(WindowOwnership) }
+
 	## Who takes a removed workspace's windows and claims.
 	Successor := [Into(U64), Unassign]
 

@@ -2679,3 +2679,50 @@ fn from_present(presence: abi::BoundaryPresent) -> Presence {
         })),
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Who places each window, kept between events.
+
+/// The ownerships' box, which only Roc can read or free; only the `roc_ownerships_*` entries
+/// make and take one (see [`LifecycleBox`]). Dropping it releases the ownerships.
+pub(crate) struct OwnershipsBox(abi::RocBox);
+
+impl OwnershipsBox {
+    pub(crate) fn empty() -> OwnershipsBox { OwnershipsBox(unsafe { abi::roc_ownerships_init() }) }
+
+    /// `window`'s new owner, or that nobody places it: who places it now.
+    pub(crate) fn step(&mut self, window: u64, who: Owned<u64, u64>) -> Owned<u64, u64> {
+        // SAFETY: the box is these ownerships', moved into the step; its successor replaces it.
+        let stepped = unsafe { abi::roc_ownerships_step(self.0, owned(window, who)) };
+        self.0 = stepped.model;
+        from_owned(stepped.owned)
+    }
+
+    /// Every owned window and its ownership, in window order.
+    pub(crate) fn view(&mut self, host: &abi::RocHost) -> Vec<(u64, Ownership<u64, u64>)> {
+        // SAFETY: as in `step`; the list is Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_ownerships_view(self.0) };
+        self.0 = viewed.model;
+        let owners = from_owners(&viewed.owners);
+        unsafe { viewed.owners.decref(host) };
+        owners
+    }
+}
+
+impl Drop for OwnershipsBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is these ownerships' and is never used again.
+        unsafe { abi::roc_ownerships_release(self.0) }
+    }
+}
+
+fn from_owned(owned: abi::BoundaryOwned) -> Owned<u64, u64> {
+    use abi::BoundaryOwnedTag as Tag;
+    match owned.tag {
+        Tag::Unowned => Owned::Unowned,
+        // SAFETY: the tag says the payload is the ownership.
+        Tag::Owner => Owned::Owner(from_ownership(unsafe {
+            *owned.borrow_payload_owner_unchecked()
+        })),
+    }
+}

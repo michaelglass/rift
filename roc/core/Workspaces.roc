@@ -443,15 +443,30 @@ Workspaces := [].{
 	## The ownerships an empty one becomes after `events`, and their orphans against `catalog`.
 	ownership_after : List({ window : U64, owned : [Unowned, Owner(Ownership)] }), List(U64) -> { owners : Ownerships, orphans : List({ window : U64, workspace : U64 }) }
 	ownership_after = |events, catalog| {
-		owners = events.fold(
-			[],
-			|acc, event|
-				match event.owned {
-					Unowned => acc.keep_if(|entry| entry.window != event.window)
-					Owner(ownership) => own(acc, event.window, ownership)
-				},
-		)
+		owners = events.fold([], |acc, event| ownership_step(acc, event.window, event.owned))
 		{ owners, orphans: orphans(owners, catalog) }
+	}
+
+	## The ownerships after a window's new owner, or after nobody places it any more.
+	ownership_step : Ownerships, U64, [Unowned, Owner(Ownership)] -> Ownerships
+	ownership_step = |ownerships, window, owned|
+		match owned {
+			Unowned => ownerships.keep_if(|entry| entry.window != window)
+			Owner(ownership) => own(ownerships, window, ownership)
+		}
+
+	## Who places `window`, or that nobody does.
+	owned_in : Ownerships, U64 -> [Unowned, Owner(Ownership)]
+	owned_in = |ownerships, window| {
+		var $owned = Unowned
+		for entry in ownerships {
+			if entry.window == window {
+				$owned = Owner(entry.ownership)
+			} else {
+				{}
+			}
+		}
+		$owned
 	}
 
 	## What each event of a run met from empty workspaces, and the workspaces it leaves.

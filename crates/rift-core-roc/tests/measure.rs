@@ -518,3 +518,72 @@ fn measure_lifecycle_twin() {
         show("roc view", &stats(roc_views));
     }
 }
+
+/// Who places each window, kept between events, Rust against the Roc twin: per change (drags
+/// holding and placing, claims, reassignments, windows going unowned and owned again) after
+/// owning `windows` windows; and reading every owner back.
+#[test]
+#[ignore]
+fn measure_ownerships_twin() {
+    use rift_core::workspaces::{Destination, Owned, Ownership, OwnershipEvent, Ownerships};
+    use rift_core_roc::RocOwnerships;
+    for windows in [10u64, 100, 1000] {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64 ^ windows;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let events: Vec<OwnershipEvent<u64, u64, u64>> = (0..20_000)
+            .map(|_| {
+                let window = 1 + next() % windows;
+                let owned = match next() % 6 {
+                    0 => Owned::Owner(Ownership::Held),
+                    1 | 2 => Owned::Owner(Ownership::Assigned(1 + next() % 9)),
+                    3 => Owned::Owner(Ownership::Claimed {
+                        owner: 1,
+                        destination: Destination::Returns(1 + next() % 9),
+                    }),
+                    4 => Owned::Unowned,
+                    _ => Owned::Owner(Ownership::Assigned(1)),
+                };
+                OwnershipEvent::Owned { window, owned }
+            })
+            .collect();
+        let mut rust = Ownerships::<u64, u64, u64>::default();
+        let mut roc = RocOwnerships::default();
+        for window in 1..=windows {
+            let event = OwnershipEvent::Owned {
+                window,
+                owned: Owned::Owner(Ownership::Assigned(1)),
+            };
+            rust.step(event);
+            roc.step(event);
+        }
+        let rust_times = time(&events, |&event| {
+            rust.step(event);
+            std::hint::black_box(rust.owned(1));
+        });
+        let before = AllocationCount::now();
+        let roc_times = time(&events, |&event| {
+            std::hint::black_box(roc.step(event));
+        });
+        let allocated = AllocationCount::now().allocated - before.allocated;
+        let views: Vec<()> = vec![(); 200];
+        let rust_views = time(&views, |_| {
+            std::hint::black_box(rust.owners().collect::<Vec<_>>());
+        });
+        let roc_views = time(&views, |_| {
+            std::hint::black_box(roc.view());
+        });
+        eprintln!(
+            "ownerships twin, {windows} windows ({:.2} Roc allocations per step):",
+            allocated as f64 / events.len() as f64
+        );
+        show("rust", &stats(rust_times));
+        show("roc", &stats(roc_times));
+        show("rust view", &stats(rust_views));
+        show("roc view", &stats(roc_views));
+    }
+}

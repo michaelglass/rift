@@ -237,6 +237,42 @@ impl RocLifecycle {
     }
 }
 
+/// Who places each window (`rift_core::workspaces::Ownerships`) kept in Roc between events:
+/// a workspace, a claim (its owner and where the window returns), or the user's hand (`Held`).
+/// Stepped beside the Rust ownerships, it must keep the same owners.
+pub struct RocOwnerships {
+    owners: boundary::OwnershipsBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocOwnerships {}
+
+impl Default for RocOwnerships {
+    fn default() -> Self {
+        RocOwnerships {
+            owners: boundary::OwnershipsBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocOwnerships {
+    /// As `Ownerships::step`, answering who places the window now (`Ownerships::owned`).
+    pub fn step(
+        &mut self,
+        event: rift_core::workspaces::OwnershipEvent<u64, u64, u64>,
+    ) -> rift_core::workspaces::Owned<u64, u64> {
+        let rift_core::workspaces::OwnershipEvent::Owned { window, owned } = event;
+        self.owners.step(window, owned)
+    }
+
+    /// As `Ownerships::owners`: every owned window and its ownership, in window order.
+    pub fn view(&mut self) -> Vec<(u64, rift_core::workspaces::Ownership<u64, u64>)> {
+        self.owners.view(&self.host)
+    }
+}
+
 /// Why the Roc core gave no answer: it always answers, so there is no such value. (The layout
 /// functions keep a `Result` for their callers until those are next changed.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

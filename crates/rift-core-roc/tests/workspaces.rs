@@ -392,3 +392,62 @@ fn target(answer: Option<(u64, u64)>) -> Vec<u64> {
         None => vec![0],
     }
 }
+
+/// Who places each window, kept between events: the Roc twin and the Rust ownerships take the
+/// same runs of ownership changes on a few windows (assigned, claimed with or without a
+/// destination, held under the user's hand, unowned), each run on one persistent model. After
+/// every change both must say the same of the changed window and keep the same owners.
+#[test]
+fn the_roc_ownerships_keep_owners_between_events_as_the_rust_ones_do() {
+    use rift_core::workspaces::{Destination, Owned, Ownership, OwnershipEvent, Ownerships};
+    use rift_core_roc::RocOwnerships;
+    let mut rng = Rng(0x0C4E_5000_0000_0037);
+    let before = AllocationCount::now();
+    let mut steps = 0;
+    let mut held = 0;
+    for run in 0..400 {
+        let mut rust = Ownerships::<u64, u64, u64>::default();
+        let mut roc = RocOwnerships::default();
+        for step in 0..60 {
+            let window = 1 + rng.below(6);
+            let owned = match rng.below(8) {
+                0 | 1 => Owned::Unowned,
+                2 | 3 => Owned::Owner(Ownership::Assigned(1 + rng.below(5))),
+                4 => Owned::Owner(Ownership::Claimed {
+                    owner: 1 + rng.below(3),
+                    destination: Destination::Returns(1 + rng.below(5)),
+                }),
+                5 => Owned::Owner(Ownership::Claimed {
+                    owner: 1 + rng.below(3),
+                    destination: Destination::Nowhere,
+                }),
+                _ => {
+                    held += 1;
+                    Owned::Owner(Ownership::Held)
+                }
+            };
+            let event = OwnershipEvent::Owned { window, owned };
+            rust.step(event);
+            assert_eq!(
+                roc.step(event),
+                rust.owned(window),
+                "run {run} step {step}: {event:?}"
+            );
+            let expected: Vec<_> = rust.owners().collect();
+            assert_eq!(
+                roc.view(),
+                expected,
+                "run {run} step {step}: owners after {event:?}"
+            );
+            steps += 1;
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    eprintln!(
+        "workspaces: {steps} kept-ownership steps identical ({held} held), owners compared after each"
+    );
+}

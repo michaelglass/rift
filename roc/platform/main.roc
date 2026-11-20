@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows] for core : {
+		[Model : model, Windows : windows, Owners : owners] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -49,6 +49,9 @@ platform ""
 			lifecycle_invalidate : windows, U64 -> { model : windows, happened : Bool },
 			lifecycle_revalidate : windows, U64 -> { model : windows, happened : Bool },
 			lifecycle_view : windows -> { model : windows, windows : List(PresentWindow) },
+			ownerships_init : {} -> owners,
+			ownerships_step : owners, OwnershipEvent -> { model : owners, owned : Owned },
+			ownerships_view : owners -> { model : owners, owners : List(WindowOwnership) },
 		}
 	}
 	exposes [Boundary]
@@ -61,6 +64,10 @@ platform ""
 		"roc_lifecycle_revalidate": lifecycle_revalidate_for_host,
 		"roc_lifecycle_view": lifecycle_view_for_host,
 		"roc_lifecycle_release": lifecycle_release_for_host,
+		"roc_ownerships_init": ownerships_init_for_host,
+		"roc_ownerships_step": ownerships_step_for_host,
+		"roc_ownerships_view": ownerships_view_for_host,
+		"roc_ownerships_release": ownerships_release_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
 		"roc_bsp": bsp_for_host,
@@ -107,7 +114,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleToggled, LifecycleViewed]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleToggled, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -305,3 +312,25 @@ lifecycle_view_for_host = |boxed| {
 ## The host cannot release a `Box(Windows)`: only Roc knows its layout.
 lifecycle_release_for_host : Box(Windows) -> {}
 lifecycle_release_for_host = |_| {}
+
+## Who places each window (`rift_core::workspaces::Ownerships`), kept between events, empty.
+ownerships_init_for_host : {} -> Box(Owners)
+ownerships_init_for_host = |{}| Box.box((core.ownerships_init)({}))
+
+## A window's new owner, or that nobody places it: who places it now.
+ownerships_step_for_host : Box(Owners), OwnershipEvent -> OwnershipsStepped(Owners)
+ownerships_step_for_host = |boxed, event| {
+	stepped = (core.ownerships_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), owned: stepped.owned }
+}
+
+## Every owned window, and the ownerships back unchanged.
+ownerships_view_for_host : Box(Owners) -> OwnershipsViewed(Owners)
+ownerships_view_for_host = |boxed| {
+	viewed = (core.ownerships_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), owners: viewed.owners }
+}
+
+## The host cannot release a `Box(Owners)`: only Roc knows its layout.
+ownerships_release_for_host : Box(Owners) -> {}
+ownerships_release_for_host = |_| {}
