@@ -10,7 +10,9 @@ use rift_core::layout::scrolling::{self, Strip};
 use rift_core::layout::traditional::{self, StackLine, Traditional};
 use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
 use rift_core::plain::{Rect, WindowId, wire};
-use rift_core_roc::{AllocationCount, tile_words};
+use rift_core_roc::{
+    AllocationCount, first_frames, place_strip, settle, tile_bsp, tile_traditional,
+};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -227,12 +229,10 @@ fn the_roc_core_tiles_traditional_layouts_as_the_rust_core_does() {
         let shape = tshape(&mut rng);
         let rust = shape.frames();
         windows += rust.len();
-        let roc = tile_words(&wire::encode_traditional(shape.clone()));
-        if roc != Ok(wire::encode_frames(rust.clone())) {
-            panic!(
-                "case {case}: {shape:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                roc.map(|words| wire::decode_frames(&words))
-            );
+        // Compared as words: bit for bit, floats included.
+        let roc = tile_traditional(shape.clone()).expect("frames");
+        if wire::encode_frames(roc.clone()) != wire::encode_frames(rust.clone()) {
+            panic!("case {case}: {shape:#?}\n  roc:  {roc:?}\n  rust: {rust:?}");
         }
     }
     let after = AllocationCount::now();
@@ -250,12 +250,9 @@ fn the_roc_core_tiles_what_the_rust_core_tiles() {
         let shape = shape(&mut rng);
         let rust = shape.frames();
         windows += rust.len();
-        let roc = tile_words(&wire::encode_bsp(shape.clone()));
-        if roc != Ok(wire::encode_frames(rust.clone())) {
-            panic!(
-                "case {case}: {shape:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                roc.map(|words| wire::decode_frames(&words))
-            );
+        let roc = tile_bsp(shape.clone()).expect("frames");
+        if wire::encode_frames(roc.clone()) != wire::encode_frames(rust.clone()) {
+            panic!("case {case}: {shape:#?}\n  roc:  {roc:?}\n  rust: {rust:?}");
         }
     }
     let after = AllocationCount::now();
@@ -342,12 +339,9 @@ fn the_roc_core_places_scrolling_strips_as_the_rust_core_does() {
         let rust = strip.place();
         windows += rust.frames.len();
         snaps += 1 + rust.snaps.1.len();
-        let roc = tile_words(&wire::encode_strip(strip.clone()));
-        if roc != Ok(wire::encode_placed(rust.clone())) {
-            panic!(
-                "case {case}: {strip:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                roc.map(|words| wire::decode_placed(&words))
-            );
+        let roc = place_strip(strip.clone()).expect("a placement");
+        if wire::encode_placed(roc.clone()) != wire::encode_placed(rust.clone()) {
+            panic!("case {case}: {strip:#?}\n  roc:  {roc:?}\n  rust: {rust:?}");
         }
     }
     let after = AllocationCount::now();
@@ -392,11 +386,10 @@ fn the_roc_core_settles_the_camera_where_the_rust_core_does() {
         };
         let view = strip.tiling.w;
         let rust = placed.settle(view, projected, from, how);
-        let roc = tile_words(&wire::encode_settle(placed.clone(), view, projected, from, how));
-        if roc != Ok(wire::encode_settled(rust)) {
+        let roc = settle(placed.clone(), view, projected, from, how).expect("a settling");
+        if wire::encode_settled(roc) != wire::encode_settled(rust) {
             panic!(
-                "case {case}: {how:?} from {from} to {projected}, view {view}, {placed:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                roc.map(|words| wire::decode_settled(&words))
+                "case {case}: {how:?} from {from} to {projected}, view {view}, {placed:#?}\n  roc:  {roc:?}\n  rust: {rust:?}"
             );
         }
     }
@@ -443,12 +436,9 @@ fn the_roc_core_places_floating_newcomers_as_the_rust_core_does() {
             .collect();
         let rust = floating.first_frames(&windows);
         placed += rust.len();
-        let roc = tile_words(&wire::encode_floating(floating, windows.clone()));
-        if roc != Ok(wire::encode_rects(rust.clone())) {
-            panic!(
-                "case {case}: {floating:?} {windows:#?}\n  roc:  {:?}\n  rust: {rust:?}",
-                roc.map(|words| wire::decode_rects(&words))
-            );
+        let roc = first_frames(floating, windows.clone()).expect("first frames");
+        if wire::encode_rects(roc.clone()) != wire::encode_rects(rust.clone()) {
+            panic!("case {case}: {floating:?} {windows:#?}\n  roc:  {roc:?}\n  rust: {rust:?}");
         }
     }
     let after = AllocationCount::now();
@@ -460,11 +450,10 @@ fn the_roc_core_places_floating_newcomers_as_the_rust_core_does() {
 #[ignore]
 fn tile_timing() {
     let mut rng = Rng(0x1234_5678_9ABC_DEF1);
-    let bsp: Vec<Vec<u64>> = (0..200_000).map(|_| wire::encode_bsp(shape(&mut rng))).collect();
-    let trad: Vec<Vec<u64>> =
-        (0..200_000).map(|_| wire::encode_traditional(tshape(&mut rng))).collect();
-    let strips: Vec<Vec<u64>> = (0..200_000).map(|_| wire::encode_strip(strip(&mut rng))).collect();
-    let floating: Vec<Vec<u64>> = (0..200_000)
+    let bsp: Vec<_> = (0..200_000).map(|_| shape(&mut rng)).collect();
+    let trad: Vec<_> = (0..200_000).map(|_| tshape(&mut rng)).collect();
+    let strips: Vec<_> = (0..200_000).map(|_| strip(&mut rng)).collect();
+    let floating: Vec<_> = (0..200_000)
         .map(|_| {
             let screen = Rect {
                 x: 0.,
@@ -472,32 +461,40 @@ fn tile_timing() {
                 w: rng.length(400., 3000.),
                 h: rng.length(300., 2000.),
             };
-            let windows = (0..1 + rng.below(6))
+            let windows: Vec<Newcomer> = (0..1 + rng.below(6))
                 .map(|_| Newcomer {
                     constraints: constraints(&mut rng),
                     seen: Seen::Unseen,
                 })
                 .collect();
-            wire::encode_floating(Floating { screen, spread: rng.chance(50) }, windows)
+            (Floating { screen, spread: rng.chance(50) }, windows)
         })
         .collect();
-    for (name, shapes) in [
-        ("bsp", &bsp),
-        ("traditional", &trad),
-        ("scrolling", &strips),
-        ("floating", &floating),
-    ] {
+    fn best<T: Clone>(name: &str, items: &[T], mut run: impl FnMut(T)) {
         let mut best = std::time::Duration::MAX;
         for _ in 0..5 {
+            let owned: Vec<T> = items.to_vec();
             let start = std::time::Instant::now();
-            for words in shapes {
-                std::hint::black_box(tile_words(words).expect("a shape"));
+            for item in owned {
+                run(item);
             }
             best = best.min(start.elapsed());
         }
         eprintln!(
             "TILE {name}: {:?} per shape (best of 5)",
-            best / shapes.len() as u32
+            best / items.len() as u32
         );
     }
+    best("bsp", &bsp, |shape| {
+        std::hint::black_box(tile_bsp(shape).expect("frames"));
+    });
+    best("traditional", &trad, |shape| {
+        std::hint::black_box(tile_traditional(shape).expect("frames"));
+    });
+    best("scrolling", &strips, |strip| {
+        std::hint::black_box(place_strip(strip).expect("a placement"));
+    });
+    best("floating", &floating, |(floating, windows)| {
+        std::hint::black_box(first_frames(floating, windows).expect("first frames"));
+    });
 }

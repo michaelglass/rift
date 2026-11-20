@@ -1,7 +1,6 @@
 ## A floating layout's first frames (`rift_core::layout::floating`): where a window goes the
 ## first time the layout places it.
 
-import Wire exposing [finished, put_list, put_rect, take_flag, take_list, take_rect]
 import Geometry exposing [fixed_for_axis, max, max_for_axis, min, normalized, reported_min, take_constraints]
 
 WindowId : { pid : I32, idx : U32 }
@@ -113,27 +112,5 @@ Floating := [].{
 				{ position: acc.position + 1, out: acc.out.append(placed) }
 			},
 		).out
-	}
-
-	take_newcomer : Words -> Taken(Newcomer)
-	take_newcomer = |c0| {
-		(constraints, c1) = take_constraints(c0)?
-		(is_seen, c2) = take_flag(c1)?
-		if is_seen {
-			(live, c3) = take_rect(c2)?
-			Ok(({ constraints, seen: Live(live) }, c3))
-		} else {
-			Ok(({ constraints, seen: Unseen }, c2))
-		}
-	}
-
-	## The first frames for the newcomers `cursor` holds (after their tag), all of it, as words.
-	first_frames_words : Words -> Try(List(U64), [Malformed])
-	first_frames_words = |c0| {
-		(screen, c1) = take_rect(c0)?
-		(spread, c2) = take_flag(c1)?
-		(windows, c3) = take_list(c2, take_newcomer)?
-		finished(c3)?
-		Ok(put_list([], first_frames(screen, spread, windows), put_rect))
 	}
 }

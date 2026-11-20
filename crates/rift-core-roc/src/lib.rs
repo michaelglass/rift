@@ -18,12 +18,15 @@
     improper_ctypes_definitions,
     non_camel_case_types,
     non_snake_case,
+    unexpected_cfgs,
     unused,
     unsafe_op_in_unsafe_fn
 )]
 mod abi {
     include!(concat!(env!("OUT_DIR"), "/roc_platform_abi.rs"));
 }
+
+mod boundary;
 
 #[cfg(feature = "count-allocations")]
 use std::cell::Cell;
@@ -293,24 +296,28 @@ pub fn tile_words(shape: &[u64]) -> Result<Vec<u64>, RocError> {
     words
 }
 
-/// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core.
+/// A BSP layout's frames, as `Bsp::frames` computes them, computed by the Roc core. (Typed
+/// all the way, it cannot fail; the `Result` stays for its callers until they are next touched.)
 pub fn tile_bsp(shape: Bsp<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
-    let words = tile_words(&wire::encode_bsp(shape))?;
-    wire::decode_frames(&words).map_err(RocError::Unreadable)
+    let host = host();
+    let shape = boundary::bsp_shape(shape, &host);
+    Ok(boundary::frames(unsafe { abi::roc_bsp(shape) }, &host))
 }
 
 /// A traditional layout's frames, as `Traditional::frames` computes them, computed by the Roc
 /// core.
 pub fn tile_traditional(shape: Traditional<WindowId>) -> Result<Vec<(WindowId, Rect)>, RocError> {
-    let words = tile_words(&wire::encode_traditional(shape))?;
-    wire::decode_frames(&words).map_err(RocError::Unreadable)
+    let host = host();
+    let shape = boundary::traditional_shape(shape, &host);
+    Ok(boundary::frames(unsafe { abi::roc_traditional(shape) }, &host))
 }
 
 /// Where a scrolling strip's columns, windows and camera go, as `Strip::place` computes them,
 /// computed by the Roc core.
 pub fn place_strip(strip: Strip<WindowId, u64>) -> Result<Placed<WindowId, u64>, RocError> {
-    let words = tile_words(&wire::encode_strip(strip))?;
-    wire::decode_placed(&words).map_err(RocError::Unreadable)
+    let host = host();
+    let strip = boundary::strip(strip, &host);
+    Ok(boundary::from_placed(unsafe { abi::roc_strip(strip) }, &host))
 }
 
 /// Where the camera settles on a strip's placement, as `Placed::settle` decides, decided by
@@ -322,15 +329,17 @@ pub fn settle(
     from: f64,
     how: Settle<u64>,
 ) -> Result<Settled<u64>, RocError> {
-    let words = tile_words(&wire::encode_settle(placed, view, projected, from, how))?;
-    wire::decode_settled(&words).map_err(RocError::Unreadable)
+    let host = host();
+    let question = boundary::settle_question(placed, view, projected, from, how, &host);
+    Ok(boundary::from_settled(unsafe { abi::roc_settle(question) }))
 }
 
 /// A floating layout's first frames, as `Floating::first_frames` places them, placed by the Roc
 /// core.
 pub fn first_frames(floating: Floating, windows: Vec<Newcomer>) -> Result<Vec<Rect>, RocError> {
-    let words = tile_words(&wire::encode_floating(floating, windows))?;
-    wire::decode_rects(&words).map_err(RocError::Unreadable)
+    let host = host();
+    let question = boundary::floating_question(floating, windows, &host);
+    Ok(boundary::rects(unsafe { abi::roc_floating(question) }, &host))
 }
 
 impl Drop for RocCore {

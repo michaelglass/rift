@@ -5,6 +5,7 @@
 app [core] { pf: platform "../platform/main.roc" }
 
 import Wire exposing [finished, put_list, put_rect, put_window, take, take_flag, take_list, take_rect, take_u32, take_window]
+import pf.Boundary exposing [BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion]
 import Bsp
 import Traditional
 import Scrolling
@@ -117,22 +118,41 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, tile }
+core = { init, step, tile, bsp, traditional, strip, settle, floating }
 
-## The model-free questions: layout geometry and the topology decisions. A question's words
-## (its tag first: 0 BSP, 1 traditional, 2 a scrolling strip, 3 a settle question on a strip's
-## placement, 4 a floating layout's newcomers; 5 to 8 the topology decisions, `Topology`; 9 to
-## 16 the lifecycle decisions, `Lifecycle`; 17 to 23 the focus decisions, `Focus`;
-## 24 a window's admission, 25 a lifecycle reading, 26 a presence event, 27 an inventory's
-## retirement question, 28 two admission changes in a row, `Lifecycle`; 29 to
-## 31 the workspace decisions, 32 the workspaces' topology after its events, 33 window
-## ownership after its events and its orphans, 34 the joined workspaces after a run of events,
-## `Workspaces`) in;
-## out, a 0 and the answer's words (the frames; for a strip, where it placed everything; for a
-## settle question, where the camera settles; for newcomers, their first frames; for a topology
-## question, its answer), or a 1: the words were not a question it answers, or a 2 and a fact's
-## place among its question's facts: the decision read that fact, which the platform's run of
-## it never asked.
+# The layout questions, typed (`Boundary`). Each core's own types are structural, so the
+# platform's named ones pass straight in; the answers become the platform's.
+
+## A BSP layout's frames.
+bsp : BspShape -> List(Frame)
+bsp = |shape| Bsp.frames(shape).map(|(window, frame)| { window, frame })
+
+## A traditional layout's frames.
+traditional : TraditionalShape -> List(Frame)
+traditional = |shape| Traditional.frames(shape).map(|(window, frame)| { window, frame })
+
+## Where a scrolling strip places its columns, windows and camera.
+strip : Strip -> Placed
+strip = |columns| Scrolling.place(columns)
+
+## Where the camera settles on a strip's placement.
+settle : SettleQuestion -> Settled
+settle = |question| Scrolling.settle(question.placed, question.view, question.projected, question.from, question.how)
+
+## A floating layout's newcomers' first frames.
+floating : FloatingQuestion -> List(Rect)
+floating = |question| Floating.first_frames(question.screen, question.spread, question.windows)
+
+## The model-free questions still on words (the layouts are typed entries above). A question's
+## words (its tag first: 5 to 8 the topology decisions, `Topology`; 9 to 16 the lifecycle
+## decisions, `Lifecycle`; 17 to 23 the focus decisions, `Focus`; 24 a window's admission, 25 a
+## lifecycle reading, 26 a presence event, 27 an inventory's retirement question, 28 two
+## admission changes in a row, `Lifecycle`; 29 to 31 the workspace decisions, 32 the
+## workspaces' topology after its events, 33 window ownership after its events and its
+## orphans, 34 the joined workspaces after a run of events, `Workspaces`) in; out, a 0 and the
+## answer's words, or a 1: the words were not a question it answers, or a 2 and a fact's place
+## among its question's facts: the decision read that fact, which the platform's run of it
+## never asked.
 tile : List(U64) -> List(U64)
 tile = |words|
 	match shape_answer(words) {
@@ -147,11 +167,6 @@ shape_answer : List(U64) -> Try(List(U64), [Malformed, Unasked(U64)])
 shape_answer = |words| {
 	(system, cursor) = take({ words, at: 0 })?
 	match system {
-		0 => Bsp.frames_of(cursor).map_ok(put_frames)
-		1 => Traditional.frames_of(cursor).map_ok(put_frames)
-		2 => Scrolling.placed_words(cursor)
-		3 => Scrolling.settled_words(cursor)
-		4 => Floating.first_frames_words(cursor)
 		5 => Topology.discovered_words(cursor)
 		6 => Topology.discovery_words(cursor)
 		7 => Topology.admit_words(cursor)

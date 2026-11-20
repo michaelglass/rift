@@ -2,7 +2,7 @@
 ## their children out along an axis by weight, or stack them with an offset (one shown on top),
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
-import Wire exposing [finished, take, take_flag, take_float, take_list, take_rect, take_u32, take_window]
+import pf.Boundary exposing [TraditionalNode]
 import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, take_constraints, tiled_min, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
@@ -48,16 +48,8 @@ StackLine : { thickness : F64, spacing : F64, top : Bool, left : Bool }
 ## A container's child and its weight (the share of an axis it asks for).
 Child : { size : F32, node : Node }
 
-Node := [
-	Window({ window : WindowId, constraints : [Constrained(WindowConstraints), Unconstrained], fill : Fill }),
-
-	## Along an axis by weight; a container with nothing that takes space is pruned, so there is
-	## always a first.
-	Axis({ horizontal : Bool, fill : Fill, first : Child, rest : List(Child) }),
-
-	## A stack, `focused` shown on top.
-	Stack({ horizontal : Bool, fill : Fill, before : List(Child), focused : Child, after : List(Child) }),
-]
+## A traditional node is the platform's (`Boundary.TraditionalNode`).
+Node : TraditionalNode
 
 Shape : { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, root : Node }
 
@@ -146,16 +138,16 @@ Traditional := [].{
 	summary : Shape, Node, Bool -> Summary
 	summary = |shape, node, horizontal|
 		match node {
-			Node.Window({ constraints: Constrained(c), .. }) => leaf_summary(c, horizontal)
-			Node.Window({ constraints: Unconstrained, .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
-			Node.Axis({ horizontal: along, first, rest, .. }) => {
+			TraditionalNode.Window({ constraints: Constrained(c), .. }) => leaf_summary(c, horizontal)
+			TraditionalNode.Window({ constraints: Unconstrained, .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
+			TraditionalNode.Axis({ horizontal: along, first, rest, .. }) => {
 				aligned = along == horizontal
 				add = |acc, child| gather(acc, summary(shape, child.node, horizontal), aligned, False)
 				acc = rest.fold(add(gather_start, first), add)
 				gathered(acc, aligned, False, gap_along(shape, horizontal), shape.stack_offset, 0.0)
 			}
 
-			Node.Stack({ horizontal: along, before, focused, after, .. }) => {
+			TraditionalNode.Stack({ horizontal: along, before, focused, after, .. }) => {
 				aligned = along == horizontal
 				add = |acc, child| gather(acc, summary(shape, child.node, horizontal), aligned, True)
 				acc = after.fold(add(before.fold(gather_start, add), focused), add)
@@ -208,7 +200,7 @@ Traditional := [].{
 	place : Shape, Node, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
 	place = |shape, node, rect0, out|
 		match node {
-			Node.Window({ window, constraints, fill }) => {
+			TraditionalNode.Window({ window, constraints, fill }) => {
 				rect = filled(shape, fill, rect0)
 				frame =
 					match constraints {
@@ -235,10 +227,10 @@ Traditional := [].{
 				out.append((window, frame))
 			}
 
-			Node.Stack({ horizontal, fill, before, focused, after }) =>
+			TraditionalNode.Stack({ horizontal, fill, before, focused, after }) =>
 				stack(shape, before, focused, after, horizontal, filled(shape, fill, rect0), out)
 
-			Node.Axis({ horizontal, fill, first, rest }) =>
+			TraditionalNode.Axis({ horizontal, fill, first, rest }) =>
 				axis(shape, first, rest, horizontal, filled(shape, fill, rect0), out)
 		}
 
@@ -317,98 +309,4 @@ Traditional := [].{
 	frames : Shape -> List((WindowId, Rect))
 	frames = |shape|
 		place(shape, shape.root, shape.area, [])
-
-	take_fill : Words -> Taken(Fill)
-	take_fill = |cursor| {
-		(word, rest) = take(cursor)?
-		match word {
-			0 => Ok((Tiled, rest))
-			1 => Ok((Screen, rest))
-			2 => Ok((WithinGaps, rest))
-			_ => Err(Malformed)
-		}
-	}
-
-	take_child : Words -> Taken(Child)
-	take_child = |cursor| {
-		(bits, after_size) = take_u32(cursor)?
-		(node, after) = take_node(after_size)?
-		Ok(({ size: F32.from_bits(bits), node }, after))
-	}
-
-	take_node : Words -> Taken(Node)
-	take_node = |c0| {
-		(tag, c1) = take(c0)?
-		match tag {
-			0 => {
-				(window, c2) = take_window(c1)?
-				(constrained, c3) = take_flag(c2)?
-				(constraints, c4) =
-					if constrained {
-						(c, after) = take_constraints(c3)?
-						(Constrained(c), after)
-					} else {
-						(Unconstrained, c3)
-					}
-				(fill, c5) = take_fill(c4)?
-				Ok((Node.Window({ window, constraints, fill }), c5))
-			}
-
-			1 => {
-				(horizontal, c2) = take_flag(c1)?
-				(fill, c3) = take_fill(c2)?
-				(first, c4) = take_child(c3)?
-				(rest, c5) = take_list(c4, take_child)?
-				Ok((Node.Axis({ horizontal, fill, first, rest }), c5))
-			}
-
-			2 => {
-				(horizontal, c2) = take_flag(c1)?
-				(fill, c3) = take_fill(c2)?
-				(before, c4) = take_list(c3, take_child)?
-				(focused, c5) = take_child(c4)?
-				(after, c6) = take_list(c5, take_child)?
-				Ok((Node.Stack({ horizontal, fill, before, focused, after }), c6))
-			}
-
-			_ => Err(Malformed)
-		}
-	}
-
-	take_shape : Words -> Taken(Shape)
-	take_shape = |c0| {
-		(screen, c1) = take_rect(c0)?
-		(area, c2) = take_rect(c1)?
-		(top, c3) = take_float(c2)?
-		(left, c4) = take_float(c3)?
-		(bottom, c5) = take_float(c4)?
-		(right, c6) = take_float(c5)?
-		(horizontal, c7) = take_float(c6)?
-		(vertical, c8) = take_float(c7)?
-		(stack_offset, c9) = take_float(c8)?
-		(thickness, c10) = take_float(c9)?
-		(spacing, c11) = take_float(c10)?
-		(line_top, c12) = take_flag(c11)?
-		(line_left, c13) = take_flag(c12)?
-		(root, c15) = take_node(c13)?
-		Ok((
-			{
-				screen,
-				area,
-				gaps: { top, left, bottom, right, horizontal, vertical },
-				stack_offset,
-				stack_line: { thickness, spacing, top: line_top, left: line_left },
-				root,
-			},
-			c15,
-		))
-	}
-
-	## The frames of the traditional shape `cursor` holds (after its system's tag), all of it.
-	frames_of : Words -> Try(List((WindowId, Rect)), [Malformed])
-	frames_of = |cursor| {
-		(shape, rest) = take_shape(cursor)?
-		finished(rest)?
-		Ok(frames(shape))
-	}
 }

@@ -1,7 +1,7 @@
 ## A BSP layout's frames (`rift_core::layout::bsp`): every split divides its area in two along
 ## one axis, by a ratio, as far as its windows' constraints allow.
 
-import Wire exposing [finished, take, take_flag, take_float, take_rect, take_u32, take_window]
+import pf.Boundary exposing [BspNode]
 import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, normalized, reported_min, resizable_for_axis, solve, take_constraints, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
@@ -40,10 +40,8 @@ Slot : [Empty, Window({ window : WindowId, constraints : [Constrained(WindowCons
 
 Fill : [Tiled, Screen, WithinGaps]
 
-Node := [
-	Split({ horizontal : Bool, ratio : F64, children : [One(Node), Two(Node, Node)] }),
-	Leaf({ slot : Slot, fill : Fill, stacked : Bool }),
-]
+## A BSP node is the platform's (`Boundary.BspNode`).
+Node : BspNode
 
 Shape : { screen : Rect, gaps : Gaps, aspect : [Aspect(F64), Free], root : Node }
 
@@ -61,7 +59,7 @@ Bsp := [].{
 	summary : Gaps, Node, Bool -> Summary
 	summary = |gaps, node, horizontal|
 		match node {
-			Node.Leaf({ slot: Window({ constraints: Constrained(raw), .. }), .. }) => {
+			BspNode.Leaf({ slot: Window({ constraints: Constrained(raw), .. }), .. }) => {
 				c = normalized(raw)
 				high = max_for_axis(c, horizontal)
 				{
@@ -72,9 +70,9 @@ Bsp := [].{
 				}
 			}
 
-			Node.Leaf({ slot: Window({ constraints: Unconstrained, .. }), .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
-			Node.Leaf({ slot: Empty, .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
-			Node.Split({ horizontal: split, children, .. }) => {
+			BspNode.Leaf({ slot: Window({ constraints: Unconstrained, .. }), .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
+			BspNode.Leaf({ slot: Empty, .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
+			BspNode.Split({ horizontal: split, children, .. }) => {
 				summaries =
 					match children {
 						One(child) => [summary(gaps, child, horizontal)]
@@ -105,8 +103,8 @@ Bsp := [].{
 	place : Shape, Node, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
 	place = |bsp, node, rect, out|
 		match node {
-			Node.Leaf({ slot: Empty, .. }) => out
-			Node.Leaf({ slot: Window({ window, constraints }), fill, .. }) => {
+			BspNode.Leaf({ slot: Empty, .. }) => out
+			BspNode.Leaf({ slot: Window({ window, constraints }), fill, .. }) => {
 				target =
 					match fill {
 						Screen => bsp.screen
@@ -120,8 +118,9 @@ Bsp := [].{
 				out.append((window, target))
 			}
 
-			Node.Split({ children: One(child), .. }) => place(bsp, child, rect, out)
-			Node.Split({ horizontal, ratio, children: Two(first, second) }) => {
+			BspNode.Split({ children: One(child), .. }) => place(bsp, child, rect, out)
+			BspNode.Split({ horizontal, ratio: share, children: Two(first, second) }) => {
+				ratio = F32.to_f64(share)
 				(total, gap) = if (horizontal) (rect.w, bsp.gaps.horizontal) else (rect.h, bsp.gaps.vertical)
 				available = max(total - gap, 0.0)
 				axis = |child, weight| {
@@ -154,7 +153,7 @@ Bsp := [].{
 		out = place(bsp, bsp.root, area, [])
 		# A layout's only window, tiled and not stacked, is fitted to the aspect.
 		match (bsp.aspect, bsp.root) {
-			(Aspect(ratio), Node.Leaf({ fill: Tiled, stacked: False, .. })) =>
+			(Aspect(ratio), BspNode.Leaf({ fill: Tiled, stacked: False, .. })) =>
 				match out {
 					[(window, frame)] => {
 						(w, h) = if (frame.w > frame.h * ratio) (frame.h * ratio, frame.h) else (frame.w, frame.w / ratio)
@@ -164,104 +163,7 @@ Bsp := [].{
 					[] | [_, _, ..] => out
 				}
 
-			(Aspect(_), Node.Leaf(_)) | (Aspect(_), Node.Split(_)) | (Free, _) => out
+			(Aspect(_), BspNode.Leaf(_)) | (Aspect(_), BspNode.Split(_)) | (Free, _) => out
 		}
-	}
-
-	take_node : Words -> Taken(Node)
-	take_node = |c0| {
-		(tag, c1) = take(c0)?
-		match tag {
-			0 => {
-				(horizontal, c2) = take_flag(c1)?
-				(bits, c3) = take_u32(c2)?
-				ratio = F32.to_f64(F32.from_bits(bits))
-				(children_tag, c4) = take(c3)?
-				match children_tag {
-					0 => {
-						(child, c5) = take_node(c4)?
-						Ok((Node.Split({ horizontal, ratio, children: One(child) }), c5))
-					}
-
-					1 => {
-						(first, c5) = take_node(c4)?
-						(second, c6) = take_node(c5)?
-						Ok((Node.Split({ horizontal, ratio, children: Two(first, second) }), c6))
-					}
-
-					_ => Err(Malformed)
-				}
-			}
-
-			1 => {
-				(slot, c3) = take_slot(c1)?
-				(fill, c4) = take_fill(c3)?
-				(stacked, c5) = take_flag(c4)?
-				Ok((Node.Leaf({ slot, fill, stacked }), c5))
-			}
-
-			_ => Err(Malformed)
-		}
-	}
-
-	take_slot : Words -> Taken(Slot)
-	take_slot = |c0| {
-		(tag, c1) = take(c0)?
-		match tag {
-			0 => Ok((Empty, c1))
-			1 => {
-				(window, c2) = take_window(c1)?
-				(constrained, c3) = take_flag(c2)?
-				if constrained {
-					(c, c4) = take_constraints(c3)?
-					Ok((Window({ window, constraints: Constrained(c) }), c4))
-				} else {
-					Ok((Window({ window, constraints: Unconstrained }), c3))
-				}
-			}
-
-			_ => Err(Malformed)
-		}
-	}
-
-	take_fill : Words -> Taken(Fill)
-	take_fill = |c0| {
-		(tag, c1) = take(c0)?
-		match tag {
-			0 => Ok((Tiled, c1))
-			1 => Ok((Screen, c1))
-			2 => Ok((WithinGaps, c1))
-			_ => Err(Malformed)
-		}
-	}
-
-	take_bsp : Words -> Taken(Shape)
-	take_bsp = |c0| {
-		(screen, c1) = take_rect(c0)?
-		(top, c2) = take_float(c1)?
-		(left, c3) = take_float(c2)?
-		(bottom, c4) = take_float(c3)?
-		(right, c5) = take_float(c4)?
-		(horizontal, c6) = take_float(c5)?
-		(vertical, c7) = take_float(c6)?
-		gaps = { top, left, bottom, right, horizontal, vertical }
-		(has_aspect, c8) = take_flag(c7)?
-		(aspect, c9) =
-			if has_aspect {
-				(ratio, after) = take_float(c8)?
-				(Aspect(ratio), after)
-			} else {
-				(Free, c8)
-			}
-		(root, c10) = take_node(c9)?
-		Ok(({ screen, gaps, aspect, root }, c10))
-	}
-
-	## The frames of the BSP shape `cursor` holds (after its system's tag), all of it.
-	frames_of : Words -> Try(List((WindowId, Rect)), [Malformed])
-	frames_of = |cursor| {
-		(shape, rest) = take_bsp(cursor)?
-		finished(rest)?
-		Ok(frames(shape))
 	}
 }

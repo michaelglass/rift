@@ -71,6 +71,14 @@ fn glue(roc: &str, roc_src: &Path, roc_dir: &Path, out: &Path) {
          (roc/NIGHTLY): set ROC_SRC to it (looked for {})",
         spec.display()
     );
+    let misdescribed = single_tag_multi_payload_unions(&roc_dir.join("platform"));
+    assert!(
+        misdescribed.is_empty(),
+        "the platform has a union with one tag carrying several values, which roc glue describes \
+         by its first value only (src/glue/platform/TypeTable.roc, single_variant_payload), so \
+         the host would read the rest as garbage; give the values a named record instead: \
+         {misdescribed:?}"
+    );
     let generated = out.join("glue");
     let status = Command::new(roc)
         .current_dir(roc_dir)
@@ -119,4 +127,75 @@ fn unnamed_types(text: &str) -> Vec<String> {
     found.sort();
     found.dedup();
     found
+}
+
+/// Every tag union in the platform's Roc sources (`dir`'s `.roc` files) with exactly one tag that
+/// carries more than one value (`[Stepped(Box(model), List(U64))]`). The glue at the pinned
+/// nightly keeps only such a tag's first value, silently. In the platform's sources, square
+/// brackets hold only tag unions and lists of names (`exposes [..]`), so every bracketed span is
+/// read as tags split at their top-level commas.
+fn single_tag_multi_payload_unions(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("the platform directory") {
+        let path = entry.expect("a platform file").path();
+        if path.extension().is_none_or(|ext| ext != "roc") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a platform module");
+        let code: String = source
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for union in bracketed(&code) {
+            let tags = top_level(union, ',');
+            if let [only] =
+                tags.as_slice().iter().map(|tag| tag.trim()).collect::<Vec<_>>().as_slice()
+                && let Some(open) = only.find('(')
+                && top_level(&only[open + 1..only.len().saturating_sub(1)], ',').len() > 1
+            {
+                found.push(format!("{}: [{only}]", path.display()));
+            }
+        }
+    }
+    found
+}
+
+/// The contents of every `[...]` span in `code`, innermost ones included.
+fn bracketed(code: &str) -> Vec<&str> {
+    let mut open = Vec::new();
+    let mut spans = Vec::new();
+    for (at, c) in code.char_indices() {
+        match c {
+            '[' => open.push(at),
+            ']' => {
+                if let Some(start) = open.pop() {
+                    spans.push(&code[start + 1..at]);
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// `text` split at `separator` where no bracket, brace or parenthesis is open; empty parts
+/// dropped.
+fn top_level(text: &str, separator: char) -> Vec<&str> {
+    let mut depth = 0i32;
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            c if c == separator && depth == 0 => {
+                parts.push(&text[start..at]);
+                start = at + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts.into_iter().filter(|part| !part.trim().is_empty()).collect()
 }

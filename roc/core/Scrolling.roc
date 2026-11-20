@@ -1,7 +1,6 @@
 ## A scrolling layout's strip (`rift_core::layout::scrolling`): columns side by side in world
 ## space, each column's windows in rows sharing its height, and the camera's resting points.
 
-import Wire exposing [finished, put_float, put_list, put_rect, put_window, take, take_flag, take_float, take_list, take_rect, take_window]
 import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, solve, take_constraints]
 
 WindowId : { pid : I32, idx : U32 }
@@ -57,7 +56,9 @@ Spot : { id : U64, world_x : F64, width : F64, anchor : F64 }
 ## A camera offset the camera may rest at, and the column it shows.
 Snap : { offset : F64, column : U64 }
 
-Placed : { first : Spot, rest : List(Spot), frames : List((WindowId, Rect)), snaps : (Snap, List(Snap)), bounds : (F64, F64) }
+## Where a strip placed everything: its spots, its windows' frames, its snaps (at least one),
+## and the camera's bounds (the platform's `Boundary.Placed`).
+Placed : { first : Spot, rest : List(Spot), frames : List({ window : WindowId, frame : Rect }), first_snap : Snap, rest_snaps : List(Snap), low : F64, high : F64 }
 
 ## How ties go when the camera settles: niri (the leftmost point, then the furthest column
 ## wholly in view in the direction of travel), anchored (the earlier point), or anchored
@@ -272,14 +273,21 @@ Scrolling := [].{
 					(spots.append(spot), gathered.concat(placed))
 				}
 			}
-		snaps = snaps_of(strip, first, rest)
-		(head, tail) = snaps
-		bounds =
+		(head, tail) = snaps_of(strip, first, rest)
+		(low, high) =
 			tail.fold(
 				(head.offset, head.offset),
-				|(low, high), snap| (min(low, snap.offset), max(high, snap.offset)),
+				|(lowest, highest), snap| (min(lowest, snap.offset), max(highest, snap.offset)),
 			)
-		{ first, rest, frames, snaps, bounds }
+		{
+			first,
+			rest,
+			frames: frames.map(|(window, frame)| { window, frame }),
+			first_snap: head,
+			rest_snaps: tail,
+			low,
+			high,
+		}
 	}
 
 	## Anchored: each column's anchor. Free: the strip's two ends, then every column edge
@@ -347,7 +355,7 @@ Scrolling := [].{
 	## Where the camera settles when a release would carry it to `projected` from `from`.
 	settle : Placed, F64, F64, F64, Settle -> Settled
 	settle = |placed, view, projected, from, how| {
-		(head, tail) = placed.snaps
+		(head, tail) = (placed.first_snap, placed.rest_snaps)
 		order = |a, b| {
 			da = total_order((a.offset - projected).abs())
 			db = total_order((b.offset - projected).abs())
@@ -419,152 +427,5 @@ Scrolling := [].{
 					}
 			}
 		{ column, offset: snap.offset }
-	}
-
-	take_spot : Words -> Taken(Spot)
-	take_spot = |c0| {
-		(id, c1) = take(c0)?
-		(world_x, c2) = take_float(c1)?
-		(width, c3) = take_float(c2)?
-		(anchor_at, c4) = take_float(c3)?
-		Ok(({ id, world_x, width, anchor: anchor_at }, c4))
-	}
-
-	take_snap : Words -> Taken(Snap)
-	take_snap = |c0| {
-		(offset, c1) = take_float(c0)?
-		(column, c2) = take(c1)?
-		Ok(({ offset, column }, c2))
-	}
-
-	take_frame : Words -> Taken((WindowId, Rect))
-	take_frame = |c0| {
-		(window, c1) = take_window(c0)?
-		(frame, c2) = take_rect(c1)?
-		Ok(((window, frame), c2))
-	}
-
-	take_placed : Words -> Taken(Placed)
-	take_placed = |c0| {
-		(first, c1) = take_spot(c0)?
-		(rest, c2) = take_list(c1, take_spot)?
-		(frames, c3) = take_list(c2, take_frame)?
-		(head, c4) = take_snap(c3)?
-		(tail, c5) = take_list(c4, take_snap)?
-		(low, c6) = take_float(c5)?
-		(high, c7) = take_float(c6)?
-		Ok(({ first, rest, frames, snaps: (head, tail), bounds: (low, high) }, c7))
-	}
-
-	## Where the camera settles for the settle question `cursor` holds (after its tag), all of
-	## it, as words: the column, then the offset.
-	settled_words : Words -> Try(List(U64), [Malformed])
-	settled_words = |c0| {
-		(view, c1) = take_float(c0)?
-		(projected, c2) = take_float(c1)?
-		(from, c3) = take_float(c2)?
-		(tag, c4) = take(c3)?
-		(how, c5) =
-			match tag {
-				0 => Ok((Niri, c4))
-				1 => Ok((Anchored, c4))
-				2 => {
-					(column, after) = take(c4)?
-					Ok((AnchoredTowards(column), after))
-				}
-
-				_ => Err(Malformed)
-			}?
-		(placed, c6) = take_placed(c5)?
-		finished(c6)?
-		settled = settle(placed, view, projected, from, how)
-		Ok(put_float([settled.column], settled.offset))
-	}
-
-	take_row : Words -> Taken(Row)
-	take_row = |c0| {
-		(window, c1) = take_window(c0)?
-		(constraints, c2) = take_constraints(c1)?
-		(weight, c3) = take_float(c2)?
-		Ok(({ window, constraints, weight }, c3))
-	}
-
-	take_column : Words -> Taken(Column)
-	take_column = |c0| {
-		(id, c1) = take(c0)?
-		(tag, c2) = take(c1)?
-		(width, c3) =
-			match tag {
-				0 => Ok((Default, c2))
-				1 => {
-					(ratio, after) = take_float(c2)?
-					Ok((Proportion(ratio), after))
-				}
-
-				2 => {
-					(value, after) = take_float(c2)?
-					Ok((Exactly(value), after))
-				}
-
-				_ => Err(Malformed)
-			}?
-		(first, c4) = take_row(c3)?
-		(rest, c5) = take_list(c4, take_row)?
-		Ok(({ id, width, first, rest }, c5))
-	}
-
-	take_strip : Words -> Taken(Strip)
-	take_strip = |c0| {
-		(tiling, c1) = take_rect(c0)?
-		(column_gap, c2) = take_float(c1)?
-		(row_gap, c3) = take_float(c2)?
-		(ratio, c4) = take_float(c3)?
-		(min_ratio, c5) = take_float(c4)?
-		(max_ratio, c6) = take_float(c5)?
-		(preserve_window_sizes, c7) = take_flag(c6)?
-		(expand_single_column, c8) = take_flag(c7)?
-		(alignment_tag, c9) = take(c8)?
-		alignment =
-			match alignment_tag {
-				0 => Ok(Left)
-				1 => Ok(Center)
-				2 => Ok(Right)
-				_ => Err(Malformed)
-			}?
-		(navigation_tag, c10) = take(c9)?
-		navigation =
-			match navigation_tag {
-				0 => Ok(Anchored)
-				1 => Ok(Free)
-				_ => Err(Malformed)
-			}?
-		(first, c11) = take_column(c10)?
-		(rest, c12) = take_list(c11, take_column)?
-		widths = { ratio, min_ratio, max_ratio, preserve_window_sizes, expand_single_column }
-		Ok(({ tiling, column_gap, row_gap, widths, alignment, navigation, first, rest }, c12))
-	}
-
-	put_spot : List(U64), Spot -> List(U64)
-	put_spot = |words, spot| put_float(put_float(put_float(words.append(spot.id), spot.world_x), spot.width), spot.anchor)
-
-	put_snap : List(U64), Snap -> List(U64)
-	put_snap = |words, snap| put_float(words, snap.offset).append(snap.column)
-
-	put_placed : Placed -> List(U64)
-	put_placed = |placed| {
-		(head, tail) = placed.snaps
-		(low, high) = placed.bounds
-		spots = put_list(put_spot([], placed.first), placed.rest, put_spot)
-		framed = put_list(spots, placed.frames, |out, (window, frame)| put_rect(put_window(out, window), frame))
-		put_float(put_float(put_list(put_snap(framed, head), tail, put_snap), low), high)
-	}
-
-	## Where the strip `cursor` holds (after its system's tag), all of it, placed everything,
-	## as words.
-	placed_words : Words -> Try(List(U64), [Malformed])
-	placed_words = |cursor| {
-		(strip, rest) = take_strip(cursor)?
-		finished(rest)?
-		Ok(put_placed(place(strip)))
 	}
 }
