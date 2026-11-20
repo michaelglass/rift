@@ -1528,7 +1528,10 @@ impl LayoutEngine {
         if self.focused_window == Some(wid) {
             self.focused_window = None;
         }
-        self.window_layout_constraints.remove(&wid);
+        // A display move also arrives as a removal: keep constraints while the window exists.
+        if window_store.record(wid).is_none() {
+            self.window_layout_constraints.remove(&wid);
+        }
 
         removal.is_some()
     }
@@ -4331,5 +4334,78 @@ mod tests {
             let layout = workspace.active_layout().unwrap();
             assert_eq!(workspace.layout_system.contains_window(layout, wid), id == ws1);
         }
+    }
+
+    #[test]
+    fn moving_a_window_between_spaces_keeps_its_size_constraints() {
+        let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
+        let space = SpaceId::new(93);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let fixed = WindowId::new(7, 1);
+        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 800.0));
+        let info = crate::actor::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: false,
+            min_size: None,
+            max_size: None,
+            title: String::new(),
+            frame,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+        let state = crate::model::reactor::WindowState {
+            is_manageable: true,
+            ..info.into()
+        };
+        window_store.insert_window(fixed, state);
+        for (window, info) in [
+            (fixed, WindowLayoutInfo {
+                is_resizable: false,
+                ..window_layout_info(fixed, CGSize::new(300.0, 800.0))
+            }),
+            (
+                WindowId::new(8, 1),
+                window_layout_info(WindowId::new(8, 1), CGSize::new(500.0, 500.0)),
+            ),
+        ] {
+            let _ = engine.handle_event(
+                &mut window_store,
+                LayoutEvent::windows_observed(space, window.pid, vec![info], None),
+            );
+        }
+        let width = |engine: &mut LayoutEngine| {
+            let frames =
+                engine.calculate_layout(space, screen, &Default::default(), Default::default());
+            frames
+                .into_iter()
+                .find(|(w, _)| *w == fixed)
+                .expect("fixed window is tiled")
+                .1
+                .size
+                .width
+        };
+        assert_eq!(width(&mut engine), 300.0);
+
+        for removal in [
+            LayoutEvent::WindowRemovedPreserveFloating(fixed),
+            LayoutEvent::WindowRemoved(fixed),
+        ] {
+            let _ = engine.handle_event(&mut window_store, removal);
+            let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, fixed));
+            assert_eq!(width(&mut engine), 300.0);
+        }
+
+        window_store.remove_window(fixed);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(fixed));
+        assert!(!engine.window_layout_constraints.windows.contains_key(&fixed));
     }
 }
