@@ -55,7 +55,20 @@ fn sync_existing_window_state(
         }
         _ => {
             // The fresh reading's roles and the heuristic, as one change to its admission.
-            let change = rift_core::lifecycle::net(reading, utils::refresh_heuristic(state, wid));
+            let heuristic = utils::refresh_heuristic(state, wid);
+            let change = rift_core::lifecycle::net(reading, heuristic);
+            #[cfg(feature = "roc-core")]
+            {
+                use rift_core::plain::wire;
+
+                use crate::roc_path::transition;
+                crate::roc_path::check(
+                    "net",
+                    &[],
+                    &wire::encode_net(transition(reading), transition(heuristic)),
+                    &wire::encode_net_change(transition(change)),
+                );
+            }
             let is_admitted = state.windows.is_admitted_state(wid);
             admission_changed = change.is_some();
             if let Some(rift_core::lifecycle::Transition::Suspended(..)) = change {

@@ -135,6 +135,18 @@ impl Word for crate::actor::app::pid_t {
     fn word(self) -> u64 { i64::from(self) as u64 }
 }
 
+/// An admission change as the plain questions carry it (its window as a word).
+#[cfg(feature = "roc-core")]
+pub(crate) fn transition(
+    change: Option<rift_core::lifecycle::Transition<crate::actor::app::WindowId>>,
+) -> Option<rift_core::lifecycle::Transition<u64>> {
+    use rift_core::lifecycle::Transition;
+    change.map(|change| match change {
+        Transition::Admitted(window) => Transition::Admitted(window.word()),
+        Transition::Suspended(window, why) => Transition::Suspended(window.word(), why),
+    })
+}
+
 /// A window with its app, as the plain questions carry it.
 #[cfg(feature = "roc-core")]
 pub(crate) fn window(window: crate::actor::app::WindowId) -> rift_core::plain::WindowId {

@@ -5320,6 +5320,50 @@ fn title_change_rule_moves_window_to_matching_workspace() {
 }
 
 #[test]
+fn a_title_change_reapplies_rules_only_on_an_active_space() {
+    // A rule a new title matches would move the window, but only a window on a Space showing
+    // now: one left on another desktop keeps its workspace.
+    for active in [true, false] {
+        let settings = crate::common::config::VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            reapply_app_rules_on_title_change: true,
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                title_substring: Some("matched title".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (mut apps, mut reactor) =
+            (Apps::new(), test_reactor_with_workspace_settings(&settings));
+        reactor.config.virtual_workspaces = settings;
+        let (space, other) = (SpaceId::new(1), SpaceId::new(2));
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let window = WindowId::new(1, 1);
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+        let initial = reactor.test_workspace_for_window(space, window).unwrap();
+        if !active {
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(other)]));
+        }
+
+        reactor.handle_event(Event::WindowTitleChanged(window, "matched title".into()));
+
+        let expected = if active {
+            reactor.test_workspace(space, 1)
+        } else {
+            initial
+        };
+        assert_eq!(
+            reactor.test_workspace_for_window(space, window),
+            Some(expected),
+            "active: {active}"
+        );
+    }
+}
+
+#[test]
 fn title_change_non_title_fallback_preserves_manually_moved_workspace() {
     let settings = crate::common::config::VirtualWorkspaceSettings {
         default_workspace_count: 3,

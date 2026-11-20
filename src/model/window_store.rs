@@ -1150,35 +1150,64 @@ impl WindowStore {
                         AxValidity::Valid
                     },
                 };
+                let asked = crate::roc_path::Asked::new();
                 let verdict = rift_core::lifecycle::retirement(facts, |wsid| {
-                    let observation = observe(wsid, self.get_window_server_info(wsid));
-                    NativeEvidence {
-                        suitability: observation.suitable.map(|suitable| {
-                            if suitable {
-                                Suitability::Suitable
-                            } else {
-                                Suitability::Unsuitable
-                            }
-                        }),
-                        ordering: observation.ordered_in.map(|ordered_in| {
-                            if ordered_in {
-                                Ordering::OrderedIn
-                            } else {
-                                Ordering::OrderedOut
-                            }
-                        }),
-                        look: observation.info.map(|info| {
-                            if info.layer != 0
-                                || info.frame.size.width.abs() < 2.0
-                                || info.frame.size.height.abs() < 2.0
-                            {
-                                NativeLook::NotAWindow
-                            } else {
-                                NativeLook::Window
-                            }
-                        }),
-                    }
+                    asked.ask(|| {
+                        let observation = observe(wsid, self.get_window_server_info(wsid));
+                        NativeEvidence {
+                            suitability: observation.suitable.map(|suitable| {
+                                if suitable {
+                                    Suitability::Suitable
+                                } else {
+                                    Suitability::Unsuitable
+                                }
+                            }),
+                            ordering: observation.ordered_in.map(|ordered_in| {
+                                if ordered_in {
+                                    Ordering::OrderedIn
+                                } else {
+                                    Ordering::OrderedOut
+                                }
+                            }),
+                            look: observation.info.map(|info| {
+                                if info.layer != 0
+                                    || info.frame.size.width.abs() < 2.0
+                                    || info.frame.size.height.abs() < 2.0
+                                {
+                                    NativeLook::NotAWindow
+                                } else {
+                                    NativeLook::Window
+                                }
+                            }),
+                        }
+                    })
                 });
+                #[cfg(feature = "roc-core")]
+                {
+                    use rift_core::plain::wire;
+
+                    use crate::roc_path::Word;
+                    let question = rift_core::lifecycle::plain::Inventory {
+                        facts: InventoryFacts {
+                            identity: match facts.identity {
+                                NativeIdentity::Known(wsid) => NativeIdentity::Known(wsid.word()),
+                                NativeIdentity::Unknown => NativeIdentity::Unknown,
+                            },
+                            report: facts.report,
+                            view: facts.view,
+                            minimize: facts.minimize,
+                            fullscreen: facts.fullscreen,
+                            validity: facts.validity,
+                        },
+                        evidence: asked.fact(|evidence| evidence),
+                    };
+                    crate::roc_path::check(
+                        "retirement",
+                        rift_core::lifecycle::plain::Inventory::FACTS,
+                        &wire::encode_inventory(question),
+                        &wire::encode_retirement(verdict),
+                    );
+                }
                 (verdict == Retirement::Retire).then_some((wid, wsid))
             })
             .collect()
@@ -1412,10 +1441,21 @@ impl WindowStore {
         state.info = info;
         let (ax, minimize) = (state.ax_kind(), state.minimize());
         let roles = self.tell_lifecycle(window, FactChange::Ax(ax));
-        rift_core::lifecycle::net(
-            roles,
-            self.tell_lifecycle(window, FactChange::Minimize(minimize)),
-        )
+        let minimized = self.tell_lifecycle(window, FactChange::Minimize(minimize));
+        let change = rift_core::lifecycle::net(roles, minimized);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::plain::wire;
+
+            use crate::roc_path::transition;
+            crate::roc_path::check(
+                "net",
+                &[],
+                &wire::encode_net(transition(roles), transition(minimized)),
+                &wire::encode_net_change(transition(change)),
+            );
+        }
+        change
     }
 
     /// Whether a window is away for now (hidden, minimized, invalidated, in fullscreen, or
@@ -1452,10 +1492,19 @@ impl WindowStore {
     ) -> Option<bool> {
         let facts = self.lifecycle.facts(window)?;
         let rule = crate::model::reactor::rule_of(manage_override);
-        Some(
-            rift_core::lifecycle::admission(AdmissionFacts { rule, ..facts })
-                == Admission::Admitted,
-        )
+        let facts = AdmissionFacts { rule, ..facts };
+        let admission = rift_core::lifecycle::admission(facts);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::plain::wire;
+            crate::roc_path::check(
+                "admission",
+                &[],
+                &wire::encode_admission_facts(facts),
+                &wire::encode_window_admission(admission),
+            );
+        }
+        Some(admission == Admission::Admitted)
     }
 
     /// The app rule a window with AX state is under.
@@ -3354,6 +3403,39 @@ mod tests {
                 state.windows.debug_assert_invariants();
             }
         }
+    }
+
+    #[test]
+    fn a_reading_that_admits_by_its_roles_and_suspends_by_its_minimize_changes_nothing() {
+        // Suspended as an AXDialog window, a fresh reading finds ordinary roles (admitting it)
+        // and the window minimized (suspending it again): one reading, no change.
+        let wid = WindowId::new(3, 1);
+        let mut store = WindowStore::default();
+        let info = crate::sys::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "w".into(),
+            frame: objc2_core_foundation::CGRect::ZERO,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: Some("AXWindow".into()),
+            ax_subrole: Some("AXDialog".into()),
+        };
+        store.insert_manageable_window(wid, WindowState::from(info.clone()));
+        assert!(!store.is_admitted_state(wid));
+        let reading = crate::sys::app::WindowInfo {
+            ax_subrole: Some("AXStandardWindow".into()),
+            is_minimized: true,
+            ..info
+        };
+        assert_eq!(store.replace_info(wid, reading), None);
+        assert!(!store.is_admitted_state(wid));
     }
 
     #[test]

@@ -3713,17 +3713,37 @@ impl Reactor {
         } else {
             OnTitleChange::Ignore
         };
-        if !rift_core::lifecycle::reapplies_on_title_change(
+        let (space, active, reconcilable) = (Asked::new(), AskedAbout::new(), Asked::new());
+        let reapplies = rift_core::lifecycle::reapplies_on_title_change(
             configured,
-            || self.best_space_for_window_id(window_id),
-            |space| self.is_space_active(space),
+            || space.ask(|| self.best_space_for_window_id(window_id)),
+            |space| active.ask(space, |space| self.is_space_active(space)),
             || {
-                self.state
-                    .windows
-                    .window(window_id)
-                    .is_some_and(WindowState::can_reconcile_admission)
+                reconcilable.ask(|| {
+                    self.state
+                        .windows
+                        .window(window_id)
+                        .is_some_and(WindowState::can_reconcile_admission)
+                })
             },
-        ) {
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::lifecycle::plain::TitleChange;
+            let question = TitleChange {
+                configured,
+                space: space.fact(|space| space.map(Word::word)),
+                active: active.answers(Word::word, |active| active),
+                reconcilable: reconcilable.fact(|open| open),
+            };
+            crate::roc_path::check(
+                "reapplies_on_title_change",
+                TitleChange::FACTS,
+                &wire::encode_title_change(question),
+                &wire::encode_verdict(reapplies),
+            );
+        }
+        if !reapplies {
             return;
         }
 
@@ -4691,7 +4711,22 @@ impl Reactor {
                 .record(wid)
                 .and_then(|record| record.window_server_id())
                 .and_then(|wsid| native_spaces[&wsid]);
-            rift_core::lifecycle::misplaced(assigned, native)
+            let misplaced = rift_core::lifecycle::misplaced(assigned, native);
+            #[cfg(feature = "roc-core")]
+            {
+                use rift_core::lifecycle::plain::Misplaced;
+                let question = Misplaced {
+                    assigned: assigned.map(Word::word),
+                    native: native.map(Word::word),
+                };
+                crate::roc_path::check(
+                    "misplaced",
+                    Misplaced::FACTS,
+                    &wire::encode_misplaced(question),
+                    &wire::encode_verdict(misplaced),
+                );
+            }
+            misplaced
         }) {
             self.request_space_snapshot();
         }
@@ -4706,12 +4741,30 @@ impl Reactor {
                     .record(*wid)
                     .and_then(|record| record.window_server_id())
                     .and_then(|wsid| native_spaces[&wsid]);
-                rift_core::lifecycle::out_of_inventory_view(
+                let (assigned, active, parked) = (Asked::new(), AskedAbout::new(), Asked::new());
+                let out_of_view = rift_core::lifecycle::out_of_inventory_view(
                     native,
-                    || self.assigned_space_for_window_id(*wid),
-                    |space| self.is_space_active(space),
-                    || self.hidden_assigned_space_for_window_id(*wid).is_some(),
-                )
+                    || assigned.ask(|| self.assigned_space_for_window_id(*wid)),
+                    |space| active.ask(space, |space| self.is_space_active(space)),
+                    || parked.ask(|| self.hidden_assigned_space_for_window_id(*wid).is_some()),
+                );
+                #[cfg(feature = "roc-core")]
+                {
+                    use rift_core::lifecycle::plain::OutOfView;
+                    let question = OutOfView {
+                        native: native.map(Word::word),
+                        assigned: assigned.fact(|space| space.map(Word::word)),
+                        active: active.answers(Word::word, |active| active),
+                        parked: parked.fact(|parked| parked),
+                    };
+                    crate::roc_path::check(
+                        "out_of_inventory_view",
+                        OutOfView::FACTS,
+                        &wire::encode_out_of_view(question),
+                        &wire::encode_verdict(out_of_view),
+                    );
+                }
+                out_of_view
             })
             .collect();
         // A returned native identity protects its previous AX key until rekeying.
@@ -5524,9 +5577,25 @@ impl Reactor {
             .sys_id
             .and_then(|id| self.transient_focus.windows.get(&id))
             .map(|t| (transient_origin(t.native), t.pid));
+        let exempt = Asked::new();
         let transient = rift_core::lifecycle::is_native_transient(entry, wid.pid, || {
-            crate::sys::app::is_ibkr_desktop_dialog(&window.info)
+            exempt.ask(|| crate::sys::app::is_ibkr_desktop_dialog(&window.info))
         });
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::lifecycle::plain::NativeTransient;
+            let question = NativeTransient {
+                entry: entry.map(|(origin, pid)| (origin, pid.word())),
+                owner: wid.pid.word(),
+                exempt: exempt.fact(|exempt| exempt),
+            };
+            crate::roc_path::check(
+                "is_native_transient",
+                NativeTransient::FACTS,
+                &wire::encode_native_transient(question),
+                &wire::encode_verdict(transient),
+            );
+        }
         if let Some(Transition::Suspended(..)) =
             self.state.windows.set_native_transient(wid, transient)
         {
@@ -5551,7 +5620,29 @@ impl Reactor {
             _ => return,
         };
         self.transient_focus.windows.retain(|&id, t| {
-            rift_core::lifecycle::keeps_transient(departure, id, transient_origin(t.native), t.pid)
+            let origin = transient_origin(t.native);
+            let keeps = rift_core::lifecycle::keeps_transient(departure, id, origin, t.pid);
+            #[cfg(feature = "roc-core")]
+            {
+                use rift_core::lifecycle::plain::KeepsTransient;
+                let question = KeepsTransient {
+                    departure: match departure {
+                        Departure::Destroyed(gone) => Departure::Destroyed(gone.map(Word::word)),
+                        Departure::Closed(gone) => Departure::Closed(gone.word()),
+                        Departure::AppGone(pid) => Departure::AppGone(pid.word()),
+                    },
+                    id: id.word(),
+                    origin,
+                    owner: t.pid.word(),
+                };
+                crate::roc_path::check(
+                    "keeps_transient",
+                    KeepsTransient::FACTS,
+                    &wire::encode_keeps_transient(question),
+                    &wire::encode_verdict(keeps),
+                );
+            }
+            keeps
         });
     }
 
@@ -5656,16 +5747,41 @@ impl Reactor {
         } else {
             RuleRun::Admission
         };
+        let (reconcilable, spaces, active) =
+            (AskedAbout::new(), AskedAbout::new(), AskedAbout::new());
         let targets = rift_core::lifecycle::rule_targets(
             &window_ids,
             run,
-            |wid| self.state.windows.can_reconcile_admission(wid),
+            |wid| reconcilable.ask(wid, |wid| self.state.windows.can_reconcile_admission(wid)),
             |wid| {
-                self.assigned_space_for_window_id(wid)
-                    .or_else(|| self.best_space_for_window_id(wid))
+                spaces.ask(wid, |wid| {
+                    self.assigned_space_for_window_id(wid)
+                        .or_else(|| self.best_space_for_window_id(wid))
+                })
             },
-            |space| self.is_space_active(space),
+            |space| active.ask(space, |space| self.is_space_active(space)),
         );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::lifecycle::plain::RuleTargets;
+            let question = RuleTargets {
+                windows: window_ids.iter().map(|&wid| wid.word()).collect(),
+                run,
+                reconcilable: reconcilable.answers(Word::word, |open| open),
+                spaces: spaces.answers(Word::word, |space| space.map(Word::word)),
+                active: active.answers(Word::word, |active| active),
+            };
+            let answer = targets
+                .iter()
+                .map(|(space, wids)| (space.word(), wids.iter().map(|&wid| wid.word()).collect()))
+                .collect();
+            crate::roc_path::check(
+                "rule_targets",
+                RuleTargets::FACTS,
+                &wire::encode_rule_targets_question(question),
+                &wire::encode_rule_targets(answer),
+            );
+        }
 
         let visible: Vec<_> = self.iter_active_spaces().collect();
         for (space, wids) in targets {
@@ -5704,7 +5820,30 @@ impl Reactor {
                         was_ignored,
                         unavailable: self.state.windows.is_temporarily_unavailable(*wid),
                     };
-                    if rift_core::lifecycle::rule_refreshes_layout(run, &outcome) {
+                    let refreshes = rift_core::lifecycle::rule_refreshes_layout(run, &outcome);
+                    #[cfg(feature = "roc-core")]
+                    {
+                        use rift_core::lifecycle::RuleOutcome;
+                        use rift_core::lifecycle::plain::RuleRefresh;
+                        let question = RuleRefresh {
+                            run,
+                            outcome: RuleOutcome {
+                                workspace_before: outcome.workspace_before.map(Word::word),
+                                workspace: outcome.workspace.word(),
+                                floating_before: outcome.floating_before,
+                                floating: outcome.floating,
+                                was_ignored: outcome.was_ignored,
+                                unavailable: outcome.unavailable,
+                            },
+                        };
+                        crate::roc_path::check(
+                            "rule_refreshes_layout",
+                            RuleRefresh::FACTS,
+                            &wire::encode_rule_refresh(question),
+                            &wire::encode_verdict(refreshes),
+                        );
+                    }
+                    if refreshes {
                         windows_needing_layout_refresh.push((*wid, assignment));
                     }
                 }
@@ -6755,32 +6894,66 @@ impl Reactor {
             Some(state) if !state.info.is_standard => NewWindow::NotStandard,
             Some(state) => NewWindow::Standard(state),
         };
-        let Some(target) = rift_core::lifecycle::pointer_display_target(
-            match engine.workspaces().settings.mode {
-                crate::common::config::WorkspaceMode::PerDisplay => WorkspaceMode::PerDisplay,
-                crate::common::config::WorkspaceMode::Global => WorkspaceMode::Global,
-            },
+        let mode = match engine.workspaces().settings.mode {
+            crate::common::config::WorkspaceMode::PerDisplay => WorkspaceMode::PerDisplay,
+            crate::common::config::WorkspaceMode::Global => WorkspaceMode::Global,
+        };
+        #[cfg(feature = "roc-core")]
+        let plain_window = match new_window {
+            NewWindow::Untracked => NewWindow::Untracked,
+            NewWindow::NotStandard => NewWindow::NotStandard,
+            NewWindow::Standard(_) => NewWindow::Standard(()),
+        };
+        let (pointer, active, names_workspace) = (Asked::new(), AskedAbout::new(), Asked::new());
+        let target = rift_core::lifecycle::pointer_display_target(
+            mode,
             space,
             || {
-                window_server::current_cursor_location()
-                    .ok()
-                    .and_then(|point| self.screen_for_point(point))
-                    .and_then(|screen| screen.space)
-            },
-            |space| self.is_space_active(space),
-            new_window,
-            |state| {
-                let app = self.app_manager.apps.get(&window.pid).map(|app| &app.info);
-                engine.app_rule_names_workspace(crate::model::WindowRuleContext {
-                    app_bundle_id: app.and_then(|info| info.bundle_id.as_deref()),
-                    app_name: app.and_then(|info| info.localized_name.as_deref()),
-                    window_title: Some(&state.info.title),
-                    ax_role: state.info.ax_role.as_deref(),
-                    ax_subrole: state.info.ax_subrole.as_deref(),
-                    window_tags: state.info.sys_id.and_then(crate::sys::window_server::window_tags),
+                pointer.ask(|| {
+                    window_server::current_cursor_location()
+                        .ok()
+                        .and_then(|point| self.screen_for_point(point))
+                        .and_then(|screen| screen.space)
                 })
             },
-        ) else {
+            |space| active.ask(space, |space| self.is_space_active(space)),
+            new_window,
+            |state| {
+                names_workspace.ask(|| {
+                    let app = self.app_manager.apps.get(&window.pid).map(|app| &app.info);
+                    engine.app_rule_names_workspace(crate::model::WindowRuleContext {
+                        app_bundle_id: app.and_then(|info| info.bundle_id.as_deref()),
+                        app_name: app.and_then(|info| info.localized_name.as_deref()),
+                        window_title: Some(&state.info.title),
+                        ax_role: state.info.ax_role.as_deref(),
+                        ax_subrole: state.info.ax_subrole.as_deref(),
+                        window_tags: state
+                            .info
+                            .sys_id
+                            .and_then(crate::sys::window_server::window_tags),
+                    })
+                })
+            },
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::lifecycle::plain::PointerTarget;
+            let question = PointerTarget {
+                mode,
+                opened_on: space.word(),
+                pointer: pointer.fact(|space| space.map(Word::word)),
+                active: active.answers(Word::word, |active| active),
+                window: plain_window,
+                rule_names_workspace: names_workspace.fact(|names| names),
+            };
+            crate::roc_path::check(
+                "pointer_display_target",
+                PointerTarget::FACTS,
+                &wire::encode_pointer_target(question),
+                &wire::encode_maybe_space(target.map(Word::word)),
+            );
+        }
+        let Some(target) = target else {
             return;
         };
         let outcome = self.move_window_to_display(window, space, target);
