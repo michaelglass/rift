@@ -10,7 +10,7 @@ platform ""
 			tile : List(U64) -> List(U64),
 		}
 	}
-	exposes []
+	exposes [Boundary]
 	packages {}
 	provides {
 		"roc_init": init_for_host,
@@ -25,12 +25,14 @@ platform ""
 		},
 	}
 
+import Boundary exposing [Stepped]
+
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
 
 ## One step: an event's words in, the effect list's words out. The box is unboxed and boxed
 ## again so the model stays unique: the host keeps no reference to the old one.
-step_for_host : Box(Model), List(U64) -> { model : Box(Model), effects : List(U64) }
+step_for_host : Box(Model), List(U64) -> Stepped(Model)
 step_for_host = |boxed, event| {
 	stepped = (core.step)(Box.unbox(boxed), event)
 	{ model: Box.box(stepped.model), effects: stepped.effects }
