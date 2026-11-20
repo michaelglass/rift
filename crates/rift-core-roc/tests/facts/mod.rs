@@ -17,7 +17,7 @@ pub fn rust<A>(answer: Result<A, Unasked>, encode: impl FnOnce(A) -> Vec<u64>) -
     answer.map(encode).map_err(|unasked| unasked.fact)
 }
 
-fn roc(question: &[u64]) -> Answered {
+pub fn roc(question: &[u64]) -> Answered {
     match tile_words(question) {
         Ok(words) => Ok(words),
         Err(RocError::Unasked { fact }) => Err(fact),

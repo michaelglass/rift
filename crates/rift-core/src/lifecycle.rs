@@ -705,40 +705,46 @@ pub fn retirement<V: Copy>(
     }
 }
 
-/// Each decision as a question on plain data: every fact it may ask for is in the question.
-/// Windows, Spaces, window-server ids and apps are one word each.
+/// Each decision as a question on plain data. Its arguments are plain values; every fact it
+/// asks for is a [`Fact`] (or, asked about a key, [`Answers`]): what the platform answered, or
+/// that the platform's run of the decision never asked it. Each question names its facts in
+/// `FACTS`, in the order the wire carries them; an answer that read a fact the question does not
+/// carry is [`Unasked`]. Windows, Spaces, window-server ids and apps are one word each.
 pub mod plain {
     use super::{
-        Departure, NewWindow, OnTitleChange, RuleOutcome, RuleRun, TransientOrigin, WorkspaceMode,
+        Departure, InventoryFacts, NativeEvidence, NewWindow, OnTitleChange, Retirement,
+        RuleOutcome, RuleRun, TransientOrigin, WorkspaceMode,
     };
+    use crate::plain::{Answers, Fact, Reading, Unasked};
 
-    fn lookup(pairs: &[(u64, u64)], key: u64) -> Option<u64> {
-        pairs.iter().find(|(k, _)| *k == key).map(|(_, value)| *value)
-    }
-
-    /// [`super::rule_targets`]: each window's Space, where it has one.
+    /// [`super::rule_targets`]: whether a window is reconcilable, its Space (if it has one),
+    /// whether a Space is active.
     #[derive(Debug, Clone, PartialEq)]
     pub struct RuleTargets {
         pub windows: Vec<u64>,
         pub run: RuleRun,
-        pub reconcilable: Vec<u64>,
-        pub spaces: Vec<(u64, u64)>,
-        pub active: Vec<u64>,
+        pub reconcilable: Answers<u64, bool>,
+        pub spaces: Answers<u64, Option<u64>>,
+        pub active: Answers<u64, bool>,
     }
 
     impl RuleTargets {
-        pub fn answer(&self) -> Vec<(u64, Vec<u64>)> {
-            super::rule_targets(
+        pub const FACTS: &[&str] = &["reconcilable", "space", "active"];
+
+        pub fn answer(&self) -> Result<Vec<(u64, Vec<u64>)>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::rule_targets(
                 &self.windows,
                 self.run,
-                |window| self.reconcilable.contains(&window),
-                |window| lookup(&self.spaces, window),
-                |space| self.active.contains(&space),
-            )
+                |window| reading.about(&self.reconcilable, &window, 0, false),
+                |window| reading.about(&self.spaces, &window, 1, None),
+                |space| reading.about(&self.active, &space, 2, false),
+            );
+            reading.answer(answer)
         }
     }
 
-    /// [`super::rule_refreshes_layout`].
+    /// [`super::rule_refreshes_layout`]: it asks for no fact.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct RuleRefresh {
         pub run: RuleRun,
@@ -746,48 +752,61 @@ pub mod plain {
     }
 
     impl RuleRefresh {
+        pub const FACTS: &[&str] = &[];
+
         pub fn answer(&self) -> bool { super::rule_refreshes_layout(self.run, &self.outcome) }
     }
 
-    /// [`super::pointer_display_target`]: what the rules say of a standard window.
+    /// [`super::pointer_display_target`]: the pointer's Space, whether a Space is active, and
+    /// whether the rules name a standard window's workspace.
     #[derive(Debug, Clone, PartialEq)]
     pub struct PointerTarget {
         pub mode: WorkspaceMode,
         pub opened_on: u64,
-        pub pointer: Option<u64>,
-        pub active: Vec<u64>,
+        pub pointer: Fact<Option<u64>>,
+        pub active: Answers<u64, bool>,
         pub window: NewWindow<()>,
-        pub rule_names_workspace: bool,
+        pub rule_names_workspace: Fact<bool>,
     }
 
     impl PointerTarget {
-        pub fn answer(&self) -> Option<u64> {
-            super::pointer_display_target(
+        pub const FACTS: &[&str] = &["pointer", "active", "rule_names_workspace"];
+
+        pub fn answer(&self) -> Result<Option<u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::pointer_display_target(
                 self.mode,
                 self.opened_on,
-                || self.pointer,
-                |space| self.active.contains(&space),
+                || reading.fact(&self.pointer, 0, None),
+                |space| reading.about(&self.active, &space, 1, false),
                 self.window,
-                |()| self.rule_names_workspace,
-            )
+                |()| reading.fact(&self.rule_names_workspace, 2, false),
+            );
+            reading.answer(answer)
         }
     }
 
-    /// [`super::is_native_transient`].
+    /// [`super::is_native_transient`]: whether the window is exempt.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct NativeTransient {
         pub entry: Option<(TransientOrigin, u64)>,
         pub owner: u64,
-        pub exempt: bool,
+        pub exempt: Fact<bool>,
     }
 
     impl NativeTransient {
-        pub fn answer(&self) -> bool {
-            super::is_native_transient(self.entry, self.owner, || self.exempt)
+        pub const FACTS: &[&str] = &["exempt"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::is_native_transient(self.entry, self.owner, || {
+                reading.fact(&self.exempt, 0, false)
+            });
+            reading.answer(answer)
         }
     }
 
-    /// [`super::keeps_transient`].
+    /// [`super::keeps_transient`]: it asks for no fact.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct KeepsTransient {
         pub departure: Departure<u64, u64>,
@@ -797,12 +816,14 @@ pub mod plain {
     }
 
     impl KeepsTransient {
+        pub const FACTS: &[&str] = &[];
+
         pub fn answer(&self) -> bool {
             super::keeps_transient(self.departure, self.id, self.origin, self.owner)
         }
     }
 
-    /// [`super::misplaced`].
+    /// [`super::misplaced`]: it asks for no fact.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Misplaced {
         pub assigned: Option<u64>,
@@ -810,46 +831,81 @@ pub mod plain {
     }
 
     impl Misplaced {
+        pub const FACTS: &[&str] = &[];
+
         pub fn answer(&self) -> bool { super::misplaced(self.assigned, self.native) }
     }
 
-    /// [`super::out_of_inventory_view`].
+    /// [`super::out_of_inventory_view`]: the window's assignment, whether a Space is active,
+    /// whether it is parked.
     #[derive(Debug, Clone, PartialEq)]
     pub struct OutOfView {
         pub native: Option<u64>,
-        pub assigned: Option<u64>,
-        pub active: Vec<u64>,
-        pub parked: bool,
+        pub assigned: Fact<Option<u64>>,
+        pub active: Answers<u64, bool>,
+        pub parked: Fact<bool>,
     }
 
     impl OutOfView {
-        pub fn answer(&self) -> bool {
-            super::out_of_inventory_view(
+        pub const FACTS: &[&str] = &["assigned", "active", "parked"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::out_of_inventory_view(
                 self.native,
-                || self.assigned,
-                |space| self.active.contains(&space),
-                || self.parked,
-            )
+                || reading.fact(&self.assigned, 0, None),
+                |space| reading.about(&self.active, &space, 1, false),
+                || reading.fact(&self.parked, 2, false),
+            );
+            reading.answer(answer)
         }
     }
 
-    /// [`super::reapplies_on_title_change`].
+    /// [`super::reapplies_on_title_change`]: the window's Space, whether a Space is active,
+    /// whether it is reconcilable.
     #[derive(Debug, Clone, PartialEq)]
     pub struct TitleChange {
         pub configured: OnTitleChange,
-        pub space: Option<u64>,
-        pub active: Vec<u64>,
-        pub reconcilable: bool,
+        pub space: Fact<Option<u64>>,
+        pub active: Answers<u64, bool>,
+        pub reconcilable: Fact<bool>,
     }
 
     impl TitleChange {
-        pub fn answer(&self) -> bool {
-            super::reapplies_on_title_change(
+        pub const FACTS: &[&str] = &["space", "active", "reconcilable"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::reapplies_on_title_change(
                 self.configured,
-                || self.space,
-                |space| self.active.contains(&space),
-                || self.reconcilable,
-            )
+                || reading.fact(&self.space, 0, None),
+                |space| reading.about(&self.active, &space, 1, false),
+                || reading.fact(&self.reconcilable, 2, false),
+            );
+            reading.answer(answer)
+        }
+    }
+
+    /// [`super::retirement`]: what the window server says of the omitted window.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Inventory {
+        pub facts: InventoryFacts<u64>,
+        pub evidence: Fact<NativeEvidence>,
+    }
+
+    impl Inventory {
+        pub const FACTS: &[&str] = &["evidence"];
+
+        pub fn answer(&self) -> Result<Retirement, Unasked> {
+            let reading = Reading::new();
+            let unknown = NativeEvidence {
+                suitability: None,
+                ordering: None,
+                look: None,
+            };
+            let answer =
+                super::retirement(self.facts, |_| reading.fact(&self.evidence, 0, unknown));
+            reading.answer(answer)
         }
     }
 }

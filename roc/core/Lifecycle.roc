@@ -1,9 +1,9 @@
 ## Decisions about a window's life (`rift_core::lifecycle`): app rules, placement, transients,
-## what an inventory says about the windows it omits. Questions on plain data: every fact a
-## decision may ask for is in its question; windows, Spaces, window-server ids and apps are one
-## word each.
+## what an inventory says about the windows it omits. Questions on plain data: a decision's
+## facts are what the platform's run of it asked (`Wire.Fact`), read in the same order;
+## windows, Spaces, window-server ids and apps are one word each.
 
-import Wire exposing [finished, put_list, take, take_flag, take_list]
+import Wire exposing [ask, ask_word, finished, put_list, take, take_answers, take_fact, take_flag, take_list]
 
 ## Words being read, and where.
 Words : { words : List(U64), at : U64 }
@@ -20,45 +20,71 @@ RuleRun : [Admission, Reapply]
 ## Where a transient entry's evidence came from.
 Origin : [Native, Heuristic]
 
+## A fact the platform's run of the decision answered, or one it never asked.
+Fact(a) : [Asked(a), Unasked]
+
+## A fact asked about keys: each key asked and its answer.
+Answers(k, v) : List({ key : k, answer : v })
+
+## What a decision decided, or the first fact it read that its question does not carry.
+Read(a) : Try(a, [Unasked(U64)])
+
 ## What admission reads of a window.
 Facts : { manageable : Bool, rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native_transient : Bool, minimized : Bool }
 
 Lifecycle := [].{
 
-	## The windows app rules run over, by Space in Space order.
-	rule_targets : List(U64), RuleRun, List(U64), List({ window : U64, space : U64 }), List(U64) -> List({ space : U64, windows : List(U64) })
+	## The windows app rules run over, by Space in Space order. Facts: 0 whether a window is
+	## reconcilable, 1 its Space, 2 whether a Space is active (asked once every window is placed,
+	## in Space order).
+	rule_targets : List(U64), RuleRun, Answers(U64, Bool), Answers(U64, MaybeSpace), Answers(U64, Bool) -> Read(List({ space : U64, windows : List(U64) }))
 	rule_targets = |windows, run, reconcilable, spaces, active| {
-		var $groups = []
+		var $groups = Ok([])
 		for window in windows {
-			considered =
-				match run {
-					Reapply => True
-					Admission => reconcilable.contains(window)
+			match $groups {
+				Ok(groups) => {
+					$groups = add_target(groups, window, run, reconcilable, spaces)
 				}
-			if considered {
-				match space_of(spaces, window) {
-					Space(space) => {
-						$groups = add_to_space($groups, space, window)
-					}
-					NoSpace => {}
-				}
-			} else {
-				{}
+				Err(_) => {}
 			}
 		}
-		$groups.keep_if(|group| active.contains(group.space))
+		groups = $groups?
+		var $kept = Ok([])
+		for group in groups {
+			match $kept {
+				Ok(kept) =>
+					match ask_word(active, group.space, 2) {
+						Ok(True) => {
+							$kept = Ok(kept.append(group))
+						}
+						Ok(False) => {}
+						Err(unasked) => {
+							$kept = Err(unasked)
+						}
+					}
+				Err(_) => {}
+			}
+		}
+		$kept
 	}
 
-	space_of : List({ window : U64, space : U64 }), U64 -> MaybeSpace
-	space_of = |spaces, window| {
-		var $found = NoSpace
-		for entry in spaces {
-			match $found {
-				NoSpace => if (entry.window == window) { $found = Space(entry.space) } else {}
-				Space(_) => {}
+	## Adds `window` to its Space's group, if the run considers it and it has a Space.
+	add_target : List({ space : U64, windows : List(U64) }), U64, RuleRun, Answers(U64, Bool), Answers(U64, MaybeSpace) -> Read(List({ space : U64, windows : List(U64) }))
+	add_target = |groups, window, run, reconcilable, spaces| {
+		considered =
+			match run {
+				Reapply => Ok(True)
+				Admission => ask_word(reconcilable, window, 0)
+			}?
+		if considered {
+			space_of = ask_word(spaces, window, 1)?
+			match space_of {
+				Space(space) => Ok(add_to_space(groups, space, window))
+				NoSpace => Ok(groups)
 			}
+		} else {
+			Ok(groups)
 		}
-		$found
 	}
 
 	## Adds `window` to its Space's group, keeping the groups in Space order (a BTreeMap's).
@@ -98,34 +124,50 @@ Lifecycle := [].{
 		}
 
 	## The Space a new window moves to: in global mode, the pointer's other active display's,
-	## for a standard window no app rule places.
-	pointer_display_target : Bool, U64, MaybeSpace, List(U64), [Untracked, NotStandard, Standard], Bool -> MaybeSpace
+	## for a standard window no app rule places. Facts: 0 the pointer's Space, 1 whether a Space
+	## is active, 2 whether a rule names the window's workspace.
+	pointer_display_target : Bool, U64, Fact(MaybeSpace), Answers(U64, Bool), [Untracked, NotStandard, Standard], Fact(Bool) -> Read(MaybeSpace)
 	pointer_display_target = |global, opened_on, pointer, active, window, rule_names_workspace|
 		if global {
-			match pointer {
+			pointer_of = ask(pointer, 0)?
+			match pointer_of {
 				Space(target) =>
-					if target != opened_on and active.contains(target) {
-						match window {
-							Standard => if (rule_names_workspace) NoSpace else Space(target)
-							Untracked => NoSpace
-							NotStandard => NoSpace
+					if target != opened_on {
+						is_active = ask_word(active, target, 1)?
+						if is_active {
+							match window {
+								Standard => {
+									names = ask(rule_names_workspace, 2)?
+									if names Ok(NoSpace) else Ok(Space(target))
+								}
+								Untracked => Ok(NoSpace)
+								NotStandard => Ok(NoSpace)
+							}
+						} else {
+							Ok(NoSpace)
 						}
 					} else {
-						NoSpace
+						Ok(NoSpace)
 					}
-				NoSpace => NoSpace
+				NoSpace => Ok(NoSpace)
 			}
 		} else {
-			NoSpace
+			Ok(NoSpace)
 		}
 
-	## Whether `owner`'s window is a native transient.
-	is_native_transient : [Entry({ origin : Origin, pid : U64 }), NoEntry], U64, Bool -> Bool
+	## Whether `owner`'s window is a native transient. Fact: 0 whether it is exempt.
+	is_native_transient : [Entry({ origin : Origin, pid : U64 }), NoEntry], U64, Fact(Bool) -> Read(Bool)
 	is_native_transient = |entry, owner, exempt|
 		match entry {
-			Entry({ origin: Native, pid }) => pid == owner and !exempt
-			Entry({ origin: Heuristic, .. }) => False
-			NoEntry => False
+			Entry({ origin: Native, pid }) =>
+				if pid == owner {
+					is_exempt = ask(exempt, 0)?
+					Ok(!is_exempt)
+				} else {
+					Ok(False)
+				}
+			Entry({ origin: Heuristic, .. }) => Ok(False)
+			NoEntry => Ok(False)
 		}
 
 	## Whether a transient entry survives a departure.
@@ -157,32 +199,38 @@ Lifecycle := [].{
 			NoSpace => False
 		}
 
-	## Whether an inventory that omits a window says nothing about it.
-	out_of_inventory_view : MaybeSpace, MaybeSpace, List(U64), Bool -> Bool
+	## Whether an inventory that omits a window says nothing about it. Facts: 0 its assignment,
+	## 1 whether a Space is active, 2 whether it is parked.
+	out_of_inventory_view : MaybeSpace, Fact(MaybeSpace), Answers(U64, Bool), Fact(Bool) -> Read(Bool)
 	out_of_inventory_view = |native, assigned, active, parked| {
 		known =
 			match native {
-				Space(space) => Space(space)
-				NoSpace => assigned
-			}
+				Space(space) => Ok(Space(space))
+				NoSpace => ask(assigned, 0)
+			}?
 		inactive =
 			match known {
-				Space(space) => !active.contains(space)
-				NoSpace => False
-			}
-		inactive or parked
+				Space(space) => ask_word(active, space, 1).map_ok(|is_active| !is_active)
+				NoSpace => Ok(False)
+			}?
+		if inactive Ok(True) else ask(parked, 2)
 	}
 
-	## Whether a title change re-applies a window's app rules.
-	reapplies_on_title_change : Bool, MaybeSpace, List(U64), Bool -> Bool
+	## Whether a title change re-applies a window's app rules. Facts: 0 its Space, 1 whether a
+	## Space is active, 2 whether it is reconcilable.
+	reapplies_on_title_change : Bool, Fact(MaybeSpace), Answers(U64, Bool), Fact(Bool) -> Read(Bool)
 	reapplies_on_title_change = |configured, space, active, reconcilable|
 		if configured {
-			match space {
-				Space(id) => active.contains(id) and reconcilable
-				NoSpace => False
+			space_of = ask(space, 0)?
+			match space_of {
+				Space(id) => {
+					is_active = ask_word(active, id, 1)?
+					if is_active ask(reconcilable, 2) else Ok(False)
+				}
+				NoSpace => Ok(False)
 			}
 		} else {
-			False
+			Ok(False)
 		}
 
 	## Whether rift manages a window, and if not the first veto that applies: 0 admitted, or 1
@@ -445,32 +493,35 @@ Lifecycle := [].{
 		presence_step(before, event)
 	}
 
-	## Whether an inventory retires a window: 0 retire, or 1 and why it keeps it.
-	retirement : { reported : Bool, out_of_view : Bool, minimize : [Shown, Minimized, NoAxState], fullscreen : Bool, identified : Bool, invalidated : Bool, suitable : [Yes, No, Unknown], ordered_in : [Yes, No, Unknown], not_a_window : [Yes, No, Unknown] } -> List(U64)
-	retirement = |facts|
+	## Whether an inventory retires a window: 0 retire, or 1 and why it keeps it. Fact: 0 what
+	## the window server says of it, asked only for an omitted window in view with AX state,
+	## shown, not in fullscreen and with a native identity.
+	retirement : { reported : Bool, out_of_view : Bool, minimize : [Shown, Minimized, NoAxState], fullscreen : Bool, identified : Bool, invalidated : Bool }, Fact({ suitable : [Yes, No, Unknown], ordered_in : [Yes, No, Unknown], not_a_window : [Yes, No, Unknown] }) -> Read(List(U64))
+	retirement = |facts, evidence|
 		if facts.reported {
-			[1, 0]
+			Ok([1, 0])
 		} else if facts.out_of_view {
-			[1, 1]
+			Ok([1, 1])
 		} else {
 			match facts.minimize {
-				NoAxState => [1, 2]
-				Minimized => [1, 3]
+				NoAxState => Ok([1, 2])
+				Minimized => Ok([1, 3])
 				Shown =>
 					if facts.fullscreen {
-						[1, 4]
+						Ok([1, 4])
 					} else if !facts.identified {
-						[1, 5]
+						Ok([1, 5])
 					} else {
-						suitable = facts.suitable == Yes
-						unsuitable = facts.suitable == No
-						ordered_out = facts.ordered_in == No
+						native = ask(evidence, 0)?
+						suitable = native.suitable == Yes
+						unsuitable = native.suitable == No
+						ordered_out = native.ordered_in == No
 						if suitable and ordered_out and !facts.invalidated {
-							[1, 6]
-						} else if unsuitable or ordered_out or facts.not_a_window == Yes {
-							[0]
+							Ok([1, 6])
+						} else if unsuitable or ordered_out or native.not_a_window == Yes {
+							Ok([0])
 						} else {
-							[1, 7]
+							Ok([1, 7])
 						}
 					}
 			}
@@ -492,7 +543,7 @@ Lifecycle := [].{
 	}
 
 	## Tag 27. (Suitability and the window look are written 0 for yes; ordering 0 for in.)
-	inventory_words : Words -> Try(List(U64), [Malformed])
+	inventory_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	inventory_words = |c0| {
 		(report, c1) = take(c0)?
 		(view, c2) = take(c1)?
@@ -515,15 +566,19 @@ Lifecycle := [].{
 				(False, after_flag)
 			}
 		(validity, c7) = take(c6)?
-		(suitable, c8) = take_tri(c7)?
-		(ordered_in, c9) = take_tri(c8)?
-		(look, c10) = take_tri(c9)?
-		finished(c10)?
+		take_evidence = |c| {
+			(suitable, after_suitable) = take_tri(c)?
+			(ordered_in, after_ordering) = take_tri(after_suitable)?
+			(look, rest) = take_tri(after_ordering)?
+			Ok(({ suitable, ordered_in, not_a_window: invert(look) }, rest))
+		}
+		(evidence, c8) = take_fact(c7, take_evidence)?
+		finished(c8)?
 		reported = !(binary(report)?)
 		out_of_view = binary(view)?
 		fullscreen = !(binary(fullscreen_word)?)
 		invalidated = binary(validity)?
-		Ok(retirement({ reported, out_of_view, minimize, fullscreen, identified, invalidated, suitable, ordered_in, not_a_window: invert(look) }))
+		retirement({ reported, out_of_view, minimize, fullscreen, identified, invalidated }, evidence)
 	}
 
 	## A window look read as "a window?" (0 yes) becomes "not a window?".
@@ -704,20 +759,16 @@ Lifecycle := [].{
 	}
 
 	## Tag 9.
-	rule_targets_words : Words -> Try(List(U64), [Malformed])
+	rule_targets_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	rule_targets_words = |c0| {
-		take_pair = |c| {
-			(window, after) = take(c)?
-			(space, rest) = take(after)?
-			Ok(({ window, space }, rest))
-		}
 		(windows, c1) = take_list(c0, take)?
 		(run, c2) = take_run(c1)?
-		(reconcilable, c3) = take_list(c2, take)?
-		(spaces, c4) = take_list(c3, take_pair)?
-		(active, c5) = take_list(c4, take)?
+		(reconcilable, c3) = take_answers(c2, take, take_flag)?
+		(spaces, c4) = take_answers(c3, take, take_space)?
+		(active, c5) = take_answers(c4, take, take_flag)?
 		finished(c5)?
-		Ok(put_list([], rule_targets(windows, run, reconcilable, spaces, active), |w, group| put_list(w.append(group.space), group.windows, |ws, id| ws.append(id))))
+		groups = rule_targets(windows, run, reconcilable, spaces, active)?
+		Ok(put_list([], groups, |w, group| put_list(w.append(group.space), group.windows, |ws, id| ws.append(id))))
 	}
 
 	## Tag 10.
@@ -735,12 +786,12 @@ Lifecycle := [].{
 	}
 
 	## Tag 11.
-	pointer_target_words : Words -> Try(List(U64), [Malformed])
+	pointer_target_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	pointer_target_words = |c0| {
 		(global, c1) = take_binary(c0)?
 		(opened_on, c2) = take(c1)?
-		(pointer, c3) = take_space(c2)?
-		(active, c4) = take_list(c3, take)?
+		(pointer, c3) = take_fact(c2, take_space)?
+		(active, c4) = take_answers(c3, take, take_flag)?
 		(window_word, c5) = take(c4)?
 		window =
 			match window_word {
@@ -749,13 +800,14 @@ Lifecycle := [].{
 				2 => Ok(Standard)
 				_ => Err(Malformed)
 			}?
-		(rule_names_workspace, c6) = take_flag(c5)?
+		(rule_names_workspace, c6) = take_fact(c5, take_flag)?
 		finished(c6)?
-		Ok(put_space([], pointer_display_target(global, opened_on, pointer, active, window, rule_names_workspace)))
+		target = pointer_display_target(global, opened_on, pointer, active, window, rule_names_workspace)?
+		Ok(put_space([], target))
 	}
 
 	## Tag 12.
-	native_transient_words : Words -> Try(List(U64), [Malformed])
+	native_transient_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	native_transient_words = |c0| {
 		(has_entry, c1) = take_flag(c0)?
 		(entry, c2) =
@@ -767,9 +819,10 @@ Lifecycle := [].{
 				(NoEntry, c1)
 			}
 		(owner, c3) = take(c2)?
-		(exempt, c4) = take_flag(c3)?
+		(exempt, c4) = take_fact(c3, take_flag)?
 		finished(c4)?
-		Ok(put_verdict(is_native_transient(entry, owner, exempt)))
+		verdict = is_native_transient(entry, owner, exempt)?
+		Ok(put_verdict(verdict))
 	}
 
 	## Tag 13.
@@ -800,24 +853,26 @@ Lifecycle := [].{
 	}
 
 	## Tag 15.
-	out_of_view_words : Words -> Try(List(U64), [Malformed])
+	out_of_view_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	out_of_view_words = |c0| {
 		(native, c1) = take_space(c0)?
-		(assigned, c2) = take_space(c1)?
-		(active, c3) = take_list(c2, take)?
-		(parked, c4) = take_flag(c3)?
+		(assigned, c2) = take_fact(c1, take_space)?
+		(active, c3) = take_answers(c2, take, take_flag)?
+		(parked, c4) = take_fact(c3, take_flag)?
 		finished(c4)?
-		Ok(put_verdict(out_of_inventory_view(native, assigned, active, parked)))
+		verdict = out_of_inventory_view(native, assigned, active, parked)?
+		Ok(put_verdict(verdict))
 	}
 
 	## Tag 16.
-	title_change_words : Words -> Try(List(U64), [Malformed])
+	title_change_words : Words -> Try(List(U64), [Malformed, Unasked(U64)])
 	title_change_words = |c0| {
 		(configured, c1) = take_binary(c0)?
-		(space, c2) = take_space(c1)?
-		(active, c3) = take_list(c2, take)?
-		(reconcilable, c4) = take_flag(c3)?
+		(space, c2) = take_fact(c1, take_space)?
+		(active, c3) = take_answers(c2, take, take_flag)?
+		(reconcilable, c4) = take_fact(c3, take_flag)?
 		finished(c4)?
-		Ok(put_verdict(reapplies_on_title_change(configured, space, active, reconcilable)))
+		verdict = reapplies_on_title_change(configured, space, active, reconcilable)?
+		Ok(put_verdict(verdict))
 	}
 }

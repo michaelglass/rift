@@ -3,13 +3,16 @@
 //! purpose, so windows share Spaces, entries share apps, and departures hit and miss.
 
 use rift_core::lifecycle::plain::{
-    KeepsTransient, Misplaced, NativeTransient, OutOfView, PointerTarget, RuleRefresh, RuleTargets,
-    TitleChange,
+    Inventory, KeepsTransient, Misplaced, NativeTransient, OutOfView, PointerTarget, RuleRefresh,
+    RuleTargets, TitleChange,
 };
 use rift_core::lifecycle::{
     Departure, NewWindow, OnTitleChange, RuleOutcome, RuleRun, TransientOrigin, WorkspaceMode,
 };
-use rift_core::plain::wire;
+mod facts;
+
+use facts::{Coin, differential, roc, rust};
+use rift_core::plain::{Fact, wire};
 use rift_core_roc::{AllocationCount, tile_words};
 
 /// xorshift64*: deterministic, no dependency.
@@ -59,156 +62,210 @@ impl Rng {
     }
 }
 
-/// Runs random questions through both cores; `ask` makes one and returns its words and the
-/// Rust core's answer as words.
-fn differential(name: &str, seed: u64, mut ask: impl FnMut(&mut Rng) -> (Vec<u64>, Vec<u64>)) {
-    let cases: u64 = std::env::var("RIFT_LIFECYCLE_CASES").map_or(20_000, |n| n.parse().unwrap());
-    let mut rng = Rng(seed);
-    let before = AllocationCount::now();
-    for case in 0..cases {
-        let (question, rust) = ask(&mut rng);
-        assert_eq!(
-            tile_words(&question),
-            Ok(rust),
-            "case {case}: {name} {question:?}"
-        );
-    }
-    let after = AllocationCount::now();
-    assert_eq!(after.live(), before.live(), "Roc allocations left live");
-    eprintln!("lifecycle: {cases} {name} questions answered identically");
+impl Coin for Rng {
+    fn chance(&mut self, percent: u64) -> bool { Rng::chance(self, percent) }
 }
 
 #[test]
 fn the_roc_core_picks_app_rule_targets_as_the_rust_core_does() {
-    differential("rule-targets", 0x7A26_E750_0000_0009, |rng| {
-        let question = RuleTargets {
-            windows: rng.ids(6),
-            run: rng.run(),
-            reconcilable: rng.ids(4),
-            spaces: (0..rng.below(6)).map(|_| (rng.id(), rng.id())).collect(),
-            active: rng.ids(3),
-        };
-        let rust = wire::encode_rule_targets(question.answer());
-        (wire::encode_rule_targets_question(question), rust)
-    });
+    differential(
+        "lifecycle",
+        "rule-targets",
+        Rng(0x7A26_E750_0000_0009),
+        |rng, blank| {
+            let windows = rng.ids(6);
+            let run = rng.run();
+            let reconcilable = rng.ids(4);
+            // A window's Space is the first listed for it, if any.
+            let listed: Vec<(u64, u64)> = (0..rng.below(6)).map(|_| (rng.id(), rng.id())).collect();
+            let space = |window: u64| listed.iter().find(|(w, _)| *w == window).map(|(_, s)| *s);
+            let active = rng.ids(3);
+            let spaces: Vec<u64> = listed.iter().map(|(_, space)| *space).collect();
+            let question = RuleTargets {
+                reconcilable: blank
+                    .answers(rng, windows.iter().copied(), |w| reconcilable.contains(&w)),
+                spaces: blank.answers(rng, windows.iter().copied(), space),
+                active: blank.answers(rng, spaces, |space| active.contains(&space)),
+                windows,
+                run,
+            };
+            let rust = rust(question.answer(), wire::encode_rule_targets);
+            (wire::encode_rule_targets_question(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_decides_whether_the_layout_hears_of_a_window_as_the_rust_core_does() {
-    differential("rule-refresh", 0x2EF2_E540_0000_0010, |rng| {
-        let question = RuleRefresh {
-            run: rng.run(),
-            outcome: RuleOutcome {
-                workspace_before: rng.maybe(),
-                workspace: rng.id(),
-                floating_before: rng.chance(50),
-                floating: rng.chance(50),
-                was_ignored: rng.chance(20),
-                unavailable: rng.chance(20),
-            },
-        };
-        let rust = wire::encode_verdict(question.answer());
-        (wire::encode_rule_refresh(question), rust)
-    });
+    differential(
+        "lifecycle",
+        "rule-refresh",
+        Rng(0x2EF2_E540_0000_0010),
+        |rng, blank| {
+            let question = RuleRefresh {
+                run: rng.run(),
+                outcome: RuleOutcome {
+                    workspace_before: rng.maybe(),
+                    workspace: rng.id(),
+                    floating_before: rng.chance(50),
+                    floating: rng.chance(50),
+                    was_ignored: rng.chance(20),
+                    unavailable: rng.chance(20),
+                },
+            };
+            let _ = blank;
+            let rust = Ok(wire::encode_verdict(question.answer()));
+            (wire::encode_rule_refresh(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_places_a_new_window_on_the_pointers_display_as_the_rust_core_does() {
-    differential("pointer-target", 0x9014_7E2D_0000_0011, |rng| {
-        let question = PointerTarget {
-            mode: if rng.chance(70) {
+    differential(
+        "lifecycle",
+        "pointer-target",
+        Rng(0x9014_7E2D_0000_0011),
+        |rng, blank| {
+            let mode = if rng.chance(70) {
                 WorkspaceMode::Global
             } else {
                 WorkspaceMode::PerDisplay
-            },
-            opened_on: rng.id(),
-            pointer: rng.maybe(),
-            active: rng.ids(3),
-            window: match rng.below(4) {
+            };
+            let opened_on = rng.id();
+            let pointer = rng.maybe();
+            let active = rng.ids(3);
+            let window = match rng.below(4) {
                 0 => NewWindow::Untracked,
                 1 => NewWindow::NotStandard,
                 _ => NewWindow::Standard(()),
-            },
-            rule_names_workspace: rng.chance(30),
-        };
-        let rust = wire::encode_maybe_space(question.answer());
-        (wire::encode_pointer_target(question), rust)
-    });
+            };
+            let rule_names_workspace = rng.chance(30);
+            let question = PointerTarget {
+                mode,
+                opened_on,
+                pointer: blank.fact(rng, pointer),
+                active: blank.answers(rng, pointer, |space| active.contains(&space)),
+                window,
+                rule_names_workspace: blank.fact(rng, rule_names_workspace),
+            };
+            let rust = rust(question.answer(), wire::encode_maybe_space);
+            (wire::encode_pointer_target(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_finds_native_transients_as_the_rust_core_does() {
-    differential("native-transient", 0x7EA2_5157_0000_0012, |rng| {
-        let question = NativeTransient {
-            entry: rng.chance(70).then(|| (rng.origin(), rng.id())),
-            owner: rng.id(),
-            exempt: rng.chance(20),
-        };
-        let rust = wire::encode_verdict(question.answer());
-        (wire::encode_native_transient(question), rust)
-    });
+    differential(
+        "lifecycle",
+        "native-transient",
+        Rng(0x7EA2_5157_0000_0012),
+        |rng, blank| {
+            let entry = rng.chance(70).then(|| (rng.origin(), rng.id()));
+            let owner = rng.id();
+            let exempt = rng.chance(20);
+            let question = NativeTransient {
+                entry,
+                owner,
+                exempt: blank.fact(rng, exempt),
+            };
+            let rust = rust(question.answer(), wire::encode_verdict);
+            (wire::encode_native_transient(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_keeps_transient_entries_as_the_rust_core_does() {
-    differential("keeps-transient", 0x6EE9_5000_0000_0013, |rng| {
-        let question = KeepsTransient {
-            departure: match rng.below(3) {
-                0 => Departure::Destroyed(rng.maybe()),
-                1 => Departure::Closed(rng.id()),
-                _ => Departure::AppGone(rng.id()),
-            },
-            id: rng.id(),
-            origin: rng.origin(),
-            owner: rng.id(),
-        };
-        let rust = wire::encode_verdict(question.answer());
-        (wire::encode_keeps_transient(question), rust)
-    });
+    differential(
+        "lifecycle",
+        "keeps-transient",
+        Rng(0x6EE9_5000_0000_0013),
+        |rng, blank| {
+            let question = KeepsTransient {
+                departure: match rng.below(3) {
+                    0 => Departure::Destroyed(rng.maybe()),
+                    1 => Departure::Closed(rng.id()),
+                    _ => Departure::AppGone(rng.id()),
+                },
+                id: rng.id(),
+                origin: rng.origin(),
+                owner: rng.id(),
+            };
+            let _ = blank;
+            let rust = Ok(wire::encode_verdict(question.answer()));
+            (wire::encode_keeps_transient(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_finds_misplaced_windows_as_the_rust_core_does() {
-    differential("misplaced", 0x0315_91AC_ED00_0014, |rng| {
-        let question = Misplaced {
-            assigned: rng.maybe(),
-            native: rng.maybe(),
-        };
-        let rust = wire::encode_verdict(question.answer());
-        (wire::encode_misplaced(question), rust)
-    });
+    differential(
+        "lifecycle",
+        "misplaced",
+        Rng(0x0315_91AC_ED00_0014),
+        |rng, blank| {
+            let question = Misplaced {
+                assigned: rng.maybe(),
+                native: rng.maybe(),
+            };
+            let _ = blank;
+            let rust = Ok(wire::encode_verdict(question.answer()));
+            (wire::encode_misplaced(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_knows_what_an_inventory_cannot_see_as_the_rust_core_does() {
-    differential("out-of-view", 0x0070_F713_0000_0015, |rng| {
-        let question = OutOfView {
-            native: rng.maybe(),
-            assigned: rng.maybe(),
-            active: rng.ids(3),
-            parked: rng.chance(20),
-        };
-        let rust = wire::encode_verdict(question.answer());
-        (wire::encode_out_of_view(question), rust)
-    });
+    differential(
+        "lifecycle",
+        "out-of-view",
+        Rng(0x0070_F713_0000_0015),
+        |rng, blank| {
+            let native = rng.maybe();
+            let assigned = rng.maybe();
+            let active = rng.ids(3);
+            let parked = rng.chance(20);
+            let question = OutOfView {
+                native,
+                assigned: blank.fact(rng, assigned),
+                active: blank.answers(rng, native.or(assigned), |space| active.contains(&space)),
+                parked: blank.fact(rng, parked),
+            };
+            let rust = rust(question.answer(), wire::encode_verdict);
+            (wire::encode_out_of_view(question), rust)
+        },
+    );
 }
 
 #[test]
 fn the_roc_core_reapplies_rules_on_a_title_change_as_the_rust_core_does() {
-    differential("title-change", 0x7171_EC4A_0000_0016, |rng| {
-        let question = TitleChange {
-            configured: if rng.chance(80) {
+    differential(
+        "lifecycle",
+        "title-change",
+        Rng(0x7171_EC4A_0000_0016),
+        |rng, blank| {
+            let configured = if rng.chance(80) {
                 OnTitleChange::Reapply
             } else {
                 OnTitleChange::Ignore
-            },
-            space: rng.maybe(),
-            active: rng.ids(3),
-            reconcilable: rng.chance(60),
-        };
-        let rust = wire::encode_verdict(question.answer());
-        (wire::encode_title_change(question), rust)
-    });
+            };
+            let space = rng.maybe();
+            let active = rng.ids(3);
+            let reconcilable = rng.chance(60);
+            let question = TitleChange {
+                configured,
+                space: blank.fact(rng, space),
+                active: blank.answers(rng, space, |space| active.contains(&space)),
+                reconcilable: blank.fact(rng, reconcilable),
+            };
+            let rust = rust(question.answer(), wire::encode_verdict);
+            (wire::encode_title_change(question), rust)
+        },
+    );
 }
 
 #[test]
@@ -425,15 +482,19 @@ fn the_roc_core_retires_windows_as_the_rust_core_does_for_every_combination_of_f
                                         };
                                         let evidence =
                                             NativeEvidence { suitability, ordering, look };
-                                        let rust = wire::encode_retirement(
-                                            rift_core::lifecycle::retirement(facts, |_| evidence),
-                                        );
-                                        assert_eq!(
-                                            tile_words(&wire::encode_inventory(facts, evidence)),
-                                            Ok(rust),
-                                            "{facts:?} {evidence:?}"
-                                        );
-                                        checked += 1;
+                                        // As asked, and unasked: both cores read it at the same
+                                        // point, or neither does.
+                                        for evidence in [Fact::Asked(evidence), Fact::Unasked] {
+                                            let question = Inventory { facts, evidence };
+                                            let rust =
+                                                rust(question.answer(), wire::encode_retirement);
+                                            assert_eq!(
+                                                roc(&wire::encode_inventory(question)),
+                                                rust,
+                                                "{question:?}"
+                                            );
+                                            checked += 1;
+                                        }
                                     }
                                 }
                             }
@@ -443,7 +504,7 @@ fn the_roc_core_retires_windows_as_the_rust_core_does_for_every_combination_of_f
             }
         }
     }
-    assert_eq!(checked, 2 * 2 * 3 * 2 * 2 * 2 * 27);
+    assert_eq!(checked, 2 * 2 * 3 * 2 * 2 * 2 * 27 * 2);
     let after = AllocationCount::now();
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("lifecycle: all {checked} retirement fact combinations answered identically");

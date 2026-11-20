@@ -806,18 +806,18 @@ pub fn encode_rule_targets(answer: Vec<(u64, Vec<u64>)>) -> Vec<u64> {
 }
 
 /// Tag 9, [`lifecycle::plain::RuleTargets`]: the windows, the run (0 admission, 1 re-apply),
-/// the reconcilable windows, the windows' Spaces (window, Space), the active Spaces.
+/// then its facts: whether a window is reconcilable, its Space (answers of an option), whether a
+/// Space is active (answers).
 pub fn encode_rule_targets_question(question: lifecycle::plain::RuleTargets) -> Vec<u64> {
     let mut words = Words::default();
     words.word(9);
     words.list(question.windows, Words::word);
     words.rule_run(question.run);
-    words.list(question.reconcilable, Words::word);
-    words.list(question.spaces, |words, (window, space)| {
-        words.word(window);
-        words.word(space);
+    words.answers(question.reconcilable, Words::word, Words::flag);
+    words.answers(question.spaces, Words::word, |words, space| {
+        words.option(space, Words::word)
     });
-    words.list(question.active, Words::word);
+    words.answers(question.active, Words::word, Words::flag);
     words.0
 }
 
@@ -838,8 +838,9 @@ pub fn encode_rule_refresh(question: lifecycle::plain::RuleRefresh) -> Vec<u64> 
 }
 
 /// Tag 11, [`lifecycle::plain::PointerTarget`]: the mode (0 per display, 1 global), the Space
-/// it opened on, the pointer's Space (an option), the active Spaces, the window (0 untracked, 1
-/// not standard, 2 standard), whether a rule names its workspace.
+/// it opened on, the pointer's Space (a fact of an option), whether a Space is active (answers),
+/// the window (0 untracked, 1 not standard, 2 standard), whether a rule names its workspace (a
+/// fact).
 pub fn encode_pointer_target(question: lifecycle::plain::PointerTarget) -> Vec<u64> {
     let mut words = Words::default();
     words.word(11);
@@ -848,19 +849,19 @@ pub fn encode_pointer_target(question: lifecycle::plain::PointerTarget) -> Vec<u
         WorkspaceMode::Global => 1,
     });
     words.word(question.opened_on);
-    words.option(question.pointer, Words::word);
-    words.list(question.active, Words::word);
+    words.fact(question.pointer, |words, space| words.option(space, Words::word));
+    words.answers(question.active, Words::word, Words::flag);
     words.word(match question.window {
         NewWindow::Untracked => 0,
         NewWindow::NotStandard => 1,
         NewWindow::Standard(()) => 2,
     });
-    words.flag(question.rule_names_workspace);
+    words.fact(question.rule_names_workspace, Words::flag);
     words.0
 }
 
 /// Tag 12, [`lifecycle::plain::NativeTransient`]: the entry (an option of origin, owner), the
-/// window's app, whether it is exempt.
+/// window's app, then its fact: whether it is exempt.
 pub fn encode_native_transient(question: lifecycle::plain::NativeTransient) -> Vec<u64> {
     let mut words = Words::default();
     words.word(12);
@@ -869,7 +870,7 @@ pub fn encode_native_transient(question: lifecycle::plain::NativeTransient) -> V
         words.word(owner);
     });
     words.word(question.owner);
-    words.flag(question.exempt);
+    words.fact(question.exempt, Words::flag);
     words.0
 }
 
@@ -907,20 +908,23 @@ pub fn encode_misplaced(question: lifecycle::plain::Misplaced) -> Vec<u64> {
     words.0
 }
 
-/// Tag 15, [`lifecycle::plain::OutOfView`]: the native Space and the assignment (options), the
-/// active Spaces, whether it is parked.
+/// Tag 15, [`lifecycle::plain::OutOfView`]: the native Space (an option), then its facts: the
+/// assignment (a fact of an option), whether a Space is active (answers), whether it is parked.
 pub fn encode_out_of_view(question: lifecycle::plain::OutOfView) -> Vec<u64> {
     let mut words = Words::default();
     words.word(15);
     words.option(question.native, Words::word);
-    words.option(question.assigned, Words::word);
-    words.list(question.active, Words::word);
-    words.flag(question.parked);
+    words.fact(question.assigned, |words, space| {
+        words.option(space, Words::word)
+    });
+    words.answers(question.active, Words::word, Words::flag);
+    words.fact(question.parked, Words::flag);
     words.0
 }
 
-/// Tag 16, [`lifecycle::plain::TitleChange`]: the setting (0 ignore, 1 re-apply), the window's
-/// Space (an option), the active Spaces, whether it is reconcilable.
+/// Tag 16, [`lifecycle::plain::TitleChange`]: the setting (0 ignore, 1 re-apply), then its
+/// facts: the window's Space (a fact of an option), whether a Space is active (answers), whether
+/// it is reconcilable.
 pub fn encode_title_change(question: lifecycle::plain::TitleChange) -> Vec<u64> {
     let mut words = Words::default();
     words.word(16);
@@ -928,9 +932,9 @@ pub fn encode_title_change(question: lifecycle::plain::TitleChange) -> Vec<u64> 
         OnTitleChange::Ignore => 0,
         OnTitleChange::Reapply => 1,
     });
-    words.option(question.space, Words::word);
-    words.list(question.active, Words::word);
-    words.flag(question.reconcilable);
+    words.fact(question.space, |words, space| words.option(space, Words::word));
+    words.answers(question.active, Words::word, Words::flag);
+    words.fact(question.reconcilable, Words::flag);
     words.0
 }
 
@@ -1351,12 +1355,10 @@ pub fn encode_window_admission(answer: lifecycle::Admission) -> Vec<u64> {
 /// Tag 27, an inventory's retirement question: report (0 reported, 1 omitted), view (0 in, 1
 /// out), minimize (an option: 0 shown, 1 minimized; none without AX state), fullscreen record
 /// (0 recorded, 1 not), the native identity (an option of its word), validity (0 valid, 1
-/// invalidated), then the evidence: suitability (an option: 0 suitable, 1 not), ordering (an
-/// option: 0 in, 1 out), look (an option: 0 a window, 1 not).
-pub fn encode_inventory(
-    facts: lifecycle::InventoryFacts<u64>,
-    evidence: lifecycle::NativeEvidence,
-) -> Vec<u64> {
+/// invalidated), then its fact, the evidence: suitability (an option: 0 suitable, 1 not),
+/// ordering (an option: 0 in, 1 out), look (an option: 0 a window, 1 not).
+pub fn encode_inventory(question: lifecycle::plain::Inventory) -> Vec<u64> {
+    let facts = question.facts;
     use lifecycle::{
         AxValidity, FullscreenRecord, InventoryView, NativeIdentity, NativeLook, Ordering, Report,
         Suitability,
@@ -1389,23 +1391,25 @@ pub fn encode_inventory(
         AxValidity::Valid => 0,
         AxValidity::Invalidated => 1,
     });
-    words.option(evidence.suitability, |words, suitability| {
-        words.word(match suitability {
-            Suitability::Suitable => 0,
-            Suitability::Unsuitable => 1,
-        })
-    });
-    words.option(evidence.ordering, |words, ordering| {
-        words.word(match ordering {
-            Ordering::OrderedIn => 0,
-            Ordering::OrderedOut => 1,
-        })
-    });
-    words.option(evidence.look, |words, look| {
-        words.word(match look {
-            NativeLook::Window => 0,
-            NativeLook::NotAWindow => 1,
-        })
+    words.fact(question.evidence, |words, evidence| {
+        words.option(evidence.suitability, |words, suitability| {
+            words.word(match suitability {
+                Suitability::Suitable => 0,
+                Suitability::Unsuitable => 1,
+            })
+        });
+        words.option(evidence.ordering, |words, ordering| {
+            words.word(match ordering {
+                Ordering::OrderedIn => 0,
+                Ordering::OrderedOut => 1,
+            })
+        });
+        words.option(evidence.look, |words, look| {
+            words.word(match look {
+                NativeLook::Window => 0,
+                NativeLook::NotAWindow => 1,
+            })
+        });
     });
     words.0
 }

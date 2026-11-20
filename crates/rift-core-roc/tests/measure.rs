@@ -337,34 +337,34 @@ fn measure_focus_questions() {
 #[test]
 #[ignore]
 fn measure_lifecycle_questions() {
-    use rift_core::lifecycle::plain::{KeepsTransient, NativeTransient};
+    use rift_core::lifecycle::plain::{Inventory, KeepsTransient, NativeTransient};
     use rift_core::lifecycle::{
         AxValidity, Departure, FullscreenRecord, InventoryFacts, InventoryView, Minimize,
         NativeEvidence, NativeIdentity, NativeLook, Ordering, Report, Suitability, TransientOrigin,
-        retirement,
     };
+    use rift_core::plain::Fact;
 
     let native = vec![
         NativeTransient {
             entry: None,
             owner: 7,
-            exempt: false,
+            exempt: Fact::Unasked,
         },
         NativeTransient {
             entry: Some((TransientOrigin::Native, 7)),
             owner: 7,
-            exempt: false,
+            exempt: Fact::Asked(false),
         },
         NativeTransient {
             entry: Some((TransientOrigin::Heuristic, 7)),
             owner: 7,
-            exempt: true,
+            exempt: Fact::Unasked,
         },
     ];
     question(
         "is_native_transient",
         &native,
-        |q| wire::encode_verdict(q.answer()),
+        |q| wire::encode_verdict(q.answer().expect("the facts it asks")),
         wire::encode_native_transient,
     );
     let keeps = vec![
@@ -408,13 +408,19 @@ fn measure_lifecycle_questions() {
     };
     // Reported (kept at once), and omitted with the evidence asked.
     let inventories = vec![
-        (facts(Report::Reported), evidence),
-        (facts(Report::Omitted), evidence),
+        Inventory {
+            facts: facts(Report::Reported),
+            evidence: Fact::Unasked,
+        },
+        Inventory {
+            facts: facts(Report::Omitted),
+            evidence: Fact::Asked(evidence),
+        },
     ];
     question(
         "retirement",
         &inventories,
-        |(facts, evidence)| wire::encode_retirement(retirement(*facts, |_| *evidence)),
-        |(facts, evidence)| wire::encode_inventory(facts, evidence),
+        |q| wire::encode_retirement(q.answer().expect("the facts it asks")),
+        wire::encode_inventory,
     );
 }
