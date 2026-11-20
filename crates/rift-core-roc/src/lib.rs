@@ -446,9 +446,10 @@ pub mod lifecycle {
 /// The workspace decisions and steps (`rift_core::workspaces`) decided by the Roc core. The
 /// steps answer with what a run leaves, as views of the Rust core's state.
 pub mod workspaces {
+    use rift_core::plain::Unasked;
     use rift_core::workspaces::plain::{
-        OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
-        WorkspacesQuestion,
+        EligibleQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
+        TopologyQuestion, WorkspacesQuestion,
     };
     use rift_core::workspaces::{Activation, Ownership, Refused};
 
@@ -479,10 +480,17 @@ pub mod workspaces {
         pub windows: Vec<Vec<u64>>,
     }
 
-    pub fn step(question: StepQuestion) -> Option<u64> {
+    pub fn step(question: StepQuestion) -> Result<Option<u64>, Unasked> {
         let host = host();
         let question = boundary::step_question(question, &host);
-        boundary::from_word(unsafe { abi::roc_workspace_step(question) })
+        boundary::word_answer(unsafe { abi::roc_workspace_step(question) })
+    }
+
+    /// It asks for no fact.
+    pub fn eligible(question: EligibleQuestion) -> bool {
+        let host = host();
+        let question = boundary::eligible_question(question, &host);
+        unsafe { abi::roc_workspace_eligible(question) }
     }
 
     pub fn resolve(question: ResolveQuestion) -> Option<(u64, u64)> {
@@ -491,10 +499,10 @@ pub mod workspaces {
         boundary::from_reached(unsafe { abi::roc_workspace_resolve(question) })
     }
 
-    pub fn previous(question: PreviousQuestion) -> Option<(u64, u64)> {
+    pub fn previous(question: PreviousQuestion) -> Result<Option<(u64, u64)>, Unasked> {
         let host = host();
         let question = boundary::previous_question(question, &host);
-        boundary::from_reached(unsafe { abi::roc_workspace_previous(question) })
+        boundary::reached_answer(unsafe { abi::roc_workspace_previous(question) })
     }
 
     pub fn topology(question: TopologyQuestion) -> TopologyView {

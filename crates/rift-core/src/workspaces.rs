@@ -577,8 +577,33 @@ pub mod plain {
         TopologyEvent, Workspaces, WorkspacesEvent, Wrapping,
     };
     use crate::lifecycle::WorkspaceMode;
+    use crate::plain::{Answers, Fact, Reading, Unasked};
 
-    /// [`super::step`]: the workspaces with windows.
+    /// [`super::eligible`]: it asks for no fact.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct EligibleQuestion {
+        pub mode: WorkspaceMode,
+        pub space: u64,
+        pub visible: Vec<u64>,
+        pub on: u64,
+    }
+
+    impl EligibleQuestion {
+        pub const FACTS: &[&str] = &[];
+
+        pub fn answer(&self) -> bool {
+            super::eligible(
+                self.mode,
+                Context {
+                    space: self.space,
+                    visible: &self.visible,
+                },
+                self.on,
+            )
+        }
+    }
+
+    /// [`super::step`]: whether a workspace has windows (asked only when skipping empty ones).
     #[derive(Debug, Clone, PartialEq)]
     pub struct StepQuestion {
         pub mode: WorkspaceMode,
@@ -589,12 +614,15 @@ pub mod plain {
         pub way: Step,
         pub skip_empty: SkipEmpty,
         pub wrapping: Wrapping,
-        pub with_windows: Vec<u64>,
+        pub has_windows: Answers<u64, bool>,
     }
 
     impl StepQuestion {
-        pub fn answer(&self) -> Option<u64> {
-            super::step(
+        pub const FACTS: &[&str] = &["has_windows"];
+
+        pub fn answer(&self) -> Result<Option<u64>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::step(
                 self.mode,
                 &self.catalog,
                 Context {
@@ -605,12 +633,13 @@ pub mod plain {
                 self.way,
                 self.skip_empty,
                 self.wrapping,
-                |id| self.with_windows.contains(&id),
-            )
+                |id| reading.about(&self.has_windows, &id, 0, false),
+            );
+            reading.answer(answer)
         }
     }
 
-    /// [`super::resolve`].
+    /// [`super::resolve`]: it asks for no fact. Names are one word each.
     #[derive(Debug, Clone, PartialEq)]
     pub struct ResolveQuestion {
         pub mode: WorkspaceMode,
@@ -621,6 +650,8 @@ pub mod plain {
     }
 
     impl ResolveQuestion {
+        pub const FACTS: &[&str] = &[];
+
         pub fn answer(&self) -> Option<(u64, u64)> {
             super::resolve(
                 self.mode,
@@ -634,27 +665,32 @@ pub mod plain {
         }
     }
 
-    /// [`super::previous`]: the Space the history's workspace is on, if it still exists.
+    /// [`super::previous`]: the Space the history's workspace is on, if it still exists
+    /// (asked only with a history).
     #[derive(Debug, Clone, PartialEq)]
     pub struct PreviousQuestion {
         pub mode: WorkspaceMode,
         pub space: u64,
         pub visible: Vec<u64>,
         pub last: Option<u64>,
-        pub on: Option<u64>,
+        pub on: Fact<Option<u64>>,
     }
 
     impl PreviousQuestion {
-        pub fn answer(&self) -> Option<(u64, u64)> {
-            super::previous(
+        pub const FACTS: &[&str] = &["on"];
+
+        pub fn answer(&self) -> Result<Option<(u64, u64)>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::previous(
                 self.mode,
                 Context {
                     space: self.space,
                     visible: &self.visible,
                 },
                 self.last,
-                |_| self.on,
-            )
+                |_| reading.fact(&self.on, 0, None),
+            );
+            reading.answer(answer)
         }
     }
 

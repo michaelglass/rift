@@ -228,23 +228,24 @@ mod tests {
             space: 10,
             visible: vec![10, 20],
             last: Some(3),
-            on: Some(20),
+            on: Fact::Asked(Some(20)),
         }
     }
 
     #[test]
     fn an_answer_both_cores_give_passes() {
         let question = question();
-        let roc = Ok(rift_core_roc::workspaces::previous(question.clone()));
-        check("previous", &[], &question, &question.answer(), roc);
+        let roc = rift_core_roc::workspaces::previous(question.clone());
+        let rust = question.answer().expect("the facts it asks");
+        check("previous", PreviousQuestion::FACTS, &question, &rust, roc);
     }
 
     #[test]
     #[should_panic(expected = "roc-divergence: previous")]
     fn a_different_answer_is_a_divergence() {
         let question = question();
-        let roc = Ok(rift_core_roc::workspaces::previous(question.clone()));
-        check("previous", &[], &question, &None, roc);
+        let roc = rift_core_roc::workspaces::previous(question.clone());
+        check("previous", PreviousQuestion::FACTS, &question, &None, roc);
     }
 
     #[test]

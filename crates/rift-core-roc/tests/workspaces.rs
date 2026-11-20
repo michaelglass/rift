@@ -8,10 +8,14 @@
 //! unknown workspaces, succeed workspaces into themselves and remove shown ones often enough
 //! that every refusal is met.
 
+mod facts;
+
+use facts::{Coin, rust, typed};
 use rift_core::lifecycle::WorkspaceMode;
+use rift_core::plain::{Answers, wire};
 use rift_core::workspaces::plain::{
-    OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion, TopologyQuestion,
-    WorkspacesQuestion,
+    EligibleQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
+    TopologyQuestion, WorkspacesQuestion,
 };
 use rift_core::workspaces::{
     Activation, Destination, Owned, Ownership, OwnershipEvent, Selector, SkipEmpty, Step,
@@ -60,6 +64,10 @@ impl Rng {
     }
 }
 
+impl Coin for Rng {
+    fn chance(&mut self, percent: u64) -> bool { Rng::chance(self, percent) }
+}
+
 /// Runs random questions through both cores; `ask` makes one and returns it (for the failure
 /// message), the Roc core's answer and the Rust core's.
 fn differential<A: PartialEq + std::fmt::Debug>(
@@ -81,7 +89,7 @@ fn differential<A: PartialEq + std::fmt::Debug>(
 
 #[test]
 fn the_roc_core_steps_through_workspaces_as_the_rust_core_does() {
-    differential("step", 0x57E9_0000_0000_0029, |rng| {
+    typed("workspaces", "step", Rng(0x57E9_0000_0000_0029), |rng, blank| {
         let catalog = rng.catalog();
         let current = match (rng.chance(85), catalog.len()) {
             (true, n) if n > 0 => catalog[rng.below(n as u64) as usize].0,
@@ -111,12 +119,23 @@ fn the_roc_core_steps_through_workspaces_as_the_rust_core_does() {
             } else {
                 Wrapping::Wrap
             },
-            with_windows: (1..=6).filter(|_| rng.chance(60)).collect(),
+            has_windows: Answers(Vec::new()),
             catalog,
         };
+        // Every catalogued workspace answered whether it has windows (each key once).
+        let with_windows: Vec<u64> = (1..=6).filter(|_| rng.chance(60)).collect();
+        let ids: Vec<u64> = question.catalog.iter().map(|(id, _)| *id).collect();
+        let question = StepQuestion {
+            has_windows: blank.answers(rng, ids, |id| with_windows.contains(&id)),
+            ..question
+        };
         // A step answers an option of one workspace.
-        let roc = rift_core_roc::workspaces::step(question.clone());
-        (format!("{question:?}"), roc, question.answer())
+        let roc = rust(
+            rift_core_roc::workspaces::step(question.clone()),
+            wire::encode_maybe_space,
+        );
+        let expected = rust(question.answer(), wire::encode_maybe_space);
+        (format!("{question:?}"), roc, expected)
     });
 }
 
@@ -150,8 +169,34 @@ fn the_roc_core_resolves_selectors_as_the_rust_core_does() {
 
 #[test]
 fn the_roc_core_follows_navigation_history_as_the_rust_core_does() {
-    differential("previous", 0x9E21_0000_0000_0031, |rng| {
-        let question = PreviousQuestion {
+    typed(
+        "workspaces",
+        "previous",
+        Rng(0x9E21_0000_0000_0031),
+        |rng, blank| {
+            let on = rng.chance(85).then(|| rng.space());
+            let question = PreviousQuestion {
+                mode: rng.mode(),
+                space: rng.space(),
+                visible: if rng.chance(15) {
+                    vec![]
+                } else {
+                    rng.visible()
+                },
+                last: rng.chance(80).then(|| 1 + rng.below(6)),
+                on: blank.fact(rng, on),
+            };
+            let roc = rust(rift_core_roc::workspaces::previous(question.clone()), target);
+            let expected = rust(question.answer(), target);
+            (format!("{question:?}"), roc, expected)
+        },
+    );
+}
+
+#[test]
+fn the_roc_core_finds_a_workspace_reachable_as_the_rust_core_does() {
+    differential("eligible", 0xE119_0000_0000_0035, |rng| {
+        let question = EligibleQuestion {
             mode: rng.mode(),
             space: rng.space(),
             visible: if rng.chance(15) {
@@ -159,10 +204,9 @@ fn the_roc_core_follows_navigation_history_as_the_rust_core_does() {
             } else {
                 rng.visible()
             },
-            last: rng.chance(80).then(|| 1 + rng.below(6)),
-            on: rng.chance(85).then(|| rng.space()),
+            on: rng.space(),
         };
-        let roc = rift_core_roc::workspaces::previous(question.clone());
+        let roc = rift_core_roc::workspaces::eligible(question.clone());
         (format!("{question:?}"), roc, question.answer())
     });
 }
@@ -339,4 +383,12 @@ fn the_roc_core_steps_the_joined_workspaces_as_the_rust_core_does() {
         let roc = rift_core_roc::workspaces::joined(question.clone());
         (format!("{question:?}"), roc, rust)
     });
+}
+
+/// A target (workspace and Space) or none, as words.
+fn target(answer: Option<(u64, u64)>) -> Vec<u64> {
+    match answer {
+        Some((workspace, space)) => vec![1, workspace, space],
+        None => vec![0],
+    }
 }

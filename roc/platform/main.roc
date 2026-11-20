@@ -37,9 +37,10 @@ platform ""
 			lifecycle_presence : PresenceQuestion -> PresenceAnswer,
 			lifecycle_net : NetQuestion -> Change,
 			inventory_retirement : InventoryQuestion -> RetirementAnswer,
-			workspace_step : StepQuestion -> MaybeWord,
+			workspace_step : StepQuestion -> WordAnswer,
 			workspace_resolve : ResolveQuestion -> Reached,
-			workspace_previous : PreviousQuestion -> Reached,
+			workspace_previous : PreviousQuestion -> ReachedAnswer,
+			workspace_eligible : EligibleQuestion -> Bool,
 			topology_steps : TopologyQuestion -> TopologyView,
 			ownership_steps : OwnershipQuestion -> OwnershipView,
 			joined_steps : JoinedQuestion -> JoinedView,
@@ -83,6 +84,7 @@ platform ""
 		"roc_workspace_step": workspace_step_for_host,
 		"roc_workspace_resolve": workspace_resolve_for_host,
 		"roc_workspace_previous": workspace_previous_for_host,
+		"roc_workspace_eligible": workspace_eligible_for_host,
 		"roc_topology_steps": topology_steps_for_host,
 		"roc_ownership_steps": ownership_steps_for_host,
 		"roc_joined_steps": joined_steps_for_host,
@@ -94,7 +96,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -228,7 +230,7 @@ inventory_retirement_for_host : InventoryQuestion -> RetirementAnswer
 inventory_retirement_for_host = |question| (core.inventory_retirement)(question)
 
 ## Where stepping through the workspaces lands.
-workspace_step_for_host : StepQuestion -> MaybeWord
+workspace_step_for_host : StepQuestion -> WordAnswer
 workspace_step_for_host = |question| (core.workspace_step)(question)
 
 ## The workspace a selector names, if reachable.
@@ -236,7 +238,7 @@ workspace_resolve_for_host : ResolveQuestion -> Reached
 workspace_resolve_for_host = |question| (core.workspace_resolve)(question)
 
 ## The workspace navigation history points at, if reachable.
-workspace_previous_for_host : PreviousQuestion -> Reached
+workspace_previous_for_host : PreviousQuestion -> ReachedAnswer
 workspace_previous_for_host = |question| (core.workspace_previous)(question)
 
 ## The topology an empty one becomes after a run of events.
@@ -250,3 +252,7 @@ ownership_steps_for_host = |question| (core.ownership_steps)(question)
 ## What each event of a run met, and the joined workspaces it leaves.
 joined_steps_for_host : JoinedQuestion -> JoinedView
 joined_steps_for_host = |question| (core.joined_steps)(question)
+
+## Whether a workspace on a Space is reachable from where a command is given.
+workspace_eligible_for_host : EligibleQuestion -> Bool
+workspace_eligible_for_host = |question| (core.workspace_eligible)(question)

@@ -1,6 +1,8 @@
 ## Decisions about virtual workspaces (`rift_core::workspaces`): which workspace a command
 ## reaches and where stepping goes. Workspaces, Spaces and names are one word each.
 
+import Asking exposing [ask, ask_word]
+
 ## Where a command is given: the acting Space, and the Spaces visible now.
 Context : { space : U64, visible : List(U64) }
 
@@ -57,6 +59,15 @@ JoinedEvent : [
 ## What an event met: accepted, or why it was refused (a refusal changes nothing).
 Outcome : [Accepted, Exists(U64), Unknown(U64), OwnSuccessor(U64), Shown({ workspace : U64, space : U64 })]
 
+## A fact the platform's run of the decision answered, or one it never asked.
+Fact(a) : [Asked(a), Unasked]
+
+## A fact asked about keys: each key asked and its answer.
+Answers(k, v) : List({ key : k, answer : v })
+
+## What a decision decided, or the first fact it read that its question does not carry.
+Read(a) : Try(a, [Unasked(U64)])
+
 Workspaces := [].{
 
 	## Whether a workspace on `on` is reachable: per display, only the acting Space's;
@@ -69,14 +80,15 @@ Workspaces := [].{
 			on == context.space
 		}
 
-	## Where a step from `current` lands, if anywhere.
-	step : Bool, List({ id : U64, space : U64 }), Context, U64, Bool, Bool, Bool, List(U64) -> Maybe
-	step = |global, catalog, context, current, backwards, skip, stop, with_windows| {
+	## Where a step from `current` lands, if anywhere. Fact: 0 whether a workspace has windows
+	## (asked only when skipping empty ones, in the order the step meets them).
+	step : Bool, List({ id : U64, space : U64 }), Context, U64, Bool, Bool, Bool, Answers(U64, Bool) -> Read(Maybe)
+	step = |global, catalog, context, current, backwards, skip, stop, has_windows| {
 		reachable = |entry| eligible(global, context, entry.space)
 		if !catalog.any(|entry| entry.id == current and reachable(entry)) {
-			Nothing
+			Ok(Nothing)
 		} else {
-			counts = |id| if (skip) with_windows.contains(id) else True
+			counts = |id| if (skip) ask_word(has_windows, id, 0) else Ok(True)
 			unset = |maybe|
 				match maybe {
 					Nothing => True
@@ -86,31 +98,53 @@ Workspaces := [].{
 			var $crossed = False
 			var $wrapped = Nothing
 			var $found = Nothing
-			var $done = False
+			var $state = Going
 			for entry in ordered {
-				if $done or !reachable(entry) {
-					{}
-				} else if entry.id == current {
-					$crossed = True
-					if unset($wrapped) and counts(entry.id) {
-						$wrapped = Some(entry.id)
-					} else {
-						{}
-					}
-				} else if counts(entry.id) {
-					if $crossed {
-						$found = Some(entry.id)
-						$done = True
-					} else if unset($wrapped) {
-						$wrapped = Some(entry.id)
-					} else {
-						{}
-					}
-				} else {
-					{}
+				match $state {
+					Going =>
+						if !reachable(entry) {
+							{}
+						} else if entry.id == current {
+							$crossed = True
+							if unset($wrapped) {
+								match counts(entry.id) {
+									Ok(True) => {
+										$wrapped = Some(entry.id)
+									}
+									Ok(False) => {}
+									Err(unasked) => {
+										$state = Stopped(unasked)
+									}
+								}
+							} else {
+								{}
+							}
+						} else {
+							match counts(entry.id) {
+								Ok(True) =>
+									if $crossed {
+										$found = Some(entry.id)
+										$state = Done
+									} else if unset($wrapped) {
+										$wrapped = Some(entry.id)
+									} else {
+										{}
+									}
+								Ok(False) => {}
+								Err(unasked) => {
+									$state = Stopped(unasked)
+								}
+							}
+						}
+					Done => {}
+					Stopped(_) => {}
 				}
 			}
-			if $done $found else if (stop) Nothing else $wrapped
+			match $state {
+				Stopped(unasked) => Err(unasked)
+				Done => Ok($found)
+				Going => if (stop) Ok(Nothing) else Ok($wrapped)
+			}
 		}
 	}
 
@@ -388,16 +422,18 @@ Workspaces := [].{
 	# The wire.
 
 	## The workspace navigation history points at and its Space, if it is on a Space and
-	## reachable.
-	previous : Bool, Context, Maybe, Maybe -> [Reached({ workspace : U64, space : U64 }), Unreached]
+	## reachable. Fact: 0 the Space it is on (asked only with a history).
+	previous : Bool, Context, Maybe, Fact(Maybe) -> Read([Reached({ workspace : U64, space : U64 }), Unreached])
 	previous = |global, context, last, on|
 		match last {
-			Some(id) =>
-				match on {
-					Some(space) => if (eligible(global, context, space)) Reached({ workspace: id, space }) else Unreached
-					Nothing => Unreached
+			Some(id) => {
+				on_space = ask(on, 0)?
+				match on_space {
+					Some(space) => if (eligible(global, context, space)) Ok(Reached({ workspace: id, space })) else Ok(Unreached)
+					Nothing => Ok(Unreached)
 				}
-			Nothing => Unreached
+			}
+			Nothing => Ok(Unreached)
 		}
 
 	## The topology an empty one becomes after `events`.

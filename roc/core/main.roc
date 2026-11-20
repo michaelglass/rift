@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion]
 import Bsp
 import Traditional
 import Scrolling
@@ -93,7 +93,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps }
+core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -243,7 +243,7 @@ global = |mode|
 		PerDisplay => False
 	}
 
-workspace_step : StepQuestion -> MaybeWord
+workspace_step : StepQuestion -> WordAnswer
 workspace_step = |q| {
 	backwards =
 		match q.way {
@@ -260,14 +260,17 @@ workspace_step = |q| {
 			Stop => True
 			Wrap => False
 		}
-	Workspaces.step(global(q.mode), q.catalog, q.context, q.current, backwards, skip, stop, q.with_windows)
+	decision_of(Workspaces.step(global(q.mode), q.catalog, q.context, q.current, backwards, skip, stop, q.has_windows))
 }
 
 workspace_resolve : ResolveQuestion -> Reached
 workspace_resolve = |q| Workspaces.resolve(global(q.mode), q.scope, q.context, q.selector)
 
-workspace_previous : PreviousQuestion -> Reached
-workspace_previous = |q| Workspaces.previous(global(q.mode), q.context, q.last, q.on)
+workspace_previous : PreviousQuestion -> ReachedAnswer
+workspace_previous = |q| decision_of(Workspaces.previous(global(q.mode), q.context, q.last, q.on))
+
+workspace_eligible : EligibleQuestion -> Bool
+workspace_eligible = |q| Workspaces.eligible(global(q.mode), q.context, q.on)
 
 topology_steps : TopologyQuestion -> TopologyView
 topology_steps = |q| Workspaces.topology_after(q.events)

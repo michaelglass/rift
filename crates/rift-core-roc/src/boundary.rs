@@ -1848,11 +1848,9 @@ pub(crate) fn step_question(
             Wrapping::Wrap => abi::BoundaryWrapping::Wrap,
             Wrapping::Stop => abi::BoundaryWrapping::Stop,
         },
-        with_windows: list(&question.with_windows, host),
+        has_windows: word_bools(question.has_windows, host),
     }
 }
-
-pub(crate) fn from_word(word: abi::BoundaryMaybeWord) -> Option<u64> { from_maybe_word(word) }
 
 pub(crate) fn resolve_question(
     question: workspaces::plain::ResolveQuestion,
@@ -1891,8 +1889,27 @@ pub(crate) fn previous_question(
         mode: workspace_mode(question.mode),
         context: context(question.space, question.visible, host),
         last: maybe_word(question.last),
-        on: maybe_word(question.on),
+        on: fact_word(question.on, host),
     }
+}
+
+pub(crate) fn eligible_question(
+    question: workspaces::plain::EligibleQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryEligibleQuestion {
+    abi::BoundaryEligibleQuestion {
+        mode: workspace_mode(question.mode),
+        context: context(question.space, question.visible, host),
+        on: question.on,
+    }
+}
+
+pub(crate) fn reached_answer(
+    answer: abi::BoundaryReachedAnswer,
+) -> Result<Option<(u64, u64)>, Unasked> {
+    decision!(answer, BoundaryReachedAnswerTag, |reached| from_reached(
+        *reached
+    ))
 }
 
 pub(crate) fn from_reached(reached: abi::BoundaryReached) -> Option<(u64, u64)> {

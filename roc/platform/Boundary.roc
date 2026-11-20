@@ -419,7 +419,8 @@ Boundary := [].{
 
 	Wrapping := [Wrap, Stop]
 
-	StepQuestion := { mode : WorkspaceMode, catalog : List(CatalogEntry), context : Context, current : U64, way : Way, skip_empty : SkipEmpty, wrapping : Wrapping, with_windows : List(U64) }
+	## Fact: 0 whether a workspace has windows (asked only when skipping empty ones).
+	StepQuestion := { mode : WorkspaceMode, catalog : List(CatalogEntry), context : Context, current : U64, way : Way, skip_empty : SkipEmpty, wrapping : Wrapping, has_windows : List(WordBool) }
 
 	ScopeEntry := { id : U64, space : U64, name : U64 }
 
@@ -434,7 +435,12 @@ Boundary := [].{
 	## The workspace a command reaches and its Space, if any.
 	Reached := [Reached(WorkspaceSpace), Unreached]
 
-	PreviousQuestion := { mode : WorkspaceMode, context : Context, last : MaybeWord, on : MaybeWord }
+	## Fact: 0 the Space the history's workspace is on (asked only with a history).
+	PreviousQuestion := { mode : WorkspaceMode, context : Context, last : MaybeWord, on : FactWord }
+
+	ReachedAnswer := [Decided(Reached), Unasked(U64)]
+
+	EligibleQuestion := { mode : WorkspaceMode, context : Context, on : U64 }
 
 	Showing := { current : U64, previous : MaybeWord, remembered : MaybeWord }
 
