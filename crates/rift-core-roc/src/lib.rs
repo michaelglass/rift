@@ -189,6 +189,22 @@ impl Default for RocCore {
     }
 }
 
+/// What an invalidation found: AX state to invalidate, or none. (`Lifecycle::invalidate`
+/// answers this as a bool.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invalidation {
+    Invalidated,
+    NoAxState,
+}
+
+/// What a revalidation found: an invalidated window, brought back, or a window that was not
+/// invalidated (valid, or without AX state). (`Lifecycle::revalidate` answers this as a bool.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revalidation {
+    Revalidated,
+    NotInvalidated,
+}
+
 /// The lifecycle of every window (`rift_core::lifecycle::Lifecycle`) kept in Roc between
 /// events: each window with AX state and its presence. Stepped beside the Rust lifecycle, it
 /// must make the same changes and keep the same windows.
@@ -222,18 +238,23 @@ impl RocLifecycle {
             LifecycleEvent::Changed { window, change } => (window, Reading::Changed(change)),
             LifecycleEvent::Gone(window) => (window, Reading::Gone),
         };
-        self.windows.read(window, reading)
+        boundary::in_place(&mut self.windows, |windows| windows.read(window, reading))
     }
 
     /// As `Lifecycle::invalidate`.
-    pub fn invalidate(&mut self, window: u64) -> bool { self.windows.invalidate(window) }
+    pub fn invalidate(&mut self, window: u64) -> Invalidation {
+        boundary::in_place(&mut self.windows, |windows| windows.invalidate(window))
+    }
 
     /// As `Lifecycle::revalidate`.
-    pub fn revalidate(&mut self, window: u64) -> bool { self.windows.revalidate(window) }
+    pub fn revalidate(&mut self, window: u64) -> Revalidation {
+        boundary::in_place(&mut self.windows, |windows| windows.revalidate(window))
+    }
 
     /// As `Lifecycle::presences`: every window with AX state and its presence, in window order.
     pub fn view(&mut self) -> Vec<(u64, rift_core::lifecycle::Presence)> {
-        self.windows.view(&self.host)
+        let host = &self.host;
+        boundary::in_place(&mut self.windows, |windows| windows.view(host))
     }
 }
 
@@ -264,12 +285,13 @@ impl RocOwnerships {
         event: rift_core::workspaces::OwnershipEvent<u64, u64, u64>,
     ) -> rift_core::workspaces::Owned<u64, u64> {
         let rift_core::workspaces::OwnershipEvent::Owned { window, owned } = event;
-        self.owners.step(window, owned)
+        boundary::in_place(&mut self.owners, |owners| owners.step(window, owned))
     }
 
     /// As `Ownerships::owners`: every owned window and its ownership, in window order.
     pub fn view(&mut self) -> Vec<(u64, rift_core::workspaces::Ownership<u64, u64>)> {
-        self.owners.view(&self.host)
+        let host = &self.host;
+        boundary::in_place(&mut self.owners, |owners| owners.view(host))
     }
 }
 
@@ -296,11 +318,14 @@ impl Default for RocTopology {
 impl RocTopology {
     /// As `Topology::step`.
     pub fn step(&mut self, event: rift_core::workspaces::TopologyEvent<u64, u64>) {
-        self.places.step(event)
+        boundary::in_place(&mut self.places, |places| places.step(event))
     }
 
     /// As `Topology::catalog` and `Topology::activations`.
-    pub fn view(&mut self) -> workspaces::TopologyView { self.places.view(&self.host) }
+    pub fn view(&mut self) -> workspaces::TopologyView {
+        let host = &self.host;
+        boundary::in_place(&mut self.places, |places| places.view(host))
+    }
 }
 
 /// Why the Roc core gave no answer: it always answers, so there is no such value. (The layout

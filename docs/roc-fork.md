@@ -184,6 +184,15 @@ boundary typed.**
   `VIEW_EVERY`) or every step (the topology, which is small and changes rarely). Each has a
   differential on persistent models and planted bugs caught by the regular checks.
 
+- A twin's box is stepped by value: each step takes the box and gives back its successor
+  (`boundary::in_place` puts it back in the owner, aborting on a panic in between), so a box
+  that has been stepped cannot be stepped again.
+- The lifecycle's invalidate and revalidate answer named tags at the boundary
+  (`[Invalidated, NoAxState]`, `[Revalidated, NotInvalidated]`). **Candidate for the Rust
+  core too:** `Lifecycle::invalidate` and `revalidate` answer the same as bare bools, and
+  `PresenceOutcome::Invalidated(bool)` / `Revalidated(bool)` carry them; the twin maps the
+  bools to the tags to compare.
+
 **Next:** the ownerships' step grows with the windows (a list rebuilt per change; 641 ns at
 100 windows, 7 us at 1000) and would be flat on a `Dict`, the lead's call. The joined
 Workspaces twin replaces the three after #688 (W4b/c). No call site is in `layout_engine/`;

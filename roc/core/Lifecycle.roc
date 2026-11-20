@@ -355,12 +355,22 @@ Lifecycle := [].{
 					(presence, Read(change))
 				}
 				Invalidate => {
-					(presence, happened) = presence_invalidate(before)
-					(presence, Invalidated(happened))
+					(presence, invalidation) = presence_invalidate(before)
+					found =
+						match invalidation {
+							Invalidated => True
+							NoAxState => False
+						}
+					(presence, Invalidated(found))
 				}
 				Revalidate => {
-					(presence, happened) = presence_revalidate(before)
-					(presence, Revalidated(happened))
+					(presence, revalidation) = presence_revalidate(before)
+					back =
+						match revalidation {
+							Revalidated => True
+							NotInvalidated => False
+						}
+					(presence, Revalidated(back))
 				}
 			}
 		manages =
@@ -407,22 +417,22 @@ Lifecycle := [].{
 
 	## A window's presence after its AX element was invalidated, and whether it had AX state
 	## to invalidate.
-	presence_invalidate : Presence -> (Presence, Bool)
+	presence_invalidate : Presence -> (Presence, [Invalidated, NoAxState])
 	presence_invalidate = |before|
 		match before {
-			NoPresence => (NoPresence, False)
-			Live(facts) => (Invalidated(facts), True)
-			Invalidated(facts) => (Invalidated(facts), True)
+			NoPresence => (NoPresence, NoAxState)
+			Live(facts) => (Invalidated(facts), Invalidated)
+			Invalidated(facts) => (Invalidated(facts), Invalidated)
 		}
 
 	## A window's presence after a positive AX observation, and whether it had been
-	## invalidated.
-	presence_revalidate : Presence -> (Presence, Bool)
+	## invalidated (a valid window, or one without AX state, had not).
+	presence_revalidate : Presence -> (Presence, [Revalidated, NotInvalidated])
 	presence_revalidate = |before|
 		match before {
-			Invalidated(facts) => (Live(facts), True)
-			Live(facts) => (Live(facts), False)
-			NoPresence => (NoPresence, False)
+			Invalidated(facts) => (Live(facts), Revalidated)
+			Live(facts) => (Live(facts), NotInvalidated)
+			NoPresence => (NoPresence, NotInvalidated)
 		}
 
 	## The lifecycle of every window (`rift_core::lifecycle::Lifecycle`), kept between events:
@@ -438,18 +448,18 @@ Lifecycle := [].{
 	}
 
 	## `window`'s AX element was invalidated: the windows after, and whether it had AX state.
-	windows_invalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), Bool)
+	windows_invalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), [Invalidated, NoAxState])
 	windows_invalidate = |windows, window| {
-		(after, happened) = presence_invalidate(presence_in(windows, window))
-		(with_presence(windows, window, after), happened)
+		(after, invalidation) = presence_invalidate(presence_in(windows, window))
+		(with_presence(windows, window, after), invalidation)
 	}
 
 	## A positive AX observation of `window`: the windows after, and whether it had been
 	## invalidated.
-	windows_revalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), Bool)
+	windows_revalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), [Revalidated, NotInvalidated])
 	windows_revalidate = |windows, window| {
-		(after, happened) = presence_revalidate(presence_in(windows, window))
-		(with_presence(windows, window, after), happened)
+		(after, revalidation) = presence_revalidate(presence_in(windows, window))
+		(with_presence(windows, window, after), revalidation)
 	}
 
 	## Every window with AX state and its presence.

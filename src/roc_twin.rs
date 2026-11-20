@@ -85,9 +85,16 @@ impl TwinnedLifecycle {
         let invalidated = self.rust.invalidate(window);
         #[cfg(feature = "roc-core")]
         {
+            use rift_core_roc::Invalidation;
+
             use crate::roc_path::Word;
+            let rust = if invalidated {
+                Invalidation::Invalidated
+            } else {
+                Invalidation::NoAxState
+            };
             let roc = self.twin.roc.invalidate(window.word());
-            self.stepped("lifecycle invalidate", &window, &invalidated, &roc);
+            self.stepped("lifecycle invalidate", &window, &rust, &roc);
         }
         invalidated
     }
@@ -97,9 +104,16 @@ impl TwinnedLifecycle {
         let revalidated = self.rust.revalidate(window);
         #[cfg(feature = "roc-core")]
         {
+            use rift_core_roc::Revalidation;
+
             use crate::roc_path::Word;
+            let rust = if revalidated {
+                Revalidation::Revalidated
+            } else {
+                Revalidation::NotInvalidated
+            };
             let roc = self.twin.roc.revalidate(window.word());
-            self.stepped("lifecycle revalidate", &window, &revalidated, &roc);
+            self.stepped("lifecycle revalidate", &window, &rust, &roc);
         }
         revalidated
     }

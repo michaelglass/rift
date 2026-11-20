@@ -381,8 +381,18 @@ Boundary := [].{
 	## The lifecycle after a reading, and the change in the window's admission.
 	LifecycleStepped(model) := { model : Box(model), change : Change }
 
-	## The lifecycle after an invalidation or revalidation, and whether it happened.
-	LifecycleToggled(model) := { model : Box(model), happened : Bool }
+	## Whether an invalidation found AX state to invalidate.
+	Invalidation := [Invalidated, NoAxState]
+
+	## Whether a revalidation brought an invalidated window back (a valid window, or one
+	## without AX state, was not invalidated).
+	Revalidation := [Revalidated, NotInvalidated]
+
+	## The lifecycle after an invalidation, and what it found.
+	LifecycleInvalidated(model) := { model : Box(model), invalidation : Invalidation }
+
+	## The lifecycle after a revalidation, and what it found.
+	LifecycleRevalidated(model) := { model : Box(model), revalidation : Revalidation }
 
 	## The lifecycle, unchanged, and every window with AX state.
 	LifecycleViewed(model) := { model : Box(model), windows : List(PresentWindow) }

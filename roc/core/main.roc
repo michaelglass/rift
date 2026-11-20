@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation, Invalidation, Revalidation]
 import Bsp
 import Traditional
 import Scrolling
@@ -252,17 +252,17 @@ lifecycle_step = |windows, event| {
 }
 
 ## A window's AX element invalidated.
-lifecycle_invalidate : Windows, U64 -> { model : Windows, happened : Bool }
+lifecycle_invalidate : Windows, U64 -> { model : Windows, invalidation : Invalidation }
 lifecycle_invalidate = |windows, window| {
-	(model, happened) = Lifecycle.windows_invalidate(windows, window)
-	{ model, happened }
+	(model, invalidation) = Lifecycle.windows_invalidate(windows, window)
+	{ model, invalidation }
 }
 
 ## A positive AX observation of a window.
-lifecycle_revalidate : Windows, U64 -> { model : Windows, happened : Bool }
+lifecycle_revalidate : Windows, U64 -> { model : Windows, revalidation : Revalidation }
 lifecycle_revalidate = |windows, window| {
-	(model, happened) = Lifecycle.windows_revalidate(windows, window)
-	{ model, happened }
+	(model, revalidation) = Lifecycle.windows_revalidate(windows, window)
+	{ model, revalidation }
 }
 
 ## Every window with AX state.

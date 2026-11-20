@@ -2603,50 +2603,79 @@ pub(crate) fn effects(
 }
 
 // ---------------------------------------------------------------------------------------------
-// The lifecycle kept between events.
+// The machines kept between events. Each machine's box is a type of its own (the glue types
+// every box alike), which only that machine's entries make and take; a step takes the box by
+// value and gives back its successor, so a box that has been stepped cannot be stepped again.
 
-/// The lifecycle's box, which only Roc can read or free. Only the `roc_lifecycle_*` entries
-/// make and take one, so another machine's box can never reach a lifecycle step: every
-/// machine's box is a `RocBox` to the glue, and this type tells them apart. Dropping it
-/// releases the lifecycle.
+/// Steps the machine in `slot` by value, putting its successor back: `step` takes the box and
+/// returns the next one with the answer. A panic while the slot is moved out aborts, so the
+/// moved-out box is never seen (nor dropped twice).
+pub(crate) fn in_place<B, A>(slot: &mut B, step: impl FnOnce(B) -> (B, A)) -> A {
+    struct AbortOnUnwind;
+    impl Drop for AbortOnUnwind {
+        fn drop(&mut self) { std::process::abort() }
+    }
+    let guard = AbortOnUnwind;
+    // SAFETY: the box is read out of the slot, stepped, and its successor written back before
+    // anything else can reach the slot; a panic in between aborts (the guard), so the slot is
+    // never used, nor dropped, while it is moved out.
+    let (next, answer) = step(unsafe { std::ptr::read(slot) });
+    unsafe { std::ptr::write(slot, next) };
+    std::mem::forget(guard);
+    answer
+}
+
+/// The lifecycle's box, which only Roc can read or free; only the `roc_lifecycle_*` entries
+/// make and take one. Dropping it releases the lifecycle.
 pub(crate) struct LifecycleBox(abi::RocBox);
 
 impl LifecycleBox {
     pub(crate) fn empty() -> LifecycleBox { LifecycleBox(unsafe { abi::roc_lifecycle_init() }) }
 
-    /// A reading of `window`'s facts: the change in its admission.
-    pub(crate) fn read(&mut self, window: u64, reading: Reading) -> Option<Change> {
+    /// The raw box, handed to Roc: this owner is gone, so its drop does not release it.
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// A reading of `window`'s facts: the lifecycle after it, and the change in its admission.
+    pub(crate) fn read(self, window: u64, reading: Reading) -> (LifecycleBox, Option<Change>) {
         let event = abi::BoundaryLifecycleEvent {
             window,
             reading: self::reading(reading),
         };
-        // SAFETY: the box is this lifecycle's, moved into the step; its successor replaces it.
-        let stepped = unsafe { abi::roc_lifecycle_step(self.0, event) };
-        self.0 = stepped.model;
-        from_change(stepped.change)
+        // SAFETY: the box is this lifecycle's, given to the step; its successor comes back.
+        let stepped = unsafe { abi::roc_lifecycle_step(self.into_raw(), event) };
+        (LifecycleBox(stepped.model), from_change(stepped.change))
     }
 
-    /// `window`'s AX element invalidated: whether it had AX state.
-    pub(crate) fn invalidate(&mut self, window: u64) -> bool {
+    /// `window`'s AX element invalidated: whether it had AX state to invalidate.
+    pub(crate) fn invalidate(self, window: u64) -> (LifecycleBox, crate::Invalidation) {
         // SAFETY: as in `read`.
-        let toggled = unsafe { abi::roc_lifecycle_invalidate(self.0, window) };
-        self.0 = toggled.model;
-        toggled.happened
+        let stepped = unsafe { abi::roc_lifecycle_invalidate(self.into_raw(), window) };
+        let invalidation = match stepped.invalidation {
+            abi::BoundaryInvalidation::Invalidated => crate::Invalidation::Invalidated,
+            abi::BoundaryInvalidation::NoAxState => crate::Invalidation::NoAxState,
+        };
+        (LifecycleBox(stepped.model), invalidation)
     }
 
     /// A positive AX observation of `window`: whether it had been invalidated.
-    pub(crate) fn revalidate(&mut self, window: u64) -> bool {
+    pub(crate) fn revalidate(self, window: u64) -> (LifecycleBox, crate::Revalidation) {
         // SAFETY: as in `read`.
-        let toggled = unsafe { abi::roc_lifecycle_revalidate(self.0, window) };
-        self.0 = toggled.model;
-        toggled.happened
+        let stepped = unsafe { abi::roc_lifecycle_revalidate(self.into_raw(), window) };
+        let revalidation = match stepped.revalidation {
+            abi::BoundaryRevalidation::Revalidated => crate::Revalidation::Revalidated,
+            abi::BoundaryRevalidation::NotInvalidated => crate::Revalidation::NotInvalidated,
+        };
+        (LifecycleBox(stepped.model), revalidation)
     }
 
     /// Every window with AX state and its presence, in window order.
-    pub(crate) fn view(&mut self, host: &abi::RocHost) -> Vec<(u64, Presence)> {
+    pub(crate) fn view(self, host: &abi::RocHost) -> (LifecycleBox, Vec<(u64, Presence)>) {
         // SAFETY: as in `read`; the list is Roc's answer, owned here, read in full, released.
-        let viewed = unsafe { abi::roc_lifecycle_view(self.0) };
-        self.0 = viewed.model;
+        let viewed = unsafe { abi::roc_lifecycle_view(self.into_raw()) };
         let mut windows: Vec<(u64, Presence)> = viewed
             .windows
             .as_slice()
@@ -2655,7 +2684,7 @@ impl LifecycleBox {
             .collect();
         unsafe { viewed.windows.decref(host) };
         windows.sort_by_key(|&(window, _)| window);
-        windows
+        (LifecycleBox(viewed.model), windows)
     }
 }
 
@@ -2684,28 +2713,41 @@ fn from_present(presence: abi::BoundaryPresent) -> Presence {
 // Who places each window, kept between events.
 
 /// The ownerships' box, which only Roc can read or free; only the `roc_ownerships_*` entries
-/// make and take one (see [`LifecycleBox`]). Dropping it releases the ownerships.
+/// make and take one. Dropping it releases the ownerships.
 pub(crate) struct OwnershipsBox(abi::RocBox);
 
 impl OwnershipsBox {
     pub(crate) fn empty() -> OwnershipsBox { OwnershipsBox(unsafe { abi::roc_ownerships_init() }) }
 
-    /// `window`'s new owner, or that nobody places it: who places it now.
-    pub(crate) fn step(&mut self, window: u64, who: Owned<u64, u64>) -> Owned<u64, u64> {
-        // SAFETY: the box is these ownerships', moved into the step; its successor replaces it.
-        let stepped = unsafe { abi::roc_ownerships_step(self.0, owned(window, who)) };
-        self.0 = stepped.model;
-        from_owned(stepped.owned)
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// `window`'s new owner, or that nobody places it: the ownerships after, and who places it
+    /// now.
+    pub(crate) fn step(
+        self,
+        window: u64,
+        who: Owned<u64, u64>,
+    ) -> (OwnershipsBox, Owned<u64, u64>) {
+        // SAFETY: the box is these ownerships', given to the step; its successor comes back.
+        let stepped = unsafe { abi::roc_ownerships_step(self.into_raw(), owned(window, who)) };
+        (OwnershipsBox(stepped.model), from_owned(stepped.owned))
     }
 
     /// Every owned window and its ownership, in window order.
-    pub(crate) fn view(&mut self, host: &abi::RocHost) -> Vec<(u64, Ownership<u64, u64>)> {
+    pub(crate) fn view(
+        self,
+        host: &abi::RocHost,
+    ) -> (OwnershipsBox, Vec<(u64, Ownership<u64, u64>)>) {
         // SAFETY: as in `step`; the list is Roc's answer, owned here, read in full, released.
-        let viewed = unsafe { abi::roc_ownerships_view(self.0) };
-        self.0 = viewed.model;
+        let viewed = unsafe { abi::roc_ownerships_view(self.into_raw()) };
         let owners = from_owners(&viewed.owners);
         unsafe { viewed.owners.decref(host) };
-        owners
+        (OwnershipsBox(viewed.model), owners)
     }
 }
 
@@ -2731,23 +2773,35 @@ fn from_owned(owned: abi::BoundaryOwned) -> Owned<u64, u64> {
 // The workspaces' topology, kept between events.
 
 /// The topology's box, which only Roc can read or free; only the `roc_topology_*` entries make
-/// and take one (see [`LifecycleBox`]). Dropping it releases the topology.
+/// and take one. Dropping it releases the topology.
 pub(crate) struct TopologyBox(abi::RocBox);
 
 impl TopologyBox {
     pub(crate) fn empty() -> TopologyBox { TopologyBox(unsafe { abi::roc_topology_init() }) }
 
-    /// A change to the topology.
-    pub(crate) fn step(&mut self, event: TopologyEvent<u64, u64>) {
-        // SAFETY: the box is this topology's, moved into the step; its successor replaces it.
-        self.0 = unsafe { abi::roc_topology_step(self.0, topology_event(event)) };
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// A change to the topology: the topology after it.
+    pub(crate) fn step(self, event: TopologyEvent<u64, u64>) -> (TopologyBox, ()) {
+        // SAFETY: the box is this topology's, given to the step; its successor comes back.
+        (
+            TopologyBox(unsafe { abi::roc_topology_step(self.into_raw(), topology_event(event)) }),
+            (),
+        )
     }
 
     /// The catalog and every Space's activation.
-    pub(crate) fn view(&mut self, host: &abi::RocHost) -> crate::workspaces::TopologyView {
+    pub(crate) fn view(
+        self,
+        host: &abi::RocHost,
+    ) -> (TopologyBox, crate::workspaces::TopologyView) {
         // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
-        let viewed = unsafe { abi::roc_topology_view(self.0) };
-        self.0 = viewed.model;
+        let viewed = unsafe { abi::roc_topology_view(self.into_raw()) };
         let view = crate::workspaces::TopologyView {
             catalog: from_catalog(&viewed.catalog),
             activations: from_activations(&viewed.activations),
@@ -2756,7 +2810,7 @@ impl TopologyBox {
             viewed.catalog.decref(host);
             viewed.activations.decref(host);
         }
-        view
+        (TopologyBox(viewed.model), view)
     }
 }
 

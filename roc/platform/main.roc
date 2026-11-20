@@ -46,8 +46,8 @@ platform ""
 			joined_steps : JoinedQuestion -> JoinedView,
 			lifecycle_init : {} -> windows,
 			lifecycle_step : windows, LifecycleEvent -> { model : windows, change : Change },
-			lifecycle_invalidate : windows, U64 -> { model : windows, happened : Bool },
-			lifecycle_revalidate : windows, U64 -> { model : windows, happened : Bool },
+			lifecycle_invalidate : windows, U64 -> { model : windows, invalidation : Invalidation },
+			lifecycle_revalidate : windows, U64 -> { model : windows, revalidation : Revalidation },
 			lifecycle_view : windows -> { model : windows, windows : List(PresentWindow) },
 			ownerships_init : {} -> owners,
 			ownerships_step : owners, OwnershipEvent -> { model : owners, owned : Owned },
@@ -121,7 +121,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleToggled, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -295,18 +295,18 @@ lifecycle_step_for_host = |boxed, event| {
 	{ model: Box.box(stepped.model), change: stepped.change }
 }
 
-## A window's AX element invalidated: whether it had AX state.
-lifecycle_invalidate_for_host : Box(Windows), U64 -> LifecycleToggled(Windows)
+## A window's AX element invalidated: whether it had AX state to invalidate.
+lifecycle_invalidate_for_host : Box(Windows), U64 -> LifecycleInvalidated(Windows)
 lifecycle_invalidate_for_host = |boxed, window| {
 	stepped = (core.lifecycle_invalidate)(Box.unbox(boxed), window)
-	{ model: Box.box(stepped.model), happened: stepped.happened }
+	{ model: Box.box(stepped.model), invalidation: stepped.invalidation }
 }
 
 ## A positive AX observation of a window: whether it had been invalidated.
-lifecycle_revalidate_for_host : Box(Windows), U64 -> LifecycleToggled(Windows)
+lifecycle_revalidate_for_host : Box(Windows), U64 -> LifecycleRevalidated(Windows)
 lifecycle_revalidate_for_host = |boxed, window| {
 	stepped = (core.lifecycle_revalidate)(Box.unbox(boxed), window)
-	{ model: Box.box(stepped.model), happened: stepped.happened }
+	{ model: Box.box(stepped.model), revalidation: stepped.revalidation }
 }
 
 ## Every window with AX state, and the lifecycle back unchanged.
