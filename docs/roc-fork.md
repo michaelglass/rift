@@ -169,12 +169,14 @@ boundary typed.**
   `Boundary.roc` types, the glue generated at build time; the word codec is only the trace
   format (1b1acb1d, 1c733288, c98b1eb1, 1260394b, 99d903a6, 53098cb3, 1f0069d4, cf9f84d0).
 
-**Now: S4 workspaces on the typed entries**, 4 sites inside virtual_workspace.rs's VWM
-methods (engine.rs only calls the wrappers, so #688's ground is untouched): eligible (needs an
-entry of its own), previous, resolve, step; facts first where the decision asks lazily (step's
-windows, previous's Space). Then a plan for a **stateful Roc platform entry** so Lifecycle,
-Topology, Ownerships and the joined Workspaces can live in Roc between events; whatever only
-matters after W4b/c waits for #688. No call site is in `layout_engine/`; keep it that way.
+- S4 workspaces (9cb2018a facts and an `eligible` entry, 0710152c the 4 VWM sites: eligible,
+  previous, resolve, step; engine.rs only calls the wrappers, so #688's ground is untouched).
+- The reconciler's ack tolerance has a literal differential at its edge (the committed traces
+  alone let 1.5 to 2.5 through).
+
+**Now: a stateful Roc platform entry (plan sent, waiting for the lead)** so Lifecycle,
+Ownerships and Topology live in Roc between events, each a twin stepped beside its Rust owner;
+the joined Workspaces after #688. No call site is in `layout_engine/`; keep it that way.
 
 ### Rulings that bind (the lead's and the owner's)
 
