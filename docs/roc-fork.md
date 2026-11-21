@@ -238,12 +238,47 @@ line is three parts, each the lead's ruling:
   rewritten for each change). Regenerating the corpus from today's fuzzer is not the same thing:
   that records different runs.
 
-**Next:** (b), the reactor's event flow on upstream #700, and the lifecycle flip and the
-MainWindowTracker twin wait for upstream PR #702 (window admission centralised in the reactor,
-which also changes the main-window tracker); if #702 has not merged by 2026-11-23, (b) goes on
-#700's structure without it. Then the reactor predicates, then W4b–d (the joined Workspaces twin
-replaces the three). The core_geometry flip on the new layout trees comes after (b). No call
-site is in `layout_engine/`; keep it that way.
+**Merge (b) done (2026-11-21).** Upstream main (#688 layout, #700 event outcome, #702 window
+admission) and `experiment/upstream-layout` are merged into this line: one three-parent merge, then
+1/4 layout (upstream's systems with the three re-lands), 2/4 event flow and admission, 4/4 tests (3/4,
+reconciliation and drag, is ours wholesale and needed no resolution of its own). Every adoption and
+difference, instance by instance, is in [roc-fork-merge-b.md](roc-fork-merge-b.md).
+- Handlers stay pure and return `EventOutcome` (the lead's ruling: no convergence on #700's
+  `&mut Changes`); `changes.rs` is not adopted. The outcome gains `memberships`, `retirements` and
+  `reprocess_app_rules` for the work #702 routes through its reactor methods.
+- `window_lifecycle.rs` keeps #702's names and module: `reconcile_window_membership`,
+  `retire_window`, `replace_window_identity`, `retire_app_windows`, `invalidate_window_identity`,
+  `restore_native_fullscreen`, `reconcile_native_presence`, `reassign_window_to_authoritative_space`,
+  backed by the core's lifecycle and ownerships through the window store. #702's handler-level
+  `observe_*` names live on as comments on our pure handlers.
+- Minimized is the core's `Minimize` fact (never a write to manageability); a workspace's manual
+  display choice is `PlacedBy` inside the placed `Home` variants.
+- D4 rulings: upstream's on both (no discard of unmatched persisted windows when an app's discovery
+  completes; a focus command arranges only where focus changes geometry).
+- Two merge bugs the fuzzer and the tests found, fixed in 2/4: a cross-display drop's queued removal
+  cleared the window's new assignment; an added window arranged once per window.
+- Plants after the merge: all 27 roc_path sites reached by tests; behaviour plants caught at the
+  retirement verdict, discovery's net (both the dropped and the uncancelled change) and the lifecycle twin.
+
+**Made obsolete by #702/#700 on our side:** `WindowStore::reconcile_admission`; `observe_minimized`
+(it wrote manageability); `NativeDeparture`'s `remove_projection`; `WindowStore::retire_window`
+(retirement goes through `RiftState` so a grip ends via the core); our `WindowDiscoveryCompleted`
+emission; `find_window_by_idx` (now `resolve_window_index`, which refuses an ambiguous index); the
+seeding expectations (`seed_space` is gone); `bsp_saved.rs`; the old discovery visibility filter; the
+arrange on any focus change; `AppRuleEffects.names_workspace` (one source: our placement question).
+
+**Next:**
+1. The lifecycle flip (gate met): Roc wins, the Rust shadow is re-seeded, the re-seed count is
+   visible, tests panic (policy (a)); the Rust `Lifecycle`'s named tags for invalidate/revalidate in
+   the same slice. The fuzzer runs with the flip on; cost re-measured.
+2. The MainWindowTracker twin: its fields typed first, #702's main-window clearing included.
+3. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
+4. The core_geometry converters on the new layout trees.
+5. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
+   or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
+   Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
+
+No call site is in `layout_engine/`; keep it that way.
 
 ### Rulings that bind (the lead's and the owner's)
 
