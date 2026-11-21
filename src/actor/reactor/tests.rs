@@ -403,8 +403,12 @@ fn layout_query_exposes_active_and_inactive_workspace_container_trees() {
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.send_layout_event(LayoutEvent::SpaceExposed(space, screen.size));
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space, WindowId::new(42, 1)));
-    reactor.send_layout_event(LayoutEvent::WindowAdded(space, WindowId::new(42, 2)));
+    // The layout takes only windows the store owns (#702).
+    for window in [WindowId::new(42, 1), WindowId::new(42, 2)] {
+        reactor.insert_test_window_state(window, screen, None, true);
+        reactor.assign_test_window_to_active_workspace(space, window);
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, window));
+    }
 
     let state = reactor.query_layout_state(None, None).expect("layout state");
     assert_eq!(state.space_id, space.get());
@@ -2439,6 +2443,7 @@ fn layout_events_defer_arrangement_during_drag_except_removal() {
         }
         assert!(reactor.user_is_dragging());
         let added = WindowId::new(1, 2);
+        reactor.insert_test_window_state(added, frame, None, true);
         let observe = || {
             LayoutEvent::TestWindowsObserved(
                 space,
@@ -3121,9 +3126,9 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     // logically unavailable windows instead of manufacturing this ghost.
     let engine = &mut reactor.layout_manager.layout_engine;
     let layout = engine.workspaces().active_layout(user_space, active_workspace).unwrap();
-    engine.workspaces_mut()[active_workspace]
-        .layout_system
-        .add_window_after_selection(layout, duplicate_wid);
+    engine.workspaces_mut()[active_workspace].layout_system.update(
+        crate::layout_engine::systems::WindowChange::Add(layout, duplicate_wid, None),
+    );
     assert!(has_window_in_layout(
         &mut reactor,
         user_space,
@@ -5088,6 +5093,7 @@ fn mouse_raise_queries_order_only_when_it_could_cover_a_floating_window() {
     let floating_wsid = WindowServerId::new(102);
     let smaller = CGRect::new(CGPoint::new(100.0, 100.0), CGSize::new(300.0, 300.0));
     reactor.add_test_window(floating, floating_wsid, Some(space), smaller);
+    reactor.assign_test_window_to_active_workspace(space, floating);
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, floating));
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, floating));
     reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
@@ -7196,6 +7202,7 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
         window_discovery::EmitLayoutPayload {
             pid: window.pid,
             known_visible: &[],
+            resumed: &Default::default(),
             app_info: &None,
             window_spaces: [(window, (Some(space), Some(space)))].into_iter().collect(),
             active_spaces: vec![space],
@@ -9804,6 +9811,7 @@ fn unplug_and_replug_second_display(
     let place = |reactor: &mut Reactor, idx, space, frame, workspace| {
         let wid = WindowId::new(91, idx);
         reactor.add_test_window(wid, WindowServerId::new(910_000 + idx), Some(space), frame);
+        reactor.assign_test_window_to_active_workspace(space, wid);
         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
         if workspace != 0 {
             reactor.handle_test_workspace_command(space, &LayoutCommand::MoveWindowToWorkspace {
@@ -9944,6 +9952,7 @@ fn disconnect_does_not_erase_display_layout_memory() {
     let wsid = WindowServerId::new(910_001);
     reactor.add_test_app(wid.pid);
     reactor.add_test_window(wid, wsid, Some(b), right);
+    reactor.assign_test_window_to_active_workspace(b, wid);
     reactor.send_layout_event(LayoutEvent::WindowAdded(b, wid));
     let workspaces = reactor.test_workspace_ids(b);
     reactor.handle_test_workspace_command(b, &LayoutCommand::MoveWindowToWorkspace {
@@ -10674,6 +10683,10 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
         display: Some(vec!["test-display-1".into()]),
     }];
     reactor.handle_event(Event::ConfigUpdated(config));
+    // The pin's display takes ids[0]; balancing spreads the rest (#702).
+    let balanced = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(balanced.workspace_ids(a), [ids[1], ids[3]]);
+    assert_eq!(balanced.workspace_ids(b), [ids[0], ids[2]]);
     let mut survivor = reactor.space_state.screens[1].clone();
     // Clamshell transition from the log: the LG stays connected but borrows the
     // built-in desktop, and its original native desktop is destroyed.
@@ -10710,7 +10723,7 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     reactor.handle_event(Event::SpaceStateChanged(snapshot));
     apps.simulate_until_quiet(&mut reactor);
     let workspaces = reactor.layout_manager.layout_engine.workspaces();
-    for &id in &[ids[0], ids[2], ids[3]] {
+    for &id in &[ids[0], ids[2]] {
         assert_eq!(
             workspaces[id].space, replacement,
             "{id:?} returns to its home display"
@@ -10718,7 +10731,8 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     }
     assert_eq!(workspaces.active_workspace(replacement), Some(ids[0]));
     assert_eq!(
-        workspaces[ids[1]].space, a,
+        workspaces.workspace_ids(a),
+        [ids[1], ids[3]],
         "the built-in desktop is dormant, not destroyed"
     );
     assert_eq!(workspaces.catalog().count(), 4);
@@ -11725,14 +11739,15 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
         assert_ne!(workspaces[independent].name, workspaces[original].name);
         assert_eq!(
             workspaces.catalog().count(),
-            3,
-            "connecting seeds the emptied display without replacing existing identities"
+            2,
+            "applying the pin preserves both existing identities (#702: no seeding)"
         );
+        assert_eq!(workspaces.active_workspace(a), None);
     }
 }
 
 #[test]
-fn named_pin_reload_moves_immediately_and_seeds_only_once() {
+fn named_pin_reload_moves_immediately_without_creating_workspaces() {
     for create_scratch in [false, true] {
         let mut settings = shared_settings();
         settings.default_workspace_count = 2;
@@ -11774,16 +11789,16 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
                 reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
                 target
             );
-            // Repeated exposure must keep the replacement workspace.
+            // Repeated exposure must retain the workspace moved to balance the displays (#702).
             reactor.handle_event(space_state_event_with(
                 vec![shared_left(), shared_right()],
                 vec![Some(a), Some(b)],
                 |s| s.should_force_refresh_layout = true,
             ));
             if target == a {
+                let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
+                assert_eq!(workspaces.active_workspace(b), Some(ids[0]));
                 if create_scratch {
-                    let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
-                    assert!(workspaces.active_workspace(b).is_some());
                     workspaces.create_workspace(b, Some("scratch".into())).unwrap();
                 }
                 let snapshot = reactor
@@ -11801,7 +11816,7 @@ fn named_pin_reload_moves_immediately_and_seeds_only_once() {
         }
         let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
         assert_eq!(&catalog[..ids.len()], &ids);
-        assert_eq!(catalog.len(), ids.len() + 1 + usize::from(create_scratch));
+        assert_eq!(catalog.len(), ids.len() + usize::from(create_scratch));
     }
 }
 
@@ -11960,8 +11975,9 @@ fn floating_display_transfer_round_trip_preserves_user_geometry() {
 fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
     let (a, b) = (SpaceId::new(1), SpaceId::new(2));
     let windows = [1, 2, 3].map(|idx| WindowId::new(1, idx));
-    // Connecting adds one workspace, regardless of the existing default count.
-    for count in [1, 2] {
+    use crate::common::config::MAX_WORKSPACES;
+
+    for (count, at_capacity) in [(1, false), (2, false), (1, true)] {
         let mut settings = shared_settings();
         settings.default_workspace_count = count;
         let mut reactor = test_reactor_with_workspace_settings(&settings);
@@ -11978,19 +11994,40 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
             let owners: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
             (owners, windows.map(|w| r.state.windows.workspace_for_window(w)))
         };
+        if at_capacity {
+            let store = reactor.layout_manager.layout_engine.workspaces_mut();
+            for _ in 1..MAX_WORKSPACES {
+                store.create_workspace(a, None).unwrap();
+            }
+        }
         let before = model(&reactor);
+        assert_eq!(
+            before.0.iter().filter(|&&(_, owner)| owner == b).count(),
+            count - 1,
+            "display discovery must preserve the configured catalog"
+        );
         let move_first = |index| {
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector: DisplaySelector::Index(index),
                 window_id: Some(1),
             }))
         };
-        let target = reactor.layout_manager.layout_engine.workspaces().active_workspace(b).unwrap();
-        // A newly connected display immediately accepts commands and pointer placement.
         for _ in 0..2 {
             reactor.handle_event(move_first(1));
             apps.simulate_until_quiet(&mut reactor);
         }
+        let Some(target) = reactor.layout_manager.layout_engine.workspaces().active_workspace(b)
+        else {
+            assert!(at_capacity);
+            assert_eq!(model(&reactor), before);
+            assert!(reactor.state.windows.record(windows[0]).unwrap().transfer().is_none());
+            for window in windows {
+                assert!(has_window_in_layout(&mut reactor, a, shared_left(), window));
+            }
+            continue;
+        };
+        assert!(!at_capacity);
+        // A newly connected display with a workspace accepts commands and pointer placement.
         let opened = WindowId::new(1, 9);
         crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
         reactor.handle_event(Event::WindowCreated(
@@ -12012,7 +12049,11 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
         ));
         apps.simulate_until_quiet(&mut reactor);
         let (owners, members) = model(&reactor);
-        assert_eq!(owners, before.0, "window moves preserve workspace ownership");
+        assert_eq!(&owners[..before.0.len()], &before.0);
+        assert_eq!(owners.len(), before.0.len() + usize::from(count == 1));
+        if count == 1 {
+            assert_eq!(owners.last(), Some(&(target, b)));
+        }
         assert_eq!(members, [Some(target), before.1[1], before.1[2]]);
         assert!(has_window_in_layout(&mut reactor, b, shared_right(), windows[0]));
         assert!(!has_window_in_layout(&mut reactor, a, shared_left(), windows[0]));

@@ -98,6 +98,21 @@ impl Reactor {
         }
     }
 
+    /// Assign a window to the active workspace of `space`, as admission does before the layout
+    /// takes it (#702: the layout projects only windows the store owns).
+    pub fn assign_test_window_to_active_workspace(
+        &mut self,
+        space: SpaceId,
+        wid: WindowId,
+    ) -> bool {
+        let Some(workspace) =
+            self.layout_manager.layout_engine.workspaces().active_workspace(space)
+        else {
+            return false;
+        };
+        self.assign_test_window_to_workspace(space, wid, workspace)
+    }
+
     pub fn assign_test_window_to_workspace(
         &mut self,
         space: SpaceId,
@@ -302,7 +317,6 @@ pub fn test_reactor_with_workspace_settings(
     Reactor::new_for_test(LayoutEngine::new(
         workspace_settings,
         &crate::common::config::LayoutSettings::default(),
-        None,
     ))
 }
 

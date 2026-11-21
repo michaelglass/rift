@@ -1225,10 +1225,17 @@ impl Sim {
                 if let Some(held) = &mut self.held {
                     held.command_during_drag = true;
                 }
+                // The user focuses the window and moves the focused one: an index alone names
+                // a window only when no other app's window shares it (upstream refuses an
+                // ambiguous index, #702), and the simulated apps share indexes.
+                let window = self.pick(w);
+                if let Some(space) = self.reactor.assigned_space_for_window_id(window) {
+                    self.reactor.send_layout_event(LayoutEvent::WindowFocused(space, window));
+                }
                 self.reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
                     workspace: WorkspaceSelector::Index(k),
                     follow: false,
-                    window_id: Some(self.pick(w).idx.get()),
+                    window_id: None,
                 });
             }
             Step::SwitchWorkspace { to } => {

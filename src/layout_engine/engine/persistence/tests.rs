@@ -33,28 +33,22 @@ fn evidence(window: WindowId) -> WindowFingerprint {
 fn live_state(window: WindowId) -> WindowState {
     let saved = evidence(window);
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(saved.width, saved.height));
-    WindowState {
-        native_transient: false,
-        info: WindowInfo {
-            has_native_tabs: false,
-            is_standard: true,
-            is_root: true,
-            is_minimized: false,
-            is_resizable: true,
-            min_size: None,
-            max_size: None,
-            title: saved.title.unwrap(),
-            frame,
-            sys_id: saved.window_server_id.map(WindowServerId::new),
-            bundle_id: saved.app_id,
-            path: None,
-            ax_role: None,
-            ax_subrole: None,
-        },
-        frame_monotonic: frame,
-        is_manageable: true,
-        manage_override: None,
-    }
+    WindowState::from(WindowInfo {
+        has_native_tabs: false,
+        is_standard: true,
+        is_root: true,
+        is_minimized: false,
+        is_resizable: true,
+        min_size: None,
+        max_size: None,
+        title: saved.title.unwrap(),
+        frame,
+        sys_id: saved.window_server_id.map(WindowServerId::new),
+        bundle_id: saved.app_id,
+        path: None,
+        ax_role: None,
+        ax_subrole: None,
+    })
 }
 
 fn fresh(
@@ -80,7 +74,7 @@ fn open(
     window: WindowId,
 ) {
     let space = engine.workspaces[id].space;
-    store.insert_window(window, live_state(window));
+    store.insert_manageable_window(window, live_state(window));
     assert!(engine.workspaces.assign_window_to_workspace(store, space, window, id));
     engine.add_window_to_layout(store, space, window);
 }
@@ -272,7 +266,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         .workspaces
         .transfer_workspace(moved, b, None, WorkspaceTransferReason::DisplayDeparture);
     let replacement = engine.workspaces.active_workspace(a);
-    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space).unwrap();
+    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space()).unwrap();
     let old = ron::ser::to_string(&HashMap::from_iter([
         (a, (None::<VirtualWorkspaceId>, moved)),
         (b, (None, engine.workspaces.active_workspace(b).unwrap())),
@@ -282,7 +276,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     let loaded = LayoutEngine::deserialize_from_str(&file).unwrap();
     assert_eq!(loaded.workspaces.active_workspace(a), replacement);
     assert_eq!(
-        loaded.workspaces.active_workspace_per_space[&a].remembered,
+        loaded.workspaces.active_workspace_per_space()[&a].remembered(),
         Some(moved)
     );
 
