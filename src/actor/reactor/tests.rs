@@ -14897,3 +14897,54 @@ fn a_space_remapped_onto_one_holding_workspaces_takes_its_windows_and_claims_alo
         Some(migrated)
     );
 }
+
+/// One discovery reading can change a window's admission twice: its fresh roles admit it while
+/// the heuristic, refreshed from the same reading, suspends it. The two cancel: nothing leaves
+/// the layout and the window stays out (the net of the two changes, asked of the Roc core too).
+#[test]
+fn a_reading_whose_roles_admit_and_heuristic_suspends_changes_nothing() {
+    let mut reactor = test_reactor();
+    let wid = WindowId::new(77, 1);
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(500., 500.));
+    let mut dialog = make_window_info(frame, None, "Dialog", None);
+    dialog.ax_role = Some("AXWindow".into());
+    dialog.ax_subrole = Some("AXDialog".into());
+    reactor.state.insert_window_as(
+        wid,
+        WindowState::from(dialog),
+        rift_core::lifecycle::Manageability::Manageable,
+        rift_core::lifecycle::Rule::NoRule,
+    );
+    assert!(
+        !reactor.state.windows.is_admitted(wid),
+        "an AXDialog with no rule is vetoed"
+    );
+
+    let mut reading = make_window_info(frame, None, "Dialog", None);
+    reading.ax_role = Some("AXWindow".into());
+    reading.ax_subrole = Some("AXStandardWindow".into());
+    reading.is_standard = false;
+    let (new, _, outcome) = window_discovery::process_window_list(
+        &mut reactor.state,
+        &mut reactor.layout_manager,
+        vec![window_discovery::ObservedWindow {
+            wid,
+            info: reading,
+            as_of: None,
+        }],
+    );
+    assert!(new.is_empty());
+    assert!(
+        !reactor.state.windows.is_admitted(wid),
+        "the heuristic keeps it out"
+    );
+    assert!(
+        !outcome.layout_events.iter().any(|event| matches!(
+            event,
+            LayoutEvent::WindowRemoved(w) | LayoutEvent::WindowSuspended(w) if *w == wid
+        )),
+        "admitted and suspended in one reading is no change: {:?}",
+        outcome.layout_events
+    );
+    assert_eq!(outcome.arrange.passes, 0, "no change, no arrange");
+}
