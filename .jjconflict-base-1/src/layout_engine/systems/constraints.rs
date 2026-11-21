@@ -90,14 +90,21 @@ pub(super) fn traditional_leaf_axis_constraints(
     let c = c.normalized();
     let min = c.min_for_axis(horizontal);
     let max = (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal));
-    if c.is_resizable {
-        if let Some(fixed) = c.fixed_for_axis(horizontal) {
-            return (min, Some(fixed), Some(fixed), false);
-        }
-        // Some apps report transient or overly conservative min/max bounds while still
-        // being user-resizable. In traditional tiling, honoring those bounds at split
-        // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split).
-        return (0.0, None, max, true);
+    // A resizable window keeps an axis its app locks (min = max); otherwise it takes its slot,
+    // down to `tiled_min`.
+    let resizable = |tiled_min: f64| match c.fixed_for_axis(horizontal) {
+        Some(fixed) => (min, Some(fixed), Some(fixed), false),
+        None => (tiled_min, None, max, true),
+    };
+    match c.sizing {
+        // Some apps report transient or overly conservative min/max bounds while still being
+        // user-resizable. In traditional tiling, honoring those bounds at split time causes
+        // visibly uneven insertion (e.g. 2:1 right after a 50/50 split), so a resizable
+        // window's minimum is advisory...
+        super::Sizing::Resizable => return resizable(0.0),
+        // ...unless an app rule asks to respect it.
+        super::Sizing::ResizableAtLeastMin => return resizable(min),
+        super::Sizing::Fixed => {}
     }
     let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
     let can_grow = fixed.is_none();

@@ -460,7 +460,9 @@ impl LayoutEngine {
     ) -> Option<DropPreview> {
         let (workspace, layout) = self.workspaces.active_layout_for_space(space)?;
         let system = &self.workspaces[workspace].layout_system;
-        let before = system.window_slot(layout, source)?;
+        // A window dragged in from another display is in no slot here yet: it joins this layout
+        // the way the drop adds it.
+        let before = system.window_slot(layout, source);
         if !system.window_participates(source)
             || !system.window_participates(target)
             || !system.contains_window(layout, target)
@@ -469,6 +471,9 @@ impl LayoutEngine {
         }
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
         let mut system = system.preview_clone()?;
+        if before.is_none() {
+            system.update(WindowChange::Add(layout, source, None));
+        }
         system
             .edit(layout, LayoutEdit::Drop { source, target, action })
             .changed()
@@ -480,7 +485,7 @@ impl LayoutEngine {
             .find_map(|(window, frame)| (window == source).then_some(frame))?;
         Some(DropPreview {
             frame,
-            same_slot: system.window_slot(layout, source)? == before,
+            same_slot: system.window_slot(layout, source) == before,
         })
     }
 
@@ -1644,7 +1649,7 @@ impl LayoutEngine {
                     // Scrolling ignores respect_min_size; WindowObserved sets it.
                     WindowLayoutConstraints {
                         sizing: Sizing::new(window.info.is_resizable, false),
-                        locked_height: window.frame_monotonic.size.height,
+                        locked_height: window.frame_monotonic().size.height,
                         min_width: window.info.min_size.map_or(0.0, |size| size.width),
                         min_height: window.info.min_size.map_or(0.0, |size| size.height),
                         max_width: window.info.max_size.map_or(0.0, |size| size.width),
@@ -1653,7 +1658,7 @@ impl LayoutEngine {
                     }
                     .normalized()
                 });
-            constraints.locked_width = window.frame_monotonic.size.width;
+            constraints.locked_width = window.frame_monotonic().size.width;
             self.window_layout_constraints.insert(wid, constraints);
         }
     }
@@ -1720,7 +1725,7 @@ impl LayoutEngine {
                 .workspaces
                 .workspaces
                 .values()
-                .any(|ws| ws.space == space && ws.preferred_display.is_none())
+                .any(|ws| ws.space == space && ws.home.display().is_none())
         {
             return;
         }
@@ -1731,9 +1736,9 @@ impl LayoutEngine {
                 .values_mut()
                 .filter(|workspace| workspace.space == space)
             {
-                if workspace.preferred_display.is_none() {
-                    workspace.preferred_display = Some(uuid.to_owned());
-                    workspace.home_space = Some(space);
+                if workspace.home.display().is_none() {
+                    workspace.home =
+                        crate::model::virtual_workspace::Home::placed(space, Some(uuid.to_owned()));
                 }
             }
             self.space_display_map.insert(space, Some(uuid.to_owned()));
@@ -2417,7 +2422,7 @@ impl LayoutEngine {
                             && let (Some(center), Some(size), Some(current)) = (
                                 visible_space_frames.get(&space).map(|frame| frame.mid()),
                                 self.workspaces[ws_id].layout_state.active_size(),
-                                window_store.window(wid).map(|window| window.frame_monotonic),
+                                window_store.window(wid).map(|window| window.frame_monotonic()),
                             )
                         {
                             let screen = CGRect::new(
@@ -2473,7 +2478,7 @@ impl LayoutEngine {
                         .workspace_for_window(&window_store, space, wid)
                         .or_else(|| self.workspaces.active_workspace(space));
                     if let (Some(ws), Some(frame)) =
-                        (ws, window_store.window(wid).map(|w| w.frame_monotonic))
+                        (ws, window_store.window(wid).map(|w| w.frame_monotonic()))
                     {
                         self.floating_positions.store(ws, wid, frame);
                     }
@@ -3386,7 +3391,7 @@ impl LayoutEngine {
             window_store.window(window_id).filter(|_| self.is_restoring()).map(|window| {
                 (
                     context.window_title.unwrap_or(&window.info.title).to_owned(),
-                    window.frame_monotonic.size,
+                    window.frame_monotonic().size,
                 )
             });
         let restored = observation.is_some_and(|(title, size)| {
@@ -3744,16 +3749,14 @@ impl LayoutEngine {
             })
     }
 
-    /// Requested geometry is presentation intent, never native membership evidence.
+    /// Requested geometry is presentation intent, never native membership evidence. The
+    /// model's frame for the window is the core's (the caller tells it first).
     pub(crate) fn prepare_window_placement(
         &mut self,
         windows: &mut WindowStore,
         window: WindowId,
         frame: CGRect,
     ) {
-        if let Some(state) = windows.window_mut(window) {
-            state.frame_monotonic = frame;
-        }
         if self.is_window_floating(window)
             && let Some(assignment) = windows.workspace_for_window(window)
         {

@@ -21,9 +21,34 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
+/// How tiling may size a window. The minimum it reports is `min_width`/`min_height`; this says
+/// whether tiling honours it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Sizing {
+    /// Not resizable: kept at its own (locked) size.
+    #[default]
+    Fixed,
+    /// Resizable; traditional tiling may shrink it below the minimum it reports, so splits stay
+    /// even.
+    Resizable,
+    /// Resizable, but never below the minimum it reports (an app rule's `respect_min_size`).
+    ResizableAtLeastMin,
+}
+
+impl Sizing {
+    /// What the app says of a window, and whether a rule asks to respect its minimum.
+    pub fn new(is_resizable: bool, respect_min_size: bool) -> Self {
+        match (is_resizable, respect_min_size) {
+            (false, _) => Self::Fixed,
+            (true, false) => Self::Resizable,
+            (true, true) => Self::ResizableAtLeastMin,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowLayoutConstraints {
-    pub is_resizable: bool,
+    pub sizing: Sizing,
     pub locked_width: f64,
     pub locked_height: f64,
     pub min_width: f64,
@@ -46,7 +71,7 @@ impl WindowLayoutConstraints {
             max_height = min_height;
         }
         Self {
-            is_resizable: self.is_resizable,
+            sizing: self.sizing,
             locked_width: clean(self.locked_width),
             locked_height: clean(self.locked_height),
             min_width,
@@ -85,7 +110,7 @@ impl WindowLayoutConstraints {
         if min > 0.0 && max > 0.0 && (min - max).abs() <= f64::EPSILON {
             return Some(max);
         }
-        if !self.is_resizable {
+        if self.sizing == Sizing::Fixed {
             return (locked > 0.0).then_some(locked);
         }
         None

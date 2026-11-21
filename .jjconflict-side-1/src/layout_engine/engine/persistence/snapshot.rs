@@ -252,6 +252,7 @@ impl PersistedLayout {
             app_rules: AppRuleEngine::default(),
             focused_window: None,
             window_layout_constraints: Default::default(),
+            app_min_sizes: Default::default(),
             workspaces: self.workspaces,
             layout_settings: LayoutSettings::default(),
             space_display_map: self.space_display_map,
