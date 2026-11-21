@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod app_rules;
 pub mod floating_position_store;
 pub mod hidden_window_placement;
