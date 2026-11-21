@@ -137,7 +137,10 @@ impl WindowState {
         }
     }
 
-    pub(crate) fn can_reconcile_admission(&self) -> bool { !self.info.is_minimized }
+    /// Admission is reconciled only for a window that is shown (not minimized).
+    pub(crate) fn can_reconcile_admission(&self) -> bool {
+        self.minimize() == rift_core::lifecycle::Minimize::Shown
+    }
 }
 
 /// An app rule's override as the rule it is.

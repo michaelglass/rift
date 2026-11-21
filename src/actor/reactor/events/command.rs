@@ -148,8 +148,21 @@ pub fn handle_command_layout(
     // Geometry commands must reconcile frames even when their layout-system
     // operation has no explicit change result. Focus, selection and workspace
     // commands provide one, so preserve their no-op behavior.
-    let needs_arrange = response_changed
-        || (!is_focus_command && !is_selection_command && !is_virtual_workspace_command);
+    // A focus change rearranges only where focus moves geometry (scrolling, stacks); elsewhere
+    // it only redraws tabs (#700).
+    let focus_moves_geometry = || {
+        response
+            .focus_window
+            .and_then(|window| state.windows.workspace_for_window(window))
+            .map(|workspace| layout.layout_engine.workspaces()[workspace].space)
+            .or(command_space)
+            .is_none_or(|space| layout.layout_engine.focus_changes_geometry(space))
+    };
+    let needs_arrange = if is_focus_command {
+        response_changed && focus_moves_geometry()
+    } else {
+        response_changed || (!is_selection_command && !is_virtual_workspace_command)
+    };
     let mut outcome = if needs_arrange {
         EventOutcome::layout_changed(false)
     } else {
@@ -287,6 +300,8 @@ pub fn handle_config_updated(
     } else {
         EventOutcome::no_change()
     };
+    let rules_changed =
+        config.virtual_workspaces.app_rules != new_config.virtual_workspaces.app_rules;
     *config = new_config;
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
@@ -300,6 +315,7 @@ pub fn handle_config_updated(
 
     outcome.absorb(EventOutcome {
         service_config_update: Some(config.clone()),
+        reprocess_app_rules: rules_changed,
         ..EventOutcome::layout_changed(false)
     });
     Ok(outcome)

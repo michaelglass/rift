@@ -878,11 +878,19 @@ impl RiftState {
             Option<crate::sys::window_server::WindowServerInfo>,
         ) -> crate::model::window_store::InventoryWindowObservation,
     ) -> Vec<(WindowId, Option<WindowServerId>)> {
-        let retired = self.windows.inventory_retirements(pid, observed, inactive, observe);
-        for &(window, _) in &retired {
-            self.remove_window(window);
-        }
+        let retired = self.windows.inventory_retirements(
+            pid,
+            observed.iter().copied(),
+            |window| inactive.contains(&window),
+            observe,
+        );
         retired
+            .into_iter()
+            .filter_map(|window| {
+                let record = self.remove_window(window)?;
+                Some((window, record.window_server_id()))
+            })
+            .collect()
     }
 
     pub(crate) fn reconcile_ax_identity(

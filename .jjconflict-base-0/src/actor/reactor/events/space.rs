@@ -1,9 +1,9 @@
+use rift_core::topology::{Displays, Incoming};
 use tracing::{debug, trace};
 
-use crate::actor::app::Request;
-use crate::actor::reactor::events::{EventOutcome, window};
-use crate::actor::reactor::managers::{DragManager, MissionControlManager};
-use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
+use crate::actor::reactor::events::EventOutcome;
+use crate::actor::reactor::managers::MissionControlManager;
+use crate::actor::reactor::{MissionControlState, SpaceEventKind};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
@@ -66,6 +66,83 @@ pub(crate) fn analyze_space_snapshot(
     }
 }
 
+/// A snapshot's displays as admission reads them: each screen's display id (none when
+/// empty), each display's Spaces.
+pub(crate) fn displays(state: &ForwardedSpaceState) -> Displays<&str, SpaceId> {
+    Displays {
+        screens: state.screens.iter().map(|screen| screen.display_uuid_opt()).collect(),
+        spaces: state
+            .display_space_ids
+            .iter()
+            .map(|(display, spaces)| (display.as_str(), spaces.clone()))
+            .collect(),
+    }
+}
+
+/// A snapshot being admitted, as admission reads it.
+pub(crate) fn incoming(state: &ForwardedSpaceState) -> Incoming<&str, SpaceId> {
+    Incoming {
+        displays: displays(state),
+        remaps: state.space_remaps.clone(),
+        display_set_changed: state.display_set_changed,
+        force_refresh: state.should_force_refresh_layout,
+        membership_complete: state.membership_complete,
+    }
+}
+
+/// An admission as the Roc core's question: Spaces as their words, each display as the place
+/// it first appears in this question (the answer names only Spaces, so a display needs only
+/// to be told apart from the others).
+#[cfg(feature = "roc-core")]
+pub(crate) fn plain_admit(
+    current: &Displays<&str, SpaceId>,
+    incoming: &Incoming<&str, SpaceId>,
+    mission_control: rift_core::topology::MissionControl,
+) -> rift_core::topology::plain::Admit {
+    use crate::roc_path::Word;
+    /// The place `display` first appears among `names`.
+    fn name(names: &mut Vec<String>, display: &str) -> u64 {
+        match names.iter().position(|named| named == display) {
+            Some(place) => place as u64,
+            None => {
+                names.push(display.to_owned());
+                (names.len() - 1) as u64
+            }
+        }
+    }
+    let mut names = Vec::new();
+    let mut plain = |displays: &Displays<&str, SpaceId>| Displays {
+        screens: displays
+            .screens
+            .iter()
+            .map(|screen| screen.map(|display| name(&mut names, display)))
+            .collect(),
+        spaces: displays
+            .spaces
+            .iter()
+            .map(|(display, spaces)| {
+                (
+                    name(&mut names, display),
+                    spaces.iter().map(|&space| space.word()).collect(),
+                )
+            })
+            .collect(),
+    };
+    let current = plain(current);
+    let displays = plain(&incoming.displays);
+    rift_core::topology::plain::Admit {
+        mission_control,
+        current,
+        incoming: Incoming {
+            displays,
+            remaps: incoming.remaps.iter().map(|&(old, new)| (old.word(), new.word())).collect(),
+            display_set_changed: incoming.display_set_changed,
+            force_refresh: incoming.force_refresh,
+            membership_complete: incoming.membership_complete,
+        },
+    }
+}
+
 /// Prepends an older sample's deltas to a newer one; geometry and membership stay the newer's.
 pub(crate) fn merge_space_deltas(
     mut older: ForwardedSpaceState,
@@ -116,8 +193,6 @@ pub struct WindowServerAppearedObservations {
 
 pub fn handle_window_server_destroyed(
     state: &mut RiftState,
-    transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
-    drag: &mut DragManager,
     payload: WindowServerLifecyclePayload,
     observations: WindowServerDestroyedObservations,
 ) -> anyhow::Result<EventOutcome> {
@@ -137,7 +212,7 @@ pub fn handle_window_server_destroyed(
         // Departure alone cannot establish entry. Startup recovery uses positive
         // fullscreen appearance/discovery, even if this notification arrives late.
         if let Some(wid) = state.windows.tracked_window_id(wsid) {
-            outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+            outcome = outcome.with_window_inventory_request(wid.pid);
         }
 
         return Ok(outcome);
@@ -156,19 +231,12 @@ pub fn handle_window_server_destroyed(
                 }
             }
             crate::model::window_store::NativeDeparture::Closed(wid) => {
-                outcome.absorb(window::handle_window_destroyed(
-                    state,
-                    transactions,
-                    drag,
-                    window::WindowDestroyedPayload { window: wid },
-                ));
+                outcome.retirements.push(wid);
             }
-            crate::model::window_store::NativeDeparture::Hidden { window, remove_projection } => {
+            crate::model::window_store::NativeDeparture::Hidden(window) => {
                 if let Some(wid) = window {
-                    if remove_projection {
-                        outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
-                    }
-                    outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
+                    outcome.memberships.push((wid, None));
+                    outcome = outcome.with_window_inventory_request(wid.pid);
                 }
             }
         }
@@ -223,91 +291,61 @@ pub fn handle_window_server_appeared(
         }
     }
 
-    if state.windows.knows_window_server_id(wsid) || state.windows.is_window_server_observed(wsid) {
-        if !mission_control_active {
-            match kind {
-                SpaceEventKind::User => {
-                    if let Some(wid) = state.windows.tracked_window_id(wsid) {
-                        outcome.fullscreen_restorations.push((wsid, sid, wid));
-                        if state.windows.native_fullscreen_record_for_window(wid).is_some() {
-                            outcome = outcome.with_window_inventory_request(wid.pid);
-                        }
-                    } else if let Some(pid) =
-                        state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
-                    {
-                        outcome = outcome.with_window_inventory_request(pid);
-                    }
-                }
-                SpaceEventKind::Fullscreen => {
-                    let tracked_window_id = state.windows.tracked_window_id(wsid);
-                    let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
-                        state.windows.get_window_server_info(wsid).map(|info| info.pid)
-                    });
-                    if let Some(wid) = state.windows.observe_native_fullscreen(
-                        wsid,
-                        sid,
-                        last_known_user_space,
-                        owner_pid,
-                    ) {
-                        outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
-                    }
-                    if tracked_window_id.is_none()
-                        && let Some(pid) = owner_pid
-                    {
-                        outcome = outcome.with_window_inventory_request(pid);
-                    }
-                }
-            }
-        }
-        debug!(
-            ?wsid,
-            "Received WindowServerAppeared for known window - ignoring"
-        );
+    let tracked = state.windows.tracked_window_id(wsid);
+    let known = tracked.is_some()
+        || state.windows.knows_window_server_id(wsid)
+        || state.windows.is_window_server_observed(wsid);
+    if known && mission_control_active {
         return Ok(outcome);
     }
-
-    state.windows.mark_window_server_observed(wsid);
-    // TODO: figure out why this is happening, we should really know about this app,
-    // why dont we get notifications that its being launched?
-    if let Some(window_server_info) = window_server_info {
-        if window_server_info.layer != 0 {
-            state.windows.clear_window_server_observed(wsid);
-            trace!(
-                ?wsid,
-                layer = window_server_info.layer,
-                "Ignoring non-normal window"
-            );
-            return Ok(outcome);
-        }
-
-        // Filter out very small windows (likely tooltips or similar UI elements)
-        // that shouldn't be managed by the window manager
+    if !known {
+        state.windows.mark_window_server_observed(wsid);
+        // Layered or tiny windows (tooltips and similar chrome) are never managed.
         const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
-        if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
-            || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+        if let Some(info) = window_server_info
+            && (info.layer != 0
+                || info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+                || info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE)
         {
             state.windows.clear_window_server_observed(wsid);
-            trace!(
-                ?wsid,
-                "Ignoring tiny window ({}x{}) - likely tooltip",
-                window_server_info.frame.size.width,
-                window_server_info.frame.size.height
-            );
+            trace!(?wsid, layer = info.layer, "Ignoring non-normal or tiny window");
             return Ok(outcome);
         }
+    }
 
-        if matches!(kind, SpaceEventKind::Fullscreen) {
-            state.windows.observe_native_fullscreen(
-                wsid,
-                sid,
-                last_known_user_space,
-                Some(window_server_info.pid),
-            );
-            outcome = outcome.with_window_inventory_request(window_server_info.pid);
-
+    if matches!(kind, SpaceEventKind::Fullscreen) {
+        let pid = tracked.map(|wid| wid.pid).or_else(|| {
+            state
+                .windows
+                .get_window_server_info(wsid)
+                .or(window_server_info)
+                .map(|info| info.pid)
+        });
+        if pid.is_none() {
             return Ok(outcome);
         }
-
+        if let Some(wid) =
+            state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, pid)
+        {
+            outcome.memberships.push((wid, None));
+        }
+        if tracked.is_none()
+            && let Some(pid) = pid
+        {
+            outcome = outcome.with_window_inventory_request(pid);
+        }
+        return Ok(outcome);
+    }
+    if let Some(wid) = tracked {
+        if state.windows.native_fullscreen_record_for_window(wid).is_some() {
+            outcome = outcome.with_window_inventory_request(wid.pid);
+        }
+        outcome.fullscreen_restorations.push((wsid, sid, wid));
+    } else if known {
+        if let Some(pid) = state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid) {
+            outcome = outcome.with_window_inventory_request(pid);
+        }
+    } else if let Some(window_server_info) = window_server_info {
         outcome = outcome.with_window_server_updates(vec![window_server_info]);
 
         if !app_known {
@@ -327,38 +365,18 @@ pub fn handle_window_server_appeared(
 
 pub fn handle_mission_control_native_entered(
     mission_control: &mut MissionControlManager,
-    drag: &mut DragManager,
+    state: &mut crate::model::RiftState,
 ) -> anyhow::Result<EventOutcome> {
-    drag.suppress_preview(true);
-    drag.reset();
-    let changed = !matches!(
-        mission_control.mission_control_state,
-        MissionControlState::Active
-    );
+    state.let_go();
     mission_control.mission_control_state = MissionControlState::Active;
-    let outcome = EventOutcome::focus_changed(None, false);
-    Ok(if changed {
-        outcome.with_focus_follows_mouse_refresh()
-    } else {
-        outcome
-    })
+    Ok(EventOutcome::focus_changed(None, false))
 }
 
 pub fn handle_mission_control_native_exited(
     mission_control: &mut MissionControlManager,
-    drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
-    drag.suppress_preview(false);
-    let changed = matches!(
-        mission_control.mission_control_state,
-        MissionControlState::Active
-    );
     mission_control.mission_control_state = MissionControlState::Inactive;
     let mut outcome = EventOutcome::layout_changed(false);
     outcome.recover_after_mission_control = true;
-    Ok(if changed {
-        outcome.with_focus_follows_mouse_refresh()
-    } else {
-        outcome
-    })
+    Ok(outcome)
 }

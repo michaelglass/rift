@@ -139,7 +139,7 @@ impl Reactor {
             let space = s.context.space;
             let gesture = (!s.released)
                 .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
-            let _ = self.present_camera(space, true, gesture, None);
+            let _ = self.present_camera(space, true, gesture);
         }
     }
 
@@ -167,7 +167,7 @@ impl Reactor {
     fn apply_viewport_frames(&mut self) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
-            let _ = self.present_camera(space, false, None, None);
+            let _ = self.present_camera(space, false, None);
             self.commit_presentations();
         }
     }
@@ -401,10 +401,10 @@ mod tests {
             mode: LayoutMode::Scrolling,
         });
         for i in 1..=4 {
-            r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(
-                space,
-                crate::actor::app::WindowId::new(1, i),
-            ));
+            let window = crate::actor::app::WindowId::new(1, i);
+            r.insert_test_window_state(window, CGRect::ZERO, None, true);
+            r.assign_test_window_to_active_workspace(space, window);
+            r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(space, window));
         }
         // Prepare through the real engine boundary; no native app is needed to
         // exercise viewport focus, cached frames and workspace ownership.
@@ -419,7 +419,14 @@ mod tests {
         else {
             panic!("scrolling layout");
         };
-        system.select_window(layout, crate::actor::app::WindowId::new(1, 1));
+        system
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(crate::actor::app::WindowId::new(
+                    1, 1,
+                )),
+            )
+            .handled;
         system.prepare_layout(
             layout,
             CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),
@@ -517,6 +524,63 @@ mod tests {
     }
 
     #[test]
+    fn a_swipe_during_a_drag_does_nothing_and_nothing_happens_at_the_drop() {
+        let mut r = test_reactor_with_workspace_count(3);
+        let space = SpaceId::new(1);
+        r.handle_loop_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+            vec![Some(space)],
+        ));
+        let mut config = Config::default();
+        config.settings.layout.scrolling.gestures.enabled = true;
+        config.settings.gestures.haptics_enabled = false;
+        config.settings.gestures.skip_empty = false;
+        let settings = Settings::new(&config);
+        let control = Control::new(&config);
+        control.configure(settings, true, Vec::new());
+        let fingers = config.settings.layout.scrolling.gestures.fingers;
+        let context = Context::new(
+            1,
+            0,
+            space,
+            (LayoutMode::Scrolling, fingers),
+            settings,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let swipe = || {
+            super::super::Event::Gesture(Lifecycle::Workspace {
+                context: context.clone(),
+                next: true,
+                control: control.clone(),
+            })
+        };
+        let active =
+            |r: &Reactor| r.layout_manager.layout_engine.workspaces().active_workspace(space);
+        let wid = WindowId::new(1, 1);
+        let frame = CGRect::new(CGPoint::new(50.0, 50.0), CGSize::new(100.0, 100.0));
+        r.insert_test_window_state(
+            wid,
+            frame,
+            Some(crate::sys::window_server::WindowServerId::new(1)),
+            true,
+        );
+        let start = active(&r);
+        r.ensure_active_drag(wid, &frame);
+
+        r.handle_loop_event(swipe());
+        assert_eq!(active(&r), start, "a swipe mid-drag switched workspaces");
+        r.handle_loop_event(super::super::Event::PointerReleased(
+            crate::actor::drag::MouseButton::Left,
+        ));
+        assert_eq!(active(&r), start, "the swipe was replayed at the drop");
+
+        // The same swipe with the hand off runs.
+        r.handle_loop_event(swipe());
+        assert_ne!(active(&r), start);
+    }
+
+    #[test]
     fn workspace_gesture_with_one_workspace_leaves_switch_inactive() {
         for next in [true, false] {
             let settings = crate::common::config::VirtualWorkspaceSettings {
@@ -548,7 +612,6 @@ mod tests {
                 r.workspace_switch_manager.workspace_switch_state,
                 super::super::WorkspaceSwitchState::Inactive
             );
-            assert_eq!(r.workspace_switch_manager.pending_workspace_switch_origin, None);
             assert_eq!(r.workspace_switch_manager.active_workspace_switch, None);
             assert!(!r.workspace_switch_manager.manual_switch_in_progress());
         }
@@ -645,7 +708,7 @@ mod tests {
 
             apps.simulate_until_quiet(&mut r);
 
-            let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic();
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
@@ -657,7 +720,7 @@ mod tests {
                 r.gesture_tick();
             }
 
-            let moved = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            let moved = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic();
             assert!(
                 moved.origin.x < initial.origin.x,
                 "a display above must not pin horizontal viewport motion: external={external}, initial={initial:?}, moved={moved:?}"
@@ -682,13 +745,14 @@ mod tests {
             queue.drain_with(|wid, frame, set_size, _, source, _, _| {
                 assert_eq!(source, crate::actor::app::FrameSource::Viewport);
                 assert!(!set_size, "scrolling must only move windows");
-                assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic));
+                assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic()));
                 written.insert(wid);
             });
             assert_eq!(written.len(), 4);
             assert!(
-                !initial
-                    .same_as(r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic)
+                !initial.same_as(
+                    r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic()
+                )
             );
 
             // Reconcile the last interactive frame before the release snap (or
@@ -978,7 +1042,7 @@ mod tests {
                             }
                             assert_eq!(
                                 position.origin,
-                                r.state.windows.window(wid).unwrap().frame_monotonic.origin
+                                r.state.windows.window(wid).unwrap().frame_monotonic().origin
                             );
                             hidden.insert(wid);
                         }
@@ -1019,7 +1083,7 @@ mod tests {
             r.start_gesture_presentation();
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
-            let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic();
             r.gesture_event(Lifecycle::End {
                 sample: sample(1, 300.0, 100),
                 cancelled: false,
@@ -1029,7 +1093,7 @@ mod tests {
                 "gesture override must animate even with global animation disabled"
             );
             assert_eq!(
-                r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic,
+                r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic(),
                 before
             );
             // Duplicate lift and late physical samples cannot retarget the release.
@@ -1072,7 +1136,9 @@ mod tests {
                             assert_eq!(source, FrameSource::Viewport);
                             assert!(!set_size);
                             assert!(
-                                frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic)
+                                frame.same_as(
+                                    r.state.windows.window(wid).unwrap().frame_monotonic()
+                                )
                             );
                             moved += 1;
                         });

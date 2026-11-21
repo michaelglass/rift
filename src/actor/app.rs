@@ -3104,7 +3104,7 @@ mod frame_tests {
                 size_step: 10.,
                 ..Default::default()
             };
-            let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+            let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, []));
             let target = AuthorizedFrameTarget {
                 target: &window,
                 authority: &authority,

@@ -4,7 +4,6 @@ use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, WindowId};
 use crate::actor::reactor::AppState;
 use crate::actor::reactor::events::{EventOutcome, WindowDiscoveryRequest};
 use crate::actor::reactor::managers::AppManager;
-use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerInfo;
 
@@ -39,6 +38,7 @@ pub fn handle_application_launched(
             new: visible_windows,
             known_visible: Vec::new(),
             app_info: Some(info),
+            as_of: Default::default(),
         }))
 }
 
@@ -47,15 +47,11 @@ pub fn handle_application_terminated(pid: i32) -> anyhow::Result<EventOutcome> {
 }
 
 pub fn handle_application_thread_terminated(
-    state: &mut crate::model::RiftState,
     apps: &mut AppManager,
     pid: i32,
 ) -> anyhow::Result<EventOutcome> {
-    state.windows.remove_windows_for_app(pid);
     apps.apps.remove(&pid);
-    Ok(EventOutcome::window_membership_changed(false, true)
-        .with_arrange_passes(0)
-        .with_layout_event(LayoutEvent::AppClosed(pid)))
+    Ok(EventOutcome::window_membership_changed(false, true).with_arrange_passes(0))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,18 +80,23 @@ pub struct WindowsDiscoveredPayload {
     pub pid: i32,
     pub new: Vec<(WindowId, WindowInfo)>,
     pub known_visible: Vec<WindowId>,
+    pub as_of: crate::common::collections::HashMap<
+        WindowId,
+        crate::actor::reactor::transaction_manager::TransactionId,
+    >,
 }
 
 pub fn handle_windows_discovered(
     payload: WindowsDiscoveredPayload,
 ) -> anyhow::Result<EventOutcome> {
-    let WindowsDiscoveredPayload { pid, new, known_visible } = payload;
+    let WindowsDiscoveredPayload { pid, new, known_visible, as_of } = payload;
     Ok(
         EventOutcome::window_notification_refresh().with_discovery(WindowDiscoveryRequest {
             pid,
             new,
             known_visible,
             app_info: None,
+            as_of,
         }),
     )
 }

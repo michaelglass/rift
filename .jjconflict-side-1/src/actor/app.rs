@@ -25,6 +25,7 @@ use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::actor::wm_controller::{self, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
+use crate::common::expecting::{Echo, Expecting};
 use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 use crate::model::tx_store::WindowTxStore;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -337,6 +338,10 @@ pub(crate) enum FrameSource {
 #[derive(Default)]
 struct InteractiveFrames {
     wake_pending: bool,
+    /// For each wake a write was sent behind, in wake order: the last frame sequence it may
+    /// drain. Frames queued after the write wait for a wake behind it, so they cannot overtake
+    /// the write and be undone by it.
+    fences: std::collections::VecDeque<u64>,
     sequence: u64,
     latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority)>,
 }
@@ -356,13 +361,38 @@ impl Debug for InteractiveFrameQueue {
 }
 
 impl InteractiveFrameQueue {
+    /// The windows with a frame waiting, without taking them.
+    #[cfg(test)]
+    pub(crate) fn windows(&self) -> Vec<WindowId> {
+        self.0.lock().unwrap().latest.keys().copied().collect()
+    }
+
     pub(crate) fn drain_with(
         &self,
         mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority),
     ) {
         let mut frames = self.0.lock().unwrap();
-        frames.wake_pending = false;
-        for (wid, (frame, set_size, txid, source, sequence, authority)) in frames.latest.drain() {
+        let drained: Vec<_> = match frames.fences.pop_front() {
+            // A wake a write was sent behind: only what was queued before that write.
+            Some(fence) => {
+                let fenced: Vec<_> = frames
+                    .latest
+                    .iter()
+                    .filter(|(_, entry)| entry.4 <= fence)
+                    .map(|(&wid, _)| wid)
+                    .collect();
+                fenced
+                    .into_iter()
+                    .filter_map(|wid| frames.latest.remove(&wid).map(|entry| (wid, entry)))
+                    .collect()
+            }
+            None => {
+                frames.wake_pending = false;
+                frames.latest.drain().collect()
+            }
+        };
+        drop(frames);
+        for (wid, (frame, set_size, txid, source, sequence, authority)) in drained {
             if authority.is_current() {
                 consume(wid, frame, set_size, txid, source, sequence, authority);
             }
@@ -505,20 +535,23 @@ impl AppThreadHandle {
     pub fn send(&self, req: Request) -> anyhow::Result<()> {
         let mut req = req;
         match &mut req {
-            Request::SetWindowFrames(frames, transaction, mode, _, authority) => {
-                trace!(
-                    count = frames.len(),
-                    ?transaction,
-                    ?mode,
-                    "Submitting native frame request"
-                );
-                *authority = self.frame_authority.clone();
-            }
-            Request::BeginWindowAnimation(_, authority)
+            Request::SetWindowFrames(_, _, _, _, authority)
+            | Request::BeginWindowAnimation(_, authority)
             | Request::EndWindowAnimation(_, authority) => {
                 *authority = self.frame_authority.clone()
             }
             _ => (),
+        }
+        if matches!(req, Request::SetWindowFrames(..)) {
+            // A wake already queued drains only the frames queued before this write; later
+            // frames get a wake behind it. (Under the lock, so no wake slips in between.)
+            let mut frames = self.interactive_frames.0.lock().unwrap();
+            if std::mem::replace(&mut frames.wake_pending, false) {
+                let fence = frames.sequence;
+                frames.fences.push_back(fence);
+            }
+            self.requests_tx.send(req);
+            return Ok(());
         }
         self.requests_tx.send(req);
         Ok(())
@@ -565,7 +598,6 @@ impl AppThreadHandle {
         }
         let mut changed = false;
         for (wid, frame, set_size, txid, source) in frames {
-            trace!(?wid, ?txid, ?source, "Publishing interactive native frame");
             let set_size = set_size
                 || pending
                     .latest
@@ -600,6 +632,7 @@ impl AppThreadHandle {
                 .is_err()
         {
             pending.wake_pending = false;
+            pending.fences.clear();
             pending.latest.clear();
         }
     }
@@ -620,6 +653,10 @@ pub enum Request {
     /// Carbon supplies the activation edge, while the app thread resolves the
     /// focused/main window and the quiet marker before notifying the reactor.
     ApplicationGloballyActivated(pid_t),
+    WindowMaybeDestroyed(WindowId),
+    /// Re-read the frame of every window of this app and report each as an unprompted
+    /// change: the reactor's full reconcile after a lifecycle event.
+    ReadFrames,
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrames(
@@ -728,14 +765,14 @@ pub fn spawn_app_thread(
 enum PendingActivation {
     #[default]
     None,
-    Ax(Instant, Quiet),
+    Ax(Expecting<Quiet>),
     Hidden(Quiet, Option<WindowId>),
 }
 
 impl PendingActivation {
     fn ax_activated(&mut self, quiet: Quiet) {
         if !matches!(self, Self::Hidden(..)) {
-            *self = Self::Ax(Instant::now(), quiet);
+            *self = Self::Ax(Expecting::now(quiet));
         }
     }
 
@@ -753,8 +790,11 @@ impl PendingActivation {
     ) -> Option<(Quiet, Option<WindowId>)> {
         let pending = std::mem::take(self);
         let context = initiated.unwrap_or_else(|| match pending {
-            Self::Ax(at, quiet) if at.elapsed() < Duration::from_millis(1000) => (quiet, None),
-            _ => (Quiet::No, None),
+            Self::Ax(quiet) => match quiet.settle(Instant::now()) {
+                Echo::Ours(quiet) => (quiet, None),
+                Echo::Late(_) => (Quiet::No, None),
+            },
+            Self::None | Self::Hidden(..) => (Quiet::No, None),
         });
         if hidden {
             *self = Self::Hidden(context.0, context.1);
@@ -785,7 +825,8 @@ struct State {
     windows: HashMap<WindowId, AppWindowState>,
     elem_to_wid: HashMap<AXUIElement, WindowId>,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
+    /// An activation Rift requested; the sender wakes the raise awaiting it.
+    last_activated: Option<Expecting<(Quiet, Option<WindowId>, oneshot::Sender<()>)>>,
     pending_activation: PendingActivation,
     is_hidden: bool,
     is_frontmost: bool,
@@ -798,6 +839,7 @@ struct AppWindowState {
     pub elem: AXUIElement,
     notifications_registered: bool,
     last_seen_txid: TransactionId,
+    hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
     title: String,
     is_animating: bool,
@@ -1094,6 +1136,7 @@ impl State {
                     successful: false,
                     new: Default::default(),
                     known_visible: Default::default(),
+                    as_of: Default::default(),
                 });
                 return Err(e);
             }
@@ -1159,20 +1202,30 @@ impl State {
             new.push((wid, info));
         }
 
+        // Each window was read after every request this actor applied to it (in order).
+        let as_of = new
+            .iter()
+            .filter_map(|(wid, _)| {
+                let applied = Self::some_txid(self.windows.get(wid)?.last_seen_txid)?;
+                Some((*wid, applied))
+            })
+            .collect();
         self.send_event(Event::WindowsDiscovered {
             pid: self.pid,
             token,
             successful: true,
             new,
             known_visible,
+            as_of,
         });
         Ok(())
     }
 
-    fn frame_write_is_current(&self, server: Option<WindowServerId>, txid: TransactionId) -> bool {
-        server
-            .and_then(|id| self.tx_store.as_ref()?.get(&id))
-            .is_none_or(|record| record.txid == txid)
+    fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
+        let store = self.tx_store.as_ref()?;
+        let wsid = wsid?;
+        let record = store.get(&wsid)?;
+        record.target.map(|_| record.txid)
     }
 
     fn some_txid(txid: TransactionId) -> Option<TransactionId> {
@@ -1305,9 +1358,7 @@ impl State {
         pending: PendingFrame,
         eui: &mut BatchEui,
     ) -> Result<(), AxError> {
-        if !pending.authority.is_current()
-            || !self.frame_write_is_current(self.window(wid)?.window_server_id, pending.txid)
-        {
+        if !pending.authority.is_current() {
             return Ok(());
         }
         let PendingFrame {
@@ -1480,20 +1531,49 @@ impl State {
         pending_frames: &mut HashMap<WindowId, PendingFrame>,
         eui: &mut BatchEui,
     ) -> Result<bool, AxError> {
-        if let Request::SetWindowFrames(frames, txid, _, _, authority) = &request
-            && !authority.is_current()
-        {
-            for (wid, _) in frames {
-                self.send_event(Event::WindowFrameWriteFailed(*wid, *txid));
-            }
-            return Ok(false);
-        }
         let Some((request, authority)) = request.authorized() else {
             return Ok(false);
         };
         match request {
             Request::Terminate => {
                 return Ok(true);
+            }
+            Request::WindowMaybeDestroyed(wid) => {
+                if wid.pid != self.pid {
+                    return Ok(false);
+                }
+
+                // If we don't know this window, nothing to verify.
+                if !self.windows.contains_key(&wid) {
+                    return Ok(false);
+                }
+
+                // Destruction is verified by the reactor's revisioned inventory
+                // coordinator. Do not enumerate AX windows independently here.
+                self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
+                return Ok(false);
+            }
+            Request::ReadFrames => {
+                // Every read is reported, even one equal to `last_known_frame`: the reactor
+                // drops reports while the topology is unstable, after this actor recorded
+                // them, so what this actor last saw is not what the reactor knows.
+                let windows: Vec<_> = self
+                    .windows
+                    .iter()
+                    .map(|(&wid, window)| {
+                        (wid, window.elem.clone(), Self::some_txid(window.last_seen_txid))
+                    })
+                    .collect();
+                // A read Rift asked for, stamped with the newest request this actor applied to
+                // the window (it applies requests in order, so the read reflects them all).
+                for (wid, elem, applied) in windows {
+                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame())) {
+                        Ok(Some(frame)) => self.report_frame(wid, frame, applied, Requested(true)),
+                        Ok(None) => {}
+                        Err(error) => debug!(?wid, ?error, "reconcile: frame unreadable"),
+                    }
+                }
+                return Ok(false);
             }
             Request::CloseWindow(window_server_id) => {
                 if let Some(wsid) = window_server_id
@@ -1528,23 +1608,42 @@ impl State {
                 });
             }
             Request::SetWindowFrames(frames, txid, mode, _, _) => {
-                for (wid, desired) in frames {
+                // A frame that never reaches its app is reported failed, so the core writes it
+                // again at the next arrange (and gives it up after three failures in a row)
+                // instead of waiting for an answer that will not come.
+                let windows: Vec<WindowId> = frames.iter().map(|&(wid, _)| wid).collect();
+                for (at, (wid, desired)) in frames.into_iter().enumerate() {
                     if !authority.is_current() {
-                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
-                        continue;
+                        // Dropped for a stale authority: none of the rest go out either.
+                        for &unsent in &windows[at..] {
+                            self.send_event(Event::WindowFrameWriteFailed(unsent, txid));
+                        }
+                        break;
                     }
-                    if let Ok(window) = self.window(wid)
-                        && !self.frame_write_is_current(window.window_server_id, txid)
-                    {
-                        continue;
-                    }
-                    let Ok(window) = self.window_mut(wid) else {
-                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
-                        continue;
+                    let (elem, hint) = match self.window_mut(wid) {
+                        Ok(window) => {
+                            window.last_seen_txid = txid;
+                            window.frame_source = FrameSource::Ordinary;
+                            (window.elem.clone(), window.last_known_frame)
+                        }
+                        Err(err) => match err {
+                            AxError::Ax(code) => {
+                                // An invalid element: the window is gone, reported as such.
+                                if self.handle_ax_error(wid, &code) {
+                                    continue;
+                                }
+                                // The batch stops here: this frame and the rest never go out.
+                                for &unsent in &windows[at..] {
+                                    self.send_event(Event::WindowFrameWriteFailed(unsent, txid));
+                                }
+                                return Err(AxError::Ax(code));
+                            }
+                            AxError::NotFound => {
+                                self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                                continue;
+                            }
+                        },
                     };
-                    window.last_seen_txid = txid;
-                    window.frame_source = FrameSource::Ordinary;
-                    let (elem, hint) = (window.elem.clone(), window.last_known_frame);
 
                     // The acknowledgment always carries geometry read back from AX.
                     let result = trace("set_frame", &elem, || {
@@ -1559,22 +1658,29 @@ impl State {
                             || self.hold_batch_eui(eui),
                         )
                     });
-                    let frame = match self.handle_frame_result(wid, txid, result) {
-                        Ok(Some(frame)) => frame,
+                    if result.is_err() {
+                        self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+                    }
+                    let frame = match self.handle_ax_result(wid, result) {
+                        Ok(Some(frame)) => {
+                            self.window_mut(wid)?.last_known_frame = frame;
+                            frame
+                        }
                         Ok(None) => continue,
                         Err(error) => {
-                            warn!(?wid, ?error, "Failed to reconcile frame");
-                            continue;
+                            // The batch stops here: the rest never go out.
+                            for &unsent in &windows[at + 1..] {
+                                self.send_event(Event::WindowFrameWriteFailed(unsent, txid));
+                            }
+                            return Err(error);
                         }
                     };
-                    self.window_mut(wid)?.last_known_frame = frame;
 
                     self.send_event(Event::WindowFrameChanged(
                         wid,
                         frame,
                         Some(txid),
                         Requested(true),
-                        None,
                     ));
                 }
             }
@@ -1671,18 +1777,16 @@ impl State {
                 if ended_animation {
                     self.restart_notifications_after_animation(&elem);
                 }
-                let result = trace("frame", &elem, || elem.frame());
-                let mut frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
-                    Some(frame) => frame,
-                    None => return Ok(false),
-                };
+                let mut frame =
+                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                        Some(frame) => frame,
+                        None => return Ok(false),
+                    };
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
                 if let Some((target, authority)) = last_animation_frame
                     && authority.is_current()
-                    && self
-                        .frame_write_is_current(self.window(wid)?.window_server_id, last_seen_txid)
                     && !frame.same_as(target)
                 {
                     let result = trace("set_frame", &elem, || {
@@ -1697,19 +1801,13 @@ impl State {
                             || self.require_batch_eui(eui),
                         )
                     });
-                    frame = match self.handle_frame_result(wid, last_seen_txid, result)? {
+                    frame = match self.handle_ax_result(wid, result)? {
                         Some(frame) => frame,
                         None => return Ok(false),
                     };
                 }
                 self.window_mut(wid)?.last_known_frame = frame;
-                self.send_event(Event::WindowFrameChanged(
-                    wid,
-                    frame,
-                    txid,
-                    Requested(true),
-                    None,
-                ));
+                self.send_event(Event::WindowFrameChanged(wid, frame, txid, Requested(true)));
             }
             Request::Raise(wids, token, sequence_id, quiet) => {
                 self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));
@@ -1753,12 +1851,7 @@ impl State {
                 };
                 let window_server_info = window_server_info
                     .or_else(|| window.sys_id.and_then(window_server::get_window));
-                self.send_event(Event::WindowCreated(
-                    wid,
-                    window,
-                    window_server_info,
-                    event::get_mouse_state(),
-                ));
+                self.send_event(Event::WindowCreated(wid, window, window_server_info));
             }
             AxNotificationKind::MenuOpened => self.send_event(Event::MenuOpened(self.pid)),
             AxNotificationKind::MenuClosed => self.send_event(Event::MenuClosed(self.pid)),
@@ -1804,7 +1897,7 @@ impl State {
                             trace!(?wid, ?notif, "Ignoring notification during owned frame writes");
                             return;
                         }
-                        (Self::some_txid(window.last_seen_txid), window.frame_source)
+                        (None, window.frame_source)
                     }
                     Err(err) => {
                         match err {
@@ -1818,8 +1911,9 @@ impl State {
                         return;
                     }
                 };
-                let mouse_state = event::get_mouse_state();
-                if source == FrameSource::Drag && mouse_state == Some(event::MouseState::Down) {
+                if source == FrameSource::Drag
+                    && event::get_mouse_state() == Some(event::MouseState::Down)
+                {
                     trace!(?wid, ?notif, "Ignoring interactive drag notification");
                     return;
                 }
@@ -1848,35 +1942,31 @@ impl State {
                         return;
                     }
                 };
-                if let Some(window) = self.windows.get_mut(&wid) {
-                    window.last_known_frame = frame;
-                }
-                self.send_event(Event::WindowFrameChanged(
-                    wid,
-                    frame,
-                    txid,
-                    Requested(false),
-                    mouse_state,
-                ));
+                self.report_frame(wid, frame, txid, Requested(false));
             }
-            AxNotificationKind::WindowMiniaturized | AxNotificationKind::WindowDeminiaturized => {
+            AxNotificationKind::WindowMiniaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                if !self.is_current_window_element(wid, &elem) {
+                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
+                else {
+                    trace!(?wid, "Ignoring miniaturize for superseded AX element");
                     return;
-                }
-                // A queued notification may predate a newer inventory observation.
-                let minimized = if self.is_hidden {
-                    Ok(true)
-                } else {
-                    trace("minimized", &elem, || elem.minimized())
                 };
-                self.send_event(match minimized {
-                    Ok(true) => Event::WindowMinimized(wid),
-                    Ok(false) => Event::WindowDeminiaturized(wid),
-                    Err(_) => Event::WindowInventoryRefreshRequested(self.pid),
-                });
+                window.hidden_by_app = false;
+                self.send_event(Event::WindowMinimized(wid));
+            }
+            AxNotificationKind::WindowDeminiaturized => {
+                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
+                    return;
+                };
+                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
+                else {
+                    trace!(?wid, "Ignoring deminiaturize for superseded AX element");
+                    return;
+                };
+                window.hidden_by_app = false;
+                self.send_event(Event::WindowDeminiaturized(wid));
             }
             AxNotificationKind::TitleChanged => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
@@ -2108,12 +2198,7 @@ impl State {
                 };
                 let window_server_info =
                     window_server_info.or_else(|| info.sys_id.and_then(window_server::get_window));
-                self.send_event(Event::WindowCreated(
-                    wid,
-                    info,
-                    window_server_info,
-                    event::get_mouse_state(),
-                ));
+                self.send_event(Event::WindowCreated(wid, info, window_server_info));
                 wid
             }
         };
@@ -2131,16 +2216,16 @@ impl State {
     }
 
     fn take_activation_context(&mut self) -> (Quiet, Option<WindowId>) {
-        match self.last_activated.take() {
-            Some((ts, quiet_activation, quiet_window_change, tx)) => {
+        match self.last_activated.take().map(|activated| activated.settle(Instant::now())) {
+            Some(Echo::Ours((quiet_activation, quiet_window_change, tx))) => {
                 _ = tx.send(());
-                if ts.elapsed() < Duration::from_millis(1000) {
-                    trace!("by us");
-                    (quiet_activation, quiet_window_change)
-                } else {
-                    trace!("by user");
-                    (Quiet::No, None)
-                }
+                trace!("by us");
+                (quiet_activation, quiet_window_change)
+            }
+            Some(Echo::Late((_, _, tx))) => {
+                _ = tx.send(());
+                trace!("by user");
+                (Quiet::No, None)
             }
             None => {
                 trace!("by user");
@@ -2203,10 +2288,11 @@ impl State {
     ) -> Result<(), RaiseError> {
         let app = this.app.clone();
         let (tx, rx) = oneshot::channel();
-        if let Some((_, _, _, prev_tx)) =
+        if let Some(previous) =
             this.last_activated
-                .replace((Instant::now(), quiet_activation, quiet_window_change, tx))
+                .replace(Expecting::now((quiet_activation, quiet_window_change, tx)))
         {
+            let (_, _, prev_tx) = previous.forget();
             let _ = prev_tx.send(());
         }
         drop(this);
@@ -2238,28 +2324,48 @@ impl State {
 
         self.is_hidden = true;
         self.pending_activation.ax_deactivated();
-        for &wid in self.windows.keys() {
+        let mut to_minimize = Vec::new();
+        for (wid, window) in self.windows.iter_mut() {
+            if window.hidden_by_app {
+                continue;
+            }
+            window.hidden_by_app = true;
+            to_minimize.push(*wid);
+        }
+
+        for wid in to_minimize {
             self.send_event(Event::WindowMinimized(wid));
         }
     }
 
     fn on_application_shown(&mut self) {
-        if !std::mem::take(&mut self.is_hidden) {
+        if !self.is_hidden {
             return;
         }
-        let mut refresh_inventory = false;
-        for (&wid, window) in &self.windows {
-            match trace("minimized", &window.elem, || window.elem.minimized()) {
-                Ok(false) => self.send_event(Event::WindowDeminiaturized(wid)),
-                Ok(true) => {}
+
+        self.is_hidden = false;
+        let mut to_restore = Vec::new();
+        for (wid, window) in self.windows.iter_mut() {
+            if !window.hidden_by_app {
+                continue;
+            }
+            window.hidden_by_app = false;
+            let minimized = match trace("minimized", &window.elem, || window.elem.minimized()) {
+                Ok(minimized) => minimized,
                 Err(err) => {
                     debug!(?wid, ?err, "Failed to read minimized state after app shown");
-                    refresh_inventory = true;
+                    false
                 }
+            };
+            if minimized {
+                continue;
             }
+            let wid = *wid;
+            to_restore.push(wid);
         }
-        if refresh_inventory {
-            self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
+
+        for wid in to_restore {
+            self.send_event(Event::WindowDeminiaturized(wid));
         }
         if let Some((quiet, window)) = self.pending_activation.shown() {
             self.finish_activation(quiet, window);
@@ -2335,11 +2441,14 @@ impl State {
         // those elements registered even when per-window AX notifications are
         // unavailable; app-level discovery remains the lifecycle fallback.
         let notifications_registered = self.register_window_notifications(&elem, wid);
+        let hidden_by_app = self.is_hidden;
+        let last_seen_txid = self.txid_from_store(Some(window_server_id)).unwrap_or_default();
 
         let old = self.windows.insert(wid, AppWindowState {
             elem: elem.clone(),
             notifications_registered,
-            last_seen_txid: TransactionId::default(),
+            last_seen_txid,
+            hidden_by_app,
             window_server_id: Some(window_server_id),
             title: info.title.clone(),
             is_animating: false,
@@ -2351,6 +2460,9 @@ impl State {
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
+        if hidden_by_app {
+            self.send_event(Event::WindowMinimized(wid));
+        }
         Some((info, wid, server_info))
     }
 
@@ -2492,7 +2604,6 @@ impl State {
     }
 
     fn normalize_window_info(&self, elem: &AXUIElement, info: &mut WindowInfo) {
-        info.is_minimized |= self.is_hidden;
         // TODO: improve this heuristic using ideas from AeroSpace(maybe implement a similar testing architecture based on ax dumps)
         if (self.bundle_id.as_deref() == Some("com.googlecode.iterm2")
             || self.bundle_id.as_deref() == Some("com.apple.TextInputUI.xpc.CursorUIViewService"))
@@ -2557,16 +2668,19 @@ impl State {
         false
     }
 
-    fn handle_frame_result(
+    /// `wid` was seen at `frame`: remembered, and reported (a read Rift asked for, stamped
+    /// with the request applied, or a notification).
+    fn report_frame(
         &mut self,
         wid: WindowId,
-        txid: TransactionId,
-        result: Result<CGRect, AxError>,
-    ) -> Result<Option<CGRect>, AxError> {
-        if result.is_err() {
-            self.send_event(Event::WindowFrameWriteFailed(wid, txid));
+        frame: CGRect,
+        applied: Option<TransactionId>,
+        requested: Requested,
+    ) {
+        if let Some(window) = self.windows.get_mut(&wid) {
+            window.last_known_frame = frame;
         }
-        self.handle_ax_result(wid, result)
+        self.send_event(Event::WindowFrameChanged(wid, frame, applied, requested));
     }
 
     fn handle_ax_result<T>(
@@ -2748,7 +2862,8 @@ fn collect_visible_window_server_info(
 
 impl Drop for State {
     fn drop(&mut self) {
-        if let Some((_, _, _, tx)) = self.last_activated.take() {
+        if let Some(activation) = self.last_activated.take() {
+            let (_, _, tx) = activation.forget();
             let _ = tx.send(());
         }
         self.enhanced_ui.restore_if_needed(&self.app);

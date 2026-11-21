@@ -6,19 +6,19 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
 use tracing::{debug, trace};
 
-use super::managers::ScrollingDisplayBounds;
-use super::{Presentation, TransactionId};
-use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
+use super::TransactionId;
+use super::reconciler::{Desired, Owner, Want};
+use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
 };
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
-use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
-use crate::sys::geometry::{Round, SameAs};
+use crate::sys::geometry::SameAs;
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -42,34 +42,19 @@ impl AnimationSender {
     }
 
     pub fn send(&self, message: Message) -> Result<(), crossbeam_channel::SendError<Message>> {
-        match &message {
-            Message::Replace(animation) | Message::SkipToEnd(animation) => {
-                trace!(
-                    display = animation.display,
-                    count = animation.windows.len(),
-                    "Submitting frame animation"
-                );
-            }
-            Message::Camera(camera) => {
-                trace!(
-                    display = camera.display,
-                    count = camera.windows.len(),
-                    "Submitting camera frames"
-                );
-            }
-            _ => {}
-        }
         self.tx.send(message)
     }
 
-    pub fn cancel(&self, windows: Vec<WindowId>) -> Vec<(WindowId, CGRect)> {
+    /// Stops presenting `windows`; returns each one's last published frame and the request it
+    /// went out under.
+    pub fn cancel(&self, windows: Vec<WindowId>) -> Vec<(WindowId, CGRect, TransactionId)> {
         let mut control = self.control.lock();
         let frames = windows
             .iter()
             .filter_map(|wid| {
-                let (handle, frame) = control.frames.remove(wid)?;
+                let (handle, frame, txid) = control.frames.remove(wid)?;
                 handle.cancel_window_animation(*wid);
-                Some((*wid, frame))
+                Some((*wid, frame, txid))
             })
             .collect();
         control.cancelled.extend(windows.iter().copied());
@@ -80,12 +65,29 @@ impl AnimationSender {
 
 #[derive(Debug, Default)]
 struct PresenterControl {
-    frames: HashMap<WindowId, (AppThreadHandle, CGRect)>,
+    /// Each window's last published frame, and the request it went out under.
+    frames: HashMap<WindowId, (AppThreadHandle, CGRect, TransactionId)>,
     cancelled: HashSet<WindowId>,
 }
 impl PresenterControl {
+    /// The cancelled windows, sorted (as `stop_windows` takes them).
+    fn cancelled_sorted(&self) -> Vec<WindowId> {
+        let mut cancelled: Vec<_> = self.cancelled.iter().copied().collect();
+        cancelled.sort_unstable();
+        cancelled
+    }
+
+    /// The stop of `windows` reached the presenter: their cancellation and published frames
+    /// are done with.
+    fn forget_stopped(&mut self, windows: &[WindowId]) {
+        for wid in windows {
+            self.cancelled.remove(wid);
+            self.frames.remove(wid);
+        }
+    }
+
     fn frame(&self, wid: WindowId, fallback: CGRect) -> CGRect {
-        self.frames.get(&wid).map_or(fallback, |(_, frame)| *frame)
+        self.frames.get(&wid).map_or(fallback, |(_, frame, _)| *frame)
     }
 }
 
@@ -97,7 +99,6 @@ pub struct AnimationReceiver {
 #[derive(Debug)]
 pub enum Message {
     Replace(Animation),
-    SkipToEnd(Animation),
     Stop(Vec<WindowId>),
     Camera(Box<CameraAnimation>),
     StopCamera(SpaceId),
@@ -175,6 +176,9 @@ pub struct Animation {
     display: u32,
     windows: Vec<PresentedWindow>,
     handled_windows: Vec<WindowId>,
+    /// Where the end of each window's animation is reported (`Event::AnimationEnded`, by the
+    /// request its frames went out under), so the core stops holding it as animating.
+    events: Option<super::Sender>,
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +195,9 @@ pub(super) struct ViewportHandle {
     pub state: Arc<Mutex<PresentedCamera>>,
     windows: Vec<WindowId>,
     pub headless: Option<CameraAnimation>,
+    /// The request the camera's frames go out under, and the core holds its windows as
+    /// animating under. A camera that replaces one still presenting continues its request.
+    request: TransactionId,
 }
 
 #[derive(Debug)]
@@ -215,9 +222,8 @@ pub struct CameraAnimation {
     display: u32,
     animate: bool,
     scale: f64,
-    store: WindowTxStore,
     interval: Duration,
-    bound: Option<ScrollingDisplayBounds>,
+    bound: Option<super::managers::ScrollingDisplayBounds>,
 }
 
 #[derive(Debug)]
@@ -248,7 +254,7 @@ enum Sample<'a> {
         presentation: &'a ViewportPresentation,
         offset: f64,
         scale: f64,
-        bound: Option<ScrollingDisplayBounds>,
+        bound: Option<super::managers::ScrollingDisplayBounds>,
         movement: f64,
     },
 }
@@ -276,14 +282,9 @@ impl PresentedWindow {
         }
     }
 
-    fn cancel(&mut self, store: Option<&WindowTxStore>) {
+    fn cancel(&mut self) {
         self.leased = false;
         self.handle.cancel_window_animation(self.wid);
-        if let Some(store) = store
-            && let Some(wsid) = self.wsid
-        {
-            store.clear_target_if_current(&wsid, self.txid);
-        }
     }
 
     fn sample(&mut self, sample: Sample<'_>) -> Option<Frame> {
@@ -467,15 +468,6 @@ impl CameraAnimation {
         self.windows.sort_unstable_by_key(|w| w.wid.pid);
         for window in &mut self.windows {
             window.announced = false;
-            window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
-                let target =
-                    (self.gesture.is_none() && !self.presentation.gesturing()).then(|| {
-                        let frame =
-                            self.presentation.target_frame(window.to, window.fixed, self.scale);
-                        self.bound.map_or(frame, |bounds| bounds.apply(frame))
-                    });
-                self.store.begin(wsid, target)
-            });
             window.begin();
         }
     }
@@ -483,7 +475,7 @@ impl CameraAnimation {
     fn cancel_windows(&mut self, windows: &[WindowId]) {
         self.windows.retain_mut(|window| {
             if windows.binary_search(&window.wid).is_ok() {
-                window.cancel(Some(&self.store));
+                window.cancel();
                 false
             } else {
                 true
@@ -504,53 +496,73 @@ impl CameraAnimation {
     pub(super) fn stop(&mut self) {
         if std::mem::replace(&mut self.active, false) {
             for window in &mut self.windows {
-                window.cancel(Some(&self.store));
+                window.cancel();
             }
         }
     }
 }
 
 impl Reactor {
-    pub(super) fn cancel_window_presentations(&mut self, mut windows: Vec<WindowId>) {
+    pub(super) fn cancel_window_presentations(&mut self, windows: Vec<WindowId>) {
         if windows.is_empty() {
             return;
+        }
+        let stopped = self.stop_window_presentations(windows);
+        self.settle_stopped(stopped);
+        self.commit_presentations();
+    }
+
+    /// Presentations stopped where they last published: each window is where the model now
+    /// takes it to be, and its animation settles there.
+    fn settle_stopped(&mut self, stopped: Vec<(WindowId, CGRect, TransactionId)>) {
+        for (window, at, request) in stopped {
+            if self.state.windows.window(window).is_some() {
+                self.state.step(CoreEvent::AnimationStopped { window, request, at: Some(at) });
+            }
+        }
+    }
+
+    /// Stops presenting `windows`; returns the last frame each presentation published.
+    fn stop_window_presentations(
+        &mut self,
+        mut windows: Vec<WindowId>,
+    ) -> Vec<(WindowId, CGRect, TransactionId)> {
+        if windows.is_empty() {
+            return Vec::new();
         }
         windows.sort_unstable();
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
             if let Some(state) = &mut camera.headless {
+                let before = frames.len();
                 frames.extend(
                     state
                         .windows
                         .iter()
                         .filter(|w| windows.binary_search(&w.wid).is_ok())
-                        .map(|w| (w.wid, w.frame)),
+                        .map(|w| (w.wid, w.frame, w.txid)),
                 );
-                state.cancel_windows(&windows);
-                state.publish_state(Instant::now());
+                // Only a camera that presented one of them changes.
+                if frames.len() > before {
+                    state.cancel_windows(&windows);
+                    state.publish_state(Instant::now());
+                }
             }
         }
         if let Some(tx) = &self.animation_tx {
             frames.extend(tx.cancel(windows));
         }
-        for (wid, frame) in frames {
-            if let Some(window) = self.state.windows.window_mut(wid) {
-                window.frame_monotonic = frame;
-                if let Some(wsid) = window.info.sys_id {
-                    self.transaction_manager.clear_target_for_window(wsid);
-                }
-            }
-        }
-        self.commit_presentations();
+        frames
     }
 
     pub(super) fn commit_presentations(&mut self) {
-        if self.refreshes_blocked() {
+        if self.presentations.is_empty() || self.refreshes_blocked() {
             return;
         }
         let control = self.animation_tx.as_ref().map(|tx| tx.control.clone());
         let control = control.as_ref().map(|c| c.lock());
         let mut completed = Vec::new();
+        let mut moved = Vec::new();
         for (space, camera) in &self.presentations {
             let state = camera.state.lock();
             let identity = &camera.identity;
@@ -562,11 +574,17 @@ impl Reactor {
                 .get_mut(identity.workspace)
                 && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
             {
-                system.commit_presented_viewport(identity.layout, &state.viewport);
+                // A camera can end before its viewport arrives: one whose windows were all
+                // written instead of presented ends at once.
+                if state.active {
+                    system.commit_presented_viewport(identity.layout, &state.viewport);
+                } else {
+                    system.commit_ended_viewport(identity.layout, &state.viewport);
+                }
             }
             for &wid in &camera.windows {
                 let frame = if let Some(control) = &control {
-                    control.frames.get(&wid).map(|(_, frame)| *frame)
+                    control.frames.get(&wid).map(|(_, frame, _)| *frame)
                 } else {
                     camera
                         .headless
@@ -574,10 +592,15 @@ impl Reactor {
                         .and_then(|c| c.windows.iter().find(|w| w.wid == wid))
                         .map(|w| w.frame)
                 };
+                // The camera moves the window; its size is what the app has.
                 if let Some(frame) = frame
-                    && let Some(model) = self.state.windows.window_mut(wid)
+                    && let Some(window) = self.state.windows.window(wid)
                 {
-                    model.frame_monotonic = frame;
+                    let known = window.frame_monotonic();
+                    let frame = CGRect::new(frame.origin, known.size);
+                    if frame != known {
+                        moved.push((wid, frame));
+                    }
                 }
             }
             if let Some(session) = &mut self.viewport_gesture
@@ -592,8 +615,14 @@ impl Reactor {
                 completed.push(*space);
             }
         }
+        drop(control);
+        for (window, frame) in moved {
+            self.state.step(CoreEvent::Seen { window, frame });
+        }
         for space in completed {
-            self.presentations.remove(&space);
+            if let Some(camera) = self.presentations.remove(&space) {
+                self.state.animation_ended(camera.request);
+            }
             if self
                 .viewport_gesture
                 .as_ref()
@@ -608,7 +637,7 @@ impl Reactor {
         if let Some(mut camera) = self.presentations.remove(&space) {
             camera.state.lock().stopped = true;
             let frames = if let Some(headless) = &mut camera.headless {
-                let frames = headless.windows.iter().map(|w| (w.wid, w.frame)).collect();
+                let frames = headless.windows.iter().map(|w| (w.wid, w.frame, w.txid)).collect();
                 headless.stop();
                 frames
             } else if let Some(tx) = &self.animation_tx {
@@ -616,11 +645,8 @@ impl Reactor {
             } else {
                 Vec::new()
             };
-            for (wid, frame) in frames {
-                if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.frame_monotonic = frame;
-                }
-            }
+            self.settle_stopped(frames);
+            self.state.animation_ended(camera.request);
             if let Some(tx) = &self.animation_tx {
                 let _ = tx.send(Message::StopCamera(space));
             }
@@ -648,8 +674,6 @@ impl Reactor {
         space: SpaceId,
         animate: bool,
         gesture: Option<(Context, Control, f64, Duration)>,
-        skip: Option<WindowId>,
-        bound: Option<ScrollingDisplayBounds>,
     ) -> Option<HashSet<WindowId>> {
         if self.animation_tx.is_none() && gesture.is_none() && self.viewport_gesture.is_none() {
             return None;
@@ -657,6 +681,12 @@ impl Reactor {
         let screen = self.space_state.screen_by_space(space)?;
         let display = screen.id.as_u32();
         let scale = screen.backing_scale;
+        let screen_frames: Vec<_> =
+            self.space_state.screens.iter().map(|screen| screen.frame).collect();
+        let bound = super::managers::ScrollingDisplayBounds::for_screen(
+            screen.frame,
+            screen_frames.iter().copied(),
+        );
         let (workspace, layout) =
             self.layout_manager.layout_engine.workspaces().active_layout_for_space(space)?;
         let LayoutSystemKind::Scrolling(system) =
@@ -665,7 +695,9 @@ impl Reactor {
             return None;
         };
         let (mut presentation, frames) = system.presentation(layout)?;
-        let previous = self.presentations.remove(&space).and_then(|p| p.headless);
+        let previous = self.presentations.remove(&space);
+        let request = previous.as_ref().map_or_else(|| self.state.tx.next_id(), |p| p.request);
+        let previous = previous.and_then(|p| p.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
                 .as_ref()
@@ -679,51 +711,74 @@ impl Reactor {
         });
         let now = Instant::now();
         let control = self.animation_tx.as_ref().map(|tx| tx.control.lock());
-        let mut covered = HashSet::default();
-        let semantic = gesture.is_none() && !presentation.gesturing();
-        let windows = frames
+        let windows: Vec<PresentedWindow> = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
-                if Some(wid) == skip {
+                // A drag changes nothing until the drop: the viewport moves only Rift's windows.
+                if self.owner(wid) == Owner::User {
                     return None;
                 }
                 let window = self.state.windows.window(wid)?;
-                if semantic
-                    && let Some(wsid) = window.info.sys_id
-                    && let Some(write) = self.transaction_manager.store.get(&wsid)
-                {
-                    if write.needs_full_retry() {
-                        return None;
-                    }
-                    let target = presentation.target_frame(base_frame, fixed, scale);
-                    let target = bound.map_or(target, |bounds| bounds.apply(target));
-                    if control.as_ref().is_none_or(|control| !control.frames.contains_key(&wid))
-                        && write.refused(target, window.frame_monotonic)
-                    {
-                        covered.insert(wid);
-                        return None;
-                    }
-                }
                 let app = self.app_manager.apps.get(&wid.pid)?;
-                let frame = control.as_ref().map_or(window.frame_monotonic, |control| {
-                    control.frame(wid, window.frame_monotonic)
+                let frame = control.as_ref().map_or(window.frame_monotonic(), |control| {
+                    control.frame(wid, window.frame_monotonic())
                 });
                 Some(PresentedWindow {
                     handle: app.handle.with_scrolling_bounds(bound),
                     wid,
                     wsid: window.info.sys_id,
-                    from: window.frame_monotonic,
+                    from: window.frame_monotonic(),
                     to: base_frame,
                     fixed,
                     announced: false,
                     leased: false,
                     frame,
                     move_from: CGPoint::ZERO,
-                    txid: TransactionId::default(),
+                    txid: request,
                 })
             })
             .collect();
         drop(control);
+        // The core decides what is pending: a camera Rift steers (no gesture) takes each window
+        // to its frame at the viewport's target offset, which is where it is pending until the
+        // camera ends; a gesture's camera has no target, so nothing is pending for its windows.
+        // A window whose whereabouts are unknown is written instead, and the camera leaves it.
+        let mut windows = windows;
+        if gesture.is_none() && !presentation.gesturing() {
+            let desires = windows
+                .iter()
+                .map(|w| {
+                    let frame = presentation.target_frame(w.to, w.fixed, scale);
+                    let frame = bound.map_or(frame, |bounds| bounds.apply(frame));
+                    rift_core::Desire { window: w.wid, frame, request }
+                })
+                .collect();
+            let animated = self.state.animate(desires);
+            let written: HashSet<_> = animated.writes.iter().map(|write| write.window()).collect();
+            let animating: HashSet<_> = animated.animations.iter().map(|&(wid, ..)| wid).collect();
+            windows.retain(|w| !written.contains(&w.wid));
+            // The camera resizes (once, at its start) only what the core animates; any other
+            // window it presents starts at its target size.
+            for window in &mut windows {
+                if !animating.contains(&window.wid) {
+                    window.from.size = window.to.size;
+                }
+            }
+            self.stop_window_presentations(animated.writes.iter().map(|w| w.window()).collect());
+            for write in animated.writes {
+                self.send_arranged(write);
+            }
+        } else {
+            // A gesture's camera has no target: nothing is pending, but its frames go out
+            // under the request, outside the core, which is told so (reads stamped with it are
+            // Rift's own).
+            for window in &windows {
+                self.state.step(CoreEvent::SentOutside { window: window.wid, request });
+                if let Some(wsid) = window.wsid {
+                    self.state.tx.sent(wsid, request);
+                }
+            }
+        }
         if !animate {
             presentation.finish();
         }
@@ -746,7 +801,6 @@ impl Reactor {
             display,
             animate,
             scale,
-            store: self.transaction_manager.store.clone(),
             interval: Duration::from_secs_f64(1.0 / self.config.settings.animation_fps),
             bound,
         };
@@ -754,13 +808,14 @@ impl Reactor {
         if !previous_was_absent {
             next.replace(previous);
         }
-        covered.extend(next.windows.iter().map(|w| w.wid));
+        let windows = next.windows.iter().map(|w| w.wid).collect();
         let ids = next.windows.iter().map(|w| w.wid).collect();
         self.presentations.insert(space, ViewportHandle {
             identity,
             state,
             windows: ids,
             headless: None,
+            request,
         });
         if let Some(tx) = &self.animation_tx {
             let _ = tx.send(Message::Camera(Box::new(next)));
@@ -773,28 +828,63 @@ impl Reactor {
             self.presentations.get_mut(&space).unwrap().headless = Some(next);
             self.commit_presentations();
         }
-        Some(covered)
+        Some(windows)
     }
 }
 
 pub(super) fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
-) -> Option<ScrollingDisplayBounds> {
+) -> Option<super::managers::ScrollingDisplayBounds> {
     if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
         != crate::common::config::LayoutMode::Scrolling
     {
         return None;
     }
     let screen = reactor.space_state.screen_by_space(space)?;
-    ScrollingDisplayBounds::for_screen(
-        screen.frame,
-        reactor.space_state.screens.iter().map(|s| s.frame),
-    )
+    let screens: Vec<_> = reactor.space_state.screens.iter().map(|s| s.frame).collect();
+    super::managers::ScrollingDisplayBounds::for_screen(screen.frame, screens.iter().copied())
 }
 
 impl AnimationManager {
     pub fn new() -> Self { Self::default() }
+
+    /// Applies one command to this display's motions. A stop's shared bookkeeping is the
+    /// caller's, once for every display ([`PresenterControl::forget_stopped`]).
+    fn apply(&mut self, shared: &mut PresenterControl, mut message: Message) {
+        match &mut message {
+            Message::Displays(_) => return,
+            Message::StopCamera(space) => {
+                for motion in &mut self.motions {
+                    if let Motion::Viewport(camera) = motion
+                        && camera.identity.space == *space
+                    {
+                        camera.stop();
+                    }
+                }
+                self.retire();
+                return;
+            }
+            Message::Stop(windows) => {
+                windows.sort_unstable();
+                self.stop_windows(windows);
+                self.retire();
+                return;
+            }
+            // A command queued before cancellation cannot resurrect its windows or replay an
+            // obsolete instant-layout target.
+            Message::Replace(a) => a.windows.retain(|w| !shared.cancelled.contains(&w.wid)),
+            Message::Camera(c) => {
+                c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
+                c.active = !c.windows.is_empty();
+            }
+        }
+        self.stop_windows(&shared.cancelled_sorted());
+        self.retire();
+        self.handle_message(message);
+        self.publish_frames(shared, true);
+        self.retire();
+    }
 
     /// One runner for all displays. Commands are semantic work; display wakes
     /// are bounded to one permit and each link retains only its newest timing.
@@ -822,22 +912,21 @@ impl AnimationManager {
                             });
                         }
                         Message::StopCamera(space) => {
+                            let mut shared = control.lock();
                             for d in displays.values_mut() {
-                                for motion in &mut d.manager.motions {
-                                    if let Motion::Viewport(camera) = motion && camera.identity.space == space { camera.stop(); }
-                                }
-                                d.manager.retire();
+                                d.manager.apply(&mut shared, Message::StopCamera(space));
                             }
                         }
-                        Message::Stop(mut windows) => {
-                            windows.sort_unstable();
-                            for d in displays.values_mut() { d.manager.stop_windows(&windows); d.manager.retire(); }
+                        Message::Stop(windows) => {
                             let mut shared = control.lock();
-                            for wid in &windows { shared.cancelled.remove(wid); shared.frames.remove(wid); }
+                            for d in displays.values_mut() {
+                                d.manager.apply(&mut shared, Message::Stop(windows.clone()));
+                            }
+                            shared.forget_stopped(&windows);
                         }
-                        mut message => {
+                        message @ (Message::Replace(_) | Message::Camera(_)) => {
                             let display = match &message {
-                                Message::Replace(a) | Message::SkipToEnd(a) => a.display,
+                                Message::Replace(a) => a.display,
                                 Message::Camera(c) => c.display,
                                 Message::Stop(..) | Message::StopCamera(..) | Message::Displays(..) => unreachable!(),
                             };
@@ -845,24 +934,7 @@ impl AnimationManager {
                                 manager: Self::new(), link: DisplayLink::for_display(display, wake.clone()),
                                 fallback_deadline: Instant::now(),
                             });
-                            let mut shared = control.lock();
-                            let mut cancelled: Vec<_> = shared.cancelled.iter().copied().collect();
-                            cancelled.sort_unstable();
-                            entry.manager.stop_windows(&cancelled);
-                            entry.manager.retire();
-                            // A command queued before cancellation cannot resurrect its
-                            // windows or replay an obsolete instant-layout target.
-                            match &mut message {
-                                Message::Replace(a) | Message::SkipToEnd(a) => a.windows.retain(|w| !shared.cancelled.contains(&w.wid)),
-                                Message::Camera(c) => {
-                                    c.windows.retain(|w| !shared.cancelled.contains(&w.wid));
-                                    c.active = !c.windows.is_empty();
-                                }
-                                _ => unreachable!(),
-                            }
-                            entry.manager.handle_message(message);
-                            entry.manager.publish_frames(&mut shared, true);
-                            entry.manager.retire();
+                            entry.manager.apply(&mut control.lock(), message);
                             entry.link.set_paused(!entry.manager.has_work());
                             entry.fallback_deadline = Instant::now();
                         }
@@ -873,11 +945,7 @@ impl AnimationManager {
             }
             let now = Instant::now();
             let mut shared = control.lock();
-            let cancelled: Vec<_> = {
-                let mut w: Vec<_> = shared.cancelled.iter().copied().collect();
-                w.sort_unstable();
-                w
-            };
+            let cancelled = shared.cancelled_sorted();
             for DisplayPresenter {
                 manager,
                 link,
@@ -947,9 +1015,12 @@ impl AnimationManager {
 
     fn publish_frames(&self, shared: &mut PresenterControl, initialize: bool) {
         for w in self.motions.iter().flat_map(Motion::windows) {
-            let (handle, frame) =
-                shared.frames.entry(w.wid).or_insert_with(|| (w.handle.clone(), w.frame));
+            let (handle, frame, txid) = shared
+                .frames
+                .entry(w.wid)
+                .or_insert_with(|| (w.handle.clone(), w.frame, w.txid));
             *frame = w.frame;
+            *txid = w.txid;
             if initialize {
                 *handle = w.handle.clone();
             }
@@ -1006,17 +1077,6 @@ impl AnimationManager {
                     self.motions.push(Motion::Transition(next));
                 }
             }
-            Message::SkipToEnd(animation) => {
-                self.motions.retain_mut(|m| {
-                    if let Motion::Transition(a) = m {
-                        a.animation.finish_all();
-                        false
-                    } else {
-                        true
-                    }
-                });
-                animation.skip_to_end();
-            }
             _ => unreachable!("runner handles display control"),
         }
     }
@@ -1037,51 +1097,38 @@ impl AnimationManager {
         delay
     }
 
-    pub(super) fn apply_layout(
+    pub fn animate_layout(
         reactor: &mut Reactor,
         space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        presentation: Presentation,
-        skip_wid: Option<WindowId>,
-        bounds: Option<ScrollingDisplayBounds>,
-    ) -> bool {
-        match presentation {
-            Presentation::Animated | Presentation::Resize => Self::animate_layout(
-                reactor,
-                space,
-                layout,
-                presentation == Presentation::Resize,
-                skip_wid,
-                bounds,
-            ),
-            Presentation::WorkspaceSwitch | Presentation::Instant | Presentation::Force => {
-                Self::instant_layout(reactor, space, layout, skip_wid, bounds, presentation)
-            }
-        }
-    }
-
-    fn animate_layout(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
+        desired: &Desired,
         is_resize: bool,
-        skip_wid: Option<WindowId>,
-        bounds: Option<ScrollingDisplayBounds>,
+        allow_animation: bool,
     ) -> bool {
+        let layout = desired.frames();
+        // The animated path's own bookkeeping still names the dragged window: a replaced
+        // animation must not carry it over.
+        let dragged = reactor.state.windows.drag().map(|(window, _)| window);
+        reactor.retire_presentations();
         let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
-        let animate_camera = !is_resize
+        let animate_camera = allow_animation
+            && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
-        let presentation = reactor.present_camera(space, animate_camera, None, skip_wid, bounds);
+        let presentation = reactor.present_camera(space, animate_camera, None);
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
-            let windows = layout
-                .iter()
-                .map(|(wid, _)| *wid)
-                .filter(|wid| Some(*wid) != skip_wid && !presented.contains(wid))
-                .collect();
+            // Nothing to animate: these are ordinary desires, reconciled like any other.
+            if presented.is_empty() {
+                reactor.cancel_window_presentations(desired.windows());
+                return reactor.arrange_frames(space, layout, Want::Arrange) || camera;
+            }
+            let windows =
+                desired.windows().into_iter().filter(|wid| !presented.contains(wid)).collect();
             reactor.cancel_window_presentations(windows);
+            let frames: Vec<_> =
+                layout.iter().copied().filter(|(wid, _)| !presented.contains(wid)).collect();
+            return reactor.arrange_frames(space, &frames, Want::Arrange) || camera;
         }
         let Some(active_ws) =
             reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
@@ -1096,214 +1143,120 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
+        // From here on is the animated path. The core plans which windows animate and holds
+        // each as animating until an answer lands on its target or the animation ends; the
+        // animation thread only presents (`PresentedWindow::begin`, `FrameBatch::flush`,
+        // `skip_to_end`).
+        let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
-
-        for &(wid, target_frame) in layout {
-            if presented.contains(&wid) {
-                anim.mark_handled(wid);
-                continue;
-            }
-            if skip_wid == Some(wid) {
-                anim.mark_handled(wid);
-                trace!(
-                    ?wid,
-                    "Skipping animated layout update for window currently being dragged"
-                );
-                continue;
-            }
-
-            let target_frame = target_frame.round();
-            let Some(window) = reactor.state.windows.window(wid) else {
-                continue;
-            };
-            let current_frame = window.frame_monotonic;
-            let window_server_id = window.info.sys_id;
-            let transactions = &reactor.transaction_manager;
-            let write =
-                window_server_id.and_then(|id| transactions.store.get(&id)).unwrap_or_default();
-            if write.covers(target_frame, current_frame) {
-                continue;
-            }
-            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
-                debug!(?wid, "Skipping for window - app no longer exists");
-                continue;
-            };
-            any_frame_changed = true;
-            let txid = window_server_id
-                .map(|wsid| transactions.begin(wsid, target_frame))
-                .unwrap_or_default();
-            let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
-
-            let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| {
-                is_active && !reactor.layout_manager.layout_engine.is_window_floating(wid)
-            }));
-            if is_active && !write.needs_full_retry() {
-                trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                anim.add_window(&handle, wid, current_frame, target_frame, txid);
-            } else {
-                anim.mark_handled(wid);
-                trace!(
-                    ?wid,
-                    ?current_frame,
-                    ?target_frame,
-                    "Reconciling window directly"
-                );
-                if let Err(e) =
-                    handle.send(Request::set_window_frame(wid, target_frame, txid, true))
-                {
-                    debug!(?wid, ?e, "Failed to send frame request");
-                    continue;
-                }
-            }
-
-            if let Some(window) = reactor.state.windows.window_mut(wid) {
-                window.frame_monotonic = target_frame;
-            }
+        if let Some(dragged) = dragged {
+            anim.mark_handled(dragged);
         }
 
+        let request = reactor.state.tx.next_id();
+        let mut hidden = Vec::new();
+        let mut desires = Vec::new();
+        for &(wid, target_frame) in layout {
+            // The window the user holds keeps its slot, but its frame is theirs until the drop.
+            if presented.contains(&wid) || reactor.owner(wid) == Owner::User {
+                anim.mark_handled(wid);
+                continue;
+            }
+            if reactor.state.windows.workspace_for_window(wid) != Some(active_ws) {
+                // A hidden window has nothing to animate: an ordinary desire.
+                anim.mark_handled(wid);
+                hidden.push((wid, target_frame));
+                continue;
+            }
+            if !reactor.app_manager.apps.contains_key(&wid.pid) {
+                debug!(?wid, "Skipping for window - app no longer exists");
+                continue;
+            }
+            desires.push(rift_core::Desire {
+                window: wid,
+                frame: target_frame,
+                request,
+            });
+        }
+        let animated = reactor.state.animate(desires);
+        // A window the core writes instead is no longer presented by an older animation.
+        reactor.stop_window_presentations(animated.writes.iter().map(|w| w.window()).collect());
+        for write in animated.writes {
+            any_frame_changed = true;
+            reactor.send_arranged(write);
+        }
+        for (wid, from, to, request) in animated.animations {
+            any_frame_changed = true;
+            trace!(?wid, ?from, ?to, "Animating visible window");
+            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
+                continue;
+            };
+            let handle = app_state.handle.with_scrolling_bounds(
+                bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
+            );
+            anim.add_window(&handle, wid, from, to, request);
+        }
+        // A hidden window's desire is written: an animation still presenting it stops first.
+        reactor.cancel_window_presentations(hidden.iter().map(|&(wid, _)| wid).collect());
+        any_frame_changed |= reactor.arrange_frames(space, &hidden, Want::Arrange);
+
         if !anim.is_empty() {
-            if let Some(tx) = &reactor.animation_tx {
-                let message = if !animate_camera {
-                    Message::SkipToEnd(anim)
-                } else {
-                    Message::Replace(anim)
-                };
-                if let Err(err) = tx.send(message) {
-                    match err.0 {
-                        Message::Replace(animation) => animation.skip_to_end(),
-                        Message::SkipToEnd(animation) => animation.skip_to_end(),
-                        Message::Stop(..)
-                        | Message::Camera(_)
-                        | Message::StopCamera(_)
-                        | Message::Displays(_) => {}
+            let anim = match reactor.communication_manager.events_tx.clone() {
+                Some(events) => anim.reporting_to(events),
+                None => anim,
+            };
+            let presented = match &reactor.animation_tx {
+                Some(tx) => match tx.send(Message::Replace(anim)) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        match err.0 {
+                            Message::Replace(animation) => animation.skip_to_end(),
+                            Message::Stop(..)
+                            | Message::Camera(_)
+                            | Message::StopCamera(_)
+                            | Message::Displays(_) => {}
+                        }
+                        false
                     }
+                },
+                None => {
+                    anim.skip_to_end();
+                    false
                 }
-            } else {
-                anim.skip_to_end();
+            };
+            // Applied at once instead of animated: the animation is over as soon as it began.
+            if !presented {
+                reactor.state.animation_ended(request);
             }
         }
 
         any_frame_changed
     }
 
-    fn instant_layout(
+    pub fn instant_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
+        reactor.cancel_window_presentations(desired.windows());
+        reactor.arrange_frames(space, desired.frames(), Want::Arrange)
+    }
+
+    /// Apply the position-only layout used while switching virtual workspaces.
+    ///
+    /// Keep this entry point separate from `instant_layout`: layouts merely suppressed
+    /// while a switch is in progress may still change window sizes and must use the
+    /// full-frame request.
+    pub fn workspace_switch_layout(
         reactor: &mut Reactor,
         space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
-        bounds: Option<ScrollingDisplayBounds>,
-        presentation: Presentation,
+        desired: &Desired,
     ) -> bool {
-        let force_frames = presentation == Presentation::Force;
-        reactor.cancel_window_presentations(
-            layout
-                .iter()
-                .map(|(wid, _)| *wid)
-                .filter(|wid| Some(*wid) != skip_wid)
-                .collect(),
-        );
-        let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
-        let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
-        let mut any_frame_changed = false;
+        reactor.cancel_window_presentations(desired.windows());
+        reactor.arrange_frames(space, desired.frames(), Want::ArrangePositions)
+    }
 
-        for &(wid, target_frame) in layout {
-            if skip_wid == Some(wid) {
-                trace!(?wid, "Skipping layout update for window currently being dragged");
-                continue;
-            }
-
-            let constrained = bounds.is_some()
-                && reactor.state.windows.workspace_for_window(wid) == active
-                && !reactor.layout_manager.layout_engine.is_window_floating(wid);
-            let window_store = &mut reactor.state.windows;
-            let Some(window) = window_store.window_mut(wid) else {
-                debug!(?wid, "Skipping layout - window no longer exists");
-                continue;
-            };
-            let target_frame = target_frame.round();
-            let current_frame = window.frame_monotonic;
-            let write = window
-                .info
-                .sys_id
-                .and_then(|id| reactor.transaction_manager.store.get(&id))
-                .unwrap_or_default();
-            if !force_frames && write.covers(target_frame, current_frame) {
-                trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
-                continue;
-            }
-            any_frame_changed = true;
-            trace!(
-                ?wid,
-                ?current_frame,
-                ?target_frame,
-                "Instant workspace positioning"
-            );
-
-            let size_unchanged = !force_frames
-                && !write.needs_full_retry()
-                && write.target().is_none()
-                && current_frame.size.same_as(target_frame.size);
-            window.frame_monotonic = target_frame;
-            let (frames, positions) = per_app
-                .entry((wid.pid, constrained))
-                .or_insert_with(|| (Vec::new(), Vec::new()));
-            if presentation == Presentation::WorkspaceSwitch && size_unchanged {
-                positions.push((wid, target_frame));
-            } else {
-                frames.push((wid, target_frame));
-            }
-        }
-
-        for ((pid, constrained), (frames, positions)) in per_app {
-            let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
-                debug!(?pid, "Skipping layout update for app - app no longer exists");
-                continue;
-            };
-
-            let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
-
-            let txid = reactor.transaction_manager.store.next_id();
-            for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
-            {
-                if let Some(window) = reactor.state.windows.window(*wid)
-                    && let Some(wsid) = window.info.sys_id
-                {
-                    reactor.transaction_manager.store_txid(wsid, txid, window.frame_monotonic);
-                }
-            }
-            let requests = [
-                (!positions.is_empty()).then(|| {
-                    Request::SetWindowFrames(
-                        positions,
-                        txid,
-                        FrameMode::Position,
-                        true,
-                        Default::default(),
-                    )
-                }),
-                (!frames.is_empty()).then(|| {
-                    Request::SetWindowFrames(
-                        frames,
-                        txid,
-                        FrameMode::Full,
-                        true,
-                        Default::default(),
-                    )
-                }),
-            ];
-            for request in requests.into_iter().flatten() {
-                if let Err(e) = handle.send(request) {
-                    debug!(
-                        ?pid,
-                        ?e,
-                        "Failed to send instant layout request - app may have quit"
-                    );
-                    break;
-                }
-            }
-        }
-
-        any_frame_changed
+    /// Restore native geometry after a display change invalidated cached frames.
+    pub fn reapply_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
+        reactor.cancel_window_presentations(desired.windows());
+        reactor.state.step(CoreEvent::Distrust { windows: desired.windows() });
+        reactor.arrange_frames(space, desired.frames(), Want::Arrange)
     }
 }
 
@@ -1322,18 +1275,10 @@ impl Motion {
         }
     }
 
-    fn store(&self) -> Option<WindowTxStore> {
-        match self {
-            Self::Transition(_) => None,
-            Self::Viewport(c) => Some(c.store.clone()),
-        }
-    }
-
     fn stop_windows(&mut self, windows: &[WindowId]) {
-        let store = self.store();
         self.windows_mut().retain_mut(|window| {
             if windows.binary_search(&window.wid).is_ok() {
-                window.cancel(store.as_ref());
+                window.cancel();
                 false
             } else {
                 true
@@ -1347,9 +1292,8 @@ impl Motion {
     }
 
     fn stop(&mut self) {
-        let store = self.store();
         for window in self.windows_mut().iter_mut() {
-            window.cancel(store.as_ref());
+            window.cancel();
         }
         self.windows_mut().clear();
         if let Self::Viewport(c) = self {
@@ -1445,7 +1389,8 @@ impl ActiveAnimation {
                 old.from = old.frame;
                 next.windows.push(old);
             } else if !next.windows.iter().any(|w| w.wid == old.wid) {
-                old.cancel(None);
+                old.cancel();
+                next.report_ended([old.txid]);
             }
         }
         next.windows.sort_unstable_by_key(|w| w.wid.pid);
@@ -1485,6 +1430,23 @@ impl Animation {
             display: 0,
             windows: vec![],
             handled_windows: vec![],
+            events: None,
+        }
+    }
+
+    /// The end of each window's animation is reported to `events`.
+    fn reporting_to(mut self, events: super::Sender) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Reports that the animations under `requests` ended.
+    fn report_ended(&self, requests: impl IntoIterator<Item = TransactionId>) {
+        let Some(events) = &self.events else { return };
+        let mut requests: Vec<_> = requests.into_iter().collect();
+        requests.dedup();
+        for request in requests {
+            events.send(super::Event::AnimationEnded(request));
         }
     }
 
@@ -1560,6 +1522,52 @@ impl Animation {
         for window in &mut self.windows {
             window.end();
         }
+        self.report_ended(self.windows.iter().map(|window| window.txid));
+    }
+}
+
+/// The animation thread, run in step with a test: every queued command is applied as the
+/// runner applies it, then every motion runs to its end on a virtual clock.
+#[cfg(test)]
+pub(crate) struct TestPresenter {
+    receiver: AnimationReceiver,
+    manager: AnimationManager,
+}
+
+#[cfg(test)]
+impl TestPresenter {
+    pub(crate) fn new(receiver: AnimationReceiver) -> Self {
+        Self {
+            receiver,
+            manager: AnimationManager::new(),
+        }
+    }
+
+    /// Whether no command is queued and nothing is moving.
+    pub(crate) fn idle(&self) -> bool {
+        self.receiver.commands.is_empty() && !self.manager.has_work()
+    }
+
+    pub(crate) fn present(&mut self) {
+        while let Ok(message) = self.receiver.commands.try_recv() {
+            let mut shared = self.receiver.control.lock();
+            let stopped = match &message {
+                Message::Stop(windows) => windows.clone(),
+                _ => vec![],
+            };
+            self.manager.apply(&mut shared, message);
+            shared.forget_stopped(&stopped);
+        }
+        let start = Instant::now();
+        for step in 1..=200 {
+            if !self.manager.has_work() {
+                break;
+            }
+            self.manager.tick_at(start + Duration::from_millis(50) * step);
+            let mut shared = self.receiver.control.lock();
+            self.manager.publish_frames(&mut shared, false);
+            self.manager.retire();
+        }
     }
 }
 
@@ -1623,6 +1631,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
+    use crate::actor::app::FrameMode;
 
     fn rect(origin_x: f64, origin_y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))
@@ -1726,23 +1735,6 @@ mod tests {
                 assert!(*eui);
             }
             _ => panic!("expected SetWindowFrame, got {request:?}"),
-        }
-    }
-
-    fn assert_animation_frame(request: &Observed, wid: WindowId, frame: CGRect) {
-        match request {
-            Observed::Frame {
-                wid: req_wid,
-                frame: req_frame,
-                set_size,
-                txid,
-            } => {
-                assert_eq!(*req_wid, wid);
-                assert_eq!(*req_frame, frame);
-                assert!(*set_size, "expected a set_size frame");
-                assert_eq!(*txid, TransactionId::default());
-            }
-            _ => panic!("expected coalesced frame, got {request:?}"),
         }
     }
 
@@ -1949,7 +1941,6 @@ mod tests {
                 display: 1,
                 animate: true,
                 scale: 1.0,
-                store: WindowTxStore::new(),
                 interval: Duration::from_secs_f64(1.0 / 60.0),
                 bound: None,
             }
@@ -2061,7 +2052,7 @@ mod tests {
         manager.retire();
         assert!(manager.motions.is_empty());
         let before: Vec<_> =
-            control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
+            control.frames.iter().map(|(wid, (_, frame, _))| (*wid, *frame)).collect();
         assert!(
             system
                 .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
@@ -2181,7 +2172,6 @@ mod tests {
             &Default::default(),
         );
         system.begin_viewport_gesture(layout, now);
-        let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let camera = CameraAnimation {
             presentation: system.presentation(layout).unwrap().0,
@@ -2216,7 +2206,6 @@ mod tests {
             display: 1,
             animate: false,
             scale: 2.0,
-            store: store.clone(),
             interval: Duration::from_secs_f64(1.0 / 60.0),
             bound: None,
         };
@@ -2242,23 +2231,12 @@ mod tests {
                 "camera must use its cached 2x scale"
             );
         });
-        let presentation_txid = store.last_txid(&wsid);
         // Camera work remains eligible on consecutive 120Hz input refreshes.
         for tick in 1..=2 {
             let camera = camera_mut(&mut manager).unwrap();
             camera.presentation.update(0.001, Duration::from_millis(tick * 8));
             camera.sample(now + Duration::from_secs_f64(tick as f64 / 120.0));
             assert_eq!(collect_requests(&mut rx).len(), 1);
-            assert_eq!(
-                store.last_txid(&wsid),
-                presentation_txid,
-                "display sampling cannot advance transactions"
-            );
-            assert_eq!(
-                store.get(&wsid).unwrap().target(),
-                None,
-                "free gestures have no semantic target"
-            );
         }
         camera_mut(&mut manager)
             .unwrap()
@@ -2428,17 +2406,9 @@ mod tests {
                 .control
                 .lock()
                 .frames
-                .insert(wid, (handle.clone(), retained));
+                .insert(wid, (handle.clone(), retained, TransactionId::default()));
             // Within a Space, a new camera must preserve the last publication.
-            reactor
-                .present_camera(
-                    spaces[source],
-                    true,
-                    None,
-                    None,
-                    scrolling_bounds(&reactor, spaces[source]),
-                )
-                .unwrap();
+            reactor.present_camera(spaces[source], true, None).unwrap();
             let Message::Camera(source_camera) = receiver.commands.try_recv().unwrap() else {
                 panic!("expected source camera");
             };
@@ -2459,7 +2429,7 @@ mod tests {
                 .unwrap()
                 .display_uuid
                 .clone();
-            reactor.handle_event(Event::Command(Command::Reactor(
+            reactor.handle_loop_event(Event::Command(Command::Reactor(
                 ReactorCommand::MoveWindowToDisplay {
                     selector: if turn % 2 == 0 {
                         DisplaySelector::Uuid(uuid)
@@ -2545,11 +2515,14 @@ mod tests {
         let wid = WindowId::new(1, 1);
         let (sender, receiver) = AnimationSender::channel();
         let frame = rect(10., 10., 500., 400.);
-        sender
-            .control
-            .lock()
-            .frames
-            .insert(wid, (reactor.app_manager.apps[&1].handle.clone(), frame));
+        sender.control.lock().frames.insert(
+            wid,
+            (
+                reactor.app_manager.apps[&1].handle.clone(),
+                frame,
+                TransactionId::default(),
+            ),
+        );
         let control = Arc::clone(&sender.control);
         reactor.animation_tx = Some(sender);
         for revision in [snapshot.revision, snapshot.revision.saturating_sub(1)] {
@@ -2594,7 +2567,7 @@ mod tests {
             .lock()
             .frames
             .get(&wid)
-            .is_some_and(|(_, frame)| frame.origin.x > 0.0)
+            .is_some_and(|(_, frame, _)| frame.origin.x > 0.0)
             && Instant::now() < deadline
         {
             std::thread::yield_now();
@@ -2772,36 +2745,21 @@ mod tests {
     }
 
     #[test]
-    fn skip_to_end_finishes_active_animation_and_applies_new_layout() {
+    fn skip_to_end_applies_every_target_at_once() {
+        // The fallback when an animation cannot be handed to the animation thread.
         let (tx, mut rx) = crate::actor::channel();
         let handle = AppThreadHandle::new_for_test(tx);
         let wid = WindowId::new(1, 1);
-        let first = animation(
-            &handle,
-            wid,
-            rect(0.0, 0.0, 10.0, 10.0),
-            rect(50.0, 60.0, 10.0, 10.0),
-        );
-        let second = animation(
+        animation(
             &handle,
             wid,
             rect(50.0, 60.0, 10.0, 10.0),
             rect(80.0, 90.0, 10.0, 10.0),
-        );
-
-        let mut manager = AnimationManager::new();
-        manager.handle_message(Message::Replace(first));
-        manager.handle_message(Message::SkipToEnd(second));
+        )
+        .skip_to_end();
 
         let requests = collect_requests(&mut rx);
-        assert_eq!(requests.len(), 4);
-        assert!(
-            matches!(requests[0], Observed::Request(Request::BeginWindowAnimation(req_wid, _)) if req_wid == wid)
-        );
-        assert_animation_frame(&requests[1], wid, rect(50.0, 60.0, 10.0, 10.0));
-        assert!(
-            matches!(requests[2], Observed::Request(Request::EndWindowAnimation(req_wid, _)) if req_wid == wid)
-        );
-        assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
+        assert_eq!(requests.len(), 1);
+        assert_set_window_frame(&requests[0], wid, rect(80.0, 90.0, 10.0, 10.0));
     }
 }

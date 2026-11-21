@@ -1,25 +1,21 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use objc2_core_foundation::CGRect;
 use rift_protocol::StackInfo;
 use tracing::trace;
 
-use super::changes::SpaceChange;
 use super::replay::Record;
-use super::{AppState, Changes, Event, Presentation, WorkspaceSwitchOrigin};
+use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
+use crate::actor::drag::Session;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
+use crate::actor::reactor::reconciler::Desired;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
-use crate::layout_engine::engine::GroupContainerInfo;
-use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
-use crate::sys::geometry::Round;
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -42,70 +38,31 @@ impl AppManager {
     }
 }
 
-/// Manages drag operations and window swapping
+/// The drag preview; the drag itself is the held window's placement.
 pub struct DragManager {
-    pub actor: crate::actor::drag::DragActor,
-    pub native_motion_active: Arc<AtomicBool>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) haptics_enabled: bool,
-    // Layouts suppressed across native drag events resume when the drag ends.
-    pub(super) deferred_layouts: Vec<(Option<SpaceId>, Presentation, bool)>,
 }
 
 impl DragManager {
-    pub(super) fn defer_layout(
-        &mut self,
-        space: Option<SpaceId>,
-        policy: Presentation,
-        changed: bool,
-    ) {
-        if let Some((_, current, layout_changed)) =
-            self.deferred_layouts.iter_mut().find(|(id, ..)| *id == space)
-        {
-            *current = (*current).max(policy);
-            *layout_changed |= changed;
-        } else {
-            self.deferred_layouts.push((space, policy, changed));
-        }
-    }
-
-    pub fn sync_motion_gate(&self) {
-        let active = self.actor.drop_enabled()
-            && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
-        if self.native_motion_active.load(Ordering::Relaxed) != active {
-            self.native_motion_active.store(active, Ordering::Release);
-        }
-    }
-
-    /// A window leaving Rift's control can no longer be dragged by it.
-    pub fn forget_window(&mut self, wid: WindowId) {
-        self.actor.window_removed(wid);
-        self.sync_motion_gate();
-        self.sync_preview();
-    }
-
-    pub fn reset(&mut self) {
-        self.actor.cancel();
-        self.sync_motion_gate();
-        self.release_preview();
-    }
-
     pub fn update_config(&mut self, config: DragDropSettings) {
         self.haptics_enabled = config.haptics_enabled;
-        self.actor.update_config(config);
         self.preview_enabled = config.enabled && config.preview;
         if !config.enabled || !config.preview {
             self.release_preview();
         }
-        self.sync_preview();
     }
 
-    pub fn sync_preview(&mut self) {
+    pub fn sync_preview(&mut self, held: Option<(WindowId, &Session)>) {
         if cfg!(test) {
             return;
         }
-        let Some(target) = self.actor.preview_target().filter(|_| self.preview_enabled) else {
+        let Some((window, session)) = held else {
+            self.release_preview();
+            return;
+        };
+        let Some(target) = session.preview_target(window).filter(|_| self.preview_enabled) else {
             self.hide_preview();
             return;
         };
@@ -162,28 +119,50 @@ pub struct WindowInventoryManager {
 
 /// Manages workspace switching state
 pub struct WorkspaceSwitchManager {
-    pub active_workspace_switch: Option<SpaceId>,
-    pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
+    pub workspace_switch_state: super::WorkspaceSwitchState,
+    pub workspace_switch_generation: u64,
+    pub active_workspace_switch: Option<u64>,
+    /// A pointer warp owed after the next arrange. Its target is read when it is paid, from
+    /// the focus then: a newer focus intent in between is where it lands, nothing stale.
+    pub owed_warp: Option<OwedWarp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwedWarp {
+    /// To the focused window's centre (mouse follows focus across a switch or a scroll).
+    Focus,
+    /// Into this Space's selected window at the spot the cursor held in the old one, or onto
+    /// the display when the workspace is empty. Includes a focus warp.
+    Display(crate::sys::screen::SpaceId),
 }
 
 impl WorkspaceSwitchManager {
-    pub fn start_workspace_switch(&mut self, space: SpaceId, origin: WorkspaceSwitchOrigin) {
-        self.active_workspace_switch = Some(space);
-        self.pending_workspace_switch_origin = Some(origin);
+    /// Owe a focus warp; an owed display warp already lands on the focus.
+    pub fn owe_focus_warp(&mut self) {
+        if self.owed_warp.is_none() {
+            self.owed_warp = Some(OwedWarp::Focus);
+        }
+    }
+}
+
+impl WorkspaceSwitchManager {
+    pub fn start_workspace_switch(&mut self, origin: WorkspaceSwitchOrigin) {
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        self.active_workspace_switch = Some(self.workspace_switch_generation);
+        self.workspace_switch_state = WorkspaceSwitchState::Active(origin);
     }
 
     pub fn manual_switch_in_progress(&self) -> bool {
-        self.pending_workspace_switch_origin == Some(WorkspaceSwitchOrigin::Manual)
+        self.workspace_switch_state == WorkspaceSwitchState::Active(WorkspaceSwitchOrigin::Manual)
     }
 
     pub fn mark_workspace_switch_inactive(&mut self) {
-        self.pending_workspace_switch_origin = None;
+        self.workspace_switch_state = WorkspaceSwitchState::Inactive;
     }
 }
 
 /// Manages refocus and cleanup state
 pub struct RefocusManager {
-    pub stale_cleanup_state: super::StaleCleanupState,
     pub refocus_state: super::RefocusState,
 }
 
@@ -207,85 +186,127 @@ pub struct LayoutManager {
     pub layout_engine: LayoutEngine,
 }
 
+pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
+
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 
-struct CalculatedLayout {
-    space: SpaceId,
-    presentation: Presentation,
-    bounds: Option<ScrollingDisplayBounds>,
-    frames: Vec<(WindowId, CGRect)>,
-    groups: Vec<GroupContainerInfo>,
-    change: SpaceChange,
-    placed: usize,
+/// The stacks a `StacksChanged` broadcast reports. Clients have always received vertical
+/// stacks bottom to top.
+fn stack_infos(groups: &[crate::layout_engine::engine::GroupContainerInfo]) -> Vec<StackInfo> {
+    use crate::layout_engine::LayoutKind;
+    groups
+        .iter()
+        .map(|g| {
+            let mut windows: Vec<_> = g.window_ids.iter().map(WindowId::to_debug_string).collect();
+            let mut selected_index = g.selected_index;
+            if g.container_kind == LayoutKind::VerticalStack {
+                windows.reverse();
+                selected_index = windows.len().saturating_sub(1).saturating_sub(selected_index);
+            }
+            StackInfo {
+                total_count: g.total_count,
+                container_kind: match g.container_kind {
+                    LayoutKind::Horizontal => rift_protocol::LayoutKind::Horizontal,
+                    LayoutKind::Vertical => rift_protocol::LayoutKind::Vertical,
+                    LayoutKind::HorizontalStack => rift_protocol::LayoutKind::HorizontalStack,
+                    LayoutKind::VerticalStack => rift_protocol::LayoutKind::VerticalStack,
+                },
+                selected_index,
+                windows,
+            }
+        })
+        .collect()
+}
+
+fn bound_scrolling_tiled_frames_to_screen(
+    reactor: &Reactor,
+    layout: &mut Vec<(WindowId, CGRect)>,
+    bounds: ScrollingDisplayBounds,
+    active_workspace_windows: &HashSet<WindowId>,
+) {
+    for (wid, frame) in layout.iter_mut() {
+        if !active_workspace_windows.contains(wid)
+            || reactor.layout_manager.layout_engine.is_window_floating(*wid)
+        {
+            continue;
+        }
+        *frame = bounds.apply(*frame);
+    }
 }
 
 impl LayoutManager {
     fn publish_stack_tabs(
         reactor: &Reactor,
-        tx: &stack_line::Sender,
         space: SpaceId,
-        group_infos: &[GroupContainerInfo],
+        group_infos: &[crate::layout_engine::engine::GroupContainerInfo],
         active_workspace_for_space_has_fullscreen: bool,
         reorder: bool,
     ) {
-        let groups: Vec<stack_line::GroupInfo> = group_infos
-            .iter()
-            .map(|g| stack_line::GroupInfo {
-                node_id: g.node_id,
+        if reactor.config.settings.ui.stack_line.enabled
+            && let Some(tx) = &reactor.communication_manager.stack_line_tx
+        {
+            let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                .iter()
+                .map(|g| crate::actor::stack_line::GroupInfo {
+                    node_id: g.node_id,
+                    space_id: space,
+                    frame: g.frame,
+                    horizontal: g.container_kind != crate::layout_engine::LayoutKind::VerticalStack,
+                    selected_index: g.selected_index,
+                    tabs: g
+                        .window_ids
+                        .iter()
+                        .map(|&window_id| {
+                            let info = reactor.state.windows.window(window_id).map(|w| &w.info);
+                            crate::actor::stack_line::TabInfo {
+                                window_id,
+                                title: info.map(|i| i.title.clone()).unwrap_or_default(),
+                                bundle_id: info.and_then(|i| i.bundle_id.clone()),
+                                window_server_id: reactor
+                                    .state
+                                    .windows
+                                    .record(window_id)
+                                    .and_then(|record| record.window_server_id()),
+                            }
+                        })
+                        .collect(),
+                })
+                .collect();
+            let active_space_ids: Vec<crate::sys::screen::SpaceId> =
+                reactor.iter_active_spaces().collect();
+
+            if let Err(e) = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                active_space_ids,
                 space_id: space,
-                frame: g.frame,
-                horizontal: g.container_kind != crate::layout_engine::LayoutKind::VerticalStack,
-                selected_index: g.selected_index,
-                tabs: g
-                    .window_ids
-                    .iter()
-                    .map(|&window_id| {
-                        let info = reactor.state.windows.window(window_id).map(|w| &w.info);
-                        stack_line::TabInfo {
-                            window_id,
-                            title: info.map(|i| i.title.clone()).unwrap_or_default(),
-                            bundle_id: info.and_then(|i| i.bundle_id.clone()),
-                            window_server_id: reactor
-                                .state
-                                .windows
-                                .record(window_id)
-                                .and_then(|record| record.window_server_id()),
-                        }
-                    })
-                    .collect(),
-            })
-            .collect();
-        trace!(?space, count = groups.len(), "Publishing stack tabs");
-        if let Err(e) = tx.try_send(stack_line::Event::GroupsUpdated {
-            active_space_ids: reactor.iter_active_spaces().collect(),
-            space_id: space,
-            groups,
-            active_workspace_for_space_has_fullscreen,
-            reorder,
-        }) {
-            tracing::warn!("Failed to send groups update to stack_line: {}", e);
+                groups,
+                active_workspace_for_space_has_fullscreen,
+                reorder,
+            }) {
+                tracing::warn!("Failed to send groups update to stack_line: {}", e);
+            }
         }
     }
 
     pub(super) fn refresh_stack_tabs(reactor: &mut Reactor, space: SpaceId) {
-        if !reactor.config.settings.ui.stack_line.enabled || !reactor.is_space_active(space) {
+        if !reactor.config.settings.ui.stack_line.enabled
+            || reactor.communication_manager.stack_line_tx.is_none()
+            || !reactor.is_space_active(space)
+        {
             return;
         }
-        let Some(tx) = &reactor.communication_manager.stack_line_tx else {
-            return;
-        };
         let Some(screen) = reactor.space_state.screen_by_space(space) else {
             return;
         };
+        let frame = screen.frame;
         let gaps = reactor
             .config
             .settings
             .layout
             .gaps
-            .effective_for_display(screen.display_uuid_opt());
+            .effective_for_display(screen.display_uuid_owned().as_deref());
         let groups = reactor.layout_manager.layout_engine.collect_group_containers(
             space,
-            screen.frame,
+            frame,
             &gaps,
             reactor.config.settings.ui.stack_line.reserve(),
         );
@@ -293,274 +314,215 @@ impl LayoutManager {
             .layout_manager
             .layout_engine
             .active_workspace_for_space_has_fullscreen(space);
-        Self::publish_stack_tabs(reactor, tx, space, &groups, fullscreen, true);
+        Self::publish_stack_tabs(reactor, space, &groups, fullscreen, true);
     }
 
-    pub(super) fn commit(reactor: &mut Reactor, changes: &mut Changes) -> bool {
-        if reactor.refreshes_blocked() || reactor.is_mission_control_active() {
-            return false;
+    pub fn update_layout(
+        reactor: &mut Reactor,
+        is_resize: bool,
+        is_workspace_switch: bool,
+        space_scope: Option<SpaceId>,
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
+        if reactor.refreshes_blocked() {
+            return Ok(false);
         }
-        let publish_stacks = !reactor.communication_manager.event_broadcaster.is_closed();
-        let tabs_enabled = reactor.config.settings.ui.stack_line.enabled;
-        let collect_groups = publish_stacks
-            || (tabs_enabled && reactor.communication_manager.stack_line_tx.is_some());
-        let screens = &reactor.space_state.screens;
-        let inline_frames;
-        let extra_frames;
-        let all_screen_frames = match screens.as_slice() {
-            [] => &[],
-            [screen] => {
-                inline_frames = [screen.frame, CGRect::ZERO];
-                &inline_frames[..1]
-            }
-            [left, right] => {
-                inline_frames = [left.frame, right.frame];
-                &inline_frames[..]
-            }
-            _ => {
-                extra_frames = screens.iter().map(|screen| screen.frame).collect::<Vec<_>>();
-                &extra_frames[..]
-            }
-        };
-        let has_windows = reactor.state.windows.tracked_window_count() != 0;
-        let mut any_frame_changed = false;
-        let skip_wid = reactor.drag_manager.actor.source().map(|source| source.window);
-        let mut inline = [None, None];
-        let mut rest = Vec::new();
+        let layout_result = Self::calculate_layout(reactor, space_scope);
+        Self::apply_layout(
+            reactor,
+            layout_result,
+            is_resize,
+            is_workspace_switch,
+            false,
+            false,
+        )
+    }
 
-        for screen in screens {
+    pub fn update_layout_instant(
+        reactor: &mut Reactor,
+        space_scope: Option<SpaceId>,
+        force_frames: bool,
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
+        if reactor.refreshes_blocked() {
+            return Ok(false);
+        }
+        let layout = Self::calculate_layout(reactor, space_scope);
+        // Finish the logical scrolling viewport here, without queueing a second
+        // animation behind the overview's own transition.
+        for &(space, _) in &layout {
+            let engine = &mut reactor.layout_manager.layout_engine;
+            if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
+                && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
+                    &mut engine.workspaces_mut().workspaces[workspace].layout_system
+                && let Some((mut camera, _)) = system.presentation(layout)
+            {
+                camera.finish();
+                system
+                    .commit_presented_viewport(layout, &camera.snapshot(std::time::Instant::now()));
+            }
+        }
+        let layout = Self::calculate_layout(reactor, space_scope);
+        Self::apply_layout(reactor, layout, false, false, true, force_frames)
+    }
+
+    pub(super) fn calculate_layout(
+        reactor: &mut Reactor,
+        space_scope: Option<SpaceId>,
+    ) -> LayoutResult {
+        if reactor.state.windows.tracked_window_count() == 0 {
+            return LayoutResult::new();
+        }
+        let all_screen_frames: Vec<CGRect> =
+            reactor.space_state.screens.iter().map(|s| s.frame).collect();
+        let mut layout_result = LayoutResult::new();
+
+        for index in 0..reactor.space_state.screens.len() {
+            let screen = &reactor.space_state.screens[index];
             let (Some(space), frame) = (screen.space, screen.frame) else {
                 continue;
             };
-            let change = changes.for_space(space);
-            let Some(mut presentation) = change.presentation else {
+            if space_scope.is_some_and(|scope| scope != space) {
                 continue;
-            };
+            }
             if !reactor.is_space_active(space) {
                 continue;
             }
-            if reactor.workspace_switch_manager.active_workspace_switch == Some(space)
-                && matches!(presentation, Presentation::Animated | Presentation::Resize)
-            {
-                presentation = Presentation::Instant;
-            }
-            if reactor.overview_focus.is_some_and(|(covered, _, started)| {
-                covered == space && started.elapsed() < std::time::Duration::from_secs(1)
-            }) {
-                presentation = presentation.max(Presentation::Instant);
-            }
-            let mut update = CalculatedLayout {
-                space,
-                presentation,
-                bounds: None,
-                frames: Vec::new(),
-                groups: Vec::new(),
-                change,
-                placed: 0,
-            };
-            if has_windows {
-                let display_uuid = screen.display_uuid_opt();
-                let gaps = reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
-                // Accepted topology owns display information. Geometry uses it without
-                // refreshing the engine's display mapping on every frame commit.
-                #[cfg(test)]
-                reactor.layout_calculations.push(space);
-                trace!(?space, ?presentation, "Calculating reactor layout");
-                let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_groups(
+            let display_uuid_opt = screen.display_uuid_owned();
+            let gaps = reactor
+                .config
+                .settings
+                .layout
+                .gaps
+                .effective_for_display(display_uuid_opt.as_deref());
+            reactor
+                .layout_manager
+                .layout_engine
+                .update_space_display(space, display_uuid_opt.as_deref());
+            let mut layout =
+                reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     &reactor.state.windows,
                     space,
                     frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
-                    all_screen_frames,
-                    collect_groups.then_some(&mut update.groups),
-                    matches!(presentation, Presentation::Instant | Presentation::Force),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic()),
+                    &all_screen_frames,
                 );
-                let engine = &reactor.layout_manager.layout_engine;
-                let bounds = (engine.active_layout_mode_at(space) == LayoutMode::Scrolling)
-                    .then(|| {
-                        ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
-                    })
-                    .flatten();
-                if let Some(bounds) = bounds
-                    && let Some(workspace) = engine.workspaces().active_workspace(space)
-                {
-                    for (window, frame) in &mut layout {
-                        if reactor.state.windows.workspace_for_window(*window) == Some(workspace)
-                            && !engine.is_window_floating(*window)
-                        {
-                            *frame = bounds.apply(*frame);
-                        }
-                    }
-                }
-                update.frames = layout;
-                update.bounds = bounds;
-            }
-            if let Some(slot) = inline.iter_mut().find(|slot| slot.is_none()) {
-                *slot = Some(update);
-            } else {
-                rest.push(update);
-            }
-        }
-
-        // All spaces have sampled the same reconciled frames. Install native
-        // placements before delivering any ordinary layout, including on the source.
-        for (window, target, fallback) in changes.tiled_transfers() {
-            let Some(update) = inline
-                .iter_mut()
-                .flatten()
-                .chain(&mut rest)
-                .find(|layout| layout.space == target)
-            else {
-                continue;
-            };
-            if !reactor
-                .state
-                .windows
-                .record(window)
-                .and_then(|record| record.pending_transfer())
-                .is_some_and(|operation| operation.requested_space == target)
-                || reactor.assigned_space_for_window_id(window) != Some(target)
+            if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                == LayoutMode::Scrolling
+                && let Some(bounds) =
+                    ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
             {
-                continue;
+                let active_workspace_windows: HashSet<WindowId> = reactor
+                    .layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&reactor.state.windows, space)
+                    .into_iter()
+                    .collect();
+                bound_scrolling_tiled_frames_to_screen(
+                    reactor,
+                    &mut layout,
+                    bounds,
+                    &active_workspace_windows,
+                );
             }
-            // An intervening switch may have parked this window. Place it on
-            // its physical display first, then apply its separate parking frame.
-            let active = reactor
-                .layout_manager
-                .layout_engine
-                .workspaces()
-                .is_window_in_active_workspace(&reactor.state.windows, target, window);
-            let tile = active
-                .then(|| update.frames.iter().position(|(wid, _)| *wid == window))
-                .flatten();
-            let frame = tile.map(|idx| update.frames[idx].1.round()).or(fallback);
-            let bounds = tile.and(update.bounds);
-            if reactor.send_transfer_frame(window, target, frame, true, bounds) {
-                any_frame_changed = true;
-                if let Some(idx) = tile {
-                    // Keep the complete projection for IPC while excluding the
-                    // already submitted tile even from a forced frame pass.
-                    update.frames.swap(update.placed, idx);
-                    update.placed += 1;
-                }
-            }
-        }
-        for update in inline.iter_mut().flatten().chain(&mut rest) {
-            if update.frames.is_empty() {
-                continue;
-            }
-            let changed = AnimationManager::apply_layout(
-                reactor,
-                update.space,
-                &update.frames[update.placed..],
-                update.presentation,
-                skip_wid,
-                update.bounds,
-            );
-            any_frame_changed |= changed;
-            update.change.layout_changed |= changed && update.presentation != Presentation::Force;
+            layout_result.push((space, layout));
         }
 
-        let active_space = publish_stacks.then(|| reactor.workspace_command_space()).flatten();
-        for CalculatedLayout {
-            space,
-            frames: layout,
-            groups,
-            change,
-            ..
-        } in inline.into_iter().flatten().chain(rest)
-        {
-            reactor.publish_space_changes(space, change);
-            let stack_line =
-                reactor.communication_manager.stack_line_tx.as_ref().filter(|_| tabs_enabled);
-            let stack_has_fullscreen = (stack_line.is_some() || !groups.is_empty())
-                && reactor
+        layout_result
+    }
+
+    fn apply_layout(
+        reactor: &mut Reactor,
+        layout_result: LayoutResult,
+        is_resize: bool,
+        is_workspace_switch: bool,
+        instant: bool,
+        force_frames: bool,
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
+        let main_window = reactor.main_window();
+        trace!(?main_window);
+        let mut any_frame_changed = false;
+
+        let active_space = reactor.workspace_command_space();
+        for (space, layout) in layout_result {
+            let desired = Desired::of(layout);
+            // Start native workspace moves before collecting stack tabs and building
+            // IPC events. App actors can perform AX work while we publish the UI.
+            let switch_dispatched = is_workspace_switch && !instant && !force_frames;
+            if switch_dispatched {
+                any_frame_changed |=
+                    AnimationManager::workspace_switch_layout(reactor, space, &desired);
+            }
+            if let Some(screen) = reactor.space_state.screen_by_space(space) {
+                let screen_frame = screen.frame;
+                let display_uuid = screen.display_uuid_owned();
+                let gaps = reactor
+                    .config
+                    .settings
+                    .layout
+                    .gaps
+                    .effective_for_display(display_uuid.as_deref());
+                let stack_has_fullscreen = reactor
                     .layout_manager
                     .layout_engine
                     .active_workspace_for_space_has_fullscreen(space);
-            let active_workspace_for_space_has_fullscreen =
-                active_space == Some(space) && stack_has_fullscreen;
-            if let Some(tx) = stack_line {
-                Self::publish_stack_tabs(reactor, tx, space, &groups, stack_has_fullscreen, false);
-            }
-
-            if !groups.is_empty()
-                && !reactor.communication_manager.event_broadcaster.is_closed()
-                && let Some(workspace_id) =
-                    reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
-            {
-                let workspace_index =
-                    reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
-                let workspace_name = reactor
-                    .layout_manager
-                    .layout_engine
-                    .workspace_name(space, workspace_id)
-                    .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-
-                let stacks: Vec<StackInfo> = groups
-                    .iter()
-                    .map(|g| {
-                        // Clients have always received vertical stacks bottom to top.
-                        let mut windows: Vec<_> =
-                            g.window_ids.iter().map(WindowId::to_debug_string).collect();
-                        let mut selected_index = g.selected_index;
-                        if g.container_kind == crate::layout_engine::LayoutKind::VerticalStack {
-                            windows.reverse();
-                            selected_index =
-                                windows.len().saturating_sub(1).saturating_sub(selected_index);
-                        }
-                        StackInfo {
-                            total_count: g.total_count,
-                            container_kind: g.container_kind,
-                            selected_index,
-                            windows,
-                        }
-                    })
-                    .collect();
-
-                let event = BroadcastEvent::StacksChanged {
-                    workspace_id: protocol_workspace_id(workspace_id),
-                    workspace_index,
-                    workspace_name,
-                    stacks,
-                    active_workspace_has_fullscreen: active_workspace_for_space_has_fullscreen,
-                    space_id: space.get(),
-                    display_uuid: reactor.display_uuid_for_space(space),
-                };
-                reactor.publish(event);
-            }
-
-            if change.layout_changed {
-                reactor.broadcast_layout_state_changed(
+                let active_workspace_for_space_has_fullscreen =
+                    active_space == Some(space) && stack_has_fullscreen;
+                let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
                     space,
-                    rift_protocol::EventKind::LayoutChanged,
-                    Some(&layout),
+                    screen_frame,
+                    &gaps,
+                    reactor.config.settings.ui.stack_line.reserve(),
                 );
+
+                Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
+
+                if let Some(header) = reactor.workspace_header(space) {
+                    let stacks = stack_infos(&group_infos);
+
+                    if stacks.len() > 0 {
+                        let event = BroadcastEvent::StacksChanged {
+                            workspace_id: header.workspace_id,
+                            workspace_index: header.workspace_index,
+                            workspace_name: header.workspace_name,
+                            stacks,
+                            active_workspace_has_fullscreen:
+                                active_workspace_for_space_has_fullscreen,
+                            space_id: header.space_id,
+                            display_uuid: header.display_uuid,
+                        };
+                        let _ = reactor.communication_manager.event_broadcaster.send(event);
+                    }
+                }
             }
-            if changes.selection_changed == Some(space) {
-                reactor.broadcast_layout_state_changed(
-                    space,
-                    rift_protocol::EventKind::SelectionChanged,
-                    Some(&layout),
-                );
-                changes.selection_changed = None;
+
+            if force_frames {
+                any_frame_changed |= AnimationManager::reapply_layout(reactor, space, &desired);
+            } else if instant {
+                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
+            } else if switch_dispatched {
+                // Already submitted before UI publication above.
+            } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
+                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
+            } else {
+                any_frame_changed |=
+                    AnimationManager::animate_layout(reactor, space, &desired, is_resize, true);
             }
-            if let Some(window) = changes.focus_warp
-                && changes.display_warp.is_none()
+            if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
+                && let Some(window) = reactor.layout_manager.layout_engine.focused_window()
                 && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                     == LayoutMode::Scrolling
-                && let Some((_, frame)) = layout.iter().find(|(wid, _)| *wid == window)
+                && let Some((_, frame)) = desired.frames().iter().find(|(wid, _)| *wid == window)
             {
-                changes.focus_warp = None;
+                reactor.workspace_switch_manager.owed_warp = None;
                 if reactor.screen_for_point(frame.mid()).is_some() {
                     reactor.warp_mouse(frame.mid());
                 }
             }
         }
 
-        any_frame_changed
+        Ok(any_frame_changed)
     }
 }
 

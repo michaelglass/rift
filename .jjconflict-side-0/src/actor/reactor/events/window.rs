@@ -7,7 +7,6 @@ use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::reconciler::CoreEvent;
 use crate::actor::reactor::{Quiet, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
-use crate::model::WindowVisibility;
 use crate::model::tx_store::WindowTxStore;
 use crate::model::window_store::Pointer;
 use crate::sys::app::WindowInfo as Window;
@@ -80,10 +79,13 @@ pub fn handle_window_destroyed(
     if state.suspend_fullscreen_ax_identity(wid) {
         return EventOutcome::no_change().with_layout_event(LayoutEvent::WindowSuspended(wid));
     }
-    let Some(record) = state.remove_window(wid) else {
-        return EventOutcome::no_change();
-    };
-    apply_window_retirement(&state.tx, (wid, record.window_server_id()))
+    // Retired at the reactor's edge (#702's retire_window): the store, the layout and every
+    // tracker naming the window (the main window, a pending refocus) let go of it together.
+    let mut outcome = EventOutcome::no_change();
+    if state.windows.record(wid).is_some() {
+        outcome.retirements.push(wid);
+    }
+    outcome
 }
 
 pub(crate) fn apply_window_retirement(
@@ -98,55 +100,44 @@ pub(crate) fn apply_window_retirement(
         .with_layout_event(LayoutEvent::WindowRemoved(wid))
 }
 
-/// Application hiding and AX minimization share one suspension/return lifecycle.
+/// Application hiding and AX minimization share one suspension/return lifecycle (#702's
+/// observe_window_minimization). Minimized is the core's admission fact; minimizing never
+/// writes manageability.
 pub fn handle_window_visibility_changed(
     state: &mut crate::model::RiftState,
     wid: WindowId,
     visible: bool,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    if !visible {
-        if !state.windows.observe_minimized(wid) {
-            return Ok(EventOutcome::no_change());
-        }
-        return Ok(EventOutcome::window_membership_changed(false, false)
-            .with_arrange_passes(0)
-            .with_layout_event(LayoutEvent::WindowSuspended(wid)));
+    let minimized = !visible;
+    // Application hiding can report minimization for a cached AX key.
+    let ax_returned = !minimized && state.windows.validate_ax_identity(wid);
+    let Some(window) = state.windows.window(wid) else {
+        debug!(
+            ?wid,
+            minimized, "Minimization change for unknown window - ignoring"
+        );
+        return Ok(EventOutcome::no_change());
+    };
+    if !minimized && !window.info.is_minimized && !ax_returned {
+        return Ok(EventOutcome::no_change());
     }
-    let ax_returned = state.windows.validate_ax_identity(wid);
-    match state.windows.window(wid) {
-        Some(window) => {
-            if !window.info.is_minimized && !ax_returned {
-                return Ok(crate::actor::reactor::events::EventOutcome::no_change());
-            }
-            state.windows.set_minimized(wid, false);
-        }
-        None => {
-            debug!(
-                ?wid,
-                "Received WindowDeminiaturized for unknown window - ignoring"
-            );
-            return Ok(crate::actor::reactor::events::EventOutcome::no_change());
-        }
-    }
+    state.windows.set_minimized(wid, minimized);
+    // Minimizing orders the window out and restoring orders it back in: without native
+    // visibility, inventory treats it as an AX-only fallback and skips it while other windows
+    // of the app are visible.
+    state.windows.set_minimized_visibility(wid, minimized);
     let _ = utils::refresh_heuristic(state, wid);
-    // Minimizing ordered the window out; restoring orders it back in. Without
-    // native visibility, inventory treats it as an AX-only fallback and skips
-    // it while other windows of the app are visible.
-    match state.windows.record(wid).and_then(|record| record.window_server_id()) {
-        Some(wsid) => {
-            state.windows.mark_window_visible(wsid);
-        }
-        None => state.windows.set_visibility(wid, WindowVisibility::Visible),
+    if minimized {
+        let mut outcome =
+            EventOutcome::window_membership_changed(false, false).with_arrange_passes(0);
+        outcome.memberships.push((wid, None));
+        return Ok(outcome);
     }
-
-    // Minimized AX snapshots can have stale admission metadata. Refresh them
-    // even when the cached snapshot cannot currently be admitted.
+    // Minimized AX snapshots can have stale admission metadata: inventory refreshes them.
     let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-    if !state.windows.is_claimed(wid) {
-        // Reconcile admission while retaining the existing workspace and layout slot.
-        // A claimed window returns on release.
-        // WindowAdded restores membership only; the restore transition owns
-        // the arrange pass, even if the following inventory is unchanged.
+    if state.windows.can_reconcile_admission(wid) {
+        // Admission keeps the existing workspace and layout slot; a claimed window returns on
+        // release. The restore transition owns the arrange pass.
         outcome = outcome
             .with_created_window_finalization(wid)
             .with_arrange_passes(state.windows.is_admitted(wid).into());
@@ -291,37 +282,30 @@ pub fn handle_window_frame_changed(
             });
         }
     } else {
-        if old_space != new_space {
-            if pending_target_space.is_some()
+        if old_space == new_space
+            || keep_assigned_for_scrolling
+            || (pending_target_space.is_some()
                 && assigned_space == pending_target_space
-                && new_space != pending_target_space
-            {
-                return Ok(outcome);
-            }
-            if keep_assigned_for_scrolling {
-                return Ok(outcome);
-            }
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                && new_space != pending_target_space)
+        {
+            return Ok(outcome);
+        }
+        if let Some(server) = server_id {
             if let Some(space) = new_space {
-                if let Some(server) = server_id {
-                    state.windows.observe_native_space(server, space, true);
-                }
-                if new_space_active && state.windows.is_admitted_state(wid) {
-                    if let Some(workspace) =
-                        layout.layout_engine.workspaces().active_workspace(space)
-                    {
-                        let _ = layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-                            &mut state.windows,
-                            space,
-                            wid,
-                            workspace,
-                        );
-                    }
-                    outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, wid));
-                }
-            } else if let Some(server) = server_id {
+                state.windows.observe_native_space(server, space, true);
+            } else {
                 state.windows.set_window_server_space(server, None);
             }
+        }
+        // The Space the window is now on owns it, through the one reassignment path (#702).
+        if let Some(space) = new_space.filter(|_| new_space_active) {
+            outcome.topology_reassignments.push(
+                crate::actor::reactor::events::TopologyReassignment {
+                    window: wid,
+                    space,
+                    preserve_workspace_ordinal: false,
+                },
+            );
         }
     }
 

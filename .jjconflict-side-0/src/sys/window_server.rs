@@ -447,6 +447,7 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
 /// In tests, only what a test set: fixture ids are real windows' ids on the test machine too.
 #[cfg(test)]
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
+    TEST_WINDOW_SPACE_QUERY_COUNT.with(|count| count.set(count.get() + 1));
     TEST_WINDOW_SPACES_OVERRIDE
         .with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
         .unwrap_or_default()
@@ -475,8 +476,6 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
-    #[cfg(test)]
-    TEST_WINDOW_SPACE_QUERY_COUNT.with(|count| count.set(count.get() + 1));
     let spaces = window_spaces(id);
     // SLSCopySpacesForWindows can return multiple space IDs for a window during
     // Mission Control or fullscreen transitions — the window's real home space plus

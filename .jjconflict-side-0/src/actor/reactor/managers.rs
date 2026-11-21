@@ -396,7 +396,7 @@ impl LayoutManager {
             reactor
                 .layout_manager
                 .layout_engine
-                .update_space_display(space, display_uuid_opt.clone());
+                .update_space_display(space, display_uuid_opt.as_deref());
             let mut layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     &reactor.state.windows,
@@ -409,7 +409,8 @@ impl LayoutManager {
                 );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                 == LayoutMode::Scrolling
-                && let Some(bounds) = ScrollingDisplayBounds::for_screen(frame, &all_screen_frames)
+                && let Some(bounds) =
+                    ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
             {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager

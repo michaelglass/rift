@@ -16,15 +16,17 @@ pub(crate) struct WindowDiscoveryRequest {
     pub(crate) new: Vec<(WindowId, WindowInfo)>,
     pub(crate) known_visible: Vec<WindowId>,
     pub(crate) app_info: Option<AppInfo>,
+    /// The newest request the app had applied to each window when it read it.
+    pub(crate) as_of: crate::common::collections::HashMap<
+        WindowId,
+        crate::actor::reactor::transaction_manager::TransactionId,
+    >,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WindowFrameWriteRequest {
+pub(crate) struct WindowPlacement {
     pub(crate) window: WindowId,
     pub(crate) frame: CGRect,
-    pub(crate) requested: bool,
-    pub(crate) coalesced: bool,
-    pub(crate) set_size: bool,
 }
 
 #[derive(Debug)]
@@ -77,13 +79,22 @@ pub(crate) struct EventOutcome {
     /// A workspace switch landed on this other display; carry the cursor there.
     pub(crate) display_switch_warp: Option<SpaceId>,
     pub(crate) drop_haptic: bool,
-    pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
-    pub(crate) interactive_window_frame_write: Option<WindowFrameWriteRequest>,
-    pub(crate) dispatch_mouse_up: bool,
+    pub(crate) placements: Vec<WindowPlacement>,
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
     pub(crate) stdout_lines: Vec<String>,
+    /// Commands, and the menu bar if macOS takes it, move to this space's display.
+    pub(crate) activate_display: Option<SpaceId>,
+    /// Rift quits (the layout is saved).
+    pub(crate) exit: bool,
     pub(crate) reapply_app_rules: Vec<WindowId>,
+    /// The app rules changed: every known window of every app is run through them again (#702).
+    pub(crate) reprocess_app_rules: bool,
+    /// Windows whose layout participation is reconciled from their record (#702's
+    /// reconcile_window_membership), with the placement evidence when there is one.
+    pub(crate) memberships: Vec<(WindowId, Option<SpaceId>)>,
+    /// Windows retired: gone for good (#702's retire_window).
+    pub(crate) retirements: Vec<WindowId>,
     pub(crate) finalize_created_windows: Vec<WindowId>,
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,
     pub(crate) focused_window_broadcast: Option<WindowId>,
@@ -93,8 +104,9 @@ pub(crate) struct EventOutcome {
     pub(crate) arrange: ArrangeRequest,
     pub(crate) focused_window: Option<WindowId>,
     pub(crate) refresh_window_notifications: bool,
-    pub(crate) refresh_focus_follows_mouse: bool,
     pub(crate) refresh_layout_mode: bool,
+    /// Writes the core released (a desire that waited behind a write a read answered).
+    pub(crate) released: Vec<crate::actor::reactor::reconciler::Write>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -119,8 +131,12 @@ impl EventOutcome {
     /// reducer order for every queued operation.
     pub(crate) fn absorb(&mut self, mut other: Self) {
         self.window_server_updates.append(&mut other.window_server_updates);
+        self.released.append(&mut other.released);
         self.discoveries.append(&mut other.discoveries);
         self.recompute_active_spaces |= other.recompute_active_spaces;
+        self.reprocess_app_rules |= other.reprocess_app_rules;
+        self.memberships.append(&mut other.memberships);
+        self.retirements.append(&mut other.retirements);
         self.recover_after_mission_control |= other.recover_after_mission_control;
         self.refresh_window_inventories |= other.refresh_window_inventories;
         self.switch_native_space = other.switch_native_space.or(self.switch_native_space);
@@ -139,17 +155,7 @@ impl EventOutcome {
         self.post_arrange_mouse_warp =
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
         self.display_switch_warp = other.display_switch_warp.or(self.display_switch_warp);
-        if !other.pre_layout_window_frame_writes.is_empty()
-            || other.interactive_window_frame_write.is_some()
-        {
-            if let Some(write) = self.interactive_window_frame_write.take() {
-                self.pre_layout_window_frame_writes.push(write);
-            }
-            self.pre_layout_window_frame_writes
-                .append(&mut other.pre_layout_window_frame_writes);
-            self.interactive_window_frame_write = other.interactive_window_frame_write.take();
-        }
-        self.dispatch_mouse_up |= other.dispatch_mouse_up;
+        self.placements.append(&mut other.placements);
         self.close_window = other.close_window.or(self.close_window);
         self.service_config_update =
             other.service_config_update.or(self.service_config_update.take());
@@ -180,7 +186,6 @@ impl EventOutcome {
         }
         self.focused_window = other.focused_window.or(self.focused_window);
         self.refresh_window_notifications |= other.refresh_window_notifications;
-        self.refresh_focus_follows_mouse |= other.refresh_focus_follows_mouse;
         self.refresh_layout_mode |= other.refresh_layout_mode;
     }
 
@@ -222,11 +227,6 @@ impl EventOutcome {
             refresh_window_notifications,
             ..Self::default()
         }
-    }
-
-    pub(crate) fn with_focus_follows_mouse_refresh(mut self) -> Self {
-        self.refresh_focus_follows_mouse = true;
-        self
     }
 
     pub(crate) fn window_notification_refresh() -> Self {
@@ -314,41 +314,8 @@ impl EventOutcome {
         self
     }
 
-    pub(crate) fn with_pre_layout_window_frame_write(
-        mut self,
-        window: WindowId,
-        frame: CGRect,
-        requested: bool,
-    ) -> Self {
-        if let Some(write) = self.interactive_window_frame_write.take() {
-            self.pre_layout_window_frame_writes.push(write);
-        }
-        self.pre_layout_window_frame_writes.push(WindowFrameWriteRequest {
-            window,
-            frame,
-            requested,
-            coalesced: false,
-            set_size: true,
-        });
-        self
-    }
-
-    pub(crate) fn with_interactive_window_frame_write(
-        mut self,
-        window: WindowId,
-        frame: CGRect,
-        set_size: bool,
-    ) -> Self {
-        if let Some(write) = self.interactive_window_frame_write.take() {
-            self.pre_layout_window_frame_writes.push(write);
-        }
-        self.interactive_window_frame_write = Some(WindowFrameWriteRequest {
-            window,
-            frame,
-            requested: true,
-            coalesced: true,
-            set_size,
-        });
+    pub(crate) fn with_placement(mut self, window: WindowId, frame: CGRect) -> Self {
+        self.placements.push(WindowPlacement { window, frame });
         self
     }
 
@@ -388,26 +355,6 @@ impl EventOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn interactive_write_stays_inline_and_follows_earlier_frame_writes() {
-        let first = WindowId::new(1, 1);
-        let second = WindowId::new(1, 2);
-        let frame = CGRect::default();
-        let mut outcome =
-            EventOutcome::no_change().with_pre_layout_window_frame_write(first, frame, true);
-        let interactive =
-            EventOutcome::no_change().with_interactive_window_frame_write(second, frame, false);
-        assert_eq!(interactive.pre_layout_window_frame_writes.capacity(), 0);
-        outcome.absorb(interactive);
-        let ordered: Vec<_> = outcome
-            .pre_layout_window_frame_writes
-            .into_iter()
-            .chain(outcome.interactive_window_frame_write)
-            .map(|write| write.window)
-            .collect();
-        assert_eq!(ordered, [first, second]);
-    }
 
     #[test]
     fn absorbed_arrange_requests_keep_only_a_common_space_scope() {

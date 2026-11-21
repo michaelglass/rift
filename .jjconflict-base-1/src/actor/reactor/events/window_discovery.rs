@@ -1,17 +1,109 @@
 use tracing::{debug, warn};
 
-use super::super::{Changes, Presentation, Reactor};
+use super::window;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{LayoutEvent, WindowState, utils};
-use crate::common::collections::{BTreeMap, HashMap, HashSet};
+use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
-use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
 /// and managing the lifecycle of window state in the reactor.
+fn sync_existing_window_state(
+    state: &mut crate::model::RiftState,
+    wid: WindowId,
+    mut info: WindowInfo,
+    as_of: Option<crate::actor::reactor::transaction_manager::TransactionId>,
+) -> anyhow::Result<(crate::actor::reactor::events::EventOutcome, bool)> {
+    let ax_returned = state.windows.validate_ax_identity(wid);
+    let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
+
+    let is_minimized = info.is_minimized;
+    let claimed = state.windows.is_claimed(wid);
+    let frame = info.frame;
+    let Some(existing) = state.windows.window(wid) else {
+        return Ok((crate::actor::reactor::events::EventOutcome::default(), false));
+    };
+    let constraints_changed = existing.info.is_resizable != info.is_resizable
+        || existing.info.min_size != info.min_size
+        || existing.info.max_size != info.max_size;
+    // Preserve the observed frame and minimize transition until their handlers run.
+    info.frame = existing.info.frame;
+    info.is_minimized = was_minimized;
+    let reading = state.windows.replace_info(wid, info);
+    // Where the inventory read it: a read like any other, news only if the core says so (a
+    // read from before the app applied Rift's latest word is not).
+    let valid_frame = frame.size.width != 0.0 || frame.size.height != 0.0;
+    let (geometry_changed, released) = if valid_frame {
+        let (reply, released) = state.read(wid, frame, as_of);
+        (
+            reply == crate::actor::reactor::reconciler::Reply::Foreign,
+            released,
+        )
+    } else {
+        (false, None)
+    };
+    // A claimed window's owner has geometry authority.
+    let needs_arrange = (geometry_changed || constraints_changed) && !claimed;
+
+    let mut admission_changed = false;
+    let mut admitted_now = false;
+    let mut outcome = match (was_minimized, is_minimized) {
+        (_, true) | (true, false) => {
+            let mut outcome = window::handle_window_visibility_changed(state, wid, !is_minimized)?;
+            // Discovery admits a returning window itself (#702): its observation, not the
+            // minimization handler, puts it back.
+            outcome.finalize_created_windows.retain(|window| *window != wid);
+            outcome
+        }
+        _ => {
+            // The fresh reading's roles and the heuristic, as one change to its admission.
+            let heuristic = utils::refresh_heuristic(state, wid);
+            let change = rift_core::lifecycle::net(reading, heuristic);
+            #[cfg(feature = "roc-core")]
+            {
+                use crate::roc_path::window_free;
+                let question = (window_free(reading), window_free(heuristic));
+                let roc = Ok(rift_core_roc::lifecycle::net(question.0, question.1));
+                crate::roc_path::check("net", &[], &question, &window_free(change), roc);
+            }
+            admission_changed = change.is_some();
+            admitted_now = matches!(change, Some(rift_core::lifecycle::Transition::Admitted(_)));
+            if let Some(rift_core::lifecycle::Transition::Suspended(..)) = change {
+                crate::actor::reactor::events::EventOutcome::default()
+                    .with_layout_event(utils::layout_departure(state, wid))
+            } else {
+                // A window that came back (admitted, restored or revalidated) is admitted by
+                // discovery's observation, even on an inactive workspace (#702's resumed).
+                crate::actor::reactor::events::EventOutcome::default()
+            }
+        }
+    };
+    if (needs_arrange || admission_changed || ax_returned)
+        && state.windows.is_admitted(wid)
+        && was_minimized == is_minimized
+    {
+        outcome.absorb(crate::actor::reactor::events::EventOutcome::layout_changed(
+            false,
+        ));
+    }
+    outcome.released.extend(released);
+
+    if was_minimized != is_minimized {
+        debug!(
+            ?wid,
+            was_minimized,
+            is_minimized = is_minimized,
+            "Window minimize state reconciled from discovery"
+        );
+    }
+    let restored = was_minimized && !is_minimized;
+    let resumed = !is_minimized && !claimed && (restored || ax_returned || admitted_now);
+    Ok((outcome, resumed))
+}
+
 fn should_emit_window_for_space(
     state: &crate::model::RiftState,
     layout: &crate::actor::reactor::managers::LayoutManager,
@@ -32,6 +124,73 @@ fn should_emit_window_for_space(
     }
 }
 
+/// Process new and updated windows, returning lists of new and updated windows.
+#[derive(Debug)]
+pub(crate) struct ObservedWindow {
+    pub(crate) wid: WindowId,
+    pub(crate) info: WindowInfo,
+    /// The newest request the app had applied to the window when it read it.
+    pub(crate) as_of: Option<crate::actor::reactor::transaction_manager::TransactionId>,
+}
+
+pub(crate) fn process_window_list(
+    state: &mut crate::model::RiftState,
+    layout: &mut crate::actor::reactor::managers::LayoutManager,
+    observed: Vec<ObservedWindow>,
+) -> (
+    Vec<(WindowId, WindowInfo)>,
+    HashSet<WindowId>,
+    crate::actor::reactor::events::EventOutcome,
+) {
+    let mut new_windows = Vec::new();
+    let mut resumed = HashSet::default();
+    let mut outcome = crate::actor::reactor::events::EventOutcome::default();
+
+    for window in observed {
+        let ObservedWindow { wid, info, as_of } = window;
+        let previous = state.reconcile_ax_identity(wid, info.sys_id);
+        if let Some(previous) = previous {
+            layout.layout_engine.transfer_persistent_window_identity(previous, wid);
+            outcome =
+                outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
+            // Anything pending for the old identity died with it: arrange, so the core writes
+            // the desire again for the new one (an outside owner's window is never arranged).
+            if state.windows.claim(wid).is_none() {
+                let arrange = crate::actor::reactor::events::EventOutcome::layout_changed(false);
+                outcome.absorb(arrange);
+            }
+        }
+        if state.windows.contains_window(wid) {
+            let minimized = info.is_minimized;
+            if let Ok((existing_outcome, came_back)) =
+                sync_existing_window_state(state, wid, info, as_of)
+            {
+                outcome.absorb(existing_outcome);
+                if came_back || (previous.is_some() && !minimized) {
+                    resumed.insert(wid);
+                }
+            }
+        } else {
+            new_windows.push((wid, info));
+        }
+    }
+
+    (new_windows, resumed, outcome)
+}
+
+/// Inserts the newly discovered window snapshots into domain state.
+pub(crate) fn update_window_states(
+    rift_state: &mut crate::model::RiftState,
+    new_windows: Vec<(WindowId, WindowInfo)>,
+) {
+    // Update or insert window states
+    for (wid, info) in new_windows {
+        let state: WindowState = info.into();
+        rift_state.insert_window(wid, state);
+        let _ = utils::refresh_heuristic(rift_state, wid);
+    }
+}
+
 /// Assignment and rejection handling shared by discovery and rule reapplication.
 /// Callers decide whether successful, unchanged membership needs a layout refresh.
 pub(crate) fn assign_window<'a>(
@@ -44,7 +203,12 @@ pub(crate) fn assign_window<'a>(
 ) -> (Option<AppRuleEffects>, Option<LayoutEvent>) {
     let context = context.into();
     let space = context.space;
-    let result = if state.windows.contains_window(wid) {
+    let result = if let Some(window) = state.windows.window(wid) {
+        let (title, role, subrole) = (
+            window.info.title.clone(),
+            window.info.ax_role.clone(),
+            window.info.ax_subrole.clone(),
+        );
         layout.layout_engine.assign_window_with_app_info(
             &mut state.windows,
             wid,
@@ -52,7 +216,10 @@ pub(crate) fn assign_window<'a>(
             WindowRuleContext {
                 app_bundle_id: app_info.and_then(|app| app.bundle_id.as_deref()),
                 app_name: app_info.and_then(|app| app.localized_name.as_deref()),
-                ..Default::default()
+                window_title: Some(&title),
+                ax_role: role.as_deref(),
+                ax_subrole: subrole.as_deref(),
+                window_tags: None,
             },
             reapply,
         )
@@ -60,8 +227,9 @@ pub(crate) fn assign_window<'a>(
         Err(WorkspaceError::AssignmentFailed)
     };
     match result {
-        Ok(AppRuleResult::Managed(effects)) => (Some(effects), None),
-        Ok(AppRuleResult::Rejected(_)) => (
+        Ok(None) => (None, None),
+        Ok(Some(AppRuleResult::Managed(effects))) => (Some(effects), None),
+        Ok(Some(AppRuleResult::Rejected(_))) => (
             None,
             utils::rejection_needs_removal(state, layout, wid, space)
                 .then_some(LayoutEvent::WindowRemoved(wid)),
@@ -77,6 +245,8 @@ pub(crate) fn assign_window<'a>(
 pub(crate) struct EmitLayoutPayload<'a> {
     pub(crate) pid: pid_t,
     pub(crate) known_visible: &'a [WindowId],
+    /// Windows this inventory found coming back: observed even on an inactive workspace.
+    pub(crate) resumed: &'a HashSet<WindowId>,
     pub(crate) app_info: &'a Option<AppInfo>,
     // Authoritative ownership and location allowing geometry fallback, respectively.
     pub(crate) window_spaces: HashMap<WindowId, (Option<SpaceId>, Option<SpaceId>)>,
@@ -84,261 +254,109 @@ pub(crate) struct EmitLayoutPayload<'a> {
     pub(crate) focused_window: Option<(SpaceId, WindowId)>,
 }
 
-impl Reactor {
-    pub(in crate::actor::reactor) fn reconcile_window_list(
-        &mut self,
-        changes: &mut Changes,
-        observed: Vec<(WindowId, WindowInfo)>,
-    ) -> Vec<WindowId> {
-        let mut new_windows = Vec::new();
-        for (wid, info) in observed {
-            if let Some(previous) = self.state.windows.reconcile_ax_identity(wid, info.sys_id) {
-                self.layout_manager
-                    .layout_engine
-                    .transfer_persistent_window_identity(previous, wid);
-                self.reconcile_layout_event(
-                    changes,
-                    LayoutEvent::WindowRemovedPreserveFloating(previous),
-                );
-            }
-            if self.state.windows.contains_window(wid) {
-                self.sync_existing_window_state(changes, wid, info);
-            } else {
-                self.state.windows.insert_window(wid, info.into());
-                let _ = utils::refresh_heuristic(&mut self.state, wid);
-                new_windows.push(wid);
-            }
-        }
-        new_windows
+pub(crate) fn emit_layout_events(
+    state: &mut crate::model::RiftState,
+    layout: &mut crate::actor::reactor::managers::LayoutManager,
+    payload: EmitLayoutPayload<'_>,
+) -> crate::actor::reactor::events::EventOutcome {
+    let EmitLayoutPayload {
+        pid,
+        known_visible,
+        resumed,
+        app_info,
+        window_spaces,
+        active_spaces,
+        focused_window,
+    } = payload;
+    let mut outcome = crate::actor::reactor::events::EventOutcome::default();
+    if state.windows.window_ids_for_pid(pid).next().is_none() {
+        return outcome;
     }
 
-    fn sync_existing_window_state(
-        &mut self,
-        changes: &mut Changes,
-        wid: WindowId,
-        mut info: WindowInfo,
-    ) {
-        let ax_returned = self.state.windows.validate_ax_identity(wid);
-        let was_minimized =
-            self.state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
-        let was_manageable = self.state.windows.window(wid).is_some_and(WindowState::is_admitted);
-
-        let is_minimized = info.is_minimized;
-        let rift_owns_geometry = info
-            .sys_id
-            .is_some_and(|wsid| self.transaction_manager.get_target_frame(wsid).is_some());
-        let needs_arrange;
-        let claimed = self.state.windows.is_claimed(wid);
-        if let Some(existing) = self.state.windows.window_mut(wid) {
-            let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
-            let geometry_changed =
-                !rift_owns_geometry && valid_frame && !existing.frame_monotonic.same_as(info.frame);
-            let constraints_changed = existing.info.is_resizable != info.is_resizable
-                || existing.info.min_size != info.min_size
-                || existing.info.max_size != info.max_size;
-            // A claimed window's owner has geometry authority.
-            needs_arrange = (geometry_changed || constraints_changed) && !claimed;
-            if !rift_owns_geometry && valid_frame {
-                existing.frame_monotonic = info.frame;
-            }
-            // Preserve the observed frame and minimize transition until their handlers run.
-            info.frame = existing.info.frame;
-            info.is_minimized = was_minimized;
-            existing.info = info;
-        } else {
-            return;
-        }
-
-        if was_minimized || is_minimized {
-            self.reconcile_window_visibility(changes, wid, !is_minimized);
-        } else {
-            let admitted = utils::refresh_heuristic(&mut self.state, wid)
-                .is_some_and(|transition| transition.is_admitted);
-            if was_manageable && !admitted {
-                self.reconcile_layout_event(
-                    changes,
-                    if self.state.windows.is_temporarily_unavailable(wid) {
-                        LayoutEvent::WindowSuspended(wid)
-                    } else {
-                        LayoutEvent::WindowRemoved(wid)
-                    },
-                );
-            } else if admitted && !claimed && (!was_manageable || ax_returned) {
-                self.finalize_created_window(changes, wid);
-            }
-            if admitted
-                && (needs_arrange || !was_manageable || ax_returned)
-                && let Some(space) = self
-                    .assigned_space_for_window_id(wid)
-                    .or_else(|| self.best_space_for_window_id(wid))
-            {
-                changes.arrange(Some(space), Presentation::Animated);
-            }
-        }
-
-        if was_minimized != is_minimized {
-            debug!(
-                ?wid,
-                was_minimized,
-                is_minimized = is_minimized,
-                "Window minimize state reconciled from discovery"
-            );
-        }
-    }
-
-    pub(in crate::actor::reactor) fn reconcile_discovered_windows(
-        &mut self,
-        changes: &mut Changes,
-        payload: EmitLayoutPayload<'_>,
-    ) {
-        let EmitLayoutPayload {
-            pid,
-            known_visible,
-            app_info,
-            window_spaces,
-            active_spaces,
-            focused_window,
-        } = payload;
-        if self.state.windows.window_ids_for_pid(pid).next().is_none() {
-            return;
-        }
-
-        // Minimized windows still match saved membership. Match before the app's
-        // discovery-completed event prunes truly missing identities; admission and
-        // geometry remain suspended until a positive return.
-        let minimized: Vec<_> = self
-            .state
+    // Which windows this inventory observes (#702): a minimized window still matches its saved
+    // slot; otherwise one rift may reconcile, natively visible (or reported by AX when nothing of
+    // the app is natively visible, or on an active Space), on its workspace's active slot. A
+    // window that came back is observed regardless.
+    let native_visible = |wid: WindowId| {
+        state
             .windows
-            .window_ids_for_pid(pid)
-            .filter(|wid| {
-                !self.state.windows.is_claimed(*wid)
-                    && self.state.windows.window(*wid).is_some_and(|w| w.info.is_minimized)
-            })
-            .collect();
-        for wid in minimized {
-            let Some(space) =
-                window_spaces.get(&wid).and_then(|(native, discovery)| native.or(*discovery))
-            else {
-                continue;
-            };
-            let (_, removal) = assign_window(
-                &mut self.state,
-                &mut self.layout_manager,
-                wid,
-                crate::model::virtual_workspace::WorkspaceContext {
-                    space,
-                    visible: &active_spaces,
-                },
-                app_info.as_ref(),
-                false,
-            );
-            if let Some(event) = removal {
-                self.reconcile_layout_event(changes, event);
-            } else if self.state.windows.workspace_for_window(wid).is_some() {
-                self.reconcile_layout_event(changes, LayoutEvent::WindowSuspended(wid));
+            .record(wid)
+            .and_then(|record| record.window_server_id())
+            .is_some_and(|wsid| state.windows.is_window_visible(wsid))
+    };
+    let has_visible = state
+        .windows
+        .window_ids_for_pid(pid)
+        .any(|wid| native_visible(wid) && state.windows.can_reconcile_admission(wid));
+    let known_visible: HashSet<_> = known_visible.iter().copied().collect();
+    let mut observations: Vec<(SpaceId, WindowId)> = state
+        .windows
+        .window_ids_for_pid(pid)
+        .filter_map(|wid| {
+            let (native, discovery) = *window_spaces.get(&wid)?;
+            let window = state.windows.window(wid)?;
+            if window.info.is_minimized && !state.windows.is_claimed(wid) {
+                return Some((native.or(discovery)?, wid));
             }
-        }
-
-        let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
-        let mut included: HashSet<WindowId> = HashSet::default();
-        let visible: Vec<_> = self
-            .state
-            .windows
-            .iter_visible_window_server_ids()
-            .filter_map(|wsid| self.state.windows.tracked_window_id(wsid))
-            .filter(|wid| wid.pid == pid)
-            .filter(|wid| self.state.windows.can_reconcile_admission(*wid))
-            .collect();
-        let has_visible_window_server_windows = !visible.is_empty();
-
-        for (wid, native_visible) in visible.into_iter().map(|wid| (wid, true)).chain(
-            known_visible
-                .iter()
-                .copied()
-                .filter(|wid| wid.pid == pid)
-                .map(|wid| (wid, false)),
-        ) {
-            if included.contains(&wid) || !self.state.windows.can_reconcile_admission(wid) {
-                continue;
+            if !state.windows.can_reconcile_admission(wid) {
+                return None;
             }
-            // AX fallback must not resurrect an omitted window via geometry when native
-            // membership already identifies other visible windows of this application.
-            if !native_visible
-                && has_visible_window_server_windows
-                && window_spaces
-                    .get(&wid)
-                    .and_then(|(native, _)| *native)
-                    .is_none_or(|space| !active_spaces.contains(&space))
+            let space = discovery?;
+            if !resumed.contains(&wid)
+                && (!should_emit_window_for_space(state, layout, space, wid)
+                    || !(native_visible(wid)
+                        || (known_visible.contains(&wid)
+                            && (!has_visible
+                                || native.is_some_and(|s| active_spaces.contains(&s))))))
             {
-                continue;
+                return None;
             }
-            let Some(space) = window_spaces.get(&wid).and_then(|(_, discovery)| *discovery) else {
-                continue;
-            };
-            if should_emit_window_for_space(&self.state, &self.layout_manager, space, wid) {
-                included.insert(wid);
-                app_windows.entry(space).or_default().push(wid);
-            }
+            Some((space, wid))
+        })
+        .collect();
+    observations.sort_unstable();
+    for (space, wid) in observations {
+        let active = active_spaces.contains(&space);
+        let assigned_space = state
+            .windows
+            .workspace_for_window(wid)
+            .and_then(|workspace| layout.layout_engine.workspaces().workspace_space(workspace));
+        if !active && resumed.contains(&wid) && assigned_space == Some(space) {
+            // Back on its own, inactive workspace: it rejoins its slot there.
+            outcome.memberships.push((wid, Some(space)));
+            continue;
         }
-
-        for (space, mut windows_for_space) in app_windows {
-            windows_for_space.sort_unstable();
-            for wid in windows_for_space {
-                let (effects, removal) = assign_window(
-                    &mut self.state,
-                    &mut self.layout_manager,
-                    wid,
-                    crate::model::virtual_workspace::WorkspaceContext {
-                        space,
-                        visible: &active_spaces,
-                    },
-                    app_info.as_ref(),
-                    false,
-                );
-                if let Some(event) = removal {
-                    self.reconcile_layout_event(changes, event);
-                }
-                let Some(effects) = effects else {
-                    continue;
-                };
-                let Some(window) =
-                    self.state.windows.window(wid).filter(|_| self.state.windows.is_admitted(wid))
-                else {
-                    continue;
-                };
-                if active_spaces.contains(&space) {
-                    self.reconcile_layout_event(
-                        changes,
-                        LayoutEvent::WindowObserved(space, ResolvedWindow {
-                            info: window.layout_info(wid),
-                            effects,
-                        }),
-                    );
-                }
-            }
-        }
-
-        // Matching is allowed to observe every native-space slice for this application before stale
-        // saved identities are discarded. Cleaning after an individual slice would incorrectly drop
-        // windows that are discovered on a later space in the same batch.
-        let ignored = self.layout_manager.layout_engine.discard_unmatched_candidates_for_app(
-            pid,
-            app_info.as_ref().and_then(|info| info.bundle_id.as_deref()),
-            &active_spaces,
+        let (effects, removal) = assign_window(
+            state,
+            layout,
+            wid,
+            crate::model::virtual_workspace::WorkspaceContext { space, visible: &active_spaces },
+            app_info.as_ref(),
+            false,
         );
-        if ignored > 0 {
-            debug!(
-                pid,
-                ignored, "Ignored unmatched persisted windows after application discovery"
-            );
-            for space in active_spaces {
-                changes.membership_for(Some(space));
-                changes.arrange(Some(space), Presentation::Animated);
-            }
+        if removal.is_some() {
+            // A rule rejects it: its membership follows its record (#702).
+            outcome.memberships.push((wid, None));
         }
-
-        if let Some((space, main_window)) = focused_window {
-            self.reconcile_layout_event(changes, LayoutEvent::WindowFocused(space, main_window));
+        let Some(effects) = effects else {
+            continue;
+        };
+        if active && let Some(window) = state.windows.window(wid) {
+            outcome =
+                outcome.with_layout_event(LayoutEvent::WindowObserved(space, ResolvedWindow {
+                    info: window.layout_info(wid),
+                    effects,
+                }));
         }
     }
+
+    // D4 (pending the lead): upstream #700 no longer discards unmatched persisted windows when
+    // an app's discovery completes (LayoutEvent::WindowDiscoveryCompleted is gone); provisionally
+    // upstream's.
+    let _ = (&app_info, &active_spaces);
+
+    if let Some((space, main_window)) = focused_window {
+        outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, main_window));
+    }
+    outcome
 }

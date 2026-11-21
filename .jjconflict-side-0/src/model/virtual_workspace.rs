@@ -12,7 +12,7 @@ use crate::common::config::{
     WorkspaceMode, WorkspaceSelector,
 };
 use crate::common::log::trace_misc;
-use crate::layout_engine::systems::LayoutSystemKind;
+use crate::layout_engine::systems::{self, LayoutSystemKind};
 use crate::layout_engine::workspaces::WorkspaceLayoutState;
 use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
 use crate::model::WindowStore;
@@ -52,20 +52,21 @@ pub(crate) struct WorkspaceTarget {
     pub space: SpaceId,
 }
 
-/// Allocate only a fresh catalog. Pins are hard constraints. Minimize owner runs
-/// first, then squared run loads (including pins outside each run), then physical
-/// owner order. Unpinned displays need only one run, in physical order: splitting
-/// or permuting those unconstrained runs cannot improve the transition count.
-fn distribute(displays: usize, mut pins: Vec<Option<usize>>) -> Vec<usize> {
+/// Start with contiguous blocks, then balance any uneven loads the pins forced
+/// into separate blocks. Pins are hard constraints throughout.
+fn distribute(displays: usize, pins: Vec<Option<usize>>) -> Vec<usize> {
+    if pins.iter().all(Option::is_none) {
+        let (share, extra) = (pins.len() / displays, pins.len() % displays);
+        return (0..displays)
+            .flat_map(|owner| std::iter::repeat_n(owner, share + usize::from(owner < extra)))
+            .collect();
+    }
     let mut pinned = vec![0; displays];
     pins.iter().flatten().for_each(|&d| pinned[d] += 1);
-    let mut bare: Vec<_> = (0..displays).filter(|&d| pinned[d] == 0).collect();
-    let free = pins.iter().filter(|pin| pin.is_none()).count();
-    pins.resize(
-        (pins.len() + bare.len().saturating_sub(free)).min(MAX_WORKSPACES),
-        None,
-    );
-    bare.truncate(pins.iter().filter(|pin| pin.is_none()).count());
+    let bare: Vec<_> = (0..displays)
+        .filter(|&d| pinned[d] == 0)
+        .take(pins.iter().filter(|pin| pin.is_none()).count())
+        .collect();
 
     // (number of runs, balance penalty, owners); tuple ordering supplies a stable
     // physical left-to-right tie break without reordering workspace identities.
@@ -123,20 +124,59 @@ fn distribute(displays: usize, mut pins: Vec<Option<usize>>) -> Vec<usize> {
             best
         }
     }
-    Allocator {
+    let owners = Allocator {
         pins: &pins,
         pinned: &pinned,
         bare: &bare,
         memo: HashMap::default(),
     }
     .solve(0, 0, displays)
-    .expect("pins and appended empty slots admit a distribution")
-    .2
+    .expect("pins and available unassigned workspaces admit a distribution")
+    .2;
+
+    balance_owners(displays, &pins, owners)
+}
+
+/// Each move strictly reduces squared load and moves only an unpinned workspace.
+fn balance_owners(displays: usize, pins: &[Option<usize>], mut owners: Vec<usize>) -> Vec<usize> {
+    let mut counts = vec![0; displays];
+    for &owner in &owners {
+        counts[owner] += 1;
+    }
+    let mut movable = vec![0; displays];
+    for (&owner, pin) in owners.iter().zip(pins) {
+        movable[owner] += usize::from(pin.is_none());
+    }
+    loop {
+        let Some(target) = (0..displays).min_by_key(|&display| counts[display]) else {
+            break;
+        };
+        let Some(source) = (0..displays)
+            .filter(|&display| movable[display] > 0 && counts[display] > counts[target] + 1)
+            .max_by_key(|&display| counts[display])
+        else {
+            break;
+        };
+        let mut eligible =
+            (0..owners.len()).filter(|&index| owners[index] == source && pins[index].is_none());
+        let index = if source < target {
+            eligible.next_back()
+        } else {
+            eligible.next()
+        };
+        owners[index.expect("source has a movable workspace")] = target;
+        counts[source] -= 1;
+        counts[target] += 1;
+        movable[source] -= 1;
+        movable[target] += 1;
+    }
+    owners
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceTransferReason {
     Explicit,
+    DisplayArrival,
     DisplayDeparture,
     Restoration,
 }
@@ -183,41 +223,76 @@ pub struct VirtualWorkspace {
 }
 
 /// Where a workspace belongs when topology is not moving it: the Space (and the display it was
-/// on) it was created on or explicitly moved to.
+/// on) it was created on or moved to, and who chose it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Home {
     /// Never placed: saved before homes were recorded.
     Unplaced,
     /// A Space, with no display preference (created where no workspace had one).
-    Space(SpaceId),
-    /// A Space on a display: created beside a workspace with that display preference, or moved
-    /// there explicitly.
-    OnDisplay { space: SpaceId, display: String },
+    Space { space: SpaceId, by: PlacedBy },
+    /// A Space on a display: created beside a workspace with that display preference, moved
+    /// there explicitly, or handed to a display as it arrived.
+    OnDisplay {
+        space: SpaceId,
+        display: String,
+        by: PlacedBy,
+    },
     /// A display preference with no Space, as older versions saved it.
     DisplayOnly(String),
 }
 
+/// Who chose a placed workspace's home. Automatic display balancing moves only the workspaces
+/// rift placed itself: a home the user chose (an explicit display move) is kept.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlacedBy {
+    /// Rift: created there, or handed to an arriving display.
+    #[default]
+    Automatic,
+    /// The user, by an explicit display move.
+    User,
+}
+
 impl Home {
     /// The home of a workspace placed on `space`, on `display` if it has one.
-    pub fn placed(space: SpaceId, display: Option<String>) -> Home {
+    pub fn placed(space: SpaceId, display: Option<String>, by: PlacedBy) -> Home {
         match display {
-            Some(display) => Home::OnDisplay { space, display },
-            None => Home::Space(space),
+            Some(display) => Home::OnDisplay { space, display, by },
+            None => Home::Space { space, by },
         }
     }
 
-    /// From the saved form's two fields.
-    fn from_saved(space: Option<SpaceId>, display: Option<String>) -> Home {
+    /// From the saved form's fields. `display_manually_selected` belongs to a placed home; on a
+    /// home with no Space (never written so, only by hand) it is dropped, with one log line.
+    fn from_saved(
+        space: Option<SpaceId>,
+        display: Option<String>,
+        display_manually_selected: bool,
+    ) -> Home {
+        let by = if display_manually_selected {
+            PlacedBy::User
+        } else {
+            PlacedBy::Automatic
+        };
         match (space, display) {
-            (None, None) => Home::Unplaced,
-            (Some(space), display) => Home::placed(space, display),
-            (None, Some(display)) => Home::DisplayOnly(display),
+            (Some(space), display) => Home::placed(space, display, by),
+            (None, saved_display) => {
+                if display_manually_selected {
+                    warn!(
+                        "workspace-load: normalized: dropped display_manually_selected on a workspace with no home Space (display {:?})",
+                        saved_display.as_deref()
+                    );
+                }
+                match saved_display {
+                    None => Home::Unplaced,
+                    Some(display) => Home::DisplayOnly(display),
+                }
+            }
         }
     }
 
     pub fn space(&self) -> Option<SpaceId> {
         match self {
-            Home::Space(space) | Home::OnDisplay { space, .. } => Some(*space),
+            Home::Space { space, .. } | Home::OnDisplay { space, .. } => Some(*space),
             Home::Unplaced | Home::DisplayOnly(_) => None,
         }
     }
@@ -225,30 +300,54 @@ impl Home {
     pub fn display(&self) -> Option<&str> {
         match self {
             Home::OnDisplay { display, .. } | Home::DisplayOnly(display) => Some(display),
-            Home::Unplaced | Home::Space(_) => None,
+            Home::Unplaced | Home::Space { .. } => None,
+        }
+    }
+
+    /// Who chose a placed home; `None` for a home with no Space.
+    pub fn placed_by(&self) -> Option<PlacedBy> {
+        match self {
+            Home::Space { by, .. } | Home::OnDisplay { by, .. } => Some(*by),
+            Home::Unplaced | Home::DisplayOnly(_) => None,
         }
     }
 
     /// The Space and display of a home on a display.
     pub fn on_display(&self) -> Option<(SpaceId, &str)> {
         match self {
-            Home::OnDisplay { space, display } => Some((*space, display)),
-            Home::Unplaced | Home::Space(_) | Home::DisplayOnly(_) => None,
+            Home::OnDisplay { space, display, .. } => Some((*space, display)),
+            Home::Unplaced | Home::Space { .. } | Home::DisplayOnly(_) => None,
         }
     }
 
     /// The same home with no display preference.
     #[cfg(test)]
     pub fn without_display(&self) -> Home {
-        match self.space() {
-            Some(space) => Home::Space(space),
-            None => Home::Unplaced,
+        match *self {
+            Home::Space { space, by } | Home::OnDisplay { space, by, .. } => {
+                Home::Space { space, by }
+            }
+            Home::Unplaced | Home::DisplayOnly(_) => Home::Unplaced,
         }
     }
 
-    /// The same home on another Space (the display preference, if any, kept).
+    /// The same home on another Space (the display preference and who chose it, if any, kept).
+    /// The same home, as rift's own placement: automatic balancing may move it again.
+    pub fn automatic(&self) -> Home {
+        match self.space() {
+            Some(space) => {
+                Home::placed(space, self.display().map(str::to_owned), PlacedBy::Automatic)
+            }
+            None => self.clone(),
+        }
+    }
+
     pub fn with_space(&self, space: SpaceId) -> Home {
-        Home::placed(space, self.display().map(str::to_owned))
+        Home::placed(
+            space,
+            self.display().map(str::to_owned),
+            self.placed_by().unwrap_or_default(),
+        )
     }
 }
 
@@ -273,6 +372,9 @@ struct SavedWorkspace {
     preferred_display: Option<String>,
     #[serde(default)]
     home_space: Option<SpaceId>,
+    /// Explicit display moves keep their destination during automatic balancing.
+    #[serde(default)]
+    display_manually_selected: bool,
     #[serde(default)]
     rule_overridden: bool,
     last_focused: Option<WindowId>,
@@ -292,6 +394,7 @@ struct SavedWorkspaceRef<'a> {
     space: SpaceId,
     preferred_display: Option<&'a str>,
     home_space: Option<SpaceId>,
+    display_manually_selected: bool,
     rule_overridden: bool,
     last_focused: Option<WindowId>,
     layout_system: &'a LayoutSystemKind,
@@ -304,7 +407,11 @@ impl From<SavedWorkspace> for VirtualWorkspace {
         VirtualWorkspace {
             name: saved.name,
             space: saved.space,
-            home: Home::from_saved(saved.home_space, saved.preferred_display),
+            home: Home::from_saved(
+                saved.home_space,
+                saved.preferred_display,
+                saved.display_manually_selected,
+            ),
             rule_standing: if saved.rule_overridden {
                 RuleStanding::Overridden
             } else {
@@ -325,6 +432,7 @@ impl Serialize for VirtualWorkspace {
             space: self.space,
             preferred_display: self.home.display(),
             home_space: self.home.space(),
+            display_manually_selected: self.home.placed_by() == Some(PlacedBy::User),
             rule_overridden: self.rule_standing == RuleStanding::Overridden,
             last_focused: self.last_focused,
             layout_system: &self.layout_system,
@@ -381,44 +489,57 @@ impl VirtualWorkspace {
     pub fn layout_mode(&self) -> LayoutMode { self.layout_mode }
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
-        match mode {
-            LayoutMode::Traditional => LayoutSystemKind::Traditional(
-                crate::layout_engine::systems::TraditionalLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                    settings.traditional.equalize_nodes,
-                ),
-            ),
-            LayoutMode::Floating => LayoutSystemKind::Floating(
-                crate::layout_engine::systems::FloatingLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                ),
-            ),
-            LayoutMode::Bsp => {
-                let mut system = crate::layout_engine::systems::BspLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                );
-                system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
-                LayoutSystemKind::Bsp(system)
+        let mut system = match mode {
+            LayoutMode::Traditional => systems::TraditionalLayoutSystem::default().into(),
+            LayoutMode::Floating => systems::FloatingLayoutSystem::default().into(),
+            LayoutMode::Bsp => systems::BspLayoutSystem::default().into(),
+            LayoutMode::Stack => systems::StackLayoutSystem::default().into(),
+            LayoutMode::MasterStack => systems::MasterStackLayoutSystem::default().into(),
+            LayoutMode::Scrolling => systems::ScrollingLayoutSystem::default().into(),
+        };
+        Self::configure_layout_system(&mut system, mode, settings, None);
+        system
+    }
+
+    pub(crate) fn apply_layout_settings(
+        &mut self,
+        settings: &LayoutSettings,
+        display: Option<&str>,
+    ) {
+        Self::configure_layout_system(&mut self.layout_system, self.layout_mode, settings, display);
+    }
+
+    fn configure_layout_system(
+        system: &mut LayoutSystemKind,
+        mode: LayoutMode,
+        settings: &LayoutSettings,
+        display: Option<&str>,
+    ) {
+        let insertion_point = settings.window_insertion_point_for(mode);
+        match system {
+            LayoutSystemKind::Traditional(system) => {
+                system.set_window_insertion_point(insertion_point);
+                system.set_equalize_nodes(settings.traditional.equalize_nodes);
             }
-            LayoutMode::Stack => LayoutSystemKind::Stack(
-                crate::layout_engine::systems::StackLayoutSystem::new_with_insertion_point(
-                    settings.stack.default_orientation,
-                    settings.window_insertion_point_for(mode),
-                ),
-            ),
-            LayoutMode::MasterStack => {
+            LayoutSystemKind::Floating(system) => {
+                system.set_window_insertion_point(insertion_point);
+            }
+            LayoutSystemKind::Bsp(system) => {
+                system.set_window_insertion_point(insertion_point);
+                system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
+            }
+            LayoutSystemKind::Stack(system) => {
+                system.update_settings(settings.stack.default_orientation, insertion_point);
+            }
+            LayoutSystemKind::MasterStack(system) => {
                 let mut mode_settings = settings.master_stack.clone();
                 mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::MasterStack(
-                    crate::layout_engine::systems::MasterStackLayoutSystem::new(mode_settings),
-                )
+                system.update_settings(mode_settings);
             }
-            LayoutMode::Scrolling => {
-                let mut mode_settings = settings.scrolling.clone();
+            LayoutSystemKind::Scrolling(system) => {
+                let mut mode_settings = settings.scrolling.effective_for_display(display);
                 mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::Scrolling(
-                    crate::layout_engine::systems::ScrollingLayoutSystem::new(&mode_settings),
-                )
+                system.update_settings(&mode_settings);
             }
         }
     }
@@ -1115,6 +1236,46 @@ impl WorkspaceStore {
         self.workspaces.order().iter().copied()
     }
 
+    /// Balance visible workspaces around explicit placements and display rules.
+    pub(crate) fn plan_display_balance(
+        &self,
+        displays: &[SpaceId],
+        restored: &HashSet<VirtualWorkspaceId>,
+    ) -> Vec<(VirtualWorkspaceId, SpaceId)> {
+        if displays.len() < 2 {
+            return Vec::new();
+        }
+        let mut visible = Vec::new();
+        let pins: Vec<_> = self
+            .catalog()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                let workspace = &self[id];
+                let owner = displays.iter().position(|&space| space == workspace.space)?;
+                visible.push((id, owner));
+                let fixed = restored.contains(&id)
+                    || workspace.home.placed_by() == Some(PlacedBy::User)
+                    || workspace.rule_standing == RuleStanding::Overridden
+                    || workspace.home.space().is_some_and(|home| home != workspace.space)
+                    || self
+                        .matching_rules(index, &workspace.name)
+                        .any(|rule| rule.display.is_some());
+                Some(fixed.then_some(owner))
+            })
+            .collect();
+        // Start from current ownership so an improved load does not reshuffle
+        // workspaces just to recreate the initial contiguous distribution.
+        let owners = visible.iter().map(|&(_, owner)| owner).collect();
+        let allocation = balance_owners(displays.len(), &pins, owners);
+        visible
+            .into_iter()
+            .zip(allocation)
+            .filter_map(|((id, source), target)| {
+                (source != target).then_some((id, displays[target]))
+            })
+            .collect()
+    }
+
     /// Ownership changes leave the workspace object, layout and focus history intact.
     pub(crate) fn transfer_workspace(
         &mut self,
@@ -1127,21 +1288,6 @@ impl WorkspaceStore {
             return false;
         };
         let source = workspace.space;
-        // An explicit move must leave its source usable without growing the catalog
-        // beyond the user creation limit. Check before mutating ownership or history.
-        if reason == WorkspaceTransferReason::Explicit
-            && source != target
-            && self.effective_mode() == WorkspaceMode::Global
-            && self.catalog().count() >= MAX_WORKSPACES
-            && self.workspaces_on(source).count() == 1
-        {
-            warn!(
-                ?source,
-                ?target,
-                "Workspace move refused: replacement would exceed workspace limit"
-            );
-            return false;
-        }
         if reason == WorkspaceTransferReason::Explicit
             && let Some(home) = workspace.home.space()
             && self
@@ -1156,7 +1302,8 @@ impl WorkspaceStore {
                 return false;
             }
             let workspace = &mut self[id];
-            let home = Home::placed(target, display.map(str::to_owned));
+            // `by` is part of the home: re-choosing the current display still marks it chosen.
+            let home = Home::placed(target, display.map(str::to_owned), PlacedBy::User);
             let changed = workspace.home != home;
             workspace.home = home;
             return changed;
@@ -1168,8 +1315,18 @@ impl WorkspaceStore {
                 }
             });
         }
-        if reason == WorkspaceTransferReason::Explicit {
-            self[id].home = Home::placed(target, display.map(str::to_owned));
+        let workspace = &mut self[id];
+        match reason {
+            WorkspaceTransferReason::Explicit => {
+                workspace.home = Home::placed(target, display.map(str::to_owned), PlacedBy::User);
+            }
+            // An arriving display takes the workspace as its home; who chose the old home
+            // still stands (a home the user chose stays out of automatic balancing).
+            WorkspaceTransferReason::DisplayArrival => {
+                let by = workspace.home.placed_by().unwrap_or_default();
+                workspace.home = Home::placed(target, display.map(str::to_owned), by);
+            }
+            WorkspaceTransferReason::DisplayDeparture | WorkspaceTransferReason::Restoration => {}
         }
         self.move_workspace(id, target);
         // Remembered presentation becomes active again only when ownership returns.
@@ -1186,9 +1343,6 @@ impl WorkspaceStore {
         }
         self.repair_activation(source);
         self.repair_activation(target);
-        if reason == WorkspaceTransferReason::Explicit {
-            self.seed_space(source);
-        }
         true
     }
 
@@ -1359,9 +1513,8 @@ impl WorkspaceStore {
         let scope_ids =
             |space| self.catalog().filter(move |id| namespace(self[*id].space) == namespace(space));
         for space in self.initialized_spaces() {
-            // Automatic global seeds may exceed the creation limit so every live display
-            // remains usable. Reloading that catalog must remain valid; mode migrations
-            // still cannot merge independent catalogs beyond the limit.
+            // Legacy catalogs may exceed the limit because earlier versions appended
+            // workspaces for empty displays. Keep those catalogs valid on reload.
             if scope_ids(space).count() > MAX_WORKSPACES
                 && (mode_changed || config.mode != WorkspaceMode::Global)
             {
@@ -1486,7 +1639,7 @@ impl WorkspaceStore {
                 .filter(|(home, _)| *home == space)
                 .map(|(_, display)| display.to_owned())
         });
-        workspace.home = Home::placed(space, display);
+        workspace.home = Home::placed(space, display, PlacedBy::Automatic);
         if let Some(size) = size {
             workspace.ensure_layout_for_size(size);
         }
@@ -1528,9 +1681,8 @@ impl WorkspaceStore {
         }
     }
 
-    /// Allocate the initial global target in contiguous blocks across visible managed
-    /// desktops. Later arrivals receive one workspace without redistributing the catalog.
-    /// Reconnection and physical display reordering never rebalance existing ownership.
+    /// Allocate the configured global catalog in contiguous blocks across visible managed
+    /// desktops. Existing catalogs retain their placement as desktops are exposed.
     /// `rule_space` resolves a workspace rule's display to one of `spaces`.
     pub(crate) fn ensure_visible_spaces(
         &mut self,
@@ -1545,7 +1697,7 @@ impl WorkspaceStore {
         if self.effective_mode() == WorkspaceMode::Global
             && self.scope_ids(spaces[0]).next().is_none()
         {
-            let count = self.settings.default_workspace_count.max(spaces.len()).min(MAX_WORKSPACES);
+            let count = self.settings.default_workspace_count.clamp(1, MAX_WORKSPACES);
             let pins: Vec<_> = (0..count)
                 .map(|index| {
                     let name = self.settings.workspace_name(index);
@@ -1569,19 +1721,6 @@ impl WorkspaceStore {
             for &space in spaces {
                 self.ensure_space_initialized(space);
             }
-        }
-        for &space in spaces {
-            self.seed_space(space);
-        }
-    }
-
-    /// Only accepted visible topology and explicit moves seed an empty global desktop.
-    /// Internal restoration may temporarily have no owner and must preserve its history.
-    fn seed_space(&mut self, space: SpaceId) {
-        if self.effective_mode() == WorkspaceMode::Global && self.active_workspace(space).is_none()
-        {
-            let id = self.append_default_workspace(space);
-            self.set_active_workspace(space, id);
         }
     }
 
@@ -1764,13 +1903,6 @@ impl WorkspaceStore {
         space: SpaceId,
         name: Option<String>,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        if self.effective_mode() == WorkspaceMode::Global
-            && self.scope_ids(space).count() >= MAX_WORKSPACES
-        {
-            return Err(WorkspaceError::InconsistentState(
-                "Maximum global workspace limit reached".into(),
-            ));
-        }
         if self.effective_mode() == WorkspaceMode::PerDisplay {
             self.ensure_space_initialized(space);
         }
@@ -1796,8 +1928,7 @@ impl WorkspaceStore {
                 .expect("a bounded catalog always has an available generated name")
         };
 
-        let idx = self.scope_ids(space).count();
-        let mode = self.resolve_layout_mode_for_workspace(idx, &name);
+        let mode = self.resolve_layout_mode_for_workspace(count, &name);
 
         let id = self.insert_workspace(space, name, mode);
         self.repair_activation(space);
@@ -2091,7 +2222,9 @@ impl WorkspaceStore {
             {
                 // Membership is single-valued: the window leaves the old workspace's tree here,
                 // where its assignment changes, not later from wherever removal looks.
-                previous_workspace.layout_system.remove_window_and_rebalance_parent(window_id);
+                previous_workspace.layout_system.update(
+                    crate::layout_engine::systems::WindowChange::RemoveAndRebalance(window_id),
+                );
                 if previous_workspace.last_focused() == Some(window_id) {
                     previous_workspace.set_last_focused(None);
                 }
@@ -2162,17 +2295,39 @@ impl WorkspaceStore {
             .collect()
     }
 
-    pub fn find_window_by_idx(
+    /// Resolve an index in the command Space, then other visible Spaces,
+    /// then retained workspaces. A tie in the best matching scope is ambiguous.
+    pub(crate) fn resolve_window_index(
         &self,
-        window_store: &WindowStore,
-        space: SpaceId,
-        idx: u32,
+        windows: &WindowStore,
+        command_space: Option<SpaceId>,
+        is_visible: impl Fn(SpaceId) -> bool,
+        index: u32,
     ) -> Option<WindowId> {
-        window_store.iter_workspace_assignments().find_map(|(wid, info)| {
-            (self.workspaces.get(info).is_some_and(|workspace| workspace.space == space)
-                && wid.idx.get() == idx)
-                .then_some(wid)
-        })
+        let mut best_rank = 0;
+        let mut resolved = None;
+        for (window, workspace) in windows.iter_workspace_assignments() {
+            if window.idx.get() != index {
+                continue;
+            }
+            let Some(space) = self.workspace_space(workspace) else {
+                continue;
+            };
+            let rank = if Some(space) == command_space {
+                3
+            } else if is_visible(space) {
+                2
+            } else {
+                1
+            };
+            if rank > best_rank {
+                best_rank = rank;
+                resolved = Some(window);
+            } else if rank == best_rank {
+                resolved = None;
+            }
+        }
+        resolved
     }
 
     pub fn find_window_in_workspace_by_idx(
@@ -2300,26 +2455,6 @@ impl WorkspaceStore {
                 .get(*assignment)
                 .is_some_and(|workspace| workspace.space == space)
         })
-    }
-
-    pub fn auto_assign_window(
-        &mut self,
-        window_store: &mut WindowStore,
-        window_id: WindowId,
-        space: SpaceId,
-    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        let default_workspace_id = self.get_default_workspace(space)?;
-        if self.assign_window_to_workspace(
-            window_store,
-            self[default_workspace_id].space,
-            window_id,
-            default_workspace_id,
-        ) {
-            window_store.clear_rule_floating(window_id);
-            Ok(default_workspace_id)
-        } else {
-            Err(WorkspaceError::AssignmentFailed)
-        }
     }
 
     pub(crate) fn apply_app_rule_decision<'a>(
@@ -2580,7 +2715,7 @@ mod tests {
             store
                 .workspace_view(WorkspaceContext { space: a, visible: &[a, other] })
                 .count(),
-            3
+            2
         );
         store.ensure_visible_spaces(&[b], 1, |_| None);
         assert_eq!(store.workspace_ids(b), independent);
@@ -2589,7 +2724,7 @@ mod tests {
     }
 
     #[test]
-    fn global_display_lifecycle_always_has_an_active_workspace() {
+    fn moving_the_last_global_workspace_preserves_the_catalog() {
         let (a, b) = (SpaceId::new(901), SpaceId::new(902));
         let settings = VirtualWorkspaceSettings {
             mode: WorkspaceMode::Global,
@@ -2600,42 +2735,25 @@ mod tests {
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let original = store.create_workspace(a, None).unwrap();
         store.ensure_visible_spaces(&[a, b], 2, |_| None);
-        let seeded = store.active_workspace(b).expect("new displays need a workspace");
-        assert_ne!(seeded, original);
+        assert_eq!(store.active_workspace(b), None);
+        while store.catalog().count() < MAX_WORKSPACES {
+            store.create_workspace(b, None).unwrap();
+        }
+        let catalog: Vec<_> = store.catalog().collect();
         assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
-        let replacement =
-            store.active_workspace(a).expect("moving the last workspace seeds its source");
-        assert_ne!(replacement, original);
-        assert!(store.transfer_workspace(original, a, None, WorkspaceTransferReason::Explicit));
-        let created = store.create_workspace(b, None).unwrap();
-        assert_eq!(store.active_workspace(b), Some(seeded));
+        assert_eq!(store.active_workspace(a), None);
+        assert_eq!(store.active_workspace(b), Some(original));
         // Rediscovery must retain a non-default assignment even on another display.
-        store.transfer_workspace(created, a, None, WorkspaceTransferReason::Explicit);
+        let assigned = catalog[1];
         let mut windows = WindowStore::default();
         let window = WindowId::new(90, 1);
-        store.assign_window_to_workspace(&mut windows, a, window, created);
+        store.assign_window_to_workspace(&mut windows, b, window, assigned);
         assert_eq!(
-            expect_managed(store.apply_app_rule_decision(&mut windows, window, b, None, true))
+            expect_managed(store.apply_app_rule_decision(&mut windows, window, a, None, true))
                 .workspace_id,
-            created
+            assigned
         );
-        // Repeatedly moving the sole replacement must stop at the creation limit.
-        while store.catalog().count() < MAX_WORKSPACES {
-            let last = store.active_workspace(b).unwrap();
-            assert!(store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
-        }
-        let owners: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
-        let last = store.active_workspace(b).unwrap();
-        assert!(!store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
-        assert_eq!(
-            store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
-            owners
-        );
-        assert_eq!(store.active_workspace(b), Some(last));
-        // Moves that need no replacement remain available at the limit.
-        assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
-        assert_eq!(store.catalog().count(), MAX_WORKSPACES);
-        assert!(store.active_workspace(a).is_some());
+        assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
         store.validate_persisted_topology().unwrap();
     }
 
@@ -2693,7 +2811,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_initial_count_is_global_and_later_desktops_are_seeded_once() {
+    fn shared_initial_count_stays_fixed_across_topology_changes() {
         let (a, b, c) = (SpaceId::new(51), SpaceId::new(52), SpaceId::new(53));
         for (count, pin_all) in [
             (1, false),
@@ -2721,17 +2839,18 @@ mod tests {
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
             store.ensure_visible_spaces(&[a, b], 2, |_| pin_all.then_some(a));
             let catalog: Vec<_> = store.catalog().collect();
-            assert_eq!(catalog.len(), count.max(2) + usize::from(pin_all));
+            assert_eq!(catalog.len(), count);
             for (index, &id) in catalog.iter().enumerate() {
-                let boundary = if pin_all { count } else { count.max(2) / 2 };
+                let boundary = if pin_all || count == 1 {
+                    count
+                } else {
+                    count / 2
+                };
                 assert_eq!(store[id].space, if index < boundary { a } else { b });
             }
             store.ensure_visible_spaces(&[a, b, c], 3, |_| None);
-            assert_eq!(store.workspace_ids(c).len(), 1);
-            assert!(store.active_workspace(c).is_some());
-            assert_eq!(store.catalog().take(catalog.len()).collect::<Vec<_>>(), catalog);
-            store.ensure_visible_spaces(&[a, b, c], 3, |_| None);
-            assert_eq!(store.catalog().count(), catalog.len() + 1);
+            assert_eq!(store.active_workspace(c), None);
+            assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
             let placement: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
             let active = [a, b, c].map(|space| store.active_workspace(space));
             // Display loss, return, and physical reordering must not run the initial
@@ -2746,14 +2865,14 @@ mod tests {
                 assert_eq!(
                     store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
                     placement,
-                    "seeding must preserve catalog order and ownership"
+                    "exposure must preserve catalog order and ownership"
                 );
                 assert_eq!([a, b, c].map(|space| store.active_workspace(space)), active);
             }
             store.validate_persisted_topology().unwrap();
             store
                 .plan_settings(&settings)
-                .expect("automatic seeds must allow configuration reload");
+                .expect("the existing catalog must allow configuration reload");
         }
     }
 
@@ -2768,8 +2887,7 @@ mod tests {
             (3, 6, &[(1, 2)], &[2, 2, 0, 0, 1, 1]),
             (2, 6, &[(1, 0), (2, 0), (3, 0), (4, 0)], &[0, 0, 0, 0, 1, 1]),
             (2, 4, &[(1, 0), (2, 1), (3, 0), (4, 1)], &[0, 1, 0, 1]),
-            // Everything pinned to one display: append rather than steal.
-            (3, 2, &[(1, 0), (2, 0)], &[0, 0, 1, 2]),
+            (3, 2, &[(1, 0), (2, 0)], &[0, 0]),
         ];
         for &(displays, count, pinned, expected) in cases {
             let mut pins = vec![None; count];
@@ -2861,7 +2979,7 @@ mod tests {
         let window = WindowId::new(5, 1);
         store.assign_window_to_workspace(&mut windows, source, window, id);
         store[id].set_last_focused(Some(window));
-        store[id].home = Home::placed(source, Some("external".into()));
+        store[id].home = Home::placed(source, Some("external".into()), PlacedBy::Automatic);
         let layout = store[id].active_layout();
         assert!(store.transfer_workspace(
             id,
@@ -2874,6 +2992,7 @@ mod tests {
         assert_eq!(store[id].last_focused(), Some(window));
         assert_eq!(store[id].home.display(), Some("external"));
         assert_eq!(store[id].home.space(), Some(source));
+        assert_eq!(store[id].home.placed_by(), Some(PlacedBy::Automatic));
         assert!(store.transfer_workspace(
             id,
             target,
@@ -2882,6 +3001,7 @@ mod tests {
         ));
         assert_eq!(store[id].home.space(), Some(target));
         assert_eq!(store[id].home.display(), Some("builtin"));
+        assert_eq!(store[id].home.placed_by(), Some(PlacedBy::User));
         assert_eq!(store.active_workspace(target), Some(id));
         store.validate_persisted_topology().unwrap();
     }
@@ -3343,20 +3463,28 @@ mod tests {
     #[test]
     fn workspaces_saved_before_typed_homes_load_into_them_and_save_unchanged() {
         // Written by the code before Home and RuleStanding: every combination of the two home
-        // fields, and a rule override.
+        // fields, and a rule override; the last as upstream writes an explicit display move.
         let saved = [
-            r#"(name:"Main",space:(2),preferred_display:None,home_space:None,rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
-            r#"(name:"Development",space:(2),preferred_display:None,home_space:Some((2)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
-            r#"(name:"Communication",space:(2),preferred_display:Some("display-uuid"),home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
-            r#"(name:"Utilities",space:(2),preferred_display:Some("legacy-display"),home_space:None,rule_overridden:true,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Main",space:(2),preferred_display:None,home_space:None,rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Development",space:(2),preferred_display:None,home_space:Some((2)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Communication",space:(2),preferred_display:Some("display-uuid"),home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Utilities",space:(2),preferred_display:Some("legacy-display"),home_space:None,rule_overridden:true,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
+            r#"(name:"Chosen",space:(2),preferred_display:Some("display-uuid"),home_space:Some((3)),display_manually_selected:true,rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#,
         ];
         let expected = [
             (Home::Unplaced, RuleStanding::Followed),
-            (Home::Space(SpaceId::new(2)), RuleStanding::Followed),
+            (
+                Home::Space {
+                    space: SpaceId::new(2),
+                    by: PlacedBy::Automatic,
+                },
+                RuleStanding::Followed,
+            ),
             (
                 Home::OnDisplay {
                     space: SpaceId::new(3),
                     display: "display-uuid".into(),
+                    by: PlacedBy::Automatic,
                 },
                 RuleStanding::Followed,
             ),
@@ -3364,16 +3492,105 @@ mod tests {
                 Home::DisplayOnly("legacy-display".into()),
                 RuleStanding::Overridden,
             ),
+            (
+                Home::OnDisplay {
+                    space: SpaceId::new(3),
+                    display: "display-uuid".into(),
+                    by: PlacedBy::User,
+                },
+                RuleStanding::Followed,
+            ),
         ];
         for (saved, (home, standing)) in saved.into_iter().zip(expected) {
             let workspace: VirtualWorkspace = ron::from_str(saved).unwrap();
             assert_eq!((&workspace.home, workspace.rule_standing), (&home, standing));
+            // Written back field for field, with upstream's `display_manually_selected` added
+            // where the file predates it.
+            let written = if saved.contains("display_manually_selected") {
+                saved.to_owned()
+            } else {
+                saved.replace(
+                    ",rule_overridden:",
+                    ",display_manually_selected:false,rule_overridden:",
+                )
+            };
             assert_eq!(
                 ron::ser::to_string(&workspace).unwrap(),
-                saved,
+                written,
                 "the saved form is unchanged"
             );
         }
+    }
+
+    #[test]
+    fn display_balance_moves_only_workspaces_rift_placed_and_arrival_keeps_who_chose() {
+        let (a, b) = (SpaceId::new(71), SpaceId::new(72));
+        let settings = VirtualWorkspaceSettings {
+            mode: WorkspaceMode::Global,
+            default_workspace_count: 4,
+            ..Default::default()
+        };
+        let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        store.ensure_visible_spaces(&[a], 2, |_| None);
+        let ids: Vec<_> = store.catalog().collect();
+        assert_eq!(store.workspace_ids(a), ids);
+        assert!(ids.iter().all(|&id| store[id].home.placed_by() == Some(PlacedBy::Automatic)));
+        let none = HashSet::default();
+        assert_eq!(store.plan_display_balance(&[a, b], &none), [
+            (ids[2], b),
+            (ids[3], b)
+        ]);
+        // Choosing the display a workspace is already on marks the home chosen, and balancing
+        // then leaves it where it is.
+        assert!(store.transfer_workspace(ids[3], a, None, WorkspaceTransferReason::Explicit));
+        assert_eq!(store[ids[3]].home, Home::Space { space: a, by: PlacedBy::User });
+        assert!(!store.transfer_workspace(ids[3], a, None, WorkspaceTransferReason::Explicit));
+        assert_eq!(store.plan_display_balance(&[a, b], &none), [
+            (ids[1], b),
+            (ids[2], b)
+        ]);
+        assert!(store.plan_display_balance(&[a], &none).is_empty());
+        // An arriving display becomes the home; who chose the old home still stands.
+        assert!(store.transfer_workspace(
+            ids[2],
+            b,
+            Some("external"),
+            WorkspaceTransferReason::DisplayArrival
+        ));
+        assert_eq!(store[ids[2]].home, Home::OnDisplay {
+            space: b,
+            display: "external".into(),
+            by: PlacedBy::Automatic,
+        });
+        assert_eq!(store.active_workspace(b), Some(ids[2]));
+        assert!(store.transfer_workspace(
+            ids[3],
+            b,
+            Some("external"),
+            WorkspaceTransferReason::DisplayArrival
+        ));
+        assert_eq!(store[ids[3]].home.placed_by(), Some(PlacedBy::User));
+        assert_eq!(store.active_workspace(b), Some(ids[2]));
+        store.validate_persisted_topology().unwrap();
+    }
+
+    #[test]
+    fn a_saved_manual_selection_without_a_home_space_is_dropped() {
+        // Upstream sets `display_manually_selected` only with `home_space`; anything else was
+        // edited by hand, and the flag has no placed home to belong to.
+        let saved = r#"(name:"Utilities",space:(2),preferred_display:Some("legacy-display"),home_space:None,rule_overridden:true,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))"#
+            .replace(
+                ",rule_overridden:true",
+                ",display_manually_selected:true,rule_overridden:true",
+            );
+        let workspace: VirtualWorkspace = ron::from_str(&saved).unwrap();
+        assert_eq!(workspace.home, Home::DisplayOnly("legacy-display".into()));
+        assert_eq!(workspace.home.placed_by(), None);
+        assert!(
+            ron::ser::to_string(&workspace)
+                .unwrap()
+                .contains(",display_manually_selected:false,")
+        );
     }
 
     #[test]
@@ -3565,13 +3782,17 @@ mod tests {
     #[test]
     fn a_store_saved_before_the_catalog_type_loads_and_saves_unchanged() {
         // Written by the code before Catalog: two Spaces, two workspaces each.
-        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
+        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
         let store: WorkspaceStore = ron::from_str(saved).unwrap();
         assert_eq!(store.workspaces.order().len(), 4);
         assert_eq!(store.workspaces.len(), 4);
+        // Unchanged but for upstream's `display_manually_selected`, written on every workspace.
         assert_eq!(
             ron::ser::to_string(&store).unwrap(),
-            saved,
+            saved.replace(
+                ",rule_overridden:",
+                ",display_manually_selected:false,rule_overridden:"
+            ),
             "the saved form is unchanged"
         );
     }
@@ -3615,7 +3836,7 @@ mod tests {
 
     #[test]
     fn a_saved_store_whose_order_leaves_a_workspace_out_does_not_load() {
-        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
+        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
         let broken = saved.replace(",(idx:4,version:1)]", "]");
         assert_ne!(broken, saved);
         let error = ron::from_str::<WorkspaceStore>(&broken).unwrap_err().to_string();

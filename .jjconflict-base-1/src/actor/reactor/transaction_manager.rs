@@ -1,65 +1,32 @@
-use objc2_core_foundation::CGRect;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use serde::{Deserialize, Serialize};
 
-use crate::model::tx_store::WindowTxStore;
-use crate::sys::window_server::WindowServerId;
-
-/// A per-window counter that tracks the last time the reactor sent a request to
-/// change the window frame.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+/// Names one request that changes window frames. Ids come from one counter
+/// ([`TransactionCounter`]), so no two requests share one and they are ordered as issued: a
+/// read stamped with an older id was made before the newer request was applied. (The counter
+/// wraps after 2^32 requests; a session does not get near that.)
+#[derive(
+    Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct TransactionId(u32);
 
 impl TransactionId {
-    pub(crate) fn new(id: u32) -> Self { Self(id) }
+    /// The id as a number, for plain data (a recorded trace, the Roc core).
+    #[cfg(any(test, feature = "roc-core"))]
+    pub(crate) fn number(self) -> u32 { self.0 }
 
-    #[cfg(test)]
-    pub fn next(self) -> Self { Self(self.0.wrapping_add(1)) }
+    /// The id a plain number names (the inverse of [`TransactionId::number`]).
+    #[cfg(feature = "roc-core")]
+    pub(crate) fn from_number(number: u32) -> Self { TransactionId(number) }
 }
 
-/// Manages window transaction IDs and their associated target frames.
-#[derive(Debug)]
-pub struct TransactionManager {
-    pub store: WindowTxStore,
-}
+/// The one source of transaction ids, shared by every thread that sends frames.
+#[derive(Debug, Default)]
+pub struct TransactionCounter(AtomicU32);
 
-impl TransactionManager {
-    pub fn new(store: WindowTxStore) -> Self { Self { store } }
-
-    /// Stores a transaction ID for a window with its target frame.
-    pub fn store_txid(&self, wsid: WindowServerId, txid: TransactionId, target: CGRect) {
-        self.store.insert(wsid, txid, target);
-    }
-
-    /// Removes the transaction ID entry for a window.
-    pub fn remove_for_window(&self, wsid: WindowServerId) { self.store.remove(&wsid); }
-
-    /// Clears the pending target for a window while preserving its last txid.
-    pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
-
-    pub fn begin(&self, wsid: WindowServerId, target: CGRect) -> TransactionId {
-        self.store.begin(wsid, Some(target))
-    }
-
-    pub fn invalidate_for_window(&self, wsid: WindowServerId) { self.store.begin(wsid, None); }
-
-    #[cfg(test)]
-    pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
-        self.store.begin(wsid, None)
-    }
-
-    #[cfg(test)]
-    pub fn set_last_sent_txid(&self, wsid: WindowServerId, txid: TransactionId) {
-        self.store.set_last_txid(wsid, txid);
-    }
-
-    /// Gets the last sent transaction ID for a window.
-    #[cfg(test)]
-    pub fn get_last_sent_txid(&self, wsid: WindowServerId) -> TransactionId {
-        self.store.last_txid(&wsid)
-    }
-
-    /// Gets the target frame for a window's transaction, if it exists.
-    pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
-        self.store.get(&wsid)?.target()
+impl TransactionCounter {
+    pub fn next(&self) -> TransactionId {
+        TransactionId(self.0.fetch_add(1, Ordering::Relaxed).wrapping_add(1))
     }
 }

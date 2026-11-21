@@ -639,7 +639,7 @@ pub(crate) struct OwnershipDivergence {
 pub(crate) struct NativeFullscreenRestoration {
     pub(crate) record: NativeFullscreenRecord,
     pub(crate) window: Option<WindowId>,
-    pub(crate) removed_window: Option<WindowId>,
+    pub(crate) previous_assignment: Option<WindowId>,
 }
 
 /// Native facts supplementing a successful AX inventory omission. Unknown
@@ -656,10 +656,7 @@ pub(crate) struct InventoryWindowObservation {
 pub(crate) enum NativeDeparture {
     Moved(Option<WindowId>, SpaceId),
     Closed(WindowId),
-    Hidden {
-        window: Option<WindowId>,
-        remove_projection: bool,
-    },
+    Hidden(Option<WindowId>),
 }
 
 impl WindowStore {
@@ -696,12 +693,35 @@ impl WindowStore {
             .is_some_and(|record| record.claim().is_none() && self.lifecycle.manages(wid))
     }
 
+    /// An explicit move can change retained ownership independently of placement: a window
+    /// with valid AX state, unclaimed and assigned, that nothing but minimizing or the
+    /// manageability heuristic keeps out (#702's `allows_management`).
+    pub(crate) fn can_move_assigned_window(&self, wid: WindowId) -> bool {
+        use rift_core::lifecycle::{Admission, AdmissionFacts, Minimize, Veto, admission};
+        self.record(wid).is_some_and(|record| {
+            !self.lifecycle.is_invalidated(wid)
+                && record.claim().is_none()
+                && record.assignment().is_some()
+                && self.lifecycle.facts(wid).is_some_and(|facts| {
+                    matches!(
+                        admission(AdmissionFacts {
+                            minimize: Minimize::Shown,
+                            ..facts
+                        }),
+                        Admission::Admitted | Admission::Vetoed(Veto::Unmanageable)
+                    )
+                })
+        })
+    }
+
     /// Rules and admission are reconciled only for windows Rift may manage.
     pub(crate) fn can_reconcile_admission(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|record| {
             !self.lifecycle.is_invalidated(wid)
                 && record.claim().is_none()
-                && record.state.as_ref().is_some_and(WindowState::can_reconcile_admission)
+                && record.state.as_ref().is_some_and(|window| {
+                    window.minimize() == rift_core::lifecycle::Minimize::Shown
+                })
         })
     }
 
@@ -863,20 +883,11 @@ impl WindowStore {
             .collect()
     }
 
-    /// Temporary unavailability changes admission, not logical workspace ownership.
-    pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
-        let admitted = self.is_admitted_state(wid);
-        let explicitly_excluded = self.rule(wid) == Some(Rule::Ignore);
-        if !admitted && (explicitly_excluded || !self.is_temporarily_unavailable(wid)) {
-            self.remove_window_assignment(wid);
-        }
-        admitted
-    }
-
     /// The window's AX element was invalidated: it keeps its ownership, facts and place until
     /// fresh AX evidence or confirmed retirement. A window with no AX state has none to lose.
-    pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) {
-        self.lifecycle.invalidate(wid);
+    /// Whether this invalidated it (false if it already was, or has no AX state).
+    pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) -> bool {
+        self.lifecycle.invalidate(wid)
     }
 
     /// Only a fresh AX observation validates an invalidated identity.
@@ -906,7 +917,7 @@ impl WindowStore {
 
     /// Restore identity for native presence or a return to the recorded user Space.
     pub(crate) fn restore_native_identity(
-        &mut self,
+        &self,
         wsid: Option<WindowServerId>,
         original: WindowId,
     ) -> Option<NativeFullscreenRestoration> {
@@ -929,11 +940,14 @@ impl WindowStore {
         .into_iter()
         .flatten()
         .find(|wid| self.is_admitted(*wid));
-        let removed_window = window
-            .filter(|wid| *wid != original)
-            .and_then(|_| self.remove_window_assignment(original))
-            .map(|_| original);
-        Some(NativeFullscreenRestoration { record, window, removed_window })
+        let previous_assignment = window
+            .is_some_and(|wid| wid != original && self.workspace_for_window(original).is_some())
+            .then_some(original);
+        Some(NativeFullscreenRestoration {
+            record,
+            window,
+            previous_assignment,
+        })
     }
 
     /// Native fullscreen suspends admission while retaining identity and ownership.
@@ -1010,13 +1024,8 @@ impl WindowStore {
                 return NativeDeparture::Closed(wid);
             }
         }
-        let remove_projection = window.and_then(|wid| self.record(wid)).is_some_and(|record| {
-            record.assignment().is_some()
-                && self.is_temporarily_unavailable(window.unwrap())
-                && self.native_space(window.unwrap()) == Some(reported_space)
-        });
         self.observe_native_space(wsid, reported_space, false);
-        NativeDeparture::Hidden { window, remove_projection }
+        NativeDeparture::Hidden(window)
     }
 
     /// Bind a positive AX observation to its stable native identity. Persistent
@@ -1035,7 +1044,6 @@ impl WindowStore {
         let wsid = wsid?;
         let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
         if let Some(old) = previous {
-            self.transfer_persistent_window_metadata(old, wid);
             if !self.contains_window(wid) {
                 let state = self.windows.get_mut(&old).and_then(|record| record.state.take());
                 let facts = self.lifecycle.facts(old);
@@ -1054,7 +1062,7 @@ impl WindowStore {
                     }
                 }
             }
-            self.remove_window(old);
+            self.replace_window_identity(old, wid);
         }
         self.clear_window_server_observed(wsid);
         previous
@@ -1075,21 +1083,17 @@ impl WindowStore {
         wid
     }
 
-    /// Enforce the minimized invariant even if the AX flag was already set.
-    /// Every known identity requests projection repair; the projection reports
-    /// whether removal actually changed geometry, so correct duplicates are cheap.
-    pub(crate) fn observe_minimized(&mut self, wid: WindowId) -> bool {
-        if self.window(wid).is_none() {
-            return false;
-        }
-        self.set_minimized(wid, true);
-        self.set_manageable(wid, false);
+    pub(crate) fn set_minimized_visibility(&mut self, wid: WindowId, minimized: bool) {
         if let Some(wsid) = self.record(wid).and_then(|record| record.window_server_id()) {
-            self.mark_window_hidden(wsid);
+            self.set_native_visibility(wsid, !minimized);
         }
-        self.set_visibility(wid, WindowVisibility::Minimized);
-        self.validate_ax_identity(wid);
-        true
+        if let Some(record) = self.windows.get_mut(&wid) {
+            record.visibility = if minimized {
+                WindowVisibility::Minimized
+            } else {
+                WindowVisibility::Visible
+            };
+        }
     }
 
     /// Hidden is visibility evidence, never destruction. Return the owning PID
@@ -1099,29 +1103,29 @@ impl WindowStore {
         wsid: WindowServerId,
         visible: bool,
     ) -> Option<i32> {
-        let pid = self
-            .tracked_window_id(wsid)
+        if !self.set_native_visibility(wsid, visible) {
+            return None;
+        }
+        self.tracked_window_id(wsid)
             .map(|wid| wid.pid)
-            .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid));
-        self.set_native_visibility(wsid, visible);
-        pid
+            .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid))
     }
 
     /// A current successful AX omission is destructive only with native negative evidence:
     /// the windows to retire. The caller removes them (`RiftState::remove_window`), so a grip
     /// on one ends through the core.
     pub(crate) fn inventory_retirements(
-        &mut self,
+        &self,
         pid: i32,
-        observed: &[WindowId],
-        inactive: &HashSet<WindowId>,
+        observed: impl IntoIterator<Item = WindowId>,
+        mut inactive: impl FnMut(WindowId) -> bool,
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
-    ) -> Vec<(WindowId, Option<WindowServerId>)> {
+    ) -> Vec<WindowId> {
         use rift_core::lifecycle::{
             AxValidity, FullscreenRecord, InventoryFacts, InventoryView, NativeEvidence,
             NativeIdentity, NativeLook, Ordering, Report, Retirement, Suitability,
         };
-        let observed: HashSet<_> = observed.iter().copied().collect();
+        let observed: HashSet<_> = observed.into_iter().collect();
         self.window_ids_for_pid(pid)
             .filter_map(|wid| {
                 let record = self.record(wid)?;
@@ -1132,7 +1136,7 @@ impl WindowStore {
                     } else {
                         Report::Omitted
                     },
-                    view: if inactive.contains(&wid) {
+                    view: if inactive(wid) {
                         InventoryView::OutOfView
                     } else {
                         InventoryView::InView
@@ -1208,7 +1212,7 @@ impl WindowStore {
                         roc,
                     );
                 }
-                (verdict == Retirement::Retire).then_some((wid, wsid))
+                (verdict == Retirement::Retire).then_some(wid)
             })
             .collect()
     }
@@ -1286,7 +1290,6 @@ impl WindowStore {
         if preserve_assignment || self.is_admitted(wid) {
             return None;
         }
-        self.remove_window_assignment(wid);
         Some((wid, None))
     }
 
@@ -1808,14 +1811,15 @@ impl WindowStore {
         } else {
             return false;
         };
-        let changed = record.visible != visible;
-        record.visible = visible;
+        let mut changed = std::mem::replace(&mut record.visible, visible) != visible;
         if let Some(wid) = record.window_id {
-            self.windows.entry_or_default(wid).visibility = if visible {
+            let visibility = if visible {
                 WindowVisibility::Visible
             } else {
                 WindowVisibility::Hidden
             };
+            let window = self.windows.entry_or_default(wid);
+            changed |= std::mem::replace(&mut window.visibility, visibility) != visibility;
         } else if !visible {
             record.observed = false;
         }
@@ -1902,6 +1906,7 @@ impl WindowStore {
             record.observed = false;
             record.space = None;
             record.info = None;
+            record.pending_native_fullscreen = None;
         }
         if let Some(wid) = wid
             && let Some(record) = self.windows.get_mut(&wid)
@@ -2246,7 +2251,12 @@ impl WindowStore {
     /// macOS rekeys the same WindowServer window across sleep/wake or similar
     /// churn. The caller remains responsible for replacing any layout/window
     /// state that still references `from`.
-    pub fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
+    pub(crate) fn replace_window_identity(&mut self, from: WindowId, to: WindowId) {
+        self.transfer_persistent_window_metadata(from, to);
+        self.remove_window(from);
+    }
+
+    fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
         }
@@ -2397,9 +2407,7 @@ impl WindowStore {
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
-        let window_ids: Vec<_> =
-            self.app_windows.get(&pid).into_iter().flatten().copied().collect();
-        for window_id in window_ids {
+        for window_id in self.app_windows.remove(&pid).into_iter().flatten() {
             self.remove_window(window_id);
         }
 
@@ -2521,13 +2529,15 @@ impl WindowStore {
     }
 
     pub(crate) fn can_place_window(&self, window: WindowId) -> bool {
-        self.native_fullscreen_record_for_window(window).is_none()
-            && self.record(window).is_none_or(|record| {
-                !matches!(
+        self.record(window).is_none_or(|record| {
+            !self.lifecycle.is_invalidated(window)
+                && record.claim().is_none()
+                && (record.state.is_none() || self.is_admitted_state(window))
+                && !matches!(
                     record.visibility,
                     WindowVisibility::Hidden | WindowVisibility::Minimized
                 )
-            })
+        }) && self.native_fullscreen_record_for_window(window).is_none()
     }
 
     /// The drag holding `window`, if the user is dragging it.
@@ -2837,18 +2847,18 @@ mod tests {
         store.assign_window_to_workspace(wid, home);
 
         for _ in 0..2 {
-            assert!(store.observe_minimized(wid));
-            assert!(!store.reconcile_admission(wid));
+            store.set_minimized(wid, true);
+            store.set_minimized_visibility(wid, true);
+            assert!(!store.is_admitted(wid));
             assert_eq!(store.workspace_for_window(wid), Some(home));
             assert_eq!(store.workspace_windows(home), vec![wid]);
             store.debug_assert_invariants();
         }
 
         store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
-        assert!(store.reconcile_admission(wid));
+        assert!(store.is_admitted(wid));
         assert_eq!(store.workspace_for_window(wid), Some(home));
-        store.set_manage_override(wid, Some(false));
-        assert!(!store.reconcile_admission(wid));
+        store.remove_window(wid);
         assert_eq!(store.workspace_for_window(wid), None);
         assert!(store.workspace_windows(home).is_empty());
     }

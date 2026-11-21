@@ -4,10 +4,12 @@
 
 use rift_protocol::WindowClaimFlags;
 
-use super::{Changes, LayoutEvent, Reactor};
+use super::{LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
-use crate::layout_engine::systems::{LayoutSystem, WindowChange};
+use crate::common::collections::HashSet;
+use crate::layout_engine::systems::LayoutSystem;
 use crate::model::window_store::ClaimOwner;
+use crate::sys::screen::SpaceId;
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
 
@@ -24,28 +26,34 @@ impl Reactor {
         let wid = self.state.windows.resolve_claim_target(owner, wid).ok_or("Window not found")?;
         match self.state.windows.claim(wid) {
             Some(claim) if claim.owner != owner => return Err(OWNED_ELSEWHERE),
-            // Flags only affect focus policy, never layout.
+            // Flags only affect focus policy (the mode table reads them), never layout.
             Some(_) => {
-                self.with_claim_focus_policy(|r| r.state.windows.set_claim_flags(wid, flags));
+                self.state.windows.set_claim_flags(wid, flags);
                 return Ok(());
             }
             None => {}
         }
-        self.with_claim_focus_policy(|reactor| {
+        {
+            let reactor = &mut *self;
             // The owner takes over like a user drag: stop Rift's motion and pending writes.
             reactor.cancel_window_presentations(vec![wid]);
-            if let Some(wsid) = reactor.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                reactor.transaction_manager.clear_target_for_window(wsid);
-            }
-            reactor.drag_manager.forget_window(wid);
+            reactor.state.forget_drag_window(wid);
+            reactor.drag_manager.sync_preview(reactor.state.windows.drag());
             // Leave the projection (keeping floating state and the layout slot) before the
             // claim takes the assignment, but arrange only after: no write may target it.
-            let mut changes = Changes::default();
-            reactor.reconcile_layout_event(&mut changes, LayoutEvent::WindowSuspended(wid));
+            let space = reactor.assigned_space_for_window_id(wid);
+            let removal = LayoutEvent::WindowSuspended(wid);
+            let removed = reactor
+                .layout_manager
+                .layout_engine
+                .handle_event(&mut reactor.state.windows, removal)
+                .changed;
             reactor.state.windows.insert_claim(wid, owner, flags);
-            changes.refresh_menu = true;
-            reactor.finish(changes, None, None);
-        });
+            if removed {
+                reactor.update_layout_or_warn(false, false, space);
+            }
+            reactor.maybe_send_menu_update();
+        }
         Ok(())
     }
 
@@ -74,21 +82,20 @@ impl Reactor {
     }
 
     fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
-        self.with_claim_focus_policy(|reactor| {
-            let mut changes = Changes::default();
-            for window in windows {
-                reactor.readmit(&mut changes, window);
+        {
+            let reactor = &mut *self;
+            let spaces: HashSet<_> =
+                windows.into_iter().filter_map(|wid| reactor.readmit(wid)).collect();
+            for space in spaces {
+                reactor.update_layout_or_warn(false, false, Some(space));
             }
-            changes.refresh_menu = true;
-            reactor.finish(changes, None, None);
-        });
+            reactor.maybe_send_menu_update();
+        }
     }
 
-    /// Replays normal reconciliation for a released window.
-    fn readmit(&mut self, changes: &mut Changes, wid: WindowId) {
-        let Some(claim) = self.state.windows.remove_claim(wid) else {
-            return;
-        };
+    /// Replays normal reconciliation for a released window; returns an active space to arrange.
+    fn readmit(&mut self, wid: WindowId) -> Option<SpaceId> {
+        let claim = self.state.windows.remove_claim(wid)?;
         let engine = &mut self.layout_manager.layout_engine;
         if let Some(workspace) =
             claim.workspace().filter(|id| engine.workspaces().workspaces.contains_key(*id))
@@ -98,32 +105,26 @@ impl Reactor {
             // at release; an ordinary return keeps its canonical slot untouched.
             for (id, current) in engine.workspaces_mut().workspaces.iter_mut() {
                 if id != workspace {
-                    current.layout_system.update(WindowChange::Remove(wid));
+                    current
+                        .layout_system
+                        .update(crate::layout_engine::systems::WindowChange::Remove(wid));
                 }
             }
             // Like any external move of a floating window, the owner's geometry is authoritative.
             if engine.is_window_floating(wid)
                 && let Some(window) = self.state.windows.window(wid)
             {
-                engine.store_floating_position(workspace, wid, window.frame_monotonic);
+                engine.store_floating_position(workspace, wid, window.frame_monotonic());
             }
         }
         if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
             // Suspended windows return through native fullscreen recovery.
-            self.restore_native_fullscreen(changes, None, wid, None);
-            return;
+            let outcome = self.restore_native_fullscreen(None, wid, None);
+            self.apply_event_outcome(outcome);
+            return None;
         }
-        if let Some(space) = self.best_space_for_window_id(wid) {
-            self.reassign_window_to_authoritative_space(changes, wid, space, false);
-        }
-    }
-
-    /// Recompute focus-follows-mouse only when the focused window's claim policy changed.
-    fn with_claim_focus_policy(&mut self, change: impl FnOnce(&mut Self)) {
-        let suppressed = self.state.windows.suppresses_focus_follows_mouse(self.main_window());
-        change(self);
-        if suppressed != self.state.windows.suppresses_focus_follows_mouse(self.main_window()) {
-            self.update_focus_follows_mouse_state();
-        }
+        let space = self.best_space_for_window_id(wid)?;
+        self.reassign_window_to_authoritative_space(wid, space, false);
+        self.is_space_active(space).then_some(space)
     }
 }

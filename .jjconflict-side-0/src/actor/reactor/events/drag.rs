@@ -216,7 +216,10 @@ pub fn handle_mouse_up(
             // The haptic marks a drop onto a tile.
             outcome.drop_haptic = dropped && !floating && drag.haptics_enabled;
             if !dropped {
-                if left {
+                // Assigning to the destination takes the window out of the old workspace's tree
+                // itself; a removal would run after it and clear the new assignment (#702's
+                // WindowAdded then needs that assignment).
+                if left && workspace.is_none() {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
                 }
                 if let Some(workspace) = workspace

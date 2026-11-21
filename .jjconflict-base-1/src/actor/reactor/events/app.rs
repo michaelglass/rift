@@ -1,8 +1,111 @@
+use tracing::debug;
+
+use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, WindowId};
+use crate::actor::reactor::AppState;
+use crate::actor::reactor::events::{EventOutcome, WindowDiscoveryRequest};
+use crate::actor::reactor::managers::AppManager;
+use crate::sys::app::WindowInfo;
+use crate::sys::window_server::WindowServerInfo;
+
+#[derive(Debug)]
+pub struct ApplicationLaunchedPayload {
+    pub pid: i32,
+    pub info: AppInfo,
+    pub handle: AppThreadHandle,
+    pub visible_windows: Vec<(WindowId, WindowInfo)>,
+    pub window_server_info: Vec<WindowServerInfo>,
+}
+
+pub fn handle_application_launched(
+    apps: &mut AppManager,
+    payload: ApplicationLaunchedPayload,
+) -> anyhow::Result<EventOutcome> {
+    let ApplicationLaunchedPayload {
+        pid,
+        info,
+        handle,
+        visible_windows,
+        window_server_info,
+    } = payload;
+    if apps.reject_duplicate(pid, &handle) {
+        return Ok(EventOutcome::no_change());
+    }
+    apps.apps.insert(pid, AppState { info: info.clone(), handle });
+    Ok(EventOutcome::window_membership_changed(false, true)
+        .with_window_server_updates(window_server_info)
+        .with_discovery(WindowDiscoveryRequest {
+            pid,
+            new: visible_windows,
+            known_visible: Vec::new(),
+            app_info: Some(info),
+            as_of: Default::default(),
+        }))
+}
+
+pub fn handle_application_terminated(pid: i32) -> anyhow::Result<EventOutcome> {
+    Ok(EventOutcome::no_change().with_app_request(pid, crate::actor::app::Request::Terminate))
+}
+
+pub fn handle_application_thread_terminated(
+    apps: &mut AppManager,
+    pid: i32,
+) -> anyhow::Result<EventOutcome> {
+    apps.apps.remove(&pid);
+    Ok(EventOutcome::window_membership_changed(false, true).with_arrange_passes(0))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ApplicationActivatedPayload {
+    pub pid: i32,
+    pub quiet: Quiet,
+}
+
+pub fn handle_application_activated(
+    payload: ApplicationActivatedPayload,
+) -> anyhow::Result<EventOutcome> {
+    let ApplicationActivatedPayload { pid, quiet } = payload;
+    if quiet == Quiet::Yes {
+        debug!(
+            pid,
+            "Skipping auto workspace switch for quiet app activation (initiated by Rift)"
+        );
+        return Ok(EventOutcome::no_change());
+    }
+
+    Ok(EventOutcome::focus_changed(None, false))
+}
+
+#[derive(Debug)]
+pub struct WindowsDiscoveredPayload {
+    pub pid: i32,
+    pub new: Vec<(WindowId, WindowInfo)>,
+    pub known_visible: Vec<WindowId>,
+    pub as_of: crate::common::collections::HashMap<
+        WindowId,
+        crate::actor::reactor::transaction_manager::TransactionId,
+    >,
+}
+
+pub fn handle_windows_discovered(
+    payload: WindowsDiscoveredPayload,
+) -> anyhow::Result<EventOutcome> {
+    let WindowsDiscoveredPayload { pid, new, known_visible, as_of } = payload;
+    Ok(
+        EventOutcome::window_notification_refresh().with_discovery(WindowDiscoveryRequest {
+            pid,
+            new,
+            known_visible,
+            app_info: None,
+            as_of,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::actor::app::{AppInfo, AppThreadHandle};
+    use super::*;
+    use crate::actor::reactor::Event;
     use crate::actor::reactor::testing::test_reactor;
-    use crate::actor::reactor::{AppState, Event};
 
     #[test]
     fn duplicate_registration_retains_original_and_terminates_duplicate() {

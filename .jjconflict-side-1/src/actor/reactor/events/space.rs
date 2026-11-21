@@ -1,12 +1,14 @@
-use tracing::debug;
+use rift_core::topology::{Displays, Incoming};
+use tracing::{debug, trace};
 
-use super::super::{Changes, Reactor};
-use crate::actor::reactor::SpaceEventKind;
+use crate::actor::reactor::events::EventOutcome;
+use crate::actor::reactor::managers::MissionControlManager;
+use crate::actor::reactor::{MissionControlState, SpaceEventKind};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
+use crate::model::RiftState;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
-use crate::model::window_store::NativeDeparture;
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -64,6 +66,83 @@ pub(crate) fn analyze_space_snapshot(
     }
 }
 
+/// A snapshot's displays as admission reads them: each screen's display id (none when
+/// empty), each display's Spaces.
+pub(crate) fn displays(state: &ForwardedSpaceState) -> Displays<&str, SpaceId> {
+    Displays {
+        screens: state.screens.iter().map(|screen| screen.display_uuid_opt()).collect(),
+        spaces: state
+            .display_space_ids
+            .iter()
+            .map(|(display, spaces)| (display.as_str(), spaces.clone()))
+            .collect(),
+    }
+}
+
+/// A snapshot being admitted, as admission reads it.
+pub(crate) fn incoming(state: &ForwardedSpaceState) -> Incoming<&str, SpaceId> {
+    Incoming {
+        displays: displays(state),
+        remaps: state.space_remaps.clone(),
+        display_set_changed: state.display_set_changed,
+        force_refresh: state.should_force_refresh_layout,
+        membership_complete: state.membership_complete,
+    }
+}
+
+/// An admission as the Roc core's question: Spaces as their words, each display as the place
+/// it first appears in this question (the answer names only Spaces, so a display needs only
+/// to be told apart from the others).
+#[cfg(feature = "roc-core")]
+pub(crate) fn plain_admit(
+    current: &Displays<&str, SpaceId>,
+    incoming: &Incoming<&str, SpaceId>,
+    mission_control: rift_core::topology::MissionControl,
+) -> rift_core::topology::plain::Admit {
+    use crate::roc_path::Word;
+    /// The place `display` first appears among `names`.
+    fn name(names: &mut Vec<String>, display: &str) -> u64 {
+        match names.iter().position(|named| named == display) {
+            Some(place) => place as u64,
+            None => {
+                names.push(display.to_owned());
+                (names.len() - 1) as u64
+            }
+        }
+    }
+    let mut names = Vec::new();
+    let mut plain = |displays: &Displays<&str, SpaceId>| Displays {
+        screens: displays
+            .screens
+            .iter()
+            .map(|screen| screen.map(|display| name(&mut names, display)))
+            .collect(),
+        spaces: displays
+            .spaces
+            .iter()
+            .map(|(display, spaces)| {
+                (
+                    name(&mut names, display),
+                    spaces.iter().map(|&space| space.word()).collect(),
+                )
+            })
+            .collect(),
+    };
+    let current = plain(current);
+    let displays = plain(&incoming.displays);
+    rift_core::topology::plain::Admit {
+        mission_control,
+        current,
+        incoming: Incoming {
+            displays,
+            remaps: incoming.remaps.iter().map(|&(old, new)| (old.word(), new.word())).collect(),
+            display_set_changed: incoming.display_set_changed,
+            force_refresh: incoming.force_refresh,
+            membership_complete: incoming.membership_complete,
+        },
+    }
+}
+
 /// Prepends an older sample's deltas to a newer one; geometry and membership stay the newer's.
 pub(crate) fn merge_space_deltas(
     mut older: ForwardedSpaceState,
@@ -83,9 +162,20 @@ pub(crate) fn merge_space_deltas(
     newer
 }
 
+// spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
+// since they are literally when a window enters or leaves a space and each display has its own space(s)
+// this is functionally a connection dropping to the window server
+#[derive(Debug, Clone, Copy)]
+pub struct WindowServerLifecyclePayload {
+    pub window_server_id: WindowServerId,
+    pub space: SpaceId,
+    pub kind: SpaceEventKind,
+}
+
 #[derive(Debug)]
 pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
+    pub active_spaces: HashSet<SpaceId>,
     pub ordered_in: Option<bool>,
     pub suitable: Option<bool>,
 }
@@ -93,83 +183,98 @@ pub struct WindowServerDestroyedObservations {
 #[derive(Debug)]
 pub struct WindowServerAppearedObservations {
     pub resolved_space: Option<SpaceId>,
+    pub active_spaces: HashSet<SpaceId>,
+    pub mission_control_active: bool,
     pub last_known_user_space: Option<SpaceId>,
     pub window_server_info: Option<crate::sys::window_server::WindowServerInfo>,
+    pub app_known: bool,
+    pub running_app_info: Option<AppInfo>,
 }
 
-impl Reactor {
-    pub(in crate::actor::reactor) fn reconcile_native_departure(
-        &mut self,
-        changes: &mut Changes,
-        wsid: WindowServerId,
-        sid: SpaceId,
-        kind: SpaceEventKind,
-        observations: WindowServerDestroyedObservations,
-    ) {
-        let WindowServerDestroyedObservations {
+pub fn handle_window_server_destroyed(
+    state: &mut RiftState,
+    payload: WindowServerLifecyclePayload,
+    observations: WindowServerDestroyedObservations,
+) -> anyhow::Result<EventOutcome> {
+    let WindowServerLifecyclePayload {
+        window_server_id: wsid,
+        space: sid,
+        kind,
+    } = payload;
+    let WindowServerDestroyedObservations {
+        resolved_space,
+        active_spaces,
+        ordered_in,
+        suitable,
+    } = observations;
+    let mut outcome = EventOutcome::default();
+    if matches!(kind, SpaceEventKind::Fullscreen) {
+        // Departure alone cannot establish entry. Startup recovery uses positive
+        // fullscreen appearance/discovery, even if this notification arrives late.
+        if let Some(wid) = state.windows.tracked_window_id(wsid) {
+            outcome = outcome.with_window_inventory_request(wid.pid);
+        }
+
+        return Ok(outcome);
+    } else if matches!(kind, SpaceEventKind::User) {
+        match state.windows.observe_native_departure(
+            wsid,
+            sid,
             resolved_space,
+            &active_spaces,
             ordered_in,
             suitable,
-        } = observations;
-        if matches!(kind, SpaceEventKind::Fullscreen) {
-            // Departure alone cannot establish entry. Startup recovery uses positive
-            // fullscreen appearance/discovery, even if this notification arrives late.
-            if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                changes.inventory(wid.pid);
+        ) {
+            crate::model::window_store::NativeDeparture::Moved(window, space) => {
+                if let Some(wid) = window {
+                    outcome = outcome.with_topology_reassignment(wid, space, false);
+                }
             }
-        } else {
-            match self.state.windows.observe_native_departure(
-                wsid,
-                sid,
-                resolved_space,
-                &self.active_spaces,
-                ordered_in,
-                suitable,
-            ) {
-                NativeDeparture::Moved(Some(wid), space) => {
-                    self.reassign_window_to_authoritative_space(changes, wid, space, false);
+            crate::model::window_store::NativeDeparture::Closed(wid) => {
+                outcome.retirements.push(wid);
+            }
+            crate::model::window_store::NativeDeparture::Hidden(window) => {
+                if let Some(wid) = window {
+                    outcome.memberships.push((wid, None));
+                    outcome = outcome.with_window_inventory_request(wid.pid);
                 }
-                NativeDeparture::Closed(wid) => {
-                    self.retire_window(changes, wid);
-                }
-                NativeDeparture::Hidden(Some(wid)) => {
-                    self.reconcile_window_membership(changes, wid, None);
-                    changes.inventory(wid.pid);
-                }
-                NativeDeparture::Moved(None, _) | NativeDeparture::Hidden(None) => {}
             }
         }
+        return Ok(outcome);
     }
+    Ok(outcome)
+}
 
-    pub(in crate::actor::reactor) fn reconcile_native_appearance(
-        &mut self,
-        changes: &mut Changes,
-        wsid: WindowServerId,
-        sid: SpaceId,
-        kind: SpaceEventKind,
-        observations: WindowServerAppearedObservations,
-    ) {
-        let WindowServerAppearedObservations {
-            resolved_space,
-            last_known_user_space,
-            window_server_info,
-        } = observations;
-        if matches!(kind, SpaceEventKind::User)
-            && let Some(resolved_space) = resolved_space
-        {
+pub fn handle_window_server_appeared(
+    state: &mut RiftState,
+    payload: WindowServerLifecyclePayload,
+    observations: WindowServerAppearedObservations,
+) -> anyhow::Result<EventOutcome> {
+    let WindowServerLifecyclePayload {
+        window_server_id: wsid,
+        space: sid,
+        kind,
+    } = payload;
+    let WindowServerAppearedObservations {
+        resolved_space,
+        active_spaces,
+        mission_control_active,
+        last_known_user_space,
+        window_server_info,
+        app_known,
+        running_app_info,
+    } = observations;
+    let mut outcome = EventOutcome::default();
+    if matches!(kind, SpaceEventKind::User) {
+        if let Some(resolved_space) = resolved_space {
             if resolved_space != sid {
-                self.state.windows.observe_native_space(
+                state.windows.observe_native_space(
                     wsid,
                     resolved_space,
-                    self.active_spaces.contains(&resolved_space),
+                    active_spaces.contains(&resolved_space),
                 );
-                if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                    self.reassign_window_to_authoritative_space(
-                        changes,
-                        wid,
-                        resolved_space,
-                        false,
-                    );
+                if let Some(wid) = state.windows.tracked_window_id(wsid) {
+                    outcome = outcome.with_topology_reassignment(wid, resolved_space, false);
                 }
                 debug!(
                     ?wsid,
@@ -177,85 +282,101 @@ impl Reactor {
                     resolved_space = ?resolved_space,
                     "Resolved user-space appearance to stronger native membership"
                 );
-                return;
+                return Ok(outcome);
             }
 
-            self.state.windows.observe_native_space(wsid, resolved_space, true);
-            self.state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
+            state.windows.observe_native_space(wsid, resolved_space, true);
+            state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
+            outcome.confirmed_window_spaces.push((wsid, resolved_space));
         }
+    }
 
-        let tracked = self.state.windows.tracked_window_id(wsid);
-        let known = tracked.is_some()
-            || self.state.windows.knows_window_server_id(wsid)
-            || self.state.windows.is_window_server_observed(wsid);
-        if known && self.is_mission_control_active() {
-            return;
+    let tracked = state.windows.tracked_window_id(wsid);
+    let known = tracked.is_some()
+        || state.windows.knows_window_server_id(wsid)
+        || state.windows.is_window_server_observed(wsid);
+    if known && mission_control_active {
+        return Ok(outcome);
+    }
+    if !known {
+        state.windows.mark_window_server_observed(wsid);
+        // Layered or tiny windows (tooltips and similar chrome) are never managed.
+        const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
+        if let Some(info) = window_server_info
+            && (info.layer != 0
+                || info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+                || info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE)
+        {
+            state.windows.clear_window_server_observed(wsid);
+            trace!(?wsid, layer = info.layer, "Ignoring non-normal or tiny window");
+            return Ok(outcome);
         }
-        if !known {
-            self.state.windows.mark_window_server_observed(wsid);
-            if let Some(info) = window_server_info
-                && (info.layer != 0
-                    || info.frame.size.width < 50.0
-                    || info.frame.size.height < 50.0)
-            {
-                self.state.windows.clear_window_server_observed(wsid);
-                return;
-            }
-        }
+    }
 
-        if matches!(kind, SpaceEventKind::Fullscreen) {
-            let pid = tracked.map(|wid| wid.pid).or_else(|| {
-                self.state
-                    .windows
-                    .get_window_server_info(wsid)
-                    .or(window_server_info)
-                    .map(|info| info.pid)
-            });
-            if pid.is_none() {
-                return;
-            }
-            if let Some(wid) =
-                self.state
-                    .windows
-                    .observe_native_fullscreen(wsid, sid, last_known_user_space, pid)
-            {
-                self.reconcile_window_membership(changes, wid, None);
-            }
-            if tracked.is_none()
-                && let Some(pid) = pid
-            {
-                changes.inventory(pid);
-            }
-            return;
+    if matches!(kind, SpaceEventKind::Fullscreen) {
+        let pid = tracked.map(|wid| wid.pid).or_else(|| {
+            state
+                .windows
+                .get_window_server_info(wsid)
+                .or(window_server_info)
+                .map(|info| info.pid)
+        });
+        if pid.is_none() {
+            return Ok(outcome);
         }
-        if let Some(wid) = tracked {
-            if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
-                changes.inventory(wid.pid);
-            }
-            self.reconcile_native_presence(changes, wsid, sid, wid);
-        } else if known {
-            if let Some(pid) =
-                self.state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
-            {
-                changes.inventory(pid);
-            }
-        } else if let Some(window_server_info) = window_server_info {
-            self.update_partial_window_server_info(changes, [window_server_info]);
-            let pid = window_server_info.pid;
-            if self.app_manager.apps.contains_key(&pid) {
-                changes.inventory(pid);
-            } else if let Some(wm) = &self.communication_manager.wm_sender
-                && let Some(app) =
-                    objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
-                        pid,
-                    )
-            {
-                wm.send(WmEvent::AppLaunch(
-                    pid,
-                    AppInfo::from(&*app),
+        if let Some(wid) =
+            state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, pid)
+        {
+            outcome.memberships.push((wid, None));
+        }
+        if tracked.is_none()
+            && let Some(pid) = pid
+        {
+            outcome = outcome.with_window_inventory_request(pid);
+        }
+        return Ok(outcome);
+    }
+    if let Some(wid) = tracked {
+        if state.windows.native_fullscreen_record_for_window(wid).is_some() {
+            outcome = outcome.with_window_inventory_request(wid.pid);
+        }
+        outcome.fullscreen_restorations.push((wsid, sid, wid));
+    } else if known {
+        if let Some(pid) = state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid) {
+            outcome = outcome.with_window_inventory_request(pid);
+        }
+    } else if let Some(window_server_info) = window_server_info {
+        outcome = outcome.with_window_server_updates(vec![window_server_info]);
+
+        if !app_known {
+            if let Some(app_info) = running_app_info {
+                outcome.wm_events.push(WmEvent::AppLaunch(
+                    window_server_info.pid,
+                    app_info,
                     crate::actor::wm_controller::AppDiscoverySource::WindowServer,
                 ));
             }
+        } else {
+            outcome = outcome.with_window_inventory_request(window_server_info.pid);
         }
     }
+    Ok(outcome)
+}
+
+pub fn handle_mission_control_native_entered(
+    mission_control: &mut MissionControlManager,
+    state: &mut crate::model::RiftState,
+) -> anyhow::Result<EventOutcome> {
+    state.let_go();
+    mission_control.mission_control_state = MissionControlState::Active;
+    Ok(EventOutcome::focus_changed(None, false))
+}
+
+pub fn handle_mission_control_native_exited(
+    mission_control: &mut MissionControlManager,
+) -> anyhow::Result<EventOutcome> {
+    mission_control.mission_control_state = MissionControlState::Inactive;
+    let mut outcome = EventOutcome::layout_changed(false);
+    outcome.recover_after_mission_control = true;
+    Ok(outcome)
 }

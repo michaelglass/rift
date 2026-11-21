@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use objc2_core_foundation::CGRect;
 use rift_protocol::StackInfo;
 use tracing::trace;
@@ -9,14 +6,16 @@ use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
+use crate::actor::drag::Session;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
+use crate::actor::reactor::reconciler::Desired;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
-use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -39,68 +38,31 @@ impl AppManager {
     }
 }
 
-/// Manages drag operations and window swapping
+/// The drag preview; the drag itself is the held window's placement.
 pub struct DragManager {
-    pub actor: crate::actor::drag::DragActor,
-    pub native_motion_active: Arc<AtomicBool>,
-    pub externally_controlled_window: Option<WindowId>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
-    pub(super) preview_suppressed: bool,
     pub(super) haptics_enabled: bool,
 }
 
 impl DragManager {
-    pub fn sync_motion_gate(&self) {
-        let active = self.actor.is_active()
-            && matches!(
-                self.actor.kind(),
-                Some(
-                    crate::actor::drag::DragKind::NativeMove
-                        | crate::actor::drag::DragKind::NativeResize
-                )
-            );
-        self.native_motion_active.store(active, Ordering::Release);
-    }
-
-    /// A window leaving Rift's control can no longer be dragged by it.
-    pub fn forget_window(&mut self, wid: WindowId) {
-        if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
-            self.externally_controlled_window = None;
-        }
-        self.sync_motion_gate();
-        self.sync_preview();
-    }
-
-    pub fn reset(&mut self) {
-        self.actor.cancel();
-        self.sync_motion_gate();
-        self.release_preview();
-        self.externally_controlled_window = None;
-    }
-
     pub fn update_config(&mut self, config: DragDropSettings) {
         self.haptics_enabled = config.haptics_enabled;
-        self.actor.update_config(config);
         self.preview_enabled = config.enabled && config.preview;
         if !config.enabled || !config.preview {
             self.release_preview();
         }
-        if !config.enabled {
-            self.externally_controlled_window = None;
-        }
-        self.sync_preview();
     }
 
-    pub fn sync_preview(&mut self) {
+    pub fn sync_preview(&mut self, held: Option<(WindowId, &Session)>) {
         if cfg!(test) {
             return;
         }
-        let Some(target) = self
-            .actor
-            .preview_target()
-            .filter(|_| self.preview_enabled && !self.preview_suppressed)
-        else {
+        let Some((window, session)) = held else {
+            self.release_preview();
+            return;
+        };
+        let Some(target) = session.preview_target(window).filter(|_| self.preview_enabled) else {
             self.hide_preview();
             return;
         };
@@ -126,13 +88,6 @@ impl DragManager {
     }
 
     pub fn release_preview(&mut self) { drop(self.preview.take()); }
-
-    pub fn suppress_preview(&mut self, suppressed: bool) {
-        self.preview_suppressed = suppressed;
-        if suppressed {
-            self.hide_preview();
-        }
-    }
 }
 
 /// Manages window notifications
@@ -167,33 +122,47 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_state: super::WorkspaceSwitchState,
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
-    pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
-    pub pending_focus_mouse_warp: Option<WindowId>,
-    pub pending_display_warp: Option<crate::sys::screen::SpaceId>,
+    /// A pointer warp owed after the next arrange. Its target is read when it is paid, from
+    /// the focus then: a newer focus intent in between is where it lands, nothing stale.
+    pub owed_warp: Option<OwedWarp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwedWarp {
+    /// To the focused window's centre (mouse follows focus across a switch or a scroll).
+    Focus,
+    /// Into this Space's selected window at the spot the cursor held in the old one, or onto
+    /// the display when the workspace is empty. Includes a focus warp.
+    Display(crate::sys::screen::SpaceId),
+}
+
+impl WorkspaceSwitchManager {
+    /// Owe a focus warp; an owed display warp already lands on the focus.
+    pub fn owe_focus_warp(&mut self) {
+        if self.owed_warp.is_none() {
+            self.owed_warp = Some(OwedWarp::Focus);
+        }
+    }
 }
 
 impl WorkspaceSwitchManager {
     pub fn start_workspace_switch(&mut self, origin: WorkspaceSwitchOrigin) {
         self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
         self.active_workspace_switch = Some(self.workspace_switch_generation);
-        self.workspace_switch_state = WorkspaceSwitchState::Active;
-        self.pending_workspace_switch_origin = Some(origin);
+        self.workspace_switch_state = WorkspaceSwitchState::Active(origin);
     }
 
     pub fn manual_switch_in_progress(&self) -> bool {
-        self.workspace_switch_state == WorkspaceSwitchState::Active
-            && self.pending_workspace_switch_origin == Some(WorkspaceSwitchOrigin::Manual)
+        self.workspace_switch_state == WorkspaceSwitchState::Active(WorkspaceSwitchOrigin::Manual)
     }
 
     pub fn mark_workspace_switch_inactive(&mut self) {
         self.workspace_switch_state = WorkspaceSwitchState::Inactive;
-        self.pending_workspace_switch_origin = None;
     }
 }
 
 /// Manages refocus and cleanup state
 pub struct RefocusManager {
-    pub stale_cleanup_state: super::StaleCleanupState,
     pub refocus_state: super::RefocusState,
 }
 
@@ -220,6 +189,34 @@ pub struct LayoutManager {
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
+
+/// The stacks a `StacksChanged` broadcast reports. Clients have always received vertical
+/// stacks bottom to top.
+fn stack_infos(groups: &[crate::layout_engine::engine::GroupContainerInfo]) -> Vec<StackInfo> {
+    use crate::layout_engine::LayoutKind;
+    groups
+        .iter()
+        .map(|g| {
+            let mut windows: Vec<_> = g.window_ids.iter().map(WindowId::to_debug_string).collect();
+            let mut selected_index = g.selected_index;
+            if g.container_kind == LayoutKind::VerticalStack {
+                windows.reverse();
+                selected_index = windows.len().saturating_sub(1).saturating_sub(selected_index);
+            }
+            StackInfo {
+                total_count: g.total_count,
+                container_kind: match g.container_kind {
+                    LayoutKind::Horizontal => rift_protocol::LayoutKind::Horizontal,
+                    LayoutKind::Vertical => rift_protocol::LayoutKind::Vertical,
+                    LayoutKind::HorizontalStack => rift_protocol::LayoutKind::HorizontalStack,
+                    LayoutKind::VerticalStack => rift_protocol::LayoutKind::VerticalStack,
+                },
+                selected_index,
+                windows,
+            }
+        })
+        .collect()
+}
 
 fn bound_scrolling_tiled_frames_to_screen(
     reactor: &Reactor,
@@ -399,7 +396,7 @@ impl LayoutManager {
             reactor
                 .layout_manager
                 .layout_engine
-                .update_space_display(space, display_uuid_opt.clone());
+                .update_space_display(space, display_uuid_opt.as_deref());
             let mut layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     &reactor.state.windows,
@@ -407,12 +404,13 @@ impl LayoutManager {
                     frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic()),
                     &all_screen_frames,
                 );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                 == LayoutMode::Scrolling
-                && let Some(bounds) = ScrollingDisplayBounds::for_screen(frame, &all_screen_frames)
+                && let Some(bounds) =
+                    ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
             {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager
@@ -444,17 +442,17 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        let skip_wid = reactor.drag_manager.externally_controlled_window;
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
+            let desired = Desired::of(layout);
             // Start native workspace moves before collecting stack tabs and building
             // IPC events. App actors can perform AX work while we publish the UI.
             let switch_dispatched = is_workspace_switch && !instant && !force_frames;
             if switch_dispatched {
                 any_frame_changed |=
-                    AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+                    AnimationManager::workspace_switch_layout(reactor, space, &desired);
             }
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
                 let screen_frame = screen.frame;
@@ -480,64 +478,19 @@ impl LayoutManager {
 
                 Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
 
-                if let Some(workspace_id) =
-                    reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
-                {
-                    let workspace_index = reactor
-                        .layout_manager
-                        .layout_engine
-                        .workspaces()
-                        .active_workspace_idx(space);
-                    let workspace_name = reactor
-                        .layout_manager
-                        .layout_engine
-                        .workspace_name(space, workspace_id)
-                        .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-
-                    let stacks: Vec<StackInfo> = group_infos
-                        .iter()
-                        .map(|g| {
-                            // Clients have always received vertical stacks bottom to top.
-                            let mut windows: Vec<_> =
-                                g.window_ids.iter().map(WindowId::to_debug_string).collect();
-                            let mut selected_index = g.selected_index;
-                            if g.container_kind == crate::layout_engine::LayoutKind::VerticalStack {
-                                windows.reverse();
-                                selected_index =
-                                    windows.len().saturating_sub(1).saturating_sub(selected_index);
-                            }
-                            StackInfo {
-                                total_count: g.total_count,
-                                container_kind: match g.container_kind {
-                                    crate::layout_engine::LayoutKind::Horizontal => {
-                                        rift_protocol::LayoutKind::Horizontal
-                                    }
-                                    crate::layout_engine::LayoutKind::Vertical => {
-                                        rift_protocol::LayoutKind::Vertical
-                                    }
-                                    crate::layout_engine::LayoutKind::HorizontalStack => {
-                                        rift_protocol::LayoutKind::HorizontalStack
-                                    }
-                                    crate::layout_engine::LayoutKind::VerticalStack => {
-                                        rift_protocol::LayoutKind::VerticalStack
-                                    }
-                                },
-                                selected_index,
-                                windows,
-                            }
-                        })
-                        .collect();
+                if let Some(header) = reactor.workspace_header(space) {
+                    let stacks = stack_infos(&group_infos);
 
                     if stacks.len() > 0 {
                         let event = BroadcastEvent::StacksChanged {
-                            workspace_id: protocol_workspace_id(workspace_id),
-                            workspace_index,
-                            workspace_name,
+                            workspace_id: header.workspace_id,
+                            workspace_index: header.workspace_index,
+                            workspace_name: header.workspace_name,
                             stacks,
                             active_workspace_has_fullscreen:
                                 active_workspace_for_space_has_fullscreen,
-                            space_id: space.get(),
-                            display_uuid,
+                            space_id: header.space_id,
+                            display_uuid: header.display_uuid,
                         };
                         let _ = reactor.communication_manager.event_broadcaster.send(event);
                     }
@@ -545,28 +498,24 @@ impl LayoutManager {
             }
 
             if force_frames {
-                any_frame_changed |=
-                    AnimationManager::reapply_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |= AnimationManager::reapply_layout(reactor, space, &desired);
             } else if instant {
-                any_frame_changed |=
-                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
             } else if switch_dispatched {
                 // Already submitted before UI publication above.
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
-                any_frame_changed |=
-                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
             } else {
-                any_frame_changed |= AnimationManager::animate_layout(
-                    reactor, space, &layout, is_resize, skip_wid, true,
-                );
+                any_frame_changed |=
+                    AnimationManager::animate_layout(reactor, space, &desired, is_resize, true);
             }
-            if let Some(window) = reactor.workspace_switch_manager.pending_focus_mouse_warp
-                && reactor.workspace_switch_manager.pending_display_warp.is_none()
+            if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
+                && let Some(window) = reactor.layout_manager.layout_engine.focused_window()
                 && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                     == LayoutMode::Scrolling
-                && let Some((_, frame)) = layout.iter().find(|(wid, _)| *wid == window)
+                && let Some((_, frame)) = desired.frames().iter().find(|(wid, _)| *wid == window)
             {
-                reactor.workspace_switch_manager.pending_focus_mouse_warp = None;
+                reactor.workspace_switch_manager.owed_warp = None;
                 if reactor.screen_for_point(frame.mid()).is_some() {
                     reactor.warp_mouse(frame.mid());
                 }

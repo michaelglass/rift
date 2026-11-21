@@ -17,6 +17,12 @@ use crate::sys::screen::SpaceId;
 #[derive(Debug, Default)]
 pub struct RiftState {
     pub windows: WindowStore,
+    /// The decisions: the core, stepped through its applier. Beside the window store so a
+    /// workflow that changes windows can tell the core in the same breath.
+    pub(crate) core: crate::actor::reactor::reconciler::Reconciler,
+    /// The pending store the app actors read across threads: its targets are the projection of
+    /// the core's pending frames (`Effect::Pending`), shared with the transaction manager.
+    pub(crate) tx: crate::model::tx_store::WindowTxStore,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,7 +40,6 @@ pub enum Command {
 pub enum MissionControlState {
     Inactive,
     Active,
-    Transitioning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,15 +49,16 @@ pub enum MenuState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSwitchState {
+    Inactive,
+    /// A switch is in progress; the origin only exists while it is.
+    Active(WorkspaceSwitchOrigin),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceSwitchOrigin {
     Manual,
     Auto,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleCleanupState {
-    Enabled,
-    Suppressed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,12 +81,19 @@ pub(crate) struct WindowState {
     ///
     /// This value only updates monotonically with respect to writes; in other
     /// words, we only accept reads when we know they come after the last write.
-    pub(crate) frame_monotonic: CGRect,
-    /// Rift/macOS heuristic result, kept separately from an explicit app-rule
-    /// override so every discovered window can remain tracked.
-    pub(crate) is_manageable: bool,
-    pub(crate) native_transient: bool,
-    pub(crate) manage_override: Option<bool>,
+    /// It is the core's model frame, projected: written only by [`Self::project_seen`].
+    frame_monotonic: CGRect,
+    // Admission's own facts (the heuristic's verdict, the rule, native transience) are the
+    // core's lifecycle's, kept by the window store; minimize and the AX roles are read off
+    // `info`, the AX snapshot, and the store tells the core each change to them.
+}
+
+impl WindowState {
+    /// Where the model takes the window to be.
+    pub(crate) fn frame_monotonic(&self) -> CGRect { self.frame_monotonic }
+
+    /// The core's `Effect::Seen`, applied by the reactor's projection and nothing else.
+    pub(crate) fn project_seen(&mut self, frame: CGRect) { self.frame_monotonic = frame; }
 }
 
 impl From<WindowInfo> for WindowState {
@@ -88,9 +101,6 @@ impl From<WindowInfo> for WindowState {
         WindowState {
             frame_monotonic: info.frame,
             info,
-            is_manageable: false,
-            native_transient: false,
-            manage_override: None,
         }
     }
 }
@@ -109,28 +119,37 @@ impl WindowState {
         }
     }
 
-    /// The single admission policy used by every layout-facing caller.
-    pub(crate) fn is_admitted(&self) -> bool {
-        self.is_admitted_with_override(self.manage_override)
+    /// What the AX roles say of the window, parsed at the boundary.
+    pub(crate) fn ax_kind(&self) -> rift_core::lifecycle::AxKind {
+        rift_core::lifecycle::AxKind::classify(
+            crate::sys::app::is_ax_transient(&self.info),
+            self.info.ax_role.as_deref() == Some("AXWindow")
+                && self.info.ax_subrole.as_deref() == Some("AXDialog"),
+        )
     }
 
-    pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        !self.info.is_minimized
-            && self.allows_management(manage_override)
-            && manage_override.unwrap_or(self.is_manageable)
+    /// Whether the AX snapshot has the window minimized.
+    pub(crate) fn minimize(&self) -> rift_core::lifecycle::Minimize {
+        if self.info.is_minimized {
+            rift_core::lifecycle::Minimize::Minimized
+        } else {
+            rift_core::lifecycle::Minimize::Shown
+        }
     }
 
-    pub(super) fn allows_management(&self, manage_override: Option<bool>) -> bool {
-        // A rule that explicitly manages a window outranks the AX role
-        // heuristics when the only transient marker is the `AXDialog` subrole,
-        // which some apps use for a real main window. Native transient
-        // attachments and other AX chrome stay vetoed.
-        let overrides_dialog_veto = manage_override == Some(true)
-            && self.info.ax_role.as_deref() == Some("AXWindow")
-            && self.info.ax_subrole.as_deref() == Some("AXDialog");
-        !self.native_transient
-            && (overrides_dialog_veto || !crate::sys::app::is_ax_transient(&self.info))
-            && manage_override != Some(false)
+    /// Admission is reconciled only for a window that is shown (not minimized).
+    pub(crate) fn can_reconcile_admission(&self) -> bool {
+        self.minimize() == rift_core::lifecycle::Minimize::Shown
+    }
+}
+
+/// An app rule's override as the rule it is.
+pub(crate) fn rule_of(manage_override: Option<bool>) -> rift_core::lifecycle::Rule {
+    use rift_core::lifecycle::Rule;
+    match manage_override {
+        None => Rule::NoRule,
+        Some(true) => Rule::Manage,
+        Some(false) => Rule::Ignore,
     }
 }
 

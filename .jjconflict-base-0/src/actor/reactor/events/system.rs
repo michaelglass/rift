@@ -32,37 +32,25 @@ pub fn handle_menu_opened(
             MenuState::Open(pid)
         }
     };
-    Ok(EventOutcome::focus_changed(None, false).with_focus_follows_mouse_refresh())
+    Ok(EventOutcome::focus_changed(None, false))
 }
 
 pub fn handle_menu_closed(
     menu: &mut MenuManager,
     pid: i32,
 ) -> Result<EventOutcome, crate::model::reactor::ReactorError> {
-    let refresh = match menu.menu_state {
-        MenuState::Closed => {
-            debug!(pid, "menu closed while no menu was marked open");
-            true
-        }
+    match menu.menu_state {
+        MenuState::Closed => debug!(pid, "menu closed while no menu was marked open"),
         MenuState::Open(owner) if owner == pid => {
             debug!(pid, "menu closed; clearing menu-open state");
             menu.menu_state = MenuState::Closed;
-            true
         }
-        MenuState::Open(owner) => {
-            debug!(
-                pid,
-                owner, "ignoring menu-closed notification for non-owning app"
-            );
-            false
-        }
-    };
-    let outcome = EventOutcome::focus_changed(None, false);
-    if refresh {
-        Ok(outcome.with_focus_follows_mouse_refresh())
-    } else {
-        Ok(outcome)
+        MenuState::Open(owner) => debug!(
+            pid,
+            owner, "ignoring menu-closed notification for non-owning app"
+        ),
     }
+    Ok(EventOutcome::focus_changed(None, false))
 }
 
 pub fn handle_system_woke() -> Result<EventOutcome, crate::model::reactor::ReactorError> {

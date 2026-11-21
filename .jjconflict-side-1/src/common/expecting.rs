@@ -32,6 +32,19 @@ impl<T> Expecting<T> {
         (now.saturating_duration_since(self.since) < ECHO_WINDOW).then_some(&self.value)
     }
 
+    /// What is expected, whatever the clock says: for bookkeeping that follows identities
+    /// (a retired or rekeyed window), never for deciding whether an echo is Rift's.
+    pub fn peek(&self) -> &T { &self.value }
+
+    /// The same expectation, about something else (a window that changed identity): the clock
+    /// keeps running from when it started.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Expecting<U> {
+        Expecting {
+            value: f(self.value),
+            since: self.since,
+        }
+    }
+
     /// Drops the expectation without an echo (superseded, or its owner is going away); the value
     /// comes back for cleanup only.
     pub fn forget(self) -> T { self.value }

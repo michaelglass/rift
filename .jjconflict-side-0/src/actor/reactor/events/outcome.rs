@@ -88,6 +88,13 @@ pub(crate) struct EventOutcome {
     /// Rift quits (the layout is saved).
     pub(crate) exit: bool,
     pub(crate) reapply_app_rules: Vec<WindowId>,
+    /// The app rules changed: every known window of every app is run through them again (#702).
+    pub(crate) reprocess_app_rules: bool,
+    /// Windows whose layout participation is reconciled from their record (#702's
+    /// reconcile_window_membership), with the placement evidence when there is one.
+    pub(crate) memberships: Vec<(WindowId, Option<SpaceId>)>,
+    /// Windows retired: gone for good (#702's retire_window).
+    pub(crate) retirements: Vec<WindowId>,
     pub(crate) finalize_created_windows: Vec<WindowId>,
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,
     pub(crate) focused_window_broadcast: Option<WindowId>,
@@ -127,6 +134,9 @@ impl EventOutcome {
         self.released.append(&mut other.released);
         self.discoveries.append(&mut other.discoveries);
         self.recompute_active_spaces |= other.recompute_active_spaces;
+        self.reprocess_app_rules |= other.reprocess_app_rules;
+        self.memberships.append(&mut other.memberships);
+        self.retirements.append(&mut other.retirements);
         self.recover_after_mission_control |= other.recover_after_mission_control;
         self.refresh_window_inventories |= other.refresh_window_inventories;
         self.switch_native_space = other.switch_native_space.or(self.switch_native_space);

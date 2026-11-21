@@ -1,9 +1,10 @@
 use objc2_core_foundation::CGRect;
 use tracing::debug;
 
+use super::native::Native;
 use super::{Reactor, WindowId, WindowInfo, WindowState};
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::sys::window_server;
-#[cfg(not(test))]
 use crate::sys::window_server::WindowServerId;
 
 fn same_tab_frame(a: CGRect, b: CGRect) -> bool {
@@ -38,21 +39,12 @@ impl Reactor {
                     || !self.is_space_active(space)
                     || self.window_in_non_active_workspace(space, old)
                     || !(info.has_native_tabs || window.info.has_native_tabs)
-                    || !(same_tab_frame(window.frame_monotonic, info.frame)
+                    || !(same_tab_frame(window.frame_monotonic(), info.frame)
                         || native_frame
                             .get_or_init(|| {
-                                #[cfg(not(test))]
-                                {
-                                    info.sys_id
-                                        .and_then(window_server::get_window)
-                                        .map(|window| window.frame)
-                                }
-                                #[cfg(test)]
-                                {
-                                    None
-                                }
+                                info.sys_id.and_then(|wsid| self.native.window_frame(wsid))
                             })
-                            .is_some_and(|frame| same_tab_frame(window.frame_monotonic, frame)))
+                            .is_some_and(|frame| same_tab_frame(window.frame_monotonic(), frame)))
                     || !(window_server::window_ordered_in(wsid) == Some(false)
                         // AppKit can announce the incoming tab before ordering
                         // out the focused tab. Do not tile it provisionally.
@@ -61,17 +53,23 @@ impl Reactor {
                 {
                     return None;
                 }
-                Some((old, window.frame_monotonic, window.manage_override, wsid))
+                Some((old, window.frame_monotonic(), self.state.windows.rule(old), wsid))
             })
             .collect();
-        let [(old, frame, manage_override, old_wsid)] = candidates.as_slice() else {
+        let [(old, frame, rule, old_wsid)] = candidates.as_slice() else {
             return;
         };
-        let (old, frame, manage_override, old_wsid) = (*old, *frame, *manage_override, *old_wsid);
+        let (old, frame, rule, old_wsid) = (*old, *frame, *rule, *old_wsid);
         info.frame = frame;
-        let mut replacement = WindowState::from(info.clone());
-        replacement.manage_override = manage_override;
-        self.state.windows.insert_window(incoming, replacement);
+        // The tab that took over keeps the rule its predecessor was under.
+        self.state.insert_window_as(
+            incoming,
+            WindowState::from(info.clone()),
+            rift_core::lifecycle::Manageability::Unmanageable,
+            rule.unwrap_or(rift_core::lifecycle::Rule::NoRule),
+        );
+        // Same window, new identity: a grip on it moves first, through the core.
+        self.state.step(CoreEvent::Rekeyed { from: old, to: incoming });
         self.state.windows.replace_window_identity(old, incoming);
         self.replace_window_identity(old, incoming, Some(old_wsid));
         debug!(?old, ?incoming, "Replaced native tab in existing layout slot");
@@ -93,15 +91,14 @@ impl Reactor {
         {
             return false;
         }
-        #[cfg(not(test))]
-        let successor = window_server::key_focused_window(space).and_then(|native| {
-            let frame = window_server::get_window(WindowServerId::new(native.idx.get()))?.frame;
+        let successor = self.native.key_focused_window(space).and_then(|native| {
+            let frame = self.native.window_frame(WindowServerId::new(native.idx.get()))?;
             Some((native, frame))
         });
-        #[cfg(test)]
-        let successor = self.native_tab_successor;
         let Some((native, frame)) = successor else { return false };
-        if native.pid != old.pid || native == old || !same_tab_frame(window.frame_monotonic, frame)
+        if native.pid != old.pid
+            || native == old
+            || !same_tab_frame(window.frame_monotonic(), frame)
         {
             return false;
         }

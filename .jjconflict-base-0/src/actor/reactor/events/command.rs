@@ -8,6 +8,7 @@ use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{
     AppManager, DragManager, LayoutManager, WorkspaceSwitchManager,
 };
+use crate::actor::reactor::reconciler::CoreEvent;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
@@ -134,7 +135,7 @@ pub fn handle_command_layout(
             let assignment = state.windows.workspace_for_window(window)?;
             let screen =
                 visible_space_frames.get(&layout.layout_engine.workspaces()[assignment].space)?;
-            let frame = state.windows.window(window)?.frame_monotonic;
+            let frame = state.windows.window(window)?.frame_monotonic();
             Some((
                 window,
                 super::super::Reactor::center_frame_on_screen(frame, *screen),
@@ -147,8 +148,21 @@ pub fn handle_command_layout(
     // Geometry commands must reconcile frames even when their layout-system
     // operation has no explicit change result. Focus, selection and workspace
     // commands provide one, so preserve their no-op behavior.
-    let needs_arrange = response_changed
-        || (!is_focus_command && !is_selection_command && !is_virtual_workspace_command);
+    // A focus change rearranges only where focus moves geometry (scrolling, stacks); elsewhere
+    // it only redraws tabs (#700).
+    let focus_moves_geometry = || {
+        response
+            .focus_window
+            .and_then(|window| state.windows.workspace_for_window(window))
+            .map(|workspace| layout.layout_engine.workspaces()[workspace].space)
+            .or(command_space)
+            .is_none_or(|space| layout.layout_engine.focus_changes_geometry(space))
+    };
+    let needs_arrange = if is_focus_command {
+        response_changed && focus_moves_geometry()
+    } else {
+        response_changed || (!is_selection_command && !is_virtual_workspace_command)
+    };
     let mut outcome = if needs_arrange {
         EventOutcome::layout_changed(false)
     } else {
@@ -157,17 +171,7 @@ pub fn handle_command_layout(
     .with_layout_response(response, workspace_space)
     .with_arrange_space_scope(arrange_space_scope);
     for (window, frame) in placement_writes {
-        if let Some(assignment) = state.windows.workspace_for_window(window) {
-            let target = layout.layout_engine.workspaces()[assignment].space;
-            outcome.absorb(request_window_transfer(
-                state,
-                layout,
-                window,
-                target,
-                Some(frame),
-                true,
-            ));
-        }
+        outcome.absorb(request_window_transfer(state, layout, window, Some(frame), true));
     }
     // Switching within the command's display leaves the cursor alone.
     if let Some(space) = workspace_space
@@ -178,7 +182,7 @@ pub fn handle_command_layout(
         outcome.display_switch_warp = Some(space);
     }
     if !response_changed || arrange_space_scope.is_some() {
-        if !outcome.pre_layout_window_frame_writes.is_empty() && command_space != workspace_space {
+        if !outcome.placements.is_empty() && command_space != workspace_space {
             outcome.arrange.secondary_space_scope = command_space;
         }
     }
@@ -189,21 +193,28 @@ pub fn handle_command_layout(
     Ok(outcome)
 }
 
-/// One physical placement boundary for commands, rules, and topology recovery.
-/// Logical membership has already been committed by the workspace model.
+/// One physical placement boundary for commands, rules, and topology recovery: the window
+/// is moved to its workspace's Space, which the workspace model has already committed.
+/// `frame` is where it lands there; nothing is written while the destination is unavailable.
 pub(in crate::actor::reactor) fn request_window_transfer(
     state: &mut RiftState,
     layout: &mut LayoutManager,
     window: WindowId,
-    target: SpaceId,
     frame: Option<objc2_core_foundation::CGRect>,
     available: bool,
 ) -> EventOutcome {
-    if state.windows.request_transfer(window, frame, target, available)
+    // A window the user is dragging has no transfer to begin: the drop places it.
+    if state
+        .windows
+        .unheld(window)
+        .is_some_and(|window| window.begin_transfer(available))
         && let Some(frame) = frame
     {
+        if state.windows.window(window).is_some() {
+            state.step(CoreEvent::Seen { window, frame });
+        }
         layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
-        EventOutcome::no_change().with_pre_layout_window_frame_write(window, frame, true)
+        EventOutcome::no_change().with_placement(window, frame)
     } else {
         EventOutcome::no_change()
     }
@@ -223,7 +234,7 @@ fn current_floating_positions(
         .into_iter()
         .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
-            state.windows.window(window).map(|state| (window, state.frame_monotonic))
+            state.windows.window(window).map(|state| (window, state.frame_monotonic()))
         })
         .collect()
 }
@@ -267,7 +278,7 @@ pub fn handle_close_window(
 pub fn handle_config_updated(
     config: &mut Config,
     layout: &mut LayoutManager,
-    state: &RiftState,
+    state: &mut RiftState,
     drag: &mut DragManager,
     new_config: Config,
 ) -> anyhow::Result<EventOutcome> {
@@ -285,10 +296,12 @@ pub fn handle_config_updated(
             anyhow::anyhow!("configuration reload retained previous workspace graph: {error}")
         })?;
     let mut outcome = if config.settings.drag_drop != new_config.settings.drag_drop {
-        super::drag::handle_cancel(drag)
+        super::drag::handle_cancel(state, layout)
     } else {
         EventOutcome::no_change()
     };
+    let rules_changed =
+        config.virtual_workspaces.app_rules != new_config.virtual_workspaces.app_rules;
     *config = new_config;
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
@@ -302,6 +315,7 @@ pub fn handle_config_updated(
 
     outcome.absorb(EventOutcome {
         service_config_update: Some(config.clone()),
+        reprocess_app_rules: rules_changed,
         ..EventOutcome::layout_changed(false)
     });
     Ok(outcome)
@@ -338,7 +352,10 @@ pub fn handle_command_reactor_save_and_exit(
         return Ok(EventOutcome::no_change()
             .with_stdout_line(format!("Could not save master file; Rift is still running: {e}")));
     }
-    std::process::exit(0);
+    Ok(EventOutcome {
+        exit: true,
+        ..EventOutcome::no_change()
+    })
 }
 
 fn save_layout(
@@ -541,7 +558,6 @@ pub fn handle_command_reactor_move_workspace_to_display(
                 state,
                 layout,
                 window_move.window,
-                target_space,
                 Some(window_move.target_frame),
                 true,
             ));

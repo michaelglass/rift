@@ -401,10 +401,10 @@ mod tests {
             mode: LayoutMode::Scrolling,
         });
         for i in 1..=4 {
-            r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(
-                space,
-                crate::actor::app::WindowId::new(1, i),
-            ));
+            let window = crate::actor::app::WindowId::new(1, i);
+            r.insert_test_window_state(window, CGRect::ZERO, None, true);
+            r.assign_test_window_to_active_workspace(space, window);
+            r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(space, window));
         }
         // Prepare through the real engine boundary; no native app is needed to
         // exercise viewport focus, cached frames and workspace ownership.
@@ -419,7 +419,14 @@ mod tests {
         else {
             panic!("scrolling layout");
         };
-        system.select_window(layout, crate::actor::app::WindowId::new(1, 1));
+        system
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(crate::actor::app::WindowId::new(
+                    1, 1,
+                )),
+            )
+            .handled;
         system.prepare_layout(
             layout,
             CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),
