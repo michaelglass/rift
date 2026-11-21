@@ -1,0 +1,8 @@
+[package]
+name = "rift-core"
+version = "0.1.0"
+edition = "2024"
+description = "Rift's pure core: the frame reconciler and the pointer's mode gate, behind one step function"
+license = "Apache-2.0"
+
+[dependencies]

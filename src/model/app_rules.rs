@@ -42,6 +42,7 @@ pub struct AppRuleEffects {
     /// Source captured by the membership mutation, used only to update layout projections.
     pub source_workspace: Option<VirtualWorkspaceId>,
     pub workspace_id: VirtualWorkspaceId,
+    pub(crate) names_workspace: bool,
     pub floating: bool,
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
@@ -98,39 +99,17 @@ pub enum AppRuleRejection {
     Heuristic,
 }
 
-/// Follow-up integration work produced while applying a batch of app rules.
-///
-/// Like the reactor's `EventOutcome`, this is returned to the owning layer and
-/// consumed explicitly rather than stored as transient engine state.
+/// Frame and workspace requests from observing a single window.
 #[derive(Debug, Default)]
 pub(crate) struct AppRuleOutcome {
-    placements: Vec<AppRulePlacement>,
-    resizes: Vec<AppRuleResize>,
-    workspace_focus: Option<AppRuleWorkspaceFocus>,
+    pub(crate) frame: Option<AppRuleFrame>,
+    pub(crate) workspace_focus: Option<AppRuleWorkspaceFocus>,
 }
 
-impl AppRuleOutcome {
-    pub(crate) fn push_placement(&mut self, placement: AppRulePlacement) {
-        self.placements.push(placement);
-    }
-
-    pub(crate) fn push_resize(&mut self, resize: AppRuleResize) { self.resizes.push(resize); }
-
-    pub(crate) fn has_resizes(&self) -> bool { !self.resizes.is_empty() }
-
-    pub(crate) fn set_workspace_focus(&mut self, focus: AppRuleWorkspaceFocus) {
-        self.workspace_focus = Some(focus);
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Vec<AppRulePlacement>,
-        Vec<AppRuleResize>,
-        Option<AppRuleWorkspaceFocus>,
-    ) {
-        (self.placements, self.resizes, self.workspace_focus)
-    }
+#[derive(Debug)]
+pub(crate) enum AppRuleFrame {
+    Place(AppRulePlacement),
+    Resize(AppRuleResize),
 }
 
 /// One-shot frame request derived from a floating app rule.
@@ -221,26 +200,28 @@ impl AppRuleEngine {
         engine
     }
 
-    pub fn uses_window_tags(&self) -> bool {
-        self.wildcard_rules
-            .iter()
-            .chain(self.rules_by_app_id.values().flatten())
-            .any(|rule| rule.window_tags.is_some())
-    }
-
     pub fn evaluate(&self, context: WindowRuleContext<'_>) -> Option<AppRuleDecision> {
-        self.matching_rule(context).map(|rule| rule.action.clone())
+        self.evaluate_observation(context, false, || None)
     }
 
-    /// Re-evaluate rules after a title change without letting a title-independent
-    /// fallback reassert its initial workspace placement.
     pub fn evaluate_for_title_change(
         &self,
         context: WindowRuleContext<'_>,
     ) -> Option<AppRuleDecision> {
-        self.matching_rule(context).map(|rule| {
+        self.evaluate_observation(context, true, || None)
+    }
+
+    pub(crate) fn evaluate_observation(
+        &self,
+        context: WindowRuleContext<'_>,
+        title_change: bool,
+        read_tags: impl FnOnce() -> Option<u64>,
+    ) -> Option<AppRuleDecision> {
+        let read_tags = std::cell::LazyCell::new(|| context.window_tags.or_else(read_tags));
+        self.matching_rule(context, || *read_tags).map(|rule| {
             let mut decision = rule.action.clone();
-            if !rule.matches_title() {
+            // A title-independent fallback must not reassert initial placement.
+            if title_change && !rule.matches_title() {
                 decision.workspace = None;
                 decision.focus = false;
             }
@@ -248,7 +229,11 @@ impl AppRuleEngine {
         })
     }
 
-    fn matching_rule(&self, context: WindowRuleContext<'_>) -> Option<&CompiledRule> {
+    fn matching_rule(
+        &self,
+        context: WindowRuleContext<'_>,
+        tags: impl Fn() -> Option<u64>,
+    ) -> Option<&CompiledRule> {
         let app_id = context.app_bundle_id.map(str::to_ascii_lowercase);
         let app_name = context.app_name.map(str::to_lowercase);
         let title = context.window_title.map(str::to_lowercase);
@@ -263,6 +248,9 @@ impl AppRuleEngine {
             )
             .filter(|rule| {
                 rule.matches(context, app_id.as_deref(), app_name.as_deref(), title.as_deref())
+                    && rule
+                        .window_tags
+                        .is_none_or(|mask| tags().is_some_and(|tags| tags & mask == mask))
             })
             // More matcher fields win; configuration order is the deterministic tie-breaker.
             .max_by_key(|rule| (rule.specificity, std::cmp::Reverse(rule.index)))
@@ -365,9 +353,6 @@ impl CompiledRule {
                 .is_none_or(|rule| title.is_some_and(|actual| actual.contains(rule)))
             && self.ax_role.as_deref().is_none_or(|rule| context.ax_role == Some(rule))
             && self.ax_subrole.as_deref().is_none_or(|rule| context.ax_subrole == Some(rule))
-            && self
-                .window_tags
-                .is_none_or(|mask| context.window_tags.is_some_and(|tags| tags & mask == mask))
     }
 }
 

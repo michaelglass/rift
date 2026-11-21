@@ -1,0 +1,1887 @@
+//! Desired frames, and the one place that decides to write them.
+//!
+//! Layout says where each window should be. The [`Reconciler`] compares that with what each
+//! window's app has acknowledged and mints a [`Write`] only where they differ. A `Write` cannot
+//! be built anywhere else, and the platform's senders take nothing but a `Write`, so a frame
+//! reaches an app only because the reconciler decided it should.
+//!
+//! Time is never read here: every call that needs it is handed `now`. Nor are request ids
+//! minted here: every call that may write is handed the `request` its writes go out under.
+
+use std::cmp::Ordering;
+use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
+
+use crate::Kinds;
+use crate::pointer::{Holder, Owner};
+
+/// How far an app's answer may be from the frame Rift asked for and still be that frame
+/// (yabai's `AX_DIFF`).
+pub const ACK_TOLERANCE: f64 = 1.5;
+
+/// How long an app has to answer a write before Rift stops waiting for it.
+pub const WRITE_DEADLINE: Duration = Duration::from_millis(300);
+
+/// A frame the reconciler decided to send, and the request it goes out under. Only a core can
+/// make one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Write<K: Kinds> {
+    window: K::Window,
+    frame: K::Frame,
+    request: K::Request,
+}
+
+impl<K: Kinds> Write<K> {
+    pub fn window(&self) -> K::Window { self.window }
+
+    pub fn frame(&self) -> K::Frame { self.frame }
+
+    /// The id to send it under; the app's answer names it.
+    pub fn request(&self) -> K::Request { self.request }
+
+    /// Only the core (and its plain-data translation and wire format) makes a write.
+    pub(crate) fn new(window: K::Window, frame: K::Frame, request: K::Request) -> Self {
+        Write { window, frame, request }
+    }
+}
+
+/// Where one window stands between what Rift asked of its app and what the app answered.
+/// Every window the model knows has one.
+/// A request the core sent a window (or recorded as sent outside it): only the reconciler makes
+/// one, so a request id from anywhere else can never pass for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Sent<R>(R);
+
+impl<R: Copy> Sent<R> {
+    /// The id it went out under.
+    pub fn request(self) -> R { self.0 }
+}
+
+/// The request a report or an event says it is about: the platform's word, not yet checked. It
+/// means something only against a request the core sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp<R>(R);
+
+impl<R: Ord> Stamp<R> {
+    pub fn new(request: R) -> Self { Stamp(request) }
+
+    /// Older than, the same as, or newer than what the core sent.
+    fn against(&self, sent: &Sent<R>) -> Ordering { self.0.cmp(&sent.0) }
+
+    /// It names `sent`.
+    fn names(&self, sent: &Sent<R>) -> bool { self.0 == sent.0 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sync<K: Kinds> {
+    /// The app has the window at `acked`: it answered so, or reported it there. A desire equal
+    /// to `acked` is not written. `last` is the request of the latest frame Rift sent it, if
+    /// any (a read stamped older than it is from before it).
+    Settled {
+        acked: K::Frame,
+        last: Option<Sent<K::Request>>,
+    },
+    /// Rift does not know where the app has the window: the user just dragged it (reports
+    /// during a drag acknowledge nothing Rift asked for), or the displays changed (macOS
+    /// resizes windows silently). The next desire is written whatever it is; a report or an
+    /// answer settles it. `last` as for `Settled`.
+    Unknown { last: Option<Sent<K::Request>> },
+    /// One write is with the app, sent under `request`, from `before`. A newer desire waits in
+    /// `queued` (one, the latest) until the app answers or `deadline` passes. `origin` says
+    /// whether Rift wrote it or an animation ended short of it.
+    InFlight {
+        target: K::Frame,
+        deadline: K::Time,
+        queued: Option<K::Frame>,
+        request: Sent<K::Request>,
+        before: Before<K>,
+        origin: Origin,
+    },
+    /// The platform is animating the window to `target` (a layout transition or a camera), its
+    /// frames sent under `request`. A desire treats the window as at `target`; an answer to an
+    /// earlier request, or a report while nobody holds it, is no news. An answer or report on
+    /// the target settles it. If the animation ends first, the window waits for the app's
+    /// answer to it as a write in flight does (deadline from the end), so a refusal is
+    /// recorded and nothing is held forever.
+    Animating {
+        target: K::Frame,
+        request: Sent<K::Request>,
+    },
+    /// The app answered `wanted` with `got`, or did not answer in time (`got` is then what it
+    /// had acknowledged before). Rift does not ask for `wanted` again while the window stays at
+    /// `got`.
+    /// `request` is the refused write's.
+    Refused {
+        wanted: K::Frame,
+        got: K::Frame,
+        request: Sent<K::Request>,
+    },
+    /// The write sent under `request` asking for `wanted` never reached the app (the platform
+    /// reported it failed), `failures` times in a row for this desire. The next desire for
+    /// `wanted` is written again; a different one is written afresh. `before` is what the app
+    /// had acknowledged.
+    Failed {
+        wanted: K::Frame,
+        failures: Failures,
+        request: Sent<K::Request>,
+        before: Before<K>,
+    },
+    /// Rift moves the window outside the core (a gesture's camera), its frames going out under
+    /// `request`, which the platform reported: a read stamped with it is Rift's own. `at` is
+    /// where the app last reported the window (where the model had it, until a report).
+    Outside {
+        request: Sent<K::Request>,
+        at: K::Frame,
+    },
+}
+
+/// Where a write in flight came from: only an ended animation's can be stopped by the platform
+/// (its frames dropped); a write Rift sent is with the app whatever the platform presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Written,
+    AnimationEnded,
+    /// Rift wrote the frame again after `failures` deliveries of it failed in a row.
+    Retry {
+        failures: Failures,
+    },
+}
+
+/// How many deliveries of one desire failed in a row. A third failure gives the desire up, so
+/// there is no third value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failures {
+    Once,
+    Twice,
+}
+
+/// What a reported delivery failure came to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Failure<K: Kinds> {
+    /// Not the write in flight (an older one): nothing changes.
+    Stale,
+    /// The next desire for its frame writes it again.
+    Retrying,
+    /// The third failure in a row: the desire is given up as refused. The app has the window
+    /// where it last acknowledged it, if Rift knows where that is.
+    GaveUp(Before<K>),
+}
+
+/// What one more failed delivery of a desire comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterFailure {
+    Retry(Failures),
+    GiveUp,
+}
+
+impl Failures {
+    /// One more failure on top of `before` (none, for a first write).
+    fn after(before: Option<Failures>) -> AfterFailure {
+        match before {
+            None => AfterFailure::Retry(Failures::Once),
+            Some(Failures::Once) => AfterFailure::Retry(Failures::Twice),
+            Some(Failures::Twice) => AfterFailure::GiveUp,
+        }
+    }
+}
+
+/// What the app had acknowledged when a write was sent: where a write it never answers leaves
+/// the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Before<K: Kinds> {
+    Acked(K::Frame),
+    Unknown,
+}
+
+/// How a layout pass wants its frames.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Want {
+    /// Layout: nothing to send when the app already has the window there.
+    Arrange,
+    /// Layout during a workspace switch: as [`Want::Arrange`], and a window that keeps its size
+    /// is only moved (a position-only request).
+    ArrangePositions,
+}
+
+/// What an animated layout pass does with one window's desire.
+#[derive(Debug, PartialEq)]
+pub enum Planned<K: Kinds> {
+    /// Animate it there.
+    Animate,
+    /// Treat it as a desire instead: where the app has the window is unknown, or a write is
+    /// with the app (the animation's frames could overtake it and be undone by it).
+    Verdict(Verdict<K>),
+}
+
+/// What the reconciler made of a desire.
+#[derive(Debug, PartialEq)]
+pub enum Verdict<K: Kinds> {
+    /// Send this now.
+    Send(Write<K>),
+    /// A write is with the app; this desire goes after it.
+    Queued,
+    /// The window is there, on its way there, refused to go there, or is the user's.
+    Nothing,
+}
+
+/// What a report of a window's frame meant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reply {
+    /// Nothing new: a read from before the app applied Rift's latest word, the frame Rift asked
+    /// for, or where the model already had the window.
+    NoNews,
+    /// Rift's own frame on its way (a step of a write or an animation, or a frame Rift sent
+    /// outside the core): the model takes it, nothing is re-derived.
+    InTransit,
+    /// The app's answer to the write in flight.
+    Answered(Answer),
+    /// Someone else put the window here (the user if their hand is on it, else its app), or
+    /// the app's answer to a write Rift stopped waiting for: news, to re-derive from.
+    Foreign,
+}
+
+/// The app's answer to a write, classified against the write it answers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Answer {
+    Acked,
+    /// The app put the window somewhere else ([`Sync::Refused`] says where).
+    Refused,
+}
+
+/// What the reconciler decided along the way that is not a write: the platform logs these.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Note {
+    /// A desire for a window that is the user's was dropped.
+    Discarded,
+    /// An app did not answer a write in time.
+    TimedOut,
+    /// A write to the window could not be delivered three times in a row (its app's AX kept
+    /// failing): Rift stops asking for that frame, as for a refusal.
+    GaveUp,
+}
+
+fn answers<K: Kinds>(target: K::Frame, frame: K::Frame) -> bool {
+    K::is_within(frame, ACK_TOLERANCE, target)
+}
+
+/// What the model has of one window: where it takes the window to be, and where the window
+/// stands with its app.
+#[derive(Debug, Clone, Copy)]
+struct Record<K: Kinds> {
+    /// The model's frame (its projection is `frame_monotonic` in rift's window store).
+    seen: K::Frame,
+    sync: Sync<K>,
+}
+
+#[derive(Debug)]
+pub struct Reconciler<K: Kinds> {
+    /// Every window the model knows.
+    windows: HashMap<K::Window, Record<K>>,
+    /// Every write sent, with its deadline, in the order sent. A deadline is the send time
+    /// plus [`WRITE_DEADLINE`], so this is also deadline order. An entry whose window has since
+    /// been answered or written again no longer matches its sync state and is dropped when it
+    /// reaches the front.
+    deadlines: VecDeque<(K::Time, K::Window)>,
+    /// What was decided along the way, for the caller to drain ([`Reconciler::notes`]).
+    notes: Vec<(K::Window, Note)>,
+    /// Windows whose state changed since the last call to [`Reconciler::touched`].
+    touched: Vec<K::Window>,
+}
+
+impl<K: Kinds> Default for Reconciler<K> {
+    fn default() -> Self {
+        Reconciler {
+            windows: HashMap::new(),
+            deadlines: VecDeque::new(),
+            notes: Vec::new(),
+            touched: Vec::new(),
+        }
+    }
+}
+
+impl<K: Kinds> Sync<K> {
+    /// The frame Rift has pending: the target of a write in flight or of an animation, or the
+    /// frame its app refused (it still says where Rift means the window to be).
+    fn pending(self) -> Option<K::Frame> {
+        match self {
+            Sync::InFlight { target, .. } | Sync::Animating { target, .. } => Some(target),
+            Sync::Refused { wanted, .. } | Sync::Failed { wanted, .. } => Some(wanted),
+            Sync::Settled { .. } | Sync::Unknown { .. } | Sync::Outside { .. } => None,
+        }
+    }
+
+    /// The request of the latest frame Rift sent the window, if any.
+    fn last(self) -> Option<Sent<K::Request>> {
+        match self {
+            Sync::Settled { last, .. } | Sync::Unknown { last } => last,
+            Sync::InFlight { request, .. }
+            | Sync::Animating { request, .. }
+            | Sync::Refused { request, .. }
+            | Sync::Failed { request, .. }
+            | Sync::Outside { request, .. } => Some(request),
+        }
+    }
+}
+
+impl<K: Kinds> Reconciler<K> {
+    /// Where `window` stands; `None` for a window the model does not know.
+    pub fn sync(&self, window: K::Window) -> Option<Sync<K>> {
+        self.windows.get(&window).map(|record| record.sync)
+    }
+
+    /// Where the model takes `window` to be; `None` for a window it does not know.
+    pub fn seen(&self, window: K::Window) -> Option<K::Frame> {
+        self.windows.get(&window).map(|record| record.seen)
+    }
+
+    /// The model takes `window` to be at `frame` from now on. A window it did not know appears
+    /// there, its app having it there. Returns where the model had it before.
+    pub fn see(&mut self, window: K::Window, frame: K::Frame) -> Option<K::Frame> {
+        match self.windows.get_mut(&window) {
+            Some(record) => Some(std::mem::replace(&mut record.seen, frame)),
+            None => {
+                let sync = Sync::Settled { acked: frame, last: None };
+                self.windows.insert(window, Record { seen: frame, sync });
+                None
+            }
+        }
+    }
+
+    /// What was decided since the last call that is not a write.
+    pub fn drain_notes(&mut self) -> std::vec::Drain<'_, (K::Window, Note)> { self.notes.drain(..) }
+
+    fn set(&mut self, window: K::Window, sync: Sync<K>) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.sync = sync;
+            self.touched.push(window);
+        }
+    }
+
+    /// The windows whose state changed since the last call, each with its pending frame.
+    pub fn drain_pending(&mut self) -> impl Iterator<Item = (K::Window, Option<K::Frame>)> + '_ {
+        self.touched.dedup();
+        let windows = &self.windows;
+        self.touched.drain(..).map(move |window| {
+            (
+                window,
+                windows.get(&window).and_then(|record| record.sync.pending()),
+            )
+        })
+    }
+
+    /// The frame Rift has pending for `window`, if any.
+    pub fn pending(&self, window: K::Window) -> Option<K::Frame> { self.sync(window)?.pending() }
+
+    /// `window` is gone, or no longer seen: nothing is tracked for it any more.
+    pub fn remove(&mut self, window: K::Window) {
+        if self.windows.remove(&window).is_some() {
+            self.touched.push(window);
+        }
+    }
+
+    /// macOS replaced `from` by `to`: unless `to` is already known, `from`'s record moves to it.
+    /// A settled window stays settled where its app acknowledged it. Anything pending for
+    /// `from` (a write in flight or queued, an animation, a refusal) went to an identity that
+    /// no longer exists, so where the app has `to` is unknown. No desire moves across: the next
+    /// arrange re-derives it for `to`.
+    pub fn rekey(&mut self, from: K::Window, to: K::Window) {
+        if let Some(Record { seen, sync }) = self.windows.get(&from).copied()
+            && !self.windows.contains_key(&to)
+        {
+            let sync = match sync {
+                Sync::Settled { .. } | Sync::Unknown { .. } => sync,
+                Sync::InFlight { .. }
+                | Sync::Animating { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. }
+                | Sync::Outside { .. } => Sync::Unknown { last: sync.last() },
+            };
+            self.windows.insert(to, Record { seen, sync });
+            self.touched.push(to);
+        }
+        self.remove(from);
+    }
+
+    /// Rift no longer knows where the app has `window` (a drag ended on it, the displays
+    /// changed). A write in flight still has its answer to come; what it falls back to if that
+    /// never comes is unknown too.
+    pub fn distrust(&mut self, window: K::Window) {
+        let unknown = match self.sync(window) {
+            None => return,
+            Some(Sync::InFlight {
+                target,
+                deadline,
+                queued,
+                request,
+                before: _,
+                origin,
+            }) => Sync::InFlight {
+                target,
+                deadline,
+                queued,
+                request,
+                before: Before::Unknown,
+                origin,
+            },
+            Some(
+                sync @ (Sync::Settled { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. }
+                | Sync::Unknown { .. }
+                | Sync::Animating { .. }
+                | Sync::Outside { .. }),
+            ) => Sync::Unknown { last: sync.last() },
+        };
+        self.set(window, unknown);
+    }
+
+    /// What a write sent now would fall back to.
+    fn before(sync: Sync<K>) -> Before<K> {
+        match sync {
+            Sync::Settled { acked, .. }
+            | Sync::Animating { target: acked, .. }
+            | Sync::Outside { at: acked, .. } => Before::Acked(acked),
+            Sync::Refused { got, .. } => Before::Acked(got),
+            Sync::Unknown { .. } => Before::Unknown,
+            Sync::InFlight { before, .. } | Sync::Failed { before, .. } => before,
+        }
+    }
+
+    fn send(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        frame: K::Frame,
+        before: Before<K>,
+        origin: Origin,
+    ) -> Write<K> {
+        let deadline = K::after(now, WRITE_DEADLINE);
+        self.deadlines.push_back((deadline, window));
+        self.set(window, Sync::InFlight {
+            target: frame,
+            deadline,
+            queued: None,
+            request: Sent(request),
+            before,
+            origin,
+        });
+        Write { window, frame, request }
+    }
+
+    /// Rift wants `window` at `desired`. A write goes out under `request`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn want(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        desired: K::Frame,
+        owner: Owner,
+    ) -> Verdict<K> {
+        let Some(Record { seen: known, mut sync }) = self.windows.get(&window).copied() else {
+            return Verdict::Nothing;
+        };
+        // A write nobody answered in time no longer holds newer desires back. Whatever was
+        // queued behind it is older than `desired`, so it is dropped.
+        if let Sync::InFlight {
+            target,
+            deadline,
+            before,
+            request: sent,
+            ..
+        } = sync
+            && now >= deadline
+        {
+            sync = self.time_out(window, target, sent, before);
+        }
+        match owner {
+            Owner::Rift => {}
+            Owner::User => {
+                // Discarded, not queued: the release re-derives the window's frame.
+                self.notes.push((window, Note::Discarded));
+                return Verdict::Nothing;
+            }
+        }
+        match sync {
+            Sync::InFlight {
+                target,
+                deadline,
+                queued,
+                request: sent,
+                before,
+                origin,
+            } => {
+                if K::same_as(desired, target) {
+                    if queued.is_some() {
+                        self.set(window, Sync::InFlight {
+                            target,
+                            deadline,
+                            queued: None,
+                            request: sent,
+                            before,
+                            origin,
+                        });
+                    }
+                    return Verdict::Nothing;
+                }
+                let queued = Some(desired);
+                self.set(window, Sync::InFlight {
+                    target,
+                    deadline,
+                    queued,
+                    request: sent,
+                    before,
+                    origin,
+                });
+                Verdict::Queued
+            }
+            // Asking again for what was refused would be a retry loop. A window that has
+            // since been seen somewhere else is no longer the one that refused.
+            Sync::Refused { wanted, got, .. }
+                if K::same_as(desired, wanted) && K::same_as(known, got) =>
+            {
+                Verdict::Nothing
+            }
+            // The app has the window there already, as near as an answer to this very desire
+            // would be (a terminal rounds to whole cells): asking again would be asked on every
+            // arrange. Rift's frames sent outside the core left it where the app last reported.
+            Sync::Settled { acked, .. } | Sync::Outside { at: acked, .. }
+                if answers::<K>(desired, acked) =>
+            {
+                Verdict::Nothing
+            }
+            // A delivery of it failed: written again, the failures counted.
+            Sync::Failed { wanted, failures, before, .. } if K::same_as(desired, wanted) => {
+                let origin = Origin::Retry { failures };
+                Verdict::Send(self.send(now, request, window, desired, before, origin))
+            }
+            // An animation is taking it there.
+            Sync::Animating { target, .. } if K::same_as(desired, target) => Verdict::Nothing,
+            // A refused window is where the model has it (a timed-out write's `got` is only what
+            // was acknowledged before it: the write may still have landed).
+            Sync::Refused { .. } if K::same_as(desired, known) => Verdict::Nothing,
+            Sync::Settled { .. }
+            | Sync::Refused { .. }
+            | Sync::Unknown { .. }
+            | Sync::Failed { .. }
+            | Sync::Animating { .. }
+            | Sync::Outside { .. } => Verdict::Send(self.send(
+                now,
+                request,
+                window,
+                desired,
+                Self::before(sync),
+                Origin::Written,
+            )),
+        }
+    }
+
+    /// The platform could not deliver the write to `window` sent under `failed`: it never
+    /// reached the app. The write in flight under that request becomes [`Sync::Failed`], so the
+    /// next desire for its frame is written again; a third failure in a row gives the desire
+    /// up as refused (noted). What waited behind it goes out under `request` now. A failure of
+    /// any other write (an older one) changes nothing.
+    pub fn failed(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        failed: K::Request,
+        owner: Owner,
+    ) -> (Failure<K>, Option<Write<K>>) {
+        let Some(Sync::InFlight {
+            target,
+            queued,
+            request: sent,
+            before,
+            origin,
+            ..
+        }) = self.sync(window)
+        else {
+            return (Failure::Stale, None);
+        };
+        if sent != Sent(failed) {
+            return (Failure::Stale, None);
+        }
+        let so_far = match origin {
+            Origin::Retry { failures } => Some(failures),
+            Origin::Written | Origin::AnimationEnded => None,
+        };
+        let (failure, after) = match Failures::after(so_far) {
+            AfterFailure::Retry(failures) => (Failure::Retrying, Sync::Failed {
+                wanted: target,
+                failures,
+                request: sent,
+                before,
+            }),
+            AfterFailure::GiveUp => {
+                self.notes.push((window, Note::GaveUp));
+                let after = match before {
+                    Before::Acked(got) => Sync::Refused {
+                        wanted: target,
+                        got,
+                        request: sent,
+                    },
+                    Before::Unknown => Sync::Unknown { last: Some(sent) },
+                };
+                (Failure::GaveUp(before), after)
+            }
+        };
+        self.set(window, after);
+        let released =
+            queued.and_then(|next| self.release(now, request, window, next, owner, after));
+        (failure, released)
+    }
+
+    /// A write to `window` is with its app: what was queued behind it is dropped, the write
+    /// itself still waited for. False when no write is in flight.
+    pub fn drop_queued(&mut self, window: K::Window) -> bool {
+        match self.sync(window) {
+            Some(Sync::InFlight {
+                target,
+                deadline,
+                queued,
+                request,
+                before,
+                origin,
+            }) => {
+                if queued.is_some() {
+                    let queued = None;
+                    self.set(window, Sync::InFlight {
+                        target,
+                        deadline,
+                        queued,
+                        request,
+                        before,
+                        origin,
+                    });
+                }
+                true
+            }
+            Some(
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::Animating { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. }
+                | Sync::Outside { .. },
+            )
+            | None => false,
+        }
+    }
+
+    /// Rift sends `window` frames outside the core under `request` (a gesture's camera), and
+    /// the platform says so: a read stamped with it is Rift's own. Whatever was pending for the
+    /// window is superseded by those frames.
+    pub fn sent_outside(&mut self, window: K::Window, request: K::Request) {
+        if let Some(Record { seen, .. }) = self.windows.get(&window).copied() {
+            self.set(window, Sync::Outside {
+                request: Sent(request),
+                at: seen,
+            });
+        }
+    }
+
+    /// The interactive frame of the window the user is dragging with the modifier held: the
+    /// drag's own desire, and the only write a dragged window gets. It is not tracked: the
+    /// next one replaces it in the app's queue, and the drop arranges the window afresh.
+    pub fn follow(&mut self, request: K::Request, window: K::Window, frame: K::Frame) -> Write<K> {
+        if self.windows.contains_key(&window) {
+            self.set(window, Sync::Settled {
+                acked: frame,
+                last: Some(Sent(request)),
+            });
+        }
+        Write { window, frame, request }
+    }
+
+    /// The desire `next` waited behind a write that has just been answered or given up on,
+    /// leaving the window `after`: it goes out now, unless the user's hand is on the window
+    /// (then it is discarded; the release re-derives the window's frame).
+    fn release(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        next: K::Frame,
+        owner: Owner,
+        after: Sync<K>,
+    ) -> Option<Write<K>> {
+        match owner {
+            Owner::Rift => {
+                Some(self.send(now, request, window, next, Self::before(after), Origin::Written))
+            }
+            Owner::User => {
+                self.notes.push((window, Note::Discarded));
+                None
+            }
+        }
+    }
+
+    /// `window` was read at `frame`. `as_of` is the newest
+    /// request the app had applied to the window when it read the frame, if the read is
+    /// stamped (an answer, a read Rift asked for); a notification is not. What waited behind
+    /// an answered write goes out under `request`.
+    ///
+    /// One rule: a read from before Rift's latest word is no news; one made after it is the
+    /// app's answer to it (an ack or a refusal of a write, a step or the landing of an
+    /// animation, else news); one made after a frame Rift sent outside the core (a camera) is
+    /// that frame. An unstamped report is placed by its geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        frame: K::Frame,
+        as_of: Option<Stamp<K::Request>>,
+        owner: Owner,
+        holder: Holder,
+    ) -> (Reply, Option<Write<K>>) {
+        let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
+            return (Reply::Foreign, None);
+        };
+        let stamped = match (as_of, sync.last()) {
+            (Some(as_of), Some(last)) => Some((as_of.against(&last), last)),
+            // Unstamped, or a stamp with nothing sent this window: placed by geometry.
+            (None, _) | (Some(_), None) => None,
+        };
+        match stamped {
+            Some((Ordering::Less, _)) => return (Reply::NoNews, None),
+            Some((Ordering::Equal, last)) => match sync {
+                Sync::InFlight { target, queued, .. } => {
+                    let (answer, after) = if answers::<K>(target, frame) {
+                        (Answer::Acked, Sync::Settled { acked: frame, last: Some(last) })
+                    } else {
+                        let refused = Sync::Refused {
+                            wanted: target,
+                            got: frame,
+                            request: last,
+                        };
+                        (Answer::Refused, refused)
+                    };
+                    self.set(window, after);
+                    let released = queued
+                        .and_then(|next| self.release(now, request, window, next, owner, after));
+                    return (Reply::Answered(answer), released);
+                }
+                Sync::Animating { target, .. } if answers::<K>(target, frame) => {
+                    self.set(window, Sync::Settled { acked: frame, last: Some(last) });
+                    return (Reply::Answered(Answer::Acked), None);
+                }
+                Sync::Animating { .. } => return (Reply::InTransit, None),
+                // One of Rift's frames sent outside the core: where the app has the window, the
+                // frames still coming.
+                Sync::Outside { request: sent, .. } => {
+                    self.set(window, Sync::Outside { request: sent, at: frame });
+                    return (Reply::InTransit, None);
+                }
+                // The answer to a write Rift stopped waiting for, or to one whose delivery
+                // failed: news like any report.
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. } => {}
+            },
+            // A stamp the core never heard of (newer than anything sent this window), or none:
+            // not Rift's, so placed by its geometry like any report.
+            Some((Ordering::Greater, _)) | None => {}
+        }
+        (self.place(window, sync, frame, known, holder), None)
+    }
+
+    /// An unstamped report, placed by its geometry. A report of the frame in flight is no
+    /// news, and does not end the wait: the app's answer does, and it can still differ. Any
+    /// other report is where the app has the window.
+    fn place(
+        &mut self,
+        window: K::Window,
+        sync: Sync<K>,
+        frame: K::Frame,
+        known: K::Frame,
+        holder: Holder,
+    ) -> Reply {
+        match (sync, holder) {
+            (Sync::InFlight { target, .. }, Holder::User | Holder::Nobody)
+                if answers::<K>(target, frame) =>
+            {
+                Reply::NoNews
+            }
+            (Sync::InFlight { .. }, Holder::Nobody) => Reply::InTransit,
+            // The animation is moving the window: a report on its target settles it, any other
+            // is a frame on the way.
+            (Sync::Animating { target, request }, Holder::Nobody) => {
+                if answers::<K>(target, frame) {
+                    self.set(window, Sync::Settled {
+                        acked: frame,
+                        last: Some(request),
+                    });
+                    Reply::NoNews
+                } else {
+                    Reply::InTransit
+                }
+            }
+            (
+                Sync::InFlight { .. }
+                | Sync::Settled { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. }
+                | Sync::Unknown { .. }
+                | Sync::Outside { .. },
+                Holder::User | Holder::Nobody,
+            )
+            | (Sync::Animating { .. }, Holder::User) => {
+                let settled = Sync::Settled {
+                    acked: frame,
+                    last: sync.last(),
+                };
+                if K::same_as(frame, known) {
+                    match sync {
+                        // A refusal stands while the window stays where the model has it, and
+                        // so do Rift's frames sent outside the core.
+                        Sync::Refused { .. } | Sync::Outside { .. } => {}
+                        // A failed write landed after all, or the app reports the window where
+                        // the model has it: settled there.
+                        Sync::Settled { .. }
+                        | Sync::Unknown { .. }
+                        | Sync::Failed { .. }
+                        | Sync::InFlight { .. }
+                        | Sync::Animating { .. } => self.set(window, settled),
+                    }
+                    Reply::NoNews
+                } else {
+                    self.set(window, settled);
+                    Reply::Foreign
+                }
+            }
+        }
+    }
+
+    /// The app did not answer the write of `target` in time: a refusal, with the window where
+    /// it was acknowledged before the write, or unknown if that was unknown.
+    fn time_out(
+        &mut self,
+        window: K::Window,
+        target: K::Frame,
+        request: Sent<K::Request>,
+        before: Before<K>,
+    ) -> Sync<K> {
+        self.notes.push((window, Note::TimedOut));
+        let late = match before {
+            Before::Acked(got) => Sync::Refused { wanted: target, got, request },
+            Before::Unknown => Sync::Unknown { last: Some(request) },
+        };
+        self.set(window, late);
+        late
+    }
+
+    /// The write a `deadlines` entry stands for, if it is still waiting: its target, what was
+    /// queued behind it, and what it falls back to.
+    #[allow(clippy::type_complexity)]
+    fn waiting(
+        &self,
+        (deadline, window): (K::Time, K::Window),
+    ) -> Option<(K::Frame, Option<K::Frame>, Sent<K::Request>, Before<K>)> {
+        match self.sync(window)? {
+            Sync::InFlight {
+                target,
+                deadline: due,
+                queued,
+                request,
+                before,
+                origin: _,
+            } if due == deadline => Some((target, queued, request, before)),
+            Sync::InFlight { .. }
+            | Sync::Settled { .. }
+            | Sync::Refused { .. }
+            | Sync::Unknown { .. }
+            | Sync::Failed { .. }
+            | Sync::Animating { .. }
+            | Sync::Outside { .. } => None,
+        }
+    }
+
+    /// Stops waiting for every write whose deadline has passed at `now`; `pointer` says whose
+    /// each window is. Returns the writes that were queued behind the late ones.
+    pub fn expire(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        pointer: crate::Pointer<K::Window>,
+    ) -> Vec<Write<K>> {
+        let mut released = Vec::new();
+        while let Some(&(deadline, window)) = self.deadlines.front()
+            && deadline <= now
+        {
+            self.deadlines.pop_front();
+            let Some((target, queued, sent, before)) = self.waiting((deadline, window)) else {
+                continue;
+            };
+            let after = self.time_out(window, target, sent, before);
+            let owner = pointer.owner(window);
+            released.extend(
+                queued.and_then(|next| self.release(now, request, window, next, owner, after)),
+            );
+        }
+        released
+    }
+
+    /// When the earliest unanswered write stops being waited for.
+    pub fn next_deadline(&mut self) -> Option<K::Time> {
+        while let Some(&entry) = self.deadlines.front() {
+            if self.waiting(entry).is_some() {
+                return Some(entry.0);
+            }
+            self.deadlines.pop_front();
+        }
+        None
+    }
+
+    /// Should `window` be animated from where the model has it to `desired`? Not when
+    /// what is pending for it (a write in flight, a refused frame, an animation) is already
+    /// `desired`, nor, with nothing pending, when the model has it there; never the user's.
+    /// Animated, it is held as [`Sync::Animating`] under `request`.
+    pub fn animate(
+        &mut self,
+        now: K::Time,
+        request: K::Request,
+        window: K::Window,
+        desired: K::Frame,
+        owner: Owner,
+    ) -> Planned<K> {
+        let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
+            return Planned::Verdict(Verdict::Nothing);
+        };
+        // Where the window is taken to be: what is pending for it, else where the model sees it.
+        let already = match sync {
+            // A write is with the app: the desire goes after it, as a write. Where the app has
+            // the window is unknown: the desire is written, once, so that what the app makes of
+            // it (a refusal, say) is known (an animation may never land). A delivery that
+            // failed is written again, as a write.
+            Sync::InFlight { .. } | Sync::Unknown { .. } | Sync::Failed { .. } => {
+                return Planned::Verdict(self.want(now, request, window, desired, owner));
+            }
+            Sync::Animating { target, .. } => K::same_as(target, desired),
+            Sync::Refused { wanted, .. } => K::same_as(wanted, desired),
+            Sync::Settled { .. } => answers::<K>(desired, known),
+            Sync::Outside { at, .. } => answers::<K>(desired, at),
+        };
+        match (owner, already) {
+            (Owner::User, _) | (Owner::Rift, true) => Planned::Verdict(Verdict::Nothing),
+            (Owner::Rift, false) => {
+                self.set(window, Sync::Animating {
+                    target: desired,
+                    request: Sent(request),
+                });
+                Planned::Animate
+            }
+        }
+    }
+
+    /// The animation under `request` ended. A window it left short of its target waits for
+    /// the app's answer to it as a write in flight does, from `now`: the answer settles it or
+    /// records a refusal, and no answer is a timeout. (Its frames went out under `request`.)
+    pub fn animation_ended(&mut self, now: K::Time, request: Stamp<K::Request>) {
+        let mut ended: Vec<(K::Window, K::Frame, Sent<K::Request>)> = self
+            .windows
+            .iter()
+            .filter_map(|(&window, record)| match record.sync {
+                Sync::Animating { target, request: sent } => {
+                    request.names(&sent).then_some((window, target, sent))
+                }
+                Sync::Settled { .. }
+                | Sync::Unknown { .. }
+                | Sync::InFlight { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. }
+                | Sync::Outside { .. } => None,
+            })
+            .collect();
+        ended.sort_unstable_by_key(|&(window, ..)| window);
+        let deadline = K::after(now, WRITE_DEADLINE);
+        for (window, target, request) in ended {
+            self.deadlines.push_back((deadline, window));
+            self.set(window, Sync::InFlight {
+                target,
+                deadline,
+                queued: None,
+                request,
+                before: Before::Unknown,
+                origin: Origin::AnimationEnded,
+            });
+        }
+    }
+
+    /// The platform stopped presenting `window` under `request`.
+    /// Still animating, it is where it stopped. Waiting for the answer to the animation that
+    /// ended, it may never get one (frames the app had not applied are dropped): where the app
+    /// has it is unknown. Anything since (a newer animation or write) is untouched, and so is a
+    /// write Rift sent under the same request: it is with the app whatever the platform presents.
+    pub fn animation_stopped(&mut self, window: K::Window, request: Stamp<K::Request>) {
+        let Some(Record { seen: known, sync }) = self.windows.get(&window).copied() else {
+            return;
+        };
+        match Some(sync) {
+            Some(Sync::Animating { request: sent, .. }) if request.names(&sent) => {
+                self.set(window, Sync::Settled { acked: known, last: Some(sent) })
+            }
+            Some(Sync::InFlight {
+                request: sent,
+                origin: Origin::AnimationEnded,
+                ..
+            }) if request.names(&sent) => self.set(window, Sync::Unknown { last: Some(sent) }),
+            Some(
+                Sync::Animating { .. }
+                | Sync::InFlight { .. }
+                | Sync::Settled { .. }
+                | Sync::Refused { .. }
+                | Sync::Failed { .. }
+                | Sync::Unknown { .. }
+                | Sync::Outside { .. },
+            )
+            | None => {}
+        }
+    }
+
+    /// Something outside the reconciler (a topology change, a claim, a failed send, a gesture)
+    /// took `window`'s frame: nothing is outstanding. What the app last acknowledged still
+    /// stands (a refusal's `got`); a write or an animation it may or may not have applied
+    /// leaves where it has the window unknown, never at a desire that was dropped. Returns the
+    /// acknowledged frame, which the model takes the window to be at.
+    pub fn forget(&mut self, window: K::Window) -> Option<K::Frame> {
+        let sync = self.sync(window)?;
+        let last = sync.last();
+        match sync {
+            Sync::Settled { acked, .. } => Some(acked),
+            Sync::Refused { got, .. } | Sync::Failed { before: Before::Acked(got), .. } => {
+                self.set(window, Sync::Settled { acked: got, last });
+                Some(got)
+            }
+            // A failed write never reached the app, but where the app had the window before it
+            // is not known either.
+            Sync::Failed { before: Before::Unknown, .. }
+            | Sync::InFlight { .. }
+            | Sync::Animating { .. }
+            | Sync::Unknown { .. }
+            | Sync::Outside { .. } => {
+                self.set(window, Sync::Unknown { last });
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
+
+    type Reconciler = super::Reconciler<Plain>;
+    type Sync = super::Sync<Plain>;
+    type Verdict = super::Verdict<Plain>;
+
+    /// The request every write in these tests goes out under, and an older one.
+    const R: RequestId = RequestId(2);
+    const OLD: RequestId = RequestId(1);
+
+    fn at(x: f64) -> Rect { Rect { x, y: 0., w: 400., h: 300. } }
+
+    fn window() -> WindowId { WindowId { pid: 1, idx: 1 } }
+
+    const T0: Nanos = Nanos(1_000);
+
+    fn later(by: Duration) -> Nanos { T0 + by }
+
+    /// A reconciler that knows `window()`, its app having it at `acked`.
+    fn with(acked: Rect) -> Reconciler {
+        let mut reconciler = Reconciler::default();
+        reconciler.see(window(), acked);
+        reconciler
+    }
+
+    /// `reconciler`, its model now having `window()` at `known`.
+    fn seen_at(reconciler: &mut Reconciler, known: Rect) -> &mut Reconciler {
+        reconciler.see(window(), known);
+        reconciler
+    }
+
+    fn want(reconciler: &mut Reconciler, now: Nanos, desired: Rect, known: Rect) -> Verdict {
+        seen_at(reconciler, known).want(now, R, window(), desired, Owner::Rift)
+    }
+
+    fn sent(verdict: Verdict) -> Rect {
+        match verdict {
+            Verdict::Send(write) => write.frame,
+            Verdict::Queued | Verdict::Nothing => panic!("expected a write, got {verdict:?}"),
+        }
+    }
+
+    fn sync(reconciler: &Reconciler) -> Sync { reconciler.sync(window()).expect("known window") }
+
+    fn settled(reconciler: &Reconciler) -> Option<Rect> {
+        match sync(reconciler) {
+            Sync::Settled { acked, .. } => Some(acked),
+            _ => None,
+        }
+    }
+
+    fn refused(reconciler: &Reconciler) -> Option<(Rect, Rect)> {
+        match sync(reconciler) {
+            Sync::Refused { wanted, got, .. } => Some((wanted, got)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_window_its_app_has_where_layout_wants_it_is_not_written() {
+        let mut reconciler = with(at(10.));
+        // Whatever the model believes (a prepared placement moved it): the app's frame decides.
+        assert_eq!(want(&mut reconciler, T0, at(10.), at(50.)), Verdict::Nothing);
+        assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(50.))), at(50.));
+    }
+
+    #[test]
+    fn a_window_the_model_does_not_know_is_not_written() {
+        let mut reconciler = Reconciler::default();
+        let verdict = reconciler.want(T0, R, window(), at(10.), Owner::Rift);
+        assert_eq!(verdict, Verdict::Nothing);
+    }
+
+    #[test]
+    fn one_write_is_in_flight_and_only_the_latest_desire_waits_behind_it() {
+        let mut reconciler = with(at(0.));
+        assert_eq!(sent(want(&mut reconciler, T0, at(10.), at(0.))), at(10.));
+        assert_eq!(want(&mut reconciler, T0, at(10.), at(10.)), Verdict::Nothing);
+        assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
+        assert_eq!(want(&mut reconciler, T0, at(30.), at(20.)), Verdict::Queued);
+
+        let (Reply::Answered(answer), next) = seen_at(&mut reconciler, at(10.5)).observe(
+            T0,
+            R,
+            window(),
+            at(10.5),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        ) else {
+            panic!("expected an answer");
+        };
+        assert_eq!(answer, Answer::Acked);
+        assert_eq!(next.map(|write| write.frame), Some(at(30.)));
+        assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+
+        assert_eq!(
+            seen_at(&mut reconciler, at(30.)).observe(
+                T0,
+                R,
+                window(),
+                at(30.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
+        );
+        assert_eq!(settled(&reconciler), Some(at(30.)));
+    }
+
+    #[test]
+    fn a_desire_withdrawn_while_queued_is_not_sent() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
+        assert_eq!(want(&mut reconciler, T0, at(10.), at(20.)), Verdict::Nothing);
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.)).observe(
+                T0,
+                R,
+                window(),
+                at(10.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
+        );
+    }
+
+    #[test]
+    fn an_adjusted_answer_is_a_refusal_that_is_not_asked_again() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(14.)).observe(
+                T0,
+                R,
+                window(),
+                at(14.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Refused), None)
+        );
+        assert_eq!(refused(&reconciler), Some((at(10.), at(14.))));
+        for _ in 0..3 {
+            assert_eq!(want(&mut reconciler, T0, at(10.), at(14.)), Verdict::Nothing);
+        }
+        assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(14.))), at(50.));
+    }
+
+    #[test]
+    fn an_answer_within_the_ack_tolerance_is_not_asked_again() {
+        // A terminal rounding to whole cells lands a point short: that answers the write, and
+        // the same desire is not sent again on every arrange.
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(11.)).observe(
+                T0,
+                R,
+                window(),
+                at(11.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
+        );
+        assert_eq!(settled(&reconciler), Some(at(11.)));
+        for _ in 0..3 {
+            assert_eq!(want(&mut reconciler, T0, at(10.), at(11.)), Verdict::Nothing);
+        }
+        // Beyond the tolerance it is a new desire.
+        assert_eq!(sent(want(&mut reconciler, T0, at(13.), at(11.))), at(13.));
+    }
+
+    #[test]
+    fn a_refused_window_seen_somewhere_else_is_asked_again() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        _ = seen_at(&mut reconciler, at(14.)).observe(
+            T0,
+            R,
+            window(),
+            at(14.),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(14.))
+                .observe(T0, R, window(), at(90.), None, Owner::Rift, Holder::Nobody)
+                .0,
+            Reply::Foreign
+        );
+        assert_eq!(settled(&reconciler), Some(at(90.)));
+        assert_eq!(sent(want(&mut reconciler, T0, at(10.), at(90.))), at(10.));
+    }
+
+    #[test]
+    fn an_unanswered_write_times_out_where_it_was_acknowledged_and_releases_what_waited() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        _ = want(&mut reconciler, T0, at(20.), at(10.));
+        assert!(reconciler.expire(T0, R, crate::Pointer::Idle).is_empty());
+
+        let t1 = later(WRITE_DEADLINE);
+        let released = reconciler.expire(t1, R, crate::Pointer::Idle);
+        assert_eq!(released.iter().map(|write| write.frame).collect::<Vec<_>>(), [
+            at(20.)
+        ]);
+
+        // The released write times out too: the app had acknowledged the window at 0 before
+        // either write.
+        let t2 = t1 + WRITE_DEADLINE;
+        assert!(reconciler.expire(t2, R, crate::Pointer::Idle).is_empty());
+        assert_eq!(refused(&reconciler), Some((at(20.), at(0.))));
+        // Its answer, when it comes, is news (the model had it where the app acknowledged it).
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).observe(
+                t2,
+                R,
+                window(),
+                at(20.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Foreign, None)
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.))
+                .observe(T0, R, window(), at(20.), None, Owner::Rift, Holder::Nobody)
+                .0,
+            Reply::Foreign
+        );
+        assert_eq!(settled(&reconciler), Some(at(20.)));
+    }
+
+    #[test]
+    fn a_write_from_unknown_that_times_out_is_unknown_again() {
+        let mut reconciler = with(at(0.));
+        reconciler.distrust(window());
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert!(reconciler.expire(later(WRITE_DEADLINE), R, crate::Pointer::Idle).is_empty());
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
+    }
+
+    #[test]
+    fn a_desire_after_the_deadline_is_sent_not_held_behind_what_was_queued() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        _ = want(&mut reconciler, T0, at(20.), at(0.));
+        let t1 = later(WRITE_DEADLINE);
+        assert_eq!(sent(want(&mut reconciler, t1, at(30.), at(0.))), at(30.));
+        assert!(matches!(
+            sync(&reconciler),
+            Sync::InFlight { target, queued: None, .. } if target == at(30.)
+        ));
+    }
+
+    #[test]
+    fn unknown_is_written_at_once_even_where_the_app_had_it() {
+        let mut reconciler = with(at(10.));
+        // The displays changed, or the user dragged it: where the app has it is unknown.
+        reconciler.distrust(window());
+        assert_eq!(sent(want(&mut reconciler, T0, at(10.), at(10.))), at(10.));
+    }
+
+    #[test]
+    fn a_report_settles_unknown() {
+        let mut reconciler = with(at(10.));
+        reconciler.distrust(window());
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.))
+                .observe(T0, R, window(), at(10.), None, Owner::Rift, Holder::Nobody)
+                .0,
+            Reply::NoNews
+        );
+        assert_eq!(settled(&reconciler), Some(at(10.)));
+        assert_eq!(want(&mut reconciler, T0, at(10.), at(10.)), Verdict::Nothing);
+    }
+
+    #[test]
+    fn a_desire_for_the_users_window_is_discarded_and_changes_nothing() {
+        let mut reconciler = with(at(10.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(50.)).want(T0, R, window(), at(50.), Owner::User),
+            Verdict::Nothing
+        );
+        assert_eq!(settled(&reconciler), Some(at(10.)));
+        assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(50.))), at(50.));
+    }
+
+    #[test]
+    fn a_report_during_a_write_is_the_users_only_if_their_hand_is_on_the_window() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.))
+                .observe(T0, R, window(), at(5.), None, Owner::Rift, Holder::Nobody)
+                .0,
+            Reply::InTransit
+        );
+        assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+        // The user holds it: theirs, and Rift stops waiting.
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.))
+                .observe(T0, R, window(), at(70.), None, Owner::Rift, Holder::User)
+                .0,
+            Reply::Foreign
+        );
+        assert_eq!(settled(&reconciler), Some(at(70.)));
+        // The answer to the abandoned write is not Rift's to wait for: news, where it says.
+        assert_eq!(
+            seen_at(&mut reconciler, at(70.)).observe(
+                T0,
+                R,
+                window(),
+                at(10.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Foreign, None)
+        );
+        assert_eq!(settled(&reconciler), Some(at(10.)));
+    }
+
+    #[test]
+    fn a_report_of_the_target_is_no_news_and_the_answer_still_decides() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        for holder in [Holder::Nobody, Holder::User] {
+            assert_eq!(
+                seen_at(&mut reconciler, at(10.))
+                    .observe(T0, R, window(), at(10.), None, Owner::Rift, holder)
+                    .0,
+                Reply::NoNews
+            );
+            assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+        }
+        assert_eq!(
+            seen_at(&mut reconciler, at(13.)).observe(
+                T0,
+                R,
+                window(),
+                at(13.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Refused), None)
+        );
+        assert_eq!(refused(&reconciler), Some((at(10.), at(13.))));
+    }
+
+    #[test]
+    fn an_answer_naming_a_replaced_write_is_stale() {
+        let mut reconciler = with(at(0.));
+        _ = seen_at(&mut reconciler, at(0.)).want(T0, OLD, window(), at(10.), Owner::Rift);
+        let t1 = later(WRITE_DEADLINE);
+        _ = seen_at(&mut reconciler, at(0.)).want(t1, R, window(), at(20.), Owner::Rift);
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.)).observe(
+                t1,
+                R,
+                window(),
+                at(10.),
+                Some(Stamp::new(OLD)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::NoNews, None)
+        );
+        assert!(matches!(sync(&reconciler), Sync::InFlight {
+            request: Sent(R),
+            ..
+        }));
+        assert_eq!(
+            seen_at(&mut reconciler, at(20.)).observe(
+                t1,
+                R,
+                window(),
+                at(20.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::Answered(Answer::Acked), None)
+        );
+    }
+
+    #[test]
+    fn the_next_deadline_is_the_earliest_unanswered_write() {
+        let mut reconciler = with(at(0.));
+        let other = WindowId { pid: 1, idx: 2 };
+        reconciler.see(other, at(0.));
+        assert_eq!(reconciler.next_deadline(), None);
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        let t1 = later(Duration::from_millis(100));
+        _ = seen_at(&mut reconciler, at(0.)).want(t1, R, other, at(10.), Owner::Rift);
+        assert_eq!(reconciler.next_deadline(), Some(T0 + WRITE_DEADLINE));
+        _ = seen_at(&mut reconciler, at(10.)).observe(
+            t1,
+            R,
+            window(),
+            at(10.),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        );
+        assert_eq!(reconciler.next_deadline(), Some(t1 + WRITE_DEADLINE));
+    }
+
+    #[test]
+    fn an_animation_is_planned_only_where_nothing_already_takes_the_window_there() {
+        let mut reconciler = with(at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(0.), Owner::Rift),
+            Planned::Verdict(Verdict::Nothing),
+            "already there"
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(10.), Owner::User),
+            Planned::Verdict(Verdict::Nothing),
+            "the user's"
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(10.), Owner::Rift),
+            Planned::Animate
+        );
+        assert_eq!(sync(&reconciler), Sync::Animating {
+            target: at(10.),
+            request: Sent(R)
+        });
+        // Pending already: the same target again is nothing.
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.)).animate(T0, OLD, window(), at(10.), Owner::Rift),
+            Planned::Verdict(Verdict::Nothing)
+        );
+        // Unknown: the model's frame says nothing about the app's, so the desire is written,
+        // even there.
+        reconciler.distrust(window());
+        assert!(matches!(
+            seen_at(&mut reconciler, at(10.)).animate(T0, R, window(), at(10.), Owner::Rift),
+            Planned::Verdict(Verdict::Send(write)) if write.frame() == at(10.)
+        ));
+    }
+
+    #[test]
+    fn while_a_window_animates_old_answers_and_lagging_reads_are_no_news() {
+        let mut reconciler = with(at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift),
+            Planned::Animate
+        );
+        // The answer to a write from before the animation.
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).observe(
+                T0,
+                OLD,
+                window(),
+                at(0.),
+                Some(Stamp::new(OLD)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::NoNews, None)
+        );
+        // A read from before the animation reached the app, or a frame on the way.
+        assert_eq!(
+            seen_at(&mut reconciler, at(100.))
+                .observe(T0, R, window(), at(0.), None, Owner::Rift, Holder::Nobody)
+                .0,
+            Reply::InTransit
+        );
+        assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
+        // The user's hand takes it wherever it is.
+        assert_eq!(
+            seen_at(&mut reconciler, at(100.))
+                .observe(T0, R, window(), at(30.), None, Owner::Rift, Holder::User)
+                .0,
+            Reply::Foreign
+        );
+        assert_eq!(settled(&reconciler), Some(at(30.)));
+        // A report on the target settles it.
+        assert_eq!(
+            seen_at(&mut reconciler, at(30.)).animate(T0, R, window(), at(100.), Owner::Rift),
+            Planned::Animate
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(100.))
+                .observe(T0, R, window(), at(100.), None, Owner::Rift, Holder::Nobody)
+                .0,
+            Reply::NoNews
+        );
+        assert_eq!(settled(&reconciler), Some(at(100.)));
+    }
+
+    #[test]
+    fn an_animation_settles_where_it_lands_and_its_frames_on_the_way_refuse_nothing() {
+        let mut reconciler = with(at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift),
+            Planned::Animate
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(40.)).observe(
+                T0,
+                OLD,
+                window(),
+                at(40.),
+                Some(Stamp::new(R)),
+                Owner::Rift,
+                Holder::Nobody
+            ),
+            (Reply::InTransit, None)
+        );
+        assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
+        _ = seen_at(&mut reconciler, at(100.)).observe(
+            T0,
+            OLD,
+            window(),
+            at(100.),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        );
+        assert_eq!(settled(&reconciler), Some(at(100.)));
+        // Its end changes nothing any more.
+        reconciler.animation_ended(T0, Stamp::new(R));
+        assert_eq!(settled(&reconciler), Some(at(100.)));
+    }
+
+    #[test]
+    fn an_animation_whose_app_never_lands_on_the_target_waits_for_its_answer_then_stands_refused() {
+        let mut reconciler = with(at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift),
+            Planned::Animate
+        );
+        // The app keeps the window short of the target (a minimum size, a rounding).
+        _ = seen_at(&mut reconciler, at(96.)).observe(
+            T0,
+            OLD,
+            window(),
+            at(96.),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        );
+        assert!(matches!(sync(&reconciler), Sync::Animating { .. }));
+        // Its end waits for the app's answer to it, as a write does: not held forever.
+        reconciler.animation_ended(T0, Stamp::new(R));
+        assert!(
+            matches!(sync(&reconciler), Sync::InFlight { target, request: Sent(R), .. } if target == at(100.))
+        );
+        // The answer, however late, is a refusal; it is not asked again, by a desire or by an
+        // animation.
+        _ = seen_at(&mut reconciler, at(96.)).observe(
+            T0,
+            OLD,
+            window(),
+            at(96.),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        );
+        assert_eq!(refused(&reconciler), Some((at(100.), at(96.))));
+        assert_eq!(want(&mut reconciler, T0, at(100.), at(96.)), Verdict::Nothing);
+        assert_eq!(
+            seen_at(&mut reconciler, at(96.)).animate(T0, R, window(), at(100.), Owner::Rift),
+            Planned::Verdict(Verdict::Nothing)
+        );
+    }
+
+    #[test]
+    fn an_unlanded_animation_with_no_answer_times_out_to_unknown() {
+        let mut reconciler = with(at(0.));
+        _ = seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift);
+        reconciler.animation_ended(T0, Stamp::new(R));
+        assert!(reconciler.expire(later(WRITE_DEADLINE), R, crate::Pointer::Idle).is_empty());
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
+    }
+
+    #[test]
+    fn a_desire_during_an_animation_treats_the_window_as_at_its_target() {
+        let mut reconciler = with(at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(0.)).animate(T0, OLD, window(), at(100.), Owner::Rift),
+            Planned::Animate
+        );
+        assert_eq!(want(&mut reconciler, T0, at(100.), at(100.)), Verdict::Nothing);
+        assert_eq!(sent(want(&mut reconciler, T0, at(50.), at(100.))), at(50.));
+        // The superseded animation's end does not touch the write in flight.
+        reconciler.animation_ended(T0, Stamp::new(OLD));
+        assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+    }
+
+    #[test]
+    fn an_animation_over_a_write_in_flight_waits_behind_it_as_a_write() {
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.)).animate(T0, R, window(), at(10.), Owner::Rift),
+            Planned::Verdict(Verdict::Nothing),
+            "on its way there"
+        );
+        assert_eq!(
+            seen_at(&mut reconciler, at(10.)).animate(T0, R, window(), at(30.), Owner::Rift),
+            Planned::Verdict(Verdict::Queued)
+        );
+        assert!(
+            matches!(sync(&reconciler), Sync::InFlight { queued: Some(q), .. } if q == at(30.))
+        );
+    }
+
+    #[test]
+    fn a_stopped_presentation_touches_only_what_its_request_left() {
+        // Still animating: where it stopped.
+        let mut reconciler = with(at(0.));
+        _ = seen_at(&mut reconciler, at(0.)).animate(T0, R, window(), at(100.), Owner::Rift);
+        seen_at(&mut reconciler, at(40.)).animation_stopped(window(), Stamp::new(R));
+        assert_eq!(settled(&reconciler), Some(at(40.)));
+        // Ended short and waiting for its answer, which may never come: unknown.
+        _ = seen_at(&mut reconciler, at(40.)).animate(T0, R, window(), at(100.), Owner::Rift);
+        reconciler.animation_ended(T0, Stamp::new(R));
+        seen_at(&mut reconciler, at(100.)).animation_stopped(window(), Stamp::new(R));
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
+        // A write sent since is not the stopped presentation's.
+        _ = want(&mut reconciler, T0, at(10.), at(100.));
+        seen_at(&mut reconciler, at(10.)).animation_stopped(window(), Stamp::new(OLD));
+        assert!(matches!(sync(&reconciler), Sync::InFlight { .. }));
+        // Nor is a write Rift sent under the stopped presentation's own request: it is still
+        // with the app, and nothing equal goes over it.
+        seen_at(&mut reconciler, at(100.)).animation_stopped(window(), Stamp::new(R));
+        assert!(matches!(sync(&reconciler), Sync::InFlight {
+            origin: Origin::Written,
+            ..
+        }));
+        assert_eq!(want(&mut reconciler, T0, at(10.), at(100.)), Verdict::Nothing);
+    }
+
+    #[test]
+    fn forgetting_keeps_only_what_the_app_acknowledged() {
+        // A write in flight with a desire queued behind it: neither may have landed.
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
+        assert_eq!(reconciler.forget(window()), None);
+        assert!(matches!(sync(&reconciler), Sync::Unknown { .. }));
+        // So the next desire goes out, even for the dropped one's frame.
+        assert_eq!(sent(want(&mut reconciler, T0, at(20.), at(20.))), at(20.));
+        // A refusal: the app acknowledged `got`.
+        _ = seen_at(&mut reconciler, at(15.)).observe(
+            T0,
+            OLD,
+            window(),
+            at(15.),
+            Some(Stamp::new(R)),
+            Owner::Rift,
+            Holder::Nobody,
+        );
+        assert!(matches!(sync(&reconciler), Sync::Refused { .. }));
+        assert_eq!(reconciler.forget(window()), Some(at(15.)));
+        assert_eq!(settled(&reconciler), Some(at(15.)));
+        // Settled stays settled.
+        assert_eq!(reconciler.forget(window()), Some(at(15.)));
+    }
+
+    #[test]
+    fn a_rekey_keeps_what_was_acknowledged_and_forgets_what_was_pending() {
+        let id = |idx| WindowId { pid: 1, idx };
+        let (settled, flying, new_settled, new_flying) = (id(1), id(2), id(11), id(12));
+        let mut reconciler = Reconciler::default();
+        reconciler.see(settled, at(0.));
+        reconciler.see(flying, at(0.));
+        let write = reconciler.want(T0, R, flying, at(100.), Owner::Rift);
+        assert!(matches!(write, Verdict::Send(_)));
+
+        reconciler.rekey(settled, new_settled);
+        reconciler.rekey(flying, new_flying);
+
+        assert_eq!(reconciler.sync(settled), None);
+        assert_eq!(reconciler.sync(flying), None);
+        assert_eq!(
+            reconciler.sync(new_settled),
+            Some(Sync::Settled { acked: at(0.), last: None })
+        );
+        // The write went to the dead identity: no target carries across, where the app has the
+        // window is unknown, and the next desire is written.
+        assert_eq!(
+            reconciler.sync(new_flying),
+            Some(Sync::Unknown { last: Some(Sent(R)) })
+        );
+        assert_eq!(reconciler.pending(new_flying), None);
+        let again = reconciler.want(T0, R, new_flying, at(100.), Owner::Rift);
+        assert!(matches!(again, Verdict::Send(_)));
+    }
+
+    /// A report of `window()` at `frame`, stamped `as_of`, with nobody's hand on it.
+    fn report(reconciler: &mut Reconciler, frame: Rect, as_of: Option<RequestId>) -> Reply {
+        reconciler
+            .observe(
+                T0,
+                R,
+                window(),
+                frame,
+                as_of.map(Stamp::new),
+                Owner::Rift,
+                Holder::Nobody,
+            )
+            .0
+    }
+
+    #[test]
+    fn a_stamp_the_core_never_heard_of_is_placed_by_geometry() {
+        // Nothing was ever sent to the window: a stamped report (a new identity carrying the
+        // old one's stamps, a stale read) is the app's, not Rift's.
+        let mut reconciler = with(at(0.));
+        assert_eq!(report(&mut reconciler, at(50.), Some(OLD)), Reply::Foreign);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Settled { acked: at(50.), last: None })
+        );
+        // Back where the model has it: no news, by geometry, and that is where it is.
+        assert_eq!(report(&mut reconciler, at(0.), Some(OLD)), Reply::NoNews);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Settled { acked: at(0.), last: None })
+        );
+
+        // A stamp newer than the last request the core sent: unknown too.
+        let mut reconciler = with(at(0.));
+        _ = want(&mut reconciler, T0, at(10.), at(0.));
+        _ = report(&mut reconciler, at(10.), Some(OLD.max(R)));
+        assert_eq!(
+            report(&mut reconciler, at(70.), Some(RequestId(R.0 + 5))),
+            Reply::Foreign
+        );
+    }
+
+    #[test]
+    fn frames_rift_sent_outside_the_core_are_its_own() {
+        let mut reconciler = with(at(0.));
+        let camera = RequestId(R.0 + 1);
+        reconciler.sent_outside(window(), camera);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Outside {
+                request: Sent(camera),
+                at: at(0.)
+            })
+        );
+        // Each stamped report is one of the camera's frames on the way.
+        assert_eq!(report(&mut reconciler, at(5.), Some(camera)), Reply::InTransit);
+        assert_eq!(report(&mut reconciler, at(9.), Some(camera)), Reply::InTransit);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Outside {
+                request: Sent(camera),
+                at: at(9.)
+            })
+        );
+        // An older stamp is no news; an unstamped report where the model has it neither.
+        assert_eq!(report(&mut reconciler, at(40.), Some(R)), Reply::NoNews);
+        assert_eq!(report(&mut reconciler, at(0.), None), Reply::NoNews);
+        assert_eq!(
+            reconciler.sync(window()),
+            Some(Sync::Outside {
+                request: Sent(camera),
+                at: at(9.)
+            })
+        );
+        // A desire where the camera left the window is no write; anywhere else is.
+        assert_eq!(
+            reconciler.want(T0, R, window(), at(9.), Owner::Rift),
+            Verdict::Nothing
+        );
+        assert!(matches!(
+            reconciler.want(T0, RequestId(R.0 + 2), window(), at(20.), Owner::Rift),
+            Verdict::Send(_)
+        ));
+    }
+
+    #[test]
+    fn a_ceded_window_keeps_its_write_in_flight_and_drops_what_was_queued() {
+        let mut reconciler = with(at(0.));
+        let Verdict::Send(_) = want(&mut reconciler, T0, at(10.), at(0.)) else {
+            panic!("the first desire is written");
+        };
+        assert_eq!(want(&mut reconciler, T0, at(20.), at(10.)), Verdict::Queued);
+        assert!(reconciler.drop_queued(window()));
+        let Some(Sync::InFlight { target, queued, request, .. }) = reconciler.sync(window()) else {
+            panic!("the write is still in flight: {:?}", reconciler.sync(window()));
+        };
+        assert_eq!((target, queued, request), (at(10.), None, Sent(R)));
+        // Its answer still resolves it.
+        assert_eq!(
+            report(&mut reconciler, at(10.), Some(R)),
+            Reply::Answered(Answer::Acked)
+        );
+        assert!(!reconciler.drop_queued(window()), "nothing is in flight now");
+    }
+}

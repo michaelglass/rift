@@ -1,0 +1,62 @@
+[package]
+name = "rift-core-roc"
+version = "0.1.0"
+edition = "2024"
+description = "Rift's core written in Roc (roc/core), stepped like rift-core's RustCore"
+license = "Apache-2.0"
+build = "build.rs"
+
+# A member of rift's workspace (cargo makes every path dependency inside it one), but empty
+# unless `roc` is on: only that feature builds the Roc app, so rift's own build never needs the
+# Roc nightly. rift's `roc-core` feature turns it on; alone: `cargo test -p rift-core-roc
+# --features roc`.
+[features]
+roc = ["dep:libmimalloc-sys"]
+# Counts Roc's allocations (AllocationCount): for the tests' leak checks only. Normal builds call
+# the allocator directly.
+count-allocations = []
+
+[[test]]
+name = "differential"
+required-features = ["roc"]
+
+[[test]]
+name = "layout"
+required-features = ["roc"]
+
+[[test]]
+name = "session"
+required-features = ["roc"]
+
+[[test]]
+name = "topology"
+required-features = ["roc"]
+
+[[test]]
+name = "lifecycle"
+required-features = ["roc"]
+
+[[test]]
+name = "focus"
+required-features = ["roc"]
+
+[[test]]
+name = "workspaces"
+required-features = ["roc"]
+
+[[test]]
+name = "modes"
+required-features = ["roc"]
+
+[[test]]
+name = "measure"
+required-features = ["roc"]
+
+[dependencies]
+rift-core = { path = "../rift-core" }
+libmimalloc-sys = { version = "0.1.39", optional = true }
+
+# The tests count allocations (and need `roc`, which they require, not turn on: rift's workspace
+# builds every member's tests without the Roc nightly).
+[dev-dependencies]
+rift-core-roc = { path = ".", features = ["count-allocations"] }

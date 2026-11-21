@@ -1,0 +1,336 @@
+//! The Roc core against the Rust core, on the steps the reactor really took.
+//!
+//! Each trace is one fuzzer seed's run through rift's reactor, recorded as the events the
+//! reactor stepped the core with and the effects the (Rust) core decided, in the wire format
+//! (`rift_core::plain::wire`, little-endian words; the traces' only use of it). Both cores
+//! replay every event from a fresh model and must decide exactly the recorded effects: the Roc
+//! core's compared as words, bit for bit.
+//!
+//! Traces come from `$RIFT_TRACE_DIR` when set (write them with
+//! `RIFT_TRACE_DIR=… cargo test dump_core_traces -- --ignored` in rift), else from the small
+//! sample committed under `traces/`.
+
+use std::path::PathBuf;
+
+use rift_core::RustCore;
+use rift_core::plain::{Plain, wire};
+use rift_core_roc::{AllocationCount, RocCore};
+
+fn traces() -> Vec<(String, Vec<u64>)> {
+    let dir = std::env::var("RIFT_TRACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("traces"));
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "trace"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no traces in {}", dir.display());
+    files
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            let words = bytes
+                .chunks_exact(8)
+                .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+                .collect();
+            (path.file_name().unwrap().to_string_lossy().into_owned(), words)
+        })
+        .collect()
+}
+
+#[test]
+fn the_roc_core_decides_what_the_rust_core_decided() {
+    let before = AllocationCount::now();
+    let mut steps = 0;
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+    for (name, words) in traces() {
+        let trace = wire::decode_trace(&words).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let mut rust = RustCore::<Plain>::default();
+        let mut roc = RocCore::default();
+        for (index, (event, recorded)) in trace.into_iter().enumerate() {
+            let kind = format!("{event:?}");
+            let kind = kind.split([' ', '(', '{']).next().unwrap_or_default().to_owned();
+            *kinds.entry(kind).or_default() += 1;
+            let from_rust = rust.step(event.clone());
+            assert_eq!(
+                &from_rust, &recorded,
+                "{name} step {index}: Rust core, {event:?}"
+            );
+            // Compared as words: bit for bit, floats included.
+            let from_roc = roc.step(event.clone());
+            if wire::encode_effects(from_roc.clone()) != wire::encode_effects(recorded.clone()) {
+                panic!(
+                    "{name} step {index}: Roc core, {event:?}\n  roc:      {from_roc:?}\n  recorded: {recorded:?}"
+                );
+            }
+            steps += 1;
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(
+        after.live(),
+        before.live(),
+        "Roc allocations left live after every core was dropped: {before:?} -> {after:?}"
+    );
+    eprintln!(
+        "differential: {steps} steps identical; Roc allocated {} times",
+        after.allocated - before.allocated
+    );
+    eprintln!("differential: events by kind: {kinds:?}");
+}
+
+/// The reconciler's ack tolerance, held at its edge: a window is told a frame, then answers
+/// (stamped with the write's request) at offsets either side of the tolerance and of values a
+/// slip could give it, on every edge of the frame. Both cores must decide the same effects at
+/// every step, bit for bit: the committed traces alone pass a wrong tolerance.
+#[test]
+fn the_cores_answer_a_write_alike_at_the_edge_of_the_ack_tolerance() {
+    use rift_core::plain::{Nanos, Rect, RequestId, WindowId};
+    use rift_core::{Desire, Event, Want};
+    let window = WindowId { pid: 7, idx: 1 };
+    let target = Rect {
+        x: 100.,
+        y: 100.,
+        w: 400.,
+        h: 300.,
+    };
+    let tolerance = rift_core::reconciler::ACK_TOLERANCE;
+    let offsets = [
+        0.,
+        tolerance - 0.01,
+        tolerance,
+        tolerance + 0.01,
+        2.,
+        2.5 - 0.01,
+        2.5,
+        3.,
+    ];
+    let before = AllocationCount::now();
+    let mut checked = 0;
+    for offset in offsets {
+        for edge in 0..4 {
+            let mut answered = target;
+            match edge {
+                0 => answered.x += offset,
+                1 => answered.y -= offset,
+                2 => answered.w += offset,
+                _ => answered.h -= offset,
+            }
+            let request = RequestId(1);
+            let events = [
+                Event::Seen {
+                    window,
+                    frame: Rect { x: 0., y: 0., w: 400., h: 300. },
+                },
+                Event::Arrange {
+                    now: Nanos(1_000),
+                    want: Want::Arrange,
+                    desires: vec![Desire { window, frame: target, request }],
+                },
+                Event::Observe {
+                    now: Nanos(2_000),
+                    request,
+                    window,
+                    frame: answered,
+                    as_of: Some(request),
+                },
+                Event::Tick {
+                    now: Nanos(1_000_000_000),
+                    request,
+                },
+            ];
+            let mut rust = RustCore::<Plain>::default();
+            let mut roc = RocCore::default();
+            for event in events {
+                let from_rust = rust.step(event.clone());
+                let from_roc = roc.step(event.clone());
+                assert_eq!(
+                    wire::encode_effects(from_roc.clone()),
+                    wire::encode_effects(from_rust.clone()),
+                    "{offset} off on edge {edge}, {event:?}\n  roc:  {from_roc:?}\n  rust: {from_rust:?}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    eprintln!("differential: {checked} steps at the ack tolerance's edge identical");
+}
+
+/// Re-records the committed traces' effects through the current Rust core, keeping every event:
+/// for a reviewed behaviour change of the core. Each changed step must be one the change
+/// explains (`explained`); anything else stops it. Run explicitly:
+/// `cargo test -p rift-core-roc --features roc --test differential rerecord -- --ignored`.
+#[test]
+#[ignore]
+fn rerecord_the_committed_traces_effects() {
+    use rift_core::{Answer, Effect, Event, Reply};
+    // A refused answer now also takes the model to the app's frame: the recorded effects gain
+    // `Seen { window, frame: got }` right after `Replied { Answered(Refused) }`.
+    let explained = |event: &Event<Plain>, old: &[Effect<Plain>], new: &[Effect<Plain>]| {
+        let Event::Observe { window, frame, .. } = *event else {
+            return false;
+        };
+        let mut expected = old.to_vec();
+        match expected.iter().position(|effect| {
+            *effect
+                == Effect::Replied {
+                    window,
+                    reply: Reply::Answered(Answer::Refused),
+                }
+        }) {
+            Some(at) => expected.insert(at + 1, Effect::Seen { window, frame }),
+            None => return false,
+        }
+        expected == new
+    };
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("traces");
+    let (mut changed, mut steps) = (0, 0);
+    for (name, words) in traces() {
+        let trace = wire::decode_trace(&words).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let mut rust = RustCore::<Plain>::default();
+        let mut out = Vec::new();
+        for (index, (event, recorded)) in trace.into_iter().enumerate() {
+            let now = rust.step(event.clone());
+            if now != recorded {
+                assert!(
+                    explained(&event, &recorded, &now),
+                    "{name} step {index}: a change the reviewed one does not explain\n  {event:?}\n  was {recorded:?}\n  now {now:?}"
+                );
+                changed += 1;
+            }
+            steps += 1;
+            wire::record_step(&mut out, event, now);
+        }
+        let bytes: Vec<u8> = out.iter().flat_map(|word| word.to_le_bytes()).collect();
+        std::fs::write(dir.join(&name), bytes).unwrap();
+    }
+    eprintln!("re-recorded: {changed} of {steps} steps changed, each one the reviewed change");
+}
+
+/// Writes whose delivery fails, on random runs: arranges toward two targets (a desire queued
+/// behind a write in flight among them), failures of the latest write or an older one, answers
+/// that ack or refuse, ticks past the deadline, and distrust. Both cores must decide the same
+/// effects at every step, bit for bit. The committed traces have no failed writes.
+#[test]
+fn the_cores_retry_and_give_up_failed_writes_alike() {
+    use rift_core::plain::{Nanos, Rect, RequestId, WindowId};
+    use rift_core::reconciler::WRITE_DEADLINE;
+    use rift_core::{Desire, Event, Want};
+    let window = WindowId { pid: 7, idx: 1 };
+    let frames = [
+        Rect { x: 0., y: 0., w: 400., h: 300. },
+        Rect {
+            x: 100.,
+            y: 0.,
+            w: 400.,
+            h: 300.,
+        },
+        Rect {
+            x: 200.,
+            y: 0.,
+            w: 500.,
+            h: 300.,
+        },
+    ];
+    let deadline = u64::try_from(WRITE_DEADLINE.as_nanos()).unwrap();
+    let mut seed = 0xFA11_ED00_0000_0039u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let before = AllocationCount::now();
+    let (mut steps, mut failures, mut given_up) = (0, 0, 0);
+    for run in 0..2000 {
+        let mut rust = RustCore::<Plain>::default();
+        let mut roc = RocCore::default();
+        let (mut now, mut request) = (1u64, 1u32);
+        let mut sent: Vec<u32> = Vec::new();
+        let mut events = vec![Event::Seen { window, frame: frames[0] }];
+        for _ in 0..30 {
+            now += 1 + next() % 40;
+            request += 1;
+            let pick = next() % 10;
+            events.push(match pick {
+                0..=3 => {
+                    sent.push(request);
+                    Event::Arrange {
+                        now: Nanos(now),
+                        want: Want::Arrange,
+                        desires: vec![Desire {
+                            window,
+                            frame: frames[1 + (next() % 2) as usize],
+                            request: RequestId(request),
+                        }],
+                    }
+                }
+                4..=6 if !sent.is_empty() => {
+                    // Mostly the latest write's failure; now and then an older one's.
+                    let failed = if next() % 4 == 0 {
+                        sent[(next() % sent.len() as u64) as usize]
+                    } else {
+                        *sent.last().unwrap()
+                    };
+                    failures += 1;
+                    Event::WriteFailed {
+                        now: Nanos(now),
+                        request: RequestId(request),
+                        window,
+                        failed: RequestId(failed),
+                    }
+                }
+                7 if !sent.is_empty() => Event::Observe {
+                    now: Nanos(now),
+                    request: RequestId(request),
+                    window,
+                    frame: frames[(next() % 3) as usize],
+                    as_of: Some(RequestId(*sent.last().unwrap())),
+                },
+                8 => {
+                    now += deadline;
+                    Event::Tick {
+                        now: Nanos(now),
+                        request: RequestId(request),
+                    }
+                }
+                _ => Event::Distrust { windows: vec![window] },
+            });
+        }
+        for (index, event) in events.into_iter().enumerate() {
+            let from_rust = rust.step(event.clone());
+            let from_roc = roc.step(event.clone());
+            assert_eq!(
+                wire::encode_effects(from_roc.clone()),
+                wire::encode_effects(from_rust.clone()),
+                "run {run} step {index}: {event:?}\n  roc:  {from_roc:?}\n  rust: {from_rust:?}"
+            );
+            given_up += from_rust
+                .iter()
+                .filter(|effect| {
+                    matches!(effect, rift_core::Effect::Note {
+                        note: rift_core::Note::GaveUp,
+                        ..
+                    })
+                })
+                .count();
+            steps += 1;
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    assert!(given_up > 0, "no run gave a desire up");
+    eprintln!(
+        "differential: {steps} steps with {failures} failed writes ({given_up} given up) identical"
+    );
+}
