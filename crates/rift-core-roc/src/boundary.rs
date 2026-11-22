@@ -16,10 +16,10 @@ use rift_core::layout::traditional::{self, Traditional};
 use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
 use rift_core::lifecycle::{
     self, Admission as WindowAdmission, AdmissionFacts, AxKind, AxValidity, Change, Departure,
-    FactChange, FullscreenRecord, InventoryView, Keep, Manageability, Minimize, NativeIdentity,
-    NativeKind, NativeLook, NewWindow, OnTitleChange, Ordering, Presence, PresenceEvent,
-    PresenceOutcome, Reading, Report, Retirement, Rule, RuleRun, Suitability, TransientOrigin,
-    Veto, WorkspaceMode,
+    FactChange, FullscreenRecord, Invalidation, InventoryView, Keep, Manageability, Minimize,
+    NativeIdentity, NativeKind, NativeLook, NewWindow, OnTitleChange, Ordering, Presence,
+    PresenceEvent, PresenceOutcome, Reading, Report, Retirement, Revalidation, Rule, RuleRun,
+    Suitability, TransientOrigin, Veto, WorkspaceMode,
 };
 use rift_core::plain::{Answers, Fact, Nanos, Plain, Rect, RequestId, Unasked, WindowId};
 use rift_core::topology::{
@@ -1698,13 +1698,21 @@ pub(crate) fn from_presence_answer(
             PresenceOutcome::Read(from_change(unsafe { *outcome.borrow_payload_read_unchecked() }))
         }
         // SAFETY: the tag says the payload is whether it invalidated.
-        Tag::Invalidated => {
-            PresenceOutcome::Invalidated(unsafe { *outcome.borrow_payload_invalidated_unchecked() })
-        }
+        Tag::Invalidated => PresenceOutcome::Invalidated(
+            if unsafe { *outcome.borrow_payload_invalidated_unchecked() } {
+                Invalidation::Invalidated
+            } else {
+                Invalidation::NoAxState
+            },
+        ),
         // SAFETY: the tag says the payload is whether it revalidated.
-        Tag::Revalidated => {
-            PresenceOutcome::Revalidated(unsafe { *outcome.borrow_payload_revalidated_unchecked() })
-        }
+        Tag::Revalidated => PresenceOutcome::Revalidated(
+            if unsafe { *outcome.borrow_payload_revalidated_unchecked() } {
+                Revalidation::Revalidated
+            } else {
+                Revalidation::NotInvalidated
+            },
+        ),
     };
     (from_presence(answer.after), outcome, answer.manages)
 }

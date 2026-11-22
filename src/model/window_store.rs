@@ -887,12 +887,12 @@ impl WindowStore {
     /// fresh AX evidence or confirmed retirement. A window with no AX state has none to lose.
     /// Whether this invalidated it (false if it already was, or has no AX state).
     pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) -> bool {
-        self.lifecycle.invalidate(wid)
+        self.lifecycle.invalidate(wid) == rift_core::lifecycle::Invalidation::Invalidated
     }
 
     /// Only a fresh AX observation validates an invalidated identity.
     pub(crate) fn validate_ax_identity(&mut self, wid: WindowId) -> bool {
-        self.lifecycle.revalidate(wid)
+        self.lifecycle.revalidate(wid) == rift_core::lifecycle::Revalidation::Revalidated
     }
 
     /// Live windows can lose heuristic admission as their AX/native metadata

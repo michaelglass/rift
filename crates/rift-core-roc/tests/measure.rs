@@ -488,8 +488,12 @@ fn measure_lifecycle_twin() {
         let rust_times = time(&ops, |&op| {
             std::hint::black_box(match op {
                 Op::Step(event) => rust.step(event).is_some(),
-                Op::Invalidate(window) => rust.invalidate(window),
-                Op::Revalidate(window) => rust.revalidate(window),
+                Op::Invalidate(window) => {
+                    rust.invalidate(window) == rift_core_roc::Invalidation::Invalidated
+                }
+                Op::Revalidate(window) => {
+                    rust.revalidate(window) == rift_core_roc::Revalidation::Revalidated
+                }
             });
         });
         let before = AllocationCount::now();

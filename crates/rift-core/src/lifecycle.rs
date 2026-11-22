@@ -367,9 +367,24 @@ pub enum PresenceOutcome {
     /// The change in its admission by its facts.
     Read(Option<Change>),
     /// Whether there was AX state to invalidate.
-    Invalidated(bool),
+    Invalidated(Invalidation),
     /// Whether it had been invalidated.
-    Revalidated(bool),
+    Revalidated(Revalidation),
+}
+
+/// What an invalidation found: AX state to invalidate, or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Invalidation {
+    Invalidated,
+    NoAxState,
+}
+
+/// What a revalidation found: an invalidated window, brought back, or a window that was not
+/// invalidated (valid, or without AX state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revalidation {
+    Revalidated,
+    NotInvalidated,
 }
 
 /// A window's presence after `event` (none without AX state), and what the event came to.
@@ -394,15 +409,19 @@ pub fn present(
         PresenceEvent::Invalidate => match before {
             Some(presence) => (
                 Some(Presence::Invalidated(presence.facts())),
-                PresenceOutcome::Invalidated(true),
+                PresenceOutcome::Invalidated(Invalidation::Invalidated),
             ),
-            None => (None, PresenceOutcome::Invalidated(false)),
+            None => (None, PresenceOutcome::Invalidated(Invalidation::NoAxState)),
         },
         PresenceEvent::Revalidate => match before {
-            Some(Presence::Invalidated(facts)) => {
-                (Some(Presence::Live(facts)), PresenceOutcome::Revalidated(true))
-            }
-            live_or_none => (live_or_none, PresenceOutcome::Revalidated(false)),
+            Some(Presence::Invalidated(facts)) => (
+                Some(Presence::Live(facts)),
+                PresenceOutcome::Revalidated(Revalidation::Revalidated),
+            ),
+            live_or_none => (
+                live_or_none,
+                PresenceOutcome::Revalidated(Revalidation::NotInvalidated),
+            ),
         },
     }
 }
@@ -516,14 +535,24 @@ impl<W: Copy + Ord> Lifecycle<W> {
     /// Whether rift manages the window by its lifecycle: valid AX state and admitted.
     pub fn manages(&self, window: W) -> bool { manages(self.windows.get(&window).copied()) }
 
-    /// The window's AX element was invalidated; false for a window with no AX state.
-    pub fn invalidate(&mut self, window: W) -> bool {
-        self.apply(window, PresenceEvent::Invalidate) == PresenceOutcome::Invalidated(true)
+    /// The window's AX element was invalidated: what that found.
+    pub fn invalidate(&mut self, window: W) -> Invalidation {
+        match self.apply(window, PresenceEvent::Invalidate) {
+            PresenceOutcome::Invalidated(found) => found,
+            PresenceOutcome::Read(_) | PresenceOutcome::Revalidated(_) => {
+                unreachable!("an invalidation answers as one")
+            }
+        }
     }
 
-    /// A positive AX observation: whether the window had been invalidated.
-    pub fn revalidate(&mut self, window: W) -> bool {
-        self.apply(window, PresenceEvent::Revalidate) == PresenceOutcome::Revalidated(true)
+    /// A positive AX observation: what it found.
+    pub fn revalidate(&mut self, window: W) -> Revalidation {
+        match self.apply(window, PresenceEvent::Revalidate) {
+            PresenceOutcome::Revalidated(found) => found,
+            PresenceOutcome::Read(_) | PresenceOutcome::Invalidated(_) => {
+                unreachable!("a revalidation answers as one")
+            }
+        }
     }
 
     pub fn is_invalidated(&self, window: W) -> bool {
@@ -533,7 +562,7 @@ impl<W: Copy + Ord> Lifecycle<W> {
     /// `from`'s identity moved to `to`: an invalidation moves with it, to a window with AX
     /// state.
     pub fn carry_invalidation(&mut self, from: W, to: W) {
-        if self.revalidate(from) {
+        if self.revalidate(from) == Revalidation::Revalidated {
             self.invalidate(to);
         }
     }
@@ -1301,11 +1330,11 @@ mod tests {
         };
         let mut lifecycle = Lifecycle::default();
         // Only a window with AX state can lose it.
-        assert!(!lifecycle.invalidate(1_u32));
+        assert_eq!(lifecycle.invalidate(1_u32), Invalidation::NoAxState);
         assert!(!lifecycle.is_invalidated(1));
         lifecycle.step(LifecycleEvent::Live { window: 1, facts });
         assert!(lifecycle.manages(1));
-        assert!(lifecycle.invalidate(1));
+        assert_eq!(lifecycle.invalidate(1), Invalidation::Invalidated);
         assert!(lifecycle.is_invalidated(1) && !lifecycle.manages(1));
         // Its facts stay, and still change, while it is invalidated.
         assert_eq!(lifecycle.admission(1), Some(Admission::Admitted));
@@ -1315,8 +1344,8 @@ mod tests {
         });
         assert_eq!(lifecycle.facts(1).map(|f| f.rule), Some(Rule::Manage));
         // A positive AX observation brings it back, once.
-        assert!(lifecycle.revalidate(1));
-        assert!(!lifecycle.revalidate(1));
+        assert_eq!(lifecycle.revalidate(1), Revalidation::Revalidated);
+        assert_eq!(lifecycle.revalidate(1), Revalidation::NotInvalidated);
         assert!(lifecycle.manages(1));
         // So does a fresh AX reading.
         lifecycle.invalidate(1);

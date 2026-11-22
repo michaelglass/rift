@@ -598,7 +598,7 @@ fn the_roc_lifecycle_keeps_windows_between_events_as_the_rust_one_does() {
         AdmissionFacts, AxKind, Change, FactChange, Lifecycle, LifecycleEvent, Manageability,
         Minimize, NativeKind, Rule, Transition,
     };
-    use rift_core_roc::{Invalidation, Revalidation, RocLifecycle};
+    use rift_core_roc::{Revalidation, RocLifecycle};
     fn facts(rng: &mut Rng) -> AdmissionFacts {
         AdmissionFacts {
             manageability: if rng.chance(85) {
@@ -672,20 +672,12 @@ fn the_roc_lifecycle_keeps_windows_between_events_as_the_rust_one_does() {
                     format!("{event:?}")
                 }
                 7 => {
-                    let expected = if rust.invalidate(window) {
-                        Invalidation::Invalidated
-                    } else {
-                        Invalidation::NoAxState
-                    };
+                    let expected = rust.invalidate(window);
                     assert_eq!(roc.invalidate(window), expected, "run {run} step {step}");
                     format!("invalidate {window}")
                 }
                 8 => {
-                    let expected = if rust.revalidate(window) {
-                        Revalidation::Revalidated
-                    } else {
-                        Revalidation::NotInvalidated
-                    };
+                    let expected = rust.revalidate(window);
                     assert_eq!(roc.revalidate(window), expected, "run {run} step {step}");
                     format!("revalidate {window}")
                 }

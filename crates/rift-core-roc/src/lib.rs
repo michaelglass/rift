@@ -189,21 +189,9 @@ impl Default for RocCore {
     }
 }
 
-/// What an invalidation found: AX state to invalidate, or none. (`Lifecycle::invalidate`
-/// answers this as a bool.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Invalidation {
-    Invalidated,
-    NoAxState,
-}
-
-/// What a revalidation found: an invalidated window, brought back, or a window that was not
-/// invalidated (valid, or without AX state). (`Lifecycle::revalidate` answers this as a bool.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Revalidation {
-    Revalidated,
-    NotInvalidated,
-}
+/// What an invalidation and a revalidation found: the Rust core's named tags, as the Roc
+/// boundary answers them.
+pub use rift_core::lifecycle::{Invalidation, Revalidation};
 
 /// The lifecycle of every window (`rift_core::lifecycle::Lifecycle`) kept in Roc between
 /// events: each window with AX state and its presence. Stepped beside the Rust lifecycle, it

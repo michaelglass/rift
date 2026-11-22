@@ -11,7 +11,7 @@
 
 use std::ops::Deref;
 
-use rift_core::lifecycle::{Lifecycle, LifecycleEvent, Transition};
+use rift_core::lifecycle::{Invalidation, Lifecycle, LifecycleEvent, Revalidation, Transition};
 use rift_core::workspaces::{OwnershipEvent, Ownerships, Topology, TopologyEvent};
 
 use crate::actor::app::WindowId;
@@ -81,46 +81,32 @@ impl TwinnedLifecycle {
     }
 
     /// As [`Lifecycle::invalidate`].
-    pub(crate) fn invalidate(&mut self, window: WindowId) -> bool {
+    pub(crate) fn invalidate(&mut self, window: WindowId) -> Invalidation {
         let invalidated = self.rust.invalidate(window);
         #[cfg(feature = "roc-core")]
         {
-            use rift_core_roc::Invalidation;
-
             use crate::roc_path::Word;
-            let rust = if invalidated {
-                Invalidation::Invalidated
-            } else {
-                Invalidation::NoAxState
-            };
             let roc = self.twin.roc.invalidate(window.word());
-            self.stepped("lifecycle invalidate", &window, &rust, &roc);
+            self.stepped("lifecycle invalidate", &window, &invalidated, &roc);
         }
         invalidated
     }
 
     /// As [`Lifecycle::revalidate`].
-    pub(crate) fn revalidate(&mut self, window: WindowId) -> bool {
+    pub(crate) fn revalidate(&mut self, window: WindowId) -> Revalidation {
         let revalidated = self.rust.revalidate(window);
         #[cfg(feature = "roc-core")]
         {
-            use rift_core_roc::Revalidation;
-
             use crate::roc_path::Word;
-            let rust = if revalidated {
-                Revalidation::Revalidated
-            } else {
-                Revalidation::NotInvalidated
-            };
             let roc = self.twin.roc.revalidate(window.word());
-            self.stepped("lifecycle revalidate", &window, &rust, &roc);
+            self.stepped("lifecycle revalidate", &window, &revalidated, &roc);
         }
         revalidated
     }
 
     /// As [`Lifecycle::carry_invalidation`], step by step so the twin takes each.
     pub(crate) fn carry_invalidation(&mut self, from: WindowId, to: WindowId) {
-        if self.revalidate(from) {
+        if self.revalidate(from) == Revalidation::Revalidated {
             self.invalidate(to);
         }
     }
