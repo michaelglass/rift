@@ -8,6 +8,7 @@ use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
+use crate::model::admission::{Manageability, Rule};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::{Round, SameAs};
@@ -4817,8 +4818,8 @@ fn same_app_native_focus_respects_auto_switch_guards() {
             }
             "unmanaged" => {
                 let window = reactor.state.windows.window_mut(hidden).unwrap();
-                window.is_manageable = false;
-                window.manage_override = Some(false);
+                window.manageability = Manageability::Unmanageable;
+                window.rule = Rule::Ignore;
             }
             "disabled" => reactor.active_spaces.clear(),
             "duplicate" => {}
@@ -5237,7 +5238,7 @@ fn native_focus_refreshes_stale_window_admission() {
     reactor.handle_event(Event::WindowMinimized(wid));
     let stale = reactor.state.windows.window_mut(wid).unwrap();
     stale.info.is_minimized = false;
-    stale.is_manageable = false;
+    stale.manageability = Manageability::Unmanageable;
     let _ = apps.requests();
     assert!(reactor.query_window_info(wid).is_none());
 
@@ -5267,7 +5268,8 @@ fn carbon_activation_refreshes_inventory_once_when_no_windows_are_admitted() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
     apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 7, make_windows(1));
-    reactor.state.windows.window_mut(WindowId::new(7, 1)).unwrap().is_manageable = false;
+    reactor.state.windows.window_mut(WindowId::new(7, 1)).unwrap().manageability =
+        Manageability::Unmanageable;
     let _ = apps.requests();
     reactor.handle_event(Event::ApplicationGloballyActivated(7));
     reactor.handle_event(Event::ApplicationGloballyActivated(7));
@@ -5306,10 +5308,10 @@ fn focus_and_activation_do_not_rescan_intentionally_excluded_windows() {
             );
             let window = reactor.state.windows.window_mut(wid).unwrap();
             if case != "healthy" {
-                window.is_manageable = false;
+                window.manageability = Manageability::Unmanageable;
             }
             match case {
-                "unmanaged" => window.manage_override = Some(false),
+                "unmanaged" => window.rule = Rule::Ignore,
                 "minimized" => window.info.is_minimized = true,
                 "nonstandard" => window.info.is_standard = false,
                 "child" => window.info.is_root = false,
@@ -6939,7 +6941,11 @@ fn discovery_manageability_loss_removes_window_from_layout() {
         "window must be removed from layout when discovery marks it unmanageable"
     );
     assert!(
-        reactor.state.windows.window(wid).is_some_and(|window| !window.is_manageable),
+        reactor
+            .state
+            .windows
+            .window(wid)
+            .is_some_and(|window| window.manageability == Manageability::Unmanageable),
         "reactor state must keep the window marked unmanageable"
     );
 }
@@ -13400,7 +13406,7 @@ fn native_admission_veto_survives_manage_rule() {
     info.ax_subrole = Some("AXStandardWindow".into());
     reactor.handle_event(Event::WindowCreated(wid, info, None, None));
     let window = reactor.state.windows.window_mut(wid).unwrap();
-    window.manage_override = Some(true);
+    window.rule = Rule::Manage;
     assert!(!window.is_admitted());
     assert!(reactor.test_workspace_for_window(space, wid).is_none());
     reactor.handle_event(Event::WindowServerHidden(id));

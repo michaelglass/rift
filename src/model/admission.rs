@@ -1,7 +1,7 @@
 //! Whether rift manages a window, as a pure function of typed facts.
 //!
-//! Each fact is read off the window once ([`crate::model::reactor::WindowState::admission_facts`]),
-//! and [`admission`] is the only place the policy lives.
+//! The window keeps these facts and [`crate::model::reactor::WindowState::admission_facts`]
+//! reads them off it; [`admission`] is the only place the policy lives.
 
 /// The manageability heuristic's verdict on the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,9 +11,11 @@ pub(crate) enum Manageability {
 }
 
 /// What an app rule says about managing the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Rule {
-    NoRule,
+    /// No rule decides, so the heuristic does.
+    #[default]
+    Unset,
     Manage,
     Ignore,
 }
@@ -21,7 +23,7 @@ pub(crate) enum Rule {
 impl From<Option<bool>> for Rule {
     fn from(manage_override: Option<bool>) -> Rule {
         match manage_override {
-            None => Rule::NoRule,
+            None => Rule::Unset,
             Some(true) => Rule::Manage,
             Some(false) => Rule::Ignore,
         }
@@ -65,10 +67,10 @@ pub(crate) struct AdmissionFacts {
 /// Why a window is not admitted: the first that applies, in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Veto {
-    NativeTransient,
     Minimized,
-    AxTransient,
     RuleIgnores,
+    NativeTransient,
+    AxTransient,
     Unmanageable,
 }
 
@@ -78,21 +80,70 @@ pub(crate) enum Admission {
     Vetoed(Veto),
 }
 
-/// A window is admitted unless the window server marks it transient, it is minimized, its roles
-/// mark it transient (a Manage rule outranks only the AXDialog marker), a rule ignores it, or,
+impl Admission {
+    /// Kept out for a reason that can pass (anything but a rule ignoring it): the window keeps
+    /// its ownership and only leaves layout until then.
+    pub(crate) fn is_suspended(self) -> bool {
+        matches!(self, Admission::Vetoed(veto) if veto != Veto::RuleIgnores)
+    }
+}
+
+/// A window is admitted unless it is minimized, a rule ignores it, the window server marks it
+/// transient, its roles mark it transient (a Manage rule outranks only the AXDialog marker), or,
 /// with no rule, the heuristic finds it unmanageable.
 pub(crate) fn admission(facts: AdmissionFacts) -> Admission {
-    let veto = match (facts.native, facts.minimize, facts.ax, facts.rule) {
-        (NativeKind::Transient, ..) => Some(Veto::NativeTransient),
-        (_, Minimize::Minimized, ..) => Some(Veto::Minimized),
-        (_, _, AxKind::Transient, _) => Some(Veto::AxTransient),
-        (_, _, AxKind::DialogWindow, Rule::NoRule | Rule::Ignore) => Some(Veto::AxTransient),
-        (_, _, _, Rule::Ignore) => Some(Veto::RuleIgnores),
-        (_, _, _, Rule::Manage) => None,
-        (_, _, _, Rule::NoRule) => match facts.manageability {
+    let veto = match (facts.minimize, facts.rule, facts.native, facts.ax) {
+        (Minimize::Minimized, ..) => Some(Veto::Minimized),
+        (_, Rule::Ignore, ..) => Some(Veto::RuleIgnores),
+        (_, _, NativeKind::Transient, _) => Some(Veto::NativeTransient),
+        (_, _, _, AxKind::Transient) => Some(Veto::AxTransient),
+        (_, Rule::Unset, _, AxKind::DialogWindow) => Some(Veto::AxTransient),
+        (_, Rule::Manage, ..) => None,
+        (_, Rule::Unset, ..) => match facts.manageability {
             Manageability::Manageable => None,
             Manageability::Unmanageable => Some(Veto::Unmanageable),
         },
     };
     veto.map_or(Admission::Admitted, Admission::Vetoed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy() {
+        use Admission::*;
+        use AxKind::{DialogWindow, Ordinary as Ax, Transient as AxT};
+        use Manageability::{Manageable as M, Unmanageable as U};
+        use Minimize::{Minimized as Min, Shown};
+        use NativeKind::{Ordinary as Nat, Transient as NatT};
+        use Rule::{Ignore, Manage, Unset};
+        use Veto::*;
+        #[rustfmt::skip]
+        let table = [
+            // manageability, rule, ax, native, minimize => admission
+            ((M, Unset, Ax, Nat, Shown), Admitted),
+            ((U, Unset, Ax, Nat, Shown), Vetoed(Unmanageable)),
+            ((U, Manage, Ax, Nat, Shown), Admitted),
+            ((M, Ignore, Ax, Nat, Shown), Vetoed(RuleIgnores)),
+            ((M, Unset, DialogWindow, Nat, Shown), Vetoed(AxTransient)),
+            ((M, Manage, DialogWindow, Nat, Shown), Admitted),
+            ((M, Manage, AxT, Nat, Shown), Vetoed(AxTransient)),
+            ((M, Manage, Ax, NatT, Shown), Vetoed(NativeTransient)),
+            ((M, Ignore, AxT, NatT, Shown), Vetoed(RuleIgnores)),
+            ((M, Ignore, Ax, Nat, Min), Vetoed(Minimized)),
+            ((M, Manage, Ax, Nat, Min), Vetoed(Minimized)),
+        ];
+        for ((manageability, rule, ax, native, minimize), expected) in table {
+            let facts = AdmissionFacts {
+                manageability,
+                rule,
+                ax,
+                native,
+                minimize,
+            };
+            assert_eq!(admission(facts), expected, "{facts:?}");
+        }
+    }
 }

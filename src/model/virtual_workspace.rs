@@ -16,6 +16,7 @@ use crate::layout_engine::systems::{self, LayoutSystemKind};
 use crate::layout_engine::workspaces::WorkspaceLayoutState;
 use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
 use crate::model::WindowStore;
+use crate::model::admission::Rule;
 use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
 use crate::sys::screen::SpaceId;
 
@@ -1620,21 +1621,21 @@ impl WorkspaceStore {
             self.workspace_for_window(window_store, space, window_id)
         };
 
-        let rule_override = rule_decision.as_ref().and_then(AppRuleDecision::management_override);
-        let admitted = window_store
-            .window(window_id)
-            .map(|window| window.is_admitted_with_override(rule_override))
+        let rule = rule_decision.as_ref().map_or(Rule::Unset, |decision| decision.rule);
+        let admitted = match window_store.window_mut(window_id) {
+            Some(window) => {
+                window.rule = rule;
+                window.is_admitted()
+            }
             // Assignment tests and restore paths may not yet have an AX
             // snapshot. In that case only an explicit rejection can deny it.
-            .unwrap_or(rule_override != Some(false));
-        if let Some(window) = window_store.window_mut(window_id) {
-            window.manage_override = rule_override;
-        }
+            None => rule != Rule::Ignore,
+        };
         if !admitted {
-            if !window_store.is_temporarily_unavailable(window_id) || rule_override == Some(false) {
+            if !window_store.is_temporarily_unavailable(window_id) || rule == Rule::Ignore {
                 window_store.clear_rule_floating(window_id);
             }
-            return Ok(AppRuleResult::Rejected(if rule_override == Some(false) {
+            return Ok(AppRuleResult::Rejected(if rule == Rule::Ignore {
                 AppRuleRejection::ExplicitRule
             } else {
                 AppRuleRejection::Heuristic

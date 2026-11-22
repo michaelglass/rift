@@ -7,6 +7,7 @@ use crate::common::config::LayoutMode;
 use crate::layout_engine::systems::{Focus, WindowQuery};
 use crate::layout_engine::{LayoutEvent, LayoutSystemKind};
 use crate::model::VirtualWorkspace;
+use crate::model::admission::{Manageability, NativeKind, Rule};
 use crate::model::virtual_workspace::WorkspaceTransferReason;
 use crate::sys::window_server::WindowServerId;
 
@@ -34,7 +35,7 @@ fn live_state(window: WindowId) -> WindowState {
     let saved = evidence(window);
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(saved.width, saved.height));
     WindowState {
-        native_transient: false,
+        native: NativeKind::Ordinary,
         info: WindowInfo {
             has_native_tabs: false,
             is_standard: true,
@@ -52,8 +53,8 @@ fn live_state(window: WindowId) -> WindowState {
             ax_subrole: None,
         },
         frame_monotonic: frame,
-        is_manageable: true,
-        manage_override: None,
+        manageability: Manageability::Manageable,
+        rule: Rule::Unset,
     }
 }
 

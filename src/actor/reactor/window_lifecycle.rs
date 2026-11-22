@@ -3,6 +3,7 @@ use tracing::{debug, warn};
 use super::{Changes, Presentation, Reactor, RefocusState, utils};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::layout_engine::LayoutEvent;
+use crate::model::admission::{Manageability, NativeKind, Rule};
 use crate::model::virtual_workspace::WorkspaceContext;
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
@@ -53,7 +54,7 @@ impl Reactor {
     ) {
         let event = if self.state.windows.is_claimed(wid) {
             return;
-        } else if self.state.windows.window(wid).is_some_and(|w| w.manage_override == Some(false)) {
+        } else if self.state.windows.window(wid).is_some_and(|w| w.rule == Rule::Ignore) {
             let engine = &self.layout_manager.layout_engine;
             if self.state.windows.workspace_for_window(wid).is_none()
                 && !engine.is_window_floating(wid)
@@ -286,22 +287,28 @@ impl Reactor {
     fn refresh_admission_facts(&mut self, wid: WindowId, refresh_heuristic: bool) {
         let windows = &mut self.state.windows;
         let Some(window) = windows.window(wid) else { return };
-        let manageable = if refresh_heuristic {
-            utils::compute_window_info_manageability(&window.info, |id| {
-                windows.get_window_server_info(id)
-            })
+        let manageability = if !refresh_heuristic {
+            window.manageability
+        } else if utils::compute_window_info_manageability(&window.info, |id| {
+            windows.get_window_server_info(id)
+        }) {
+            Manageability::Manageable
         } else {
-            window.is_manageable
+            Manageability::Unmanageable
         };
-        let transient = window.info.sys_id.is_some_and(|id| {
+        let native_transient = window.info.sys_id.is_some_and(|id| {
             self.transient_focus
                 .windows
                 .get(&id)
                 .is_some_and(|t| t.native && t.pid == wid.pid)
         }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
         let window = windows.window_mut(wid).unwrap();
-        window.native_transient = transient;
-        window.is_manageable = manageable;
+        window.native = if native_transient {
+            NativeKind::Transient
+        } else {
+            NativeKind::Ordinary
+        };
+        window.manageability = manageability;
     }
 
     /// A classification change can suspend a window immediately. Readmission also

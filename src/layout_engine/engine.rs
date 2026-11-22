@@ -16,6 +16,7 @@ use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::{
     Focus, GroupEdit, LayoutEdit, WindowChange, WindowLayoutConstraints, WindowQuery,
 };
+use crate::model::admission::Rule;
 use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::{
@@ -3362,8 +3363,7 @@ impl LayoutEngine {
         };
         if window_store.is_claimed(window_id) {
             if let Some(window) = window_store.window_mut(window_id) {
-                window.manage_override =
-                    decision.as_ref().and_then(|rule| rule.management_override());
+                window.rule = decision.as_ref().map_or(Rule::Unset, |decision| decision.rule);
             }
             return Ok(None);
         }
@@ -3838,6 +3838,7 @@ mod tests {
         LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceSelector,
     };
     use crate::layout_engine::systems::{Focus, WindowQuery};
+    use crate::model::admission::Manageability;
 
     #[test]
     fn simultaneous_suspensions_keep_workspace_owners_through_inactive_returns_and_mode_changes() {
@@ -3940,7 +3941,7 @@ mod tests {
         let frame = CGRect::new(CGPoint::ZERO, size);
         let mut state: crate::model::reactor::WindowState =
             crate::actor::reactor::testing::make_window_info(frame, None, "Window", None).into();
-        state.is_manageable = true;
+        state.manageability = Manageability::Manageable;
         state
     }
 
@@ -4284,14 +4285,14 @@ mod tests {
                 .workspaces
                 .assign_window_to_workspace(&mut store, space, window, workspace)
         );
-        store.window_mut(window).unwrap().manage_override = Some(false);
+        store.window_mut(window).unwrap().rule = Rule::Ignore;
         assert!(
             !engine
                 .handle_event(&mut store, LayoutEvent::WindowAdded(space, window))
                 .response
                 .changed
         );
-        store.window_mut(window).unwrap().manage_override = None;
+        store.window_mut(window).unwrap().rule = Rule::Unset;
         assert!(
             engine
                 .handle_event(&mut store, LayoutEvent::WindowAdded(space, window))
@@ -4312,7 +4313,7 @@ mod tests {
         let mut window = crate::model::reactor::WindowState::from(
             crate::actor::reactor::testing::make_window_info(screen, None, "Window", None),
         );
-        window.is_manageable = true;
+        window.manageability = Manageability::Manageable;
         window_store.insert_window(wid, window);
 
         let _ =

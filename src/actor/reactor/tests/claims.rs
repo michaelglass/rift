@@ -167,7 +167,7 @@ fn claims_cost_one_arrangement_and_flag_updates_cost_none() {
     assert_eq!(apps.windows, frames);
 
     // An unadmitted window has no projection to remove.
-    reactor.state.windows.window_mut(wid(2)).unwrap().manage_override = Some(false);
+    reactor.state.windows.window_mut(wid(2)).unwrap().rule = crate::model::admission::Rule::Ignore;
     reactor.handle_test_layout_event(LayoutEvent::WindowRemoved(wid(2)));
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(

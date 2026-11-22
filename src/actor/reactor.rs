@@ -613,8 +613,7 @@ impl Reactor {
             // A rejected window is stale only if it now passes the normal
             // eligibility checks. Minimized, rule-excluded, and heuristic-
             // excluded windows must not trigger an AX scan just for focus.
-            !window.is_admitted()
-                && window.manage_override != Some(false)
+            window.admission().is_suspended()
                 && utils::compute_window_info_manageability(&window.info, |wsid| {
                     self.state.windows.get_window_server_info(wsid)
                 })
@@ -2142,9 +2141,7 @@ impl Reactor {
                     .get(intent.workspace)
                     .map(|ws| ws.space);
                 let valid = self.state.windows.window(intent.window).is_some_and(|window| {
-                    self.state.windows.is_admitted(intent.window)
-                        && window.info.is_standard
-                        && !window.info.is_minimized
+                    self.state.windows.is_admitted(intent.window) && window.info.is_standard
                 }) && source.zip(destination).is_some_and(|(source, destination)| {
                     [
                         self.layout_manager.layout_engine.workspaces()[source].space,
@@ -2933,7 +2930,7 @@ impl Reactor {
                 .into_iter()
                 .filter_map(|id| {
                     let state = self.state.windows.window(id)?;
-                    (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
+                    (state.is_admitted() && state.info.is_standard)
                         .then_some((id, state.frame_monotonic))
                 })
                 .collect();

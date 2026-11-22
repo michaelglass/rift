@@ -5,6 +5,9 @@ use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{LayoutCommand, WindowLayoutInfo};
 use crate::model::WindowStore;
+use crate::model::admission::{
+    Admission, AdmissionFacts, AxKind, Manageability, Minimize, NativeKind, Rule, admission,
+};
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 
@@ -76,11 +79,11 @@ pub(crate) struct WindowState {
     /// This value only updates monotonically with respect to writes; in other
     /// words, we only accept reads when we know they come after the last write.
     pub(crate) frame_monotonic: CGRect,
-    /// Rift/macOS heuristic result, kept separately from an explicit app-rule
-    /// override so every discovered window can remain tracked.
-    pub(crate) is_manageable: bool,
-    pub(crate) native_transient: bool,
-    pub(crate) manage_override: Option<bool>,
+    /// Rift/macOS heuristic result, kept separately from an explicit app rule
+    /// so every discovered window can remain tracked.
+    pub(crate) manageability: Manageability,
+    pub(crate) native: NativeKind,
+    pub(crate) rule: Rule,
 }
 
 impl From<WindowInfo> for WindowState {
@@ -88,9 +91,9 @@ impl From<WindowInfo> for WindowState {
         WindowState {
             frame_monotonic: info.frame,
             info,
-            is_manageable: false,
-            native_transient: false,
-            manage_override: None,
+            manageability: Manageability::Unmanageable,
+            native: NativeKind::Ordinary,
+            rule: Rule::Unset,
         }
     }
 }
@@ -110,46 +113,23 @@ impl WindowState {
     }
 
     /// The single admission policy used by every layout-facing caller.
-    pub(crate) fn is_admitted(&self) -> bool {
-        self.is_admitted_with_override(self.manage_override)
-    }
+    pub(crate) fn is_admitted(&self) -> bool { self.admission() == Admission::Admitted }
 
-    pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        admission(self.admission_facts(manage_override)) == Admission::Admitted
-    }
+    pub(crate) fn admission(&self) -> Admission { admission(self.admission_facts()) }
 
-    /// Whether nothing but minimizing or the heuristic keeps the window out: the window
-    /// server, its roles and its rule allow managing it.
-    pub(super) fn allows_management(&self, manage_override: Option<bool>) -> bool {
-        let facts = AdmissionFacts {
-            minimize: Minimize::Shown,
-            manageability: Manageability::Manageable,
-            ..self.admission_facts(manage_override)
-        };
-        admission(facts) == Admission::Admitted
-    }
-
-    /// What admission reads of this window, with `manage_override` as its rule.
-    pub(crate) fn admission_facts(&self, manage_override: Option<bool>) -> AdmissionFacts {
+    /// What admission reads of this window.
+    pub(crate) fn admission_facts(&self) -> AdmissionFacts {
         let dialog_window = self.info.ax_role.as_deref() == Some("AXWindow")
             && self.info.ax_subrole.as_deref() == Some("AXDialog");
         AdmissionFacts {
-            manageability: if self.is_manageable {
-                Manageability::Manageable
-            } else {
-                Manageability::Unmanageable
-            },
-            rule: manage_override.into(),
+            manageability: self.manageability,
+            rule: self.rule,
             ax: match (crate::sys::app::is_ax_transient(&self.info), dialog_window) {
                 (false, _) => AxKind::Ordinary,
                 (true, true) => AxKind::DialogWindow,
                 (true, false) => AxKind::Transient,
             },
-            native: if self.native_transient {
-                NativeKind::Transient
-            } else {
-                NativeKind::Ordinary
-            },
+            native: self.native,
             minimize: if self.info.is_minimized {
                 Minimize::Minimized
             } else {
@@ -160,10 +140,6 @@ impl WindowState {
 }
 
 use thiserror::Error;
-
-use crate::model::admission::{
-    Admission, AdmissionFacts, AxKind, Manageability, Minimize, NativeKind, admission,
-};
 
 #[derive(Debug, Error)]
 pub enum ReactorError {
@@ -184,67 +160,6 @@ mod tests {
     use rift_protocol::{RestoreScope, RestoreSource};
 
     use super::*;
-
-    #[test]
-    fn admission_facts_decide_as_the_flag_checks_they_replace() {
-        // The checks `is_admitted_with_override` and `allows_management` made before.
-        fn allowed(w: &WindowState, manage_override: Option<bool>) -> bool {
-            let overrides_dialog_veto = manage_override == Some(true)
-                && w.info.ax_role.as_deref() == Some("AXWindow")
-                && w.info.ax_subrole.as_deref() == Some("AXDialog");
-            !w.native_transient
-                && (overrides_dialog_veto || !crate::sys::app::is_ax_transient(&w.info))
-                && manage_override != Some(false)
-        }
-        fn admitted(w: &WindowState, manage_override: Option<bool>) -> bool {
-            !w.info.is_minimized
-                && allowed(w, manage_override)
-                && manage_override.unwrap_or(w.is_manageable)
-        }
-        let roles = [
-            (None, None),
-            (Some("AXWindow"), Some("AXStandardWindow")),
-            (Some("AXWindow"), Some("AXDialog")),
-            (Some("AXWindow"), Some("AXSheet")),
-            (Some("AXSheet"), None),
-        ];
-        let mut cases = 0;
-        for (role, subrole) in roles {
-            for bits in 0..8u8 {
-                let (manageable, transient, minimized) =
-                    (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
-                let mut info = crate::actor::reactor::testing::make_window_info(
-                    objc2_core_foundation::CGRect::default(),
-                    None,
-                    "w",
-                    None,
-                );
-                info.ax_role = role.map(str::to_string);
-                info.ax_subrole = subrole.map(str::to_string);
-                info.is_minimized = minimized;
-                let mut window = WindowState::from(info);
-                window.is_manageable = manageable;
-                window.native_transient = transient;
-                for manage_override in [None, Some(true), Some(false)] {
-                    let case = format!(
-                        "{role:?}/{subrole:?} {manageable} {transient} {minimized} {manage_override:?}"
-                    );
-                    assert_eq!(
-                        window.is_admitted_with_override(manage_override),
-                        admitted(&window, manage_override),
-                        "{case}"
-                    );
-                    assert_eq!(
-                        window.allows_management(manage_override),
-                        allowed(&window, manage_override),
-                        "{case}"
-                    );
-                    cases += 1;
-                }
-            }
-        }
-        assert_eq!(cases, 120);
-    }
 
     #[test]
     fn legacy_restore_command_defaults_to_portable_source_policy() {

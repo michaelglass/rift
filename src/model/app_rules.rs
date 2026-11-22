@@ -6,6 +6,7 @@ use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::common::config::{AppRulePosition, AppRuleSize, AppWorkspaceRule, WorkspaceSelector};
 use crate::model::VirtualWorkspaceId;
+use crate::model::admission::Rule;
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -20,16 +21,12 @@ pub struct WindowRuleContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AppRuleDecision {
-    pub manage: Option<bool>,
+    pub(crate) rule: Rule,
     pub workspace: Option<WorkspaceSelector>,
     pub floating: bool,
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
     pub focus: bool,
-}
-
-impl AppRuleDecision {
-    pub(crate) fn management_override(&self) -> Option<bool> { self.manage }
 }
 
 /// Complete result of applying a managed app rule to workspace policy.
@@ -310,7 +307,7 @@ impl CompiledRule {
         }
         Some(Self {
             action: AppRuleDecision {
-                manage,
+                rule: manage.into(),
                 workspace,
                 floating,
                 position,
@@ -424,7 +421,7 @@ mod tests {
                 ..Default::default()
             }),
             Some(AppRuleDecision {
-                manage: Some(true),
+                rule: Rule::Manage,
                 workspace: None,
                 floating: true,
                 position: Some(AppRulePosition { x: 0.4, y: 0.7 }),

@@ -8,6 +8,7 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
 use crate::layout_engine::{LayoutCommand, LayoutEngine, LayoutEvent};
+use crate::model::admission::{Manageability, NativeKind, Rule};
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -274,7 +275,7 @@ impl Reactor {
         is_manageable: bool,
     ) {
         self.state.windows.insert_window(wid, super::WindowState {
-            native_transient: false,
+            native: NativeKind::Ordinary,
             info: WindowInfo {
                 has_native_tabs: false,
                 is_standard: true,
@@ -292,8 +293,12 @@ impl Reactor {
                 ax_subrole: None,
             },
             frame_monotonic: frame,
-            is_manageable,
-            manage_override: None,
+            manageability: if is_manageable {
+                Manageability::Manageable
+            } else {
+                Manageability::Unmanageable
+            },
+            rule: Rule::Unset,
         });
     }
 }
