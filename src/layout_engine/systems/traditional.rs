@@ -1020,4 +1020,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_layout_saved_with_a_kind_on_a_window_loads_without_it() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.tiles.root(layout);
+        system.tiles.set_layout(root, LayoutKind::Vertical);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        let saved = ron::to_string(&system).unwrap();
+
+        // Older versions saved a kind on every node. Give each window a stacked one.
+        assert_eq!(saved.matches("kind:horizontal").count(), 2, "{saved}");
+        let old = saved.replace("kind:horizontal", "kind:vertical_stack");
+        let mut restored: TraditionalLayoutSystem = ron::from_str(&old).unwrap();
+
+        let leaf = restored.tiles.window_node(layout, w(1)).unwrap();
+        assert_eq!(restored.tiles.map().kind(leaf), None);
+        assert_eq!(restored.tiles.layout(root), LayoutKind::Vertical);
+        assert!(restored.windows(layout, WindowQuery::Stack(w(1))).is_empty());
+        assert_eq!(restored.windows(layout, WindowQuery::Visible), [w(1), w(2)]);
+        assert_eq!(ron::to_string(&restored).unwrap(), saved);
+        // With the root selected, no child is a stack to unstack.
+        assert!(restored.focus(layout, Focus::Ascend).handled);
+        assert!(!restored.parent_of_selection_is_stacked(layout));
+    }
 }
