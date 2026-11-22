@@ -119,16 +119,10 @@ impl WindowState {
 
     /// What admission reads of this window.
     pub(crate) fn admission_facts(&self) -> AdmissionFacts {
-        let dialog_window = self.info.ax_role.as_deref() == Some("AXWindow")
-            && self.info.ax_subrole.as_deref() == Some("AXDialog");
         AdmissionFacts {
             manageability: self.manageability,
             rule: self.rule,
-            ax: match (crate::sys::app::is_ax_transient(&self.info), dialog_window) {
-                (false, _) => AxKind::Ordinary,
-                (true, true) => AxKind::DialogWindow,
-                (true, false) => AxKind::Transient,
-            },
+            ax: AxKind::of(&self.info),
             native: self.native,
             minimize: if self.info.is_minimized {
                 Minimize::Minimized

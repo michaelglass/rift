@@ -605,14 +605,6 @@ pub(crate) fn is_own_window_focused(window: crate::actor::app::WindowId) -> bool
             .is_some_and(|parent| parent.windowNumber() == window.idx.get() as isize)
 }
 
-pub(crate) fn is_ax_transient(info: &WindowInfo) -> bool {
-    info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
-        || (matches!(
-            info.ax_subrole.as_deref(),
-            Some("AXDialog" | "AXSystemDialog" | "AXSheet")
-        ) && !is_ibkr_desktop_dialog(info))
-}
-
 pub(crate) fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
     let max = info.max_size.unwrap_or(info.frame.size);
     let min = info.min_size.unwrap_or(info.frame.size);

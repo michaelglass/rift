@@ -1,5 +1,6 @@
 use crate::common::collections::HashMap;
-use crate::sys::app::{WindowInfo, is_ax_transient, pid_t};
+use crate::model::admission::AxKind;
+use crate::sys::app::{WindowInfo, pid_t};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
 
@@ -34,7 +35,7 @@ impl TransientFocusGuard {
         if self.windows.get(&id).is_some_and(|t| t.native && t.pid == pid) {
             return;
         }
-        if is_ax_transient(info)
+        if AxKind::of(info) != AxKind::Ordinary
             && matches!(
                 info.ax_role.as_deref(),
                 Some("AXWindow" | "AXSheet" | "AXPopover" | "AXMenu")

@@ -3,6 +3,8 @@
 //! The window keeps these facts and [`crate::model::reactor::WindowState::admission_facts`]
 //! reads them off it; [`admission`] is the only place the policy lives.
 
+use crate::sys::app::{WindowInfo, is_ibkr_desktop_dialog};
+
 /// The manageability heuristic's verdict on the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Manageability {
@@ -39,6 +41,19 @@ pub(crate) enum AxKind {
     DialogWindow,
     /// Any other transient (a non-window role, a sheet, a system dialog).
     Transient,
+}
+
+impl AxKind {
+    /// Reads the window's AX role and subrole.
+    pub(crate) fn of(info: &WindowInfo) -> AxKind {
+        match (info.ax_role.as_deref(), info.ax_subrole.as_deref()) {
+            (Some(role), _) if role != "AXWindow" => AxKind::Transient,
+            (Some(_), Some("AXDialog")) if is_ibkr_desktop_dialog(info) => AxKind::Ordinary,
+            (Some(_), Some("AXDialog")) => AxKind::DialogWindow,
+            (_, Some("AXDialog" | "AXSystemDialog" | "AXSheet")) => AxKind::Transient,
+            _ => AxKind::Ordinary,
+        }
+    }
 }
 
 /// Whether the window server marks the window transient for its app.

@@ -1,13 +1,14 @@
 use objc2_app_kit::NSNormalWindowLevel;
 
-use crate::sys::app::{WindowInfo, is_ax_transient, is_ibkr_desktop_dialog};
+use crate::model::admission::AxKind;
+use crate::sys::app::{WindowInfo, is_ibkr_desktop_dialog};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
 
 pub(super) fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
-    if is_ax_transient(info) || info.is_minimized || !info.is_root {
+    if AxKind::of(info) != AxKind::Ordinary || info.is_minimized || !info.is_root {
         return false;
     }
 
