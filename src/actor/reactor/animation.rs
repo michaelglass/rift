@@ -217,7 +217,7 @@ impl PresentedCamera {
         }
     }
 
-    pub(super) fn active(&self) -> bool { matches!(self.phase, CameraPhase::Running(_)) }
+    fn active(&self) -> bool { matches!(self.phase, CameraPhase::Running(_)) }
 
     fn commit(&self, system: &mut ScrollingLayoutSystem, layout: LayoutId) {
         match &self.phase {
@@ -1894,6 +1894,98 @@ mod tests {
             collect_requests(&mut rx).is_empty(),
             "old timestamps cannot sample a new transition"
         );
+    }
+
+    #[test]
+    fn a_camera_cancelled_on_the_animation_thread_leaves_the_viewport_at_rest() {
+        use crate::common::config::{ScrollingAlignment, ScrollingLayoutSettings};
+        use crate::layout_engine::systems::{Focus, ScrollingLayoutSystem, WindowChange};
+
+        let (handle, _rx) = AppThreadHandle::channel();
+        let (first, second) = (WindowId::new(1, 1), WindowId::new(1, 2));
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings {
+            column_width_ratio: 1.0,
+            max_column_width_ratio: 1.0,
+            alignment: ScrollingAlignment::Left,
+            preserve_window_sizes: false,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, first, None));
+        system.update(WindowChange::Add(layout, second, None));
+        let _ = system.focus(layout, Focus::Select(first));
+        let screen = rect(0.0, 0.0, 1000.0, 800.0);
+        system.prepare_layout(layout, screen, &Default::default(), &Default::default());
+        let _ = system.focus(layout, Focus::Select(second));
+        let (presentation, frames) = system.presentation(layout).unwrap();
+        let target = presentation.target();
+        assert_ne!(
+            presentation.offset(),
+            target,
+            "the focus change moves the viewport"
+        );
+        let state = Arc::new(Mutex::new(PresentedCamera::new(
+            presentation.snapshot(Instant::now()),
+        )));
+        let windows: Vec<_> = frames.iter().map(|(wid, ..)| *wid).collect();
+        let camera = CameraAnimation {
+            presentation,
+            movement: None,
+            windows: frames
+                .into_iter()
+                .map(|(wid, world, fixed)| PresentedWindow {
+                    handle: handle.clone(),
+                    wid,
+                    wsid: None,
+                    from: world,
+                    to: world,
+                    fixed,
+                    announced: false,
+                    leased: false,
+                    frame: world,
+                    move_from: CGPoint::ZERO,
+                    txid: TransactionId::default(),
+                })
+                .collect(),
+            gesture: None,
+            active: true,
+            identity: CameraIdentity {
+                space: SpaceId::new(1),
+                workspace: VirtualWorkspaceId::default(),
+                layout,
+            },
+            events: None,
+            state: state.clone(),
+            display: 1,
+            animate: true,
+            scale: 1.0,
+            store: WindowTxStore::new(),
+            interval: Duration::from_secs_f64(1.0 / 60.0),
+            bound: None,
+        };
+        let (sender, commands) = AnimationSender::channel();
+        let runner = std::thread::spawn(move || AnimationManager::run(commands));
+        sender.send(Message::Camera(Box::new(camera))).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while sender.control.lock().frames.is_empty() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(state.lock().active(), "the camera is still on its way");
+
+        // Every window the camera presents is written instead, so it ends mid-flight. Nothing
+        // is left to advance the viewport, so committing it must leave it at its target.
+        let _ = sender.cancel(windows);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while state.lock().active() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(!state.lock().active(), "cancelling every window ends the camera");
+        state.lock().commit(&mut system, layout);
+        drop(sender);
+        runner.join().unwrap();
+        let (presentation, _) = system.presentation(layout).unwrap();
+        assert!(!presentation.animated(), "the viewport is left animating");
+        assert_eq!(presentation.offset(), target);
     }
 
     #[test]
