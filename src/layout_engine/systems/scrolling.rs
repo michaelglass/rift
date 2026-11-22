@@ -129,9 +129,18 @@ impl Viewport {
         }
     }
 
+    /// Where the viewport comes to rest if nothing advances it: its target. A gesture has no
+    /// resting place of its own; the hand holds it.
+    fn resting_offset(&self) -> Option<f64> {
+        match self {
+            Self::Gesture(_) => None,
+            _ => Some(self.target()),
+        }
+    }
+
     fn finish(&mut self) {
-        if !matches!(self, Self::Gesture(_)) {
-            *self = Self::Static(self.target());
+        if let Some(offset) = self.resting_offset() {
+            *self = Self::Static(offset);
         }
     }
 
@@ -280,9 +289,6 @@ pub(crate) struct ViewportPresentation {
     screen: CGRect,
 }
 
-/// Rendered scalar state, read only at semantic boundaries. Motion samples stay
-/// shared so release keeps the exact touchpad velocity history without cloning
-/// a camera or copying history on each display refresh.
 /// A camera's viewport once nothing drives it any more: at rest, or held by a gesture. It has
 /// no animating form, so a camera that ended can't leave its layout animating.
 #[derive(Debug)]
@@ -291,6 +297,9 @@ pub(crate) enum SettledViewport {
     Gesture(PresentedViewport),
 }
 
+/// Rendered scalar state, read only at semantic boundaries. Motion samples stay
+/// shared so release keeps the exact touchpad velocity history without cloning
+/// a camera or copying history on each display refresh.
 #[derive(Clone, Debug)]
 pub(crate) struct PresentedViewport {
     pub offset: f64,
@@ -309,10 +318,9 @@ impl ViewportPresentation {
     /// Where the viewport ends up if nothing advances it from `now`: at its target, or, for a
     /// gesture, where the hand is.
     pub fn settled(&self, now: Instant) -> SettledViewport {
-        if self.gesturing() {
-            SettledViewport::Gesture(self.snapshot(now))
-        } else {
-            SettledViewport::At(self.target())
+        match self.viewport.resting_offset() {
+            Some(offset) => SettledViewport::At(offset),
+            None => SettledViewport::Gesture(self.snapshot(now)),
         }
     }
 
@@ -1533,6 +1541,8 @@ impl ScrollingLayoutSystem {
         match v {
             SettledViewport::Gesture(p) => self.commit_presented_viewport(layout, p),
             SettledViewport::At(offset) => {
+                // Motion history only feeds a live gesture, and the next gesture clears it
+                // before use, so a viewport at rest has none to carry.
                 if let Some(state) = self.layouts.get_mut(layout) {
                     state.camera.viewport = Viewport::Static(*offset);
                 }
