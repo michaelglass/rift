@@ -267,14 +267,23 @@ emission; `find_window_by_idx` (now `resolve_window_index`, which refuses an amb
 seeding expectations (`seed_space` is gone); `bsp_saved.rs`; the old discovery visibility filter; the
 arrange on any focus change; `AppRuleEffects.names_workspace` (one source: our placement question).
 
+**Lifecycle flipped (2026-11-22, policy (a)).** Under `roc-core` the Roc core decides the
+lifecycle: `TwinnedLifecycle`'s step, invalidate and revalidate return the Roc core's answers, and
+the Rust `Lifecycle` is its shadow (read through `Deref`). Any difference (an outcome, or the views
+compared every step in tests and every 32nd in a running Rift) warns `roc-divergence:` (tests panic)
+and re-seeds the shadow from the Roc core's windows (`Lifecycle::from_presences`), counted
+process-wide and printed by `rift-cli metrics show-timing` (`roc-core: lifecycle re-seeds: N`). The
+Rust core's `invalidate`/`revalidate` answer named tags (`Invalidation`, `Revalidation`) like the
+boundary. Plants from both sides with the flip on (a revalidation that leaves the window invalidated,
+in the Rust shadow and in `Lifecycle.roc`): 6 failures each, all roc-divergence. Cost per flipped
+step (release): shadow + Roc step about 240 ns at 10 windows, 256 at 100, 280 at 1000; the views every
+32nd step add about 13, 38, 190 ns a step; a re-seed costs about one Roc view.
+
 **Next:**
-1. The lifecycle flip (gate met): Roc wins, the Rust shadow is re-seeded, the re-seed count is
-   visible, tests panic (policy (a)); the Rust `Lifecycle`'s named tags for invalidate/revalidate in
-   the same slice. The fuzzer runs with the flip on; cost re-measured.
-2. The MainWindowTracker twin: its fields typed first, #702's main-window clearing included.
-3. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
-4. The core_geometry converters on the new layout trees.
-5. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
+1. The MainWindowTracker twin: its fields typed first, #702's main-window clearing included.
+2. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
+3. The core_geometry converters on the new layout trees.
+4. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
 
