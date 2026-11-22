@@ -2739,4 +2739,44 @@ pub(crate) mod tests {
         system.update(WindowChange::Add(layout, wid(3), None));
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
+
+    #[test]
+    fn an_edit_during_a_scroll_reconciles_its_target_like_a_viewport_at_rest() {
+        // Four half-width columns; focusing the last scrolls to it.
+        let start = || {
+            let mut f = Fixture::new(4);
+            f.select(4);
+            f.prepare();
+            f
+        };
+        let edit = |f: &mut Fixture, window: u32| {
+            f.system.update(WindowChange::Remove(wid(window)));
+            f.prepare();
+        };
+        for window in [1, 3] {
+            let mut rest = start();
+            rest.system.finish_viewport(rest.layout);
+            edit(&mut rest, window);
+            rest.system.finish_viewport(rest.layout);
+            let state = &rest.system.layouts[rest.layout];
+            let expected = state.camera.viewport.offset();
+            let bounds = state.geometry.as_ref().unwrap().bounds;
+            assert!(bounds.0 <= expected && expected <= bounds.1);
+
+            // The same edit lands while a camera is carrying the viewport there.
+            let mut f = start();
+            let (mut camera, _) = f.system.presentation(f.layout).unwrap();
+            let now = Instant::now();
+            camera.sample(now + Duration::from_millis(20), 1.0);
+            assert!(camera.animated(), "still on its way");
+            f.system.commit_viewport(f.layout, &camera.snapshot().settled());
+            edit(&mut f, window);
+            let (mut next, _) = f.system.presentation(f.layout).unwrap();
+            let (from, velocity) = camera.position_velocity(now);
+            next.retarget(next.carry(&camera, from), velocity, now);
+            next.sample(now + Duration::from_secs(5), 1.0);
+            assert!(!next.animated());
+            assert_eq!(next.offset(), expected, "closing window {window}");
+        }
+    }
 }
