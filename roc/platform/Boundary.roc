@@ -521,6 +521,53 @@ Boundary := [].{
 	## The topology, unchanged, and what it holds: the catalog and every Space's activation.
 	TopologyViewed(model) := { model : Box(model), catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
 
+	# The main window (`rift_core::main_window`). Pids and windows are one word each.
+
+	## Whether an app is frontmost by its own AX activation events.
+	AppStanding := [Frontmost, Background]
+
+	## Who started an activation: Rift itself, or anything else.
+	Initiator := [Rift, Other]
+
+	MainLaunch := { pid : U64, standing : AppStanding, main_window : MaybeWord }
+
+	MainActivation := { pid : U64, initiator : Initiator }
+
+	MainWindowChange := { pid : U64, window : MaybeWord, initiator : Initiator }
+
+	## A window and its app.
+	FocusedWindow := { pid : U64, window : U64 }
+
+	MainReplacement := { pid : U64, window : U64, replacement : MaybeWord }
+
+	MainWindowEvent := [
+		Launched(MainLaunch),
+		Terminated(U64),
+		Activated(MainActivation),
+		Deactivated(U64),
+		GloballyActivated(U64),
+		GloballyDeactivated(U64),
+		MainWindowChanged(MainWindowChange),
+		NativeFocused(FocusedWindow),
+		Replaced(MainReplacement),
+	]
+
+	## The window the window server last reported focused, while it exists.
+	ReportedFocus := [NoWindow, Window(FocusedWindow)]
+
+	## What the window server has said about focus.
+	NativeFocus := [NotYetReported, Reported(ReportedFocus)]
+
+	## One app as the machine knows it.
+	MainApp := { pid : U64, standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }
+
+	## The main windows after an event, and the window to focus, if the event makes one known.
+	MainWindowsStepped(model) := { model : Box(model), focus : MaybeWord }
+
+	## The main windows, unchanged, and what they hold: the main window, the native focus, every
+	## app in pid order and the globally frontmost app.
+	MainWindowsViewed(model) := { model : Box(model), main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord }
+
 	## Where a claimed window returns to when its claim ends.
 	Destination := [Returns(U64), Nowhere]
 

@@ -316,6 +316,69 @@ impl RocTopology {
     }
 }
 
+/// Which window is the main one (`rift_core::main_window::MainWindows`) kept in Roc between
+/// events: every app by pid, the globally frontmost app and the native focus. Stepped beside the
+/// Rust machine, it must answer the same window to focus and hold the same state. Pids and
+/// windows are words (a pid sign-extended, a window as `roc_path::Word` makes it).
+pub struct RocMainWindows {
+    mains: boundary::MainWindowsBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocMainWindows {}
+
+impl Default for RocMainWindows {
+    fn default() -> Self {
+        RocMainWindows {
+            mains: boundary::MainWindowsBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocMainWindows {
+    /// As `MainWindows::step`: the window to focus, if the event makes one known.
+    pub fn step(
+        &mut self,
+        event: rift_core::main_window::MainWindowEvent<u64, u64>,
+    ) -> Option<u64> {
+        boundary::in_place(&mut self.mains, |mains| mains.step(event))
+    }
+
+    /// As `MainWindows::main_window`, `native_focus_state`, `apps` and `global_frontmost`.
+    pub fn view(&mut self) -> main_window::MainWindowsView {
+        let host = &self.host;
+        boundary::in_place(&mut self.mains, |mains| mains.view(host))
+    }
+}
+
+/// What the main-window machine holds, as both twins give it.
+pub mod main_window {
+    use rift_core::main_window::{App, MainWindows, NativeFocus};
+
+    /// The main window, the native focus, every app and its state in pid order, and the
+    /// globally frontmost app: the whole of a `MainWindows`, comparable.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct MainWindowsView {
+        pub main_window: Option<u64>,
+        pub native_focus: NativeFocus<u64, u64>,
+        pub apps: Vec<(u64, App<u64>)>,
+        pub global_frontmost: Option<u64>,
+    }
+
+    impl From<&MainWindows<u64, u64>> for MainWindowsView {
+        fn from(mains: &MainWindows<u64, u64>) -> Self {
+            MainWindowsView {
+                main_window: mains.main_window(),
+                native_focus: mains.native_focus_state(),
+                apps: mains.apps().collect(),
+                global_frontmost: mains.global_frontmost(),
+            }
+        }
+    }
+}
+
 /// The mode table (`rift_core::modes`), answered by the Roc core.
 pub mod modes {
     use rift_core::Initiative;

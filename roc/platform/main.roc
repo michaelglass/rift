@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Owners : owners, Places : places] for core : {
+		[Model : model, Windows : windows, Owners : owners, Places : places, Mains : mains] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -56,6 +56,9 @@ platform ""
 			topology_step : places, TopologyEvent -> places,
 			topology_view : places -> { model : places, catalog : List(WorkspaceSpace), activations : List(SpaceActivation) },
 			mode_verdict : ModesQuestion -> ModeVerdict,
+			main_window_init : {} -> mains,
+			main_window_step : mains, MainWindowEvent -> { model : mains, focus : MaybeWord },
+			main_window_view : mains -> { model : mains, main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord },
 		}
 	}
 	exposes [Boundary]
@@ -76,6 +79,10 @@ platform ""
 		"roc_topology_step": topology_step_for_host,
 		"roc_topology_view": topology_view_for_host,
 		"roc_topology_release": topology_release_for_host,
+		"roc_main_window_init": main_window_init_for_host,
+		"roc_main_window_step": main_window_step_for_host,
+		"roc_main_window_view": main_window_view_for_host,
+		"roc_main_window_release": main_window_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
@@ -123,7 +130,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed, ModesQuestion, ModeVerdict]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -362,6 +369,30 @@ topology_view_for_host = |boxed| {
 ## The host cannot release a `Box(Places)`: only Roc knows its layout.
 topology_release_for_host : Box(Places) -> {}
 topology_release_for_host = |_| {}
+
+## Which window is the main one (`rift_core::main_window::MainWindows`), kept between events:
+## no apps, no frontmost app, and no native focus reported yet.
+main_window_init_for_host : {} -> Box(Mains)
+main_window_init_for_host = |{}| Box.box((core.main_window_init)({}))
+
+## An observed event, and the window to focus, if it makes one known.
+main_window_step_for_host : Box(Mains), MainWindowEvent -> MainWindowsStepped(Mains)
+main_window_step_for_host = |boxed, event| {
+	stepped = (core.main_window_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), focus: stepped.focus }
+}
+
+## The main window, the native focus, every app and the globally frontmost app, and the main
+## windows back unchanged.
+main_window_view_for_host : Box(Mains) -> MainWindowsViewed(Mains)
+main_window_view_for_host = |boxed| {
+	viewed = (core.main_window_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), main_window: viewed.main_window, native_focus: viewed.native_focus, apps: viewed.apps, global_frontmost: viewed.global_frontmost }
+}
+
+## The host cannot release a `Box(Mains)`: only Roc knows its layout.
+main_window_release_for_host : Box(Mains) -> {}
+main_window_release_for_host = |_| {}
 
 ## The mode table's verdict on an initiative.
 mode_verdict_for_host : ModesQuestion -> ModeVerdict

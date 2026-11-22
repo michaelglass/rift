@@ -52,6 +52,10 @@ required-features = ["roc"]
 name = "measure"
 required-features = ["roc"]
 
+[[test]]
+name = "main_window"
+required-features = ["roc"]
+
 [dependencies]
 rift-core = { path = "../rift-core" }
 libmimalloc-sys = { version = "0.1.39", optional = true }

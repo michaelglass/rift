@@ -21,6 +21,9 @@ use rift_core::lifecycle::{
     PresenceEvent, PresenceOutcome, Reading, Report, Retirement, Revalidation, Rule, RuleRun,
     Suitability, TransientOrigin, Veto, WorkspaceMode,
 };
+use rift_core::main_window::{
+    App, Initiator, MainWindowEvent, NativeFocus, Standing as MainStanding,
+};
 use rift_core::plain::{Answers, Fact, Nanos, Plain, Rect, RequestId, Unasked, WindowId};
 use rift_core::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
@@ -2842,6 +2845,184 @@ impl Drop for TopologyBox {
     fn drop(&mut self) {
         // SAFETY: the box is this topology's and is never used again.
         unsafe { abi::roc_topology_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Which window is the main one, kept between events.
+
+fn initiator(initiator: Initiator) -> abi::BoundaryInitiator {
+    match initiator {
+        Initiator::Rift => abi::BoundaryInitiator::Rift,
+        Initiator::Other => abi::BoundaryInitiator::Other,
+    }
+}
+
+fn from_initiator(initiator: abi::BoundaryInitiator) -> Initiator {
+    match initiator {
+        abi::BoundaryInitiator::Rift => Initiator::Rift,
+        abi::BoundaryInitiator::Other => Initiator::Other,
+    }
+}
+
+fn app_standing(standing: MainStanding) -> abi::BoundaryAppStanding {
+    match standing {
+        MainStanding::Frontmost => abi::BoundaryAppStanding::Frontmost,
+        MainStanding::Background => abi::BoundaryAppStanding::Background,
+    }
+}
+
+fn from_app_standing(standing: abi::BoundaryAppStanding) -> MainStanding {
+    match standing {
+        abi::BoundaryAppStanding::Frontmost => MainStanding::Frontmost,
+        abi::BoundaryAppStanding::Background => MainStanding::Background,
+    }
+}
+
+fn main_window_event(event: MainWindowEvent<u64, u64>) -> abi::BoundaryMainWindowEvent {
+    use abi::BoundaryMainWindowEventTag as Tag;
+    match event {
+        MainWindowEvent::Launched { pid, standing, main_window } => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.launched(abi::BoundaryMainLaunch {
+                pid,
+                standing: app_standing(standing),
+                main_window: maybe_word(main_window),
+            }),
+            Tag::Launched
+        ),
+        MainWindowEvent::Terminated(pid) => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.terminated(pid),
+            Tag::Terminated
+        ),
+        MainWindowEvent::Activated(pid, by) => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload
+                .activated(abi::BoundaryMainActivation { pid, initiator: initiator(by) }),
+            Tag::Activated
+        ),
+        MainWindowEvent::Deactivated(pid) => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.deactivated(pid),
+            Tag::Deactivated
+        ),
+        MainWindowEvent::GloballyActivated(pid) => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.globally_activated(pid),
+            Tag::GloballyActivated
+        ),
+        MainWindowEvent::GloballyDeactivated(pid) => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.globally_deactivated(pid),
+            Tag::GloballyDeactivated
+        ),
+        MainWindowEvent::MainWindowChanged(pid, window, by) => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.main_window_changed(abi::BoundaryMainWindowChange {
+                pid,
+                window: maybe_word(window),
+                initiator: initiator(by),
+            }),
+            Tag::MainWindowChanged
+        ),
+        MainWindowEvent::NativeFocused { pid, window } => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload
+                .native_focused(abi::BoundaryFocusedWindow { pid, window }),
+            Tag::NativeFocused
+        ),
+        MainWindowEvent::Replaced { pid, window, replacement } => union!(
+            BoundaryMainWindowEvent,
+            BoundaryMainWindowEventPayload.replaced(abi::BoundaryMainReplacement {
+                pid,
+                window,
+                replacement: maybe_word(replacement),
+            }),
+            Tag::Replaced
+        ),
+    }
+}
+
+fn from_native_focus(focus: abi::BoundaryNativeFocus) -> NativeFocus<u64, u64> {
+    use abi::{BoundaryNativeFocusTag as Tag, BoundaryReportedFocusTag as Reported};
+    match focus.tag {
+        Tag::NotYetReported => NativeFocus::NotYetReported,
+        Tag::Reported => {
+            // SAFETY: the tag says the payload is the reported focus.
+            let reported = unsafe { *focus.borrow_payload_reported_unchecked() };
+            NativeFocus::Reported(match reported.tag {
+                Reported::NoWindow => None,
+                Reported::Window => {
+                    // SAFETY: the tag says the payload is the window and its app.
+                    let focused = unsafe { *reported.borrow_payload_window_unchecked() };
+                    Some((focused.pid, focused.window))
+                }
+            })
+        }
+    }
+}
+
+/// The main windows' box, which only Roc can read or free; only the `roc_main_window_*`
+/// entries make and take one. Dropping it releases the main windows.
+pub(crate) struct MainWindowsBox(abi::RocBox);
+
+impl MainWindowsBox {
+    pub(crate) fn empty() -> MainWindowsBox {
+        MainWindowsBox(unsafe { abi::roc_main_window_init() })
+    }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// An observed event: the main windows after it, and the window to focus, if it makes one
+    /// known.
+    pub(crate) fn step(self, event: MainWindowEvent<u64, u64>) -> (MainWindowsBox, Option<u64>) {
+        // SAFETY: the box is these main windows', given to the step; its successor comes back.
+        let stepped =
+            unsafe { abi::roc_main_window_step(self.into_raw(), main_window_event(event)) };
+        (MainWindowsBox(stepped.model), from_maybe_word(stepped.focus))
+    }
+
+    /// The main window, the native focus, every app in pid order and the globally frontmost
+    /// app.
+    pub(crate) fn view(
+        self,
+        host: &abi::RocHost,
+    ) -> (MainWindowsBox, crate::main_window::MainWindowsView) {
+        // SAFETY: as in `step`; the list is Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_main_window_view(self.into_raw()) };
+        let apps = viewed
+            .apps
+            .as_slice()
+            .iter()
+            .map(|app| {
+                (app.pid, App {
+                    standing: from_app_standing(app.standing),
+                    last_activation: from_initiator(app.last_activation),
+                    main_window: from_maybe_word(app.main_window),
+                })
+            })
+            .collect();
+        unsafe { viewed.apps.decref(host) };
+        let view = crate::main_window::MainWindowsView {
+            main_window: from_maybe_word(viewed.main_window),
+            native_focus: from_native_focus(viewed.native_focus),
+            apps,
+            global_frontmost: from_maybe_word(viewed.global_frontmost),
+        };
+        (MainWindowsBox(viewed.model), view)
+    }
+}
+
+impl Drop for MainWindowsBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is these main windows' and is never used again.
+        unsafe { abi::roc_main_window_release(self.0) }
     }
 }
 

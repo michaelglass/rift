@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation, Invalidation, Revalidation, ModesQuestion, ModeVerdict]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp]
 import Bsp
 import Traditional
 import Scrolling
@@ -14,6 +14,7 @@ import Lifecycle
 import Focus
 import Workspaces
 import Modes
+import MainWindow
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -103,6 +104,10 @@ Owners : Dict(U64, [Assigned(U64), Claimed({ owner : U64, destination : [Returns
 ## out: the platform needs the name here).
 Places : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : [Showing({ current : U64, previous : [Some(U64), Nothing], remembered : [Some(U64), Nothing] }), Vacant([Some(U64), Nothing])] }) }
 
+## Which window is the main one, kept between events: every app by pid, the globally frontmost
+## app and the native focus (`MainWindow.Mains`, written out: the platform needs the name here).
+Mains : { apps : Dict(U64, { standing : [Frontmost, Background], last_activation : [Rift, Other], main_window : [Some(U64), Nothing] }), global_frontmost : [Some(U64), Nothing], native_focus : [NotYetReported, Reported([NoWindow, Window({ pid : U64, window : U64 })])] }
+
 Model : {
 	windows : Dict(WindowId, Record),
 
@@ -118,7 +123,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, ownerships_init, ownerships_step, ownerships_view, topology_init, topology_step, topology_view, mode_verdict }
+core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, ownerships_init, ownerships_step, ownerships_view, topology_init, topology_step, topology_view, mode_verdict, main_window_init, main_window_step, main_window_view }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -304,6 +309,21 @@ topology_step = |places, event| Workspaces.topology_step(places, event)
 ## The catalog and every Space's activation.
 topology_view : Places -> { model : Places, catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
 topology_view = |places| { model: places, catalog: places.catalog, activations: places.activations }
+
+## Which window is the main one: no apps and no native focus, at first.
+main_window_init : {} -> Mains
+main_window_init = |{}| MainWindow.empty({})
+
+## An observed event, and the window to focus, if it makes one known.
+main_window_step : Mains, MainWindowEvent -> { model : Mains, focus : MaybeWord }
+main_window_step = |mains, event| {
+	(model, focus) = MainWindow.step(mains, event)
+	{ model, focus }
+}
+
+## The main window, the native focus, every app in pid order and the globally frontmost app.
+main_window_view : Mains -> { model : Mains, main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord }
+main_window_view = |mains| { model: mains, main_window: MainWindow.main_window(mains), native_focus: mains.native_focus, apps: MainWindow.apps_in_order(mains), global_frontmost: mains.global_frontmost }
 
 ## The mode table's verdict on an initiative.
 mode_verdict : ModesQuestion -> ModeVerdict
