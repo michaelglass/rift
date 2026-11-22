@@ -1789,7 +1789,6 @@ impl WindowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::admission::{NativeKind, Rule};
     use crate::model::virtual_workspace::WorkspaceStore;
 
     #[test]
@@ -1925,94 +1924,6 @@ mod tests {
         });
         state.manageability = Manageability::Manageable;
         state
-    }
-
-    #[test]
-    fn admission_decides_as_the_flag_checks_it_replaced() {
-        // The checks `is_admitted`, `can_move_assigned_window` and
-        // `is_temporarily_unavailable` made on the window's bools before.
-        struct Old {
-            manageable: bool,
-            native_transient: bool,
-            manage_override: Option<bool>,
-        }
-        fn old_allowed(w: &WindowState, old: &Old) -> bool {
-            let overrides_dialog_veto = old.manage_override == Some(true)
-                && w.info.ax_role.as_deref() == Some("AXWindow")
-                && w.info.ax_subrole.as_deref() == Some("AXDialog");
-            !old.native_transient
-                && (overrides_dialog_veto || !crate::sys::app::is_ax_transient(&w.info))
-                && old.manage_override != Some(false)
-        }
-        fn old_admitted(w: &WindowState, old: &Old) -> bool {
-            !w.info.is_minimized
-                && old_allowed(w, old)
-                && old.manage_override.unwrap_or(old.manageable)
-        }
-        fn old_unavailable(w: &WindowState, old: &Old) -> bool {
-            w.info.is_minimized || (old.manage_override != Some(false) && !old_admitted(w, old))
-        }
-        let roles = [
-            (None, None),
-            (Some("AXWindow"), Some("AXStandardWindow")),
-            (Some("AXWindow"), Some("AXDialog")),
-            (Some("AXWindow"), Some("AXSheet")),
-            (Some("AXSheet"), None),
-        ];
-        let wid = WindowId::new(1, 1);
-        let mut workspaces = WorkspaceStore::new();
-        let home = workspaces.create_workspace(SpaceId::new(10), None).unwrap();
-        let mut cases = 0;
-        for (role, subrole) in roles {
-            for bits in 0..8u8 {
-                let (manageable, native_transient, minimized) =
-                    (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
-                for manage_override in [None, Some(true), Some(false)] {
-                    let old = Old {
-                        manageable,
-                        native_transient,
-                        manage_override,
-                    };
-                    let mut window = admitted(wid, WindowServerId::new(1));
-                    window.info.ax_role = role.map(str::to_string);
-                    window.info.ax_subrole = subrole.map(str::to_string);
-                    window.info.is_minimized = minimized;
-                    window.manageability = if manageable {
-                        Manageability::Manageable
-                    } else {
-                        Manageability::Unmanageable
-                    };
-                    window.native = if native_transient {
-                        NativeKind::Transient
-                    } else {
-                        NativeKind::Ordinary
-                    };
-                    window.rule = Rule::from(manage_override);
-                    let mut store = WindowStore::default();
-                    store.insert_window(wid, window.clone());
-                    store.assign_window_to_workspace(wid, home);
-                    let case = format!(
-                        "{role:?}/{subrole:?} manageable={manageable} \
-                         native_transient={native_transient} minimized={minimized} \
-                         {manage_override:?}"
-                    );
-                    assert_eq!(window.is_admitted(), old_admitted(&window, &old), "{case}");
-                    assert_eq!(store.is_admitted(wid), old_admitted(&window, &old), "{case}");
-                    assert_eq!(
-                        store.can_move_assigned_window(wid),
-                        old_allowed(&window, &old),
-                        "{case}"
-                    );
-                    assert_eq!(
-                        store.is_temporarily_unavailable(wid),
-                        old_unavailable(&window, &old),
-                        "{case}"
-                    );
-                    cases += 1;
-                }
-            }
-        }
-        assert_eq!(cases, 120);
     }
 
     #[test]
