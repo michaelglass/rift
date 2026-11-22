@@ -88,19 +88,22 @@ struct ViewBookmark {
     relative_offset: f64,
 }
 
+/// The layout's committed viewport: where the layout wants the camera, or where a gesture
+/// holds it. The spring that carries the camera there lives only in the presenter.
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(from = "f64")]
 enum Viewport {
     #[default]
     Uninitialized,
     Static(f64),
-    // Keep the previous position until the presenter starts the new target.
+    // A target the presenter has not started yet. Keep the previous position until it does;
+    // a released gesture also hands over its fling.
     Pending {
         from: f64,
         target: f64,
+        velocity: f64,
     },
     Gesture(f64),
-    Animation(CameraSpring),
 }
 
 impl Viewport {
@@ -111,7 +114,6 @@ impl Viewport {
             Self::Uninitialized => 0.0,
             Self::Static(offset) | Self::Gesture(offset) => *offset,
             Self::Pending { target, .. } => *target,
-            Self::Animation(spring) => spring.current,
         }
     }
 
@@ -122,67 +124,34 @@ impl Viewport {
         }
     }
 
-    fn target(&self) -> f64 {
-        match self {
-            Self::Animation(spring) => spring.target,
-            _ => self.offset(),
-        }
-    }
-
-    /// Where the viewport comes to rest if nothing advances it: its target. A gesture has no
-    /// resting place of its own; the hand holds it.
-    fn resting_offset(&self) -> Option<f64> {
-        match self {
-            Self::Gesture(_) => None,
-            _ => Some(self.target()),
-        }
-    }
-
     fn finish(&mut self) {
-        if let Some(offset) = self.resting_offset() {
-            *self = Self::Static(offset);
-        }
-    }
-
-    fn set_target(&mut self, target: f64) {
-        let from = self.start_offset();
-        *self = if from == target {
-            Self::Static(target)
-        } else {
-            Self::Pending { from, target }
-        };
-    }
-
-    fn sample(&mut self, now: Instant, scale: f64) -> Option<bool> {
         if let Self::Pending { target, .. } = *self {
             *self = Self::Static(target);
-            return Some(false);
         }
-        let Self::Animation(spring) = self else {
-            return None;
-        };
-        // Bounds constrain the destination. After a column closes, the previous
-        // position can lie outside them and must remain visible while returning.
-        if spring.sample(now, scale) {
-            *self = Self::Static(spring.target);
-            Some(false)
+    }
+
+    fn set_target(&mut self, target: f64) { self.launch(target, 0.0); }
+
+    /// Asking again for the target already pending keeps its launch.
+    fn launch(&mut self, target: f64, velocity: f64) {
+        if matches!(*self, Self::Pending { target: pending, .. } if pending == target) {
+            return;
+        }
+        let from = self.start_offset();
+        *self = if from == target && velocity == 0.0 {
+            Self::Static(target)
         } else {
-            Some(true)
-        }
+            Self::Pending { from, target, velocity }
+        };
     }
 
     fn rebase(&mut self, delta: f64) {
         match self {
             Self::Uninitialized => {}
             Self::Static(offset) | Self::Gesture(offset) => *offset += delta,
-            Self::Pending { from, target } => {
+            Self::Pending { from, target, .. } => {
                 *from += delta;
                 *target += delta;
-            }
-            Self::Animation(spring) => {
-                spring.from += delta;
-                spring.target += delta;
-                spring.current += delta;
             }
         }
     }
@@ -242,7 +211,7 @@ impl From<f64> for Viewport {
     fn from(offset: f64) -> Self { Self::Static(if offset.is_finite() { offset } else { 0.0 }) }
 }
 
-/// Semantic release result; animation, when enabled, belongs to the viewport.
+/// Semantic release result; animation, when enabled, belongs to the presenter.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewportRelease {
     pub window: WindowId,
@@ -281,7 +250,7 @@ struct Geometry {
 /// boundaries; sampling does not enter the layout engine.
 #[derive(Debug)]
 pub(crate) struct ViewportPresentation {
-    viewport: Viewport,
+    viewport: CameraViewport,
     rebased: f64,
     motion: Arc<Mutex<MotionHistory>>,
     bounds: (f64, f64),
@@ -290,25 +259,67 @@ pub(crate) struct ViewportPresentation {
     screen: CGRect,
 }
 
-/// A camera's viewport once nothing drives it any more: at rest, or held by a gesture. It has
-/// no animating form, so a camera that ended can't leave its layout animating.
+/// The presenter's viewport. A target the layout asked for becomes a spring from where the
+/// viewport was, which the presenter alone advances.
 #[derive(Debug)]
-pub(crate) enum SettledViewport {
-    At(f64),
-    Gesture(PresentedViewport),
+enum CameraViewport {
+    Static(f64),
+    Gesture(f64),
+    Animation(CameraSpring),
 }
 
-/// Rendered scalar state, read only at semantic boundaries. Motion samples stay
-/// shared so release keeps the exact touchpad velocity history without cloning
-/// a camera or copying history on each display refresh.
+impl CameraViewport {
+    fn new(viewport: &Viewport, now: Instant) -> Self {
+        match *viewport {
+            Viewport::Uninitialized => Self::Static(viewport.offset()),
+            Viewport::Static(offset) => Self::Static(offset),
+            Viewport::Gesture(offset) => Self::Gesture(offset),
+            Viewport::Pending { from, target, velocity } => {
+                Self::Animation(CameraSpring::new(from, target, velocity, now))
+            }
+        }
+    }
+}
+
+/// A camera's viewport once nothing drives it any more: at rest, or held by a gesture. It is
+/// all a camera commits to its layout, so a layout never holds an animation.
 #[derive(Clone, Debug)]
-pub(crate) struct PresentedViewport {
-    pub offset: f64,
-    pub velocity: f64,
-    pub target: f64,
-    pub gesturing: bool,
-    pub timestamp: Instant,
+pub(crate) enum SettledViewport {
+    At(f64),
+    Gesture(HeldViewport),
+}
+
+/// Motion samples stay shared so release keeps the exact touchpad velocity history without
+/// cloning a camera or copying history on each display refresh.
+#[derive(Clone, Debug)]
+pub(crate) struct HeldViewport {
+    offset: f64,
     motion: Arc<Mutex<MotionHistory>>,
+}
+
+/// What a running camera publishes each frame: settled, or on its way to a target.
+#[derive(Clone, Debug)]
+pub(crate) enum PresentedViewport {
+    Settled(SettledViewport),
+    Moving(CameraSpring),
+}
+
+impl PresentedViewport {
+    /// What the camera leaves its layout with; a moving camera leaves its target.
+    pub fn settled(&self) -> SettledViewport {
+        match self {
+            Self::Settled(viewport) => viewport.clone(),
+            Self::Moving(spring) => SettledViewport::At(spring.target),
+        }
+    }
+
+    /// Where a moving camera shows the viewport at `now`.
+    pub fn moving_offset(&self, now: Instant) -> Option<f64> {
+        match self {
+            Self::Settled(_) => None,
+            Self::Moving(spring) => Some(spring.position_velocity(now.max(spring.sampled)).0),
+        }
+    }
 }
 
 impl ViewportPresentation {
@@ -318,58 +329,88 @@ impl ViewportPresentation {
         offset + self.rebased - earlier.rebased
     }
 
-    pub fn offset(&self) -> f64 { self.viewport.start_offset() }
-
-    pub fn gesturing(&self) -> bool { matches!(self.viewport, Viewport::Gesture(_)) }
-
-    /// Where the viewport ends up if nothing advances it from `now`: at its target, or, for a
-    /// gesture, where the hand is.
-    pub fn settled(&self, now: Instant) -> SettledViewport {
-        match self.viewport.resting_offset() {
-            Some(offset) => SettledViewport::At(offset),
-            None => SettledViewport::Gesture(self.snapshot(now)),
+    pub fn offset(&self) -> f64 {
+        match &self.viewport {
+            CameraViewport::Static(offset) | CameraViewport::Gesture(offset) => *offset,
+            CameraViewport::Animation(spring) => spring.current,
         }
     }
 
-    pub fn animated(&self) -> bool { matches!(self.viewport, Viewport::Animation(_)) }
+    pub fn gesturing(&self) -> bool { matches!(self.viewport, CameraViewport::Gesture(_)) }
 
-    pub fn finish(&mut self) { self.viewport.finish(); }
+    /// Where the viewport ends up if nothing advances it: at its target, or, for a gesture,
+    /// where the hand is.
+    pub fn settled(&self) -> SettledViewport {
+        match self.viewport {
+            CameraViewport::Gesture(offset) => SettledViewport::Gesture(HeldViewport {
+                offset,
+                motion: self.motion.clone(),
+            }),
+            _ => SettledViewport::At(self.target()),
+        }
+    }
 
-    pub fn target(&self) -> f64 { self.viewport.target() }
+    #[cfg(test)]
+    pub fn animated(&self) -> bool { matches!(self.viewport, CameraViewport::Animation(_)) }
+
+    pub fn finish(&mut self) {
+        if let CameraViewport::Animation(spring) = &self.viewport {
+            self.viewport = CameraViewport::Static(spring.target);
+        }
+    }
+
+    pub fn target(&self) -> f64 {
+        match &self.viewport {
+            CameraViewport::Animation(spring) => spring.target,
+            _ => self.offset(),
+        }
+    }
 
     pub fn retarget(&mut self, from: f64, velocity: f64, now: Instant) {
         let target = self.target();
-        self.viewport = Viewport::Animation(CameraSpring::new(from, target, velocity, now));
+        self.viewport = CameraViewport::Animation(CameraSpring::new(from, target, velocity, now));
+    }
+
+    pub fn velocity(&self) -> f64 {
+        match &self.viewport {
+            CameraViewport::Animation(spring) => spring.current_velocity,
+            _ => 0.0,
+        }
     }
 
     pub fn position_velocity(&self, now: Instant) -> (f64, f64) {
         match &self.viewport {
-            Viewport::Animation(s) => s.position_velocity(s.sampled.max(now)),
+            CameraViewport::Animation(s) => s.position_velocity(s.sampled.max(now)),
             _ => (self.offset(), 0.0),
         }
     }
 
     pub fn update(&mut self, delta: f64, time: Duration) {
-        if let Viewport::Gesture(offset) = &mut self.viewport {
+        if let CameraViewport::Gesture(offset) = &mut self.viewport {
             self.motion.lock().update(offset, self.bounds, delta * self.width, time);
         }
     }
 
     pub fn sample(&mut self, now: Instant, scale: f64) -> bool {
-        self.viewport.sample(now, scale).unwrap_or(self.gesturing())
+        match &mut self.viewport {
+            CameraViewport::Static(_) => false,
+            CameraViewport::Gesture(_) => true,
+            // Bounds constrain the destination. After a column closes, the previous
+            // position can lie outside them and must remain visible while returning.
+            CameraViewport::Animation(spring) => {
+                let ongoing = !spring.sample(now, scale);
+                if !ongoing {
+                    self.viewport = CameraViewport::Static(spring.target);
+                }
+                ongoing
+            }
+        }
     }
 
-    pub fn snapshot(&self, now: Instant) -> PresentedViewport {
-        PresentedViewport {
-            offset: self.offset(),
-            velocity: match &self.viewport {
-                Viewport::Animation(s) => s.current_velocity,
-                _ => 0.0,
-            },
-            target: self.target(),
-            gesturing: self.gesturing(),
-            timestamp: now,
-            motion: self.motion.clone(),
+    pub fn snapshot(&self) -> PresentedViewport {
+        match &self.viewport {
+            CameraViewport::Animation(spring) => PresentedViewport::Moving(spring.clone()),
+            _ => PresentedViewport::Settled(self.settled()),
         }
     }
 
@@ -777,10 +818,7 @@ impl Serialize for LayoutState {
         stored.serialize_field("active_column", &self.arrangement.active_column)?;
         stored.serialize_field("next_column_id", &self.arrangement.next_column_id)?;
         let current = self.camera.viewport.offset();
-        let offset = if matches!(
-            self.camera.viewport,
-            Viewport::Gesture(_) | Viewport::Animation(_)
-        ) {
+        let offset = if matches!(self.camera.viewport, Viewport::Gesture(_)) {
             self.geometry
                 .as_ref()
                 .map_or(current, |g| current.clamp(g.bounds.0, g.bounds.1))
@@ -1151,7 +1189,6 @@ impl LayoutState {
             let old = self.camera.viewport.offset();
             self.camera.rebase(column.world_x + bookmark.relative_offset - old);
         }
-        self.reconcile_camera_bounds();
         if initial {
             self.camera.viewport = Viewport::Static(0.0);
             if self.geometry.as_ref().unwrap().columns.len() == 1 {
@@ -1161,22 +1198,6 @@ impl LayoutState {
                 self.reveal(settings);
             }
             self.camera.viewport = Viewport::Static(self.camera.viewport.offset());
-        }
-    }
-
-    fn reconcile_camera_bounds(&mut self) {
-        if let (Viewport::Animation(spring), Some(g)) = (&mut self.camera.viewport, &self.geometry)
-        {
-            let target = spring.target.clamp(g.bounds.0, g.bounds.1);
-            if target != spring.target {
-                let now = Instant::now().max(spring.sampled);
-                let (_, velocity) = spring.position_velocity(now);
-                spring.from = spring.current;
-                spring.velocity = velocity;
-                spring.target = target;
-                spring.started = now;
-                spring.sampled = now;
-            }
         }
     }
 
@@ -1226,15 +1247,8 @@ impl LayoutState {
                 settings.alignment,
             )
         } else {
-            let target = match &self.camera.viewport {
-                Viewport::Animation(s) => s.target,
-                _ => self.camera.viewport.offset(),
-            };
-            fit_offset(target, g.tiling.size.width, column)
+            fit_offset(self.camera.viewport.offset(), g.tiling.size.width, column)
         };
-        if matches!(&self.camera.viewport, Viewport::Animation(s) if s.target == offset) {
-            return;
-        }
         self.camera.viewport.set_target(offset);
     }
 
@@ -1271,7 +1285,6 @@ impl LayoutState {
                 self.camera.rebase(new.world_x - old_x);
             }
         }
-        self.reconcile_camera_bounds();
         if self.arrangement.columns.is_empty() {
             self.camera.viewport = Viewport::Static(0.0);
         }
@@ -1487,7 +1500,7 @@ impl ScrollingLayoutSystem {
         let mut motion = state.camera.motion.clone();
         motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
         let camera = ViewportPresentation {
-            viewport: state.camera.viewport.clone(),
+            viewport: CameraViewport::new(&state.camera.viewport, Instant::now()),
             rebased: state.camera.rebased,
             motion: Arc::new(Mutex::new(motion)),
             bounds: g.bounds,
@@ -1507,29 +1520,19 @@ impl ScrollingLayoutSystem {
         Some((camera, frames))
     }
 
-    pub(crate) fn commit_settled_viewport(&mut self, layout: LayoutId, v: &SettledViewport) {
-        match v {
-            SettledViewport::Gesture(p) => self.commit_presented_viewport(layout, p),
-            SettledViewport::At(offset) => {
-                // Motion history only feeds a live gesture, and the next gesture clears it
-                // before use, so a viewport at rest has none to carry.
-                if let Some(state) = self.layouts.get_mut(layout) {
-                    state.camera.viewport = Viewport::Static(*offset);
-                }
+    /// A camera commits only a settled viewport, so its layout never holds an animation.
+    pub(crate) fn commit_viewport(&mut self, layout: LayoutId, viewport: &SettledViewport) {
+        let Some(state) = self.layouts.get_mut(layout) else {
+            return;
+        };
+        match viewport {
+            // Motion history only feeds a live gesture, and the next gesture clears it
+            // before use, so a viewport at rest has none to carry.
+            SettledViewport::At(offset) => state.camera.viewport = Viewport::Static(*offset),
+            SettledViewport::Gesture(held) => {
+                state.camera.viewport = Viewport::Gesture(held.offset);
+                state.camera.motion = held.motion.lock().clone();
             }
-        }
-    }
-
-    pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
-        if let Some(state) = self.layouts.get_mut(layout) {
-            state.camera.viewport = if p.gesturing {
-                Viewport::Gesture(p.offset)
-            } else if p.offset != p.target {
-                Viewport::Animation(CameraSpring::new(p.offset, p.target, p.velocity, p.timestamp))
-            } else {
-                Viewport::Static(p.offset)
-            };
-            state.camera.motion = p.motion.lock().clone();
         }
     }
 
@@ -1567,7 +1570,9 @@ impl ScrollingLayoutSystem {
         })
     }
 
-    pub fn begin_viewport_gesture(&mut self, layout: LayoutId, now: Instant) -> bool {
+    /// The gesture takes the viewport from where it is shown: by a camera moving it
+    /// (`shown`), or else at the layout's offset.
+    pub fn begin_viewport_gesture(&mut self, layout: LayoutId, shown: Option<f64>) -> bool {
         if !self.viewport_gesture_available(layout) {
             return false;
         }
@@ -1579,8 +1584,7 @@ impl ScrollingLayoutSystem {
         state.camera.motion.overscroll = 0.0;
         state.camera.motion.samples.clear();
         state.camera.motion.samples.reserve(64);
-        state.camera.viewport.sample(now, 1.0);
-        state.camera.viewport = Viewport::Gesture(state.camera.viewport.offset());
+        state.camera.viewport = Viewport::Gesture(shown.unwrap_or(state.camera.viewport.offset()));
         true
     }
 
@@ -1613,12 +1617,12 @@ impl ScrollingLayoutSystem {
         self.update_viewport_gesture(layout, delta * width, timestamp)
     }
 
-    /// Release projection is niri's exponential touchpad deceleration, in camera pixels.
+    /// Release projection is niri's exponential touchpad deceleration, in camera pixels. The
+    /// viewport is left pending with the fling, for the presenter to animate or finish.
     pub fn end_viewport_gesture(
         &mut self,
         layout: LayoutId,
         timestamp: Duration,
-        animate: bool,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let Viewport::Gesture(offset) = state.camera.viewport else {
@@ -1629,27 +1633,18 @@ impl ScrollingLayoutSystem {
         }
         let velocity = state.camera.motion.velocity();
         let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
-        let release = self.settle(layout, projected, velocity, true)?;
-        if animate {
-            self.layouts[layout].camera.viewport = Viewport::Animation(CameraSpring::new(
-                release.from_offset,
-                release.offset,
-                release.velocity,
-                Instant::now(),
-            ));
-        }
-        Some(release)
+        self.settle(layout, projected, velocity, true)
     }
 
-    /// Settle where cancellation occurred, with no artificial fling or focus change.
-    pub fn cancel_viewport_gesture(&mut self, layout: LayoutId) {
+    /// Settle where cancellation occurred, with no artificial fling or focus change: where a
+    /// camera moving the viewport shows it (`shown`), or else where the hand left it.
+    pub fn cancel_viewport_gesture(&mut self, layout: LayoutId, shown: Option<f64>) {
         if let Some(state) = self.layouts.get_mut(layout)
-            && matches!(
-                state.camera.viewport,
-                Viewport::Gesture(_) | Viewport::Animation(_)
-            )
+            && let Some(offset) = shown.or(match state.camera.viewport {
+                Viewport::Gesture(offset) => Some(offset),
+                _ => None,
+            })
         {
-            let offset = state.camera.viewport.offset();
             let offset =
                 state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
             state.camera.viewport = Viewport::Static(offset);
@@ -1731,7 +1726,7 @@ impl ScrollingLayoutSystem {
         }
         state.arrangement.active_column = canonical_index;
         state.camera.transient_restore = None;
-        state.camera.viewport.set_target(offset);
+        state.camera.viewport.launch(offset, velocity);
         Some(ViewportRelease {
             window: state.arrangement.selected(&self.inactive)?,
             offset,
@@ -1901,14 +1896,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut state = self.layouts.get(layout).cloned().unwrap_or_default();
-        if let Viewport::Pending { target, .. } = state.camera.viewport {
-            state.camera.viewport = Viewport::Static(target);
-        } else if matches!(state.camera.viewport, Viewport::Animation(_)) {
-            let offset = state.camera.viewport.offset();
-            state.camera.viewport = Viewport::Static(
-                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1)),
-            );
-        }
+        state.camera.viewport.finish();
         self.layouts.insert(state)
     }
 
@@ -2392,7 +2380,6 @@ impl ScrollingLayoutSystem {
         });
         if let Some(viewport) = viewport {
             state.camera.viewport = viewport;
-            state.reconcile_camera_bounds();
             state.reveal(&self.settings);
         }
         true
@@ -2666,7 +2653,7 @@ pub(crate) mod tests {
     fn structural_edits_rebase_an_ongoing_gesture_without_changing_focus() {
         let mut f = Fixture::new(4);
         f.select(3);
-        f.system.begin_viewport_gesture(f.layout, Instant::now());
+        f.system.begin_viewport_gesture(f.layout, None);
         f.system.update_viewport_gesture(f.layout, 30.0, Duration::from_millis(10));
         let x = f.frame(3).origin.x;
         f.system.update(WindowChange::Remove(wid(1)));
@@ -2675,10 +2662,7 @@ pub(crate) mod tests {
         f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
         assert_eq!(f.frame(3).origin.x, x - 20.0);
         assert_eq!(f.selected(), Some(wid(3)));
-        let release = f
-            .system
-            .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
-            .unwrap();
+        let release = f.system.end_viewport_gesture(f.layout, Duration::from_millis(220)).unwrap();
         assert_eq!(release.from_offset, 50.0);
         assert_eq!(release.offset, 0.0);
         assert_eq!(release.window, wid(3));

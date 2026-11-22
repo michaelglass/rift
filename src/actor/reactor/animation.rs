@@ -221,8 +221,16 @@ impl PresentedCamera {
 
     fn commit(&self, system: &mut ScrollingLayoutSystem, layout: LayoutId) {
         match &self.phase {
-            CameraPhase::Running(viewport) => system.commit_presented_viewport(layout, viewport),
-            CameraPhase::Ended(viewport) => system.commit_settled_viewport(layout, viewport),
+            CameraPhase::Running(viewport) => system.commit_viewport(layout, &viewport.settled()),
+            CameraPhase::Ended(viewport) => system.commit_viewport(layout, viewport),
+        }
+    }
+
+    /// Where the camera shows the viewport at `now`, while it moves it.
+    fn moving_offset(&self, now: Instant) -> Option<f64> {
+        match &self.phase {
+            CameraPhase::Running(viewport) => viewport.moving_offset(now),
+            CameraPhase::Ended(_) => None,
         }
     }
 }
@@ -422,15 +430,15 @@ impl CameraAnimation {
             frames,
         );
         self.active = ongoing || self.movement.is_some();
-        self.publish_state(now);
+        self.publish_state();
     }
 
-    fn publish_state(&self, now: Instant) {
+    fn publish_state(&self) {
         let mut state = self.state.lock();
         state.phase = if self.active {
-            CameraPhase::Running(self.presentation.snapshot(now))
+            CameraPhase::Running(self.presentation.snapshot())
         } else {
-            CameraPhase::Ended(self.presentation.settled(now))
+            CameraPhase::Ended(self.presentation.settled())
         };
         state.gesture = self.gesture.as_ref().map(|(_, _, total, time)| (*total, *time));
     }
@@ -444,15 +452,16 @@ impl CameraAnimation {
             previous = None;
         }
         let now = Instant::now();
-        if self.animate && self.gesture.is_none() && !self.presentation.animated() {
-            let (from, velocity) = if let Some(old) = &previous {
-                let (from, velocity) = old.presentation.position_velocity(now);
+        if self.animate && self.gesture.is_none() {
+            let (from, velocity) = match &previous {
                 // Continue in the semantic viewport's rebased coordinates.
-                (self.presentation.carry(&old.presentation, from), velocity)
-            } else {
-                // Native frames can be clamped after parking. The viewport
-                // retains its own starting position when a target changes.
-                (self.presentation.offset(), 0.0)
+                Some(old) if !old.presentation.gesturing() => {
+                    let (from, velocity) = old.presentation.position_velocity(now);
+                    (self.presentation.carry(&old.presentation, from), velocity)
+                }
+                // Native frames can be clamped after parking. The viewport retains its own
+                // starting position when a target changes, and a released gesture its fling.
+                _ => (self.presentation.offset(), self.presentation.velocity()),
             };
             self.presentation.retarget(from, velocity, now);
         }
@@ -553,7 +562,7 @@ impl Reactor {
                         .map(|w| (w.wid, w.frame)),
                 );
                 state.cancel_windows(&windows);
-                state.publish_state(Instant::now());
+                state.publish_state();
             }
         }
         if let Some(tx) = &self.animation_tx {
@@ -628,6 +637,19 @@ impl Reactor {
                 self.retire_viewport_session();
             }
         }
+    }
+
+    /// Where a camera moving `layout`'s viewport on `space` shows it now.
+    pub(super) fn moving_viewport(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        layout: LayoutId,
+    ) -> Option<f64> {
+        let camera = self.presentations.get(&space).filter(|camera| {
+            (camera.identity.workspace, camera.identity.layout) == (workspace, layout)
+        })?;
+        camera.state.lock().moving_offset(Instant::now())
     }
 
     pub(super) fn stop_camera(&mut self, space: SpaceId) {
@@ -754,7 +776,7 @@ impl Reactor {
             presentation.finish();
         }
         let identity = CameraIdentity { space, workspace, layout };
-        let state = Arc::new(Mutex::new(PresentedCamera::new(presentation.snapshot(now))));
+        let state = Arc::new(Mutex::new(PresentedCamera::new(presentation.snapshot())));
         let mut next = CameraAnimation {
             presentation,
             movement: None,
@@ -1424,7 +1446,7 @@ impl Motion {
         match self {
             Self::Transition(_) => {}
             Self::Viewport(c) => {
-                c.publish_state(Instant::now());
+                c.publish_state();
                 if let Some(events) = c.events.take() {
                     events.send(super::Event::CameraFinished);
                 }
@@ -1921,9 +1943,7 @@ mod tests {
             target,
             "the focus change moves the viewport"
         );
-        let state = Arc::new(Mutex::new(PresentedCamera::new(
-            presentation.snapshot(Instant::now()),
-        )));
+        let state = Arc::new(Mutex::new(PresentedCamera::new(presentation.snapshot())));
         let windows: Vec<_> = frames.iter().map(|(wid, ..)| *wid).collect();
         let camera = CameraAnimation {
             presentation,
@@ -2021,9 +2041,7 @@ mod tests {
                            native: &[(WindowId, CGRect)],
                            control: &PresenterControl| {
             let (presentation, frames) = system.presentation(layout).unwrap();
-            let state = Arc::new(Mutex::new(PresentedCamera::new(
-                presentation.snapshot(Instant::now()),
-            )));
+            let state = Arc::new(Mutex::new(PresentedCamera::new(presentation.snapshot())));
             CameraAnimation {
                 presentation,
                 movement: None,
@@ -2250,15 +2268,13 @@ mod tests {
         ));
         system.scroll_by_delta(layout, 0.1);
         let mut replacement = make_camera(&system, &before, &PresenterControl::default());
-        assert!(!replacement.presentation.animated());
-        let delta = replacement.presentation.carry(&next.presentation, 0.0);
-        assert_eq!(delta, -1000.0);
+        assert_eq!(replacement.presentation.carry(&next.presentation, 0.0), -1000.0);
         let (position, velocity) = next.presentation.position_velocity(started);
         assert_ne!(velocity, 0.0);
         replacement.replace(Some(next));
-        let handoff = replacement.presentation.snapshot(started);
-        assert!((handoff.offset - position - delta).abs() < 1e-9);
-        assert!((handoff.velocity - velocity).abs() < 1e-9);
+        let (handoff, handoff_velocity) = replacement.presentation.position_velocity(started);
+        assert!((handoff - position + 1000.0).abs() < 1e-9);
+        assert!((handoff_velocity - velocity).abs() < 1e-9);
     }
 
     #[test]
@@ -2290,7 +2306,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
         );
-        system.begin_viewport_gesture(layout, now);
+        system.begin_viewport_gesture(layout, None);
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let camera = CameraAnimation {
@@ -2318,7 +2334,7 @@ mod tests {
             },
             events: None,
             state: Arc::new(Mutex::new(PresentedCamera::new(
-                system.presentation(layout).unwrap().0.snapshot(now),
+                system.presentation(layout).unwrap().0.snapshot(),
             ))),
             display: 1,
             animate: false,
@@ -2395,7 +2411,7 @@ mod tests {
             assert_eq!(source, FrameSource::Drag);
             assert!(sequence > through);
         });
-        system.cancel_viewport_gesture(layout);
+        system.cancel_viewport_gesture(layout, None);
         {
             let c = camera_mut(&mut manager).unwrap();
             let (presentation, frames) = system.presentation(layout).unwrap();
@@ -2472,7 +2488,7 @@ mod tests {
         let (events, mut events_rx) = crate::actor::channel();
         camera.events = Some(events);
         let state = camera.state.clone();
-        state.lock().phase = CameraPhase::Running(camera.presentation.snapshot(Instant::now()));
+        state.lock().phase = CameraPhase::Running(camera.presentation.snapshot());
         let runner = std::thread::spawn(move || AnimationManager::run(commands_rx));
         sender.send(Message::Camera(Box::new(camera))).unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);

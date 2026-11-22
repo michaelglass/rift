@@ -1,5 +1,5 @@
 //! Paced consumption of cumulative physical motion; no layout preparation here.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::animation::scrolling_bounds;
 use super::{Changes, Reactor};
@@ -73,6 +73,11 @@ impl Reactor {
                     .layout_engine
                     .workspaces()
                     .active_layout_for_space(context.space);
+                // Finishing the previous gesture retires its camera, so read where it shows
+                // the viewport first; the new gesture takes it from there.
+                let shown = target.and_then(|(workspace, layout)| {
+                    self.moving_viewport(context.space, workspace, layout)
+                });
                 if let Some(s) = &self.viewport_gesture
                     && s.released
                     && target != Some((s.workspace, s.layout))
@@ -94,18 +99,17 @@ impl Reactor {
                 }
                 let cancel = self.viewport_gesture.as_ref().is_some_and(|s| !s.released);
                 self.finish_gesture(changes, None, cancel);
-                let engine = &mut self.layout_manager.layout_engine;
-                let Some((workspace, layout)) =
-                    engine.workspaces().active_layout_for_space(context.space)
-                else {
+                // Finishing a gesture never changes which layout the space shows.
+                let Some((workspace, layout)) = target else {
                     return;
                 };
                 let LayoutSystemKind::Scrolling(system) =
-                    &mut engine.workspaces_mut()[workspace].layout_system
+                    &mut self.layout_manager.layout_engine.workspaces_mut()[workspace]
+                        .layout_system
                 else {
                     return;
                 };
-                if !system.begin_viewport_gesture(layout, Instant::now()) {
+                if !system.begin_viewport_gesture(layout, shown) {
                     return;
                 }
                 system.update_viewport_gesture(layout, 0.0, context.started);
@@ -201,10 +205,11 @@ impl Reactor {
         if s.released {
             if cancelled {
                 let (workspace, layout) = (s.workspace, s.layout);
+                let shown = self.moving_viewport(s.context.space, workspace, layout);
                 if let LayoutSystemKind::Scrolling(system) =
                     &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
                 {
-                    system.cancel_viewport_gesture(layout);
+                    system.cancel_viewport_gesture(layout, shown);
                 }
                 if s.visible(self) {
                     self.apply_viewport_frames();
@@ -261,10 +266,10 @@ impl Reactor {
             return;
         };
         let release = if cancelled {
-            system.cancel_viewport_gesture(s.layout);
+            system.cancel_viewport_gesture(s.layout, None);
             None
         } else {
-            system.end_viewport_gesture(s.layout, s.timestamp, animate)
+            system.end_viewport_gesture(s.layout, s.timestamp)
         };
         if !visible {
             self.viewport_gesture = Some(s);
@@ -344,6 +349,8 @@ impl Reactor {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
@@ -1142,7 +1149,7 @@ mod tests {
         r.start_gesture_presentation();
         let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
         camera.sample(Instant::now() + Duration::from_millis(20));
-        let target = camera.presentation.snapshot(Instant::now()).target;
+        let target = camera.presentation.target();
         assert_ne!(camera.presentation.offset(), target, "still on its way");
 
         // Every window the camera presents is written instead, so the camera ends before
