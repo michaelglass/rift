@@ -1117,9 +1117,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_camera_whose_windows_are_all_cancelled_leaves_the_viewport_at_its_target() {
-        let (mut r, ctx, _control, motion) = setup_options_threshold(false, false, false, 0.25);
+    /// A released gesture whose viewport a headless camera is animating towards its snap.
+    fn released_fling() -> (
+        Reactor,
+        Context,
+        Control,
+        VirtualWorkspaceId,
+        LayoutId,
+        Vec<WindowId>,
+    ) {
+        let (mut r, ctx, control, motion) = setup_options_threshold(false, false, false, 0.25);
         r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(true);
         let (workspace, layout) = {
             let s = r.viewport_gesture.as_ref().unwrap();
@@ -1147,6 +1154,25 @@ mod tests {
         });
         // The released viewport animates towards where it snaps.
         r.start_gesture_presentation();
+        (r, ctx, control, workspace, layout, windows)
+    }
+
+    fn committed_viewport(
+        r: &Reactor,
+        workspace: VirtualWorkspaceId,
+        layout: LayoutId,
+    ) -> crate::layout_engine::systems::scrolling::ViewportPresentation {
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+        else {
+            panic!("scrolling")
+        };
+        system.presentation(layout).unwrap().0
+    }
+
+    #[test]
+    fn a_camera_whose_windows_are_all_cancelled_leaves_the_viewport_at_its_target() {
+        let (mut r, ctx, _control, workspace, layout, windows) = released_fling();
         let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
         camera.sample(Instant::now() + Duration::from_millis(20));
         let target = camera.presentation.target();
@@ -1156,13 +1182,50 @@ mod tests {
         // the viewport arrives. Nothing is left to advance it, so it is at its target.
         r.cancel_window_presentations(windows);
         assert!(!r.presentations.contains_key(&ctx.space));
-        let LayoutSystemKind::Scrolling(system) =
-            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
-        else {
-            panic!("scrolling")
-        };
-        let (presentation, _) = system.presentation(layout).unwrap();
+        let presentation = committed_viewport(&r, workspace, layout);
         assert!(!presentation.animated(), "the viewport is left animating");
         assert_eq!(presentation.offset(), target);
+    }
+
+    /// Samples the released camera mid-flight; returns where it shows the viewport and where
+    /// it is going.
+    fn mid_flight(r: &mut Reactor, space: SpaceId) -> (f64, f64) {
+        let camera = r.presentations.get_mut(&space).unwrap().headless.as_mut().unwrap();
+        camera.sample(Instant::now() + Duration::from_millis(20));
+        let (shown, target) = (camera.presentation.offset(), camera.presentation.target());
+        assert_ne!(shown, target, "still on its way");
+        (shown, target)
+    }
+
+    #[test]
+    fn a_new_gesture_takes_a_released_viewport_from_where_the_camera_shows_it() {
+        let (mut r, ctx, control, workspace, layout, _) = released_fling();
+        let camera = r.presentations.get(&ctx.space).unwrap().headless.as_ref().unwrap();
+        let (_, velocity) = camera.presentation.position_velocity(Instant::now());
+        assert_ne!(velocity, 0.0, "the release hands its fling to the camera");
+        let (shown, target) = mid_flight(&mut r, ctx.space);
+
+        // The layout holds only where the camera is going.
+        r.commit_presentations();
+        let committed = committed_viewport(&r, workspace, layout);
+        assert!(!committed.animated());
+        assert_eq!(committed.offset(), target);
+
+        let mut next = ctx.clone();
+        next.session = 2;
+        r.gesture_event(Lifecycle::Begin { context: next, control });
+        let committed = committed_viewport(&r, workspace, layout);
+        assert!(committed.gesturing());
+        assert_eq!(committed.offset(), shown);
+    }
+
+    #[test]
+    fn resetting_a_released_gesture_stops_the_viewport_where_the_camera_shows_it() {
+        let (mut r, ctx, _control, workspace, layout, _) = released_fling();
+        let (shown, _) = mid_flight(&mut r, ctx.space);
+        r.gesture_event(Lifecycle::Reset);
+        let committed = committed_viewport(&r, workspace, layout);
+        assert!(!committed.animated());
+        assert_eq!(committed.offset(), shown);
     }
 }
