@@ -1,167 +1,76 @@
+use rift_core::main_window::{Initiator, MainWindowEvent, MainWindows, Standing};
+
 use super::Event;
 use crate::actor::app::{Quiet, WindowId, pid_t};
-use crate::common::collections::HashMap;
 
+/// The main window, as the core's machine (`rift_core::main_window`) decides it from what the
+/// reactor observes: this only translates events.
 #[derive(Default)]
 pub(crate) struct MainWindowTracker {
-    apps: HashMap<pid_t, AppState>,
-    global_frontmost: Option<pid_t>,
-    native_focus: NativeFocus,
+    windows: MainWindows<pid_t, WindowId>,
 }
 
-/// What the window server has said about focus. Before its first answer, AX activation and
-/// main-window events stand in for it (a cold start); after it, they are metadata only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum NativeFocus {
-    #[default]
-    NotYetReported,
-    /// The window it last reported focused, while that window exists.
-    Reported(Option<WindowId>),
-}
-
-impl NativeFocus {
-    fn window(self) -> Option<WindowId> {
-        match self {
-            NativeFocus::NotYetReported => None,
-            NativeFocus::Reported(window) => window,
-        }
-    }
-}
-
-struct AppState {
-    standing: Standing,
-    /// Whether the app's latest activation was Rift's own (quiet).
-    last_activation: Quiet,
-    main_window: Option<WindowId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Standing {
-    Frontmost,
-    Background,
-}
-
-impl Standing {
-    fn of(is_frontmost: bool) -> Standing {
-        if is_frontmost {
-            Standing::Frontmost
-        } else {
-            Standing::Background
-        }
+fn initiator(quiet: Quiet) -> Initiator {
+    match quiet {
+        Quiet::Yes => Initiator::Rift,
+        Quiet::No => Initiator::Other,
     }
 }
 
 impl MainWindowTracker {
+    /// The window to focus, if `event` makes one known (only before the window server's first
+    /// focus report).
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> Option<WindowId> {
-        let (event_pid, quiet_edge) = match event {
-            &Event::ApplicationLaunched {
+        let event = match *event {
+            Event::ApplicationLaunched {
                 pid, is_frontmost, main_window, ..
-            } => {
-                self.apps.insert(pid, AppState {
-                    standing: Standing::of(is_frontmost),
-                    last_activation: Quiet::No,
-                    main_window,
-                });
-                (pid, Quiet::No)
+            } => MainWindowEvent::Launched {
+                pid,
+                standing: if is_frontmost {
+                    Standing::Frontmost
+                } else {
+                    Standing::Background
+                },
+                main_window,
+            },
+            Event::ApplicationThreadTerminated(pid) => MainWindowEvent::Terminated(pid),
+            Event::ApplicationActivated(pid, quiet) => {
+                MainWindowEvent::Activated(pid, initiator(quiet))
             }
-            &Event::ApplicationThreadTerminated(pid) => {
-                self.apps.remove(&pid);
-                if let NativeFocus::Reported(Some(wid)) = self.native_focus
-                    && wid.pid == pid
-                {
-                    self.native_focus = NativeFocus::Reported(None);
-                }
-                return None;
+            Event::ApplicationDeactivated(pid) => MainWindowEvent::Deactivated(pid),
+            Event::ApplicationGloballyActivated(pid) => MainWindowEvent::GloballyActivated(pid),
+            Event::ApplicationGloballyDeactivated(pid) => MainWindowEvent::GloballyDeactivated(pid),
+            Event::ApplicationMainWindowChanged(pid, window, quiet) => {
+                MainWindowEvent::MainWindowChanged(pid, window, initiator(quiet))
             }
-            &Event::ApplicationActivated(pid, quiet) => {
-                let app = self.apps.get_mut(&pid)?;
-                app.standing = Standing::Frontmost;
-                app.last_activation = quiet;
-                (pid, quiet)
-            }
-            &Event::ApplicationDeactivated(pid) => {
-                let app = self.apps.get_mut(&pid)?;
-                app.standing = Standing::Background;
-                return None;
-            }
-            &Event::ApplicationGloballyActivated(pid) => {
-                self.global_frontmost = Some(pid);
-                let Some(app) = self.apps.get_mut(&pid) else {
-                    return None;
-                };
-                app.standing = Standing::Frontmost;
-                (pid, app.last_activation)
-            }
-            &Event::ApplicationGloballyDeactivated(pid) => {
-                if self.global_frontmost == Some(pid) {
-                    self.global_frontmost = None;
-                }
-                if let Some(app) = self.apps.get_mut(&pid) {
-                    app.standing = Standing::Background;
-                }
-                return None;
-            }
-            &Event::ApplicationMainWindowChanged(pid, wid, quiet) => {
-                let app = self.apps.get_mut(&pid)?;
-                app.main_window = wid;
-                (pid, quiet)
-            }
-            &Event::WindowServerFocusChanged(wid, _) => {
-                self.native_focus = NativeFocus::Reported(Some(wid));
-                return None;
+            Event::WindowServerFocusChanged(window, _) => {
+                MainWindowEvent::NativeFocused { pid: window.pid, window }
             }
             _ => return None,
         };
-        // Once WindowServer focus has produced a result, AX activation/main-window
-        // events remain useful as metadata and cold-start fallback only. Letting
-        // them emit focus here can replay the previous native focus while the new
-        // 808/815 resolution is still in flight.
-        if let NativeFocus::Reported(_) = self.native_focus {
-            return None;
-        }
-        if Some(event_pid) == self.global_frontmost && quiet_edge == Quiet::No {
-            if let Some(wid) = self.main_window() {
-                return Some(wid);
-            }
-        }
-        None
+        self.windows.step(event)
     }
 
+    /// `wid` is retired (no replacement) or has a new identity (upstream #702).
     pub(super) fn replace_window(&mut self, wid: WindowId, replacement: Option<WindowId>) {
-        if self.native_focus == NativeFocus::Reported(Some(wid)) {
-            self.native_focus = NativeFocus::Reported(replacement);
-        }
-        if let Some(app) = self.apps.get_mut(&wid.pid)
-            && app.main_window == Some(wid)
-        {
-            app.main_window = replacement;
-        }
+        let _ = self.windows.step(MainWindowEvent::Replaced {
+            pid: wid.pid,
+            window: wid,
+            replacement,
+        });
     }
 
-    pub fn main_window(&self) -> Option<WindowId> {
-        let Some(pid) = self.global_frontmost else {
-            return None;
-        };
-        if let Some(window) = self.native_focus.window().filter(|window| window.pid == pid) {
-            return Some(window);
-        }
-        match self.apps.get(&pid) {
-            Some(&AppState {
-                standing: Standing::Frontmost,
-                main_window: Some(window),
-                ..
-            }) => Some(window),
-            _ => None,
-        }
+    pub fn main_window(&self) -> Option<WindowId> { self.windows.main_window() }
+
+    pub fn window_server_focus(&self) -> Option<WindowId> { self.windows.native_focus() }
+
+    pub fn is_globally_frontmost(&self, pid: pid_t) -> bool {
+        self.windows.is_globally_frontmost(pid)
     }
-
-    pub fn window_server_focus(&self) -> Option<WindowId> { self.native_focus.window() }
-
-    pub fn is_globally_frontmost(&self, pid: pid_t) -> bool { self.global_frontmost == Some(pid) }
 
     pub fn app_main_window(&self, pid: pid_t) -> Option<WindowId> {
-        self.apps.get(&pid)?.main_window
+        self.windows.app_main_window(pid)
     }
 }
 
@@ -172,7 +81,7 @@ mod tests {
 
     use super::super::testing::{Apps, make_windows, space_state_event};
     use super::super::{Event, Quiet, Reactor, SpaceId, WindowId};
-    use super::{AppState, MainWindowTracker};
+    use super::MainWindowTracker;
     use crate::layout_engine::LayoutEngine;
 
     #[test]
@@ -181,12 +90,14 @@ mod tests {
         let server_window = WindowId::new(7, 2);
         let stale_window = WindowId::new(7, 3);
         let mut tracker = MainWindowTracker::default();
-        tracker.global_frontmost = Some(7);
-        tracker.apps.insert(7, AppState {
-            standing: super::Standing::Frontmost,
-            last_activation: Quiet::No,
+        let _ = tracker.windows.step(rift_core::main_window::MainWindowEvent::Launched {
+            pid: 7,
+            standing: rift_core::main_window::Standing::Frontmost,
             main_window: Some(ax_window),
         });
+        let _ = tracker
+            .windows
+            .step(rift_core::main_window::MainWindowEvent::GloballyActivated(7));
 
         assert_eq!(tracker.main_window(), Some(ax_window));
         assert_eq!(

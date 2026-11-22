@@ -10,6 +10,7 @@ pub mod core;
 pub mod focus;
 pub mod layout;
 pub mod lifecycle;
+pub mod main_window;
 pub mod modes;
 pub mod plain;
 pub mod pointer;
