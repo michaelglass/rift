@@ -2,8 +2,13 @@
 //! between events has a Roc twin, stepped beside it with every change the owner makes. Each
 //! step must come to the same thing in both (checked on every step), and the twin must keep
 //! the same state (its whole view checked on every step in tests, every [`VIEW_EVERY`] steps
-//! in a running Rift). The Rust machine stands; a difference is a `roc-divergence:` (tests
-//! panic, a running Rift warns). Without `roc-core` a twinned machine is only its Rust machine.
+//! in a running Rift). A difference is a `roc-divergence:` (tests panic, a running Rift warns).
+//! Without `roc-core` a twinned machine is only its Rust machine.
+//!
+//! Which machine stands differs by machine. The lifecycle is flipped (the lead's policy (a)): the
+//! Roc core decides, its answers are rift's, and on a difference the Rust machine, now its shadow,
+//! is re-seeded from the Roc core's state (counted: [`lifecycle_reseeds`]). The ownerships and
+//! the topology are not flipped yet: their Rust machines stand.
 //!
 //! A twinned machine reads as its Rust machine (`Deref`), and only its own methods change it:
 //! the Rust machine's changing methods take `&mut`, which `Deref` does not give, so no change
@@ -28,8 +33,20 @@ use crate::sys::screen::SpaceId;
 #[cfg(feature = "roc-core")]
 const VIEW_EVERY: u64 = 32;
 
+/// How many times a lifecycle's Rust shadow was re-seeded from the Roc core, process-wide.
+#[cfg(feature = "roc-core")]
+static LIFECYCLE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times a lifecycle's Rust shadow has been re-seeded from the Roc core (each one a
+/// `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn lifecycle_reseeds() -> u64 {
+    LIFECYCLE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The lifecycle (every window with AX state and its presence), with its Roc twin under
-/// `roc-core`.
+/// `roc-core`. Under `roc-core` the Roc core decides and the Rust machine is its shadow, read
+/// through `Deref` and re-seeded on any difference.
 #[derive(Default)]
 pub(crate) struct TwinnedLifecycle {
     rust: Lifecycle<WindowId>,
@@ -59,6 +76,12 @@ impl TwinnedLifecycle {
     pub(crate) fn step(&mut self, event: LifecycleEvent<WindowId>) -> Option<Transition<WindowId>> {
         let transition = self.rust.step(event);
         #[cfg(feature = "roc-core")]
+        let window = match event {
+            LifecycleEvent::Live { window, .. }
+            | LifecycleEvent::Changed { window, .. }
+            | LifecycleEvent::Gone(window) => window,
+        };
+        #[cfg(feature = "roc-core")]
         {
             use crate::roc_path::Word;
             let event = match event {
@@ -76,7 +99,13 @@ impl TwinnedLifecycle {
                 Transition::Suspended(_, why) => rift_core::lifecycle::Change::Suspended(why),
             });
             self.stepped("lifecycle step", &event, &rust, &roc);
+            // The Roc core decides.
+            return roc.map(|change| match change {
+                rift_core::lifecycle::Change::Admitted => Transition::Admitted(window),
+                rift_core::lifecycle::Change::Suspended(why) => Transition::Suspended(window, why),
+            });
         }
+        #[cfg(not(feature = "roc-core"))]
         transition
     }
 
@@ -88,7 +117,9 @@ impl TwinnedLifecycle {
             use crate::roc_path::Word;
             let roc = self.twin.roc.invalidate(window.word());
             self.stepped("lifecycle invalidate", &window, &invalidated, &roc);
+            return roc;
         }
+        #[cfg(not(feature = "roc-core"))]
         invalidated
     }
 
@@ -100,7 +131,9 @@ impl TwinnedLifecycle {
             use crate::roc_path::Word;
             let roc = self.twin.roc.revalidate(window.word());
             self.stepped("lifecycle revalidate", &window, &revalidated, &roc);
+            return roc;
         }
+        #[cfg(not(feature = "roc-core"))]
         revalidated
     }
 
@@ -111,7 +144,8 @@ impl TwinnedLifecycle {
         }
     }
 
-    /// One step taken by both: its outcomes must agree, and, when due, their windows.
+    /// One step taken by both: its outcomes must agree, and, when due, their windows. On a
+    /// difference the Roc core stands: the Rust shadow is re-seeded from its windows.
     #[cfg(feature = "roc-core")]
     fn stepped<A: PartialEq + std::fmt::Debug>(
         &mut self,
@@ -120,23 +154,48 @@ impl TwinnedLifecycle {
         rust: &A,
         roc: &A,
     ) {
-        use crate::roc_path::{Word, diverged};
-        if rust != roc {
+        use crate::roc_path::diverged;
+        self.twin.steps += 1;
+        let outcome_differs = rust != roc;
+        if outcome_differs {
             diverged(what, question, rust, roc);
         }
-        self.twin.steps += 1;
-        if cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
-            let mut rust: Vec<_> = self
-                .rust
-                .presences()
-                .map(|(window, presence)| (window.word(), presence))
-                .collect();
-            rust.sort_by_key(|&(window, _)| window);
+        if outcome_differs || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
             let roc = self.twin.roc.view();
+            let rust = self.rust_view();
             if rust != roc {
                 diverged("lifecycle windows", question, &rust, &roc);
             }
+            if outcome_differs || rust != roc {
+                self.reseed(roc);
+            }
         }
+    }
+
+    /// The Rust shadow's windows as words, in window order (as the Roc core's view).
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&self) -> Vec<(u64, rift_core::lifecycle::Presence)> {
+        use crate::roc_path::Word;
+        let mut rust: Vec<_> = self
+            .rust
+            .presences()
+            .map(|(window, presence)| (window.word(), presence))
+            .collect();
+        rust.sort_by_key(|&(window, _)| window);
+        rust
+    }
+
+    /// Replace the Rust shadow with the Roc core's windows, and count it.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, roc: Vec<(u64, rift_core::lifecycle::Presence)>) {
+        self.rust = Lifecycle::from_presences(roc.into_iter().filter_map(|(word, presence)| {
+            Some((crate::roc_path::window_of_word(word)?, presence))
+        }));
+        let reseeds = LIFECYCLE_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the lifecycle's Rust shadow was re-seeded from the Roc core"
+        );
     }
 }
 
@@ -309,5 +368,56 @@ impl TwinnedTopology {
                 diverged("topology", &plain, &rust, &roc);
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "roc-core"))]
+mod tests {
+    use rift_core::lifecycle::{
+        AdmissionFacts, AxKind, LifecycleEvent, Manageability, Minimize, NativeKind, Rule,
+    };
+
+    use super::{LIFECYCLE_RESEEDS, TwinnedLifecycle};
+    use crate::actor::app::WindowId;
+
+    const FACTS: AdmissionFacts = AdmissionFacts {
+        manageability: Manageability::Manageable,
+        rule: Rule::NoRule,
+        ax: AxKind::Ordinary,
+        native: NativeKind::Ordinary,
+        minimize: Minimize::Shown,
+    };
+
+    /// A lifecycle whose Rust shadow lost a window the Roc core still has.
+    fn knocked_out_of_step() -> (TwinnedLifecycle, WindowId) {
+        let mut lifecycle = TwinnedLifecycle::default();
+        let window = WindowId::new(3, 1);
+        lifecycle.step(LifecycleEvent::Live { window, facts: FACTS });
+        lifecycle.rust.step(LifecycleEvent::Gone(window));
+        (lifecycle, window)
+    }
+
+    /// Re-seeding gives the Rust shadow exactly the Roc core's windows, and is counted.
+    #[test]
+    fn a_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        let (mut lifecycle, window) = knocked_out_of_step();
+        assert!(!lifecycle.manages(window), "the shadow lost it");
+        let before = LIFECYCLE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let roc = lifecycle.twin.roc.view();
+        lifecycle.reseed(roc.clone());
+        assert_eq!(lifecycle.rust_view(), roc);
+        assert!(lifecycle.manages(window), "reads follow the Roc core");
+        assert!(LIFECYCLE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// Tests still panic on a difference (a running Rift warns and re-seeds).
+    #[test]
+    #[should_panic(expected = "roc-divergence")]
+    fn a_shadow_out_of_step_panics_in_tests() {
+        let (mut lifecycle, window) = knocked_out_of_step();
+        lifecycle.step(LifecycleEvent::Changed {
+            window,
+            change: rift_core::lifecycle::FactChange::Rule(Rule::Ignore),
+        });
     }
 }

@@ -114,6 +114,16 @@ impl Word for crate::actor::app::WindowId {
     fn word(self) -> u64 { (u64::from(self.pid as u32) << 32) | u64::from(self.idx.get()) }
 }
 
+/// The window a word names (the inverse of its [`Word`]).
+#[cfg(feature = "roc-core")]
+pub(crate) fn window_of_word(word: u64) -> Option<crate::actor::app::WindowId> {
+    let idx = std::num::NonZeroU32::new(word as u32)?;
+    Some(crate::actor::app::WindowId {
+        pid: (word >> 32) as u32 as i32,
+        idx,
+    })
+}
+
 #[cfg(feature = "roc-core")]
 impl Word for crate::sys::screen::SpaceId {
     fn word(self) -> u64 { self.get() }

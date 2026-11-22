@@ -49,6 +49,7 @@ pub fn handle_command(command: MetricsCommand) {
 }
 
 pub fn show_timing() {
+    show_roc_core();
     #[cfg(feature = "timing")]
     tracing::dispatcher::get_default(|d| {
         if let Some(timing_layer) = d.downcast_ref::<TimingLayer>() {
@@ -61,6 +62,17 @@ pub fn show_timing() {
     println!(
         "Timing collection is disabled. Build rift with --features timing to collect metrics."
     );
+}
+
+/// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow had to be
+/// re-seeded (each one a `roc-divergence:`). Only with `roc-core`.
+fn show_roc_core() {
+    #[cfg(feature = "roc-core")]
+    {
+        let reseeds = crate::roc_twin::lifecycle_reseeds();
+        println!("roc-core: lifecycle re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: lifecycle re-seeds");
+    }
 }
 
 #[cfg(feature = "timing")]

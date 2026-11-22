@@ -570,6 +570,14 @@ impl<W: Copy + Ord> Lifecycle<W> {
     /// The live windows.
     pub fn windows(&self) -> impl Iterator<Item = W> + '_ { self.windows.keys().copied() }
 
+    /// The lifecycle with exactly these windows and presences (a shadow re-seeded from the
+    /// machine it shadows).
+    pub fn from_presences(presences: impl IntoIterator<Item = (W, Presence)>) -> Self {
+        Lifecycle {
+            windows: presences.into_iter().collect(),
+        }
+    }
+
     /// Every window with AX state and its presence, in window order.
     pub fn presences(&self) -> impl Iterator<Item = (W, Presence)> + '_ {
         self.windows.iter().map(|(&window, &presence)| (window, presence))
