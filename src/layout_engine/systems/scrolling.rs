@@ -282,6 +282,7 @@ struct Geometry {
 #[derive(Debug)]
 pub(crate) struct ViewportPresentation {
     viewport: Viewport,
+    rebased: f64,
     motion: Arc<Mutex<MotionHistory>>,
     bounds: (f64, f64),
     width: f64,
@@ -311,6 +312,12 @@ pub(crate) struct PresentedViewport {
 }
 
 impl ViewportPresentation {
+    /// Carries a position from an earlier presentation of the same layout into this one's
+    /// coordinates, across the edits between them.
+    pub fn carry(&self, earlier: &Self, offset: f64) -> f64 {
+        offset + self.rebased - earlier.rebased
+    }
+
     pub fn offset(&self) -> f64 { self.viewport.start_offset() }
 
     pub fn gesturing(&self) -> bool { matches!(self.viewport, Viewport::Gesture(_)) }
@@ -735,10 +742,20 @@ enum MoveDestination {
 #[derive(Clone, Debug, Default)]
 struct Camera {
     viewport: Viewport,
+    // How far edits have shifted the viewport's coordinates in total. A camera continuing
+    // across an edit carries its position over by the difference.
+    rebased: f64,
     motion: MotionHistory,
     transient_restore: Option<ViewBookmark>,
     fullscreen_restore: Option<ViewBookmark>,
     restored_view: Option<ViewBookmark>,
+}
+
+impl Camera {
+    fn rebase(&mut self, delta: f64) {
+        self.viewport.rebase(delta);
+        self.rebased += delta;
+    }
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -1132,7 +1149,7 @@ impl LayoutState {
             && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
         {
             let old = self.camera.viewport.offset();
-            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - old);
+            self.camera.rebase(column.world_x + bookmark.relative_offset - old);
         }
         self.reconcile_camera_bounds();
         if initial {
@@ -1251,7 +1268,7 @@ impl LayoutState {
             if let (Some(old_x), Some(new)) =
                 (old_x, anchor.and_then(|id| self.geometry.as_ref()?.column(id)))
             {
-                self.camera.viewport.rebase(new.world_x - old_x);
+                self.camera.rebase(new.world_x - old_x);
             }
         }
         self.reconcile_camera_bounds();
@@ -1471,6 +1488,7 @@ impl ScrollingLayoutSystem {
         motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
         let camera = ViewportPresentation {
             viewport: state.camera.viewport.clone(),
+            rebased: state.camera.rebased,
             motion: Arc::new(Mutex::new(motion)),
             bounds: g.bounds,
             width: g.tiling.size.width,

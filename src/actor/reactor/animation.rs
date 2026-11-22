@@ -448,10 +448,7 @@ impl CameraAnimation {
             let (from, velocity) = if let Some(old) = &previous {
                 let (from, velocity) = old.presentation.position_velocity(now);
                 // Continue in the semantic viewport's rebased coordinates.
-                (
-                    from + self.presentation.offset() - old.presentation.offset(),
-                    velocity,
-                )
+                (self.presentation.carry(&old.presentation, from), velocity)
             } else {
                 // Native frames can be clamped after parking. The viewport
                 // retains its own starting position when a target changes.
@@ -2254,7 +2251,7 @@ mod tests {
         system.scroll_by_delta(layout, 0.1);
         let mut replacement = make_camera(&system, &before, &PresenterControl::default());
         assert!(!replacement.presentation.animated());
-        let delta = replacement.presentation.offset() - next.presentation.offset();
+        let delta = replacement.presentation.carry(&next.presentation, 0.0);
         assert_eq!(delta, -1000.0);
         let (position, velocity) = next.presentation.position_velocity(started);
         assert_ne!(velocity, 0.0);
