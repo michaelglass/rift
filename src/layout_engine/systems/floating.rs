@@ -97,7 +97,7 @@ impl FloatingLayoutSystem {
         let selection = self.groups.selection(layout);
         let root = self.groups.root(layout);
         root.traverse_preorder(self.groups.map())
-            .filter(|node| self.groups.layout(*node).is_stacked())
+            .filter(|&node| self.groups.is_stack(node))
             .filter(|node| {
                 !selection_path_only
                     || selection.ancestors(self.groups.map()).any(|ancestor| ancestor == *node)
@@ -374,7 +374,7 @@ impl FloatingLayoutSystem {
             // The outermost stack contains all members that share this frame.
             let stack = node
                 .ancestors(self.groups.map())
-                .filter(|parent| self.groups.layout(*parent).is_stacked())
+                .filter(|&node| self.groups.is_stack(node))
                 .last();
             if let Some(stack) = stack {
                 for member in self.groups.windows_from(stack, Some(stack), true) {
@@ -660,9 +660,8 @@ impl FloatingLayoutSystem {
     ) -> Vec<WindowId> {
         let focused = self.groups.selected_window(layout);
         let selection = self.groups.selection(layout);
-        let container = selection
-            .ancestors(self.groups.map())
-            .find(|node| self.groups.layout(*node).is_stacked());
+        let container =
+            selection.ancestors(self.groups.map()).find(|&node| self.groups.is_stack(node));
         let Some(container) = container else {
             return Vec::new();
         };

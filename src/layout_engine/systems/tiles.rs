@@ -10,7 +10,7 @@ use crate::layout_engine::systems::constraints::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
-use crate::model::tree::{NodeId, NodeMap, Placement};
+use crate::model::tree::{NodeId, NodeMap, Placement, Tile};
 use crate::sys::geometry::Round;
 
 pub(super) struct StackLayoutResult {
@@ -83,14 +83,14 @@ impl NodeMap {
         gaps: &crate::common::config::GapSettings,
         horizontal: bool,
     ) -> (f64, Option<f64>, Option<f64>, bool) {
-        if let Some(wid) = self.window(node) {
-            if let Some(c) = constraints.get(&wid).copied() {
-                return traditional_leaf_axis_constraints(c, horizontal);
+        let kind = match self.tile(node) {
+            Tile::Window(wid) => {
+                return constraints.get(&wid).copied().map_or((0.0, None, None, true), |c| {
+                    traditional_leaf_axis_constraints(c, horizontal)
+                });
             }
-            return (0.0, None, None, true);
-        }
-
-        let kind = self[node].layout.kind;
+            Tile::Container(kind) => kind,
+        };
         container_axis_constraints(
             node.children(self)
                 .filter_map(|child| prepared.get(&child))
@@ -170,27 +170,28 @@ impl Projection<'_> {
         } else {
             rect
         };
-        if let Some(wid) = map.window(node) {
-            if !self.emit_frames {
+        let kind = match map.tile(node) {
+            Tile::Window(_) if !self.emit_frames => return,
+            Tile::Window(wid) => {
+                let final_rect = constraints.get(&wid).copied().map_or(rect, |c| {
+                    constrain_frame(rect, |horizontal| {
+                        traditional_leaf_axis_constraints(c, horizontal)
+                    })
+                });
+                sizes.push((wid, final_rect));
                 return;
             }
-            let final_rect = constraints.get(&wid).copied().map_or(rect, |c| {
-                constrain_frame(rect, |horizontal| {
-                    traditional_leaf_axis_constraints(c, horizontal)
-                })
-            });
-            sizes.push((wid, final_rect));
-            return;
-        }
+            Tile::Container(kind) => kind,
+        };
         use LayoutKind::*;
-        match info.kind {
+        match kind {
             HorizontalStack | VerticalStack => {
                 let children: Vec<_> =
                     node.children(map).filter(|child| prepared.contains_key(child)).collect();
                 if children.is_empty() {
                     return;
                 }
-                let is_horizontal = matches!(info.kind, HorizontalStack);
+                let is_horizontal = matches!(kind, HorizontalStack);
                 let focused_child = map
                     .participating_child(node, false, |child| prepared.contains_key(&child))
                     .expect("stack has a participating child");
@@ -198,7 +199,7 @@ impl Projection<'_> {
                 if collect && let Some(output) = &mut self.groups {
                     output.groups.push(self.tiles.stack_group_container_info(
                         node,
-                        info.kind,
+                        kind,
                         rect,
                         &children,
                         focused_idx,
@@ -231,7 +232,7 @@ impl Projection<'_> {
                 node,
                 rect,
                 sizes,
-                info.kind == Horizontal,
+                kind == Horizontal,
                 collect && selection_only,
                 collect,
             ),
@@ -468,8 +469,8 @@ pub(super) fn resize_internal(
         .skip(1)
         .try_fold(1.0, |r, node| match node.parent(&tiles.tree.map) {
             Some(parent)
-                if tiles.tree.map.kind(parent).orientation() == direction.orientation()
-                    && !tiles.tree.map.kind(parent).is_group() =>
+                if tiles.layout(parent).orientation() == direction.orientation()
+                    && !tiles.layout(parent).is_group() =>
             {
                 tiles.tree.map.proportion(node).map(|p| r * p)
             }
@@ -490,7 +491,7 @@ fn resize_pair(
 ) -> Option<(NodeId, NodeId)> {
     let map = tiles.map();
     node.ancestors_with_parent(map).find_map(|(candidate, parent)| {
-        if map.kind(parent?).is_group() {
+        if tiles.layout(parent?).is_group() {
             return None;
         }
         tiles.move_over(candidate, direction).map(|sibling| (candidate, sibling))

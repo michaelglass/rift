@@ -157,7 +157,7 @@ impl LegacyStackForest {
                         active,
                         members,
                         root_selected: selected == root,
-                        kind: StackLayoutSystem::stack_kind(info.kind),
+                        kind: StackLayoutSystem::stack_kind(map.kind(root).unwrap_or_default()),
                         fullscreen: info.is_fullscreen,
                         within_gaps: info.is_fullscreen_within_gaps,
                     }

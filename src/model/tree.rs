@@ -185,8 +185,9 @@ impl Tree {
     fn copy_tile(&mut self, source: NodeId, layout: LayoutId) -> NodeId {
         let node = self.create_root();
         self.map[node].layout = self.map[source].layout;
-        if let Some(window) = self.map.window(source) {
-            self.window.set_window(&mut self.map, layout, node, window);
+        match self.map.tile(source) {
+            Tile::Window(window) => self.window.set_window(&mut self.map, layout, node, window),
+            Tile::Container(kind) => self.map.set_kind(node, kind),
         }
         node
     }
@@ -216,6 +217,7 @@ impl NodeMap {
             regions: [first, last],
             selection: children.selection,
             primary_first: first == primary,
+            kind: children.kind,
         };
     }
 
@@ -240,6 +242,7 @@ impl NodeMap {
             regions,
             selection,
             primary_first,
+            kind,
         } = self[root].contents
         else {
             unreachable!("expected a region pair");
@@ -254,6 +257,7 @@ impl NodeMap {
                 regions: [right, left],
                 selection,
                 primary_first: first,
+                kind,
             };
         }
     }
@@ -284,6 +288,28 @@ impl NodeMap {
     pub fn reserve(&mut self, additional: usize) { self.map.reserve(additional) }
 
     pub(crate) fn window(&self, node: NodeId) -> Option<WindowId> { self.map.get(node)?.window() }
+
+    /// How a container arranges its children. A window arranges nothing, so it has none.
+    pub(crate) fn kind(&self, node: NodeId) -> Option<LayoutKind> {
+        Some(self.map.get(node)?.children()?.kind)
+    }
+
+    pub(crate) fn tile(&self, node: NodeId) -> Tile {
+        match self[node].contents {
+            Contents::Window(window) => Tile::Window(window),
+            Contents::Container(Children { kind, .. }) | Contents::RegionPair { kind, .. } => {
+                Tile::Container(kind)
+            }
+        }
+    }
+
+    pub(crate) fn set_kind(&mut self, container: NodeId, kind: LayoutKind) {
+        match &mut self[container].contents {
+            Contents::Container(Children { kind: slot, .. })
+            | Contents::RegionPair { kind: slot, .. } => *slot = kind,
+            Contents::Window(_) => unreachable!("a window has no layout kind"),
+        }
+    }
 
     pub(crate) fn selection_info(&self, node: NodeId) -> Option<SelectionInfo> {
         self.map.get(node)?.children()?.selection
@@ -438,15 +464,34 @@ impl NodeId {
     pub fn is_empty(self, map: &NodeMap) -> bool { self.first_child(map).is_none() }
 }
 
-#[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutInfo {
     pub(crate) size: f32,
+    pub(crate) is_fullscreen: bool,
+    pub(crate) is_fullscreen_within_gaps: bool,
+}
+
+/// The saved form of [`LayoutInfo`], which also holds a container's kind. Older versions
+/// require a kind on every node, so a window saves the default one and ignores it on read.
+#[derive(Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct StoredLayout {
+    size: f32,
     pub(crate) kind: LayoutKind,
     #[serde(default)]
-    pub(crate) is_fullscreen: bool,
+    is_fullscreen: bool,
     #[serde(default)]
-    pub(crate) is_fullscreen_within_gaps: bool,
+    is_fullscreen_within_gaps: bool,
+}
+
+impl From<StoredLayout> for LayoutInfo {
+    fn from(stored: StoredLayout) -> Self {
+        Self {
+            size: stored.size,
+            is_fullscreen: stored.is_fullscreen,
+            is_fullscreen_within_gaps: stored.is_fullscreen_within_gaps,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
@@ -459,6 +504,12 @@ pub struct Node {
     contents: Contents,
 }
 
+/// A node as layout sees it: a window, or a container that arranges its children by a kind.
+pub(crate) enum Tile {
+    Window(WindowId),
+    Container(LayoutKind),
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Contents {
     Container(Children),
@@ -466,6 +517,7 @@ enum Contents {
         regions: [NodeId; 2],
         selection: Option<SelectionInfo>,
         primary_first: bool,
+        kind: LayoutKind,
     },
     Window(WindowId),
 }
@@ -479,6 +531,7 @@ struct Children {
     first: Option<NodeId>,
     last: Option<NodeId>,
     selection: Option<SelectionInfo>,
+    kind: LayoutKind,
 }
 
 // Keep the saved SlotMap entry shape, including its original links and keys.
@@ -490,7 +543,7 @@ struct StoredNode {
     first_child: Option<NodeId>,
     last_child: Option<NodeId>,
     #[serde(default)]
-    layout: LayoutInfo,
+    layout: StoredLayout,
     #[serde(default)]
     selection: Option<SelectionInfo>,
     #[serde(default)]
@@ -512,18 +565,20 @@ impl From<StoredNode> for Node {
                 regions: [first, last],
                 selection: stored.selection,
                 primary_first,
+                kind: stored.layout.kind,
             },
             _ => Contents::Container(Children {
                 first: stored.first_child,
                 last: stored.last_child,
                 selection: stored.selection,
+                kind: stored.layout.kind,
             }),
         };
         Self {
             parent: stored.parent,
             prev_sibling: stored.prev_sibling,
             next_sibling: stored.next_sibling,
-            layout: stored.layout,
+            layout: stored.layout.into(),
             contents,
         }
     }
@@ -538,7 +593,12 @@ impl From<Node> for StoredNode {
             next_sibling: node.next_sibling,
             first_child: children.first,
             last_child: children.last,
-            layout: node.layout,
+            layout: StoredLayout {
+                size: node.layout.size,
+                kind: children.kind,
+                is_fullscreen: node.layout.is_fullscreen,
+                is_fullscreen_within_gaps: node.layout.is_fullscreen_within_gaps,
+            },
             selection: children.selection,
             window: node.window(),
             master_first: match node.contents {
@@ -558,11 +618,13 @@ impl Node {
             Contents::RegionPair {
                 regions: [first, last],
                 selection,
+                kind,
                 ..
             } => Some(Children {
                 first: Some(first),
                 last: Some(last),
                 selection,
+                kind,
             }),
             Contents::Window(_) => None,
         }

@@ -484,10 +484,9 @@ impl TraditionalLayoutSystem {
 
         // If the selection is now a container that matches the join orientation,
         // absorb the target into it to avoid creating an extra nesting layer.
-        let selection_layout = self.tiles.layout(selection);
         let target_is_ancestor = target.ancestors(map).any(|a| a == selection);
         let selection_is_ancestor = selection.ancestors(map).any(|a| a == target);
-        if self.tiles.window_at(selection).is_none()
+        if let Some(selection_layout) = map.kind(selection)
             && selection_layout.orientation() == direction.orientation()
             && !selection_layout.is_group()
             && !target_is_ancestor
@@ -652,7 +651,7 @@ impl TraditionalLayoutSystem {
                 else {
                     break node;
                 };
-                if self.tiles.tree.map.kind(node).orientation() == direction.orientation() {
+                if self.tiles.layout(node).orientation() == direction.orientation() {
                     break next;
                 }
                 node = next;
@@ -671,7 +670,7 @@ impl TraditionalLayoutSystem {
                 (target, false)
             } else {
                 let old_root = moving_node.ancestors(map).last().unwrap();
-                let root_kind = self.tiles.tree.map.kind(old_root);
+                let root_kind = self.tiles.layout(old_root);
                 // Leaving the edge of a root group splits the window out of it; at the edge
                 // of a same-oriented split there is nowhere further to go.
                 if root_kind.orientation() == direction.orientation() && !root_kind.is_group() {
@@ -715,7 +714,7 @@ impl TraditionalLayoutSystem {
             return new_container;
         }
         let container = self.tiles.tree.insert(Placement::Back(ancestor));
-        self.tiles.tree.map.set_kind(container, LayoutKind::Horizontal);
+        self.tiles.set_layout(container, LayoutKind::Horizontal);
         self.tiles.tree.move_node(node1, Placement::Back(container));
         self.tiles.tree.move_node(node2, Placement::Back(container));
         container
@@ -946,7 +945,7 @@ mod tests {
                 (_, _, VerticalPlacement::Right) => rect(472.0, 200.0, 28.0, 300.0),
             };
             assert_eq!(bar, expected_bar);
-            assert_eq!(system.tiles.tree.map.kind(root), kind);
+            assert_eq!(system.tiles.layout(root), kind);
         }
     }
 
