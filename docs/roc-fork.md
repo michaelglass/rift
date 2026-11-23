@@ -295,8 +295,29 @@ main-window re-seeds: N`). Plant check: `MainWindow.roc`'s Replaced leaving the 
 tests by roc-divergence, and with the divergence panic off (behaviour only) the reactor test
 `a_destroyed_main_window_is_no_longer_the_main_window` fails on what rift does.
 
+**The four reactor predicates on rift's path (2026-11-23, not flipped).** Each is a pure core
+function over typed facts, a Roc mirror behind a named boundary type, a `roc_path::check` site (the
+Rust answer stands), a differential on full facts and with facts left unasked at random (20,000
+questions each way, no Roc allocation left live), and a planted Roc bug caught:
+- 1f22b0eb `rift_core::workspaces::emits_window` (discovery's emit check; the Space's active
+  workspace is now asked only for an assigned window). Plant: emitting every assigned window fails
+  18 roc-core lib tests.
+- 919d300b `rift_core::topology::quarantines` (an unsettled topology holds back window reports and
+  window input; `EventClass`). Plant: letting window input through was caught by nothing; the new
+  reactor test `a_press_during_an_unsettled_topology_is_quarantined` (written first) catches it (1
+  failure).
+- c42e0370 `rift_core::topology::target_display` (MoveWindowToDisplay / MoveWorkspaceToDisplay;
+  `NoTarget`, `plain::Point`). Plant: taking an inactive Space as the target was caught by nothing;
+  the new reactor test `a_workspace_is_not_moved_to_a_display_whose_space_is_inactive` catches it
+  (1 failure).
+- 7ef619cb `rift_core::focus::mouse_raise` (focus-follows-mouse raise through `RaiseFacts`, asked in
+  the Rust order; `MouseRaise`, `Unraised`; `raise_buries_a_floater` and `contains` move into the
+  core on plain `Rect`, the same comparisons as `CGRectExt::contains_rect`). Plant: a floating,
+  unadmitted window treated as outside admission was caught by nothing; the new reactor test
+  `mouse_raises_a_floating_window_whose_admission_is_suspended` catches it (1 failure).
+
 **Next:**
-1. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
+1. W4b–d (the joined Workspaces twin replaces the topology and ownerships twins).
 2. The core_geometry converters on the new layout trees.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
