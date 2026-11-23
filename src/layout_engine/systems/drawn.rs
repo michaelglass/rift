@@ -159,3 +159,13 @@ pub(crate) fn core_frames(
         .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
         .collect()
 }
+
+pub(crate) fn drawn_direction(rng: &mut Rng) -> crate::layout_engine::Direction {
+    use crate::layout_engine::Direction;
+    match rng.below(4) {
+        0 => Direction::Left,
+        1 => Direction::Right,
+        2 => Direction::Up,
+        _ => Direction::Down,
+    }
+}

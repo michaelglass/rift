@@ -239,7 +239,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let root = self.tiles.root(layout);
-        super::tiles::project(
+        let frames = super::tiles::project(
             &self.tiles,
             root,
             |_| root,
@@ -250,7 +250,23 @@ impl LayoutSystem for TraditionalLayoutSystem {
             stack_line,
             true,
             None,
-        )
+        );
+        #[cfg(any(test, feature = "roc-core"))]
+        crate::layout_engine::core_geometry::check_traditional(
+            "traditional",
+            super::tiles::shape(
+                &self.tiles,
+                root,
+                None,
+                screen,
+                stack_offset,
+                constraints,
+                gaps,
+                stack_line,
+            ),
+            &frames,
+        );
+        frames
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -949,5 +965,181 @@ mod tests {
             assert_eq!(bar, expected_bar);
             assert_eq!(system.tiles.tree.map.kind(root), kind);
         }
+    }
+
+    /// A traditional system after random edits: windows added and removed, every focus, splits,
+    /// joins, stacks and unstacks, consume-or-expel, moves, drops of every kind, resizes, swaps,
+    /// rebalances, orientation toggles, fullscreen of a window or a container, participation.
+    fn drawn_system(
+        rng: &mut crate::layout_engine::systems::drawn::Rng,
+    ) -> (TraditionalLayoutSystem, LayoutId, Vec<WindowId>) {
+        use crate::common::config::StackDefaultOrientation;
+        use crate::layout_engine::systems::drawn::drawn_direction;
+        use crate::layout_engine::systems::{GroupEdit, LayoutEdit};
+        use crate::layout_engine::{ResizeOrientation, WindowDropAction};
+        let insertion = if rng.chance(50) {
+            WindowInsertionPoint::NextToSelection
+        } else {
+            WindowInsertionPoint::EndOfTree
+        };
+        let mut system = TraditionalLayoutSystem::new(insertion, rng.chance(50));
+        let layout = system.create_layout();
+        let mut windows: Vec<WindowId> = Vec::new();
+        let mut next = 0;
+        let stack_orientation =
+            |rng: &mut crate::layout_engine::systems::drawn::Rng| match rng.below(4) {
+                0 => StackDefaultOrientation::Perpendicular,
+                1 => StackDefaultOrientation::Same,
+                2 => StackDefaultOrientation::Horizontal,
+                _ => StackDefaultOrientation::Vertical,
+            };
+        for _ in 0..rng.below(40) {
+            let pick = |rng: &mut crate::layout_engine::systems::drawn::Rng,
+                        windows: &[WindowId]| {
+                windows[rng.below(windows.len() as u64) as usize]
+            };
+            match rng.below(18) {
+                0..=3 => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+                _ if windows.is_empty() => {}
+                4 => {
+                    let window = pick(rng, &windows);
+                    windows.retain(|w| *w != window);
+                    system.update(WindowChange::Remove(window));
+                }
+                5 => {
+                    let focus = match rng.below(4) {
+                        0 => Focus::Select(pick(rng, &windows)),
+                        1 => Focus::Ascend,
+                        2 => Focus::Descend,
+                        _ => Focus::Direction(drawn_direction(rng)),
+                    };
+                    system.focus(layout, focus);
+                }
+                6 => {
+                    for _ in 0..rng.below(3) {
+                        system.focus(layout, Focus::Ascend);
+                    }
+                    let within_gaps = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
+                }
+                7 => {
+                    let window = pick(rng, &windows);
+                    system.set_window_participation(window, rng.chance(40));
+                }
+                8 => {
+                    let direction = drawn_direction(rng);
+                    let has_display_neighbor = rng.chance(30);
+                    system.edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor,
+                    });
+                }
+                9 => {
+                    let (source, target) = (pick(rng, &windows), pick(rng, &windows));
+                    let action = match rng.below(5) {
+                        0 => WindowDropAction::Swap,
+                        1 => WindowDropAction::Stack,
+                        2 => WindowDropAction::Insert(drawn_direction(rng)),
+                        3 => WindowDropAction::Move(drawn_direction(rng)),
+                        _ => WindowDropAction::ConsumeOrExpel(drawn_direction(rng)),
+                    };
+                    system.edit(layout, LayoutEdit::Drop { source, target, action });
+                }
+                10 => {
+                    let amount = rng.length(-0.4, 0.4);
+                    let orientation = if rng.chance(50) {
+                        ResizeOrientation::Horizontal
+                    } else {
+                        ResizeOrientation::Vertical
+                    };
+                    system.edit(layout, LayoutEdit::Resize { amount, orientation }).discard();
+                }
+                11 => {
+                    let (a, b) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::Swap(a, b));
+                }
+                12 => {
+                    let kind = match rng.below(4) {
+                        0 => LayoutKind::Horizontal,
+                        1 => LayoutKind::Vertical,
+                        2 => LayoutKind::HorizontalStack,
+                        _ => LayoutKind::VerticalStack,
+                    };
+                    system.edit(layout, LayoutEdit::Split(kind));
+                }
+                13 => {
+                    let edit = match rng.below(5) {
+                        0 => GroupEdit::Join(drawn_direction(rng)),
+                        1 => GroupEdit::ConsumeOrExpel(drawn_direction(rng)),
+                        2 => GroupEdit::Stack(stack_orientation(rng)),
+                        3 => GroupEdit::Unstack(stack_orientation(rng)),
+                        _ => GroupEdit::Unjoin,
+                    };
+                    system.edit(layout, LayoutEdit::Group(edit));
+                }
+                14 => {
+                    system.edit(layout, LayoutEdit::ToggleOrientation);
+                }
+                15 => {
+                    system.edit(layout, LayoutEdit::Rebalance);
+                }
+                16 => {
+                    let (window, target) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::ReorderTab { window, target });
+                }
+                _ if rng.chance(25) => {
+                    let window = pick(rng, &windows);
+                    system.update(WindowChange::CloseApp(window.pid));
+                    windows.retain(|w| w.pid != window.pid);
+                }
+                _ => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+            }
+        }
+        (system, layout, windows)
+    }
+
+    /// The core's frames for a traditional layout are upstream's `calculate_layout`'s, bit for
+    /// bit, over drawn systems, screens, gaps, offsets, bars and window constraints.
+    #[test]
+    fn the_core_tiles_traditional_layouts_as_the_traditional_system_does() {
+        use crate::layout_engine::systems::drawn::*;
+        let mut rng = Rng(0x5eed_7a0d);
+        let (mut cases, mut frames_seen) = (0, 0);
+        for _ in 0..3000 {
+            let (system, layout, windows) = drawn_system(&mut rng);
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            let offset = drawn_offset(&mut rng);
+            let line = drawn_line(&mut rng);
+            let upstream =
+                system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
+            let root = system.tiles.root(layout);
+            let core = core_frames(super::super::tiles::shape(
+                &system.tiles,
+                root,
+                None,
+                screen,
+                offset,
+                &constraints,
+                &gaps,
+                line,
+            ));
+            assert_eq!(bits(&core), bits(&upstream));
+            cases += 1;
+            frames_seen += upstream.len();
+        }
+        eprintln!("traditional: {cases} layouts, {frames_seen} frames identical");
+        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
     }
 }
