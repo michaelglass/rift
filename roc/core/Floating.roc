@@ -1,7 +1,7 @@
 ## A floating layout's first frames (`rift_core::layout::floating`): where a window goes the
 ## first time the layout places it.
 
-import Geometry exposing [fixed_for_axis, max, max_for_axis, min, normalized, reported_min]
+import Geometry exposing [fixed_for_axis, max, max_for_axis, min, normalized, reported_min, tiling_area]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -21,6 +21,14 @@ WindowConstraints : {
 	max_width : F64,
 	max_height : F64,
 }
+
+Gaps : { top : F64, left : F64, bottom : F64, right : F64, horizontal : F64, vertical : F64 }
+
+## Where a window of a whole floating layout goes.
+Place : [Screen, WithinGaps, Kept(Rect), First(WindowConstraints)]
+
+## One of a floating layout's windows: left out (holding its position in a cascade), or in.
+Slot : [LeftOut, Placed({ window : WindowId, place : Place })]
 
 ## A window placed for the first time: its constraints, and the frame it is seen at, if seen.
 Newcomer : { constraints : WindowConstraints, seen : [Live(Rect), Unseen] }
@@ -104,6 +112,39 @@ Floating := [].{
 				frame = initial_frame(screen, window)
 				placed = if (cascading) cascade(screen, frame, acc.position.to_f64() / slots, slots) else frame
 				{ position: acc.position + 1, out: acc.out.append(placed) }
+			},
+		).out
+	}
+
+	## Each window's frame, in the layout's order (none for a window left out): the screen, the
+	## tiling area, its kept frame, or its first frame, cascaded by its position among all the
+	## layout's windows when spreading.
+	frames : Rect, Bool, Gaps, List(Slot) -> List((WindowId, Rect))
+	frames = |screen, spread, gaps, windows| {
+		count = windows.len()
+		slots = (if (count > 0) count - 1 else 0).to_f64()
+		cascading = spread and count > 1
+		windows.fold(
+			{ position: 0.U64, out: [] },
+			|acc, slot| {
+				out =
+					match slot {
+						LeftOut => acc.out
+						Placed({ window, place }) => {
+							frame =
+								match place {
+									Screen => screen
+									WithinGaps => tiling_area(screen, gaps)
+									Kept(kept) => kept
+									First(constraints) => {
+										first = initial_frame(screen, { constraints, seen: Unseen })
+										if (cascading) cascade(screen, first, acc.position.to_f64() / slots, slots) else first
+									}
+								}
+							acc.out.append((window, frame))
+						}
+					}
+				{ position: acc.position + 1, out }
 			},
 		).out
 	}

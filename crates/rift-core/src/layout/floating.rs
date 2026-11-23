@@ -1,7 +1,8 @@
-//! A floating layout's first frames: where a window goes the first time the layout places it.
-//! After that the platform keeps the frame the user gives it; the core decides only the start.
+//! A floating layout's frames: where a window goes the first time the layout places it, and,
+//! for a whole layout, each window's frame (fullscreen, the frame the layout keeps for it, or its
+//! first frame). The frames the layout keeps are the platform's: the user moves them.
 
-use super::WindowConstraints;
+use super::{Gaps, WindowConstraints, tiling_area};
 use crate::plain::Rect;
 
 /// The screen a floating layout places windows on, and whether new windows spread out.
@@ -24,6 +25,86 @@ pub struct Newcomer {
 pub enum Seen {
     Live(Rect),
     Unseen,
+}
+
+/// A floating layout's windows, in the layout's order, and how each is placed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout<W> {
+    pub floating: Floating,
+    pub gaps: Gaps,
+    pub windows: Vec<Slot<W>>,
+}
+
+/// One of a layout's windows. A window left out of the layout (suspended) has no frame, but
+/// holds its position in a cascade.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Slot<W> {
+    LeftOut,
+    In { window: W, place: Place },
+}
+
+/// Where a window of a floating layout goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Place {
+    /// Fullscreen: the screen.
+    Screen,
+    /// Fullscreen within the gaps: the tiling area.
+    WithinGaps,
+    /// The frame the layout keeps for it.
+    Kept(Rect),
+    /// Its first frame (it has no kept frame yet), cascaded by its position when spreading.
+    First(WindowConstraints),
+}
+
+impl<W> Layout<W> {
+    /// The same layout on other window ids (another platform's types).
+    pub fn map<V>(self, window: &impl Fn(W) -> V) -> Layout<V> {
+        Layout {
+            floating: self.floating,
+            gaps: self.gaps,
+            windows: self
+                .windows
+                .into_iter()
+                .map(|slot| match slot {
+                    Slot::LeftOut => Slot::LeftOut,
+                    Slot::In { window: id, place } => Slot::In { window: window(id), place },
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<W: Copy> Layout<W> {
+    /// Each window's frame, in the layout's order (none for a window left out). A first frame
+    /// cascades by the window's position among all the layout's windows.
+    pub fn frames(&self) -> Vec<(W, Rect)> {
+        let floating = self.floating;
+        let count = self.windows.len();
+        let slots = count.saturating_sub(1) as f64;
+        self.windows
+            .iter()
+            .enumerate()
+            .filter_map(|(position, slot)| match *slot {
+                Slot::LeftOut => None,
+                Slot::In { window, place } => Some((window, match place {
+                    Place::Screen => floating.screen,
+                    Place::WithinGaps => tiling_area(floating.screen, self.gaps),
+                    Place::Kept(frame) => frame,
+                    Place::First(constraints) => {
+                        let frame = floating.initial_frame(Newcomer {
+                            constraints,
+                            seen: Seen::Unseen,
+                        });
+                        if floating.spread && count > 1 {
+                            floating.cascade(frame, position as f64 / slots, slots)
+                        } else {
+                            frame
+                        }
+                    }
+                })),
+            })
+            .collect()
+    }
 }
 
 /// The step between cascaded windows, in points on each axis.

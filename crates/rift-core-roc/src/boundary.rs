@@ -594,6 +594,61 @@ pub(crate) fn from_settled(answer: abi::BoundarySettled) -> Settled<u64> {
     }
 }
 
+pub(crate) fn floating_layout(
+    layout: rift_core::layout::floating::Layout<WindowId>,
+    host: &abi::RocHost,
+) -> abi::BoundaryFloatingLayout {
+    use abi::{BoundaryFloatingPlaceTag as PlaceTag, BoundaryFloatingSlotTag as SlotTag};
+    use rift_core::layout::floating::{Place, Slot};
+    let windows: Vec<abi::BoundaryFloatingSlot> = layout
+        .windows
+        .into_iter()
+        .map(|slot| match slot {
+            Slot::LeftOut => union!(
+                BoundaryFloatingSlot,
+                BoundaryFloatingSlotPayload.left_out,
+                SlotTag::LeftOut
+            ),
+            Slot::In { window: id, place } => {
+                let place = match place {
+                    Place::Screen => union!(
+                        BoundaryFloatingPlace,
+                        BoundaryFloatingPlacePayload.screen,
+                        PlaceTag::Screen
+                    ),
+                    Place::WithinGaps => union!(
+                        BoundaryFloatingPlace,
+                        BoundaryFloatingPlacePayload.within_gaps,
+                        PlaceTag::WithinGaps
+                    ),
+                    Place::Kept(frame) => union!(
+                        BoundaryFloatingPlace,
+                        BoundaryFloatingPlacePayload.kept(rect(frame)),
+                        PlaceTag::Kept
+                    ),
+                    Place::First(constraints) => union!(
+                        BoundaryFloatingPlace,
+                        BoundaryFloatingPlacePayload.first(window_constraints(constraints)),
+                        PlaceTag::First
+                    ),
+                };
+                union!(
+                    BoundaryFloatingSlot,
+                    BoundaryFloatingSlotPayload
+                        .placed(abi::BoundaryFloatingWindow { window: window(id), place }),
+                    SlotTag::Placed
+                )
+            }
+        })
+        .collect();
+    abi::BoundaryFloatingLayout {
+        screen: rect(layout.floating.screen),
+        spread: layout.floating.spread,
+        gaps: gaps(layout.gaps),
+        windows: list(&windows, host),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // One axis.
 

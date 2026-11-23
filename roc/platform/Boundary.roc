@@ -134,6 +134,18 @@ Boundary := [].{
 	## Newcomers to a floating layout on `screen`, spread or not.
 	FloatingQuestion := { screen : Rect, spread : Bool, windows : List(Newcomer) }
 
+	## Where a window of a floating layout goes: the screen, the tiling area (fullscreen within
+	## the gaps), the frame the layout keeps for it, or its first frame.
+	FloatingPlace := [Screen, WithinGaps, Kept(Rect), First(WindowConstraints)]
+
+	FloatingWindow := { window : WindowId, place : FloatingPlace }
+
+	## One of a floating layout's windows: left out (it holds its position in a cascade), or placed.
+	FloatingSlot := [LeftOut, Placed(FloatingWindow)]
+
+	## A floating layout's windows in its order, on `screen`, spreading first frames or not.
+	FloatingLayout := { screen : Rect, spread : Bool, gaps : Gaps, windows : List(FloatingSlot) }
+
 	# Model-free questions, shared shapes. A fact is what the platform's run of the decision
 	# answered, or that it never asked it (`rift_core::plain::Fact`), one named type per
 	# payload; a fact asked about keys is a list of key and answer (`Answers`). An answer is

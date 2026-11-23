@@ -276,6 +276,60 @@ impl FloatingLayoutSystem {
 
     pub(crate) fn spread_initial_windows(&mut self) { self.spread_on_initialization = true; }
 
+    /// A floating layout as the core's geometry takes it: every window in the layout's order (a
+    /// window left out holds its position), each on the screen or in the tiling area when it or
+    /// an ancestor is fullscreen, else at the frame the layout keeps for it, else at a first
+    /// frame. Arguments as `calculate_layout` takes them.
+    #[cfg(any(test, feature = "roc-core"))]
+    pub(crate) fn shape(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+    ) -> rift_core::layout::floating::Layout<WindowId> {
+        use rift_core::layout::floating::{Floating, Layout, Place, Slot};
+
+        use crate::layout_engine::core_geometry::core_constraints;
+        use crate::layout_engine::{core_gaps, core_rect};
+        let map = self.groups.map();
+        let windows = self
+            .groups
+            .windows_with_nodes(layout)
+            .map(|(node, window)| {
+                if !self.groups.window_participates(window) {
+                    return Slot::LeftOut;
+                }
+                let fullscreen = node.ancestors(map).find_map(|node| {
+                    let info = &map[node].layout;
+                    if info.is_fullscreen {
+                        Some(Place::Screen)
+                    } else if info.is_fullscreen_within_gaps {
+                        Some(Place::WithinGaps)
+                    } else {
+                        None
+                    }
+                });
+                let place = fullscreen
+                    .or_else(|| self.frame(window).map(|frame| Place::Kept(core_rect(frame))))
+                    .unwrap_or_else(|| {
+                        Place::First(core_constraints(
+                            constraints.get(&window).copied().unwrap_or_default(),
+                        ))
+                    });
+                Slot::In { window, place }
+            })
+            .collect();
+        Layout {
+            floating: Floating {
+                screen: core_rect(screen),
+                spread: self.spread_on_initialization,
+            },
+            gaps: core_gaps(gaps),
+            windows,
+        }
+    }
+
     fn cascade_frame(frame: CGRect, screen: CGRect, index: usize, count: usize) -> CGRect {
         if count <= 1 {
             return frame;
@@ -457,7 +511,8 @@ impl LayoutSystem for FloatingLayoutSystem {
         } else {
             0
         };
-        self.groups
+        let frames: Vec<(WindowId, CGRect)> = self
+            .groups
             .windows_with_nodes(layout)
             .enumerate()
             .filter(|(_, (_, wid))| self.groups.window_participates(*wid))
@@ -477,7 +532,13 @@ impl LayoutSystem for FloatingLayoutSystem {
                     });
                 (wid, frame)
             })
-            .collect()
+            .collect();
+        #[cfg(any(test, feature = "roc-core"))]
+        crate::layout_engine::core_geometry::check_floating(
+            self.shape(layout, screen, constraints, gaps),
+            &frames,
+        );
+        frames
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -824,5 +885,139 @@ mod tests {
         assert!(restored.frame(w(9)).is_some());
         restored.remove_layout(clone);
         assert!(restored.geometry.is_empty());
+    }
+
+    /// A floating system after random edits: windows added and removed, frames kept (the user
+    /// moving them, or the first pass placing them, spread or not), every focus, fullscreen of a
+    /// window or a group, participation, joins, stacks, unstacks, swaps, tab reorders.
+    fn drawn_system(
+        rng: &mut crate::layout_engine::systems::drawn::Rng,
+    ) -> (FloatingLayoutSystem, LayoutId, Vec<WindowId>) {
+        use crate::common::config::StackDefaultOrientation;
+        use crate::layout_engine::systems::drawn::{drawn_direction, drawn_screen};
+        let mut system = FloatingLayoutSystem::default();
+        let layout = system.create_layout();
+        let mut windows: Vec<WindowId> = Vec::new();
+        let mut next = 0;
+        if rng.chance(30) {
+            system.spread_initial_windows();
+        }
+        let orientation = |rng: &mut crate::layout_engine::systems::drawn::Rng| match rng.below(4) {
+            0 => StackDefaultOrientation::Perpendicular,
+            1 => StackDefaultOrientation::Same,
+            2 => StackDefaultOrientation::Horizontal,
+            _ => StackDefaultOrientation::Vertical,
+        };
+        for _ in 0..rng.below(30) {
+            let pick = |rng: &mut crate::layout_engine::systems::drawn::Rng,
+                        windows: &[WindowId]| {
+                windows[rng.below(windows.len() as u64) as usize]
+            };
+            match rng.below(14) {
+                0..=3 => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+                _ if windows.is_empty() => {}
+                4 => {
+                    let window = pick(rng, &windows);
+                    windows.retain(|w| *w != window);
+                    system.update(WindowChange::Remove(window));
+                }
+                5 => {
+                    let window = pick(rng, &windows);
+                    let frame = drawn_screen(rng);
+                    system.store_frame(window, frame);
+                }
+                6 => {
+                    let focus = match rng.below(4) {
+                        0 => Focus::Select(pick(rng, &windows)),
+                        1 => Focus::Ascend,
+                        2 => Focus::Descend,
+                        _ => Focus::Direction(drawn_direction(rng)),
+                    };
+                    system.focus(layout, focus);
+                }
+                7 => {
+                    if rng.chance(30) {
+                        system.focus(layout, Focus::Ascend);
+                    }
+                    let within_gaps = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
+                }
+                8 => {
+                    let window = pick(rng, &windows);
+                    system.set_window_participation(window, rng.chance(40));
+                }
+                9 => {
+                    let edit = match rng.below(5) {
+                        0 => GroupEdit::Join(drawn_direction(rng)),
+                        1 => GroupEdit::ConsumeOrExpel(drawn_direction(rng)),
+                        2 => GroupEdit::Stack(orientation(rng)),
+                        3 => GroupEdit::Unstack(orientation(rng)),
+                        _ => GroupEdit::Unjoin,
+                    };
+                    system.edit(layout, LayoutEdit::Group(edit));
+                }
+                10 => {
+                    let (a, b) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::Swap(a, b));
+                }
+                11 => {
+                    let (window, target) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::ReorderTab { window, target });
+                }
+                12 => {
+                    // The first pass places the windows that have no frame (seen or not).
+                    let screen = drawn_screen(rng);
+                    let mut seen: HashMap<WindowId, CGRect> = HashMap::default();
+                    for &window in &windows {
+                        if rng.chance(50) {
+                            seen.insert(window, drawn_screen(rng));
+                        }
+                    }
+                    system.initialize_frames(layout, screen, &HashMap::default(), &|window| {
+                        seen.get(&window).copied()
+                    });
+                    if rng.chance(30) {
+                        system.spread_initial_windows();
+                    }
+                }
+                _ => {
+                    system.edit(layout, LayoutEdit::ToggleOrientation);
+                }
+            }
+        }
+        (system, layout, windows)
+    }
+
+    /// The core's frames for a floating layout are upstream's `calculate_layout`'s, bit for bit,
+    /// over drawn systems, screens, gaps and window constraints.
+    #[test]
+    fn the_core_places_floating_layouts_as_the_floating_system_does() {
+        use crate::layout_engine::systems::drawn::*;
+        let mut rng = Rng(0x5eed_f10a);
+        let (mut cases, mut frames_seen) = (0, 0);
+        for _ in 0..3000 {
+            let (system, layout, windows) = drawn_system(&mut rng);
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            let line = drawn_line(&mut rng);
+            let upstream = system.calculate_layout(layout, screen, 0.0, &constraints, &gaps, line);
+            let core: Vec<(WindowId, CGRect)> = system
+                .shape(layout, screen, &constraints, &gaps)
+                .frames()
+                .into_iter()
+                .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
+                .collect();
+            assert_eq!(bits(&core), bits(&upstream));
+            cases += 1;
+            frames_seen += upstream.len();
+        }
+        eprintln!("floating: {cases} layouts, {frames_seen} frames identical");
+        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
     }
 }

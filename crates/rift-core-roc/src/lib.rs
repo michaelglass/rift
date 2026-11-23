@@ -432,6 +432,19 @@ pub fn settle(
     Ok(boundary::from_settled(unsafe { abi::roc_settle(question) }))
 }
 
+/// A floating layout's frames, as `rift_core::layout::floating::Layout::frames` places them,
+/// placed by the Roc core.
+pub fn floating_frames(
+    layout: rift_core::layout::floating::Layout<WindowId>,
+) -> Result<Vec<(WindowId, Rect)>, RocError> {
+    let host = host();
+    let layout = boundary::floating_layout(layout, &host);
+    Ok(boundary::frames(
+        unsafe { abi::roc_floating_layout(layout) },
+        &host,
+    ))
+}
+
 /// The lengths of segments along one axis, as `rift_core::layout::axis::solve_axis_lengths`
 /// solves them, solved by the Roc core.
 pub fn solve_axis_lengths(

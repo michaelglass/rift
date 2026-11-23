@@ -79,29 +79,65 @@ pub(crate) fn check_traditional(
     shape: Option<Traditional<WindowId>>,
     upstream: &[(WindowId, CGRect)],
 ) {
+    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
+    #[cfg(feature = "roc-core")]
+    let roc = || match &shape {
+        None => Ok(Vec::new()),
+        Some(shape) => rift_core_roc::tile_traditional(shape.clone().map(&to_plain)),
+    };
+    #[cfg(not(feature = "roc-core"))]
+    let roc = no_roc;
+    check(what, &shape, upstream, rust, roc);
+}
+
+/// Holds the core's frames for a floating layout to the floating system's, as
+/// [`check_traditional`] does.
+#[cfg(any(test, feature = "roc-core"))]
+pub(crate) fn check_floating(
+    layout: rift_core::layout::floating::Layout<WindowId>,
+    upstream: &[(WindowId, CGRect)],
+) {
+    let rust = layout.frames();
+    #[cfg(feature = "roc-core")]
+    let roc = || rift_core_roc::floating_frames(layout.clone().map(&to_plain));
+    #[cfg(not(feature = "roc-core"))]
+    let roc = no_roc;
+    check("floating", &layout, upstream, rust, roc);
+}
+
+/// Without `roc-core` there is no Roc core to ask.
+#[cfg(all(test, not(feature = "roc-core")))]
+fn no_roc() -> Result<Vec<(rift_core::plain::WindowId, Rect)>, std::convert::Infallible> {
+    Ok(Vec::new())
+}
+
+/// The core's frames (`rust`, and under `roc-core` what `roc` answers) against rift's.
+#[cfg(any(test, feature = "roc-core"))]
+fn check<E: std::fmt::Debug>(
+    what: &str,
+    shape: &impl std::fmt::Debug,
+    upstream: &[(WindowId, CGRect)],
+    rust: Vec<(WindowId, Rect)>,
+    #[cfg_attr(not(feature = "roc-core"), allow(unused_variables))] roc: impl FnOnce() -> Result<
+        Vec<(rift_core::plain::WindowId, Rect)>,
+        E,
+    >,
+) {
     let upstream: Vec<(WindowId, Rect)> =
         upstream.iter().map(|&(window, frame)| (window, core_rect(frame))).collect();
-    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
     if bits(&rust) != bits(&upstream) {
-        diverged("layout-divergence", what, &shape, &upstream, &rust);
+        diverged("layout-divergence", what, shape, &upstream, &rust);
     }
     #[cfg(feature = "roc-core")]
-    {
-        let roc = match &shape {
-            None => Vec::new(),
-            Some(shape) => match rift_core_roc::tile_traditional(shape.clone().map(&to_plain)) {
-                Ok(frames) => {
-                    frames.into_iter().map(|(window, frame)| (of_plain(window), frame)).collect()
-                }
-                Err(error) => {
-                    diverged("roc-divergence", what, &shape, &upstream, &error);
-                    return;
-                }
-            },
-        };
-        if bits(&roc) != bits(&upstream) {
-            diverged("roc-divergence", what, &shape, &upstream, &roc);
+    match roc() {
+        Ok(frames) => {
+            let roc: Vec<(WindowId, Rect)> =
+                frames.into_iter().map(|(window, frame)| (of_plain(window), frame)).collect();
+            if bits(&roc) != bits(&upstream) {
+                diverged("roc-divergence", what, shape, &upstream, &roc);
+            }
         }
+        Err(error) => diverged("roc-divergence", what, shape, &upstream, &error),
     }
 }
 

@@ -567,3 +567,71 @@ fn tile_timing() {
         std::hint::black_box(first_frames(floating, windows).expect("first frames"));
     });
 }
+
+#[test]
+fn the_roc_core_places_whole_floating_layouts_as_the_rust_core_does() {
+    use rift_core::layout::floating::{Layout, Place, Slot};
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0xF10A_7E5C_1A70_0E77);
+    let before = AllocationCount::now();
+    let mut placed = 0;
+    for case in 0..cases {
+        let gap = |rng: &mut Rng| {
+            if rng.chance(40) {
+                0.
+            } else {
+                rng.length(0., 40.)
+            }
+        };
+        let layout = Layout {
+            floating: Floating {
+                screen: Rect {
+                    x: rng.length(-2000., 2000.),
+                    y: rng.length(-100., 1000.),
+                    w: rng.length(0., 3000.),
+                    h: rng.length(0., 2000.),
+                },
+                spread: rng.chance(50),
+            },
+            gaps: Gaps {
+                top: gap(&mut rng),
+                left: gap(&mut rng),
+                bottom: gap(&mut rng),
+                right: gap(&mut rng),
+                horizontal: gap(&mut rng),
+                vertical: gap(&mut rng),
+            },
+            windows: (0..rng.below(8) as u32)
+                .map(|idx| {
+                    if rng.chance(15) {
+                        return Slot::LeftOut;
+                    }
+                    let place = match rng.below(6) {
+                        0 => Place::Screen,
+                        1 => Place::WithinGaps,
+                        2 | 3 => Place::Kept(Rect {
+                            x: rng.length(-500., 2500.),
+                            y: rng.length(-500., 1500.),
+                            w: rng.length(0., 3000.),
+                            h: rng.length(0., 2000.),
+                        }),
+                        _ => Place::First(constraints(&mut rng)),
+                    };
+                    Slot::In {
+                        window: WindowId { pid: 9, idx: idx + 1 },
+                        place,
+                    }
+                })
+                .collect(),
+        };
+        let rust = layout.frames();
+        placed += rust.len();
+        let roc = rift_core_roc::floating_frames(layout.clone()).expect("frames");
+        if wire::encode_frames(roc.clone()) != wire::encode_frames(rust.clone()) {
+            panic!("case {case}: {layout:#?}\n  roc:  {roc:?}\n  rust: {rust:?}");
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} whole floating layouts, {placed} frames identical");
+}
