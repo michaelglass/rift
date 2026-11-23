@@ -126,10 +126,8 @@ impl Reactor {
             return;
         }
         // An adjusted acknowledgement of our own frame write is not a new native drag.
-        if matches!(
-            self.drag_manager.actor.kind(),
-            Some(crate::actor::drag::DragKind::ModifierMove)
-        ) && self.drag_manager.actor.source().is_some_and(|source| source.window == wid)
+        if self.is_dragging_window(wid)
+            && self.drag_manager.actor.kind() == Some(crate::actor::drag::DragKind::ModifierMove)
         {
             return;
         }

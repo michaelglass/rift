@@ -1128,7 +1128,7 @@ impl Reactor {
             Event::DragMotionPending(publisher) => {
                 let motion = publisher.take_latest();
                 let mut reactor = reactor.borrow_mut();
-                if reactor.drag_manager.actor.is_active()
+                if reactor.is_in_drag()
                     && let Some(motion) = motion
                 {
                     reactor.handle_loop_event(Event::DragMotion(motion));

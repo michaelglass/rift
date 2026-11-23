@@ -70,6 +70,8 @@ impl DragManager {
         }
     }
 
+    /// The input thread's copy of whether a native move is live. Synced once at the end of
+    /// every reactor event, after whatever started or ended a drag.
     pub fn sync_motion_gate(&self) {
         let active = self.actor.drop_enabled()
             && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
@@ -81,13 +83,11 @@ impl DragManager {
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
         self.actor.window_removed(wid);
-        self.sync_motion_gate();
         self.sync_preview();
     }
 
     pub fn reset(&mut self) {
         self.actor.cancel();
-        self.sync_motion_gate();
         self.release_preview();
     }
 
