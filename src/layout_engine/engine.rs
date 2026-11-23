@@ -3434,7 +3434,8 @@ impl LayoutEngine {
         space: SpaceId,
     ) -> Option<(crate::model::VirtualWorkspaceId, String)> {
         if self.workspaces.active_workspace(space).is_none() {
-            if let Some(id) = self.workspaces.workspace_id_at(windows, space, Some(0)) {
+            self.workspaces.ensure_space_initialized(windows, space);
+            if let Some(id) = self.workspaces.workspace_id_at(space, Some(0)) {
                 self.workspaces.set_active_workspace(windows, space, id);
             }
         }
@@ -3512,9 +3513,10 @@ impl LayoutEngine {
             let Some(index) = self.workspaces.active_workspace_idx(source_space) else {
                 return EventResponse::default();
             };
+            // Moving onto a Space initialises it, as placing a window there does.
+            self.workspaces.ensure_space_initialized(window_store, target_space);
             let Some(destination) =
-                self.workspaces
-                    .workspace_id_at(window_store, target_space, Some(index as usize))
+                self.workspaces.workspace_id_at(target_space, Some(index as usize))
             else {
                 return EventResponse::default();
             };
@@ -3880,7 +3882,7 @@ mod tests {
                 LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
             );
             let owner = engine.workspaces.active_workspace(space).unwrap();
-            let other = engine.workspaces.list_workspaces(&mut store, space)[1].0;
+            let other = engine.workspaces.listed_after_init(&mut store, space)[1].0;
             let windows = [WindowId::new(1, 1), WindowId::new(2, 1)];
             for &window in &windows {
                 store.insert_manageable_window(window, live_window(CGSize::new(500.0, 500.0)));
@@ -4249,7 +4251,7 @@ mod tests {
                 None,
             ),
         );
-        let workspaces = engine.workspaces.list_workspaces(windows, space);
+        let workspaces = engine.workspaces.listed_after_init(windows, space);
         let drop = crate::actor::reactor::OverviewDrop {
             window,
             workspace: workspaces[1].0,
@@ -4353,7 +4355,8 @@ mod tests {
             space,
             &LayoutCommand::CreateWorkspace,
         );
-        let workspaces = engine.workspaces_mut().list_workspaces(&mut window_store, space).to_vec();
+        let workspaces =
+            engine.workspaces_mut().listed_after_init(&mut window_store, space).to_vec();
         let ws1 = workspaces[0].0;
         let ws2 = workspaces[1].0;
 

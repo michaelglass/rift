@@ -1620,6 +1620,16 @@ impl Reactor {
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
             let divergences = self.state.windows.ownership_divergences();
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
+            // A query never initialises a Space (`WorkspaceStore::list_workspaces`): every Space
+            // a query can list, each active screen's, is initialised by the events that bring it.
+            for screen in &self.space_state.screens {
+                if let Some(space) = screen.space.filter(|space| self.is_space_active(*space)) {
+                    assert!(
+                        workspaces.initialized(space),
+                        "workspace-unknown: active {space:?} is not initialised"
+                    );
+                }
+            }
         }
         #[cfg(not(test))]
         if tracing::enabled!(tracing::Level::DEBUG) {

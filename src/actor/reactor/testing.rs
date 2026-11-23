@@ -47,7 +47,7 @@ impl Reactor {
         self.layout_manager
             .layout_engine
             .workspaces_mut()
-            .list_workspaces(&mut self.state.windows, space)
+            .listed_after_init(&mut self.state.windows, space)
             .iter()
             .map(|(id, _)| *id)
             .collect()

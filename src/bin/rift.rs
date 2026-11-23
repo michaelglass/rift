@@ -194,7 +194,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let (broadcast_tx, broadcast_rx) = rift_wm::actor::channel();
 
-    let mut layout = if opt.restore {
+    let layout = if opt.restore {
         let path = restore_file();
         match LayoutEngine::load_for_startup_restore(path.clone()) {
             Ok(layout) => layout,

@@ -14,7 +14,7 @@ use crate::layout_engine::systems::LayoutSystem;
 use crate::model::server::{
     RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData, protocol_rect,
 };
-use crate::model::virtual_workspace::VirtualWorkspaceId;
+use crate::model::virtual_workspace::{Listing, VirtualWorkspaceId};
 use crate::sys::screen::{ScreenInfo, SpaceId};
 
 fn union_rect(a: Rect, b: Rect) -> Rect {
@@ -893,7 +893,7 @@ impl Reactor {
         })
     }
 
-    pub(crate) fn serialize_state(&mut self) -> Result<String, serde_json::Error> {
+    pub(crate) fn serialize_state(&self) -> Result<String, serde_json::Error> {
         let layout_engine_ron =
             self.layout_manager.layout_engine.serialize_to_string(&self.state.windows);
         let workspaces = self.layout_manager.layout_engine.workspaces();
@@ -921,11 +921,24 @@ impl Reactor {
 
         for screen in &self.space_state.screens {
             if let Some(space) = screen.space.filter(|space| self.is_space_active(*space)) {
-                let workspaces = self
+                let workspaces = match self
                     .layout_manager
                     .layout_engine
-                    .workspaces_mut()
-                    .list_workspaces(&mut self.state.windows, space);
+                    .workspaces()
+                    .list_workspaces(space)
+                {
+                    Listing::Known(workspaces) => workspaces,
+                    // Every active Space is initialised by the events that bring it (the
+                    // reactor's tests assert it after every event); a query never
+                    // initialises one. Seen in use, it is a gap in those events.
+                    Listing::NotYetKnown => {
+                        tracing::warn!(
+                            space = space.get(),
+                            "workspace-unknown: an active Space is not initialised; listed without workspaces"
+                        );
+                        Vec::new()
+                    }
+                };
                 let active_ws =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space);
 
