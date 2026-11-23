@@ -14,8 +14,8 @@ The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. After the slice 2a docs (f5b0fd1b) and the
 2b ruling (6729c58a): slice 2b part 1 (4d3afda4) and this docs commit. `rearch/roc-next@fork`
 carries everything through this docs commit once it is published (publish procedure: "Rulings
-that bind", Public-clean; the published tip's id is in the slice report). All checks green: 851
-lib tests, 858 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo check --locked`, fmt;
+that bind", Public-clean; the published tip's id is in the slice report), and the slot table
+(d0734254, test-only). All checks green: 854 lib tests, 861 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo check --locked`, fmt;
 no build warnings beyond the two old test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs`
 `button`).
 
