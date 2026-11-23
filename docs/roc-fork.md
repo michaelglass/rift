@@ -9,17 +9,41 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-23, after slice 2b part 2): read this first
+## Handoff (2026-11-23, after W4d+W6 slice 5): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. After the slot table (d0734254) and its
-docs commit (94adc6b3): slice 2b part 2 and this docs commit. `rearch/roc-next@fork` carries
-everything through this docs commit once it is published (publish procedure: "Rulings that
-bind", Public-clean; the published tip's id is in the slice report). All checks green: 856 lib
-tests, 863 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
---features roc` (46), `cargo check --locked` both ways, fmt; no build warnings beyond the two old
-test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`). Clippy: no new findings on the
-lines this slice touched (three old expressions it rewrapped); `cargo clippy --features roc-core`
-stops on two old errors in `rift-core-roc` (`not_unsafe_ptr_arg_deref`), untouched here.
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done: slice 2b part 2
+(0b8c2cf6), its docs (391dcf05), the clippy fix in `rift-core-roc` (40a2b091), slice 5 (tests
+only) and this docs commit. `rearch/roc-next@fork` carries everything through this docs commit
+once it is published (publish procedure: "Rulings that bind", Public-clean; the published tip's
+id is in the slice report). All checks green: 857 lib tests, 864 with `roc-core`, the fuzzer at
+2000 × 40 both ways, `cargo test -p rift-core-roc --features roc` (46), `cargo check --locked`
+both ways, fmt, and `cargo clippy --all-targets --features roc-core` compiles (no errors; the old
+warnings stand, none on lines these slices touched); no build warnings beyond the two old
+test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`).
+
+**Next: the Roc twin decides (policy (a), as the lifecycle and main window), then core geometry
+(Next item 2).** Part of the twin step (the lead's ruling, 2026-11-23): the per-Space answers on
+`Workspaces<'a>` (`workspace_info`, `workspace_for_window`, `last_focused_window`, `active_layout`,
+`layout_spaces`, `resolve_window_index`) become the core's own queries. Building a view at each
+call site (`reading(windows)`) stays: it adds no holder.
+
+**Clippy fix (40a2b091).** `roc_realloc` and `roc_dealloc` (the Roc allocator's entries) failed
+clippy's deny-by-default `not_unsafe_ptr_arg_deref` since a159f227 (before W4d). They are
+`unsafe extern "C" fn`s with a `# Safety` contract; the C ABI and symbols are unchanged, and the
+glue's host hooks stay safe function pointers that call them in an `unsafe` block.
+
+**Slice 5, done (tests only).** What 2a and 2b left of it: each workspace's Space is written from
+the core (2b part 2), and the runtime restore needs no join: it reads the file's `SavedTopology`
+as data (which workspace each saved Space showed, the saved catalog) and writes the live core
+through the workspace store's writers (`set_active_workspace`), so the file is never a second
+holder. Saved files of every age keep loading (the 2a fixtures and the legacy tests, unchanged).
+Nothing tested the restore's reads of the file's topology: plants of the restore never showing
+the file's shown workspaces, reading the shown workspace as the Space's first, and the moves
+report comparing a window's new Space with itself each failed 0 tests; with
+`a_restore_shows_what_the_file_showed_and_reports_windows_it_moves_between_spaces` each fails 1.
+
+**Slices 3 and 4, done by 2b (the lead's ruling (a)).** Every topology read already goes through
+a `Workspaces<'a>` view built from the core, so nothing was left to move.
 
 **Slice 2b part 2, done.** `VirtualWorkspace` has no `space`: the core's catalog is the one holder
 of where each workspace is. The catalog is a `model::slot_table::SlotTable` (no longer test-only).
@@ -49,14 +73,6 @@ rebuilding the table without its vacant slots (2), the save writing every record
 (7), a move not told to the core (34), `listed_on` ignoring the Space (0, then 1 with the store
 test), `workspace_info` ignoring the Space (0, then 1), the native reconcile ignoring the active
 Spaces (0, then 1 with the reactor test).
-
-**Next: slices 3 and 4 need re-scoping (asked of the lead).** Their goal, "the engine's workspace
-operations and the reactor read the topology through `Stores`", holds by construction after 2b:
-the workspace store holds no topology, so every read goes through a `Workspaces<'a>` view built
-from the core. What could remain is a choice the plan does not rule on (for example the view
-built from `Stores` rather than from `reading(windows)` at each site, or moving the per-Space
-answers out of `Workspaces` into the core's own queries). Then the shrunken slice 5, the Roc twin
-decides (policy (a)), and core geometry.
 
 **Slice 2b part 1, done.** The workspace store keeps no catalog order and no activations: the
 core holds them. Its topology reads live on `Workspaces<'a>` (virtual_workspace.rs: the store and
@@ -586,14 +602,15 @@ A slice that needs a behaviour change stops and is reported.
   the slot table (Handoff).
 - **Slice 3, the engine glue (W6):** the layout engine's workspace operations (activation,
   transfer, remap, moving windows and workspaces between Spaces, focus by workspace) take the
-  topology from `Stores`.
+  topology from `Stores`. Done by 2b: every topology read goes through a view built from the core.
 - **Slice 4, the reactor:** commands, gestures, the IPC query, drag, discovery and lifecycle
-  read the topology through `Stores`.
+  read the topology through `Stores`. Done by 2b, as slice 3.
 - **Slice 5, persistence (W6), shrunk by 2a:** what slices 2b to 4 leave of the saved form (each
   workspace's Space written from the core if 2b has not, the runtime restore from a file joining
   its topology), with the files saved before kept loading (parsed at the load boundary,
   normalized with one `workspace-load: normalized` line where W2b did) and the 2a fixtures still
-  passing.
+  passing. Done 2026-11-23, tests only: the runtime restore reads the file's topology as data and
+  writes the live core through the writers, so it needs no join (Handoff).
 - **Then:** the Roc twin decides (policy (a), as the lifecycle and main window), and core
   geometry on upstream's layout systems (Next item 2).
 2. Core geometry on upstream's five layout systems (after W4d+W6, since the layout engine glue
