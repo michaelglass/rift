@@ -286,8 +286,14 @@ main-window clearing as its own event (`Replaced { pid, window, replacement }`: 
 the main window and the native focus, a rekeyed one moves them). `MainWindow.roc` mirrors it on a fifth
 platform model (`Mains`), with a differential (1,000 seeded runs of 60 steps, answers and the whole
 view every step; three plants caught). On rift's path `TwinnedMainWindows` compares every answer and,
-in tests every step, the whole state; plants caught from both sides (85 and 23 failures). The Rust
-machine stands until a flip is ruled.
+in tests every step, the whole state; plants caught from both sides (85 and 23 failures).
+
+**Main window flipped (2026-11-23, policy (a)).** As the lifecycle: the Roc core's answer is rift's,
+any difference warns `roc-divergence:` (tests panic) and re-seeds the Rust shadow from the Roc core's
+view (`MainWindows::from_parts`), counted and printed by `rift-cli metrics show-timing` (`roc-core:
+main-window re-seeds: N`). Plant check: `MainWindow.roc`'s Replaced leaving the main window fails 23
+tests by roc-divergence, and with the divergence panic off (behaviour only) the reactor test
+`a_destroyed_main_window_is_no_longer_the_main_window` fails on what rift does.
 
 **Next:**
 1. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
