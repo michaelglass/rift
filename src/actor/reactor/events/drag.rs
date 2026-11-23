@@ -17,11 +17,15 @@ pub fn build_drag_scene(
     space: SpaceId,
 ) -> DragScene {
     DragScene {
-        action_override: layout.layout_engine.drop_action_override(space),
-        source_neighbors: layout.layout_engine.source_move_neighbors(space, source),
+        action_override: layout.layout_engine.drop_action_override(state.windows(), space),
+        source_neighbors: layout.layout_engine.source_move_neighbors(
+            state.windows(),
+            space,
+            source,
+        ),
         targets: layout
             .layout_engine
-            .drop_scene_windows(space, source)
+            .drop_scene_windows(state.windows(), space, source)
             .into_iter()
             .filter(|window| *window != source)
             .filter_map(|window| {
@@ -66,7 +70,12 @@ fn place_on_its_space(
     else {
         return EventOutcome::no_change();
     };
-    let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space) else {
+    let Some(workspace) = layout
+        .layout_engine
+        .workspaces()
+        .reading(state.windows())
+        .active_workspace(space)
+    else {
         return EventOutcome::no_change();
     };
     if !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
@@ -168,13 +177,15 @@ pub fn handle_mouse_up(
     let needs_layout = match plan {
         DropPlan::Stays => commit.source.tiled,
         DropPlan::Within(intent) => {
-            let dropped =
-                layout.layout_engine.apply_window_drop(crate::layout_engine::WindowDropRequest {
+            let dropped = layout.layout_engine.apply_window_drop(
+                state.windows(),
+                crate::layout_engine::WindowDropRequest {
                     source: window,
                     target: intent.window,
                     space: intent.space,
                     action: intent.action,
-                });
+                },
+            );
             outcome.drop_haptic = dropped && drag.haptics_enabled;
             commit.source.tiled || dropped
         }
@@ -182,7 +193,11 @@ pub fn handle_mouse_up(
             if let Some(server_id) = state.windows.server_id(window) {
                 state.windows.observe_native_space(server_id, space, true);
             }
-            let workspace = layout.layout_engine.workspaces().active_workspace(space);
+            let workspace = layout
+                .layout_engine
+                .workspaces()
+                .reading(state.windows())
+                .active_workspace(space);
             let floating = layout.layout_engine.is_window_floating(window);
             let dropped = if floating {
                 // A floating window stays floating there, at the frame it was released at
@@ -255,7 +270,13 @@ pub fn handle_mouse_up(
             .layout_engine
             .workspaces()
             .workspace_for_window(state.windows(), space, window)
-            .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
+            .or_else(|| {
+                layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(state.windows())
+                    .active_workspace(space)
+            })
         {
             layout.layout_engine.store_floating_position(
                 workspace,

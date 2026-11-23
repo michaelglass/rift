@@ -660,7 +660,7 @@ impl Reactor {
 
     pub(super) fn retire_presentations(&mut self) {
         let invalid: Vec<_> = self.presentations.iter().filter_map(|(space, camera)| {
-            let valid = self.stores.layout.layout_engine.workspaces().active_layout_for_space(*space)
+            let valid = self.stores.layout.layout_engine.workspaces().reading(self.stores.state.windows()).active_layout_for_space(*space)
                 == Some((camera.identity.workspace, camera.identity.layout))
                 && self.active_spaces.contains(space)
                 && self.space_state.screen_by_space(*space).is_some()
@@ -692,8 +692,13 @@ impl Reactor {
             screen.frame,
             screen_frames.iter().copied(),
         );
-        let (workspace, layout) =
-            self.stores.layout.layout_engine.workspaces().active_layout_for_space(space)?;
+        let (workspace, layout) = self
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(self.stores.state.windows())
+            .active_layout_for_space(space)?;
         let LayoutSystemKind::Scrolling(system) =
             &self.stores.layout.layout_engine.workspaces()[workspace].layout_system
         else {
@@ -842,7 +847,11 @@ pub(super) fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
 ) -> Option<super::managers::ScrollingDisplayBounds> {
-    if reactor.stores.layout.layout_engine.active_layout_mode_at(space)
+    if reactor
+        .stores
+        .layout
+        .layout_engine
+        .active_layout_mode_at(reactor.stores.state.windows(), space)
         != crate::common::config::LayoutMode::Scrolling
     {
         return None;
@@ -1115,7 +1124,11 @@ impl AnimationManager {
         // animation must not carry it over.
         let dragged = reactor.stores.state.windows.drag().map(|(window, _)| window);
         reactor.retire_presentations();
-        let setting = reactor.stores.layout.layout_engine.layout_specific_animate_settings(space);
+        let setting = reactor
+            .stores
+            .layout
+            .layout_engine
+            .layout_specific_animate_settings(reactor.stores.state.windows(), space);
         let animate_camera = allow_animation
             && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
@@ -1136,8 +1149,13 @@ impl AnimationManager {
                 layout.iter().copied().filter(|(wid, _)| !presented.contains(wid)).collect();
             return reactor.arrange_frames(space, &frames, Want::Arrange) || camera;
         }
-        let Some(active_ws) =
-            reactor.stores.layout.layout_engine.workspaces().active_workspace(space)
+        let Some(active_ws) = reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .active_workspace(space)
         else {
             return false;
         };
@@ -2475,6 +2493,7 @@ mod tests {
             for (index, space) in spaces.into_iter().enumerate() {
                 let gaps = reactor.config.settings.layout.gaps.clone();
                 let layout = reactor.stores.layout.layout_engine.calculate_layout(
+                    reactor.stores.state.windows(),
                     space,
                     screens[index],
                     &gaps,

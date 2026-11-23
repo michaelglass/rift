@@ -349,7 +349,7 @@ impl Reactor {
         let store = self.stores.layout.layout_engine.workspaces();
         let context =
             crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible };
-        let view = store.workspace_view(context);
+        let view = store.reading(self.stores.state.windows()).workspace_view(context);
         view.filter(|(_, id)| owner.is_none_or(|owner| store[*id].space == owner))
             .collect()
     }
@@ -369,9 +369,14 @@ impl Reactor {
             .map(|(index, id)| {
                 let name = self.stores.layout.layout_engine.workspaces()[id].name.clone();
                 let space = self.stores.layout.layout_engine.workspaces()[id].space;
-                let is_active =
-                    self.stores.layout.layout_engine.workspaces().active_workspace(space)
-                        == Some(id);
+                let is_active = self
+                    .stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(self.stores.state.windows())
+                    .active_workspace(space)
+                    == Some(id);
                 let mut windows = self.stores.state.windows().workspace_windows(id);
                 windows.retain(|wid| {
                     self.app_manager.apps.contains_key(&wid.pid)
@@ -485,7 +490,13 @@ impl Reactor {
             let workspace_name = &self.stores.layout.layout_engine.workspaces()[*workspace_id].name;
             let space = self.stores.layout.layout_engine.workspaces()[*workspace_id].space;
             let index = *index;
-            let is_active = self.stores.layout.layout_engine.workspaces().active_workspace(space)
+            let is_active = self
+                .stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(self.stores.state.windows())
+                .active_workspace(space)
                 == Some(*workspace_id);
             let workspace_windows_ids =
                 self.stores.state.windows().workspace_windows(*workspace_id);
@@ -616,7 +627,10 @@ impl Reactor {
                     index,
                     name: workspace.name.clone(),
                     layout_mode: workspace.layout_mode().to_string(),
-                    is_active: workspaces.active_workspace(workspace.space) == Some(id),
+                    is_active: workspaces
+                        .reading(self.stores.state.windows())
+                        .active_workspace(workspace.space)
+                        == Some(id),
                 }
             })
             .collect()
@@ -627,7 +641,12 @@ impl Reactor {
         space_id_param: Option<SpaceId>,
     ) -> Option<VirtualWorkspaceId> {
         let space_id = space_id_param.or_else(|| self.default_query_space())?;
-        self.stores.layout.layout_engine.workspaces().active_workspace(space_id)
+        self.stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(self.stores.state.windows())
+            .active_workspace(space_id)
     }
 
     pub fn query_displays(&self) -> Vec<RuntimeDisplayData> {
@@ -686,10 +705,14 @@ impl Reactor {
         index: Option<usize>,
     ) -> Option<crate::model::virtual_workspace::WorkspaceTarget> {
         let store = self.stores.layout.layout_engine.workspaces();
-        let index =
-            index.or_else(|| store.workspace_index(space, store.active_workspace(space)?))?;
+        let index = index.or_else(|| {
+            store.reading(self.stores.state.windows()).workspace_index(
+                space,
+                store.reading(self.stores.state.windows()).active_workspace(space)?,
+            )
+        })?;
         let visible: Vec<_> = self.iter_active_spaces().collect();
-        store.resolve_workspace(
+        store.reading(self.stores.state.windows()).resolve_workspace(
             crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
             &crate::common::config::WorkspaceSelector::Index(index),
         )
@@ -702,7 +725,12 @@ impl Reactor {
     ) -> HashMap<WindowId, WindowLayoutPosition> {
         space_id
             .and_then(|space| self.resolve_query_workspace(space, workspace_index))
-            .and_then(|target| self.stores.layout.layout_engine.query_workspace_layout(target))
+            .and_then(|target| {
+                self.stores
+                    .layout
+                    .layout_engine
+                    .query_workspace_layout(self.stores.state.windows(), target)
+            })
             .map(|snapshot| logical_window_positions(&snapshot.container_tree))
             .unwrap_or_default()
     }
@@ -730,6 +758,7 @@ impl Reactor {
                 .layout
                 .layout_engine
                 .workspaces()
+                .reading(self.stores.state.windows())
                 .windows_in_active_workspace(self.stores.state.windows(), space);
             let logical_positions = self.logical_window_positions_for(Some(space), None);
             let claimed = self
@@ -830,7 +859,11 @@ impl Reactor {
         if !self.space_state.iter_known_spaces().any(|space| space == space_id) {
             return None;
         }
-        let mut snapshot = self.stores.layout.layout_engine.query_workspace_layout(target)?;
+        let mut snapshot = self
+            .stores
+            .layout
+            .layout_engine
+            .query_workspace_layout(self.stores.state.windows(), target)?;
         let screen = self.space_state.screen_by_space(space_id)?;
         let display_uuid = screen.display_uuid_owned();
         let gaps = self.config.settings.layout.gaps.effective_for_display(display_uuid.as_deref());
@@ -887,7 +920,8 @@ impl Reactor {
     pub fn query_metrics(&self) -> serde_json::Value {
         let workspaces = self.stores.layout.layout_engine.workspaces();
         let workspace_stats: crate::common::collections::HashMap<String, usize> = workspaces
-            .window_counts(self.stores.state.windows())
+            .reading(self.stores.state.windows())
+            .window_counts()
             .map(|(id, count)| (format!("{id:?}"), count))
             .collect();
         serde_json::json!({
@@ -909,10 +943,14 @@ impl Reactor {
         let totals = (
             workspaces.workspaces.len(),
             self.stores.state.windows().workspace_assignment_count(),
-            workspaces.active_workspace_per_space().len(),
+            workspaces
+                .reading(self.stores.state.windows())
+                .active_workspace_per_space()
+                .len(),
         );
         let workspace_window_counts: serde_json::Map<_, _> = workspaces
-            .window_counts(self.stores.state.windows())
+            .reading(self.stores.state.windows())
+            .window_counts()
             .map(|(id, count)| (format!("{id:?}"), serde_json::json!(count)))
             .collect();
 
@@ -935,6 +973,7 @@ impl Reactor {
                     .layout
                     .layout_engine
                     .workspaces()
+                    .reading(self.stores.state.windows())
                     .list_workspaces(space)
                 {
                     Listing::Known(workspaces) => workspaces,
@@ -949,8 +988,13 @@ impl Reactor {
                         Vec::new()
                     }
                 };
-                let active_ws =
-                    self.stores.layout.layout_engine.workspaces().active_workspace(space);
+                let active_ws = self
+                    .stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(self.stores.state.windows())
+                    .active_workspace(space);
 
                 let mut ws_entries = Vec::new();
                 for (workspace_id, workspace_name) in workspaces {

@@ -105,7 +105,7 @@ impl PersistedLayout {
         // Unknown preview-only metadata (including display_fallback) is ignored
         // by serde. Keep its workspace identity rather than guessing whether it
         // has since become intentional user state.
-        persisted.loaded.store.normalize_loaded_names();
+        persisted.loaded.store.normalize_loaded_names(&persisted.loaded.topology);
         persisted.migrate_workspace_layouts()?;
         if let Some((window, _)) = persisted.identities.windows.iter().find(|(_, saved)| {
             !saved.width.is_finite()
@@ -204,7 +204,7 @@ impl PersistedLayout {
                 });
             }
         }
-        for workspace in self.loaded.store.catalog().collect::<Vec<_>>() {
+        for workspace in self.loaded.topology.ids().collect::<Vec<_>>() {
             let entry = &mut self.loaded.store[workspace];
             let members: Vec<_> = (entry.layout_state.all_layouts())
                 .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
@@ -304,7 +304,9 @@ impl LayoutEngine {
             if self.floating.is_floating(window) {
                 // A hidden window's live frame is its parked position, not its placement.
                 let stored = self.floating_positions.get(workspace, window).filter(|_| {
-                    self.workspaces.active_workspace(self.workspaces[workspace].space)
+                    self.workspaces
+                        .reading(window_store)
+                        .active_workspace(self.workspaces[workspace].space)
                         != Some(workspace)
                 });
                 floating.store(workspace, window, stored.unwrap_or(state.frame_monotonic()));

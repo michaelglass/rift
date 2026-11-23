@@ -45,10 +45,11 @@ impl PersistedLayout {
     /// A shared catalog follows workspaces between displays, so ordinals pair across all of it.
     fn catalog_mappings(
         &self,
+        windows: Windows<'_>,
         engine: &LayoutEngine,
     ) -> anyhow::Result<Vec<(VirtualWorkspaceId, VirtualWorkspaceId)>> {
-        let sources: Vec<_> = self.loaded.store.catalog().collect();
-        let targets: Vec<_> = engine.workspaces.catalog().collect();
+        let sources: Vec<_> = self.loaded.topology.ids().collect();
+        let targets: Vec<_> = engine.workspaces.reading(windows).catalog().collect();
         if sources.len() != targets.len() {
             anyhow::bail!("saved and current catalogs have different workspace counts");
         }
@@ -91,12 +92,13 @@ impl PersistedLayout {
     /// every fallible check belongs here, and nothing here mutates anything.
     fn workspace_mappings(
         &self,
+        windows: Windows<'_>,
         engine: &LayoutEngine,
         request: RestoreRequest,
         source_space: SpaceId,
     ) -> anyhow::Result<Vec<(VirtualWorkspaceId, VirtualWorkspaceId)>> {
-        let sources = self.loaded.store.workspace_ids(source_space);
-        let targets = engine.workspaces.workspace_ids(request.active_space);
+        let sources = self.loaded.topology.workspace_ids(source_space);
+        let targets = engine.workspaces.reading(windows).workspace_ids(request.active_space);
         let mappings: Vec<_> = match request.scope {
             RestoreScope::Space | RestoreScope::Displays => {
                 // A space restore is all-or-nothing. `zip` silently truncates, which would split
@@ -111,13 +113,14 @@ impl PersistedLayout {
             RestoreScope::Workspace => {
                 let target = engine
                     .workspaces
+                    .reading(windows)
                     .active_workspace(request.active_space)
                     .ok_or_else(|| anyhow::anyhow!("current space has no active workspace"))?;
                 let source = match request.source {
                     // A portable workspace file represents what was active when it was saved.
                     RestoreSource::SavedActiveSpace => self
                         .loaded
-                        .store
+                        .topology
                         .active_workspace(source_space)
                         .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?,
                     // A master file represents the complete workspace catalog. Restoring S must
@@ -165,18 +168,23 @@ impl LayoutEngine {
         let mappings = if request.scope == RestoreScope::Displays
             && self.workspaces.effective_mode() == WorkspaceMode::Global
         {
-            snapshot.catalog_mappings(self)?
+            snapshot.catalog_mappings(window_store.read(), self)?
         } else {
             let mut mappings = Vec::new();
             for &(source, active_space) in &pairs {
                 let request = RestoreRequest { active_space, ..request };
-                mappings.extend(snapshot.workspace_mappings(self, request, source)?);
+                mappings.extend(snapshot.workspace_mappings(
+                    window_store.read(),
+                    self,
+                    request,
+                    source,
+                )?);
             }
             mappings
         };
         let actives: Vec<_> = (pairs.iter())
             .filter_map(|(source, space)| {
-                let source_active = snapshot.loaded.store.active_workspace(*source)?;
+                let source_active = snapshot.loaded.topology.active_workspace(*source)?;
                 let (_, active) = mappings.iter().find(|(source, _)| *source == source_active)?;
                 Some((*space, *active))
             })

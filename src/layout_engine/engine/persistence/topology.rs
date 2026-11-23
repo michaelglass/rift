@@ -71,6 +71,7 @@ impl LayoutEngine {
             }
             let display = self.display_uuid_for_space(space).map(str::to_owned).or_else(|| {
                 self.workspaces
+                    .reading(window_store.read())
                     .workspaces_on(space)
                     .find_map(|id| self.workspaces[id].home.display().map(str::to_owned))
             });
@@ -89,7 +90,7 @@ impl LayoutEngine {
                     self.persistence.unresolved_spaces.insert(space);
                     continue;
                 };
-                for id in self.workspaces.workspace_ids(space) {
+                for id in self.workspaces.reading(window_store.read()).workspace_ids(space) {
                     let _ = self.transfer_workspace(
                         window_store,
                         id,

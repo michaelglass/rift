@@ -427,7 +427,13 @@ impl Reactor {
     /// them): a tiled window of the space's active workspace.
     fn in_scrolling_bounds(&self, window: WindowId, space: SpaceId) -> bool {
         self.stores.state.windows().workspace_for_window(window)
-            == self.stores.layout.layout_engine.workspaces().active_workspace(space)
+            == self
+                .stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(self.stores.state.windows())
+                .active_workspace(space)
             && !self.stores.layout.layout_engine.is_window_floating(window)
     }
 

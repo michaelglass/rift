@@ -114,7 +114,7 @@ fn should_emit_window_for_space(
     let assigned = workspaces.workspace_for_window(state.windows(), space, wid);
     let active = crate::roc_path::Asked::new();
     let emits = rift_core::workspaces::emits_window(assigned, || {
-        active.ask(|| workspaces.active_workspace(space))
+        active.ask(|| workspaces.reading(state.windows()).active_workspace(space))
     });
     #[cfg(feature = "roc-core")]
     {

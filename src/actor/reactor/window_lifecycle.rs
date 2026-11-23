@@ -271,12 +271,20 @@ impl Reactor {
                 .workspaces_mut()
                 .ensure_space_initialized(&mut self.stores.state.windows_mut(), space);
             let workspaces = engine.workspaces();
-            let remembered =
-                returning.and_then(|ordinal| workspaces.workspaces_on(space).nth(ordinal));
+            let remembered = returning.and_then(|ordinal| {
+                workspaces
+                    .reading(self.stores.state.windows())
+                    .workspaces_on(space)
+                    .nth(ordinal)
+            });
             let destination = if remembered.is_some() {
                 remembered
             } else if preserve_workspace_ordinal {
-                workspaces.workspace_at_window_ordinal(self.stores.state.windows(), space, wid)
+                workspaces.reading(self.stores.state.windows()).workspace_at_window_ordinal(
+                    self.stores.state.windows(),
+                    space,
+                    wid,
+                )
             } else {
                 engine
                     .ensure_active_workspace_info(&mut self.stores.state.windows_mut(), space)

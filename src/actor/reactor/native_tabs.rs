@@ -22,7 +22,13 @@ impl Reactor {
         if !info.is_standard || info.is_minimized || info.sys_id.is_none() {
             return;
         }
-        if self.stores.layout.layout_engine.space_with_window(incoming).is_some() {
+        if self
+            .stores
+            .layout
+            .layout_engine
+            .space_with_window(self.stores.state.windows(), incoming)
+            .is_some()
+        {
             return;
         }
         let native_frame = std::cell::OnceCell::<Option<CGRect>>::new();
@@ -35,7 +41,11 @@ impl Reactor {
             .filter_map(|old| {
                 let window = self.stores.state.windows.window(old)?;
                 let wsid = window.info.sys_id?;
-                let space = self.stores.layout.layout_engine.space_with_window(old)?;
+                let space = self
+                    .stores
+                    .layout
+                    .layout_engine
+                    .space_with_window(self.stores.state.windows(), old)?;
                 if Some(wsid) == info.sys_id
                     || !self.is_space_active(space)
                     || self.window_in_non_active_workspace(space, old)
@@ -88,7 +98,12 @@ impl Reactor {
         let Some(window) = self.stores.state.windows.window(old) else {
             return false;
         };
-        let Some(space) = self.stores.layout.layout_engine.space_with_window(old) else {
+        let Some(space) = self
+            .stores
+            .layout
+            .layout_engine
+            .space_with_window(self.stores.state.windows(), old)
+        else {
             return false;
         };
         if self.stores.state.windows().is_claimed(old)

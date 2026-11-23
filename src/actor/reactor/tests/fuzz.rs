@@ -2354,7 +2354,14 @@ fn a_held_window_left_by_its_workspace_is_placed_by_the_drop_or_its_space() {
         let held = held.unwrap();
         let wsid = sim.reactor.stores.state.windows.server_id(held).unwrap();
         let on = sim.reactor.stores.state.windows.window_server_space(wsid).unwrap();
-        let shown = sim.reactor.stores.layout.layout_engine.workspaces().active_workspace(on);
+        let shown = sim
+            .reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(sim.reactor.stores.state.windows())
+            .active_workspace(on);
         assert!(shown.is_some(), "{end:?}");
         assert_eq!(
             sim.reactor.stores.state.windows().workspace_for_window(held),
@@ -2446,7 +2453,11 @@ fn activation_shapes_across_the_fuzzer() {
             for step in generate(seed, len) {
                 let placed = |sim: &Sim| -> Vec<_> {
                     let workspaces = sim.reactor.stores.layout.layout_engine.workspaces();
-                    workspaces.catalog().map(|id| (id, workspaces[id].space)).collect()
+                    workspaces
+                        .reading(sim.reactor.stores.state.windows())
+                        .catalog()
+                        .map(|id| (id, workspaces[id].space))
+                        .collect()
                 };
                 let before = placed(&sim);
                 let emitted = sim.run(step);
@@ -2463,7 +2474,11 @@ fn activation_shapes_across_the_fuzzer() {
                     entry.1 += u64::from(moved);
                 }
                 let workspaces = sim.reactor.stores.layout.layout_engine.workspaces();
-                for activation in workspaces.active_workspace_per_space().values() {
+                for activation in workspaces
+                    .reading(sim.reactor.stores.state.windows())
+                    .active_workspace_per_space()
+                    .values()
+                {
                     let shape = match activation {
                         SpaceActivation::Showing {
                             previous: None,

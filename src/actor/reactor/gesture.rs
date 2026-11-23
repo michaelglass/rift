@@ -22,7 +22,7 @@ impl ViewportSession {
             && r.stores.layout
                 .layout_engine
                 .workspaces()
-                .active_layout_for_space(self.context.space)
+                .reading(r.stores.state.windows()).active_layout_for_space(self.context.space)
                 == Some((self.workspace, self.layout))
             && r.stores.layout
                 .layout_engine
@@ -66,6 +66,7 @@ impl Reactor {
                     .layout
                     .layout_engine
                     .workspaces()
+                    .reading(self.stores.state.windows())
                     .active_layout_for_space(context.space);
                 if let Some(s) = &self.viewport_gesture
                     && s.released
@@ -93,8 +94,10 @@ impl Reactor {
                 let cancel = self.viewport_gesture.as_ref().is_some_and(|s| !s.released);
                 self.finish_gesture(None, cancel);
                 let engine = &mut self.stores.layout.layout_engine;
-                let Some((workspace, layout)) =
-                    engine.workspaces().active_layout_for_space(context.space)
+                let Some((workspace, layout)) = engine
+                    .workspaces()
+                    .reading(self.stores.state.windows())
+                    .active_layout_for_space(context.space)
                 else {
                     return;
                 };
@@ -248,7 +251,7 @@ impl Reactor {
                 .stores
                 .layout
                 .layout_engine
-                .layout_specific_animate_settings(s.context.space))
+                .layout_specific_animate_settings(self.stores.state.windows(), s.context.space))
             .unwrap_or(self.config.settings.animate);
         let LayoutSystemKind::Scrolling(system) =
             &mut self.stores.layout.layout_engine.workspaces_mut()[s.workspace].layout_system
@@ -417,6 +420,7 @@ mod tests {
             .layout
             .layout_engine
             .workspaces()
+            .reading(r.stores.state.windows())
             .active_layout_for_space(space)
             .unwrap();
         let LayoutSystemKind::Scrolling(system) =
@@ -493,7 +497,14 @@ mod tests {
             vec![Some(a), Some(b)],
         ));
         // Contiguous allocation: a owns [0, 1], b owns [2, 3]; a shows 1, b shows 2.
-        let ids: Vec<_> = r.stores.layout.layout_engine.workspaces().catalog().collect();
+        let ids: Vec<_> = r
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(r.stores.state.windows())
+            .catalog()
+            .collect();
         assert!(
             r.stores.layout.layout_engine.workspaces_mut().set_active_workspace(
                 &mut r.stores.state.windows_mut(),
@@ -528,7 +539,12 @@ mod tests {
             assert!(r.gesture_workspace(&context, next));
             assert_eq!(r.space_state.command_space, Some(owner));
             assert_eq!(
-                r.stores.layout.layout_engine.workspaces().active_workspace(owner),
+                r.stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(r.stores.state.windows())
+                    .active_workspace(owner),
                 Some(ids[index])
             );
         }
@@ -566,8 +582,14 @@ mod tests {
                 control: control.clone(),
             })
         };
-        let active =
-            |r: &Reactor| r.stores.layout.layout_engine.workspaces().active_workspace(space);
+        let active = |r: &Reactor| {
+            r.stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(r.stores.state.windows())
+                .active_workspace(space)
+        };
         let wid = WindowId::new(1, 1);
         let frame = CGRect::new(CGPoint::new(50.0, 50.0), CGSize::new(100.0, 100.0));
         r.insert_test_window_state(
@@ -605,7 +627,13 @@ mod tests {
                 vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
                 vec![Some(space)],
             ));
-            let workspace = r.stores.layout.layout_engine.workspaces().active_workspace(space);
+            let workspace = r
+                .stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(r.stores.state.windows())
+                .active_workspace(space);
             assert!(workspace.is_some());
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
@@ -616,7 +644,12 @@ mod tests {
 
             assert!(!r.gesture_workspace(&context, next));
             assert_eq!(
-                r.stores.layout.layout_engine.workspaces().active_workspace(space),
+                r.stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(r.stores.state.windows())
+                    .active_workspace(space),
                 workspace
             );
             assert_eq!(
@@ -808,6 +841,7 @@ mod tests {
             .layout
             .layout_engine
             .workspaces()
+            .reading(r.stores.state.windows())
             .active_layout_for_space(ctx.space)
             .unwrap();
         let initial = r.stores.layout.layout_engine.workspaces()[workspace]
@@ -868,12 +902,11 @@ mod tests {
                     setup_options_threshold(enabled, skip_empty, invert, threshold);
                 let travel = threshold * fraction;
                 let store = r.stores.layout.layout_engine.workspaces();
-                let before = store.active_workspace(ctx.space);
+                let before = store.reading(r.stores.state.windows()).active_workspace(ctx.space);
                 let expected = if !enabled || skip_empty || fraction < 1.0 || reverse || cancelled {
                     before
                 } else {
-                    store.step_workspace(
-                        r.stores.state.windows(),
+                    store.reading(r.stores.state.windows()).step_workspace(
                         ctx.space,
                         before.unwrap(),
                         Some(false),
@@ -884,7 +917,12 @@ mod tests {
                     m.publish(sample(1, total * 1000.0, time));
                     r.gesture_tick();
                     assert_eq!(
-                        r.stores.layout.layout_engine.workspaces().active_workspace(ctx.space),
+                        r.stores
+                            .layout
+                            .layout_engine
+                            .workspaces()
+                            .reading(r.stores.state.windows())
+                            .active_workspace(ctx.space),
                         before,
                         "workspace handoff waits until lift"
                     );
@@ -902,7 +940,12 @@ mod tests {
                         cancelled,
                     });
                     assert_eq!(
-                        r.stores.layout.layout_engine.workspaces().active_workspace(ctx.space),
+                        r.stores
+                            .layout
+                            .layout_engine
+                            .workspaces()
+                            .reading(r.stores.state.windows())
+                            .active_workspace(ctx.space),
                         expected,
                         "release must require deliberate edge travel and propagate only once"
                     );
@@ -970,7 +1013,10 @@ mod tests {
             "empty strips must not acquire viewport strokes"
         );
         assert_eq!(
-            r.stores.layout.layout_engine.active_layout_mode_at(ctx.space),
+            r.stores
+                .layout
+                .layout_engine
+                .active_layout_mode_at(r.stores.state.windows(), ctx.space),
             LayoutMode::Scrolling
         );
     }
@@ -1018,7 +1064,12 @@ mod tests {
                 });
             }
             assert_ne!(
-                r.stores.layout.layout_engine.workspaces().active_workspace(ctx.space),
+                r.stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(r.stores.state.windows())
+                    .active_workspace(ctx.space),
                 Some(workspace)
             );
             assert!(r.viewport_gesture.is_none());
@@ -1171,7 +1222,12 @@ mod tests {
                 assert!(r.viewport_gesture.is_none());
             }
             assert_eq!(
-                r.stores.layout.layout_engine.workspaces().active_workspace(ctx.space),
+                r.stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(r.stores.state.windows())
+                    .active_workspace(ctx.space),
                 Some(workspace)
             );
         }

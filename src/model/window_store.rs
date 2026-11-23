@@ -3844,7 +3844,7 @@ mod tests {
             ),
         ];
         for (case, (from_side, to_side, assigned, claimed)) in cases.into_iter().enumerate() {
-            let mut store = OwnedWindows::joining(&workspaces.topology());
+            let mut store = OwnedWindows::joining(&workspaces.reading(joined.view()).topology());
             setup(&mut store, from, from_side);
             setup(&mut store, to, to_side);
             store.view_mut().transfer_persistent_window_metadata(from, to);

@@ -18,6 +18,7 @@ use crate::model::RiftState;
 use crate::model::space_activation::{
     SpaceActivationConfig, SpaceActivationPolicy, ToggleSpaceContext,
 };
+use crate::model::window_store::Windows;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
 
@@ -70,7 +71,7 @@ pub fn handle_command_layout(
             | LayoutCommand::ToggleStack
             | LayoutCommand::ConsumeOrExpelWindow(_)
     ) && let Some(space) = command_space
-        && layout.layout_engine.active_layout_mode_at(space)
+        && layout.layout_engine.active_layout_mode_at(state.windows(), space)
             == crate::common::config::LayoutMode::Floating
     {
         store_current_floating_positions(state, layout, space);
@@ -156,7 +157,7 @@ pub fn handle_command_layout(
             .and_then(|window| state.windows().workspace_for_window(window))
             .map(|workspace| layout.layout_engine.workspaces()[workspace].space)
             .or(command_space)
-            .is_none_or(|space| layout.layout_engine.focus_changes_geometry(space))
+            .is_none_or(|space| layout.layout_engine.focus_changes_geometry(state.windows(), space))
     };
     let needs_arrange = if is_focus_command {
         response_changed && focus_moves_geometry()
@@ -227,11 +228,12 @@ fn current_floating_positions(
     layout: &LayoutManager,
     space: SpaceId,
 ) -> Vec<(WindowId, objc2_core_foundation::CGRect)> {
-    let floats_by_layout = layout.layout_engine.active_layout_mode_at(space)
+    let floats_by_layout = layout.layout_engine.active_layout_mode_at(state.windows(), space)
         == crate::common::config::LayoutMode::Floating;
     layout
         .layout_engine
         .workspaces()
+        .reading(state.windows())
         .windows_in_active_workspace(state.windows(), space)
         .into_iter()
         .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
@@ -244,7 +246,9 @@ fn current_floating_positions(
 fn store_current_floating_positions(state: &RiftState, layout: &mut LayoutManager, space: SpaceId) {
     let positions = current_floating_positions(state, layout, space);
     if !positions.is_empty() {
-        layout.layout_engine.store_floating_window_positions(space, &positions);
+        layout
+            .layout_engine
+            .store_floating_window_positions(state.windows(), space, &positions);
     }
 }
 
@@ -293,6 +297,7 @@ pub fn handle_config_updated(
     let migration = layout
         .layout_engine
         .workspaces()
+        .reading(state.windows())
         .plan_settings(&new_config.virtual_workspaces)
         .map_err(|error| {
             anyhow::anyhow!("configuration reload retained previous workspace graph: {error}")
@@ -325,11 +330,12 @@ pub fn handle_config_updated(
 
 pub fn handle_command_reactor_debug(
     layout: &LayoutManager,
+    windows: Windows<'_>,
     topology: &ForwardedSpaceState,
 ) -> anyhow::Result<EventOutcome> {
     for screen in &topology.screens {
         if let Some(space) = screen.space {
-            layout.layout_engine.debug_tree_desc(space, "", true);
+            layout.layout_engine.debug_tree_desc(windows, space, "", true);
         }
     }
     Ok(EventOutcome::no_change())

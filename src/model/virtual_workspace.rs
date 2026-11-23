@@ -785,9 +785,6 @@ pub struct WorkspaceStore {
     pub(crate) workspaces: Catalog,
     /// Last accepted physical topology also scopes configuration during restore.
     single_display: bool,
-    /// What each native Space shows. Written only through the activation helpers, which tell
-    /// the core's shadow.
-    activations: HashMap<SpaceId, SpaceActivation>,
     pub(crate) settings: VirtualWorkspaceSettings,
     pub layout_settings: LayoutSettings,
 }
@@ -802,29 +799,21 @@ pub enum Listing {
     NotYetKnown,
 }
 
-/// Where the store's workspace topology and the core's shadow disagree.
+/// Where the store's workspaces and the core's catalog disagree.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WorkspaceDivergence {
-    /// The catalog (each workspace with its Space, in order) differs.
+    /// The workspaces, each with its Space (in id order), differ.
     Catalog {
         store: Vec<(VirtualWorkspaceId, SpaceId)>,
         core: Vec<(VirtualWorkspaceId, SpaceId)>,
     },
-    /// What a Space shows differs.
-    Activation {
-        space: SpaceId,
-        store: Option<SpaceActivation>,
-        core: Option<rift_core::workspaces::Activation<VirtualWorkspaceId>>,
-    },
 }
 
-/// Every workspace, by id, in one catalog order: the order lists each workspace exactly once,
-/// because the two only change together (`insert` appends, `remove` takes it out of both).
-/// Lookups and slot-order iteration read the map as before.
+/// Every workspace's own data, by id (its place in the catalog order, and what Space it is on,
+/// are the core's). Iteration is in slot order.
 #[derive(Debug, Default)]
 pub struct Catalog {
     workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
-    order: Vec<VirtualWorkspaceId>,
 }
 
 /// Why a saved catalog can't be read.
@@ -862,11 +851,12 @@ impl std::fmt::Display for CatalogError {
 }
 
 impl Catalog {
-    /// A saved map and order as one catalog: the order must name every workspace, each once.
+    /// A saved map and order as one catalog and its order, each workspace with its Space: the
+    /// order must name every workspace, each once.
     fn parse(
         workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
         order: Vec<VirtualWorkspaceId>,
-    ) -> Result<Catalog, CatalogError> {
+    ) -> Result<(Catalog, Vec<(VirtualWorkspaceId, SpaceId)>), CatalogError> {
         let mut listed = HashSet::default();
         for &id in &order {
             if !workspaces.contains_key(id) {
@@ -879,25 +869,19 @@ impl Catalog {
         if let Some((id, workspace)) = workspaces.iter().find(|(id, _)| !listed.contains(id)) {
             return Err(CatalogError::Unlisted { id, space: workspace.space });
         }
-        Ok(Catalog { workspaces, order })
+        let order = order.into_iter().map(|id| (id, workspaces[id].space)).collect();
+        Ok((Catalog { workspaces }, order))
     }
 
-    /// Adds a workspace at the end of the catalog.
+    /// Adds a workspace (the core puts it at the end of the catalog order).
     pub fn insert(&mut self, workspace: VirtualWorkspace) -> VirtualWorkspaceId {
-        let id = self.workspaces.insert(workspace);
-        self.order.push(id);
-        id
+        self.workspaces.insert(workspace)
     }
 
-    /// Takes a workspace out of the catalog.
+    /// Takes a workspace out.
     pub fn remove(&mut self, id: VirtualWorkspaceId) -> Option<VirtualWorkspace> {
-        let workspace = self.workspaces.remove(id)?;
-        self.order.retain(|&listed| listed != id);
-        Some(workspace)
+        self.workspaces.remove(id)
     }
-
-    /// The catalog order.
-    pub fn order(&self) -> &[VirtualWorkspaceId] { &self.order }
 
     pub fn get(&self, id: VirtualWorkspaceId) -> Option<&VirtualWorkspace> {
         self.workspaces.get(id)
@@ -1021,6 +1005,21 @@ impl SavedTopology {
     /// What each initialised Space shows.
     pub(crate) fn activations(&self) -> &HashMap<SpaceId, SpaceActivation> { &self.activations }
 
+    /// Every workspace, in catalog order.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
+        self.catalog.iter().map(|&(id, _)| id)
+    }
+
+    /// `space`'s workspaces, in catalog order.
+    pub(crate) fn workspace_ids(&self, space: SpaceId) -> Vec<VirtualWorkspaceId> {
+        self.catalog.iter().filter(|&&(_, on)| on == space).map(|&(id, _)| id).collect()
+    }
+
+    /// The workspace `space` shows.
+    pub(crate) fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
+        self.activations.get(&space)?.current()
+    }
+
     fn space(&self, id: VirtualWorkspaceId) -> Option<SpaceId> {
         self.catalog.iter().find(|&&(listed, _)| listed == id).map(|&(_, space)| space)
     }
@@ -1119,16 +1118,15 @@ pub(crate) struct LoadedWorkspaces {
 impl<'de> Deserialize<'de> for LoadedWorkspaces {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let saved = SavedStore::deserialize(deserializer)?;
-        let workspaces =
+        let (workspaces, catalog) =
             Catalog::parse(saved.workspaces, saved.order).map_err(serde::de::Error::custom)?;
         let topology = SavedTopology {
-            catalog: workspaces.order().iter().map(|&id| (id, workspaces[id].space)).collect(),
+            catalog,
             activations: saved.active_workspace_per_space,
         };
         let store = WorkspaceStore {
             workspaces,
             single_display: saved.single_display,
-            activations: HashMap::default(),
             settings: VirtualWorkspaceSettings::default(),
             layout_settings: LayoutSettings::default(),
         };
@@ -1137,16 +1135,13 @@ impl<'de> Deserialize<'de> for LoadedWorkspaces {
 }
 
 impl LoadedWorkspaces {
-    /// Runs the load-time checks on the saved topology (normalizing, then validating it), and
-    /// gives the store its copy of the activations: until the store's topology reads move onto
-    /// the core (slice 2b), it holds them beside the core, which its tripwire holds agreeing.
+    /// Runs the load-time checks on the saved topology (normalizing, then validating it).
     pub(crate) fn checked(mut self) -> Result<LoadedWorkspaces, String> {
         let store = &self.store;
         self.topology.migrate_legacy_activation(|id| {
             store.workspaces.get(id).and_then(|workspace| workspace.home.space())
         });
         self.topology.validate()?;
-        self.store.activations = self.topology.activations.clone();
         Ok(self)
     }
 }
@@ -1217,37 +1212,56 @@ impl Default for WorkspaceStore {
     fn default() -> Self { Self::new() }
 }
 
+/// The workspace store with the window store and the core's workspaces (the catalog order, each
+/// workspace's Space, what each Space shows), lent together for reading: the store answers its
+/// topology reads from the core. The view derefs to the store, so the store's own data stays
+/// reachable.
+#[derive(Clone, Copy)]
+pub(crate) struct Workspaces<'a> {
+    pub(crate) store: &'a WorkspaceStore,
+    pub(crate) windows: Windows<'a>,
+}
+
+impl std::ops::Deref for Workspaces<'_> {
+    type Target = WorkspaceStore;
+
+    fn deref(&self) -> &WorkspaceStore { self.store }
+}
+
 impl WorkspaceStore {
-    pub(crate) fn effective_mode(&self) -> WorkspaceMode {
-        if self.single_display {
-            WorkspaceMode::PerDisplay
-        } else {
-            self.settings.mode
-        }
+    /// The store with `windows` (the window store and the core's workspaces), for reading.
+    pub(crate) fn reading<'a>(&'a self, windows: Windows<'a>) -> Workspaces<'a> {
+        Workspaces { store: self, windows }
+    }
+}
+
+impl<'a> Workspaces<'a> {
+    /// The core's joined workspaces.
+    fn core(&self) -> &'a CoreWorkspaces { self.windows.core }
+
+    /// What `space` shows, if it has an activation.
+    pub(crate) fn activation(&self, space: SpaceId) -> Option<SpaceActivation> {
+        self.core().activation(space).map(SpaceActivation::from_core)
     }
 
-    fn namespace(&self, mode: WorkspaceMode, space: SpaceId) -> Option<SpaceId> {
-        (mode != WorkspaceMode::Global || self.single_display).then_some(space)
+    /// Every Space with an activation, and what it shows.
+    pub(crate) fn activations(&self) -> impl Iterator<Item = (SpaceId, SpaceActivation)> + use<'a> {
+        self.core()
+            .activations()
+            .iter()
+            .map(|&(space, activation)| (space, SpaceActivation::from_core(activation)))
     }
 
-    pub(crate) fn workspace_space(&self, id: VirtualWorkspaceId) -> Option<SpaceId> {
-        self.workspaces.get(id).map(|workspace| workspace.space)
-    }
-
-    pub(crate) fn active_layout(
-        &self,
-        space: SpaceId,
-        workspace: VirtualWorkspaceId,
-    ) -> Option<LayoutId> {
-        self.workspace_info(space, workspace)?.active_layout()
+    /// Every workspace, in catalog order.
+    pub(crate) fn catalog(&self) -> impl Iterator<Item = VirtualWorkspaceId> + use<'a> {
+        self.core().catalog().iter().map(|&(id, _)| id)
     }
 
     pub(crate) fn active_layout_for_space(
         &self,
         space: SpaceId,
     ) -> Option<(VirtualWorkspaceId, LayoutId)> {
-        let id = self.active_workspace(space)?;
-        Some((id, self.workspaces.get(id)?.active_layout()?))
+        self.store.active_layout_in(self.core(), space)
     }
 
     /// The workspace at `index` among `space`'s, or the one it shows. A Space not initialised
@@ -1264,39 +1278,9 @@ impl WorkspaceStore {
         }
     }
 
-    fn scope_ids(&self, space: SpaceId) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
-        let namespace = self.namespace(self.settings.mode, space);
-        self.workspaces
-            .order()
-            .iter()
-            .copied()
-            .filter(move |id| self.namespace(self.settings.mode, self[*id].space) == namespace)
-    }
-
-    /// The workspace mode, as the core decides by it.
-    fn core_mode(&self) -> rift_core::lifecycle::WorkspaceMode {
-        match self.effective_mode() {
-            WorkspaceMode::PerDisplay => rift_core::lifecycle::WorkspaceMode::PerDisplay,
-            WorkspaceMode::Global => rift_core::lifecycle::WorkspaceMode::Global,
-        }
-    }
-
-    fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
-        let on = self[id].space;
-        let eligible = rift_core::workspaces::eligible(self.core_mode(), core_context(context), on);
-        #[cfg(feature = "roc-core")]
-        {
-            use rift_core::workspaces::plain::EligibleQuestion;
-            let question = EligibleQuestion {
-                mode: self.core_mode(),
-                space: context.space.word(),
-                visible: context.visible.iter().map(|&space| space.word()).collect(),
-                on: on.word(),
-            };
-            let roc = Ok(rift_core_roc::workspaces::eligible(question.clone()));
-            crate::roc_path::check("eligible", EligibleQuestion::FACTS, &question, &eligible, roc);
-        }
-        eligible
+    /// The workspaces in `space`'s namespace, in catalog order.
+    fn scope_ids(&self, space: SpaceId) -> impl Iterator<Item = VirtualWorkspaceId> + use<'a> {
+        self.store.scope_in(self.core().catalog(), space)
     }
 
     /// Navigation history, validated like any target. Unreachable history is kept.
@@ -1324,9 +1308,9 @@ impl WorkspaceStore {
         previous.map(|(id, space)| WorkspaceTarget { id, space })
     }
 
-    pub(crate) fn resolve_workspace<'a>(
+    pub(crate) fn resolve_workspace<'c>(
         &self,
-        context: impl Into<WorkspaceContext<'a>>,
+        context: impl Into<WorkspaceContext<'c>>,
         selector: &WorkspaceSelector,
     ) -> Option<WorkspaceTarget> {
         let context = context.into();
@@ -1384,17 +1368,14 @@ impl WorkspaceStore {
         self.scope_ids(space).position(|candidate| candidate == id)
     }
 
-    pub(crate) fn workspace_view<'a>(
-        &'a self,
+    pub(crate) fn workspace_view(
+        self,
         context: WorkspaceContext<'a>,
     ) -> impl Iterator<Item = (usize, VirtualWorkspaceId)> + 'a {
+        let store = self.store;
         self.scope_ids(context.space)
             .enumerate()
-            .filter(move |(_, id)| self.eligible(context, *id))
-    }
-
-    pub(crate) fn catalog(&self) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
-        self.workspaces.order().iter().copied()
+            .filter(move |(_, id)| store.eligible(context, *id))
     }
 
     /// Balance visible workspaces around explicit placements and display rules.
@@ -1435,171 +1416,6 @@ impl WorkspaceStore {
                 (source != target).then_some((id, displays[target]))
             })
             .collect()
-    }
-
-    /// Ownership changes leave the workspace object, layout and focus history intact.
-    pub(crate) fn transfer_workspace(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        id: VirtualWorkspaceId,
-        target: SpaceId,
-        display: Option<&str>,
-        reason: WorkspaceTransferReason,
-    ) -> bool {
-        let Some(workspace) = self.workspaces.get(id) else {
-            return false;
-        };
-        let source = workspace.space;
-        if reason == WorkspaceTransferReason::Explicit
-            && let Some(home) = workspace.home.space()
-            && self
-                .activations
-                .get(&home)
-                .is_some_and(|activation| activation.remembered() == Some(id))
-        {
-            self.update_activation(windows, home, SpaceActivation::forget_memory);
-        }
-        if source == target {
-            if reason != WorkspaceTransferReason::Explicit {
-                return false;
-            }
-            let workspace = &mut self[id];
-            // `by` is part of the home: re-choosing the current display still marks it chosen.
-            let home = Home::placed(target, display.map(str::to_owned), PlacedBy::User);
-            let changed = workspace.home != home;
-            workspace.home = home;
-            return changed;
-        }
-        if reason == WorkspaceTransferReason::DisplayDeparture {
-            self.update_activation_or_default(windows, source, |activation| {
-                if activation.current() == Some(id) && activation.remembered().is_none() {
-                    activation.remember(id);
-                }
-            });
-        }
-        let workspace = &mut self[id];
-        match reason {
-            WorkspaceTransferReason::Explicit => {
-                workspace.home = Home::placed(target, display.map(str::to_owned), PlacedBy::User);
-            }
-            // An arriving display takes the workspace as its home; who chose the old home
-            // still stands (a home the user chose stays out of automatic balancing).
-            WorkspaceTransferReason::DisplayArrival => {
-                let by = workspace.home.placed_by().unwrap_or_default();
-                workspace.home = Home::placed(target, display.map(str::to_owned), by);
-            }
-            WorkspaceTransferReason::DisplayDeparture | WorkspaceTransferReason::Restoration => {}
-        }
-        self.move_workspace(windows, id, target);
-        // Remembered presentation becomes active again only when ownership returns.
-        if reason == WorkspaceTransferReason::Explicit {
-            self.set_active_workspace(windows, target, id);
-        } else if self.active_workspace(target).is_none()
-            || self
-                .activations
-                .get(&target)
-                .is_some_and(|activation| activation.remembered() == Some(id))
-        {
-            self.set_active_workspace(windows, target, id);
-            self.update_activation(windows, target, SpaceActivation::forget_memory);
-        }
-        self.repair_activation(windows, source);
-        self.repair_activation(windows, target);
-        true
-    }
-
-    /// Old snapshots may contain duplicate local names. Keep every identity and
-    /// disambiguate only at load; live configuration conflicts are rejected.
-    pub(crate) fn normalize_loaded_names(&mut self) { self.normalize_names(false); }
-
-    fn normalize_names(&mut self, shared: bool) {
-        for (index, id) in self.workspaces.order().to_vec().into_iter().enumerate() {
-            let workspace = &self[id];
-            let duplicate = self.workspaces.order()[..index].iter().any(|&other| {
-                (shared || self[other].space == workspace.space)
-                    && self[other].name == workspace.name
-            });
-            if workspace.name.is_empty() || duplicate {
-                let base = if workspace.name.is_empty() {
-                    format!("Workspace {}", index + 1)
-                } else {
-                    workspace.name.clone()
-                };
-                let name = self.available_name(workspace.space, base);
-                self.workspaces[id].name = name;
-            }
-        }
-    }
-
-    fn repair_activation(&mut self, windows: &mut WindowsMut<'_>, space: SpaceId) {
-        let owned = |id| self.workspaces.get(id).is_some_and(|workspace| workspace.space == space);
-        let activation = self.activations.get(&space).copied().unwrap_or_default();
-        let (previous, remembered) = (activation.previous(), activation.remembered());
-        let current = activation
-            .current()
-            .filter(|&id| owned(id))
-            .or_else(|| previous.filter(|&id| owned(id)))
-            .or_else(|| self.workspaces_on(space).next());
-        let previous = previous.filter(|&id| {
-            self.workspaces.contains_key(id)
-                && Some(id) != current
-                && (self.effective_mode() == WorkspaceMode::Global || owned(id))
-        });
-        let repaired = match current {
-            Some(current) => SpaceActivation::Showing { current, previous, remembered },
-            // A Space that shows nothing keeps no history: showing a workspace again makes the
-            // one shown until then, none, the previous one, so the history would never be read.
-            None => SpaceActivation::Vacant { remembered },
-        };
-        self.set_activation(windows, space, repaired);
-    }
-
-    pub(crate) fn ensure_layouts_for_size(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        size: CGSize,
-    ) {
-        self.ensure_space_initialized(windows, space);
-        for workspace in self.workspaces.values_mut().filter(|workspace| workspace.space == space) {
-            workspace.ensure_layout_for_size(size);
-        }
-    }
-
-    pub(crate) fn layout_spaces(&self) -> crate::common::collections::BTreeSet<SpaceId> {
-        self.workspaces
-            .values()
-            .filter(|workspace| workspace.active_layout().is_some())
-            .map(|workspace| workspace.space)
-            .collect()
-    }
-
-    pub(crate) fn validate_layouts(&self) -> Result<(), String> {
-        for (id, workspace) in &self.workspaces {
-            workspace
-                .layout_state
-                .validate(&workspace.layout_system)
-                .map_err(|error| format!("workspace {id:?} {error}"))?;
-        }
-        Ok(())
-    }
-
-    pub fn new() -> Self {
-        Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
-    }
-
-    pub fn new_with_config(
-        config: &VirtualWorkspaceSettings,
-        layout_settings: &LayoutSettings,
-    ) -> Self {
-        warn_on_ignored_display_rules(config);
-        Self {
-            workspaces: Catalog::default(),
-            single_display: false,
-            activations: HashMap::default(),
-            settings: config.clone(),
-            layout_settings: layout_settings.clone(),
-        }
     }
 
     /// Validate the projected namespace before mutating configuration or layout trees.
@@ -1712,225 +1528,43 @@ impl WorkspaceStore {
         Ok(plan)
     }
 
-    pub(crate) fn apply_settings(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        config: &VirtualWorkspaceSettings,
-        layout_settings: &LayoutSettings,
-        plan: WorkspaceSettingsPlan,
-    ) {
-        warn_on_ignored_display_rules(config);
-        self.settings = config.clone();
-        self.layout_settings = layout_settings.clone();
-        for (id, name) in plan.names {
-            self[id].name = name;
-        }
-        for (space, name) in plan.additions {
-            let index = self.scope_ids(space).count();
-            let mode = self.resolve_layout_mode_for_workspace(index, &name);
-            self.insert_workspace(windows, space, name, mode);
-        }
-        for space in self.initialized_spaces() {
-            self.repair_activation(windows, space);
-        }
-    }
-
-    /// Adds a workspace to an already-initialized space. If the space has been
-    /// shown, the new workspace gets a layout for the space's current size so
-    /// it can accept windows immediately instead of waiting for the next
-    /// `SpaceExposed`.
-    fn insert_workspace(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        name: String,
-        mode: LayoutMode,
-    ) -> VirtualWorkspaceId {
-        let size = self
-            .workspaces_on(space)
-            .find_map(|id| self.workspaces[id].layout_state.active_size());
-        let mut workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
-        // Beside a workspace homed on this Space with a display preference, it shares it.
-        let display = self.workspaces.values().find_map(|workspace| {
-            workspace
-                .home
-                .on_display()
-                .filter(|(home, _)| *home == space)
-                .map(|(_, display)| display.to_owned())
-        });
-        workspace.home = Home::placed(space, display, PlacedBy::Automatic);
-        if let Some(size) = size {
-            workspace.ensure_layout_for_size(size);
-        }
-        self.catalog_insert(windows, workspace)
-    }
-
     fn name_exists(&self, space: SpaceId, name: &str) -> bool {
-        self.scope_ids(space).any(|id| self[id].name == name)
-    }
-
-    fn available_name(&self, space: SpaceId, base: String) -> String {
-        if !self.name_exists(space, &base) {
-            return base;
-        }
-        let mut suffix = 2;
-        loop {
-            let name = format!("{base} ({suffix})");
-            if !self.name_exists(space, &name) {
-                return name;
-            }
-            suffix += 1;
-        }
-    }
-
-    fn append_default_workspace(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-    ) -> VirtualWorkspaceId {
-        let index = self.scope_ids(space).count();
-        let name = self.available_name(space, self.settings.workspace_name(index));
-        let mode = self.resolve_layout_mode_for_workspace(index, &name);
-        self.insert_workspace(windows, space, name, mode)
-    }
-
-    /// Update scope before display placement rules run, without creating workspaces.
-    pub(crate) fn update_display_count(&mut self, display_count: usize) {
-        let was_single = self.single_display;
-        self.single_display = display_count == 1;
-        if was_single && self.effective_mode() == WorkspaceMode::Global {
-            // Independent native desktops may have used the same names.
-            self.normalize_names(true);
-        }
-    }
-
-    /// Allocate the configured global catalog in contiguous blocks across visible managed
-    /// desktops. Existing catalogs retain their placement as desktops are exposed.
-    /// `rule_space` resolves a workspace rule's display to one of `spaces`.
-    pub(crate) fn ensure_visible_spaces(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        spaces: &[SpaceId],
-        display_count: usize,
-        rule_space: impl Fn(&[String]) -> Option<SpaceId>,
-    ) {
-        if spaces.is_empty() {
-            return;
-        }
-        self.update_display_count(display_count);
-        if self.effective_mode() == WorkspaceMode::Global
-            && self.scope_ids(spaces[0]).next().is_none()
-        {
-            let count = self.settings.default_workspace_count.clamp(1, MAX_WORKSPACES);
-            let pins: Vec<_> = (0..count)
-                .map(|index| {
-                    let name = self.settings.workspace_name(index);
-                    let space = self
-                        .matching_rules(index, &name)
-                        .find_map(|rule| rule.display.as_deref())
-                        .and_then(&rule_space)?;
-                    spaces.iter().position(|candidate| *candidate == space)
-                })
-                .collect();
-            for (index, owner) in distribute(spaces.len(), pins).into_iter().enumerate() {
-                let space = spaces[owner];
-                let id = self.append_default_workspace(windows, space);
-                if index == self.settings.default_workspace
-                    || !self.activations.contains_key(&space)
-                {
-                    self.set_activation(windows, space, SpaceActivation::showing(id));
-                }
-            }
-            // A display left without a workspace (more displays than workspaces) shows nothing:
-            // it is initialised here, at its exposure, not by whichever query comes first.
-            for &space in spaces {
-                self.ensure_space_initialized(windows, space);
-            }
-        } else {
-            for &space in spaces {
-                self.ensure_space_initialized(windows, space);
-            }
-        }
-    }
-
-    pub(crate) fn ensure_space_initialized(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-    ) {
-        if self.active_workspace(space).is_some() {
-            return;
-        }
-        let first = self.workspaces_on(space).next();
-        if let Some(id) = first {
-            self.set_active_workspace(windows, space, id);
-            return;
-        }
-        if self.effective_mode() == WorkspaceMode::Global && self.scope_ids(space).next().is_some()
-        {
-            self.repair_activation(windows, space);
-            return;
-        }
-        let count = self.settings.default_workspace_count.clamp(1, MAX_WORKSPACES);
-        let selected = self.settings.default_workspace.min(count - 1);
-        for index in 0..count {
-            let id = self.append_default_workspace(windows, space);
-            if index == selected {
-                self.set_activation(windows, space, SpaceActivation::showing(id));
-            }
-        }
-    }
-
-    /// Resolve each property independently, with the last matching rule winning.
-    pub(crate) fn matching_rules<'a>(
-        &'a self,
-        index: usize,
-        name: &'a str,
-    ) -> impl Iterator<Item = &'a WorkspaceLayoutRule> {
-        self.settings
-            .workspace_rules
-            .iter()
-            .rev()
-            .filter(move |rule| selector_matches(&rule.workspace, index, name))
-    }
-
-    pub(crate) fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
-        self.matching_rules(index, name)
-            .find_map(|rule| rule.layout)
-            .unwrap_or(self.layout_settings.mode)
+        self.store.name_exists_in(self.core().catalog(), space, name)
     }
 
     /// Global-mode display assignments from workspace rules (last matching rule wins).
     /// Empty unless global mode is active and some rule names a display.
-    pub(crate) fn rule_displays(&self) -> impl Iterator<Item = (VirtualWorkspaceId, &[String])> {
+    pub(crate) fn rule_displays(
+        self,
+    ) -> impl Iterator<Item = (VirtualWorkspaceId, &'a [String])> + use<'a> {
         let order = if self.effective_mode() == WorkspaceMode::Global
             && self.settings.workspace_rules.iter().any(|rule| rule.display.is_some())
         {
-            self.workspaces.order()
+            self.core().catalog()
         } else {
             &[]
         };
-        order.iter().filter_map(|&id| {
+        let store = self.store;
+        order.iter().filter_map(move |&(id, _)| {
             let index = self.workspace_index(self[id].space, id)?;
-            let display = self
-                .matching_rules(index, &self[id].name)
+            let display = store
+                .matching_rules(index, &store[id].name)
                 .find_map(|rule| rule.display.as_deref())?;
             Some((id, display))
         })
     }
 
     pub fn initialized_spaces(&self) -> Vec<SpaceId> {
-        let mut spaces = self.activations.keys().copied().collect::<Vec<_>>();
+        let mut spaces = self.activations().map(|(space, _)| space).collect::<Vec<_>>();
         spaces.sort_unstable();
         spaces
     }
 
-    /// The store's topology in its saved shape: the store's own copy, which the core shadows
-    /// until the store's topology reads move onto the core (slice 2b).
+    /// The topology in its saved shape, as the core holds it.
     pub(crate) fn topology(&self) -> SavedTopology {
         SavedTopology {
-            catalog: self.workspaces.order().iter().map(|&id| (id, self[id].space)).collect(),
-            activations: self.activations.clone(),
+            catalog: self.core().catalog().to_vec(),
+            activations: self.activations().collect(),
         }
     }
 
@@ -1940,267 +1574,17 @@ impl WorkspaceStore {
         self.topology().validate()
     }
 
-    /// Moves `old_space`'s workspaces onto `new_space` and returns the workspaces that were
-    /// auto-created there and deleted to make room, so callers can drop state keyed by them.
-    pub(crate) fn remap_space(
-        &mut self,
-        window_store: &mut WindowsMut<'_>,
-        old_space: SpaceId,
-        new_space: SpaceId,
-    ) -> Vec<VirtualWorkspaceId> {
-        for workspace in self.workspaces.values_mut() {
-            if workspace.home.space() == Some(old_space) {
-                workspace.home = workspace.home.with_space(new_space);
-            }
-        }
-        if old_space == new_space || !self.activations.contains_key(&old_space) {
-            return Vec::new();
-        }
-
-        // The window server puts windows on a desktop before rift is told it replaced
-        // another, so some are already assigned to the workspaces about to be deleted. Dropping
-        // those assignments leaves the window on no workspace, which also loses which
-        // workspace of the desktop it was on. Each deleted workspace hands its windows and
-        // claims to the migrating workspace in the same position (the last one past the end),
-        // decided before anything is removed.
-        let heirs = self.workspace_ids(old_space);
-        let successor = |ordinal: usize| {
-            heirs
-                .get(ordinal)
-                .or_else(|| heirs.last())
-                .map_or(Successor::Unassign, |&heir| Successor::Into(heir))
-        };
-        let deleted_target_workspace_ids =
-            if self.effective_mode() == WorkspaceMode::PerDisplay && !heirs.is_empty() {
-                self.remove_space(window_store, new_space, successor)
-            } else {
-                Vec::new()
-            };
-        for &id in &heirs {
-            self.move_workspace(window_store, id, new_space);
-        }
-        if let Some(activation) = self.clear_activation(window_store, old_space) {
-            self.set_activation(window_store, new_space, activation);
-        }
-        window_store.remap_space(old_space, new_space);
-
-        deleted_target_workspace_ids
-    }
-
-    /// Delete a native Space that no longer exists, returning the workspaces it took with it;
-    /// the `ordinal`th of them hands its windows and claims to `successor(ordinal)`. Nothing
-    /// shows or remembers a workspace as it is removed: the Space's activation is cleared, and
-    /// every other Space's history and memory of them dropped, first.
-    pub(crate) fn remove_space(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        successor: impl Fn(usize) -> Successor<VirtualWorkspaceId>,
-    ) -> Vec<VirtualWorkspaceId> {
-        let removed = self.workspace_ids(space);
-        self.clear_activation(windows, space);
-        self.update_all_activations(windows, |activation| {
-            activation.retain(|id| !removed.contains(&id))
-        });
-        for (ordinal, &id) in removed.iter().enumerate() {
-            self.catalog_remove(windows, id, successor(ordinal));
-        }
-        removed
-    }
-
-    pub(crate) fn create_workspace(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        name: Option<String>,
-    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        if self.effective_mode() == WorkspaceMode::PerDisplay {
-            self.ensure_space_initialized(windows, space);
-        }
-        let count = self.scope_ids(space).count();
-        if count >= MAX_WORKSPACES {
-            return Err(WorkspaceError::InconsistentState(format!(
-                "Maximum workspace limit ({}) reached for space {:?}",
-                MAX_WORKSPACES, space
-            )));
-        }
-
-        let name = if let Some(name) = name.filter(|name| !name.is_empty()) {
-            if self.name_exists(space, &name) {
-                return Err(WorkspaceError::InconsistentState(format!(
-                    "Workspace name {name:?} already exists. Workspace names must be unique."
-                )));
-            }
-            name
-        } else {
-            (1..=MAX_WORKSPACES + 1)
-                .map(|index| format!("Workspace {index}"))
-                .find(|name| !self.name_exists(space, name))
-                .expect("a bounded catalog always has an available generated name")
-        };
-
-        let mode = self.resolve_layout_mode_for_workspace(count, &name);
-
-        let id = self.insert_workspace(windows, space, name, mode);
-        self.repair_activation(windows, space);
-        Ok(id)
-    }
-
-    /// `space` remembers `id`, to take it back when its ownership returns.
-    pub(crate) fn remember_on(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        id: VirtualWorkspaceId,
-    ) {
-        self.update_activation_or_default(windows, space, |activation| activation.remember(id));
-    }
-
     /// What each native Space shows.
-    pub fn active_workspace_per_space(&self) -> &HashMap<SpaceId, SpaceActivation> {
-        &self.activations
-    }
-
-    // The topology's only writers: each tells the core's joined shadow, which the owner holds beside
-    // the window store and lends them (`WindowsMut::topology`).
-
-    fn tell_activation(&self, windows: &mut WindowsMut<'_>, space: SpaceId) {
-        let activation = self.activations.get(&space).map(|activation| activation.to_core());
-        windows.topology().activation(space, activation);
-    }
-
-    fn set_activation(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        activation: SpaceActivation,
-    ) {
-        self.activations.insert(space, activation);
-        self.tell_activation(windows, space);
-    }
-
-    /// Changes what `space` shows, if it has an activation.
-    pub(crate) fn update_activation(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        change: impl FnOnce(&mut SpaceActivation),
-    ) {
-        if let Some(activation) = self.activations.get_mut(&space) {
-            change(activation);
-            self.tell_activation(windows, space);
-        }
-    }
-
-    fn update_activation_or_default(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        change: impl FnOnce(&mut SpaceActivation),
-    ) {
-        change(self.activations.entry(space).or_default());
-        self.tell_activation(windows, space);
-    }
-
-    fn clear_activation(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-    ) -> Option<SpaceActivation> {
-        let activation = self.activations.remove(&space);
-        self.tell_activation(windows, space);
-        activation
-    }
-
-    fn update_all_activations(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        change: impl Fn(&mut SpaceActivation),
-    ) {
-        let spaces: Vec<_> = self.activations.keys().copied().collect();
-        for space in spaces {
-            self.update_activation(windows, space, &change);
-        }
-    }
-
-    fn catalog_insert(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        workspace: VirtualWorkspace,
-    ) -> VirtualWorkspaceId {
-        let space = workspace.space;
-        let id = self.workspaces.insert(workspace);
-        windows.topology().created(id, space);
-        id
-    }
-
-    /// Takes a workspace out of the catalog; the core's shadow hands its windows and claims to
-    /// `successor` in the same step, and the window store's records follow.
-    fn catalog_remove(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        id: VirtualWorkspaceId,
-        successor: rift_core::workspaces::Successor<VirtualWorkspaceId>,
-    ) -> Option<VirtualWorkspace> {
-        let workspace = self.workspaces.remove(id)?;
-        windows.remove_workspace(id, successor);
-        Some(workspace)
-    }
-
-    /// Moves a workspace to another Space.
-    fn move_workspace(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        id: VirtualWorkspaceId,
-        space: SpaceId,
-    ) {
-        self[id].space = space;
-        windows.topology().moved(id, space);
-    }
-
-    /// Every disagreement between the store's topology and the core's joined shadow (`core`,
-    /// the window store's). Empty unless a write bypassed the helpers above.
-    pub(crate) fn workspace_divergences(
-        &self,
-        core: &rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>,
-    ) -> Vec<WorkspaceDivergence> {
-        let mut divergences = Vec::new();
-        let store: Vec<_> = self
-            .workspaces
-            .order()
-            .iter()
-            .map(|&id| (id, self.workspaces[id].space))
-            .collect();
-        if store.as_slice() != core.catalog() {
-            divergences.push(WorkspaceDivergence::Catalog {
-                store,
-                core: core.catalog().to_vec(),
-            });
-        }
-        let mut spaces: Vec<SpaceId> = self
-            .activations
-            .keys()
-            .copied()
-            .chain(core.activations().iter().map(|(space, _)| *space))
-            .collect();
-        spaces.sort_unstable();
-        spaces.dedup();
-        for space in spaces {
-            let store = self.activations.get(&space).copied();
-            let core = core.activation(space);
-            if store.map(SpaceActivation::to_core) != core {
-                divergences.push(WorkspaceDivergence::Activation { space, store, core });
-            }
-        }
-        divergences
+    pub fn active_workspace_per_space(&self) -> HashMap<SpaceId, SpaceActivation> {
+        self.activations().collect()
     }
 
     pub fn last_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.activations.get(&space)?.previous()
+        self.activation(space)?.previous()
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.activations.get(&space)?.current()
+        self.activation(space)?.current()
     }
 
     pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
@@ -2208,59 +1592,11 @@ impl WorkspaceStore {
             .map(|index| index as u64)
     }
 
-    /// Select a workspace and remember where navigation started, even when the
-    /// destination is already visible on another display.
-    pub(crate) fn set_active_workspace_from(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        source: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> bool {
-        let Some(target) = self.workspace_space(workspace_id) else {
-            return false;
-        };
-        let previous = self.active_workspace(source);
-        if !self.set_active_workspace(windows, target, workspace_id) {
-            return false;
-        }
-        if self.effective_mode() == WorkspaceMode::Global && source != target {
-            self.update_activation(windows, target, |activation| {
-                if let SpaceActivation::Showing { previous: history, .. } = activation {
-                    *history = previous;
-                }
-            });
-        }
-        true
-    }
-
-    pub(crate) fn set_active_workspace(
-        &mut self,
-        windows: &mut WindowsMut<'_>,
-        space: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> bool {
-        trace_misc("set_active_workspace", || {
-            if self.workspace_space(workspace_id) != Some(space) {
-                error!(
-                    ?workspace_id,
-                    ?space,
-                    "Attempted to activate a missing or foreign workspace"
-                );
-                return false;
-            }
-            self.update_activation_or_default(windows, space, |activation| {
-                activation.activate(workspace_id)
-            });
-            true
-        })
-    }
-
     /// Per-display mode steps through `space`'s workspaces. Global mode steps through
     /// the whole visible catalog, so the target may live on another display.
-    pub(crate) fn step_workspace<'a>(
+    pub(crate) fn step_workspace<'c>(
         &self,
-        window_store: Windows<'_>,
-        context: impl Into<WorkspaceContext<'a>>,
+        context: impl Into<WorkspaceContext<'c>>,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
         dir: Direction,
@@ -2272,8 +1608,8 @@ impl WorkspaceStore {
             // Workspaces are a line: up and down go nowhere.
             Direction::Up | Direction::Down => return None,
         };
-        let catalog: Vec<_> =
-            self.workspaces.order().iter().map(|&id| (id, self[id].space)).collect();
+        let catalog = self.core().catalog();
+        let window_store = self.windows;
         let context = context.into();
         let skip_empty = if skip_empty == Some(true) {
             SkipEmpty::Skip
@@ -2317,43 +1653,6 @@ impl WorkspaceStore {
         stepped
     }
 
-    pub(crate) fn assign_window_to_workspace(
-        &mut self,
-        window_store: &mut WindowsMut<'_>,
-        space: SpaceId,
-        window_id: WindowId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> bool {
-        trace_misc("assign_window_to_workspace", || {
-            if !self.workspaces.contains_key(workspace_id)
-                || self.workspaces.get(workspace_id).map(|w| w.space) != Some(space)
-            {
-                error!(
-                    "Attempted to assign window to non-existent/foreign workspace {:?} for space {:?}",
-                    workspace_id, space
-                );
-                return false;
-            }
-
-            let previous_assignment = window_store.read().workspace_for_window(window_id);
-            window_store.assign_window_to_workspace(window_id, workspace_id);
-            if let Some(previous_assignment) = previous_assignment
-                && previous_assignment != workspace_id
-                && let Some(previous_workspace) = self.workspaces.get_mut(previous_assignment)
-            {
-                // Membership is single-valued: the window leaves the old workspace's tree here,
-                // where its assignment changes, not later from wherever removal looks.
-                previous_workspace.layout_system.update(
-                    crate::layout_engine::systems::WindowChange::RemoveAndRebalance(window_id),
-                );
-                if previous_workspace.last_focused() == Some(window_id) {
-                    previous_workspace.set_last_focused(None);
-                }
-            }
-            true
-        })
-    }
-
     /// The workspace on `space` at the ordinal of the window's current workspace,
     /// for native-space identity churn: WindowServer can briefly report another
     /// space without a user moving the window to that space's active workspace.
@@ -2367,11 +1666,6 @@ impl WorkspaceStore {
         let source = self.workspace_space(existing)?;
         let ordinal = self.workspaces_on(source).position(|id| id == existing)?;
         self.workspaces_on(space).nth(ordinal)
-    }
-
-    pub(crate) fn remove_window(&mut self, window_store: &mut WindowsMut<'_>, window_id: WindowId) {
-        let _ = window_store.remove_window_assignment(window_id);
-        window_store.clear_rule_floating(window_id);
     }
 
     /// Gets all windows in the active virtual workspace for a given native space.
@@ -2414,6 +1708,854 @@ impl WorkspaceStore {
             .filter(|(id, workspace)| workspace.space == space && Some(*id) != active_workspace_id)
             .flat_map(|(id, _)| window_store.workspace_windows(id))
             .collect()
+    }
+
+    /// `space`'s workspaces, with their names, if the Space is initialised; a query never
+    /// initialises one (the events that bring a Space do, through
+    /// [`Self::ensure_space_initialized`]).
+    pub fn list_workspaces(&self, space: SpaceId) -> Listing {
+        match self.initialized(space) {
+            true => Listing::Known(self.existing_workspaces(space)),
+            false => Listing::NotYetKnown,
+        }
+    }
+
+    /// Whether [`Self::ensure_space_initialized`] would leave `space` as it is: it shows a
+    /// workspace, or (in global mode, with workspaces elsewhere to show) it shows nothing and
+    /// owns none.
+    pub(crate) fn initialized(&self, space: SpaceId) -> bool {
+        match self.activation(space) {
+            Some(SpaceActivation::Showing { .. }) => true,
+            // Repair keeps a vacant Space's memory as it is.
+            Some(SpaceActivation::Vacant { .. }) => {
+                self.workspaces_on(space).next().is_none()
+                    && self.effective_mode() == WorkspaceMode::Global
+                    && self.scope_ids(space).next().is_some()
+            }
+            None => false,
+        }
+    }
+
+    /// Read workspace topology without creating missing state. Validation and restore planning
+    /// must use this accessor so a failed transaction cannot initialize part of the live engine.
+    pub(crate) fn existing_workspaces(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
+        self.workspaces_on(space)
+            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
+            .collect()
+    }
+
+    /// Workspace IDs are kept in canonical ordinal order, including when loading older files.
+    pub(crate) fn workspace_ids(&self, space: SpaceId) -> Vec<VirtualWorkspaceId> {
+        self.workspaces_on(space).collect()
+    }
+
+    pub(crate) fn workspaces_on(
+        &self,
+        space: SpaceId,
+    ) -> impl Iterator<Item = VirtualWorkspaceId> + use<'a> {
+        self.core()
+            .catalog()
+            .iter()
+            .filter(move |&&(_, on)| on == space)
+            .map(|&(id, _)| id)
+    }
+
+    /// The workspace a window placed on `context`'s Space goes to without a rule. The caller
+    /// (placement) initialised the Space.
+    fn get_default_workspace<'c>(
+        &self,
+        context: impl Into<WorkspaceContext<'c>>,
+    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
+        let context = context.into();
+        let space = context.space;
+        self.active_workspace(space)
+            .or_else(|| {
+                (self.effective_mode() == WorkspaceMode::Global)
+                    .then(|| self.scope_ids(space).find(|id| self.eligible(context, *id)))
+                    .flatten()
+            })
+            .ok_or(WorkspaceError::NoWorkspacesAvailable)
+    }
+
+    pub(crate) fn window_counts(
+        &self,
+    ) -> impl Iterator<Item = (VirtualWorkspaceId, usize)> + use<'a> {
+        let windows = self.windows;
+        self.catalog().map(move |id| (id, windows.workspace_window_count(id)))
+    }
+}
+
+impl WorkspaceStore {
+    /// The workspace `space` shows (as `core` holds it) and its active layout. Takes only the
+    /// core, for a reader that holds the window records mutably (a drag's preview).
+    pub(crate) fn active_layout_in(
+        &self,
+        core: &CoreWorkspaces,
+        space: SpaceId,
+    ) -> Option<(VirtualWorkspaceId, LayoutId)> {
+        let id = core.activation(space).and_then(|activation| match activation {
+            rift_core::workspaces::Activation::Showing { current, .. } => Some(current),
+            rift_core::workspaces::Activation::Vacant { .. } => None,
+        })?;
+        Some((id, self.workspaces.get(id)?.active_layout()?))
+    }
+
+    /// `catalog`'s workspaces in `space`'s namespace, in catalog order.
+    fn scope_in<'c>(
+        &'c self,
+        catalog: &'c [(VirtualWorkspaceId, SpaceId)],
+        space: SpaceId,
+    ) -> impl Iterator<Item = VirtualWorkspaceId> + 'c {
+        let namespace = self.namespace(self.settings.mode, space);
+        catalog
+            .iter()
+            .filter(move |&&(_, on)| self.namespace(self.settings.mode, on) == namespace)
+            .map(|&(id, _)| id)
+    }
+
+    fn name_exists_in(
+        &self,
+        catalog: &[(VirtualWorkspaceId, SpaceId)],
+        space: SpaceId,
+        name: &str,
+    ) -> bool {
+        self.scope_in(catalog, space).any(|id| self[id].name == name)
+    }
+
+    /// `base`, or the first `base (n)` no workspace in `space`'s namespace of `catalog` has.
+    fn available_name_in(
+        &self,
+        catalog: &[(VirtualWorkspaceId, SpaceId)],
+        space: SpaceId,
+        base: String,
+    ) -> String {
+        if !self.name_exists_in(catalog, space, &base) {
+            return base;
+        }
+        let mut suffix = 2;
+        loop {
+            let name = format!("{base} ({suffix})");
+            if !self.name_exists_in(catalog, space, &name) {
+                return name;
+            }
+            suffix += 1;
+        }
+    }
+
+    pub(crate) fn effective_mode(&self) -> WorkspaceMode {
+        if self.single_display {
+            WorkspaceMode::PerDisplay
+        } else {
+            self.settings.mode
+        }
+    }
+
+    fn namespace(&self, mode: WorkspaceMode, space: SpaceId) -> Option<SpaceId> {
+        (mode != WorkspaceMode::Global || self.single_display).then_some(space)
+    }
+
+    pub(crate) fn workspace_space(&self, id: VirtualWorkspaceId) -> Option<SpaceId> {
+        self.workspaces.get(id).map(|workspace| workspace.space)
+    }
+
+    pub(crate) fn active_layout(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+    ) -> Option<LayoutId> {
+        self.workspace_info(space, workspace)?.active_layout()
+    }
+
+    /// The workspace mode, as the core decides by it.
+    fn core_mode(&self) -> rift_core::lifecycle::WorkspaceMode {
+        match self.effective_mode() {
+            WorkspaceMode::PerDisplay => rift_core::lifecycle::WorkspaceMode::PerDisplay,
+            WorkspaceMode::Global => rift_core::lifecycle::WorkspaceMode::Global,
+        }
+    }
+
+    fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
+        let on = self[id].space;
+        let eligible = rift_core::workspaces::eligible(self.core_mode(), core_context(context), on);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::workspaces::plain::EligibleQuestion;
+            let question = EligibleQuestion {
+                mode: self.core_mode(),
+                space: context.space.word(),
+                visible: context.visible.iter().map(|&space| space.word()).collect(),
+                on: on.word(),
+            };
+            let roc = Ok(rift_core_roc::workspaces::eligible(question.clone()));
+            crate::roc_path::check("eligible", EligibleQuestion::FACTS, &question, &eligible, roc);
+        }
+        eligible
+    }
+
+    /// Ownership changes leave the workspace object, layout and focus history intact.
+    pub(crate) fn transfer_workspace(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        id: VirtualWorkspaceId,
+        target: SpaceId,
+        display: Option<&str>,
+        reason: WorkspaceTransferReason,
+    ) -> bool {
+        let Some(workspace) = self.workspaces.get(id) else {
+            return false;
+        };
+        let source = workspace.space;
+        if reason == WorkspaceTransferReason::Explicit
+            && let Some(home) = workspace.home.space()
+            && self
+                .reading(windows.read())
+                .activation(home)
+                .is_some_and(|activation| activation.remembered() == Some(id))
+        {
+            self.update_activation(windows, home, SpaceActivation::forget_memory);
+        }
+        if source == target {
+            if reason != WorkspaceTransferReason::Explicit {
+                return false;
+            }
+            let workspace = &mut self[id];
+            // `by` is part of the home: re-choosing the current display still marks it chosen.
+            let home = Home::placed(target, display.map(str::to_owned), PlacedBy::User);
+            let changed = workspace.home != home;
+            workspace.home = home;
+            return changed;
+        }
+        if reason == WorkspaceTransferReason::DisplayDeparture {
+            self.update_activation_or_default(windows, source, |activation| {
+                if activation.current() == Some(id) && activation.remembered().is_none() {
+                    activation.remember(id);
+                }
+            });
+        }
+        let workspace = &mut self[id];
+        match reason {
+            WorkspaceTransferReason::Explicit => {
+                workspace.home = Home::placed(target, display.map(str::to_owned), PlacedBy::User);
+            }
+            // An arriving display takes the workspace as its home; who chose the old home
+            // still stands (a home the user chose stays out of automatic balancing).
+            WorkspaceTransferReason::DisplayArrival => {
+                let by = workspace.home.placed_by().unwrap_or_default();
+                workspace.home = Home::placed(target, display.map(str::to_owned), by);
+            }
+            WorkspaceTransferReason::DisplayDeparture | WorkspaceTransferReason::Restoration => {}
+        }
+        self.move_workspace(windows, id, target);
+        // Remembered presentation becomes active again only when ownership returns.
+        if reason == WorkspaceTransferReason::Explicit {
+            self.set_active_workspace(windows, target, id);
+        } else if self.reading(windows.read()).active_workspace(target).is_none()
+            || self
+                .reading(windows.read())
+                .activation(target)
+                .is_some_and(|activation| activation.remembered() == Some(id))
+        {
+            self.set_active_workspace(windows, target, id);
+            self.update_activation(windows, target, SpaceActivation::forget_memory);
+        }
+        self.repair_activation(windows, source);
+        self.repair_activation(windows, target);
+        true
+    }
+
+    /// Old snapshots may contain duplicate local names. Keep every identity and
+    /// disambiguate only at load; live configuration conflicts are rejected.
+    pub(crate) fn normalize_loaded_names(&mut self, topology: &SavedTopology) {
+        self.normalize_names(topology.catalog(), false);
+    }
+
+    /// Names every workspace of `catalog` (in its order) apart from those before it in its
+    /// namespace (`shared`: one namespace).
+    fn normalize_names(&mut self, catalog: &[(VirtualWorkspaceId, SpaceId)], shared: bool) {
+        for (index, &(id, space)) in catalog.iter().enumerate() {
+            let workspace = &self[id];
+            let duplicate = catalog[..index]
+                .iter()
+                .any(|&(other, on)| (shared || on == space) && self[other].name == workspace.name);
+            if workspace.name.is_empty() || duplicate {
+                let base = if workspace.name.is_empty() {
+                    format!("Workspace {}", index + 1)
+                } else {
+                    workspace.name.clone()
+                };
+                let name = self.available_name_in(catalog, space, base);
+                self.workspaces[id].name = name;
+            }
+        }
+    }
+
+    fn repair_activation(&mut self, windows: &mut WindowsMut<'_>, space: SpaceId) {
+        let owned = |id| self.workspaces.get(id).is_some_and(|workspace| workspace.space == space);
+        let activation = self.reading(windows.read()).activation(space).unwrap_or_default();
+        let (previous, remembered) = (activation.previous(), activation.remembered());
+        let current = activation
+            .current()
+            .filter(|&id| owned(id))
+            .or_else(|| previous.filter(|&id| owned(id)))
+            .or_else(|| self.reading(windows.read()).workspaces_on(space).next());
+        let previous = previous.filter(|&id| {
+            self.workspaces.contains_key(id)
+                && Some(id) != current
+                && (self.effective_mode() == WorkspaceMode::Global || owned(id))
+        });
+        let repaired = match current {
+            Some(current) => SpaceActivation::Showing { current, previous, remembered },
+            // A Space that shows nothing keeps no history: showing a workspace again makes the
+            // one shown until then, none, the previous one, so the history would never be read.
+            None => SpaceActivation::Vacant { remembered },
+        };
+        self.set_activation(windows, space, repaired);
+    }
+
+    pub(crate) fn ensure_layouts_for_size(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        size: CGSize,
+    ) {
+        self.ensure_space_initialized(windows, space);
+        for workspace in self.workspaces.values_mut().filter(|workspace| workspace.space == space) {
+            workspace.ensure_layout_for_size(size);
+        }
+    }
+
+    pub(crate) fn layout_spaces(&self) -> crate::common::collections::BTreeSet<SpaceId> {
+        self.workspaces
+            .values()
+            .filter(|workspace| workspace.active_layout().is_some())
+            .map(|workspace| workspace.space)
+            .collect()
+    }
+
+    pub(crate) fn validate_layouts(&self) -> Result<(), String> {
+        for (id, workspace) in &self.workspaces {
+            workspace
+                .layout_state
+                .validate(&workspace.layout_system)
+                .map_err(|error| format!("workspace {id:?} {error}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn new() -> Self {
+        Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
+    }
+
+    pub fn new_with_config(
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) -> Self {
+        warn_on_ignored_display_rules(config);
+        Self {
+            workspaces: Catalog::default(),
+            single_display: false,
+            settings: config.clone(),
+            layout_settings: layout_settings.clone(),
+        }
+    }
+
+    pub(crate) fn apply_settings(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+        plan: WorkspaceSettingsPlan,
+    ) {
+        warn_on_ignored_display_rules(config);
+        self.settings = config.clone();
+        self.layout_settings = layout_settings.clone();
+        for (id, name) in plan.names {
+            self[id].name = name;
+        }
+        for (space, name) in plan.additions {
+            let index = self.reading(windows.read()).scope_ids(space).count();
+            let mode = self.resolve_layout_mode_for_workspace(index, &name);
+            self.insert_workspace(windows, space, name, mode);
+        }
+        for space in self.reading(windows.read()).initialized_spaces() {
+            self.repair_activation(windows, space);
+        }
+    }
+
+    /// Adds a workspace to an already-initialized space. If the space has been
+    /// shown, the new workspace gets a layout for the space's current size so
+    /// it can accept windows immediately instead of waiting for the next
+    /// `SpaceExposed`.
+    fn insert_workspace(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        name: String,
+        mode: LayoutMode,
+    ) -> VirtualWorkspaceId {
+        let size = self
+            .reading(windows.read())
+            .workspaces_on(space)
+            .find_map(|id| self.workspaces[id].layout_state.active_size());
+        let mut workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
+        // Beside a workspace homed on this Space with a display preference, it shares it.
+        let display = self.workspaces.values().find_map(|workspace| {
+            workspace
+                .home
+                .on_display()
+                .filter(|(home, _)| *home == space)
+                .map(|(_, display)| display.to_owned())
+        });
+        workspace.home = Home::placed(space, display, PlacedBy::Automatic);
+        if let Some(size) = size {
+            workspace.ensure_layout_for_size(size);
+        }
+        self.catalog_insert(windows, workspace)
+    }
+
+    fn append_default_workspace(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+    ) -> VirtualWorkspaceId {
+        let index = self.reading(windows.read()).scope_ids(space).count();
+        let name = self.available_name_in(
+            windows.core.catalog(),
+            space,
+            self.settings.workspace_name(index),
+        );
+        let mode = self.resolve_layout_mode_for_workspace(index, &name);
+        self.insert_workspace(windows, space, name, mode)
+    }
+
+    /// Update scope before display placement rules run, without creating workspaces.
+    /// `catalog` is the core's (every workspace with its Space, in catalog order).
+    pub(crate) fn update_display_count(
+        &mut self,
+        catalog: &[(VirtualWorkspaceId, SpaceId)],
+        display_count: usize,
+    ) {
+        let was_single = self.single_display;
+        self.single_display = display_count == 1;
+        if was_single && self.effective_mode() == WorkspaceMode::Global {
+            // Independent native desktops may have used the same names.
+            self.normalize_names(catalog, true);
+        }
+    }
+
+    /// Allocate the configured global catalog in contiguous blocks across visible managed
+    /// desktops. Existing catalogs retain their placement as desktops are exposed.
+    /// `rule_space` resolves a workspace rule's display to one of `spaces`.
+    pub(crate) fn ensure_visible_spaces(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        spaces: &[SpaceId],
+        display_count: usize,
+        rule_space: impl Fn(&[String]) -> Option<SpaceId>,
+    ) {
+        if spaces.is_empty() {
+            return;
+        }
+        self.update_display_count(windows.core.catalog(), display_count);
+        if self.effective_mode() == WorkspaceMode::Global
+            && self.reading(windows.read()).scope_ids(spaces[0]).next().is_none()
+        {
+            let count = self.settings.default_workspace_count.clamp(1, MAX_WORKSPACES);
+            let pins: Vec<_> = (0..count)
+                .map(|index| {
+                    let name = self.settings.workspace_name(index);
+                    let space = self
+                        .matching_rules(index, &name)
+                        .find_map(|rule| rule.display.as_deref())
+                        .and_then(&rule_space)?;
+                    spaces.iter().position(|candidate| *candidate == space)
+                })
+                .collect();
+            for (index, owner) in distribute(spaces.len(), pins).into_iter().enumerate() {
+                let space = spaces[owner];
+                let id = self.append_default_workspace(windows, space);
+                if index == self.settings.default_workspace
+                    || self.reading(windows.read()).activation(space).is_none()
+                {
+                    self.set_activation(windows, space, SpaceActivation::showing(id));
+                }
+            }
+            // A display left without a workspace (more displays than workspaces) shows nothing:
+            // it is initialised here, at its exposure, not by whichever query comes first.
+            for &space in spaces {
+                self.ensure_space_initialized(windows, space);
+            }
+        } else {
+            for &space in spaces {
+                self.ensure_space_initialized(windows, space);
+            }
+        }
+    }
+
+    pub(crate) fn ensure_space_initialized(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+    ) {
+        if self.reading(windows.read()).active_workspace(space).is_some() {
+            return;
+        }
+        let first = self.reading(windows.read()).workspaces_on(space).next();
+        if let Some(id) = first {
+            self.set_active_workspace(windows, space, id);
+            return;
+        }
+        if self.effective_mode() == WorkspaceMode::Global
+            && self.reading(windows.read()).scope_ids(space).next().is_some()
+        {
+            self.repair_activation(windows, space);
+            return;
+        }
+        let count = self.settings.default_workspace_count.clamp(1, MAX_WORKSPACES);
+        let selected = self.settings.default_workspace.min(count - 1);
+        for index in 0..count {
+            let id = self.append_default_workspace(windows, space);
+            if index == selected {
+                self.set_activation(windows, space, SpaceActivation::showing(id));
+            }
+        }
+    }
+
+    /// Resolve each property independently, with the last matching rule winning.
+    pub(crate) fn matching_rules<'a>(
+        &'a self,
+        index: usize,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a WorkspaceLayoutRule> {
+        self.settings
+            .workspace_rules
+            .iter()
+            .rev()
+            .filter(move |rule| selector_matches(&rule.workspace, index, name))
+    }
+
+    pub(crate) fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
+        self.matching_rules(index, name)
+            .find_map(|rule| rule.layout)
+            .unwrap_or(self.layout_settings.mode)
+    }
+
+    /// Moves `old_space`'s workspaces onto `new_space` and returns the workspaces that were
+    /// auto-created there and deleted to make room, so callers can drop state keyed by them.
+    pub(crate) fn remap_space(
+        &mut self,
+        window_store: &mut WindowsMut<'_>,
+        old_space: SpaceId,
+        new_space: SpaceId,
+    ) -> Vec<VirtualWorkspaceId> {
+        for workspace in self.workspaces.values_mut() {
+            if workspace.home.space() == Some(old_space) {
+                workspace.home = workspace.home.with_space(new_space);
+            }
+        }
+        if old_space == new_space
+            || self.reading(window_store.read()).activation(old_space).is_none()
+        {
+            return Vec::new();
+        }
+
+        // The window server puts windows on a desktop before rift is told it replaced
+        // another, so some are already assigned to the workspaces about to be deleted. Dropping
+        // those assignments leaves the window on no workspace, which also loses which
+        // workspace of the desktop it was on. Each deleted workspace hands its windows and
+        // claims to the migrating workspace in the same position (the last one past the end),
+        // decided before anything is removed.
+        let heirs = self.reading(window_store.read()).workspace_ids(old_space);
+        let successor = |ordinal: usize| {
+            heirs
+                .get(ordinal)
+                .or_else(|| heirs.last())
+                .map_or(Successor::Unassign, |&heir| Successor::Into(heir))
+        };
+        let deleted_target_workspace_ids =
+            if self.effective_mode() == WorkspaceMode::PerDisplay && !heirs.is_empty() {
+                self.remove_space(window_store, new_space, successor)
+            } else {
+                Vec::new()
+            };
+        for &id in &heirs {
+            self.move_workspace(window_store, id, new_space);
+        }
+        if let Some(activation) = self.clear_activation(window_store, old_space) {
+            self.set_activation(window_store, new_space, activation);
+        }
+        window_store.remap_space(old_space, new_space);
+
+        deleted_target_workspace_ids
+    }
+
+    /// Delete a native Space that no longer exists, returning the workspaces it took with it;
+    /// the `ordinal`th of them hands its windows and claims to `successor(ordinal)`. Nothing
+    /// shows or remembers a workspace as it is removed: the Space's activation is cleared, and
+    /// every other Space's history and memory of them dropped, first.
+    pub(crate) fn remove_space(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        successor: impl Fn(usize) -> Successor<VirtualWorkspaceId>,
+    ) -> Vec<VirtualWorkspaceId> {
+        let removed = self.reading(windows.read()).workspace_ids(space);
+        self.clear_activation(windows, space);
+        self.update_all_activations(windows, |activation| {
+            activation.retain(|id| !removed.contains(&id))
+        });
+        for (ordinal, &id) in removed.iter().enumerate() {
+            self.catalog_remove(windows, id, successor(ordinal));
+        }
+        removed
+    }
+
+    pub(crate) fn create_workspace(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        name: Option<String>,
+    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
+        if self.effective_mode() == WorkspaceMode::PerDisplay {
+            self.ensure_space_initialized(windows, space);
+        }
+        let count = self.reading(windows.read()).scope_ids(space).count();
+        if count >= MAX_WORKSPACES {
+            return Err(WorkspaceError::InconsistentState(format!(
+                "Maximum workspace limit ({}) reached for space {:?}",
+                MAX_WORKSPACES, space
+            )));
+        }
+
+        let name = if let Some(name) = name.filter(|name| !name.is_empty()) {
+            if self.reading(windows.read()).name_exists(space, &name) {
+                return Err(WorkspaceError::InconsistentState(format!(
+                    "Workspace name {name:?} already exists. Workspace names must be unique."
+                )));
+            }
+            name
+        } else {
+            (1..=MAX_WORKSPACES + 1)
+                .map(|index| format!("Workspace {index}"))
+                .find(|name| !self.reading(windows.read()).name_exists(space, name))
+                .expect("a bounded catalog always has an available generated name")
+        };
+
+        let mode = self.resolve_layout_mode_for_workspace(count, &name);
+
+        let id = self.insert_workspace(windows, space, name, mode);
+        self.repair_activation(windows, space);
+        Ok(id)
+    }
+
+    /// `space` remembers `id`, to take it back when its ownership returns.
+    pub(crate) fn remember_on(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        id: VirtualWorkspaceId,
+    ) {
+        self.update_activation_or_default(windows, space, |activation| activation.remember(id));
+    }
+
+    // The topology's only writers: each tells the core, which the owner holds beside the window
+    // store and lends them (`WindowsMut::topology`). The core holds what each Space shows.
+
+    fn set_activation(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        activation: SpaceActivation,
+    ) {
+        windows.topology().activation(space, Some(activation.to_core()));
+    }
+
+    /// Changes what `space` shows, if it has an activation.
+    pub(crate) fn update_activation(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        change: impl FnOnce(&mut SpaceActivation),
+    ) {
+        if let Some(mut activation) = self.reading(windows.read()).activation(space) {
+            change(&mut activation);
+            self.set_activation(windows, space, activation);
+        }
+    }
+
+    fn update_activation_or_default(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        change: impl FnOnce(&mut SpaceActivation),
+    ) {
+        let mut activation = self.reading(windows.read()).activation(space).unwrap_or_default();
+        change(&mut activation);
+        self.set_activation(windows, space, activation);
+    }
+
+    fn clear_activation(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+    ) -> Option<SpaceActivation> {
+        let activation = self.reading(windows.read()).activation(space);
+        windows.topology().activation(space, None);
+        activation
+    }
+
+    fn update_all_activations(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        change: impl Fn(&mut SpaceActivation),
+    ) {
+        let spaces: Vec<_> =
+            self.reading(windows.read()).activations().map(|(space, _)| space).collect();
+        for space in spaces {
+            self.update_activation(windows, space, &change);
+        }
+    }
+
+    fn catalog_insert(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        workspace: VirtualWorkspace,
+    ) -> VirtualWorkspaceId {
+        let space = workspace.space;
+        let id = self.workspaces.insert(workspace);
+        windows.topology().created(id, space);
+        id
+    }
+
+    /// Takes a workspace out of the catalog; the core's shadow hands its windows and claims to
+    /// `successor` in the same step, and the window store's records follow.
+    fn catalog_remove(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        id: VirtualWorkspaceId,
+        successor: rift_core::workspaces::Successor<VirtualWorkspaceId>,
+    ) -> Option<VirtualWorkspace> {
+        let workspace = self.workspaces.remove(id)?;
+        windows.remove_workspace(id, successor);
+        Some(workspace)
+    }
+
+    /// Moves a workspace to another Space.
+    fn move_workspace(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        id: VirtualWorkspaceId,
+        space: SpaceId,
+    ) {
+        self[id].space = space;
+        windows.topology().moved(id, space);
+    }
+
+    /// Every disagreement between the store's workspaces (each with its Space) and the core's
+    /// catalog, both in id order (the catalog order is the core's alone). Empty unless a write
+    /// bypassed the helpers above.
+    pub(crate) fn workspace_divergences(
+        &self,
+        core: &rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>,
+    ) -> Vec<WorkspaceDivergence> {
+        let mut store: Vec<_> =
+            self.workspaces.iter().map(|(id, workspace)| (id, workspace.space)).collect();
+        let mut core = core.catalog().to_vec();
+        store.sort_unstable_by_key(|&(id, _)| id);
+        core.sort_unstable_by_key(|&(id, _)| id);
+        match store == core {
+            true => Vec::new(),
+            false => vec![WorkspaceDivergence::Catalog { store, core }],
+        }
+    }
+
+    /// Select a workspace and remember where navigation started, even when the
+    /// destination is already visible on another display.
+    pub(crate) fn set_active_workspace_from(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        source: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> bool {
+        let Some(target) = self.workspace_space(workspace_id) else {
+            return false;
+        };
+        let previous = self.reading(windows.read()).active_workspace(source);
+        if !self.set_active_workspace(windows, target, workspace_id) {
+            return false;
+        }
+        if self.effective_mode() == WorkspaceMode::Global && source != target {
+            self.update_activation(windows, target, |activation| {
+                if let SpaceActivation::Showing { previous: history, .. } = activation {
+                    *history = previous;
+                }
+            });
+        }
+        true
+    }
+
+    pub(crate) fn set_active_workspace(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> bool {
+        trace_misc("set_active_workspace", || {
+            if self.workspace_space(workspace_id) != Some(space) {
+                error!(
+                    ?workspace_id,
+                    ?space,
+                    "Attempted to activate a missing or foreign workspace"
+                );
+                return false;
+            }
+            self.update_activation_or_default(windows, space, |activation| {
+                activation.activate(workspace_id)
+            });
+            true
+        })
+    }
+
+    pub(crate) fn assign_window_to_workspace(
+        &mut self,
+        window_store: &mut WindowsMut<'_>,
+        space: SpaceId,
+        window_id: WindowId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> bool {
+        trace_misc("assign_window_to_workspace", || {
+            if !self.workspaces.contains_key(workspace_id)
+                || self.workspaces.get(workspace_id).map(|w| w.space) != Some(space)
+            {
+                error!(
+                    "Attempted to assign window to non-existent/foreign workspace {:?} for space {:?}",
+                    workspace_id, space
+                );
+                return false;
+            }
+
+            let previous_assignment = window_store.read().workspace_for_window(window_id);
+            window_store.assign_window_to_workspace(window_id, workspace_id);
+            if let Some(previous_assignment) = previous_assignment
+                && previous_assignment != workspace_id
+                && let Some(previous_workspace) = self.workspaces.get_mut(previous_assignment)
+            {
+                // Membership is single-valued: the window leaves the old workspace's tree here,
+                // where its assignment changes, not later from wherever removal looks.
+                previous_workspace.layout_system.update(
+                    crate::layout_engine::systems::WindowChange::RemoveAndRebalance(window_id),
+                );
+                if previous_workspace.last_focused() == Some(window_id) {
+                    previous_workspace.set_last_focused(None);
+                }
+            }
+            true
+        })
+    }
+
+    pub(crate) fn remove_window(&mut self, window_store: &mut WindowsMut<'_>, window_id: WindowId) {
+        let _ = window_store.remove_window_assignment(window_id);
+        window_store.clear_rule_floating(window_id);
     }
 
     /// Resolve an index in the command Space, then other visible Spaces,
@@ -2499,16 +2641,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// `space`'s workspaces, with their names, if the Space is initialised; a query never
-    /// initialises one (the events that bring a Space do, through
-    /// [`Self::ensure_space_initialized`]).
-    pub fn list_workspaces(&self, space: SpaceId) -> Listing {
-        match self.initialized(space) {
-            true => Listing::Known(self.existing_workspaces(space)),
-            false => Listing::NotYetKnown,
-        }
-    }
-
     /// Tests: `space`'s workspaces once the events that bring a Space have initialised it (as
     /// its exposure or a window placed on it does).
     #[cfg(test)]
@@ -2518,54 +2650,15 @@ impl WorkspaceStore {
         space: SpaceId,
     ) -> Vec<(VirtualWorkspaceId, String)> {
         self.ensure_space_initialized(windows, space);
-        match self.list_workspaces(space) {
+        match self.reading(windows.read()).list_workspaces(space) {
             Listing::Known(workspaces) => workspaces,
             Listing::NotYetKnown => panic!("{space:?} is initialised, so it is known"),
         }
     }
 
-    /// Whether [`Self::ensure_space_initialized`] would leave `space` as it is: it shows a
-    /// workspace, or (in global mode, with workspaces elsewhere to show) it shows nothing and
-    /// owns none.
-    pub(crate) fn initialized(&self, space: SpaceId) -> bool {
-        match self.activations.get(&space) {
-            Some(SpaceActivation::Showing { .. }) => true,
-            // Repair keeps a vacant Space's memory as it is.
-            Some(SpaceActivation::Vacant { .. }) => {
-                self.workspaces_on(space).next().is_none()
-                    && self.effective_mode() == WorkspaceMode::Global
-                    && self.scope_ids(space).next().is_some()
-            }
-            None => false,
-        }
-    }
-
-    /// Read workspace topology without creating missing state. Validation and restore planning
-    /// must use this accessor so a failed transaction cannot initialize part of the live engine.
-    pub(crate) fn existing_workspaces(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
-        self.workspaces_on(space)
-            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
-            .collect()
-    }
-
-    /// Workspace IDs are kept in canonical ordinal order, including when loading older files.
-    pub(crate) fn workspace_ids(&self, space: SpaceId) -> Vec<VirtualWorkspaceId> {
-        self.workspaces_on(space).collect()
-    }
-
-    pub(crate) fn workspaces_on(
-        &self,
-        space: SpaceId,
-    ) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
-        self.workspaces
-            .order()
-            .iter()
-            .copied()
-            .filter(move |id| self[*id].space == space)
-    }
-
     pub fn rename_workspace(
         &mut self,
+        catalog: &[(VirtualWorkspaceId, SpaceId)],
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         new_name: String,
@@ -2574,7 +2667,9 @@ impl WorkspaceStore {
             return false;
         }
         if new_name.is_empty()
-            || self.scope_ids(space).any(|id| id != workspace_id && self[id].name == new_name)
+            || self
+                .scope_in(catalog, space)
+                .any(|id| id != workspace_id && self[id].name == new_name)
         {
             return false;
         }
@@ -2647,7 +2742,9 @@ impl WorkspaceStore {
             });
         let selected = workspace
             .as_ref()
-            .and_then(|selector| self.resolve_workspace(context, selector))
+            .and_then(|selector| {
+                self.reading(window_store.read()).resolve_workspace(context, selector)
+            })
             .map(|target| target.id);
         if workspace.is_some() && selected.is_none() {
             warn!(
@@ -2662,7 +2759,7 @@ impl WorkspaceStore {
             selected.or(existing_assignment)
         }
         .map(Ok)
-        .unwrap_or_else(|| self.get_default_workspace(context))?;
+        .unwrap_or_else(|| self.reading(window_store.read()).get_default_workspace(context))?;
         let prior_assignment = window_store.read().workspace_for_window(window_id);
         let workspace_changed = prior_assignment != Some(workspace_id);
         if !self.assign_window_to_workspace(
@@ -2713,30 +2810,6 @@ impl WorkspaceStore {
             },
         );
         self.apply_app_rule_decision(window_store, window_id, space, decision, false)
-    }
-
-    /// The workspace a window placed on `context`'s Space goes to without a rule. The caller
-    /// (placement) initialised the Space.
-    fn get_default_workspace<'a>(
-        &self,
-        context: impl Into<WorkspaceContext<'a>>,
-    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        let context = context.into();
-        let space = context.space;
-        self.active_workspace(space)
-            .or_else(|| {
-                (self.effective_mode() == WorkspaceMode::Global)
-                    .then(|| self.scope_ids(space).find(|id| self.eligible(context, *id)))
-                    .flatten()
-            })
-            .ok_or(WorkspaceError::NoWorkspacesAvailable)
-    }
-
-    pub(crate) fn window_counts<'a>(
-        &'a self,
-        windows: Windows<'a>,
-    ) -> impl Iterator<Item = (VirtualWorkspaceId, usize)> + 'a {
-        self.catalog().map(move |id| (id, windows.workspace_window_count(id)))
     }
 }
 
@@ -2805,10 +2878,10 @@ mod tests {
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let mut windows = OwnedWindows::default();
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a], 1, |_| None);
-        let original = store.workspace_ids(a);
+        let original = store.reading(windows.view()).workspace_ids(a);
         store.set_active_workspace(&mut windows.view_mut(), a, original[1]);
         store.ensure_visible_spaces(&mut windows.view_mut(), &[b], 1, |_| None);
-        let independent = store.workspace_ids(b);
+        let independent = store.reading(windows.view()).workspace_ids(b);
         assert_eq!(independent.len(), 2);
         let context = WorkspaceContext { space: b, visible: &[b] };
         let window = WindowId::new(80, 1);
@@ -2824,11 +2897,16 @@ mod tests {
         for (index, &id) in independent.iter().enumerate() {
             assert_eq!(store[id].name, settings.workspace_names[index]);
             assert_eq!(
-                store.resolve_workspace(context, &WorkspaceSelector::Index(index)).unwrap().id,
+                store
+                    .reading(windows.view())
+                    .resolve_workspace(context, &WorkspaceSelector::Index(index))
+                    .unwrap()
+                    .id,
                 id
             );
             assert_eq!(
                 store
+                    .reading(windows.view())
                     .resolve_workspace(
                         context,
                         &WorkspaceSelector::Name(settings.workspace_names[index].clone())
@@ -2838,7 +2916,7 @@ mod tests {
                 id
             );
         }
-        let plan = store.plan_settings(&settings).unwrap();
+        let plan = store.reading(windows.view()).plan_settings(&settings).unwrap();
         store.apply_settings(
             &mut windows.view_mut(),
             &settings,
@@ -2852,7 +2930,7 @@ mod tests {
             .checked()
             .unwrap()
             .store;
-        let plan = loaded.plan_settings_names(&settings, true).unwrap();
+        let plan = loaded.reading(windows.view()).plan_settings_names(&settings, true).unwrap();
         loaded.apply_settings(
             &mut windows.view_mut(),
             &settings,
@@ -2862,30 +2940,41 @@ mod tests {
         assert_eq!(loaded[independent[0]].name, "Code");
         assert_eq!(loaded[original[0]].name, "Code");
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a], 1, |_| None);
-        assert_eq!(store.workspace_ids(a), original);
-        assert_eq!(store.active_workspace(a), Some(original[1]));
+        assert_eq!(store.reading(windows.view()).workspace_ids(a), original);
+        assert_eq!(
+            store.reading(windows.view()).active_workspace(a),
+            Some(original[1])
+        );
         assert_eq!(windows.view().workspace_for_window(window), Some(assigned));
         // Connecting a display restores shared navigation without replacing
         // either native desktop's workspace identities.
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a, b], 2, |_| None);
         let shared = WorkspaceContext { space: a, visible: &[a, b] };
-        assert_eq!(store.workspace_view(shared).count(), 4);
+        assert_eq!(store.reading(windows.view()).workspace_view(shared).count(), 4);
         assert_eq!(
-            store.resolve_workspace(shared, &WorkspaceSelector::Index(2)).unwrap().id,
+            store
+                .reading(windows.view())
+                .resolve_workspace(shared, &WorkspaceSelector::Index(2))
+                .unwrap()
+                .id,
             independent[0]
         );
-        store.plan_settings(&settings).unwrap();
+        store.reading(windows.view()).plan_settings(&settings).unwrap();
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a, other], 2, |_| None);
         assert_eq!(
             store
+                .reading(windows.view())
                 .workspace_view(WorkspaceContext { space: a, visible: &[a, other] })
                 .count(),
             2
         );
         store.ensure_visible_spaces(&mut windows.view_mut(), &[b], 1, |_| None);
-        assert_eq!(store.workspace_ids(b), independent);
-        assert_eq!(store.workspace_index(b, assigned), Some(0));
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(store.reading(windows.view()).workspace_ids(b), independent);
+        assert_eq!(
+            store.reading(windows.view()).workspace_index(b, assigned),
+            Some(0)
+        );
+        store.reading(windows.view()).validate_persisted_topology().unwrap();
     }
 
     #[test]
@@ -2901,11 +2990,11 @@ mod tests {
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let original = store.create_workspace(&mut windows.view_mut(), a, None).unwrap();
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a, b], 2, |_| None);
-        assert_eq!(store.active_workspace(b), None);
-        while store.catalog().count() < MAX_WORKSPACES {
+        assert_eq!(store.reading(windows.view()).active_workspace(b), None);
+        while store.reading(windows.view()).catalog().count() < MAX_WORKSPACES {
             store.create_workspace(&mut windows.view_mut(), b, None).unwrap();
         }
-        let catalog: Vec<_> = store.catalog().collect();
+        let catalog: Vec<_> = store.reading(windows.view()).catalog().collect();
         assert!(store.transfer_workspace(
             &mut windows.view_mut(),
             original,
@@ -2913,11 +3002,11 @@ mod tests {
             None,
             WorkspaceTransferReason::Explicit
         ));
-        assert_eq!(store.active_workspace(a), None);
-        assert_eq!(store.active_workspace(b), Some(original));
+        assert_eq!(store.reading(windows.view()).active_workspace(a), None);
+        assert_eq!(store.reading(windows.view()).active_workspace(b), Some(original));
         // Rediscovery must retain a non-default assignment even on another display.
         let assigned = catalog[1];
-        let mut windows = OwnedWindows::joining(&store.topology());
+        let mut windows = OwnedWindows::joining(&store.reading(windows.view()).topology());
         let window = WindowId::new(90, 1);
         store.assign_window_to_workspace(&mut windows.view_mut(), b, window, assigned);
         assert_eq!(
@@ -2931,8 +3020,11 @@ mod tests {
             .workspace_id,
             assigned
         );
-        assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(
+            store.reading(windows.view()).catalog().collect::<Vec<_>>(),
+            catalog
+        );
+        store.reading(windows.view()).validate_persisted_topology().unwrap();
     }
 
     #[test]
@@ -2969,12 +3061,12 @@ mod tests {
             // Initialize separately so both modes have two workspaces per native Space.
             for space in [a, b, dormant] {
                 store.ensure_space_initialized(&mut windows.view_mut(), space);
-                while store.workspace_ids(space).len() < 2 {
+                while store.reading(windows.view()).workspace_ids(space).len() < 2 {
                     store.create_workspace(&mut windows.view_mut(), space, None).unwrap();
                 }
             }
-            let ids: Vec<_> = store.catalog().collect();
-            let mut windows = OwnedWindows::joining(&store.topology());
+            let ids: Vec<_> = store.reading(windows.view()).catalog().collect();
+            let mut windows = OwnedWindows::joining(&store.reading(windows.view()).topology());
             windows.view_mut().assign_window_to_workspace(WindowId::new(90, 1), ids[3]);
             windows.view_mut().assign_window_to_workspace(WindowId::new(90, 2), ids[4]);
             let context = WorkspaceContext {
@@ -2982,7 +3074,12 @@ mod tests {
                 visible: if both { &[a, b] } else { &[a] },
             };
             assert_eq!(
-                store.step_workspace(windows.view(), context, ids[current], Some(skip), direction),
+                store.reading(windows.view()).step_workspace(
+                    context,
+                    ids[current],
+                    Some(skip),
+                    direction
+                ),
                 expected.map(|index| ids[index]),
                 "{mode:?} {current} {direction:?}"
             );
@@ -3020,7 +3117,7 @@ mod tests {
             store.ensure_visible_spaces(&mut windows.view_mut(), &[a, b], 2, |_| {
                 pin_all.then_some(a)
             });
-            let catalog: Vec<_> = store.catalog().collect();
+            let catalog: Vec<_> = store.reading(windows.view()).catalog().collect();
             assert_eq!(catalog.len(), count);
             for (index, &id) in catalog.iter().enumerate() {
                 let boundary = if pin_all || count == 1 {
@@ -3031,10 +3128,18 @@ mod tests {
                 assert_eq!(store[id].space, if index < boundary { a } else { b });
             }
             store.ensure_visible_spaces(&mut windows.view_mut(), &[a, b, c], 3, |_| None);
-            assert_eq!(store.active_workspace(c), None);
-            assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
-            let placement: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
-            let active = [a, b, c].map(|space| store.active_workspace(space));
+            assert_eq!(store.reading(windows.view()).active_workspace(c), None);
+            assert_eq!(
+                store.reading(windows.view()).catalog().collect::<Vec<_>>(),
+                catalog
+            );
+            let placement: Vec<_> = store
+                .reading(windows.view())
+                .catalog()
+                .map(|id| (id, store[id].space))
+                .collect();
+            let active =
+                [a, b, c].map(|space| store.reading(windows.view()).active_workspace(space));
             // Display loss, return, and physical reordering must not run the initial
             // allocator again. Departure fallback/restoration is owned by the Reactor.
             for (visible, display_count) in [
@@ -3050,14 +3155,22 @@ mod tests {
                     |_| pin_all.then_some(a),
                 );
                 assert_eq!(
-                    store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
+                    store
+                        .reading(windows.view())
+                        .catalog()
+                        .map(|id| (id, store[id].space))
+                        .collect::<Vec<_>>(),
                     placement,
                     "exposure must preserve catalog order and ownership"
                 );
-                assert_eq!([a, b, c].map(|space| store.active_workspace(space)), active);
+                assert_eq!(
+                    [a, b, c].map(|space| store.reading(windows.view()).active_workspace(space)),
+                    active
+                );
             }
-            store.validate_persisted_topology().unwrap();
+            store.reading(windows.view()).validate_persisted_topology().unwrap();
             store
+                .reading(windows.view())
                 .plan_settings(&settings)
                 .expect("the existing catalog must allow configuration reload");
         }
@@ -3109,7 +3222,7 @@ mod tests {
             Some("fallback"),
             WorkspaceTransferReason::DisplayDeparture,
         );
-        let catalog: Vec<_> = store.catalog().collect();
+        let catalog: Vec<_> = store.reading(windows.view()).catalog().collect();
         store.remap_space(&mut windows.view_mut(), old, new);
         assert_eq!(store[id].home.space(), Some(new));
         assert_eq!(store[id].space, fallback);
@@ -3120,8 +3233,11 @@ mod tests {
             Some("home"),
             WorkspaceTransferReason::Restoration,
         );
-        assert_eq!(store.active_workspace(new), Some(id));
-        assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
+        assert_eq!(store.reading(windows.view()).active_workspace(new), Some(id));
+        assert_eq!(
+            store.reading(windows.view()).catalog().collect::<Vec<_>>(),
+            catalog
+        );
     }
 
     #[test]
@@ -3135,11 +3251,18 @@ mod tests {
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a, b], 2, |_| None);
-        let ids: Vec<_> = store.catalog().collect();
-        assert!(!store.rename_workspace(b, ids[1], store[ids[0]].name.clone()));
+        let ids: Vec<_> = store.reading(windows.view()).catalog().collect();
+        assert!(!store.rename_workspace(
+            windows.view().core.catalog(),
+            b,
+            ids[1],
+            store[ids[0]].name.clone()
+        ));
         let context = WorkspaceContext { space: a, visible: &[a, b] };
         assert_eq!(
-            store.resolve_workspace(context, &WorkspaceSelector::Name(store[ids[0]].name.clone())),
+            store
+                .reading(windows.view())
+                .resolve_workspace(context, &WorkspaceSelector::Name(store[ids[0]].name.clone())),
             Some(WorkspaceTarget { id: ids[0], space: a })
         );
         store.ensure_space_initialized(&mut windows.view_mut(), dormant);
@@ -3149,18 +3272,26 @@ mod tests {
             ..context
         };
         assert_eq!(
-            store.resolve_workspace(switched, &WorkspaceSelector::Index(0)),
+            store
+                .reading(windows.view())
+                .resolve_workspace(switched, &WorkspaceSelector::Index(0)),
             None
         );
         assert_eq!(
-            store.resolve_workspace(switched, &WorkspaceSelector::Index(1)),
+            store
+                .reading(windows.view())
+                .resolve_workspace(switched, &WorkspaceSelector::Index(1)),
             Some(WorkspaceTarget { id: ids[1], space: b })
         );
         assert_eq!(
-            store.workspace_view(switched).map(|(index, _)| index).collect::<Vec<_>>(),
+            store
+                .reading(windows.view())
+                .workspace_view(switched)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
             [1]
         );
-        assert_eq!(store.active_workspace(a), Some(ids[0]));
+        assert_eq!(store.reading(windows.view()).active_workspace(a), Some(ids[0]));
     }
 
     #[test]
@@ -3199,8 +3330,8 @@ mod tests {
         assert_eq!(store[id].home.space(), Some(target));
         assert_eq!(store[id].home.display(), Some("builtin"));
         assert_eq!(store[id].home.placed_by(), Some(PlacedBy::User));
-        assert_eq!(store.active_workspace(target), Some(id));
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(store.reading(windows.view()).active_workspace(target), Some(id));
+        store.reading(windows.view()).validate_persisted_topology().unwrap();
     }
 
     #[test]
@@ -3211,7 +3342,7 @@ mod tests {
         let space = SpaceId::new(1);
         assert_eq!(
             manager.listed_after_init(&mut windows.view_mut(), space).len(),
-            manager.workspace_ids(space).len()
+            manager.reading(windows.view()).workspace_ids(space).len()
         );
 
         let ws_id = manager
@@ -3234,7 +3365,12 @@ mod tests {
         let generated = manager.create_workspace(&mut windows.view_mut(), space, None).unwrap();
         let name = manager[generated].name.clone();
         assert_ne!(name, "Workspace 1");
-        assert!(!manager.rename_workspace(space, generated, "Workspace 1".into()));
+        assert!(!manager.rename_workspace(
+            windows.view().core.catalog(),
+            space,
+            generated,
+            "Workspace 1".into()
+        ));
         assert_eq!(manager[generated].name, name);
     }
 
@@ -3605,7 +3741,7 @@ mod tests {
         ));
 
         assert_eq!(
-            manager.workspace_at_window_ordinal(
+            manager.reading(window_store.view()).workspace_at_window_ordinal(
                 window_store.view(),
                 destination_space,
                 moved_window
@@ -3687,10 +3823,16 @@ mod tests {
             .unwrap();
 
         assert!(manager.set_active_workspace(&mut windows.view_mut(), space, ws1_id));
-        assert_eq!(manager.active_workspace(space), Some(ws1_id));
+        assert_eq!(
+            manager.reading(windows.view()).active_workspace(space),
+            Some(ws1_id)
+        );
 
         assert!(manager.set_active_workspace(&mut windows.view_mut(), space, ws2_id));
-        assert_eq!(manager.active_workspace(space), Some(ws2_id));
+        assert_eq!(
+            manager.reading(windows.view()).active_workspace(space),
+            Some(ws2_id)
+        );
     }
 
     #[test]
@@ -3703,7 +3845,7 @@ mod tests {
             space: SpaceId,
         ) -> bool {
             let window_workspace = wm.workspace_for_window(window_store, space, window_id);
-            let active_workspace = wm.active_workspace(space);
+            let active_workspace = wm.reading(window_store).active_workspace(space);
 
             match (window_workspace, active_workspace) {
                 (Some(window_ws), Some(active_ws)) => window_ws == active_ws,
@@ -3746,7 +3888,10 @@ mod tests {
         let workspaces = manager.listed_after_init(&mut windows.view_mut(), space);
         let expected_ws = workspaces.get(settings.default_workspace).unwrap().0;
 
-        assert_eq!(manager.active_workspace(space), Some(expected_ws));
+        assert_eq!(
+            manager.reading(windows.view()).active_workspace(space),
+            Some(expected_ws)
+        );
     }
 
     #[test]
@@ -3822,14 +3967,14 @@ mod tests {
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a], 2, |_| None);
-        let ids: Vec<_> = store.catalog().collect();
-        assert_eq!(store.workspace_ids(a), ids);
+        let ids: Vec<_> = store.reading(windows.view()).catalog().collect();
+        assert_eq!(store.reading(windows.view()).workspace_ids(a), ids);
         assert!(ids.iter().all(|&id| store[id].home.placed_by() == Some(PlacedBy::Automatic)));
         let none = HashSet::default();
-        assert_eq!(store.plan_display_balance(&[a, b], &none), [
-            (ids[2], b),
-            (ids[3], b)
-        ]);
+        assert_eq!(
+            store.reading(windows.view()).plan_display_balance(&[a, b], &none),
+            [(ids[2], b), (ids[3], b)]
+        );
         // Choosing the display a workspace is already on marks the home chosen, and balancing
         // then leaves it where it is.
         assert!(store.transfer_workspace(
@@ -3847,11 +3992,11 @@ mod tests {
             None,
             WorkspaceTransferReason::Explicit
         ));
-        assert_eq!(store.plan_display_balance(&[a, b], &none), [
-            (ids[1], b),
-            (ids[2], b)
-        ]);
-        assert!(store.plan_display_balance(&[a], &none).is_empty());
+        assert_eq!(
+            store.reading(windows.view()).plan_display_balance(&[a, b], &none),
+            [(ids[1], b), (ids[2], b)]
+        );
+        assert!(store.reading(windows.view()).plan_display_balance(&[a], &none).is_empty());
         // An arriving display becomes the home; who chose the old home still stands.
         assert!(store.transfer_workspace(
             &mut windows.view_mut(),
@@ -3865,7 +4010,7 @@ mod tests {
             display: "external".into(),
             by: PlacedBy::Automatic,
         });
-        assert_eq!(store.active_workspace(b), Some(ids[2]));
+        assert_eq!(store.reading(windows.view()).active_workspace(b), Some(ids[2]));
         assert!(store.transfer_workspace(
             &mut windows.view_mut(),
             ids[3],
@@ -3874,8 +4019,8 @@ mod tests {
             WorkspaceTransferReason::DisplayArrival
         ));
         assert_eq!(store[ids[3]].home.placed_by(), Some(PlacedBy::User));
-        assert_eq!(store.active_workspace(b), Some(ids[2]));
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(store.reading(windows.view()).active_workspace(b), Some(ids[2]));
+        store.reading(windows.view()).validate_persisted_topology().unwrap();
     }
 
     #[test]
@@ -3917,7 +4062,7 @@ mod tests {
         let [first, second] = [on_source[0], on_source[1]];
         store.set_active_workspace(&mut windows.view_mut(), source, first);
         store.set_active_workspace(&mut windows.view_mut(), source, second);
-        assert_eq!(store.last_workspace(source), Some(first));
+        assert_eq!(store.reading(windows.view()).last_workspace(source), Some(first));
         for id in [second, first] {
             store.transfer_workspace(
                 &mut windows.view_mut(),
@@ -3929,10 +4074,10 @@ mod tests {
         }
         // Nothing shown, the departed workspace remembered, no history.
         assert_eq!(
-            store.active_workspace_per_space()[&source],
+            store.reading(windows.view()).active_workspace_per_space()[&source],
             SpaceActivation::Vacant { remembered: Some(second) }
         );
-        assert_eq!(store.last_workspace(source), None);
+        assert_eq!(store.reading(windows.view()).last_workspace(source), None);
         // The history would not have survived the return: showing a workspace again makes the
         // one shown until then (none) the previous one.
         store.transfer_workspace(
@@ -3943,7 +4088,7 @@ mod tests {
             WorkspaceTransferReason::Restoration,
         );
         assert_eq!(
-            store.active_workspace_per_space()[&source],
+            store.reading(windows.view()).active_workspace_per_space()[&source],
             SpaceActivation::Showing {
                 current: second,
                 previous: None,
@@ -3975,7 +4120,7 @@ mod tests {
             WorkspaceTransferReason::DisplayDeparture
         ));
         assert_eq!(
-            store.active_workspace_per_space()[&source],
+            store.reading(windows.view()).active_workspace_per_space()[&source],
             SpaceActivation::Showing {
                 current: fallback,
                 previous: None,
@@ -3990,9 +4135,15 @@ mod tests {
             Some("home"),
             WorkspaceTransferReason::Restoration
         ));
-        assert_eq!(store.active_workspace(source), Some(shown));
-        assert_eq!(store.active_workspace_per_space()[&source].remembered(), None);
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(
+            store.reading(windows.view()).active_workspace(source),
+            Some(shown)
+        );
+        assert_eq!(
+            store.reading(windows.view()).active_workspace_per_space()[&source].remembered(),
+            None
+        );
+        store.reading(windows.view()).validate_persisted_topology().unwrap();
     }
 
     /// Collects the messages of the events logged while `run` runs on this thread.
@@ -4100,7 +4251,7 @@ mod tests {
         let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
         let LoadedWorkspaces { store, topology } = load_store(saved);
         let windows = OwnedWindows::joining(&topology);
-        assert_eq!(store.workspaces.order().len(), 4);
+        assert_eq!(store.reading(windows.view()).catalog().count(), 4);
         assert_eq!(store.workspaces.len(), 4);
         // Unchanged but for upstream's `display_manually_selected`, written on every workspace.
         assert_eq!(
@@ -4131,7 +4282,8 @@ mod tests {
             for name in map {
                 copy.insert(workspace(&name));
             }
-            Catalog::parse(copy, order).map(|catalog| catalog.order().to_vec())
+            Catalog::parse(copy, order)
+                .map(|(_, order)| order.into_iter().map(|(id, _)| id).collect::<Vec<_>>())
         };
         assert_eq!(parse(vec![b, a]), Ok(vec![b, a]));
         assert_eq!(parse(vec![a, unknown, b]), Err(CatalogError::Unknown(unknown)));
@@ -4140,14 +4292,12 @@ mod tests {
             parse(vec![a]),
             Err(CatalogError::Unlisted { id: b, space: SpaceId::new(1) })
         );
-        // Changes keep the order whole.
-        let mut catalog = Catalog::parse(map, vec![a, b]).unwrap();
+        // The order is the core's now; the catalog keeps each workspace by id.
+        let (mut catalog, _) = Catalog::parse(map, vec![a, b]).unwrap();
         let c = catalog.insert(workspace("c"));
-        assert_eq!(catalog.order(), &[a, b, c]);
         assert_eq!(catalog.remove(b).map(|w| w.name), Some("b".into()));
-        assert_eq!(catalog.order(), &[a, c]);
         assert!(catalog.remove(b).is_none());
-        assert_eq!(catalog.order(), &[a, c]);
+        assert_eq!(catalog.keys().collect::<Vec<_>>(), vec![a, c]);
     }
 
     #[test]
@@ -4157,6 +4307,22 @@ mod tests {
         assert_ne!(broken, saved);
         let error = ron::from_str::<LoadedWorkspaces>(&broken).err().unwrap().to_string();
         assert!(error.contains("is not indexed"), "{error}");
+    }
+
+    /// Duplicate names in a saved store are told apart in catalog order (the saved `order`, not
+    /// the slots'): the first of them keeps its name.
+    #[test]
+    fn duplicate_saved_names_are_told_apart_in_catalog_order() {
+        let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
+        let saved = saved.replace(r#""Two",space:(3)"#, r#""One",space:(3)"#).replace(
+            "order:[(idx:1,version:1),(idx:2,version:1)",
+            "order:[(idx:2,version:1),(idx:1,version:1)",
+        );
+        let LoadedWorkspaces { mut store, topology } = load_store(&saved);
+        let (second, first) = (topology.catalog()[1].0, topology.catalog()[0].0);
+        store.normalize_loaded_names(&topology);
+        assert_eq!(store[first].name, "One");
+        assert_eq!(store[second].name, "One (2)");
     }
 
     /// A per-display store on Spaces 71, 72, 73 drawn from `seed`: one to four workspaces on
@@ -4176,7 +4342,7 @@ mod tests {
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let mut windows = OwnedWindows::joining(&store.topology());
+        let mut windows = OwnedWindows::default();
         let spaces = [SpaceId::new(71), SpaceId::new(72), SpaceId::new(73)];
         for space in spaces {
             store.ensure_space_initialized(&mut windows.view_mut(), space);
@@ -4184,12 +4350,12 @@ mod tests {
                 store.create_workspace(&mut windows.view_mut(), space, None).unwrap();
             }
         }
-        let all: Vec<_> = store.catalog().collect();
+        let all: Vec<_> = store.reading(windows.view()).catalog().collect();
         let any = |draw: &mut dyn FnMut(u64) -> u64| {
             (draw(3) > 0).then(|| all[draw(all.len() as u64) as usize])
         };
         for space in spaces {
-            let own = store.workspace_ids(space);
+            let own = store.reading(windows.view()).workspace_ids(space);
             let activation = if draw(5) == 0 {
                 SpaceActivation::Vacant { remembered: any(&mut draw) }
             } else {
@@ -4212,21 +4378,18 @@ mod tests {
 
     /// The catalog (each workspace with its Space, in order) and every Space's activation.
     fn topology_of(
-        store: &WorkspaceStore,
+        topology: &SavedTopology,
     ) -> (
         Vec<(VirtualWorkspaceId, SpaceId)>,
         Vec<(SpaceId, SpaceActivation)>,
     ) {
-        let mut activations: Vec<_> = store
-            .activations
+        let mut activations: Vec<_> = topology
+            .activations()
             .iter()
             .map(|(space, activation)| (*space, *activation))
             .collect();
         activations.sort_by_key(|(space, _)| *space);
-        (
-            store.catalog().map(|id| (id, store[id].space)).collect(),
-            activations,
-        )
+        (topology.catalog().to_vec(), activations)
     }
 
     /// `remove_space` now clears what the Space shows and drops every other Space's history and
@@ -4239,24 +4402,26 @@ mod tests {
     fn removing_a_space_clears_it_first_and_ends_where_removing_first_did() {
         for seed in 1..=500_u64 {
             let (mut store, mut windows, spaces) = drawn_store(seed);
-            let (mut before, _, _) = drawn_store(seed);
             let space = spaces[(seed % 3) as usize];
+            let mut before = store.reading(windows.view()).topology();
 
             let removed =
                 store.remove_space(&mut windows.view_mut(), space, |_| Successor::Unassign);
 
-            // The order before W4b, on the store's own state.
+            // The order before W4b: the workspaces removed first, then the activations.
             let removed_before = before.workspace_ids(space);
-            for id in &removed_before {
-                before.workspaces.remove(*id);
-            }
+            before.catalog.retain(|(id, _)| !removed_before.contains(id));
             before.activations.remove(&space);
             for activation in before.activations.values_mut() {
                 activation.retain(|id| !removed_before.contains(&id));
             }
 
             assert_eq!(removed, removed_before, "seed {seed}");
-            assert_eq!(topology_of(&store), topology_of(&before), "seed {seed}");
+            assert_eq!(
+                topology_of(&store.reading(windows.view()).topology()),
+                topology_of(&before),
+                "seed {seed}"
+            );
             assert_eq!(
                 store.workspace_divergences(windows.view().core_workspaces()),
                 vec![]
@@ -4266,15 +4431,19 @@ mod tests {
         for seed in 1..=500_u64 {
             let (mut store, mut windows, spaces) = drawn_store(seed);
             let (old, new) = (spaces[0], spaces[1 + (seed % 2) as usize]);
-            let heirs = store.workspace_ids(old);
-            let deleted = store.workspace_ids(new);
+            let heirs = store.reading(windows.view()).workspace_ids(old);
+            let deleted = store.reading(windows.view()).workspace_ids(new);
             let placed: Vec<_> =
                 deleted.iter().map(|&id| (id, windows.view().workspace_windows(id))).collect();
 
             store.remap_space(&mut windows.view_mut(), old, new);
 
             // Before W4b the heirs were read off the new Space after the move.
-            assert_eq!(store.workspace_ids(new), heirs, "seed {seed}");
+            assert_eq!(
+                store.reading(windows.view()).workspace_ids(new),
+                heirs,
+                "seed {seed}"
+            );
             for (ordinal, (_, placed)) in placed.iter().enumerate() {
                 let heir = heirs.get(ordinal).or_else(|| heirs.last()).copied();
                 for &window in placed {
@@ -4315,7 +4484,7 @@ mod tests {
                 ..Default::default()
             };
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-            let mut windows = OwnedWindows::joining(&store.topology());
+            let mut windows = OwnedWindows::default();
             for _ in 0..8 {
                 let visible: Vec<SpaceId> =
                     spaces.iter().copied().filter(|_| draw(2) == 0).collect();
@@ -4331,11 +4500,14 @@ mod tests {
                 );
                 for &space in &visible {
                     assert!(
-                        store.initialized(space),
+                        store.reading(windows.view()).initialized(space),
                         "case {case}: {space:?} exposed among {visible:?} is not initialised: {:?}",
-                        store.activations.get(&space),
+                        store.reading(windows.view()).activation(space),
                     );
-                    assert!(matches!(store.list_workspaces(space), Listing::Known(_)));
+                    assert!(matches!(
+                        store.reading(windows.view()).list_workspaces(space),
+                        Listing::Known(_)
+                    ));
                     exposures += 1;
                 }
             }
@@ -4358,22 +4530,27 @@ mod tests {
                 ..Default::default()
             };
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-            let mut windows = OwnedWindows::joining(&store.topology());
+            let mut windows = OwnedWindows::default();
             store.ensure_visible_spaces(&mut windows.view_mut(), &[shown, vacant], 2, |_| None);
             (store, windows)
         };
         let saved_after_remap = |queried: bool| {
             let (mut store, mut windows) = exposed();
             if queried {
-                assert_eq!(store.list_workspaces(vacant), Listing::Known(vec![]));
+                assert_eq!(
+                    store.reading(windows.view()).list_workspaces(vacant),
+                    Listing::Known(vec![])
+                );
             }
             store.remap_space(&mut windows.view_mut(), vacant, renumbered);
             assert_eq!(
-                store.active_workspace_per_space().get(&renumbered),
+                store.reading(windows.view()).active_workspace_per_space().get(&renumbered),
                 Some(&SpaceActivation::Vacant { remembered: None }),
                 "queried first: {queried}"
             );
-            assert!(!store.active_workspace_per_space().contains_key(&vacant));
+            assert!(
+                !store.reading(windows.view()).active_workspace_per_space().contains_key(&vacant)
+            );
             assert_eq!(
                 store.workspace_divergences(windows.view().core_workspaces()),
                 vec![]
@@ -4391,7 +4568,7 @@ mod tests {
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let mut windows = OwnedWindows::joining(&store.topology());
+        let mut windows = OwnedWindows::default();
         let (a, b) = (SpaceId::new(61), SpaceId::new(62));
         let ids: Vec<_> = store
             .listed_after_init(&mut windows.view_mut(), a)
@@ -4441,27 +4618,35 @@ mod tests {
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let space = SpaceId::new(2);
         let ids = store.listed_after_init(&mut windows.view_mut(), space);
-        let mut reversed = store.workspace_ids(space);
+        let mut reversed = store.reading(windows.view()).workspace_ids(space);
         reversed.reverse();
         let serialized = save_store(&store, &windows);
         let current = format!(
             "order:{}",
-            ron::ser::to_string(store.workspaces.order()).unwrap()
+            ron::ser::to_string(&store.reading(windows.view()).catalog().collect::<Vec<_>>())
+                .unwrap()
         );
         let legacy = format!(
             "workspaces_by_space:{}",
             ron::ser::to_string(&HashMap::from_iter([(space, reversed.clone())])).unwrap()
         );
-        let restored = load_store(&serialized.replace(&current, &legacy)).store;
-        assert_eq!(restored.workspace_ids(space), reversed);
-        assert_eq!(restored.catalog().collect::<Vec<_>>(), reversed);
+        let LoadedWorkspaces { store: restored, topology } =
+            load_store(&serialized.replace(&current, &legacy));
+        let restored_windows = OwnedWindows::joining(&topology);
+        assert_eq!(
+            restored.reading(restored_windows.view()).workspace_ids(space),
+            reversed
+        );
+        assert_eq!(
+            restored.reading(restored_windows.view()).catalog().collect::<Vec<_>>(),
+            reversed
+        );
         assert_eq!(restored[ids[0].0].name, ids[0].1);
     }
 
     #[test]
     fn prevent_wrapping_updates_on_config_reload() {
         let mut windows = OwnedWindows::default();
-        let window_store = OwnedWindows::default();
         let mut settings = VirtualWorkspaceSettings {
             default_workspace_count: 2,
             ..VirtualWorkspaceSettings::default()
@@ -4471,8 +4656,7 @@ mod tests {
         let workspaces = manager.listed_after_init(&mut windows.view_mut(), space).to_vec();
 
         assert_eq!(
-            manager.step_workspace(
-                window_store.view(),
+            manager.reading(windows.view()).step_workspace(
                 space,
                 workspaces[1].0,
                 None,
@@ -4483,7 +4667,7 @@ mod tests {
 
         settings.resize(2);
         settings.prevent_wrapping = true;
-        let plan = manager.plan_settings(&settings).unwrap();
+        let plan = manager.reading(windows.view()).plan_settings(&settings).unwrap();
         manager.apply_settings(
             &mut windows.view_mut(),
             &settings,
@@ -4491,8 +4675,7 @@ mod tests {
             plan,
         );
         assert_eq!(
-            manager.step_workspace(
-                window_store.view(),
+            manager.reading(windows.view()).step_workspace(
                 space,
                 workspaces[1].0,
                 None,

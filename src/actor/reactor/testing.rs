@@ -93,6 +93,7 @@ impl Reactor {
             .layout
             .layout_engine
             .workspaces()
+            .reading(self.stores.state.windows())
             .windows_in_active_workspace(self.stores.state.windows(), space)
     }
 
@@ -115,7 +116,13 @@ impl Reactor {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
-        let Some(workspace) = self.stores.layout.layout_engine.workspaces().active_workspace(space)
+        let Some(workspace) = self
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(self.stores.state.windows())
+            .active_workspace(space)
         else {
             return false;
         };

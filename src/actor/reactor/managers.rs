@@ -307,6 +307,7 @@ impl LayoutManager {
             .gaps
             .effective_for_display(screen.display_uuid_owned().as_deref());
         let groups = reactor.stores.layout.layout_engine.collect_group_containers(
+            reactor.stores.state.windows(),
             space,
             frame,
             &gaps,
@@ -316,7 +317,7 @@ impl LayoutManager {
             .stores
             .layout
             .layout_engine
-            .active_workspace_for_space_has_fullscreen(space);
+            .active_workspace_for_space_has_fullscreen(reactor.stores.state.windows(), space);
         Self::publish_stack_tabs(reactor, space, &groups, fullscreen, true);
     }
 
@@ -353,7 +354,10 @@ impl LayoutManager {
         // animation behind the overview's own transition.
         for &(space, _) in &layout {
             let engine = &mut reactor.stores.layout.layout_engine;
-            if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
+            if let Some((workspace, layout)) = engine
+                .workspaces()
+                .reading(reactor.stores.state.windows())
+                .active_layout_for_space(space)
                 && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
                     &mut engine.workspaces_mut().workspaces[workspace].layout_system
                 && let Some((mut camera, _)) = system.presentation(layout)
@@ -411,7 +415,11 @@ impl LayoutManager {
                     |wid| reactor.stores.state.windows.window(wid).map(|w| w.frame_monotonic()),
                     &all_screen_frames,
                 );
-            if reactor.stores.layout.layout_engine.active_layout_mode_at(space)
+            if reactor
+                .stores
+                .layout
+                .layout_engine
+                .active_layout_mode_at(reactor.stores.state.windows(), space)
                 == LayoutMode::Scrolling
                 && let Some(bounds) =
                     ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
@@ -421,6 +429,7 @@ impl LayoutManager {
                     .layout
                     .layout_engine
                     .workspaces()
+                    .reading(reactor.stores.state.windows())
                     .windows_in_active_workspace(reactor.stores.state.windows(), space)
                     .into_iter()
                     .collect();
@@ -468,14 +477,15 @@ impl LayoutManager {
                     .layout
                     .gaps
                     .effective_for_display(display_uuid.as_deref());
-                let stack_has_fullscreen = reactor
-                    .stores
-                    .layout
-                    .layout_engine
-                    .active_workspace_for_space_has_fullscreen(space);
+                let stack_has_fullscreen =
+                    reactor.stores.layout.layout_engine.active_workspace_for_space_has_fullscreen(
+                        reactor.stores.state.windows(),
+                        space,
+                    );
                 let active_workspace_for_space_has_fullscreen =
                     active_space == Some(space) && stack_has_fullscreen;
                 let group_infos = reactor.stores.layout.layout_engine.collect_group_containers(
+                    reactor.stores.state.windows(),
                     space,
                     screen_frame,
                     &gaps,
@@ -517,7 +527,11 @@ impl LayoutManager {
             }
             if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
                 && let Some(window) = reactor.stores.layout.layout_engine.focused_window()
-                && reactor.stores.layout.layout_engine.active_layout_mode_at(space)
+                && reactor
+                    .stores
+                    .layout
+                    .layout_engine
+                    .active_layout_mode_at(reactor.stores.state.windows(), space)
                     == LayoutMode::Scrolling
                 && let Some((_, frame)) = desired.frames().iter().find(|(wid, _)| *wid == window)
             {
