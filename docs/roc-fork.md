@@ -9,30 +9,40 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, after layout slice 3, traditional): read this first
+## Handoff (2026-11-24, after layout slice 4, floating): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
-upstream's layout systems (Next item 2) has three slices, stack, master-stack and traditional, and the core's
+upstream's layout systems (Next item 2) has four slices, stack, master-stack, traditional and floating, and the core's
 shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
 through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 864 lib tests (2
-ignored), 873 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+Public-clean; the published tip's id is in the slice report). All checks green: 865 lib tests (2
+ignored), 874 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
 --all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
 either way.
 
-**Next: the next layout slice.** Floating, then BSP, scrolling (the lead: go on between slices
-unless the stop list applies). Each as the slices before: a builder from the system's tree to the
-core's shape, a check in its `calculate_layout`, a differential over the system's own edits
+**Next: the next layout slice.** BSP, then scrolling (the lead: go on between slices unless the
+stop list applies). Each as the slices before: a builder from the system's tree to the core's
+shape, a check in its `calculate_layout`, a differential over the system's own edits
 (`systems::drawn` has the shared draws), one plant per decision the builder makes. A difference
 from the system's frames is a behaviour question: stop and report it, never adjust either side;
 a pre-#688 rule in the core is brought up to upstream first (the lead's ruling), held by a
-differential against upstream's own function. **Floating** needs more core than the others:
-upstream's `calculate_layout` gives each participating window its fullscreen frame (the nearest
-fullscreen ancestor), else its kept frame, else a first frame cascaded by its position among
-*all* the layout's windows (left-out ones hold a position); the core's `Floating::first_frames`
-only places a list of newcomers. BSP and scrolling use the solver brought up to #688; their own
-pre-#688 rules (BSP's ratio split, the strip's widths) are the likely differences there.
+differential against upstream's own function. **BSP** reads as the core's `Bsp` already does
+(upstream's split solves two weighted segments with the #688 solver); the builder must mirror its
+pruning: a leaf with no participating member is left out, except an empty leaf when nothing in the
+system is left out (`prepare_geometry`), and `stacked` is a leaf holding a stack whatever takes
+part. **Scrolling** has its own pre-#688 rules (the strip's widths) to compare first.
+
+**Layout slice 4, floating (0fa71401).** The core gained a whole floating layout:
+`floating::Layout { floating, gaps, windows: Vec<Slot> }`, `Slot::LeftOut | In { window, place }`,
+`Place::Screen | WithinGaps | Kept(Rect) | First(WindowConstraints)`, and `Layout::frames` (a first
+frame cascades by its position among all the layout's windows, left-out ones included, as
+upstream's `calculate_layout` counts them). `Floating.roc`'s `frames` mirrors it, answered through
+a new typed question (`FloatingLayout -> List(Frame)`; the slot tag is `Placed` because the glue
+does not escape Rust's `in`). `FloatingLayoutSystem::shape` builds it (the nearest fullscreen
+ancestor decides, else the kept frame, else a first frame); `check_floating` in its
+`calculate_layout`. Differentials: against upstream (3000 systems, 9,315 frames) and Rust/Roc
+(20,000 layouts). Plants: 7 Rust, 2 Roc, all caught. No difference.
 
 **Layout slice 3, traditional (6e6f79e3).** `tiles::shape(root, None)`: the traditional system
 lays its tree out from the root, with no regions. Check in its `calculate_layout`; differential
@@ -765,7 +775,7 @@ A slice that needs a behaviour change stops and is reported.
    against upstream's `calculate_layout`; a difference is a behaviour question, stopped and
    reported.
    Done: stack (aec5f920), the core's solver and weights brought up to #688 (a02886b5, 6cebd282),
-   master-stack, traditional (Handoff). Next: floating, BSP, scrolling.
+   master-stack, traditional, floating (Handoff). Next: BSP, scrolling.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
@@ -907,7 +917,8 @@ frame (the default 70%, a live frame no larger than it, the cascade when spreadi
 the platform keeps the frame the user gives it.
 
 On upstream's layout systems (merge (b)), the shapes are built again, one system at a time, from
-each system's own tree (`StackLayoutSystem::shape`, `tiles::shape` for the tiled systems, ...), and `core_geometry::check_traditional`
+each system's own tree (`StackLayoutSystem::shape`, `tiles::shape` for the tiled systems,
+`FloatingLayoutSystem::shape` onto the core's whole-layout `floating::Layout`, ...), and `core_geometry::check_traditional`
 (and its kin per shape) holds the core's frames to the system's bit for bit on rift's path; the
 system's frames still stand.
 
