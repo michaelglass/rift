@@ -18,7 +18,7 @@ use crate::layout_engine::workspaces::WorkspaceLayoutState;
 use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
 use crate::model::WindowStore;
 use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
-use crate::model::window_store::ClaimOwner;
+use crate::model::window_store::Claimant;
 use crate::sys::screen::SpaceId;
 
 new_key_type! {
@@ -2080,7 +2080,7 @@ impl WorkspaceStore {
     /// the window store's). Empty unless a write bypassed the helpers above.
     pub(crate) fn workspace_divergences(
         &self,
-        core: &rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>,
+        core: &rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>,
     ) -> Vec<WorkspaceDivergence> {
         let mut divergences = Vec::new();
         let store: Vec<_> = self

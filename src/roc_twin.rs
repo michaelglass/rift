@@ -25,7 +25,7 @@ use rift_core::workspaces::{Workspaces, WorkspacesEvent};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::model::VirtualWorkspaceId;
-use crate::model::window_store::ClaimOwner;
+use crate::model::window_store::Claimant;
 use crate::sys::screen::SpaceId;
 
 /// How often a running Rift compares a twin's whole state with its Rust machine's, in steps.
@@ -224,7 +224,7 @@ impl TwinnedLifecycle {
 /// tests).
 #[derive(Default)]
 pub(crate) struct TwinnedWorkspaces {
-    rust: Workspaces<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>,
+    rust: Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>,
     #[cfg(feature = "roc-core")]
     twin: WorkspacesTwin,
 }
@@ -241,13 +241,13 @@ impl std::fmt::Debug for TwinnedWorkspaces {
 }
 
 impl Deref for TwinnedWorkspaces {
-    type Target = Workspaces<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>;
+    type Target = Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>;
 
     fn deref(&self) -> &Self::Target { &self.rust }
 }
 
 /// A change to the joined workspaces, as the platform's types make it.
-pub(crate) type JoinedEvent = WorkspacesEvent<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>;
+pub(crate) type JoinedEvent = WorkspacesEvent<WindowId, VirtualWorkspaceId, SpaceId, Claimant>;
 
 impl TwinnedWorkspaces {
     /// As [`Workspaces::step`]; a refusal is reported here.
@@ -391,7 +391,7 @@ fn plain_activation(
 /// An ownership with its workspaces and owner as words.
 #[cfg(feature = "roc-core")]
 fn plain_ownership(
-    ownership: rift_core::workspaces::Ownership<VirtualWorkspaceId, ClaimOwner>,
+    ownership: rift_core::workspaces::Ownership<VirtualWorkspaceId, Claimant>,
 ) -> rift_core::workspaces::Ownership<u64, u64> {
     use rift_core::workspaces::{Destination, Ownership};
 
