@@ -325,8 +325,7 @@ impl WmController {
                 }
             }
             AppEventsRegistered => {
-                _ = self.input_tx.send(input::Request::EnableHotkeys);
-                _ = self.input_tx.send(input::Request::SetEventProcessing(false));
+                _ = self.input_tx.send(input::Request::AppsRegistered);
 
                 let sender = self.sender.clone();
                 let input_tx = self.input_tx.clone();
@@ -338,7 +337,7 @@ impl WmController {
 
                 queue::main().after_f_s(
                     Time::new_after(Time::NOW, (250 + 350) * 1000000),
-                    (input_tx, input::Request::SetEventProcessing(true)),
+                    (input_tx, input::Request::AppsSettled),
                     |(sender, event)| sender.send(event),
                 );
             }

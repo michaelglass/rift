@@ -48,9 +48,11 @@ pub enum Request {
     HideOnFocus,
     EnforceHidden,
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
-    SetEventProcessing(bool),
+    /// App observers are registered: hotkeys start (`Startup::Settling`).
+    AppsRegistered,
+    /// The apps found at registration have had time to attach: pointer features start.
+    AppsSettled,
     SetFocusFollowsMouseEnabled(bool),
-    EnableHotkeys,
     SetBindingMode(String),
     KeyboardLayoutChanged(MissionControlSettings),
     ConfigUpdated(Config),
@@ -116,7 +118,7 @@ pub struct Input {
     hotkeys: RefCell<Vec<HashMap<Hotkey, Vec<WmCommand>>>>,
     mode_indices: RefCell<HashMap<String, usize>>,
     active_mode: Cell<usize>,
-    hotkeys_active: Cell<bool>,
+    startup: Cell<Startup>,
     wm_sender: wm_controller::Sender,
     mission_control_tx: RefCell<Option<super::mission_control::Sender>>,
 }
@@ -129,13 +131,24 @@ impl Drop for Input {
     }
 }
 
+/// How far startup has got. It only moves forward: hotkeys never turn off again, and pointer
+/// features never run without hotkeys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Startup {
+    /// App observers are not registered: no hotkeys, no pointer features.
+    Registering,
+    /// Hotkeys work. Pointer features (focus follows mouse, hide on focus, modifier drags,
+    /// horizontal warp) wait for the discovered apps to attach.
+    Settling,
+    Running,
+}
+
 struct State {
     hide_count: u32,
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     converter: CoordinateConverter,
     screens: Vec<CGRect>,
-    event_processing_enabled: bool,
     focus_follows_mouse_enabled: bool,
     disable_hotkey_active: bool,
     low_power_mode: bool,
@@ -157,7 +170,6 @@ impl Default for State {
             focus_follows_mouse_config_enabled: false,
             converter: CoordinateConverter::default(),
             screens: Vec::new(),
-            event_processing_enabled: false,
             focus_follows_mouse_enabled: true,
             disable_hotkey_active: false,
             low_power_mode: power::is_low_power_mode_enabled(),
@@ -196,6 +208,7 @@ unsafe fn drop_input_ctx(ptr: *mut std::ffi::c_void) {
 impl Input {
     fn desired_event_mask(&self) -> CGEventMask {
         let state = self.state.borrow();
+        let running = self.running();
         let disable_hotkey = self.disable_hotkey.borrow();
         let keyed_disable =
             disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
@@ -205,13 +218,13 @@ impl Input {
             // even when no Rift keyboard bindings are configured.
             true,
             hotkeys_enabled || disable_hotkey.is_some(),
-            (state.event_processing_enabled
+            (running
                 && (state.mouse_hides_on_focus
                     || self.horizontal_mouse_warp.get().is_some()
                     || (state.focus_follows_mouse_config_enabled
                         && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
-            state.event_processing_enabled && state.mouse_hides_on_focus,
+            running && state.mouse_hides_on_focus,
             keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
         // AX can acquire a drag before optional input processing is enabled.
@@ -227,7 +240,7 @@ impl Input {
                 | (1u64 << CGEventType::RightMouseUp.0)
                 | (1u64 << CGEventType::ScrollWheel.0);
         }
-        if state.event_processing_enabled && state.mouse_features_enabled {
+        if running && state.mouse_features_enabled {
             if state.mouse_settings.action1 != MouseAction::None {
                 mask |= 1u64 << CGEventType::LeftMouseDown.0;
             }
@@ -236,7 +249,7 @@ impl Input {
                     | (1u64 << CGEventType::RightMouseDragged.0);
             }
         }
-        if state.event_processing_enabled && self.horizontal_mouse_warp.get().is_some() {
+        if running && self.horizontal_mouse_warp.get().is_some() {
             mask |= (1u64 << CGEventType::LeftMouseDragged.0)
                 | (1u64 << CGEventType::RightMouseDragged.0);
         }
@@ -376,7 +389,7 @@ impl Input {
             hotkeys: RefCell::new(Vec::new()),
             mode_indices: RefCell::new(HashMap::default()),
             active_mode: Cell::new(0),
-            hotkeys_active: Cell::new(false),
+            startup: Cell::new(Startup::Registering),
             wm_sender,
             mission_control_tx: RefCell::new(mission_control_tx),
         };
@@ -465,9 +478,7 @@ impl Input {
                         .iter()
                         .any(|(space, mode)| state.layout_mode_by_space.get(space) != Some(mode))
             }
-            Request::SetEventProcessing(enabled) => {
-                *enabled != self.state.borrow().event_processing_enabled
-            }
+            Request::AppsSettled => !self.running(),
             Request::SetMissionControlActive(active, _) => {
                 *active != self.mission_control_active.get()
             }
@@ -555,14 +566,10 @@ impl Input {
                     .collect();
                 state.converter = converter;
             }
-            Request::SetEventProcessing(enabled) => {
-                if state.captured_button.take().is_some() {
-                    self.events_tx.send(Event::DragCancel);
-                }
-                state.event_processing_enabled = enabled;
-                if enabled {
-                    self.reset_mouse_move_sample_gate();
-                }
+            Request::AppsSettled => {
+                // Nothing is captured yet: modifier presses are not subscribed before this.
+                self.startup.set(Startup::Running);
+                self.reset_mouse_move_sample_gate();
                 should_rebuild_mask = true;
             }
             Request::SetFocusFollowsMouseEnabled(enabled) => {
@@ -576,8 +583,9 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::EnableHotkeys => {
-                if !self.hotkeys_active.replace(true) {
+            Request::AppsRegistered => {
+                if self.startup.get() == Startup::Registering {
+                    self.startup.set(Startup::Settling);
                     self.rebuild_binding_maps();
                     should_rebuild_mask = true;
                 }
@@ -585,7 +593,7 @@ impl Input {
             Request::SetBindingMode(target) => self.transition_binding_mode(&target),
             Request::KeyboardLayoutChanged(overview) => {
                 self.rebuild_overview_keys(&overview);
-                if self.hotkeys_active.get() {
+                if self.hotkeys_on() {
                     self.rebuild_binding_maps();
                     should_rebuild_mask = true;
                 }
@@ -674,7 +682,7 @@ impl Input {
         if configure_gestures {
             self.gesture_control.configure(
                 state.gesture_settings,
-                state.event_processing_enabled && !self.mission_control_active.get(),
+                self.running() && !self.mission_control_active.get(),
                 state
                     .screen_spaces
                     .iter()
@@ -709,6 +717,10 @@ impl Input {
 
     #[inline]
     fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
+
+    fn running(&self) -> bool { self.startup.get() == Startup::Running }
+
+    fn hotkeys_on(&self) -> bool { self.startup.get() != Startup::Registering }
 
     fn reconcile_after_tap_reenabled(&self) {
         // A release may have been lost; do not activate from a later unrelated event.
@@ -929,7 +941,7 @@ impl Input {
                 } else {
                     state.mouse_settings.action2
                 };
-                if state.event_processing_enabled
+                if self.running()
                     && state.mouse_features_enabled
                     && action != MouseAction::None
                     && mouse_modifier_held(
@@ -1012,7 +1024,7 @@ impl Input {
     /// the sampled move path below is sufficient as a recovery check.
     fn on_mouse_moved(&self, event: &CGEvent, loc: CGPoint) -> bool {
         let mut state = self.state.borrow_mut();
-        if !state.event_processing_enabled && !self.mission_control_active.get() {
+        if !self.running() && !self.mission_control_active.get() {
             return true;
         }
         if state.hide_count > 0 {
@@ -1062,7 +1074,7 @@ impl Input {
 
     fn maybe_horizontal_mouse_warp(&self, event: &CGEvent) -> Option<CGPoint> {
         self.horizontal_mouse_warp.get()?;
-        if !self.state.borrow().event_processing_enabled {
+        if !self.running() {
             return None;
         }
         let point = CGEvent::location(Some(event));
@@ -1247,7 +1259,7 @@ impl Input {
         *self.mode_indices.borrow_mut() = indices;
         self.active_mode.set(0);
         self.notify_binding_mode_changed(previous_mode);
-        if self.hotkeys_active.get() {
+        if self.hotkeys_on() {
             self.rebuild_binding_maps();
         }
     }
@@ -2097,7 +2109,7 @@ mod tests {
             keyboard_mask | stable_release_mask | native_drag_mask
         );
         input.state.borrow_mut().mouse_features_enabled = false;
-        input.state.borrow_mut().event_processing_enabled = true;
+        input.startup.set(Startup::Running);
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(
@@ -2137,10 +2149,10 @@ mod tests {
     fn hotkey_maps_are_deferred_until_app_events_are_registered() {
         std::thread::spawn(|| {
             let (input, _, _) = input();
-            assert!(!input.hotkeys_active.get());
+            assert!(!input.hotkeys_on());
             assert!(input.hotkeys.borrow().is_empty());
 
-            input.hotkeys_active.set(true);
+            input.startup.set(Startup::Settling);
             input.rebuild_binding_maps();
 
             assert!(!input.hotkeys.borrow().is_empty());
@@ -2185,7 +2197,7 @@ mod tests {
                             Some(overview),
                             Arc::default(),
                         );
-                        input.hotkeys_active.set(true);
+                        input.startup.set(Startup::Settling);
                         input.rebuild_binding_maps();
                         assert_eq!(
                             input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0) != 0,
@@ -2286,7 +2298,7 @@ mod tests {
         let initial = config(true, &format!("{section}F2 = \"fit_workspace\""));
         let overview_settings = initial.settings.ui.mission_control.clone();
         input.on_request(Request::ConfigUpdated(initial), &recovery);
-        input.on_request(Request::EnableHotkeys, &recovery);
+        input.on_request(Request::AppsRegistered, &recovery);
         let key = |code| {
             let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
             input.on_event(CGEventType::KeyDown, &event, None)
@@ -2360,7 +2372,7 @@ mod tests {
             let (overview, mut rx) = actor::channel();
             *input.mission_control_tx.borrow_mut() = Some(overview);
             input.mission_control_active.set(true);
-            input.hotkeys_active.set(true);
+            input.startup.set(Startup::Settling);
             input.active_mode.set(1);
             *input.hotkeys.borrow_mut() = vec![
                 HashMap::default(),
@@ -2403,7 +2415,7 @@ mod tests {
             let (overview, mut rx) = actor::channel();
             *input.mission_control_tx.borrow_mut() = Some(overview);
             input.activate_on_hotkey_release.set(true);
-            input.hotkeys_active.set(true);
+            input.startup.set(Startup::Settling);
             *input.hotkeys.borrow_mut() = vec![HashMap::from_iter([(
                 Hotkey::new(Modifiers::ALT_LEFT, KeyCode::KeyA),
                 vec![WmCommand::Wm(wm_controller::WmCmd::ShowMissionControlAll)],
@@ -2456,7 +2468,7 @@ mod tests {
     #[test]
     fn hotkeys_suppress_repeats_but_do_not_intercept_rift_synthetic_keys() {
         let (input, mut wm_rx, _) = input();
-        input.hotkeys_active.set(true);
+        input.startup.set(Startup::Settling);
         input.rebuild_binding_maps();
         input
             .hotkeys
@@ -2517,7 +2529,7 @@ mod tests {
         )
         .unwrap();
         input.install_binding_specs(config.binding_mode_specs);
-        input.hotkeys_active.set(true);
+        input.startup.set(Startup::Settling);
         input.rebuild_binding_maps();
 
         let b = CGEvent::new_keyboard_event(None, 11, true).unwrap();
@@ -2554,7 +2566,7 @@ mod tests {
             )]),
             ("other".into(), vec![]),
         ]);
-        input.hotkeys_active.set(true);
+        input.startup.set(Startup::Settling);
         input.rebuild_binding_maps();
         input.hotkeys.borrow_mut()[0]
             .get_mut(&Hotkey::new(Modifiers::empty(), KeyCode::KeyA))
@@ -2583,7 +2595,7 @@ mod tests {
                 WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
             )]),
         ]);
-        input.hotkeys_active.set(true);
+        input.startup.set(Startup::Settling);
         input.active_mode.set(1);
         input.rebuild_binding_maps();
         assert_eq!(input.active_mode.get(), 1);
@@ -2606,7 +2618,7 @@ mod tests {
             )]),
         ];
         input.install_binding_specs(specs.clone());
-        input.hotkeys_active.set(true);
+        input.startup.set(Startup::Settling);
         input.rebuild_binding_maps();
         input.active_mode.set(1);
         input.install_binding_specs(specs);
