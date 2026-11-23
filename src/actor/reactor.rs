@@ -2934,12 +2934,17 @@ impl Reactor {
                 window_id,
             })) => {
                 // Which window the command means: the cursor is asked only without a main window.
+                // With none of them, the command does nothing (as upstream).
                 let which = match (window_id, self.main_window()) {
                     (Some(index), _) => WindowToMove::Index(index),
                     (None, Some(window)) => WindowToMove::Main(window),
-                    (None, None) => self
-                        .window_id_under_cursor()
-                        .map_or(WindowToMove::FirstOnCommandDisplay, WindowToMove::UnderCursor),
+                    (None, None) => match self.window_id_under_cursor() {
+                        Some(window) => WindowToMove::UnderCursor(window),
+                        None => {
+                            warn!(?selector, "Move window to display ignored: no window to move");
+                            return Ok(EventOutcome::no_change());
+                        }
+                    },
                 };
                 let (window, source_space, target_space) = match self
                     .resolve_window_display_move(&selector, which)
@@ -7259,9 +7264,6 @@ impl Reactor {
                 .reading(self.stores.state.windows())
                 .resolve_window_index(command_space, |space| self.is_space_active(space), index),
             WindowToMove::Main(window) | WindowToMove::UnderCursor(window) => Some(window),
-            // The first in layout order on the workspace the command display shows.
-            WindowToMove::FirstOnCommandDisplay => command_space
-                .and_then(|space| self.stores.layout.layout_engine.first_window_on(windows, space)),
         }
         // Only a window rift may move keeps its assignment through the move (#702).
         .filter(|&window| windows.can_move_assigned_window(window))
@@ -7628,13 +7630,12 @@ fn plan_workspace_placements(
 }
 
 /// The window a MoveWindowToDisplay means: the one at an index in the active workspaces, else
-/// the main window, else the one under the cursor, else the command display's first.
+/// the main window, else the one under the cursor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum WindowToMove {
     Index(u32),
     Main(WindowId),
     UnderCursor(WindowId),
-    FirstOnCommandDisplay,
 }
 
 /// Why a command does nothing: quietly (there is nothing to do), or with a reason worth a warning.
