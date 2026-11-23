@@ -62,6 +62,11 @@ pub(crate) fn drawn_constraints(rng: &mut Rng) -> WindowLayoutConstraints {
         c.max_width = c.min_width;
     }
     if rng.chance(5) {
+        // An axis locked within f64::EPSILON (a small minimum, the maximum one ulp above it).
+        c.min_height = rng.length(0.05, 1.0);
+        c.max_height = f64::from_bits(c.min_height.to_bits() + 1);
+    }
+    if rng.chance(5) {
         c.min_height = f64::NAN;
     }
     c

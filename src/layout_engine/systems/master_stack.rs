@@ -87,6 +87,31 @@ impl Default for MasterStackLayoutSystem {
 }
 
 impl MasterStackLayoutSystem {
+    /// A master-stack layout as the core's geometry takes it (none when nothing takes space).
+    /// Arguments as `calculate_layout` takes them.
+    #[cfg(any(test, feature = "roc-core"))]
+    pub(crate) fn shape(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Option<rift_core::layout::traditional::Traditional<WindowId>> {
+        let (root, master, stack) = self.region_roots(layout);
+        super::tiles::shape(
+            &self.tiles,
+            root,
+            Some((master, stack)),
+            screen,
+            stack_offset,
+            constraints,
+            gaps,
+            stack_line,
+        )
+    }
+
     pub fn new(settings: MasterStackSettings) -> Self {
         Self {
             tiles: GroupLayouts::default(),
@@ -470,7 +495,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let (root, master, stack) = self.region_roots(layout);
-        super::tiles::project(
+        let frames = super::tiles::project(
             &self.tiles,
             root,
             |active| super::tiles::project_root(root, Some((master, stack)), active),
@@ -481,7 +506,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             stack_line,
             true,
             None,
-        )
+        );
+        #[cfg(any(test, feature = "roc-core"))]
+        crate::layout_engine::core_geometry::check_traditional(
+            "master-stack",
+            self.shape(layout, screen, stack_offset, constraints, gaps, stack_line),
+            &frames,
+        );
+        frames
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -695,6 +727,7 @@ impl MasterStackLayoutSystem {
 mod tests {
     use super::*;
     use crate::layout_engine::ResizeOrientation;
+    use crate::layout_engine::systems::drawn::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -921,5 +954,159 @@ mod tests {
             w(3)
         ]);
         assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    fn drawn_direction(rng: &mut Rng) -> Direction {
+        match rng.below(4) {
+            0 => Direction::Left,
+            1 => Direction::Right,
+            2 => Direction::Up,
+            _ => Direction::Down,
+        }
+    }
+
+    fn drawn_settings(rng: &mut Rng) -> MasterStackSettings {
+        let orientation = |rng: &mut Rng| match rng.below(3) {
+            0 => None,
+            1 => Some(Orientation::Horizontal),
+            _ => Some(Orientation::Vertical),
+        };
+        MasterStackSettings {
+            master_ratio: if rng.chance(30) {
+                0.5
+            } else {
+                rng.length(0.05, 0.95)
+            },
+            master_count: 1 + rng.below(3) as usize,
+            master_side: match rng.below(4) {
+                0 => MasterStackSide::Left,
+                1 => MasterStackSide::Right,
+                2 => MasterStackSide::Top,
+                _ => MasterStackSide::Bottom,
+            },
+            new_window_placement: match rng.below(3) {
+                0 => MasterStackNewWindowPlacement::Master,
+                1 => MasterStackNewWindowPlacement::Stack,
+                _ => MasterStackNewWindowPlacement::Focused,
+            },
+            master_arrangement: orientation(rng),
+            stack_arrangement: orientation(rng),
+            ..MasterStackSettings::default()
+        }
+    }
+
+    /// A master-stack system after random edits: windows added and removed, selection moved,
+    /// windows moved, swapped, dropped on each other (stacked among them), resized, made
+    /// fullscreen and left out of the layout, the settings changed.
+    fn drawn_system(rng: &mut Rng) -> (MasterStackLayoutSystem, LayoutId, Vec<WindowId>) {
+        use crate::layout_engine::{ResizeOrientation, WindowDropAction};
+        let mut system = MasterStackLayoutSystem::new(drawn_settings(rng));
+        let layout = system.create_layout();
+        let mut windows: Vec<WindowId> = Vec::new();
+        let mut next = 0;
+        for _ in 0..rng.below(32) {
+            let pick = |rng: &mut Rng, windows: &[WindowId]| {
+                windows[rng.below(windows.len() as u64) as usize]
+            };
+            match rng.below(14) {
+                0..=3 => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+                _ if windows.is_empty() => {}
+                4 => {
+                    let window = pick(rng, &windows);
+                    windows.retain(|w| *w != window);
+                    system.update(WindowChange::Remove(window));
+                }
+                5 => {
+                    let focus = match rng.below(4) {
+                        0 => Focus::Select(pick(rng, &windows)),
+                        1 => Focus::Ascend,
+                        2 => Focus::Descend,
+                        _ => Focus::Direction(drawn_direction(rng)),
+                    };
+                    system.focus(layout, focus);
+                }
+                6 => {
+                    // Sometimes the whole layout (its root selected), sometimes a window.
+                    if rng.chance(40) {
+                        for _ in 0..3 {
+                            system.focus(layout, Focus::Ascend);
+                        }
+                    }
+                    let within_gaps = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
+                }
+                7 => {
+                    let window = pick(rng, &windows);
+                    system.set_window_participation(window, rng.chance(40));
+                }
+                8 => {
+                    let direction = drawn_direction(rng);
+                    let has_display_neighbor = rng.chance(30);
+                    system.edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor,
+                    });
+                }
+                9 => {
+                    let (source, target) = (pick(rng, &windows), pick(rng, &windows));
+                    let action = match rng.below(4) {
+                        0 => WindowDropAction::Swap,
+                        1 => WindowDropAction::Stack,
+                        2 => WindowDropAction::Insert(drawn_direction(rng)),
+                        _ => WindowDropAction::Move(drawn_direction(rng)),
+                    };
+                    system.edit(layout, LayoutEdit::Drop { source, target, action });
+                }
+                10 => {
+                    let amount = rng.length(-0.4, 0.4);
+                    let orientation = if rng.chance(50) {
+                        ResizeOrientation::Horizontal
+                    } else {
+                        ResizeOrientation::Vertical
+                    };
+                    system.edit(layout, LayoutEdit::Resize { amount, orientation }).discard();
+                }
+                11 => {
+                    let (a, b) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::Swap(a, b));
+                }
+                12 => {
+                    system.update_settings(drawn_settings(rng));
+                }
+                _ => {
+                    system.edit(layout, LayoutEdit::Rebalance);
+                }
+            }
+        }
+        (system, layout, windows)
+    }
+
+    /// The core's frames for a master-stack layout are upstream's `calculate_layout`'s, bit for
+    /// bit, over drawn systems, screens, gaps, offsets, bars and window constraints.
+    #[test]
+    fn the_core_tiles_master_stack_layouts_as_the_master_stack_system_does() {
+        let mut rng = Rng(0x5eed_3a57);
+        let (mut cases, mut frames_seen) = (0, 0);
+        for _ in 0..3000 {
+            let (system, layout, windows) = drawn_system(&mut rng);
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            let offset = drawn_offset(&mut rng);
+            let line = drawn_line(&mut rng);
+            let upstream =
+                system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
+            let core = core_frames(system.shape(layout, screen, offset, &constraints, &gaps, line));
+            assert_eq!(bits(&core), bits(&upstream));
+            cases += 1;
+            frames_seen += upstream.len();
+        }
+        eprintln!("master-stack: {cases} layouts, {frames_seen} frames identical");
+        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
     }
 }
