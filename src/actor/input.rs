@@ -145,6 +145,10 @@ struct State {
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
     mouse_features_enabled: bool,
     mouse_settings: DragDropSettings,
+    /// The button whose modifier press this thread swallowed. The app never saw the press,
+    /// so the button's drags and release are swallowed until the release, whether or not
+    /// the reactor started a drag.
+    swallowed_press: Option<crate::actor::drag::MouseButton>,
     gesture_settings: super::gesture::Settings,
 }
 
@@ -166,6 +170,7 @@ impl Default for State {
             layout_mode_by_space: HashMap::default(),
             mouse_features_enabled: false,
             mouse_settings: DragDropSettings::default(),
+            swallowed_press: None,
             gesture_settings: super::gesture::Settings::new(&Config::default()),
         }
     }
@@ -554,7 +559,7 @@ impl Input {
                 state.converter = converter;
             }
             Request::SetEventProcessing(enabled) => {
-                if matches!(self.drag_gate.get(), DragGate::Modifier(_)) {
+                if state.swallowed_press.take().is_some() {
                     self.events_tx.send(Event::DragCancel);
                 }
                 state.event_processing_enabled = enabled;
@@ -706,6 +711,7 @@ impl Input {
         self.overview_hotkey.set(None);
         let mut state = self.state.borrow_mut();
         self.reset_gestures();
+        state.swallowed_press = None;
         self.events_tx.send(Event::DragCancel);
         let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
         debug!(?flags, "Event tap was re-enabled; reconciling pressed keys");
@@ -881,8 +887,7 @@ impl Input {
                     .maybe_horizontal_mouse_warp(event)
                     .unwrap_or_else(|| CGEvent::location(Some(event)));
                 let gate = self.drag_gate.get();
-                let owned = gate == DragGate::Modifier(button);
-                if owned
+                if gate == DragGate::Modifier(button)
                     || (button == crate::actor::drag::MouseButton::Left
                         && gate == DragGate::NativeMove)
                 {
@@ -891,7 +896,7 @@ impl Input {
                         self.events_tx.send(Event::DragMotionPending(publisher.clone()));
                     }
                 }
-                !owned
+                self.state.borrow().swallowed_press != Some(button)
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let mut state = self.state.borrow_mut();
@@ -920,16 +925,17 @@ impl Input {
                 } else {
                     state.mouse_settings.action2
                 };
-                // Swallow the press only when the reactor last said a drag could start; if it
-                // then refuses, the gate stays open and the drag and release reach the app.
+                // Swallow the press only when the reactor last said a drag could start.
                 if state.event_processing_enabled
                     && action != MouseAction::None
+                    && state.swallowed_press.is_none()
                     && self.drag_gate.get() == DragGate::Open
                     && mouse_modifier_held(
                         state.mouse_settings.modifier,
                         CGEvent::flags(Some(event)),
                     )
                 {
+                    state.swallowed_press = Some(button);
                     self.events_tx.send(Event::ModifierMouseDown {
                         button,
                         point: CGEvent::location(Some(event)),
@@ -960,7 +966,12 @@ impl Input {
                 // Native AX moves/resizes acquire drag state even with drag/drop disabled.
                 // Always deliver releases so that state cannot keep layout writes blocked.
                 self.events_tx.send(Event::MouseUp(button));
-                self.drag_gate.get() != DragGate::Modifier(button)
+                let mut state = self.state.borrow_mut();
+                let swallowed = state.swallowed_press == Some(button);
+                if swallowed {
+                    state.swallowed_press = None;
+                }
+                !swallowed
             }
             _ => true,
         }
@@ -1032,7 +1043,7 @@ impl Input {
         if state.focus_follows_mouse_config_enabled
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
-            && !matches!(self.drag_gate.get(), DragGate::Modifier(_))
+            && state.swallowed_press.is_none()
             && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
         {
             // Secondary pointer consumers above do not participate in focus
@@ -2644,7 +2655,7 @@ mod tests {
     #[test]
     fn a_release_of_a_button_the_drag_does_not_own_reaches_the_app() {
         let (input, _, mut events_rx) = input();
-        input.state.borrow_mut().mouse_features_enabled = true;
+        input.state.borrow_mut().swallowed_press = Some(crate::actor::drag::MouseButton::Left);
         input.drag_gate.set(DragGate::Modifier(crate::actor::drag::MouseButton::Left));
         let right_up = CGEvent::new_mouse_event(
             None,
@@ -2675,6 +2686,7 @@ mod tests {
             ),
         ] {
             let (input, _, _) = input();
+            input.state.borrow_mut().swallowed_press = Some(button);
             input.drag_gate.set(DragGate::Modifier(button));
             let event =
                 CGEvent::new_mouse_event(None, event_type, CGPoint::new(99.0, 20.0), cg_button)
@@ -2700,6 +2712,7 @@ mod tests {
         assert!(input.on_event(CGEventType::LeftMouseDragged, &event, None));
         assert!(events_rx.try_recv().is_err());
 
+        input.state.borrow_mut().swallowed_press = Some(crate::actor::drag::MouseButton::Left);
         input.drag_gate.set(DragGate::Modifier(crate::actor::drag::MouseButton::Left));
         assert!(!input.on_event(CGEventType::LeftMouseDragged, &event, None));
         assert!(matches!(
@@ -2708,6 +2721,7 @@ mod tests {
         ));
         input.drag_motion_publisher.take_latest();
 
+        input.state.borrow_mut().swallowed_press = None;
         input.drag_gate.set(DragGate::NativeMove);
         assert!(input.on_event(CGEventType::LeftMouseDragged, &event, None));
         assert!(matches!(
@@ -2740,6 +2754,7 @@ mod tests {
             state.mouse_features_enabled = true;
             state.mouse_settings.modifier = crate::common::config::MouseModifier::Fn;
             state.mouse_settings.action1 = MouseAction::Move;
+            state.mouse_settings.action2 = MouseAction::Move;
         }
         (input, events_rx)
     }
@@ -2752,23 +2767,61 @@ mod tests {
         assert!(events_rx.try_recv().is_err());
     }
 
+    /// Delivers `event_type` and returns whether the app sees it.
+    fn reaches_app(input: &Input, event_type: CGEventType, flags: CGEventFlags) -> bool {
+        input.on_event(event_type, &mouse_event(event_type, flags), None)
+    }
+
     #[test]
-    fn a_modifier_press_the_reactor_refuses_leaves_the_drag_and_release_to_the_app() {
+    fn a_press_the_reactor_refuses_for_a_window_reason_is_consumed_whole_then_clicks_work() {
         let (input, mut events_rx) = modifier_drag_input();
         input.drag_gate.set(DragGate::Open);
         let fn_held = CGEventFlags::MaskSecondaryFn;
-        let down = mouse_event(CGEventType::LeftMouseDown, fn_held);
-        assert!(!input.on_event(CGEventType::LeftMouseDown, &down, None));
+        assert!(!reaches_app(&input, CGEventType::LeftMouseDown, fn_held));
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
             Event::ModifierMouseDown { .. }
         ));
 
-        // The reactor refused: the gate it publishes names no drag.
-        let dragged = mouse_event(CGEventType::LeftMouseDragged, fn_held);
-        assert!(input.on_event(CGEventType::LeftMouseDragged, &dragged, None));
-        let up = mouse_event(CGEventType::LeftMouseUp, fn_held);
-        assert!(input.on_event(CGEventType::LeftMouseUp, &up, None));
+        // The reactor refused (nothing it may drag under the cursor): the gate stays Open.
+        assert!(!reaches_app(&input, CGEventType::LeftMouseDragged, fn_held));
+        assert!(input.drag_motion_publisher.take_latest().is_none());
+        assert!(!reaches_app(&input, CGEventType::LeftMouseUp, fn_held));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::MouseUp(crate::actor::drag::MouseButton::Left)
+        ));
+
+        let plain = CGEventFlags::empty();
+        assert!(reaches_app(&input, CGEventType::LeftMouseDown, plain));
+        assert!(reaches_app(&input, CGEventType::LeftMouseDragged, plain));
+        assert!(reaches_app(&input, CGEventType::LeftMouseUp, plain));
+        assert!(!reaches_app(&input, CGEventType::LeftMouseDown, fn_held));
+    }
+
+    #[test]
+    fn a_click_released_before_the_reactor_answers_sends_the_app_no_orphan_release() {
+        let (input, _events_rx) = modifier_drag_input();
+        input.drag_gate.set(DragGate::Open);
+        let fn_held = CGEventFlags::MaskSecondaryFn;
+        assert!(!reaches_app(&input, CGEventType::LeftMouseDown, fn_held));
+        assert!(!reaches_app(&input, CGEventType::LeftMouseUp, fn_held));
+        assert!(reaches_app(
+            &input,
+            CGEventType::LeftMouseDragged,
+            CGEventFlags::empty()
+        ));
+    }
+
+    #[test]
+    fn a_second_modifier_press_before_the_reactor_answers_reaches_the_app() {
+        let (input, _events_rx) = modifier_drag_input();
+        input.drag_gate.set(DragGate::Open);
+        let fn_held = CGEventFlags::MaskSecondaryFn;
+        assert!(!reaches_app(&input, CGEventType::LeftMouseDown, fn_held));
+        assert!(reaches_app(&input, CGEventType::RightMouseDown, fn_held));
+        assert!(reaches_app(&input, CGEventType::RightMouseUp, fn_held));
+        assert!(!reaches_app(&input, CGEventType::LeftMouseUp, fn_held));
     }
 
     #[test]

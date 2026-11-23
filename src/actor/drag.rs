@@ -36,7 +36,7 @@ pub enum DragGate {
     Open,
     /// A native move is live: left-button motion is published and still delivered.
     NativeMove,
-    /// A modifier drag owns this button: its motion is published and its events swallowed.
+    /// A modifier drag owns this button: its motion is published.
     Modifier(MouseButton),
 }
 
