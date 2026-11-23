@@ -85,8 +85,12 @@ pub extern "C" fn roc_alloc(length: usize, alignment: usize) -> NonNull<c_void> 
     NonNull::new(unsafe { malloc(length) }).unwrap_or_else(|| out_of_memory())
 }
 
+/// # Safety
+///
+/// `ptr` must be an allocation from `roc_alloc` or `roc_realloc` that is still live; it is not
+/// used again after this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn roc_realloc(
+pub unsafe extern "C" fn roc_realloc(
     ptr: *mut c_void,
     length: usize,
     alignment: usize,
@@ -95,8 +99,12 @@ pub extern "C" fn roc_realloc(
     NonNull::new(unsafe { realloc(ptr, length) }).unwrap_or_else(|| out_of_memory())
 }
 
+/// # Safety
+///
+/// `ptr` must be an allocation from `roc_alloc` or `roc_realloc` that is still live; it is not
+/// used again after this call.
 #[unsafe(no_mangle)]
-pub extern "C" fn roc_dealloc(ptr: *mut c_void, _alignment: usize) {
+pub unsafe extern "C" fn roc_dealloc(ptr: *mut c_void, _alignment: usize) {
     #[cfg(feature = "count-allocations")]
     DEALLOCATIONS.with(|count| count.set(count.get() + 1));
     unsafe { free(ptr) }
@@ -128,7 +136,8 @@ extern "C" fn host_alloc(_: *mut abi::RocHost, length: usize, alignment: usize) 
 }
 
 extern "C" fn host_dealloc(_: *mut abi::RocHost, ptr: *mut c_void, alignment: usize) {
-    roc_dealloc(ptr, alignment)
+    // SAFETY: the glue hands back only allocations it made through this host.
+    unsafe { roc_dealloc(ptr, alignment) }
 }
 
 extern "C" fn host_realloc(
@@ -137,7 +146,8 @@ extern "C" fn host_realloc(
     length: usize,
     alignment: usize,
 ) -> NonNull<c_void> {
-    roc_realloc(ptr, length, alignment)
+    // SAFETY: the glue hands back only allocations it made through this host.
+    unsafe { roc_realloc(ptr, length, alignment) }
 }
 
 extern "C" fn host_dbg(_: *mut abi::RocHost, bytes: *const u8, len: usize) { roc_dbg(bytes, len) }
