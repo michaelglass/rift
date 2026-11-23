@@ -366,9 +366,24 @@ the property test fail).
   whether `remap_space` carried it along, and what the saved layout held) depended on whether a
   query had run first.
 
+**W4c, ownership from the core (2026-11-23).** The window store keeps no ownership of its own:
+a record's ownership field and the per-workspace index are gone, and the store answers who
+places a window (`workspace_for_window`, `claim`, `workspace_windows`, the assignment iteration
+and counts) from the core's joined `Workspaces`; `set_ownership` only tells the core. A record
+stays while the core owns its window, as it did while the record held the ownership.
+`workspace_windows` keeps its order: the core's per-workspace set is ordered by `WindowId`,
+whose derived order is the (pid, index) the store sorted by. **A deviation from the W4 plan,
+decided here:** a claim's flags and original id are not a platform-side projection beside the
+core (a second copy that must agree with the core's "claimed"); they ride in the core's opaque
+owner, `Claimant { owner, flags, original }`, so the core holds the whole claim. Only the owner
+takes part in a decision, and the Roc twin sees only the owner's word. What stays platform-side
+is the claims-by-owner index (its order is the owner's); the `workspace-divergence:` check now
+compares it with the core's claimed windows, and checks every owned window has a record.
+Plants: the core's index keeping a reassigned window (13 lib tests fail), a held window read as
+unassigned (3), a claim left in the index when it ends (20, the fuzzer among them).
+
 **Next:**
-1. W4c (the window store answers ownership from the core) and W4d (catalog and activations from
-   the core, with the saved form).
+1. W4d (catalog and activations from the core, with the saved form).
 2. The core_geometry converters on the new layout trees.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
