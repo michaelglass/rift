@@ -640,7 +640,7 @@ impl Reactor {
                 && self.space_state.screen_by_space(*space).is_some()
                 && self.layout_manager.layout_engine.workspaces().workspaces.get(camera.identity.workspace)
                     .is_some_and(|ws| matches!(&ws.layout_system, LayoutSystemKind::Scrolling(system) if system.contains_layout(camera.identity.layout)))
-                && matches!(self.mission_control_manager.mission_control_state, super::MissionControlState::Inactive);
+                && !self.is_mission_control_active();
             (!valid).then_some(*space)
         }).collect();
         for space in invalid {

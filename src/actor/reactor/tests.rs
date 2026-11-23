@@ -2952,6 +2952,21 @@ fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
 }
 
 #[test]
+fn opening_mission_control_ends_a_press_and_admits_its_windows() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wid = WindowId::new(1, 2);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+    let info = make_window_info(frame, None, "Detached tab", None);
+    reactor.handle_event(Event::WindowCreated(wid, info, None, Some(MouseState::Down)));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), None);
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space));
+}
+
+#[test]
 fn unrelated_native_resize_cannot_steal_a_drag_or_revive_its_transfer() {
     let (mut reactor, wid, wsid, space1, space2, frame, screen2) =
         reactor_with_window_on_space1_two_displays();

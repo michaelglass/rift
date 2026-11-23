@@ -179,13 +179,31 @@ impl Reactor {
         wid: WindowId,
         info: WindowInfo,
         native: Option<WindowServerInfo>,
+        pressed: bool,
     ) {
         if let Some(native) = native {
             self.state.windows.track_window_server_info(native);
         }
         self.observe_ax_window(changes, wid, info);
-        self.admit_ax_window(changes, wid);
+        match (&mut self.hold, pressed) {
+            (super::Hold::Press(created), true) => created.push(wid),
+            (super::Hold::Free, true) => self.hold = super::Hold::Press(vec![wid]),
+            _ => self.admit_ax_window(changes, wid),
+        }
         changes.refresh_notifications = true;
+    }
+
+    pub(super) fn admit_windows_created_under_press(&mut self, changes: &mut Changes) {
+        let created = match std::mem::take(&mut self.hold) {
+            super::Hold::Press(created) => created,
+            other => {
+                self.hold = other;
+                return;
+            }
+        };
+        for wid in created {
+            self.admit_ax_window(changes, wid);
+        }
     }
 
     /// Update facts once. Inventory projects returns together with its other observations.

@@ -84,8 +84,8 @@ pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{AppState, WindowState};
 pub use crate::model::reactor::{
-    Command, DisplaySelector, MenuState, MissionControlState, ReactorCommand, RefocusState,
-    Requested, StaleCleanupState, WorkspaceSwitchOrigin,
+    Command, DisplaySelector, MenuState, ReactorCommand, RefocusState, Requested,
+    StaleCleanupState, WorkspaceSwitchOrigin,
 };
 
 #[doc(hidden)]
@@ -389,6 +389,18 @@ pub enum WindowInvalidationSource {
     StaleAxElement,
 }
 
+/// What Rift waits out before it lays out windows.
+#[derive(Debug, Default)]
+enum Hold {
+    #[default]
+    Free,
+    /// A button is held, and these windows appeared under it (a tab torn out of its window).
+    /// They are admitted at the release, so none is tiled out from under the cursor (#689).
+    Press(Vec<WindowId>),
+    /// macOS's Mission Control is open.
+    MissionControl,
+}
+
 pub struct Reactor {
     pub config: Config,
     pub one_space: bool,
@@ -413,7 +425,7 @@ pub struct Reactor {
     notification_manager: managers::NotificationManager,
     transaction_manager: transaction_manager::TransactionManager,
     menu_manager: managers::MenuManager,
-    mission_control_manager: managers::MissionControlManager,
+    hold: Hold,
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
@@ -535,9 +547,7 @@ impl Reactor {
                 menu_tx: None,
                 last_projection_signature: None,
             },
-            mission_control_manager: managers::MissionControlManager {
-                mission_control_state: MissionControlState::Inactive,
-            },
+            hold: Hold::Free,
             window_inventory_manager: managers::WindowInventoryManager {
                 next_request_id: 0,
                 in_flight: HashMap::default(),
@@ -1058,12 +1068,7 @@ impl Reactor {
         self.drag_manager.actor.begin_native(source, scene);
     }
 
-    fn is_mission_control_active(&self) -> bool {
-        matches!(
-            self.mission_control_manager.mission_control_state,
-            MissionControlState::Active
-        )
-    }
+    fn is_mission_control_active(&self) -> bool { matches!(self.hold, Hold::MissionControl) }
 
     async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
@@ -1689,9 +1694,10 @@ impl Reactor {
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
-            Event::WindowCreated(wid, mut window, ws_info, _) => {
+            Event::WindowCreated(wid, mut window, ws_info, mouse) => {
                 self.replace_native_tab(wid, &mut window);
-                self.observe_created_window(changes, wid, window, ws_info);
+                let pressed = mouse == Some(MouseState::Down);
+                self.observe_created_window(changes, wid, window, ws_info, pressed);
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
@@ -2287,6 +2293,7 @@ impl Reactor {
             }
             Event::MissionControlNativeEntered => {
                 self.drag_manager.reset();
+                self.admit_windows_created_under_press(changes);
                 self.set_mission_control_active(true);
                 return Ok(());
             }
@@ -2706,6 +2713,7 @@ impl Reactor {
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
     ) {
+        self.admit_windows_created_under_press(changes);
         if self.is_mission_control_active()
             || (self.is_in_drag() && !self.drag_manager.actor.owns_button(button))
         {
@@ -5879,16 +5887,16 @@ impl Reactor {
         input_tx.send(crate::actor::input::Request::LayoutModesChanged(modes));
     }
 
+    /// Opening Mission Control ends a press: its windows are admitted first.
     fn set_mission_control_active(&mut self, active: bool) {
-        let new_state = if active {
-            MissionControlState::Active
-        } else {
-            MissionControlState::Inactive
-        };
         if self.is_mission_control_active() == active {
             return;
         }
-        self.mission_control_manager.mission_control_state = new_state;
+        self.hold = if active {
+            Hold::MissionControl
+        } else {
+            Hold::Free
+        };
         self.update_focus_follows_mouse_state();
     }
 

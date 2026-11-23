@@ -41,11 +41,7 @@ impl ViewportSession {
 }
 impl Reactor {
     fn gesture_space_active(&self, space: crate::sys::screen::SpaceId) -> bool {
-        self.is_space_active(space)
-            && matches!(
-                self.mission_control_manager.mission_control_state,
-                super::MissionControlState::Inactive
-            )
+        self.is_space_active(space) && !self.is_mission_control_active()
     }
 
     pub(super) fn gesture_event(&mut self, event: Lifecycle) {
