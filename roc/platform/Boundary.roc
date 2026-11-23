@@ -209,6 +209,32 @@ Boundary := [].{
 
 	DesktopQuestion := { active : Bool, workspace_empty : FactBool }
 
+	## The window under the pointer: its frame and its window-server id, if it has one.
+	HoveredWindow := { frame : Rect, server : MaybeWord }
+
+	Pointed := [Hovered(HoveredWindow), Untracked]
+
+	## A floating window's frame, if the window is one.
+	MaybeFrame := [Frame(Rect), NoFrame]
+
+	WordFrame := { key : U64, answer : MaybeFrame }
+
+	WindowLevels := { level : I64, sub_level : I32 }
+
+	## A window's levels, if known.
+	MaybeLevels := [Levels(WindowLevels), NoLevels]
+
+	WordLevels := { key : U64, answer : MaybeLevels }
+
+	RaiseQuestion := { window : Pointed, space : MaybeWord, claimed : FactBool, admitted : FactBool, floating : FactBool, active : FactBool, in_active_workspace : FactBool, could_occlude : FactBool, order : FactWords, floaters : List(WordFrame), levels : List(WordLevels) }
+
+	## Why the window under the pointer is not raised.
+	Unraised := [Unknown, OutsideAdmission, NoSpace, InactiveSpace, OutsideActiveWorkspace, BuriesFloater]
+
+	MouseRaise := [Raise, Skip(Unraised)]
+
+	RaiseAnswer := [Decided(MouseRaise), Unasked(U64)]
+
 	# Topology (`rift_core::topology`).
 
 	## A Space, or none.

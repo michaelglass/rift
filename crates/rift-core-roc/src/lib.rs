@@ -459,9 +459,9 @@ pub fn first_frames(floating: Floating, windows: Vec<Newcomer>) -> Result<Vec<Re
 /// questions carry: the decision, or the first fact it read that its question does not carry.
 pub mod focus {
     use rift_core::focus::plain::{
-        Activation, Candidate, Desktop, DisplayFollow, Hides, RemovalQuestion, Untracked,
+        Activation, Candidate, Desktop, DisplayFollow, Hides, Raise, RemovalQuestion, Untracked,
     };
-    use rift_core::focus::{Follow, RemovalFocus, UntrackedFocus};
+    use rift_core::focus::{Follow, MouseRaise, RemovalFocus, UntrackedFocus};
     use rift_core::plain::{Unasked, WindowId};
 
     use crate::{abi, boundary, host};
@@ -502,6 +502,12 @@ pub mod focus {
         let host = host();
         let question = boundary::untracked_question(question, &host);
         boundary::untracked_answer(unsafe { abi::roc_untracked_focus(question) })
+    }
+
+    pub fn mouse_raise(question: Raise) -> Result<MouseRaise, Unasked> {
+        let host = host();
+        let question = boundary::raise_question(question, &host);
+        boundary::raise_answer(unsafe { abi::roc_mouse_raise(question) })
     }
 
     pub fn focuses_desktop(question: Desktop) -> Result<bool, Unasked> {

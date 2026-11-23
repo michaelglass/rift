@@ -2,14 +2,14 @@
 //! questions: the answers must be identical word for word. Ids are few and collide on purpose,
 //! so removals hit the focused window, siblings share apps, and candidates overlap.
 
-use rift_core::focus::Removal;
 use rift_core::focus::plain::{
-    Activation, Candidate, Desktop, DisplayFollow, Hides, RemovalQuestion, Untracked,
+    Activation, Candidate, Desktop, DisplayFollow, Hides, Raise, RemovalQuestion, Untracked,
 };
+use rift_core::focus::{Hovered, MouseRaise, Removal, Unraised};
 mod facts;
 
 use facts::{Coin, rust, typed};
-use rift_core::plain::{WindowId, wire};
+use rift_core::plain::{Rect, WindowId, wire};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -261,6 +261,70 @@ fn the_roc_core_focuses_a_desktop_as_the_rust_core_does() {
             wire::encode_verdict,
         );
         let rust = rust(question.answer(), wire::encode_verdict);
+        (format!("{question:?}"), roc, rust)
+    });
+}
+
+/// A mouse raise as words: raise, or why not.
+fn mouse_raise(answer: MouseRaise) -> Vec<u64> {
+    match answer {
+        MouseRaise::Raise => vec![0],
+        MouseRaise::Skip(why) => vec![1, match why {
+            Unraised::Unknown => 0,
+            Unraised::OutsideAdmission => 1,
+            Unraised::NoSpace => 2,
+            Unraised::InactiveSpace => 3,
+            Unraised::OutsideActiveWorkspace => 4,
+            Unraised::BuriesFloater => 5,
+        }],
+    }
+}
+
+#[test]
+fn the_roc_core_raises_a_window_under_the_mouse_as_the_rust_core_does() {
+    // The candidate is window 5; the windows above it are a few ids (5 among them, so the walk
+    // stops there), floating inside it, at its edges, partly out of it, or not floating; levels
+    // collide often.
+    let rect = |x, y, w, h| Rect { x, y, w, h };
+    let frames = [
+        rect(0., 0., 500., 500.),
+        rect(10., 10., 100., 100.),
+        rect(450., 0., 100., 100.),
+        rect(-0.0, 0., 500., 500.),
+    ];
+    typed("focus", "mouse_raise", Rng(0x30_05E0_0000_0047), |rng, blank| {
+        let window = rng.chance(90).then(|| Hovered {
+            frame: frames[rng.below(2) as usize * 3],
+            server: rng.chance(85).then_some(5),
+        });
+        let order: Vec<u64> =
+            (0..rng.below(6)).map(|_| [1, 2, 3, 5][rng.below(4) as usize]).collect();
+        let floaters: Vec<Option<Rect>> =
+            (0..6).map(|_| rng.chance(70).then(|| frames[rng.below(4) as usize])).collect();
+        let levels: Vec<Option<(i64, i32)>> = (0..6)
+            .map(|_| rng.chance(85).then(|| (rng.below(2) as i64 * 3, rng.below(2) as i32)))
+            .collect();
+        let fact = |rng: &mut Rng, percent| {
+            let answer = rng.chance(percent);
+            blank.fact(rng, answer)
+        };
+        let question = Raise {
+            window,
+            space: rng.chance(90).then_some(1),
+            claimed: fact(rng, 15),
+            admitted: fact(rng, 70),
+            floating: fact(rng, 50),
+            active: fact(rng, 85),
+            in_active_workspace: fact(rng, 85),
+            could_occlude: fact(rng, 60),
+            order: blank.fact(rng, order.clone()),
+            floaters: blank.answers(rng, order.iter().copied(), |id| floaters[id as usize]),
+            levels: blank.answers(rng, [5].into_iter().chain(order.iter().copied()), |id| {
+                levels[id as usize]
+            }),
+        };
+        let roc = rust(rift_core_roc::focus::mouse_raise(question.clone()), mouse_raise);
+        let rust = rust(question.answer(), mouse_raise);
         (format!("{question:?}"), roc, rust)
     });
 }

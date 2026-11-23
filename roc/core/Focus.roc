@@ -23,6 +23,15 @@ Answers(k, v) : List({ key : k, answer : v })
 ## fact's place among the question's facts): it decides in another order than the platform's.
 Read(a) : Try(a, [Unasked(U64)])
 
+## A frame.
+Rect : { x : F64, y : F64, w : F64, h : F64 }
+
+## A window's level and sub-level, if known.
+Levels : [Levels({ level : I64, sub_level : I32 }), NoLevels]
+
+## Whether focus-follows-mouse raises the window under the pointer, or why not.
+Raise : [Raise, Skip([Unknown, OutsideAdmission, NoSpace, InactiveSpace, OutsideActiveWorkspace, BuriesFloater])]
+
 ## Whether an activation follows its window, and where, or why not.
 Follow : [To({ space : U64, workspace : U64 }), Stay([NotStandard, Unavailable, NoSpace, NoWorkspace, AlreadyActive, PendingWindow, Mode(U64), FullscreenActive, Unmanageable(U64), NoBundleId, Blacklisted])]
 
@@ -248,6 +257,114 @@ Focus := [].{
 				}
 			}
 		}
+
+	## Whether focus-follows-mouse raises the window under the pointer: a tracked window that is
+	## unclaimed and admitted or floating, on an active Space in its active workspace, unless
+	## raising it would bury a floating window above it. Facts: 0 claimed, 1 admitted, 2 floating,
+	## 3 whether its Space is active, 4 whether it is in the active workspace, 5 whether it could
+	## cover a floating window, 6 the Space's stacking order, 7 a floating window's frame, 8 a
+	## window's levels.
+	mouse_raise : { window : [Hovered({ frame : Rect, server : Maybe }), Untracked], space : Maybe, claimed : Fact(Bool), admitted : Fact(Bool), floating : Fact(Bool), active : Fact(Bool), in_active_workspace : Fact(Bool), could_occlude : Fact(Bool), order : Fact(List(U64)), floaters : Answers(U64, [Frame(Rect), NoFrame]), levels : Answers(U64, Levels) } -> Read(Raise)
+	mouse_raise = |q|
+		match q.window {
+			Untracked => Ok(Skip(Unknown))
+			Hovered(window) => {
+				claimed = ask(q.claimed, 0)?
+				outside =
+					if claimed {
+						True
+					} else {
+						admitted = ask(q.admitted, 1)?
+						if admitted {
+							False
+						} else {
+							floating = ask(q.floating, 2)?
+							if floating False else True
+						}
+					}
+				if outside {
+					Ok(Skip(OutsideAdmission))
+				} else {
+					match q.space {
+						Nothing => Ok(Skip(NoSpace))
+						Some(_) => {
+							is_active = ask(q.active, 3)?
+							if is_active {
+								inside = ask(q.in_active_workspace, 4)?
+								if inside {
+									match window.server {
+										Nothing => Ok(Raise)
+										Some(candidate) => {
+											occludes = ask(q.could_occlude, 5)?
+											if occludes {
+												order = ask(q.order, 6)?
+												buries = raise_buries_a_floater(candidate, window.frame, order, q.floaters, q.levels)?
+												if buries Ok(Skip(BuriesFloater)) else Ok(Raise)
+											} else {
+												Ok(Raise)
+											}
+										}
+									}
+								} else {
+									Ok(Skip(OutsideActiveWorkspace))
+								}
+							} else {
+								Ok(Skip(InactiveSpace))
+							}
+						}
+					}
+				}
+			}
+		}
+
+	## Whether raising `candidate` (at `frame`) would bury a floating window it covers entirely
+	## that is above it at the same level: the windows in front of it in `order`, each a floating
+	## window's frame (fact 7), and the candidate's and its levels (fact 8, the candidate's
+	## first).
+	raise_buries_a_floater : U64, Rect, List(U64), Answers(U64, [Frame(Rect), NoFrame]), Answers(U64, Levels) -> Read(Bool)
+	raise_buries_a_floater = |candidate, frame, order, floaters, levels| {
+		var $buries = Ok(False)
+		var $reached = False
+		for above in order {
+			if above == candidate {
+				$reached = True
+			} else {}
+			match $buries {
+				Ok(False) =>
+					if $reached {} else {
+						match ask_word(floaters, above, 7) {
+							Err(unasked) => { $buries = Err(unasked) }
+							Ok(NoFrame) => {}
+							Ok(Frame(above_frame)) =>
+								if contains(frame, above_frame) {
+									match ask_word(levels, candidate, 8) {
+										Err(unasked) => { $buries = Err(unasked) }
+										Ok(candidate_levels) =>
+											match ask_word(levels, above, 8) {
+												Err(unasked) => { $buries = Err(unasked) }
+												Ok(above_levels) =>
+													match candidate_levels {
+														Levels(mine) =>
+															match above_levels {
+																Levels(theirs) => if mine.level == theirs.level and mine.sub_level == theirs.sub_level { $buries = Ok(True) } else {}
+																NoLevels => {}
+															}
+														NoLevels => {}
+													}
+											}
+									}
+								} else {}
+						}
+					}
+				_ => {}
+			}
+		}
+		$buries
+	}
+
+	## Whether `outer` covers `inner` entirely (edges included).
+	contains : Rect, Rect -> Bool
+	contains = |outer, inner| outer.x <= inner.x and outer.y <= inner.y and outer.x + outer.w >= inner.x + inner.w and outer.y + outer.h >= inner.y + inner.h
 
 	## Whether to focus a Space's desktop. Fact: 0 whether its workspace is empty.
 	focuses_desktop : Bool, Fact(Bool) -> Read(Bool)

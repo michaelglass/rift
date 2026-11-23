@@ -6,7 +6,9 @@
 
 use std::mem::ManuallyDrop;
 
-use rift_core::focus::{self, Follow, Removal, RemovalFocus, Stay, UntrackedFocus};
+use rift_core::focus::{
+    self, Follow, MouseRaise, Removal, RemovalFocus, Stay, Unraised, UntrackedFocus,
+};
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -989,6 +991,98 @@ pub(crate) fn untracked_answer(
             let key = unsafe { focus.borrow_payload_make_key_unchecked() };
             UntrackedFocus::MakeKey(key.owner, key.window)
         }
+    })
+}
+
+pub(crate) fn raise_question(
+    question: focus::plain::Raise,
+    host: &abi::RocHost,
+) -> abi::BoundaryRaiseQuestion {
+    use abi::{
+        BoundaryMaybeFrameTag as FrameTag, BoundaryMaybeLevelsTag as LevelsTag,
+        BoundaryPointedTag as Tag,
+    };
+    let floaters: Vec<_> = question
+        .floaters
+        .0
+        .into_iter()
+        .map(|(key, frame)| abi::BoundaryWordFrame {
+            key,
+            answer: match frame {
+                Some(frame) => union!(
+                    BoundaryMaybeFrame,
+                    BoundaryMaybeFramePayload.frame(rect(frame)),
+                    FrameTag::Frame
+                ),
+                None => union!(
+                    BoundaryMaybeFrame,
+                    BoundaryMaybeFramePayload.no_frame,
+                    FrameTag::NoFrame
+                ),
+            },
+        })
+        .collect();
+    let levels: Vec<_> = question
+        .levels
+        .0
+        .into_iter()
+        .map(|(key, levels)| abi::BoundaryWordLevels {
+            key,
+            answer: match levels {
+                Some((level, sub_level)) => union!(
+                    BoundaryMaybeLevels,
+                    BoundaryMaybeLevelsPayload
+                        .levels(abi::BoundaryWindowLevels { level, sub_level }),
+                    LevelsTag::Levels
+                ),
+                None => union!(
+                    BoundaryMaybeLevels,
+                    BoundaryMaybeLevelsPayload.no_levels,
+                    LevelsTag::NoLevels
+                ),
+            },
+        })
+        .collect();
+    abi::BoundaryRaiseQuestion {
+        window: match question.window {
+            Some(window) => union!(
+                BoundaryPointed,
+                BoundaryPointedPayload.hovered(abi::BoundaryHoveredWindow {
+                    frame: rect(window.frame),
+                    server: maybe_word(window.server),
+                }),
+                Tag::Hovered
+            ),
+            None => union!(BoundaryPointed, BoundaryPointedPayload.untracked, Tag::Untracked),
+        },
+        space: maybe_word(question.space),
+        claimed: fact_bool(question.claimed, host),
+        admitted: fact_bool(question.admitted, host),
+        floating: fact_bool(question.floating, host),
+        active: fact_bool(question.active, host),
+        in_active_workspace: fact_bool(question.in_active_workspace, host),
+        could_occlude: fact_bool(question.could_occlude, host),
+        order: fact_words(question.order, host),
+        floaters: list(&floaters, host),
+        levels: list(&levels, host),
+    }
+}
+
+pub(crate) fn raise_answer(answer: abi::BoundaryRaiseAnswer) -> Result<MouseRaise, Unasked> {
+    use abi::{BoundaryMouseRaiseTag as Tag, BoundaryUnraised as Why};
+    decision!(answer, BoundaryRaiseAnswerTag, |raise| match raise.tag {
+        Tag::Raise => MouseRaise::Raise,
+        Tag::Skip => MouseRaise::Skip(
+            // SAFETY: the tag says the payload is the reason.
+            match unsafe { *raise.borrow_payload_skip_unchecked() } {
+                Why::Unknown => Unraised::Unknown,
+                Why::OutsideAdmission => Unraised::OutsideAdmission,
+                Why::NoSpace => Unraised::NoSpace,
+                Why::InactiveSpace => Unraised::InactiveSpace,
+                Why::OutsideActiveWorkspace => Unraised::OutsideActiveWorkspace,
+                Why::BuriesFloater => Unraised::BuriesFloater,
+            }
+        ),
     })
 }
 

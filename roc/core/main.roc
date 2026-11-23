@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
 import Bsp
 import Traditional
 import Scrolling
@@ -123,7 +123,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible, emits_window, quarantines, target_display, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, ownerships_init, ownerships_step, ownerships_view, topology_init, topology_step, topology_view, mode_verdict, main_window_init, main_window_step, main_window_view }
+core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, ownerships_init, ownerships_step, ownerships_view, topology_init, topology_step, topology_view, mode_verdict, main_window_init, main_window_step, main_window_view }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -176,6 +176,9 @@ display_to_follow = |q| decision_of(Focus.display_to_follow(q.focused_space, q.p
 
 untracked_focus : UntrackedQuestion -> UntrackedAnswer
 untracked_focus = |q| decision_of(Focus.untracked_focus(q.under_cursor, q.tracked, q.known))
+
+mouse_raise : RaiseQuestion -> RaiseAnswer
+mouse_raise = |q| decision_of(Focus.mouse_raise(q))
 
 focuses_desktop : DesktopQuestion -> VerdictAnswer
 focuses_desktop = |q| decision_of(Focus.focuses_desktop(q.active, q.workspace_empty))

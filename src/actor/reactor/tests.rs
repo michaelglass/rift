@@ -5144,6 +5144,22 @@ fn mouse_raise_queries_order_only_when_it_could_cover_a_floating_window() {
     assert_eq!(window_server::window_order_query_count(), before);
 }
 
+/// A floating window the layout still holds is raised under the mouse even while its admission
+/// is suspended (here by an app rule that unmanages it): floating is the other way into the
+/// admission policy.
+#[test]
+fn mouse_raises_a_floating_window_whose_admission_is_suspended() {
+    let (mut reactor, window, _, space, _, _) = reactor_with_window_on_space1();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, window));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, window));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
+    reactor.state.windows.set_manage_override(window, Some(false));
+    assert!(!reactor.state.windows.is_admitted_state(window));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
+    assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
+}
+
 #[test]
 fn focus_follows_mouse_raise_is_quiet_so_stale_main_window_cannot_switch_workspace() {
     let reactor = test_reactor();
@@ -14785,28 +14801,6 @@ fn which_presentations_an_event_ends_and_whether_they_commit_first() {
     assert_eq!(cancels(&Event::MenuOpened(1), |_| true), None);
     assert!(commits(&Event::WindowDestroyed(wid)));
     assert!(!commits(&Event::MenuOpened(1)));
-}
-
-#[test]
-fn a_raise_buries_a_floater_only_above_it_covered_entirely_at_the_same_level() {
-    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(500., 500.));
-    let inside = CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.));
-    let floating = |wsid| (wsid == 2).then_some(inside);
-    let same = |_| Some(0);
-    // Floater 2 above the candidate 5, inside it, same level: buried.
-    assert!(raise_buries_a_floater(5, frame, &[2, 5], floating, same));
-    // Below the candidate, it stays above nothing.
-    assert!(!raise_buries_a_floater(5, frame, &[5, 2], floating, same));
-    // At another level it stays visible.
-    assert!(!raise_buries_a_floater(5, frame, &[2, 5], floating, |w| Some(w)));
-    // Unknown levels are not the same level.
-    assert!(!raise_buries_a_floater(5, frame, &[2, 5], floating, |_| None::<
-        i32,
-    >));
-    // Not entirely covered.
-    let partly =
-        |wsid| (wsid == 2).then_some(CGRect::new(CGPoint::new(450., 0.), CGSize::new(100., 100.)));
-    assert!(!raise_buries_a_floater(5, frame, &[2, 5], partly, same));
 }
 
 #[test]

@@ -5661,70 +5661,42 @@ impl Reactor {
     // Returns true if the window should be raised on mouse over considering
     // active workspace membership and potential occlusion of floating windows above it.
     pub(crate) fn should_raise_on_mouse_over(&self, wid: WindowId, space: Option<SpaceId>) -> bool {
-        let Some(window) = self.state.windows.window(wid) else {
-            return false;
-        };
-
-        if self.state.windows.is_claimed(wid)
-            || (!self.state.windows.is_admitted_state(wid)
-                && !self.layout_manager.layout_engine.is_window_floating(wid))
-        {
-            trace!(
-                ?wid,
-                "Skipping mouse focus for a window outside admission policy"
-            );
-            return false;
-        }
-
-        let candidate_frame = window.frame_monotonic();
-
-        let Some(space) = space else {
-            trace!(?wid, "Skipping mouse focus without a resolved space");
-            return false;
-        };
-        if !self.is_space_active(space) {
-            trace!(?wid, ?space, "Skipping mouse focus on an inactive space");
-            return false;
-        }
-
-        if !self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-            &self.state.windows,
-            space,
-            wid,
-        ) {
-            trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
-            return false;
-        }
-
-        let Some(candidate_wsid) = window.info.sys_id else {
-            return true;
-        };
-
-        // Native stacking order matters only if another tracked floating
-        // window could be completely covered by this raise.
-        let could_occlude = self.state.windows.iter_windows().any(|(other, state)| {
-            other != wid
-                && state.info.sys_id.is_some()
-                && self.layout_manager.layout_engine.is_window_floating(other)
-                && candidate_frame.contains_rect(state.frame_monotonic())
+        use rift_core::focus::{Hovered, MouseRaise, Unraised};
+        let window = self.state.windows.window(wid).map(|window| Hovered {
+            frame: plain_rect(window.frame_monotonic()),
+            server: window.info.sys_id.map(|wsid| wsid.as_u32()),
         });
-        if !could_occlude {
-            return true;
+        let facts = AskedRaise::new(RaiseQuery { reactor: self, window: wid });
+        let raise = rift_core::focus::mouse_raise(window, space, &facts);
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::focus::plain::Raise;
+            let question = facts.plain(window, space);
+            let roc = rift_core_roc::focus::mouse_raise(question.clone());
+            crate::roc_path::check("mouse_raise", Raise::FACTS, &question, &raise, roc);
         }
-
-        let order =
-            crate::sys::window_server::space_window_list_for_connection(&[space.get()], 0, false);
-        !raise_buries_a_floater(
-            candidate_wsid.as_u32(),
-            candidate_frame,
-            &order,
-            |above| {
-                let above = self.state.windows.tracked_window_id(WindowServerId::new(above))?;
-                self.layout_manager.layout_engine.is_window_floating(above).then_some(())?;
-                Some(self.state.windows.window(above)?.frame_monotonic())
-            },
-            |wsid| Some((window_level(wsid)?, window_sub_level(wsid))),
-        )
+        match raise {
+            MouseRaise::Raise => true,
+            MouseRaise::Skip(why) => {
+                match why {
+                    Unraised::OutsideAdmission => trace!(
+                        ?wid,
+                        "Skipping mouse focus for a window outside admission policy"
+                    ),
+                    Unraised::NoSpace => {
+                        trace!(?wid, "Skipping mouse focus without a resolved space")
+                    }
+                    Unraised::InactiveSpace => {
+                        trace!(?wid, ?space, "Skipping mouse focus on an inactive space")
+                    }
+                    Unraised::OutsideActiveWorkspace => {
+                        trace!("Ignoring mouse over window {:?} - not in active workspace", wid)
+                    }
+                    Unraised::Unknown | Unraised::BuriesFloater => {}
+                }
+                false
+            }
+        }
     }
 
     fn process_windows_for_app_rules(
@@ -7417,27 +7389,6 @@ fn plan_workspace_placements(
     }
 }
 
-/// Whether raising `candidate` (at `frame`) would bury a floating window it covers entirely that
-/// is above it at the same level. `order` is the space's stacking order, front first;
-/// `floating(wsid)` the frame of the tracked floating window with that id; `levels(wsid)` its
-/// window level and sub-level, if known (asked only for windows that matter).
-fn raise_buries_a_floater<L: PartialEq + Copy>(
-    candidate: u32,
-    frame: CGRect,
-    order: &[u32],
-    floating: impl Fn(u32) -> Option<CGRect>,
-    levels: impl Fn(u32) -> Option<L>,
-) -> bool {
-    let mut candidate_levels = None;
-    order.iter().take_while(|&&above| above != candidate).any(|&above| {
-        floating(above).is_some_and(|above_frame| frame.contains_rect(above_frame))
-            && candidate_levels
-                .get_or_insert_with(|| levels(candidate))
-                .zip(levels(above))
-                .is_some_and(|(candidate, above)| candidate == above)
-    })
-}
-
 /// The window a MoveWindowToDisplay means: the one at an index in the active workspaces, else
 /// the main window, else the one under the cursor, else the command display's first.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -7623,6 +7574,168 @@ impl rift_core::focus::ActivationFacts for AskedActivation<'_> {
     }
 
     fn blacklisted(&self) -> Option<bool> { self.blacklisted.ask(|| self.query.blacklisted()) }
+}
+
+/// A frame as the core's plain data.
+fn plain_rect(frame: CGRect) -> rift_core::plain::Rect {
+    rift_core::plain::Rect {
+        x: frame.origin.x,
+        y: frame.origin.y,
+        w: frame.size.width,
+        h: frame.size.height,
+    }
+}
+
+/// What the reactor knows of the window under the pointer, for
+/// [`rift_core::focus::mouse_raise`].
+struct RaiseQuery<'a> {
+    reactor: &'a Reactor,
+    window: WindowId,
+}
+
+impl rift_core::focus::RaiseFacts for RaiseQuery<'_> {
+    type Levels = (objc2_app_kit::NSWindowLevel, std::ffi::c_int);
+    type Server = u32;
+    type Space = SpaceId;
+
+    fn claimed(&self) -> bool { self.reactor.state.windows.is_claimed(self.window) }
+
+    fn admitted(&self) -> bool { self.reactor.state.windows.is_admitted_state(self.window) }
+
+    fn floating(&self) -> bool {
+        self.reactor.layout_manager.layout_engine.is_window_floating(self.window)
+    }
+
+    fn active(&self, space: SpaceId) -> bool { self.reactor.is_space_active(space) }
+
+    fn in_active_workspace(&self, space: SpaceId) -> bool {
+        let reactor = self.reactor;
+        reactor.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
+            &reactor.state.windows,
+            space,
+            self.window,
+        )
+    }
+
+    fn could_occlude(&self) -> bool {
+        let reactor = self.reactor;
+        let Some(window) = reactor.state.windows.window(self.window) else {
+            return false;
+        };
+        let frame = window.frame_monotonic();
+        reactor.state.windows.iter_windows().any(|(other, state)| {
+            other != self.window
+                && state.info.sys_id.is_some()
+                && reactor.layout_manager.layout_engine.is_window_floating(other)
+                && frame.contains_rect(state.frame_monotonic())
+        })
+    }
+
+    fn order(&self, space: SpaceId) -> Vec<u32> {
+        crate::sys::window_server::space_window_list_for_connection(&[space.get()], 0, false)
+    }
+
+    fn floater(&self, above: u32) -> Option<rift_core::plain::Rect> {
+        let reactor = self.reactor;
+        let above = reactor.state.windows.tracked_window_id(WindowServerId::new(above))?;
+        reactor.layout_manager.layout_engine.is_window_floating(above).then_some(())?;
+        Some(plain_rect(
+            reactor.state.windows.window(above)?.frame_monotonic(),
+        ))
+    }
+
+    fn levels(&self, wsid: u32) -> Option<Self::Levels> {
+        Some((window_level(wsid)?, window_sub_level(wsid)))
+    }
+}
+
+/// A mouse raise's facts as the Rust decision asks them, each remembered for the Roc core's
+/// question (see `roc_path`).
+struct AskedRaise<'a> {
+    query: RaiseQuery<'a>,
+    claimed: Asked<bool>,
+    admitted: Asked<bool>,
+    floating: Asked<bool>,
+    active: Asked<bool>,
+    in_active_workspace: Asked<bool>,
+    could_occlude: Asked<bool>,
+    order: Asked<Vec<u32>>,
+    floaters: AskedAbout<u32, Option<rift_core::plain::Rect>>,
+    levels: AskedAbout<u32, Option<(objc2_app_kit::NSWindowLevel, std::ffi::c_int)>>,
+}
+
+impl<'a> AskedRaise<'a> {
+    fn new(query: RaiseQuery<'a>) -> Self {
+        AskedRaise {
+            query,
+            claimed: Asked::new(),
+            admitted: Asked::new(),
+            floating: Asked::new(),
+            active: Asked::new(),
+            in_active_workspace: Asked::new(),
+            could_occlude: Asked::new(),
+            order: Asked::new(),
+            floaters: AskedAbout::new(),
+            levels: AskedAbout::new(),
+        }
+    }
+
+    /// The facts asked, as the Roc core's question about `window` on `space`.
+    #[cfg(feature = "roc-core")]
+    fn plain(
+        self,
+        window: Option<rift_core::focus::Hovered<u32>>,
+        space: Option<SpaceId>,
+    ) -> rift_core::focus::plain::Raise {
+        rift_core::focus::plain::Raise {
+            window: window.map(|window| rift_core::focus::Hovered {
+                frame: window.frame,
+                server: window.server.map(u64::from),
+            }),
+            space: space.map(Word::word),
+            claimed: self.claimed.fact(|claimed| claimed),
+            admitted: self.admitted.fact(|admitted| admitted),
+            floating: self.floating.fact(|floating| floating),
+            active: self.active.fact(|active| active),
+            in_active_workspace: self.in_active_workspace.fact(|inside| inside),
+            could_occlude: self.could_occlude.fact(|occludes| occludes),
+            order: self.order.fact(|order| order.into_iter().map(u64::from).collect()),
+            floaters: self.floaters.answers(u64::from, |frame| frame),
+            levels: self.levels.answers(u64::from, |levels| {
+                levels.map(|(level, sub_level)| (level as i64, sub_level))
+            }),
+        }
+    }
+}
+
+impl rift_core::focus::RaiseFacts for AskedRaise<'_> {
+    type Levels = (objc2_app_kit::NSWindowLevel, std::ffi::c_int);
+    type Server = u32;
+    type Space = SpaceId;
+
+    fn claimed(&self) -> bool { self.claimed.ask(|| self.query.claimed()) }
+
+    fn admitted(&self) -> bool { self.admitted.ask(|| self.query.admitted()) }
+
+    fn floating(&self) -> bool { self.floating.ask(|| self.query.floating()) }
+
+    fn active(&self, space: SpaceId) -> bool { self.active.ask(|| self.query.active(space)) }
+
+    fn in_active_workspace(&self, space: SpaceId) -> bool {
+        self.in_active_workspace.ask(|| self.query.in_active_workspace(space))
+    }
+
+    fn could_occlude(&self) -> bool { self.could_occlude.ask(|| self.query.could_occlude()) }
+
+    fn order(&self, space: SpaceId) -> Vec<u32> { self.order.ask(|| self.query.order(space)) }
+
+    fn floater(&self, above: u32) -> Option<rift_core::plain::Rect> {
+        self.floaters.ask(above, |above| self.query.floater(above))
+    }
+
+    fn levels(&self, wsid: u32) -> Option<Self::Levels> {
+        self.levels.ask(wsid, |wsid| self.query.levels(wsid))
+    }
 }
 
 /// What an event is, to an unsettled topology's quarantine.
