@@ -3,6 +3,9 @@ pub mod floating_position_store;
 pub mod hidden_window_placement;
 pub mod selection;
 pub mod server;
+// Test-only until the workspace catalog moves onto it (slice 2b part 2).
+#[cfg(test)]
+pub(crate) mod slot_table;
 pub mod tree;
 pub mod tx_store;
 pub mod virtual_workspace;

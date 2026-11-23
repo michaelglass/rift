@@ -42,9 +42,8 @@ shown workspace read as the previous one (122), load-time names told apart in re
 order (0: a new test, `duplicate_saved_names_are_told_apart_in_catalog_order`, now 1).
 
 **Next: slice 2b part 2.** Each `VirtualWorkspace`'s `space` leaves the store: the catalog moves
-onto `model::slot_table` (ruled below; the module and its differential test are written and
-proven against slotmap, set aside until this part wires it in: re-create
-`src/model/slot_table.rs` from the ruling if it is not in the tree) and writes `space` from the
+onto `model::slot_table` (ruled below; the module and its differential test are in the tree,
+compiled for tests only until this part wires it in: drop the `#[cfg(test)]` in model.rs) and writes `space` from the
 core; the load splits each saved record into the workspace and its Space (`SavedTopology`'s
 catalog); every `workspace.space` / `store[id].space` read goes to the core (the compiler finds
 them once the field is gone); the tripwire retires whole (`workspace_divergences`,
