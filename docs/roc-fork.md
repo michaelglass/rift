@@ -9,27 +9,37 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-23, after layout slice 2, master-stack): read this first
+## Handoff (2026-11-24, after layout slice 3, traditional): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
-upstream's layout systems (Next item 2) has two slices, stack and master-stack, and the core's
+upstream's layout systems (Next item 2) has three slices, stack, master-stack and traditional, and the core's
 shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
 through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 863 lib tests (2
-ignored), 872 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+Public-clean; the published tip's id is in the slice report). All checks green: 864 lib tests (2
+ignored), 873 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
 --all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
 either way.
 
-**Next: the next layout slice.** Traditional, then floating, BSP, scrolling. Each as the stack and
-master-stack slices: a builder from the system's tree to the core's shape, a check in its
-`calculate_layout`, a differential over the system's own edits (`systems::drawn` has the shared
-draws), one plant per decision the builder makes. A difference from the system's frames is a
-behaviour question: stop and report it, never adjust either side. **The traditional slice is
-small:** `tiles::shape` already builds its tree (with no regions: `TraditionalLayoutSystem`
-projects from its root), so it is the check, the system's edits drawn, and plants. BSP and
-scrolling use the solver brought up to #688 below; their own pre-#688 rules (BSP's ratio split,
-the strip's widths) are the likely differences there.
+**Next: the next layout slice.** Floating, then BSP, scrolling (the lead: go on between slices
+unless the stop list applies). Each as the slices before: a builder from the system's tree to the
+core's shape, a check in its `calculate_layout`, a differential over the system's own edits
+(`systems::drawn` has the shared draws), one plant per decision the builder makes. A difference
+from the system's frames is a behaviour question: stop and report it, never adjust either side;
+a pre-#688 rule in the core is brought up to upstream first (the lead's ruling), held by a
+differential against upstream's own function. **Floating** needs more core than the others:
+upstream's `calculate_layout` gives each participating window its fullscreen frame (the nearest
+fullscreen ancestor), else its kept frame, else a first frame cascaded by its position among
+*all* the layout's windows (left-out ones hold a position); the core's `Floating::first_frames`
+only places a list of newcomers. BSP and scrolling use the solver brought up to #688; their own
+pre-#688 rules (BSP's ratio split, the strip's widths) are the likely differences there.
+
+**Layout slice 3, traditional (6e6f79e3).** `tiles::shape(root, None)`: the traditional system
+lays its tree out from the root, with no regions. Check in its `calculate_layout`; differential
+`the_core_tiles_traditional_layouts_as_the_traditional_system_does` (3000 systems through every
+edit the system takes; 10,515 frames identical, no difference). Plants: within-gaps (1), weights
+(3), the stack's top (1), stack orientation (2), axis orientation (3), the offset not handed on
+(1), Roc's vertical stack clamp (1, `roc-core`); the fullscreen root is equivalent here.
 
 **The core's geometry predated #688, and is brought up to it (the lead's ruling, 2026-11-23).**
 The core's layout geometry was written against rift's systems before upstream's #688 rewrote them;
@@ -755,7 +765,7 @@ A slice that needs a behaviour change stops and is reported.
    against upstream's `calculate_layout`; a difference is a behaviour question, stopped and
    reported.
    Done: stack (aec5f920), the core's solver and weights brought up to #688 (a02886b5, 6cebd282),
-   master-stack (Handoff). Next: traditional, floating, BSP, scrolling.
+   master-stack, traditional (Handoff). Next: floating, BSP, scrolling.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
