@@ -9,15 +9,54 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-23, after slice 2b part 1): read this first
+## Handoff (2026-11-23, after slice 2b part 2): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. After the slice 2a docs (f5b0fd1b) and the
-2b ruling (6729c58a): slice 2b part 1 (4d3afda4) and this docs commit. `rearch/roc-next@fork`
-carries everything through this docs commit once it is published (publish procedure: "Rulings
-that bind", Public-clean; the published tip's id is in the slice report), and the slot table
-(d0734254, test-only). All checks green: 854 lib tests, 861 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo check --locked`, fmt;
-no build warnings beyond the two old test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs`
-`button`).
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. After the slot table (d0734254) and its
+docs commit (94adc6b3): slice 2b part 2 and this docs commit. `rearch/roc-next@fork` carries
+everything through this docs commit once it is published (publish procedure: "Rulings that
+bind", Public-clean; the published tip's id is in the slice report). All checks green: 856 lib
+tests, 863 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+--features roc` (46), `cargo check --locked` both ways, fmt; no build warnings beyond the two old
+test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`). Clippy: no new findings on the
+lines this slice touched (three old expressions it rewrapped); `cargo clippy --features roc-core`
+stops on two old errors in `rift-core-roc` (`not_unsafe_ptr_arg_deref`), untouched here.
+
+**Slice 2b part 2, done.** `VirtualWorkspace` has no `space`: the core's catalog is the one holder
+of where each workspace is. The catalog is a `model::slot_table::SlotTable` (no longer test-only).
+Loading parses the saved slot sequence (`SavedStore.workspaces: Vec<SavedSlot<SavedWorkspace>>`,
+`SlotTable::parse`) and `Catalog::parse` splits each record into the workspace and its Space
+(`SavedWorkspace::split`), the Spaces going only into `SavedTopology`'s catalog. Saving writes each
+record with the core's Space (`SavedRecords`, `VirtualWorkspace::saved(space)`; the slot sequence
+by `SlotTable::saved`), so files are byte-compatible (the 2a fixtures pass unchanged). Every
+`space` read went to the view: `Workspaces::workspace_space`, and the per-Space answers moved onto
+it (`workspace_info`, `last_focused_window`, `workspace_for_window`, `active_layout`,
+`layout_spaces`, `resolve_window_index`, `eligible`); the two writers that checked a Space
+(`set_last_focused_window`, `rename_workspace`) take the core's catalog slice (`listed_on`); the
+window store's native reconcile reads the core's catalog it already holds (its workspace-store
+argument went). `move_workspace` only tells the core. The tripwire retired whole
+(`workspace_divergences`, `WorkspaceDivergence`, the reactor's catalog check; the
+`workspace-divergence:` lines left are ownership's). `.expect("a listed workspace has a Space")`
+stands where the code indexed the store before (same panic, one holder). Kept on purpose:
+`Workspaces::topology()` reads the core (live validation and the quarantine question), and the
+three test re-joins through it fork a fresh window store over the same core (fixture reuse, not a
+second holder). No bare-store topology test is left: every topology read needs a view. New tests:
+`a_saved_catalog_allocates_after_a_removal_as_the_store_it_was_saved_from` (300 drawn stores per
+mode, removals among the draws: the next id after a load is the saving store's, the ids alike,
+reused slots reached in both modes), `a_workspace_answers_only_on_the_space_it_is_listed_on`
+(store), `a_window_on_an_inactive_space_is_not_missing_from_the_active_snapshot` (reactor).
+Plants (lib tests failing): the load pairing every id with the first Space (9), the load
+rebuilding the table without its vacant slots (2), the save writing every record on one Space
+(7), a move not told to the core (34), `listed_on` ignoring the Space (0, then 1 with the store
+test), `workspace_info` ignoring the Space (0, then 1), the native reconcile ignoring the active
+Spaces (0, then 1 with the reactor test).
+
+**Next: slices 3 and 4 need re-scoping (asked of the lead).** Their goal, "the engine's workspace
+operations and the reactor read the topology through `Stores`", holds by construction after 2b:
+the workspace store holds no topology, so every read goes through a `Workspaces<'a>` view built
+from the core. What could remain is a choice the plan does not rule on (for example the view
+built from `Stores` rather than from `reading(windows)` at each site, or moving the per-Space
+answers out of `Workspaces` into the core's own queries). Then the shrunken slice 5, the Roc twin
+decides (policy (a)), and core geometry.
 
 **Slice 2b part 1, done.** The workspace store keeps no catalog order and no activations: the
 core holds them. Its topology reads live on `Workspaces<'a>` (virtual_workspace.rs: the store and
@@ -33,24 +72,13 @@ the shown workspace from the core alone (`WorkspaceStore::active_layout_in`, whi
 `windows: Windows<'_>` argument (slice 3/4 territory, done here because the store could no
 longer answer without the core); nine engine `pub fn`s went `pub(crate)` (they now take a
 crate-private view); `collect_group_containers_in_selection_path` was dead and went;
-`calculate_layout` is test-only. The tripwire's activation half retired; its catalog half (each
-workspace's `space` against the core's catalog, compared by id) stays until part 2. The overview
+`calculate_layout` is test-only. The tripwire's activation half retired (its catalog half went
+in part 2). The overview
 engine-test fixture initialised its Space through an unrelated window store (harmless only while
 the store kept activations); fixed. Plants: `update_activation` not telling the core (4 lib tests
 fail), `clear_activation` not telling it (9), `workspaces_on` in reverse catalog order (62), the
 shown workspace read as the previous one (122), load-time names told apart in reverse catalog
 order (0: a new test, `duplicate_saved_names_are_told_apart_in_catalog_order`, now 1).
-
-**Next: slice 2b part 2.** Each `VirtualWorkspace`'s `space` leaves the store: the catalog moves
-onto `model::slot_table` (ruled below; the module and its differential test are in the tree,
-compiled for tests only until this part wires it in: drop the `#[cfg(test)]` in model.rs) and writes `space` from the
-core; the load splits each saved record into the workspace and its Space (`SavedTopology`'s
-catalog); every `workspace.space` / `store[id].space` read goes to the core (the compiler finds
-them once the field is gone); the tripwire retires whole (`workspace_divergences`,
-`WorkspaceDivergence`, the reactor's `workspace-divergence:` catalog check). The 2a fixtures
-must keep passing byte for byte. Then the tests' re-joins via `topology()`, and the remaining
-bare-store tests onto a store+core fixture (most already build an `OwnedWindows` beside the
-store).
 
 **Slice 2a, done.** `SavedTopology` (virtual_workspace.rs): every workspace with its Space in
 catalog order, and the activations. A saved store deserializes as `LoadedWorkspaces { store,
@@ -553,7 +581,9 @@ A slice that needs a behaviour change stops and is reported.
   the core it is lent, through `Workspaces<'a>` / `WorkspacesMut<'a>`; its `activations` map,
   catalog order and each workspace's `space` go. Writers still write the store's per-workspace
   data and tell the core. Its tests move with it, onto a store+core fixture. Load-time code reads
-  `SavedTopology`. The tripwire's topology half retires (one holder).
+  `SavedTopology`. The tripwire's topology half retires (one holder). Done 2026-11-23: part 1
+  (4d3afda4) the catalog order and activations, part 2 each workspace's Space and the catalog on
+  the slot table (Handoff).
 - **Slice 3, the engine glue (W6):** the layout engine's workspace operations (activation,
   transfer, remap, moving windows and workspaces between Spaces, focus by workspace) take the
   topology from `Stores`.
