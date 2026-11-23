@@ -14948,3 +14948,22 @@ fn a_reading_whose_roles_admit_and_heuristic_suspends_changes_nothing() {
     );
     assert_eq!(outcome.arrange.passes, 0, "no change, no arrange");
 }
+
+/// A main window that is destroyed stops being the main window (upstream #702's main-window
+/// clearing): rift asks the main window for the window to act on, so a retired one must not linger.
+#[test]
+fn a_destroyed_main_window_is_no_longer_the_main_window() {
+    let mut reactor = test_reactor();
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    let mut apps = Apps::new();
+    let main = WindowId::new(1, 1);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(main));
+    assert_eq!(reactor.main_window(), Some(main));
+    reactor.handle_event(Event::WindowDestroyed(main));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.main_window(), None);
+    assert_eq!(reactor.main_window_tracker.app_main_window(1), None);
+}
