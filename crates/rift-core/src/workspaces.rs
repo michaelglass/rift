@@ -127,6 +127,16 @@ pub fn previous<K: Copy, S: Copy + PartialEq>(
     eligible(mode, context, on).then_some((id, on))
 }
 
+/// Whether window discovery emits a window it found on a Space: unless the window is assigned
+/// to a workspace and the Space's active workspace (asked only then) is another one. A window
+/// with no assignment, or a Space with no active workspace, is emitted.
+pub fn emits_window<K: PartialEq>(assigned: Option<K>, active: impl FnOnce() -> Option<K>) -> bool {
+    match assigned {
+        None => true,
+        Some(assigned) => active().is_none_or(|active| active == assigned),
+    }
+}
+
 /// What a native Space shows (the platform's `SpaceActivation`, in the core's terms).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activation<K> {
@@ -603,6 +613,24 @@ pub mod plain {
         }
     }
 
+    /// [`super::emits_window`]: the Space's active workspace (asked only for an assigned
+    /// window).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct EmitsQuestion {
+        pub assigned: Option<u64>,
+        pub active: Fact<Option<u64>>,
+    }
+
+    impl EmitsQuestion {
+        pub const FACTS: &[&str] = &["active"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::emits_window(self.assigned, || reading.fact(&self.active, 0, None));
+            reading.answer(answer)
+        }
+    }
+
     /// [`super::step`]: whether a workspace has windows (asked only when skipping empty ones).
     #[derive(Debug, Clone, PartialEq)]
     pub struct StepQuestion {
@@ -763,6 +791,14 @@ mod tests {
     use WorkspaceMode::{Global, PerDisplay};
 
     use super::*;
+
+    #[test]
+    fn discovery_emits_a_window_unless_it_is_assigned_to_another_workspace_than_the_active() {
+        assert!(emits_window(None::<u32>, || panic!("not asked")));
+        assert!(emits_window(Some(1), || Some(1)));
+        assert!(!emits_window(Some(1), || Some(2)));
+        assert!(emits_window(Some(1), || None));
+    }
 
     #[test]
     fn the_topology_follows_the_catalog_and_what_each_space_shows() {

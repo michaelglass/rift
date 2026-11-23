@@ -653,8 +653,8 @@ pub mod lifecycle {
 pub mod workspaces {
     use rift_core::plain::Unasked;
     use rift_core::workspaces::plain::{
-        EligibleQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
-        TopologyQuestion, WorkspacesQuestion,
+        EligibleQuestion, EmitsQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion,
+        StepQuestion, TopologyQuestion, WorkspacesQuestion,
     };
     use rift_core::workspaces::{Activation, Ownership, Refused};
 
@@ -708,6 +708,12 @@ pub mod workspaces {
         let host = host();
         let question = boundary::previous_question(question, &host);
         boundary::reached_answer(unsafe { abi::roc_workspace_previous(question) })
+    }
+
+    pub fn emits_window(question: EmitsQuestion) -> Result<bool, Unasked> {
+        let host = host();
+        let question = boundary::emits_question(question, &host);
+        boundary::verdict_answer(unsafe { abi::roc_emits_window(question) })
     }
 
     pub fn topology(question: TopologyQuestion) -> TopologyView {

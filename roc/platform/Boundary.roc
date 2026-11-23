@@ -504,6 +504,9 @@ Boundary := [].{
 
 	EligibleQuestion := { mode : WorkspaceMode, context : Context, on : U64 }
 
+	## Whether discovery emits a window: its workspace, and the Space's active one (asked).
+	EmitsQuestion := { assigned : MaybeWord, active : FactWord }
+
 	Showing := { current : U64, previous : MaybeWord, remembered : MaybeWord }
 
 	## What a native Space shows.

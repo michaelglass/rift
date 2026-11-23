@@ -1915,6 +1915,16 @@ pub(crate) fn eligible_question(
     }
 }
 
+pub(crate) fn emits_question(
+    question: workspaces::plain::EmitsQuestion,
+    host: &abi::RocHost,
+) -> abi::BoundaryEmitsQuestion {
+    abi::BoundaryEmitsQuestion {
+        assigned: maybe_word(question.assigned),
+        active: fact_word(question.active, host),
+    }
+}
+
 pub(crate) fn reached_answer(
     answer: abi::BoundaryReachedAnswer,
 ) -> Result<Option<(u64, u64)>, Unasked> {

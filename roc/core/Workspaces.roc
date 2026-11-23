@@ -420,6 +420,22 @@ Workspaces := [].{
 			Nothing => Ok(Unreached)
 		}
 
+	## Whether window discovery emits a window it found on a Space: unless the window is
+	## assigned to a workspace and the Space's active workspace is another one. Fact: 0 the
+	## Space's active workspace (asked only for an assigned window).
+	emits_window : Maybe, Fact(Maybe) -> Read(Bool)
+	emits_window = |assigned, active|
+		match assigned {
+			Nothing => Ok(True)
+			Some(workspace) => {
+				active_workspace = ask(active, 0)?
+				match active_workspace {
+					Some(shown) => Ok(shown == workspace)
+					Nothing => Ok(True)
+				}
+			}
+		}
+
 	## The topology an empty one becomes after `events`.
 	topology_after : List(TopologyEvent) -> Topology
 	topology_after = |events| events.fold({ catalog: [], activations: [] }, topology_step)

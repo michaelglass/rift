@@ -14,8 +14,8 @@ use facts::{Coin, rust, typed};
 use rift_core::lifecycle::WorkspaceMode;
 use rift_core::plain::{Answers, wire};
 use rift_core::workspaces::plain::{
-    EligibleQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
-    TopologyQuestion, WorkspacesQuestion,
+    EligibleQuestion, EmitsQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion,
+    StepQuestion, TopologyQuestion, WorkspacesQuestion,
 };
 use rift_core::workspaces::{
     Activation, Destination, Owned, Ownership, OwnershipEvent, Selector, SkipEmpty, Step,
@@ -516,5 +516,28 @@ fn the_roc_topology_keeps_workspaces_between_events_as_the_rust_one_does() {
     );
     eprintln!(
         "workspaces: {steps} kept-topology steps identical, catalog and activations compared after each"
+    );
+}
+
+#[test]
+fn the_roc_core_emits_a_discovered_window_as_the_rust_core_does() {
+    typed(
+        "workspaces",
+        "emits_window",
+        Rng(0xE417_0000_0000_0037),
+        |rng, blank| {
+            // Few workspaces, so the assigned one is often the active one.
+            let active = rng.chance(85).then(|| 1 + rng.below(3));
+            let question = EmitsQuestion {
+                assigned: rng.chance(80).then(|| 1 + rng.below(3)),
+                active: blank.fact(rng, active),
+            };
+            let roc = rust(
+                rift_core_roc::workspaces::emits_window(question),
+                wire::encode_verdict,
+            );
+            let expected = rust(question.answer(), wire::encode_verdict);
+            (format!("{question:?}"), roc, expected)
+        },
     );
 }

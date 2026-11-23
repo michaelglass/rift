@@ -110,18 +110,25 @@ fn should_emit_window_for_space(
     space: SpaceId,
     wid: WindowId,
 ) -> bool {
-    let engine = &layout.layout_engine;
-    let assigned_workspace =
-        layout
-            .layout_engine
-            .workspaces()
-            .workspace_for_window(&state.windows, space, wid);
-    let active_workspace = engine.workspaces().active_workspace(space);
+    let workspaces = layout.layout_engine.workspaces();
+    let assigned = workspaces.workspace_for_window(&state.windows, space, wid);
+    let active = crate::roc_path::Asked::new();
+    let emits = rift_core::workspaces::emits_window(assigned, || {
+        active.ask(|| workspaces.active_workspace(space))
+    });
+    #[cfg(feature = "roc-core")]
+    {
+        use rift_core::workspaces::plain::EmitsQuestion;
 
-    match (assigned_workspace, active_workspace) {
-        (Some(assigned), Some(active)) => assigned == active,
-        _ => true,
+        use crate::roc_path::Word;
+        let question = EmitsQuestion {
+            assigned: assigned.map(Word::word),
+            active: active.fact(|active| active.map(Word::word)),
+        };
+        let roc = rift_core_roc::workspaces::emits_window(question);
+        crate::roc_path::check("emits_window", EmitsQuestion::FACTS, &question, &emits, roc);
     }
+    emits
 }
 
 /// Process new and updated windows, returning lists of new and updated windows.
