@@ -2372,27 +2372,6 @@ impl WorkspaceStore {
         resolved
     }
 
-    // Unused in the crate: it was public, and takes a crate-private view now.
-    #[allow(dead_code)]
-    pub(crate) fn find_window_in_workspace_by_idx(
-        &self,
-        window_store: Windows<'_>,
-        space: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-        idx: u32,
-    ) -> Option<WindowId> {
-        if self.workspaces.get(workspace_id).map(|w| w.space) != Some(space) {
-            return None;
-        }
-
-        self.workspaces.get(workspace_id).and_then(|_| {
-            window_store
-                .workspace_windows(workspace_id)
-                .into_iter()
-                .find(|wid| wid.idx.get() == idx)
-        })
-    }
-
     pub fn set_last_focused_window(
         &mut self,
         space: SpaceId,

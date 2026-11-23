@@ -656,15 +656,6 @@ impl WindowsMut<'_> {
             core: self.core,
         }
     }
-
-    /// The same two, lent on for writing.
-    #[allow(dead_code)] // for a holder of a view lending it on by value
-    pub(crate) fn reborrow(&mut self) -> WindowsMut<'_> {
-        WindowsMut {
-            records: self.records,
-            core: self.core,
-        }
-    }
 }
 
 /// The core's workspaces joining `workspaces`, the live workspace store they are built beside:
