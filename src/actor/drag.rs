@@ -25,6 +25,30 @@ pub enum MouseButton {
     Right,
 }
 
+/// The reactor's drag state as the input thread needs it. The reactor publishes it at the
+/// end of every event; the input thread only reads it and keeps no drag state of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DragGate {
+    /// No drag, and a modifier press would be refused: the press goes to the app.
+    #[default]
+    Closed,
+    /// No drag, and a modifier press may start one: the press is swallowed and offered.
+    Open,
+    /// A native move is live: left-button motion is published and still delivered.
+    NativeMove,
+    /// A modifier drag owns this button: its motion is published and its events swallowed.
+    Modifier(MouseButton),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SharedDragGate(Arc<Mutex<DragGate>>);
+
+impl SharedDragGate {
+    pub fn get(&self) -> DragGate { *self.0.lock().expect("drag gate mutex poisoned") }
+
+    pub fn set(&self, gate: DragGate) { *self.0.lock().expect("drag gate mutex poisoned") = gate; }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DragMotion {
     pub point: CGPoint,
@@ -345,6 +369,17 @@ impl DragActor {
         };
         (session.kind == DragKind::ModifierMove)
             .then_some((session.source.window, session.source.last_frame))
+    }
+
+    /// What the input thread should do with mouse events, given whether the reactor could
+    /// start a drag right now.
+    pub fn gate(&self, can_start: bool) -> DragGate {
+        match self.session().map(|session| (session.kind, session.button)) {
+            None if self.drop_enabled() && can_start => DragGate::Open,
+            Some((DragKind::ModifierMove, button)) => DragGate::Modifier(button),
+            Some((DragKind::NativeMove, _)) if self.drop_enabled() => DragGate::NativeMove,
+            None | Some((DragKind::NativeMove | DragKind::NativeResize, _)) => DragGate::Closed,
+        }
     }
 
     pub fn owns_button(&self, button: MouseButton) -> bool {
@@ -698,6 +733,38 @@ mod tests {
             scene(rect()),
         );
         actor
+    }
+
+    #[test]
+    fn the_gate_opens_only_when_drops_are_enabled_and_a_drag_could_start() {
+        let idle = DragActor::new(DragDropSettings::default());
+        assert_eq!(idle.gate(true), DragGate::Open);
+        assert_eq!(idle.gate(false), DragGate::Closed);
+        let disabled = DragActor::new(DragDropSettings {
+            enabled: false,
+            ..DragDropSettings::default()
+        });
+        assert_eq!(disabled.gate(true), DragGate::Closed);
+    }
+
+    #[test]
+    fn a_modifier_drag_owns_its_button_through_the_gate() {
+        let drag = modifier(MouseAction::Move, false);
+        assert_eq!(drag.gate(true), DragGate::Modifier(MouseButton::Left));
+        assert_eq!(drag.gate(false), DragGate::Modifier(MouseButton::Left));
+    }
+
+    #[test]
+    fn only_a_native_move_publishes_native_motion_through_the_gate() {
+        assert_eq!(
+            native(false, rect(), scene(rect())).gate(true),
+            DragGate::NativeMove
+        );
+        let resized = frame(0.0, 0.0, 300.0, 100.0);
+        assert_eq!(
+            native(false, resized, scene(rect())).gate(true),
+            DragGate::Closed
+        );
     }
 
     #[test]
