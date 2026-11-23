@@ -9,45 +9,60 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-23): read this first
+## Handoff (2026-11-23, after slice 2a): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2` at 1c68bc17 (the slice 1 docs commit);
-this handoff is the commit on top of it, not published. `rearch/roc-next@fork` is 127180c0, a
-stripped copy of everything through 1c68bc17 (publish procedure: "Rulings that bind",
-Public-clean). Since the last handover, in order: the four reactor predicates (reviewed, done);
-W4b (one joined shadow, d4494458, bb610794; tags 32 and 33 retired, a159f227); no getter
-initialises a Space (833c7c2c, ruling A); W4c (ownership from the core, 7d6132f2; the `Claimant`
-decision); the dead core-geometry converters deleted (e17a835a); W4d+W6 slice 1 (b19cf57b,
-807cbcbf, ee8416c1). Each is described where its section is below. All checks green at every
-commit: 848 lib tests, 855 with `roc-core`, the fuzzer at 2000 × 40 both ways, zero build
-warnings (two old unused-variable warnings remain in test builds: `tests/fuzz.rs` `mouse`,
-`tests.rs` `button`).
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. Since the slice 1 docs commit (1c68bc17):
+the slice 2 handoff (ed33e05a), then W4d+W6 slice 2a: its tests first (0fc40f84), the change
+(edb6dbca), and this docs commit. `rearch/roc-next@fork` carries everything through this docs
+commit once it is published (publish procedure: "Rulings that bind", Public-clean; the published
+tip's id is in the slice report). All checks green at every commit: 851 lib tests, 858 with
+`roc-core`, the fuzzer at 2000 × 40 both ways, zero build warnings beyond the two old test-build
+ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`).
 
-**Next: W4d+W6 slice 2, design ruled (the lead, 2026-11-23).** The workspace store answers its
-topology reads from the core through a second pair of views, the same pattern as slice 1's
-(ruling (d)): `Workspaces<'a> { store: &'a WorkspaceStore, core: &'a TwinnedWorkspaces }` (read,
-`Copy`) and `WorkspacesMut<'a>`, built from a split borrow of `Stores` (the layout engine's
-workspace store and `RiftState`'s core). The topology reads (`active_workspace` about 138
-callers, catalog order about 48, `workspace_ids` about 27, `workspaces_on`, `workspace_space`,
-`active_workspace_per_space`, `last_workspace`, ...) and the store's topology writers move onto
-the views; the workspace store keeps only what is per workspace (name, home, rule standing,
-layout state, last focus), and its `activations` map and catalog order become derived from the
-core or go. The layout engine reads the topology itself (46 sites): that borrow is a real
-dependency, so threading it is fine (what was ruled out is a borrow we'd undo later). **Where an
-engine method already holds a `WindowsMut`, build the `Workspaces` view from it (it carries the
-core) plus `&self.workspaces`, rather than adding a second argument.** Same rules: no behaviour
-change; a handler that needs restructuring beyond an added argument or a local binding is
-listed in the report, not worked around; each slice green and published. The mechanical work
-went well delegated to a helper with an exact brief (1b: 33 files, about 2,700 lines, 62 tool
-calls), then reviewed and re-checked here: drive it with `cargo check --tests --message-format
-json` and small scripts.
+**The reorder (the lead's ruling (A), 2026-11-23).** Slice 2 as first planned could not take the
+topology out of the workspace store while the saved form still passed through it (loading built
+the store with the topology and seeded the core from the store). So the persistence boundary came
+first: slice 2a (done) parses the saved topology into its own type and seeds the core from it;
+slice 2b moves the store's reads onto the core and takes the topology out of the store. Slice 5
+shrinks to what is left of persistence (see the plan below).
 
-**Flagged for slice 5 (persistence): the core's seeding is weakly checked.** A plant in
-`window_store::joined_core` that drops one activation from the seeding failed only one lib
-test (`the_workspace_shadow_agrees_through_the_store_and_catches_a_write_around_it`, the
-saved-and-loaded agreement check). When slice 5 loads the saved form into the core, add a
-stronger check: a round trip over drawn stores (every activation shape, both modes) whose loaded
-core must equal the saving store's, and a planted seeding bug that fails it.
+**Slice 2a, done.** `SavedTopology` (virtual_workspace.rs): every workspace with its Space in
+catalog order, and the activations. A saved store deserializes as `LoadedWorkspaces { store,
+topology }`; `LoadedWorkspaces::checked` runs the load-time checks on the topology
+(`SavedTopology::migrate_legacy_activation`, `SavedTopology::validate`, the same refusal
+messages) and gives the store its copy of the activations (2a only). Loading answers
+`StartingLayout { engine, topology }` (`LayoutEngine::deserialize_from_str`,
+`load_for_startup_restore`; `StartingLayout::new` for a new engine, no topology);
+`Stores::joining(StartingLayout)` seeds the core with `window_store::joined_core(&SavedTopology)`.
+Saving writes `order` and `active_workspace_per_space` from the core
+(`WorkspaceStore::saved(core)`, `SavedStoreRef`); `WorkspaceStore` itself no longer implements
+`Serialize`/`Deserialize`. Tests: the drawn round trip
+(`a_saved_topology_seeds_the_core_it_was_saved_from`: 300 seeds per mode, all six activation
+shapes, the flagged stronger seeding check), the refusals
+(`a_saved_topology_naming_what_it_cannot_hold_is_refused`: nothing caught skipping validation
+before), and byte compatibility both ways through the old serializer's fixtures
+(`persistence/fixtures/saved-before-2a-*.ron`,
+`files_saved_before_the_topology_boundary_load_and_are_written_alike`; the activations compared
+as a map, since a hash map's order is not the format).
+
+**Next: slice 2b.** The workspace store's topology reads move onto `Workspaces<'a>` /
+`WorkspacesMut<'a>` views (store + core, built from a split borrow of `Stores`; inside an engine
+method that already holds a `WindowsMut`, build the view from it plus `&self.workspaces`). Its
+`activations` map, the catalog's `order` and each `VirtualWorkspace`'s `space` leave the store;
+the tripwire's topology half retires. Load-time code that reads the topology before the core
+exists reads `SavedTopology` instead (`await_topology`, `normalize_loaded_names`,
+`migrate_workspace_layouts`, the legacy floating positions, `resolve_locations`, the runtime
+restore in `persistence/restore.rs`, which reads the file's `loaded.store` topology today). The
+2a crutches go: `WorkspaceStore::topology()` (live validation and the tests' re-joins),
+`LoadedWorkspaces::checked`'s copy into the store, and the two reactor tests that swap
+`layout_engine` for a reloaded one in place (they keep the old core; a reload re-joins). The 43
+store tests built on `WorkspaceStore::new*` move to a store+core fixture.
+**Open design point for 2b (to the lead first):** each workspace's `space` is written inside the
+workspace's record in the slotmap's own serde format (a sequence of `(value, version)` slots,
+vacant ones included, whose versions slotmap does not expose). Writing `space` from the core
+keeps the file byte-compatible only if the save writes that slot sequence itself, which needs the
+vacant slots' versions (the catalog would track them: read at load, set on remove). See the
+slice 2a report.
 
 **Not elsewhere in this doc yet:**
 - The old twins' per-step costs in "Measured" are the separate topology and ownerships
@@ -55,14 +70,16 @@ core must equal the saving store's, and a planted seeding bug that fails it.
 - `WindowStore::remove_workspace` (W4b) still re-sends each handed-on window's ownership after
   the core's `Removed` (now redundant: the core already holds it). It is kept because
   `remove_window_assignment` also clears a transfer and prunes the record, and
-  `assign_window_to_workspace` updates `app_windows` and native fullscreen records; slice 2 or
+  `assign_window_to_workspace` updates `app_windows` and native fullscreen records; slice 2b or
   later can split those record-side effects from the ownership re-send.
 - `OwnershipDivergence` now means "the claims index (or a missing record) disagrees with the
   core", not store-vs-core ownership (W4c); the reactor's `workspace-divergence:` lines keep
   their text.
 - `WorkspaceStore::initialized` is the one definition of "a Space is initialised" (the IPC's
-  `NotYetKnown` and the reactor tripwire both use it); keep it when slice 2 moves activations
+  `NotYetKnown` and the reactor tripwire both use it); keep it when slice 2b moves activations
   into the core.
+- `SavedTopology::validate`'s "previous names what it shows" refusal is unreachable from a file:
+  the legacy normalization before it clears such a history. Kept as it was.
 - Helper scripts used for the plumbing lived in the session scratchpad and are gone; the pattern
   is in this doc (compiler JSON → insert the argument, or the field rename by span).
 
@@ -481,20 +498,28 @@ A slice that needs a behaviour change stops and is reported.
   23 functions that take the crate-private views went from `pub` to `pub(crate)` (nothing
   outside the crate used them). A plant dropping one activation from the seeding fails the
   load-agreement test.
-- **Slice 2, the workspace store's own reads.** The workspace store answers its topology reads
+- **Slice 2a, the persistence boundary first (the lead's ruling (A), done 2026-11-23).** The
+  saved topology is parsed into `SavedTopology` at the load boundary; the load-time checks run on
+  it; `Stores::joining(StartingLayout)` seeds the core from it; the save writes the catalog order
+  and the activations from the core. Saved files load and are written alike both ways (the old
+  serializer's fixtures). The strong round trip flagged for slice 5 is here. The store keeps its
+  copy (the tripwire stays) until 2b. Tests first: 0fc40f84; the change: edb6dbca.
+- **Slice 2b, the workspace store's own reads.** The workspace store answers its topology reads
   (`active_workspace`, `workspace_space`, `workspaces_on`, catalog order, the activations) from
-  the core it is lent; its `activations` map and catalog order become derived or go. Writers
-  still write the store's per-workspace data and tell the core. Its tests move with it. The
-  tripwire's topology half retires (one holder).
+  the core it is lent, through `Workspaces<'a>` / `WorkspacesMut<'a>`; its `activations` map,
+  catalog order and each workspace's `space` go. Writers still write the store's per-workspace
+  data and tell the core. Its tests move with it, onto a store+core fixture. Load-time code reads
+  `SavedTopology`. The tripwire's topology half retires (one holder).
 - **Slice 3, the engine glue (W6):** the layout engine's workspace operations (activation,
   transfer, remap, moving windows and workspaces between Spaces, focus by workspace) take the
   topology from `Stores`.
 - **Slice 4, the reactor:** commands, gestures, the IPC query, drag, discovery and lifecycle
   read the topology through `Stores`.
-- **Slice 5, persistence (W6):** the saved form (catalog order, each workspace's Space, the
-  activations) is written from the core and loaded into it at `Stores::joining`; old saved forms
-  keep loading (parsed at the load boundary, normalized with one `workspace-load: normalized`
-  line where W2b did). A round-trip test against files saved before the slice.
+- **Slice 5, persistence (W6), shrunk by 2a:** what slices 2b to 4 leave of the saved form (each
+  workspace's Space written from the core if 2b has not, the runtime restore from a file joining
+  its topology), with the files saved before kept loading (parsed at the load boundary,
+  normalized with one `workspace-load: normalized` line where W2b did) and the 2a fixtures still
+  passing.
 - **Then:** the Roc twin decides (policy (a), as the lifecycle and main window), and core
   geometry on upstream's layout systems (Next item 2).
 2. Core geometry on upstream's five layout systems (after W4d+W6, since the layout engine glue
