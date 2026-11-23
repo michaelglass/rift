@@ -6335,6 +6335,40 @@ fn display_index_selector_uses_physical_left_to_right_order() {
     assert_eq!(selected.frame, left);
 }
 
+/// With no window named, no main window and nothing under the cursor, the command moves the
+/// first window in layout order on the workspace the command display shows.
+#[test]
+fn moving_to_a_display_with_no_window_named_moves_the_command_displays_first_window() {
+    let (mut apps, mut reactor) = test_context();
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., -800.), CGSize::new(1900., 800.));
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    // The app's windows tile left to right in the order they opened.
+    let (first, second) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    assert_eq!(reactor.main_window(), None, "the setup has no main window");
+    assert_eq!(
+        reactor.window_id_under_cursor(),
+        None,
+        "nor a window under the cursor"
+    );
+    assert_eq!(reactor.workspace_command_space(), Some(space1));
+
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: None,
+        },
+    )));
+
+    assert_eq!(reactor.assigned_space_for_window_id(first), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(second), Some(space1));
+}
+
 #[test]
 fn moving_tiled_window_to_display_writes_destination_tile_directly() {
     let (mut apps, mut reactor) = test_context();

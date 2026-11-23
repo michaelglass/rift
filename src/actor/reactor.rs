@@ -7259,14 +7259,9 @@ impl Reactor {
                 .reading(self.stores.state.windows())
                 .resolve_window_index(command_space, |space| self.is_space_active(space), index),
             WindowToMove::Main(window) | WindowToMove::UnderCursor(window) => Some(window),
-            // Index 0 on the command display, and nowhere else.
-            WindowToMove::FirstOnCommandDisplay => command_space.and_then(|space| {
-                workspaces.reading(self.stores.state.windows()).resolve_window_index(
-                    Some(space),
-                    |s| s == space,
-                    0,
-                )
-            }),
+            // The first in layout order on the workspace the command display shows.
+            WindowToMove::FirstOnCommandDisplay => command_space
+                .and_then(|space| self.stores.layout.layout_engine.first_window_on(windows, space)),
         }
         // Only a window rift may move keeps its assignment through the move (#702).
         .filter(|&window| windows.can_move_assigned_window(window))

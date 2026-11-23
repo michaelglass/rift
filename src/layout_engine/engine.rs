@@ -451,6 +451,17 @@ impl LayoutEngine {
 
     /// Return the visible logical tiles eligible for drag targeting.
     /// Hidden members of stacked/grouped containers are excluded.
+    /// The first window in layout order on the workspace `space` shows.
+    pub(crate) fn first_window_on(&self, windows: Windows<'_>, space: SpaceId) -> Option<WindowId> {
+        let (workspace, layout) =
+            self.workspaces.reading(windows).active_layout_for_space(space)?;
+        self.workspaces[workspace]
+            .layout_system
+            .windows(layout, WindowQuery::All)
+            .into_iter()
+            .next()
+    }
+
     pub(crate) fn drop_scene_windows(
         &self,
         windows: Windows<'_>,
