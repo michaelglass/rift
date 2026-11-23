@@ -447,3 +447,254 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
         assert_eq!(store.view().workspace_for_window(window), Some(target));
     }
 }
+
+/// xorshift64*: deterministic, no dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self { Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1) }
+
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize { (self.next() % n as u64) as usize }
+}
+
+type CoreActivation = rift_core::workspaces::Activation<VirtualWorkspaceId>;
+
+/// An activation's shape: what it shows, and whether it has history and memory.
+fn shape(activation: &CoreActivation) -> &'static str {
+    use rift_core::workspaces::Activation::{Showing, Vacant};
+    match activation {
+        Showing {
+            previous: None,
+            remembered: None,
+            ..
+        } => "showing",
+        Showing {
+            previous: Some(_),
+            remembered: None,
+            ..
+        } => "showing, previous",
+        Showing {
+            previous: None,
+            remembered: Some(_),
+            ..
+        } => "showing, remembered",
+        Showing {
+            previous: Some(_),
+            remembered: Some(_),
+            ..
+        } => "showing, previous, remembered",
+        Vacant { remembered: None } => "vacant",
+        Vacant { remembered: Some(_) } => "vacant, remembered",
+    }
+}
+
+/// The core's topology: its catalog in order, and its activations by Space.
+fn topology_of(
+    core: &crate::roc_twin::TwinnedWorkspaces,
+) -> (
+    Vec<(VirtualWorkspaceId, SpaceId)>,
+    Vec<(SpaceId, CoreActivation)>,
+) {
+    let mut activations = core.activations().to_vec();
+    activations.sort_by_key(|&(space, _)| space);
+    (core.catalog().to_vec(), activations)
+}
+
+/// A store driven by `seed` through the workspace store's topology writers: workspaces created,
+/// shown from another Space, remembered (also on a Space never exposed), moved between Spaces,
+/// and Spaces removed.
+fn drawn(settings: &VirtualWorkspaceSettings, seed: u64) -> (LayoutEngine, OwnedWindows) {
+    let mut rng = Rng::new(seed);
+    let all = [
+        (SpaceId::new(301), "d1"),
+        (SpaceId::new(302), "d2"),
+        (SpaceId::new(303), "d3"),
+    ];
+    let spaces = &all[..1 + rng.below(all.len())];
+    let (mut engine, mut store) = fresh(settings, spaces);
+    let unexposed = SpaceId::new(304);
+    let space = |rng: &mut Rng| spaces[rng.below(spaces.len())].0;
+    for _ in 0..rng.below(14) {
+        let catalog: Vec<_> = engine.workspaces.catalog().collect();
+        let Some(&workspace) = catalog.get(rng.below(catalog.len().max(1))) else {
+            break;
+        };
+        let windows = &mut store.view_mut();
+        match rng.below(6) {
+            0 => {
+                let on = space(&mut rng);
+                let _ = engine.workspaces.create_workspace(windows, on, None);
+            }
+            1 => {
+                let from = space(&mut rng);
+                engine.workspaces.set_active_workspace_from(windows, from, workspace);
+            }
+            2 => {
+                let on = space(&mut rng);
+                engine.workspaces.remember_on(windows, on, workspace);
+            }
+            3 => engine.workspaces.remember_on(windows, unexposed, workspace),
+            4 => {
+                let gone = if rng.below(2) == 0 {
+                    unexposed
+                } else {
+                    space(&mut rng)
+                };
+                engine
+                    .workspaces
+                    .remove_space(windows, gone, |_| rift_core::workspaces::Successor::Unassign);
+            }
+            _ => {
+                let to = space(&mut rng);
+                engine.workspaces.transfer_workspace(
+                    windows,
+                    workspace,
+                    to,
+                    None,
+                    WorkspaceTransferReason::DisplayDeparture,
+                );
+            }
+        }
+    }
+    (engine, store)
+}
+
+/// The saved form carries the topology whole: over drawn stores in both modes, the core a load
+/// seeds holds exactly the saving core's catalog and activations, and the draws reach every
+/// activation shape in each mode.
+#[test]
+fn a_saved_topology_seeds_the_core_it_was_saved_from() {
+    let per_display = VirtualWorkspaceSettings::default();
+    let shared = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 2,
+        ..Default::default()
+    };
+    for (mode, settings) in [("per-display", &per_display), ("shared", &shared)] {
+        let mut shapes = std::collections::BTreeSet::new();
+        for seed in 0..300 {
+            let (engine, store) = drawn(settings, seed);
+            let saving = topology_of(&store.core);
+            shapes.extend(saving.1.iter().map(|(_, activation)| shape(activation)));
+            let saved = engine.serialize_to_string(store.view());
+            let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
+            let joined = OwnedWindows::joining(loaded.workspaces());
+            assert_eq!(topology_of(&joined.core), saving, "{mode}, seed {seed}");
+        }
+        assert_eq!(shapes.len(), 6, "{mode}: the draws reach only {shapes:?}");
+    }
+}
+
+/// The fixture states: one drawn store in each mode (four activations, four shapes), with a
+/// window tiled on the first workspace.
+fn fixture_state(mode: &str) -> (LayoutEngine, OwnedWindows) {
+    let (settings, seed) = match mode {
+        "per-display" => (VirtualWorkspaceSettings::default(), 14),
+        _ => (
+            VirtualWorkspaceSettings {
+                mode: WorkspaceMode::Global,
+                default_workspace_count: 2,
+                ..Default::default()
+            },
+            28,
+        ),
+    };
+    let (mut engine, mut store) = drawn(&settings, seed);
+    let first = engine.workspaces.catalog().next().unwrap();
+    open(&mut engine, &mut store.view_mut(), first, win(7, 1));
+    (engine, store)
+}
+
+/// `file` with its saved activations in Space order: written from a hash map, their order is the
+/// map's, so two writers agree on the activations as a map, not on their order.
+fn activations_in_order(file: &str) -> String {
+    let key = "active_workspace_per_space:";
+    let start = file.find(key).expect("a saved store has its activations") + key.len();
+    let mut depth = 0;
+    let end = start
+        + file[start..]
+            .char_indices()
+            .find_map(|(at, c)| {
+                depth += match c {
+                    '{' | '(' | '[' => 1,
+                    '}' | ')' | ']' => -1,
+                    _ => 0,
+                };
+                (depth == 0).then_some(at + 1)
+            })
+            .unwrap();
+    let activations: BTreeMap<SpaceId, ron::Value> = ron::from_str(&file[start..end]).unwrap();
+    format!(
+        "{}{}{}",
+        &file[..start],
+        ron::ser::to_string(&activations).unwrap(),
+        &file[end..]
+    )
+}
+
+/// Saved files stay compatible both ways, through fixtures the serializer wrote before the core
+/// took the saved topology at the load boundary: each loads into the core it was saved from, and
+/// the same state is saved as the same file (its activations as a map), so a build from before
+/// reads what this one writes.
+#[test]
+fn files_saved_before_the_topology_boundary_load_and_are_written_alike() {
+    for (mode, file) in [
+        (
+            "per-display",
+            include_str!("fixtures/saved-before-2a-per-display.ron"),
+        ),
+        ("shared", include_str!("fixtures/saved-before-2a-shared.ron")),
+    ] {
+        let (engine, store) = fixture_state(mode);
+        let loaded = LayoutEngine::deserialize_from_str(file).unwrap();
+        let joined = OwnedWindows::joining(loaded.workspaces());
+        assert_eq!(topology_of(&joined.core), topology_of(&store.core), "{mode}");
+        let saved = engine.serialize_to_string(store.view());
+        assert_eq!(
+            activations_in_order(&saved),
+            activations_in_order(file),
+            "{mode}"
+        );
+    }
+}
+
+/// A saved topology that names what it can't hold is refused whole at the load boundary.
+#[test]
+fn a_saved_topology_naming_what_it_cannot_hold_is_refused() {
+    let file = include_str!("fixtures/saved-before-2a-per-display.ron");
+    let showing = "(301):(current:Some((idx:1,version:1)),previous:None,remembered:None)";
+    let remembering = "(304):(current:None,previous:None,remembered:Some((idx:6,version:1)))";
+    assert!(file.contains(showing) && file.contains(remembering));
+    for (broken, refusal) in [
+        (
+            file.replacen(showing, &showing.replace("idx:1,", "idx:5,"), 1),
+            "native space 301 has an invalid active workspace",
+        ),
+        (
+            file.replacen(
+                showing,
+                &showing.replace("previous:None", "previous:Some((idx:60,version:1))"),
+                1,
+            ),
+            "native space 301 has an invalid previous workspace",
+        ),
+        (
+            file.replacen(remembering, &remembering.replace("idx:6,", "idx:60,"), 1),
+            "native space 304 remembers a missing workspace",
+        ),
+        (
+            file.replacen(&format!("{showing},"), "", 1)
+                .replacen(&format!(",{showing}"), "", 1),
+            "workspace VirtualWorkspaceId(1v1) for native space 301 is not indexed",
+        ),
+    ] {
+        assert_rejected(&broken, &format!("invalid workspace topology: {refusal}"));
+    }
+}
