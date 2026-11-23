@@ -789,3 +789,64 @@ fn a_saved_catalog_allocates_after_a_removal_as_the_store_it_was_saved_from() {
         assert!(reused > 0, "{mode}: no draw reuses a removed slot");
     }
 }
+
+/// A restore reads the file's topology as data and writes the live core through the store's
+/// writers: each restored Space shows the workspace the file showed (not merely its first), and a
+/// window the restore places on another display's Space is reported as moved there.
+#[test]
+fn a_restore_shows_what_the_file_showed_and_reports_windows_it_moves_between_spaces() {
+    let per_display = VirtualWorkspaceSettings::default();
+    let [a, b, c, d] = [910, 911, 912, 913].map(SpaceId::new);
+    let (w1, w2) = (win(7, 1), win(7, 2));
+
+    // Saved: Space a shows its second workspace, holding w1.
+    let (mut engine, mut store) = fresh(&per_display, &[(a, "x")]);
+    let second = ws(&engine, store.view(), a, 1);
+    open(&mut engine, &mut store.view_mut(), second, w1);
+    assert!(engine.workspaces.set_active_workspace(&mut store.view_mut(), a, second));
+    let file = with_active_space(engine.serialize_to_string(store.view()), a);
+
+    let (mut engine, mut store) = fresh(&per_display, &[(c, "z")]);
+    assert_eq!(
+        engine.workspaces.reading(store.view()).active_workspace(c),
+        Some(ws(&engine, store.view(), c, 0))
+    );
+    restore(
+        &mut engine,
+        &mut store.view_mut(),
+        &file,
+        RestoreScope::Space,
+        c,
+        RestoreSource::SavedActiveSpace,
+    )
+    .unwrap();
+    assert_eq!(
+        engine.workspaces.reading(store.view()).active_workspace(c),
+        Some(ws(&engine, store.view(), c, 1)),
+        "the restored Space shows the workspace the file showed"
+    );
+
+    // Saved: w2 on display y's Space b. Live: w2 on display x's Space c, display y on Space d.
+    let file = session(&per_display, &[(a, "x", &[]), (b, "y", &[w2])]);
+    let (mut engine, mut store) = fresh(&per_display, &[(c, "x"), (d, "y")]);
+    let on_c = ws(&engine, store.view(), c, 0);
+    open(&mut engine, &mut store.view_mut(), on_c, w2);
+    let report = restore_on(
+        &mut engine,
+        &mut store.view_mut(),
+        &file,
+        RestoreScope::Displays,
+        c,
+        RestoreSource::CurrentSpace,
+        &[c, d],
+    )
+    .unwrap();
+    assert_eq!(report.moved, vec![(w2, c, d)]);
+    assert_eq!(
+        engine
+            .workspaces
+            .reading(store.view())
+            .workspace_space(store.view().workspace_for_window(w2).unwrap()),
+        Some(d)
+    );
+}
