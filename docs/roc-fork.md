@@ -9,21 +9,47 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-23, after W4d+W6 slice 5): read this first
+## Handoff (2026-11-23, after layout slice 1, stack): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done: slice 2b part 2
-(0b8c2cf6), its docs (391dcf05), the clippy fix in `rift-core-roc` (40a2b091), slice 5 (tests
-only) and this docs commit. `rearch/roc-next@fork` carries everything through this docs commit
-once it is published (publish procedure: "Rulings that bind", Public-clean; the published tip's
-id is in the slice report). All checks green: 857 lib tests, 864 with `roc-core`, the fuzzer at
-2000 × 40 both ways, `cargo test -p rift-core-roc --features roc` (46), `cargo check --locked`
-both ways, fmt, and `cargo clippy --all-targets --features roc-core` compiles (no errors; the old
-warnings stand, none on lines these slices touched); no build warnings beyond the two old
-test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`).
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done, and core geometry on
+upstream's layout systems (Next item 2) has its first slice: the stack system. `rearch/roc-next@fork`
+carries everything through this docs commit once it is published (publish procedure: "Rulings that
+bind", Public-clean; the published tip's id is in the slice report). All checks green: 859 lib tests
+(2 ignored), 868 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+--features roc`, `cargo check --locked` both ways, fmt, and `cargo clippy --all-targets --features
+roc-core` compiles (no errors; the old warnings stand, none on lines this slice touched).
 
-**Next: core geometry on upstream's layout systems (Next item 2).** The joined workspaces are
-flipped (step 3, below): with them, the lifecycle and the main window, every machine kept between
-events now has the Roc core deciding under `roc-core`.
+**Next: the next layout slice.** One per system, smallest first: master-stack, then traditional,
+floating, BSP, scrolling. Each as the stack slice below: a builder from the system's tree to the
+core's shape, a check in its `calculate_layout`, a differential over the system's own edits, one
+plant per decision the builder makes. A difference from the system's frames is a behaviour question:
+stop and report it, never adjust either side.
+
+**Layout slice 1, stack (aec5f920).** `StackLayoutSystem::shape` builds the core's
+`Traditional` shape of a stack layout: one `Node::Stack` of the participating members (the
+system's `window_participates`), the visible member (`visible_index`: the first participating one
+when the root is selected) on top; a member's fill is `Screen` when fullscreen, else `WithinGaps`
+when within gaps, else `Tiled`; the stack's is `Screen` when the stack is fullscreen, else `Tiled`
+(upstream reads no within-gaps flag on the stack itself); no shape when no member participates.
+`core_geometry` gains `core_constraints` (upstream's `Sizing` tag and min numbers into the core's
+`Sizing` with its `Size`, parsed by `Size::reported`), `core_stack_line`, and `check_traditional`:
+the core's frames held to the system's bit for bit (`f64::to_bits`), in tests and under `roc-core`
+(Rust core, `layout-divergence:`), and under `roc-core` the Roc core's too (`roc-divergence:`). The
+system's frames stand; tests panic, a running Rift warns. The check is called from the system's
+`calculate_layout`, and lives in `core_geometry` (where the Roc layouts were checked before merge
+(b)), not on `roc_path`. The Roc mirror is `Traditional.roc`, unchanged: the stack is a traditional
+shape it already tiles, held to the Rust core by `the_roc_core_tiles_traditional_layouts_as_the_rust_core_does`.
+Differential: `the_core_tiles_stack_layouts_as_the_stack_system_does` (3000 systems drawn through
+the system's own edits, 12,493 frames identical). Plants (lib tests failing): member fullscreen
+ignored (1), member within-gaps ignored (1), stack fullscreen ignored (1), the active member on top
+instead of the visible (1), left-out members kept (5), orientation ignored (11), constraints
+dropped (3), offset dropped (11), bar placement swapped (1), respect_min_size dropped (1), locked
+size dropped (2); in `Traditional.roc`, the bar's spacing dropped (1, under `roc-core`).
+**For the traditional slice:** upstream's `traditional_leaf_axis_constraints` answers a resizable
+window's locked axis as `(min, Some(fixed), ..)`, the core's `leaf_summary` as `(fixed, Some(fixed),
+..)`; `fixed` is the max, which may exceed the min by up to `f64::EPSILON`. A stack reads only
+`fixed` there, so the stack slice cannot see it; a container's summary sums the first element, so
+the traditional differential may. If it does, that is a reported difference, not a fix.
 
 **Joined workspaces flipped (step 3, policy (a)).** `TwinnedWorkspaces::step` reports the Roc
 core's outcome (a refusal is `workspace-refused:` as before), and the Rust `Workspaces` is its
@@ -677,6 +703,7 @@ A slice that needs a behaviour change stops and is reported.
    upstream's tree to the core's shape, and a bit-for-bit differential of the core's frames
    against upstream's `calculate_layout`; a difference is a behaviour question, stopped and
    reported.
+   Done: stack (aec5f920, Handoff). Next: master-stack, traditional, floating, BSP, scrolling.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
@@ -811,6 +838,11 @@ rift's strip geometry is `Empty | Placed`; the camera spring and viewport stay r
 the layout's `Newcomer`s (constraints, and `Seen::Live(frame) | Unseen`) give each its first
 frame (the default 70%, a live frame no larger than it, the cascade when spreading); after that
 the platform keeps the frame the user gives it.
+
+On upstream's layout systems (merge (b)), the shapes are built again, one system at a time, from
+each system's own tree (`StackLayoutSystem::shape`, ...), and `core_geometry::check_traditional`
+(and its kin per shape) holds the core's frames to the system's bit for bit on rift's path; the
+system's frames still stand.
 
 Window constraints carry a `Sizing` (`Fixed | Resizable | ResizableAtLeastMin`, each with the
 `Size` the app reported, parsed once): BSP, scrolling and floating hold a window to its
