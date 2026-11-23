@@ -11,11 +11,20 @@ pub(super) enum MatchScope<'a> {
 }
 
 impl LayoutEngine {
-    fn saved_window_in_scope(&self, saved: &SavedWindow, scope: MatchScope<'_>) -> bool {
+    fn saved_window_in_scope(
+        &self,
+        windows: Windows<'_>,
+        saved: &SavedWindow,
+        scope: MatchScope<'_>,
+    ) -> bool {
         match scope {
             MatchScope::Workspaces(targets) => targets.contains(&saved.workspace),
             MatchScope::Space(space) => {
-                let destination = self.workspaces[saved.workspace].space;
+                let destination = self
+                    .workspaces
+                    .reading(windows)
+                    .workspace_space(saved.workspace)
+                    .expect("a listed workspace has a Space");
                 // A shared workspace carries its windows between native Spaces, while a
                 // per-display workspace is defined by the one it belongs to.
                 !self.persistence.unresolved_spaces.contains(&destination)
@@ -30,6 +39,7 @@ impl LayoutEngine {
     /// veto a restarted application's unique title.
     fn fuzzy_saved_window(
         &self,
+        windows: Windows<'_>,
         live: &WindowFingerprint,
         scope: MatchScope<'_>,
     ) -> Option<WindowId> {
@@ -40,7 +50,7 @@ impl LayoutEngine {
             let fingerprint = &saved.fingerprint;
             if !fingerprint.same_known_app(live)
                 || !fingerprint.same_title(live)
-                || !self.saved_window_in_scope(saved, scope)
+                || !self.saved_window_in_scope(windows, saved, scope)
             {
                 continue;
             }
@@ -79,14 +89,14 @@ impl LayoutEngine {
                 .filter(|(_, saved)| saved.fingerprint.same_server_window(live))
                 .max_by_key(|(candidate, saved)| {
                     (
-                        self.saved_window_in_scope(saved, scope),
+                        self.saved_window_in_scope(window_store.read(), saved, scope),
                         Some(saved.workspace) == assigned,
                         std::cmp::Reverse(**candidate),
                     )
                 })
                 .map(|(candidate, _)| *candidate)
         });
-        let selected = exact.or_else(|| self.fuzzy_saved_window(live, scope));
+        let selected = exact.or_else(|| self.fuzzy_saved_window(window_store.read(), live, scope));
         let stale = pending
             .iter()
             .filter(|(candidate, saved)| {
@@ -103,7 +113,7 @@ impl LayoutEngine {
             return false;
         };
         let saved = self.persistence.pending.remove(&selected).expect("selected window is pending");
-        if self.saved_window_in_scope(&saved, scope) {
+        if self.saved_window_in_scope(window_store.read(), &saved, scope) {
             self.adopt_saved_window(window_store, selected, window, saved);
             return true;
         }
@@ -137,7 +147,11 @@ impl LayoutEngine {
             self.floating.remove_floating(live);
             self.floating_positions.remove_workspace_window(saved.workspace, live);
         }
-        let space = self.workspaces[saved.workspace].space;
+        let space = self
+            .workspaces
+            .reading(window_store.read())
+            .workspace_space(saved.workspace)
+            .expect("a listed workspace has a Space");
         let _ =
             self.workspaces
                 .assign_window_to_workspace(window_store, space, live, saved.workspace);
@@ -166,6 +180,7 @@ impl LayoutEngine {
 
     pub(crate) fn discard_unmatched_candidates_for_app(
         &mut self,
+        windows: Windows<'_>,
         pid: pid_t,
         app_id: Option<&str>,
         discovered_spaces: &[SpaceId],
@@ -184,7 +199,13 @@ impl LayoutEngine {
             .filter(|(window, saved)| {
                 (window.pid == pid
                     || app_id.is_some_and(|id| saved.fingerprint.app_id.as_deref() == Some(id)))
-                    && discovered_spaces.contains(&self.workspaces[saved.workspace].space)
+                    && discovered_spaces.contains(
+                        &self
+                            .workspaces
+                            .reading(windows)
+                            .workspace_space(saved.workspace)
+                            .expect("a listed workspace has a Space"),
+                    )
             })
             .map(|(window, _)| *window)
             .collect();
@@ -201,20 +222,31 @@ impl LayoutEngine {
             })
             .collect();
         for (window, live, workspace) in assigned {
-            let scope = MatchScope::Space(self.workspaces[workspace].space);
+            let scope = MatchScope::Space(
+                self.workspaces
+                    .reading(window_store.read())
+                    .workspace_space(workspace)
+                    .expect("a listed workspace has a Space"),
+            );
             if self.is_restoring()
                 && self.reconcile_saved_window(window_store, window, &live, scope)
             {
                 let owner = window_store.read().workspace_for_window(window).unwrap_or(workspace);
-                self.add_window_to_layout(
-                    window_store.read(),
-                    self.workspaces[owner].space,
-                    window,
-                );
+                let owner_space = self
+                    .workspaces
+                    .reading(window_store.read())
+                    .workspace_space(owner)
+                    .expect("a listed workspace has a Space");
+                self.add_window_to_layout(window_store.read(), owner_space, window);
             }
         }
         for (pid, app_id, spaces) in std::mem::take(&mut self.persistence.awaited_discoveries) {
-            self.discard_unmatched_candidates_for_app(pid, app_id.as_deref(), &spaces);
+            self.discard_unmatched_candidates_for_app(
+                window_store.read(),
+                pid,
+                app_id.as_deref(),
+                &spaces,
+            );
         }
     }
 

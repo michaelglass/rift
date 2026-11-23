@@ -134,8 +134,13 @@ pub fn handle_command_layout(
         .iter()
         .filter_map(|&window| {
             let assignment = state.windows().workspace_for_window(window)?;
-            let screen =
-                visible_space_frames.get(&layout.layout_engine.workspaces()[assignment].space)?;
+            let space = layout
+                .layout_engine
+                .workspaces()
+                .reading(state.windows())
+                .workspace_space(assignment)
+                .expect("a listed workspace has a Space");
+            let screen = visible_space_frames.get(&space)?;
             let frame = state.windows.window(window)?.frame_monotonic();
             Some((
                 window,
@@ -155,7 +160,14 @@ pub fn handle_command_layout(
         response
             .focus_window
             .and_then(|window| state.windows().workspace_for_window(window))
-            .map(|workspace| layout.layout_engine.workspaces()[workspace].space)
+            .map(|workspace| {
+                layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(state.windows())
+                    .workspace_space(workspace)
+                    .expect("a listed workspace has a Space")
+            })
             .or(command_space)
             .is_none_or(|space| layout.layout_engine.focus_changes_geometry(state.windows(), space))
     };
@@ -310,7 +322,9 @@ pub fn handle_config_updated(
     let rules_changed =
         config.virtual_workspaces.app_rules != new_config.virtual_workspaces.app_rules;
     *config = new_config;
-    layout.layout_engine.set_layout_settings(&config.settings.layout);
+    layout
+        .layout_engine
+        .set_layout_settings(state.windows(), &config.settings.layout);
 
     layout.layout_engine.update_virtual_workspace_settings(
         &mut state.windows_mut(),
@@ -559,7 +573,8 @@ pub fn handle_command_reactor_move_workspace_to_display(
         if layout
             .layout_engine
             .workspaces()
-            .workspace_for_window(state.windows(), target_space, window_move.window)
+            .reading(state.windows())
+            .workspace_for_window(target_space, window_move.window)
             .is_some()
         {
             outcome.absorb(request_window_transfer(

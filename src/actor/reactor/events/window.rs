@@ -215,11 +215,11 @@ pub fn handle_window_frame_changed(
     // Requested frame acknowledgements have already been filtered by the classifier.
     if let Some(space) = assigned_space.or(old_space)
         && Some(space) == new_space
-        && let Some(workspace) =
-            layout
-                .layout_engine
-                .workspaces()
-                .workspace_for_window(state.windows(), space, wid)
+        && let Some(workspace) = layout
+            .layout_engine
+            .workspaces()
+            .reading(state.windows())
+            .workspace_for_window(space, wid)
         && layout.layout_engine.is_window_floating(wid)
     {
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);

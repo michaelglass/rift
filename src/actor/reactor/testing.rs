@@ -67,11 +67,12 @@ impl Reactor {
         space: crate::sys::screen::SpaceId,
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.stores.layout.layout_engine.workspaces().workspace_for_window(
-            self.stores.state.windows(),
-            space,
-            wid,
-        )
+        self.stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(self.stores.state.windows())
+            .workspace_for_window(space, wid)
     }
 
     /// Time passes: every unanswered write is past its deadline, and Rift stops waiting for it.
@@ -102,7 +103,15 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        if self.stores.layout.layout_engine.workspaces()[workspace].space == space {
+        if self
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(self.stores.state.windows())
+            .workspace_space(workspace)
+            == Some(space)
+        {
             self.stores.state.windows().workspace_windows(workspace)
         } else {
             Vec::new()

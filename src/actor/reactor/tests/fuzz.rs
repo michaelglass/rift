@@ -2452,12 +2452,7 @@ fn activation_shapes_across_the_fuzzer() {
             let mut sim = Sim::new(setup);
             for step in generate(seed, len) {
                 let placed = |sim: &Sim| -> Vec<_> {
-                    let workspaces = sim.reactor.stores.layout.layout_engine.workspaces();
-                    workspaces
-                        .reading(sim.reactor.stores.state.windows())
-                        .catalog()
-                        .map(|id| (id, workspaces[id].space))
-                        .collect()
+                    sim.reactor.stores.state.windows().core.catalog().to_vec()
                 };
                 let before = placed(&sim);
                 let emitted = sim.run(step);

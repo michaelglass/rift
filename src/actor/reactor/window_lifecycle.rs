@@ -163,7 +163,12 @@ impl Reactor {
         let engine = &mut self.stores.layout.layout_engine;
         let Some((workspace, target)) = (self.stores.state.windows().workspace_for_window(window))
             .or(restored.record.workspace)
-            .and_then(|id| Some((id, engine.workspaces().workspace_space(id)?)))
+            .and_then(|id| {
+                Some((
+                    id,
+                    engine.workspaces().reading(self.stores.state.windows()).workspace_space(id)?,
+                ))
+            })
         else {
             let Some(space) = native else { return outcome };
             self.stores.state.windows.restore_window_from_native_fullscreen(window);

@@ -49,7 +49,10 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
 
         let engine = &reactor.stores.layout.layout_engine;
         let workspaces = engine.workspaces();
-        let source_layout = workspaces.active_layout(space1, source).unwrap();
+        let source_layout = workspaces
+            .reading(reactor.stores.state.windows())
+            .active_layout(space1, source)
+            .unwrap();
         let (target, target_layout) = workspaces
             .reading(reactor.stores.state.windows())
             .active_layout_for_space(space2)
@@ -1049,7 +1052,11 @@ fn scrolling_focus_warps_to_revealed_window() {
         config.settings.layout.scrolling.column_width_ratio = ratio;
         config.settings.layout.scrolling.animate = Some(animated);
         config.settings.layout.scrolling.preserve_window_sizes = false;
-        reactor.stores.layout.layout_engine.set_layout_settings(&config.settings.layout);
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .set_layout_settings(reactor.stores.state.windows(), &config.settings.layout);
         reactor.config = config;
         reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
         reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
@@ -2228,7 +2235,11 @@ fn scrolling_display_transfer_ignores_intermediate_native_width() {
     let mut config = reactor.config.clone();
     config.settings.layout.scrolling.column_width_ratio = 0.5;
     config.settings.layout.scrolling.preserve_window_sizes = false;
-    reactor.stores.layout.layout_engine.set_layout_settings(&config.settings.layout);
+    reactor
+        .stores
+        .layout
+        .layout_engine
+        .set_layout_settings(reactor.stores.state.windows(), &config.settings.layout);
     reactor.config = config;
     for space in [b, a] {
         reactor.space_state.command_space = Some(space);
@@ -3223,7 +3234,11 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     // Seed a stale persisted projection. WindowAdded itself must now reject
     // logically unavailable windows instead of manufacturing this ghost.
     let engine = &mut reactor.stores.layout.layout_engine;
-    let layout = engine.workspaces().active_layout(user_space, active_workspace).unwrap();
+    let layout = engine
+        .workspaces()
+        .reading(reactor.stores.state.windows())
+        .active_layout(user_space, active_workspace)
+        .unwrap();
     engine.workspaces_mut()[active_workspace].layout_system.update(
         crate::layout_engine::systems::WindowChange::Add(layout, duplicate_wid, None),
     );
@@ -4222,7 +4237,7 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
             .layout_engine
             .workspaces()
             .reading(reactor.stores.state.windows())
-            .is_window_in_active_workspace(reactor.stores.state.windows(), space, same_app_visible),
+            .is_window_in_active_workspace(space, same_app_visible),
         "another window from the activated app should remain visible on the current workspace"
     );
     // Native ordering is independent of AX minimization and workspace ownership.
@@ -6470,6 +6485,59 @@ fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_spa
         reactor.assigned_space_for_window_id(retained),
         Some(active_space),
         "other visible windows on the active space must remain untouched"
+    );
+}
+
+/// A window whose workspace is on an inactive Space is not looked for in the active Spaces'
+/// snapshot: its absence there neither moves nor removes it, and the window server is not asked
+/// where it is.
+#[test]
+fn a_window_on_an_inactive_space_is_not_missing_from_the_active_snapshot() {
+    let (mut apps, mut reactor) = test_context();
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let active_space = SpaceId::new(1);
+    let inactive_space = SpaceId::new(2);
+    let pid: pid_t = 44;
+    let moved = WindowId::new(pid, 1);
+    let retained = WindowId::new(pid, 2);
+    let moved_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 1);
+    let retained_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 2);
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(active_space)]));
+    apps.make_app_and_settle(&mut reactor, pid, make_windows(2));
+    reactor.mark_test_window_visible_in_space(moved_wsid, active_space);
+    reactor.mark_test_window_visible_in_space(retained_wsid, active_space);
+    crate::sys::window_server::set_window_spaces_override(
+        moved_wsid,
+        Some(vec![inactive_space.get()]),
+    );
+    reactor.reconcile_authoritative_active_window_snapshot(
+        vec![(retained_wsid, Some(active_space))],
+        false,
+        &[],
+    );
+    crate::sys::window_server::set_window_spaces_override(moved_wsid, None);
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(inactive_space));
+
+    // The next snapshot still lists only the active Space's windows, while the window server
+    // would place the window on yet another inactive Space if asked.
+    crate::sys::window_server::set_window_spaces_override(moved_wsid, Some(vec![3]));
+    reactor.reconcile_authoritative_active_window_snapshot(
+        vec![(retained_wsid, Some(active_space))],
+        false,
+        &[],
+    );
+    crate::sys::window_server::set_window_spaces_override(moved_wsid, None);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(moved),
+        Some(inactive_space),
+        "a window on an inactive Space keeps its workspace"
+    );
+    assert!(reactor.test_workspace_for_window(inactive_space, moved).is_some());
+    assert_eq!(
+        reactor.assigned_space_for_window_id(retained),
+        Some(active_space)
     );
 }
 
@@ -9156,7 +9224,8 @@ fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() 
         .layout
         .layout_engine
         .workspaces()
-        .workspace_for_window(reactor.stores.state.windows(), space, window)
+        .reading(reactor.stores.state.windows())
+        .workspace_for_window(space, window)
         .unwrap();
     let destination = workspaces.iter().find(|ws| ws.workspace_id != source).unwrap();
     let intent = OverviewDrop {
@@ -9186,11 +9255,13 @@ fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() 
         assert_eq!(outcome.arrange.passes, 0);
         assert!(outcome.placements.is_empty());
         assert_eq!(
-            reactor.stores.layout.layout_engine.workspaces().workspace_for_window(
-                reactor.stores.state.windows(),
-                space,
-                window
-            ),
+            reactor
+                .stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(reactor.stores.state.windows())
+                .workspace_for_window(space, window),
             Some(source)
         );
     }
@@ -9203,11 +9274,13 @@ fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() 
     assert!(!rx.recv().unwrap());
     assert_eq!(outcome.arrange.passes, 0);
     assert_eq!(
-        reactor.stores.layout.layout_engine.workspaces().workspace_for_window(
-            reactor.stores.state.windows(),
-            space,
-            window
-        ),
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_for_window(space, window),
         Some(source)
     );
     let (reply, rx) = std::sync::mpsc::sync_channel(1);
@@ -9215,11 +9288,13 @@ fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() 
     reactor.handle_event(Event::OverviewDrop { intent, reply });
     assert!(rx.recv().unwrap());
     assert_ne!(
-        reactor.stores.layout.layout_engine.workspaces().workspace_for_window(
-            reactor.stores.state.windows(),
-            space,
-            window
-        ),
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_for_window(space, window),
         Some(source)
     );
 }
@@ -9260,16 +9335,19 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
             .layout
             .layout_engine
             .workspaces()
-            .workspace_for_window(reactor.stores.state.windows(), destination, window)
+            .reading(reactor.stores.state.windows())
+            .workspace_for_window(destination, window)
             .unwrap(),
         target
     );
     assert_eq!(
-        reactor.stores.layout.layout_engine.workspaces().workspace_for_window(
-            reactor.stores.state.windows(),
-            source,
-            window
-        ),
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_for_window(source, window),
         None
     );
     apps.requests();
@@ -10957,7 +11035,17 @@ fn shared_display_departure_restores_only_the_recorded_native_context() {
     let dormant = reactor.test_workspace_ids(other);
     reactor.handle_event(screens(b));
     reactor.handle_event(space_state_event(vec![shared_left()], vec![Some(a)]));
-    assert_eq!(reactor.stores.layout.layout_engine.workspaces()[id].space, a);
+    assert_eq!(
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(id)
+            .unwrap(),
+        a
+    );
     assert_eq!(
         reactor
             .stores
@@ -10975,9 +11063,29 @@ fn shared_display_departure_restores_only_the_recorded_native_context() {
             s.display_space_ids.insert("test-display-1".into(), vec![b, other]);
         },
     ));
-    assert_eq!(reactor.stores.layout.layout_engine.workspaces()[id].space, a);
+    assert_eq!(
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(id)
+            .unwrap(),
+        a
+    );
     reactor.handle_event(screens(b));
-    assert_eq!(reactor.stores.layout.layout_engine.workspaces()[id].space, b);
+    assert_eq!(
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(id)
+            .unwrap(),
+        b
+    );
     assert_eq!(
         reactor
             .stores
@@ -11225,7 +11333,8 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     let workspaces = reactor.stores.layout.layout_engine.workspaces();
     for &id in &ids {
         assert_eq!(
-            workspaces[id].space, a,
+            workspaces.reading(reactor.stores.state.windows()).workspace_space(id).unwrap(),
+            a,
             "no workspace may remain on a destroyed desktop"
         );
     }
@@ -11255,7 +11364,8 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
         .reading(reactor.stores.state.windows());
     for &id in &[ids[0], ids[2]] {
         assert_eq!(
-            workspaces[id].space, replacement,
+            workspaces.workspace_space(id).unwrap(),
+            replacement,
             "{id:?} returns to its home display"
         );
     }
@@ -11313,7 +11423,7 @@ fn shared_display_returning_on_new_desktop_restores_its_workspaces() {
         .workspaces()
         .reading(reactor.stores.state.windows());
     for &id in [ids[0], ids[2], ids[3]].iter() {
-        assert_eq!(ws[id].space, b_new);
+        assert_eq!(ws.workspace_space(id).unwrap(), b_new);
     }
     assert_eq!(
         ws.reading(reactor.stores.state.windows()).active_workspace(b_new),
@@ -11483,7 +11593,17 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
     }];
     reactor.handle_event(Event::ConfigUpdated(config));
     apps.simulate_until_quiet(&mut reactor);
-    assert_eq!(reactor.stores.layout.layout_engine.workspaces()[ids[0]].space, a);
+    assert_eq!(
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(ids[0])
+            .unwrap(),
+        a
+    );
     assert_eq!(transfer(&reactor), Some(crate::model::Transfer::Waiting));
     assert!(on_right(&apps), "no frame write reaches a fullscreen window");
     reactor.handle_event(snapshot(Some(a2), Some(b), false, &[]));
@@ -11527,7 +11647,12 @@ fn another_displays_space_changes_never_move_workspaces_around_a_fullscreen_disp
         let owners: Vec<_> = store
             .reading(r.stores.state.windows())
             .catalog()
-            .map(|id| (id, store[id].space))
+            .map(|id| {
+                (
+                    id,
+                    store.reading(r.stores.state.windows()).workspace_space(id).unwrap(),
+                )
+            })
             .collect();
         (
             owners,
@@ -11582,7 +11707,17 @@ fn another_displays_space_changes_never_move_workspaces_around_a_fullscreen_disp
             .native_fullscreen_record_for_window(second)
             .is_none()
     );
-    assert_eq!(reactor.stores.layout.layout_engine.workspaces()[ids[0]].space, b);
+    assert_eq!(
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(ids[0])
+            .unwrap(),
+        b
+    );
     for window in [first, second] {
         assert!(has_window_in_layout(&mut reactor, b, shared_right(), window));
         assert!(shared_right().contains(apps.windows[&window].frame.mid()));
@@ -12229,7 +12364,14 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
         let workspace = &reactor.stores.layout.layout_engine.workspaces()[pinned];
         assert_eq!(
             (
-                workspace.space,
+                reactor
+                    .stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(reactor.stores.state.windows())
+                    .workspace_space(pinned)
+                    .unwrap(),
                 (workspace.rule_standing == RuleStanding::Overridden)
             ),
             (target, overridden)
@@ -12251,11 +12393,17 @@ fn shared_destroyed_dormant_desktop_releases_ownership_without_rebuilding_catalo
             s.membership_complete = true;
         },
     ));
-    assert!(
-        dormant
-            .iter()
-            .all(|&id| reactor.stores.layout.layout_engine.workspaces()[id].space == b)
-    );
+    assert!(dormant.iter().all(|&id| {
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(id)
+            .unwrap()
+            == b
+    }));
     let catalog: Vec<_> = reactor
         .stores
         .layout
@@ -12275,7 +12423,9 @@ fn shared_destroyed_dormant_desktop_releases_ownership_without_rebuilding_catalo
         },
     ));
     let store = reactor.stores.layout.layout_engine.workspaces();
-    assert!(dormant.iter().all(|&id| store[id].space == next));
+    assert!(dormant.iter().all(|&id| {
+        store.reading(reactor.stores.state.windows()).workspace_space(id) == Some(next)
+    }));
     assert_eq!(
         store.reading(reactor.stores.state.windows()).catalog().collect::<Vec<_>>(),
         catalog
@@ -12312,7 +12462,15 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
     reactor.handle_event(Event::SpaceStateChanged(snapshot));
     let workspace = &reactor.stores.layout.layout_engine.workspaces()[id];
     assert_eq!(
-        workspace.space, b,
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .workspace_space(id)
+            .unwrap(),
+        b,
         "reconnecting a pin must preserve the explicit destination"
     );
     assert!((workspace.rule_standing == RuleStanding::Overridden));
@@ -12337,7 +12495,14 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
         let workspace = &reactor.stores.layout.layout_engine.workspaces()[id];
         assert_eq!(
             (
-                workspace.space,
+                reactor
+                    .stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(reactor.stores.state.windows())
+                    .workspace_space(id)
+                    .unwrap(),
                 (workspace.rule_standing == RuleStanding::Overridden)
             ),
             (target, overridden)
@@ -12352,7 +12517,14 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
     let workspace = &reactor.stores.layout.layout_engine.workspaces()[id];
     assert_eq!(
         (
-            workspace.space,
+            reactor
+                .stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(reactor.stores.state.windows())
+                .workspace_space(id)
+                .unwrap(),
             (workspace.rule_standing == RuleStanding::Overridden)
         ),
         (b, false)
@@ -12405,11 +12577,13 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
             .workspaces()
             .reading(reactor.stores.state.windows());
         assert_eq!(
-            workspaces[independent].space, b,
+            workspaces.workspace_space(independent).unwrap(),
+            b,
             "the other native Space stays isolated"
         );
         assert_eq!(
-            workspaces[original].space, external,
+            workspaces.workspace_space(original).unwrap(),
+            external,
             "the named pin still applies"
         );
         assert_ne!(workspaces[independent].name, workspaces[original].name);
@@ -12472,7 +12646,14 @@ fn named_pin_reload_moves_immediately_without_creating_workspaces() {
             reactor.apply_event_outcome(outcome);
             apps.simulate_until_quiet(&mut reactor);
             assert_eq!(
-                reactor.stores.layout.layout_engine.workspaces()[ids[1]].space,
+                reactor
+                    .stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(reactor.stores.state.windows())
+                    .workspace_space(ids[1])
+                    .unwrap(),
                 target
             );
             // Repeated exposure must retain the workspace moved to balance the displays (#702).
@@ -12700,7 +12881,12 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
             let owners: Vec<_> = store
                 .reading(r.stores.state.windows())
                 .catalog()
-                .map(|id| (id, store[id].space))
+                .map(|id| {
+                    (
+                        id,
+                        store.reading(r.stores.state.windows()).workspace_space(id).unwrap(),
+                    )
+                })
                 .collect();
             (
                 owners,
@@ -12876,11 +13062,10 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                     .serialize_to_string(reactor.stores.state.windows());
                 reactor.stores.layout.layout_engine =
                     LayoutEngine::deserialize_from_str(&snapshot).unwrap().engine;
-                reactor
-                    .stores
-                    .layout
-                    .layout_engine
-                    .set_layout_settings(&reactor.config.settings.layout);
+                reactor.stores.layout.layout_engine.set_layout_settings(
+                    reactor.stores.state.windows(),
+                    &reactor.config.settings.layout,
+                );
                 let ids: Vec<_> = (1..=3).map(|idx| WindowId::new(1, idx)).collect();
                 let discovered = ids
                     .iter()
@@ -13028,7 +13213,11 @@ fn overview_activation_arranges_and_focuses_under_cover() {
         let mut config = reactor.config.clone();
         config.settings.layout.scrolling.column_width_ratio = 1.;
         config.settings.layout.scrolling.preserve_window_sizes = false;
-        reactor.stores.layout.layout_engine.set_layout_settings(&config.settings.layout);
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .set_layout_settings(reactor.stores.state.windows(), &config.settings.layout);
         reactor.config = config;
         reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
             workspace: None,
@@ -15660,7 +15849,10 @@ fn a_space_remapped_onto_one_holding_workspaces_takes_its_windows_and_claims_alo
             .catalog()
             .any(|id| id == replaced)
     );
-    assert_eq!(workspaces[migrated].space, target);
+    assert_eq!(
+        workspaces.reading(reactor.stores.state.windows()).workspace_space(migrated),
+        Some(target)
+    );
     assert_eq!(
         reactor.stores.state.windows().workspace_for_window(held),
         Some(migrated)

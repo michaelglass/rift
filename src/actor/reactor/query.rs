@@ -350,8 +350,12 @@ impl Reactor {
         let context =
             crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible };
         let view = store.reading(self.stores.state.windows()).workspace_view(context);
-        view.filter(|(_, id)| owner.is_none_or(|owner| store[*id].space == owner))
-            .collect()
+        view.filter(|(_, id)| {
+            owner.is_none_or(|owner| {
+                store.reading(self.stores.state.windows()).workspace_space(*id) == Some(owner)
+            })
+        })
+        .collect()
     }
 
     /// The workspaces `space` owns. A global catalog view spans every visible display,
@@ -368,7 +372,14 @@ impl Reactor {
             .into_iter()
             .map(|(index, id)| {
                 let name = self.stores.layout.layout_engine.workspaces()[id].name.clone();
-                let space = self.stores.layout.layout_engine.workspaces()[id].space;
+                let space = self
+                    .stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(self.stores.state.windows())
+                    .workspace_space(id)
+                    .expect("a listed workspace has a Space");
                 let is_active = self
                     .stores
                     .layout
@@ -383,8 +394,12 @@ impl Reactor {
                         && self.stores.state.windows.is_admitted_state(*wid)
                 });
                 let window_count = windows.len();
-                let has_fullscreen =
-                    self.stores.layout.layout_engine.workspace_has_fullscreen(space, id, &windows);
+                let has_fullscreen = self.stores.layout.layout_engine.workspace_has_fullscreen(
+                    self.stores.state.windows(),
+                    space,
+                    id,
+                    &windows,
+                );
                 let mut frames = Vec::new();
                 if show_layout && (!active_only || is_active) && !windows.is_empty() {
                     // Preserve scrolling visual order without rich per-window snapshots
@@ -447,6 +462,7 @@ impl Reactor {
                         .layout
                         .layout_engine
                         .workspaces()
+                        .reading(self.stores.state.windows())
                         .workspace_info(space, id)
                         .map(|ws| ws.layout_mode().to_string())
                         .unwrap_or_else(|| "unknown".into()),
@@ -488,7 +504,14 @@ impl Reactor {
 
         for (index, workspace_id) in &workspace_list {
             let workspace_name = &self.stores.layout.layout_engine.workspaces()[*workspace_id].name;
-            let space = self.stores.layout.layout_engine.workspaces()[*workspace_id].space;
+            let space = self
+                .stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(self.stores.state.windows())
+                .workspace_space(*workspace_id)
+                .expect("a listed workspace has a Space");
             let index = *index;
             let is_active = self
                 .stores
@@ -538,6 +561,7 @@ impl Reactor {
                         .gaps
                         .effective_for_display(screen.display_uuid_opt());
                     self.stores.layout.layout_engine.logical_window_frames(
+                        self.stores.state.windows(),
                         space,
                         *workspace_id,
                         screen.frame,
@@ -627,10 +651,12 @@ impl Reactor {
                     index,
                     name: workspace.name.clone(),
                     layout_mode: workspace.layout_mode().to_string(),
-                    is_active: workspaces
-                        .reading(self.stores.state.windows())
-                        .active_workspace(workspace.space)
-                        == Some(id),
+                    is_active: {
+                        let view = workspaces.reading(self.stores.state.windows());
+                        view.active_workspace(
+                            view.workspace_space(id).expect("a listed workspace has a Space"),
+                        ) == Some(id)
+                    },
                 }
             })
             .collect()
@@ -745,7 +771,12 @@ impl Reactor {
         }
         windows.native_space(wid).or_else(|| {
             let workspace = windows.claim(wid)?.workspace()?;
-            self.stores.layout.layout_engine.workspaces().workspace_space(workspace)
+            self.stores
+                .layout
+                .layout_engine
+                .workspaces()
+                .reading(self.stores.state.windows())
+                .workspace_space(workspace)
         })
     }
 
@@ -797,15 +828,17 @@ impl Reactor {
         if let Some(workspace) = self.stores.state.windows().workspace_for_window(window_id) {
             let engine = &self.stores.layout.layout_engine;
             let ws = &engine.workspaces()[workspace];
+            let view = engine.workspaces().reading(self.stores.state.windows());
+            let ws_space = view.workspace_space(workspace).expect("a listed workspace has a Space");
             if let crate::layout_engine::systems::LayoutSystemKind::Scrolling(system) =
                 &ws.layout_system
-                && let Some(layout) = engine.workspaces().active_layout(ws.space, workspace)
+                && let Some(layout) = view.active_layout(ws_space, workspace)
                 && let Some((camera, frames)) = system.presentation(layout)
                 && let Some((_, frame, fixed)) =
                     frames.into_iter().find(|(id, _, _)| *id == window_id)
             {
                 let scale =
-                    self.space_state.screen_by_space(ws.space).map_or(1., |s| s.backing_scale);
+                    self.space_state.screen_by_space(ws_space).map_or(1., |s| s.backing_scale);
                 data.layout_frame = Some(camera.target_frame(frame, fixed, scale));
             }
         }
@@ -872,6 +905,7 @@ impl Reactor {
             frames
         } else {
             calculated = self.stores.layout.layout_engine.calculate_workspace_layout(
+                self.stores.state.windows(),
                 space_id,
                 snapshot.workspace_id,
                 screen.frame,
@@ -1006,6 +1040,7 @@ impl Reactor {
                         .layout
                         .layout_engine
                         .workspaces()
+                        .reading(self.stores.state.windows())
                         .last_focused_window(space, workspace_id);
 
                     let floating_positions =
@@ -1032,7 +1067,14 @@ impl Reactor {
         )> = Vec::new();
         for (window_id, assignment) in self.stores.state.windows().iter_workspace_assignments() {
             mapping_intermediate.push((
-                self.stores.layout.layout_engine.workspaces()[assignment].space.get(),
+                self.stores
+                    .layout
+                    .layout_engine
+                    .workspaces()
+                    .reading(self.stores.state.windows())
+                    .workspace_space(assignment)
+                    .expect("a listed workspace has a Space")
+                    .get(),
                 window_id,
                 assignment,
             ));

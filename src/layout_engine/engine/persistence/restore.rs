@@ -3,11 +3,19 @@ use super::snapshot::PersistedLayout;
 use super::*;
 
 impl PersistedLayout {
+    /// Every saved Space with a workspace that has an active layout.
+    fn saved_layout_spaces(&self) -> crate::common::collections::BTreeSet<SpaceId> {
+        (self.loaded.topology.catalog().iter())
+            .filter(|&&(id, _)| self.loaded.store[id].active_layout().is_some())
+            .map(|&(_, space)| space)
+            .collect()
+    }
+
     /// The file's entry for a live Space. The disk master can still contain the previous launch's
     /// SpaceIds even though startup already repaired the live engine; display identity bridges
     /// that interval until the next master save.
     fn entry_for_space(&self, engine: &LayoutEngine, space: SpaceId) -> Option<SpaceId> {
-        let saved_spaces = self.loaded.store.layout_spaces();
+        let saved_spaces = self.saved_layout_spaces();
         Some(space).filter(|space| saved_spaces.contains(space)).or_else(|| {
             engine
                 .display_uuid_for_space(space)
@@ -65,7 +73,7 @@ impl PersistedLayout {
         engine: &LayoutEngine,
         request: RestoreRequest,
     ) -> anyhow::Result<SpaceId> {
-        let saved_spaces = self.loaded.store.layout_spaces();
+        let saved_spaces = self.saved_layout_spaces();
         let preferred = match request.source {
             RestoreSource::SavedActiveSpace => (self.saved_active_space())
                 .filter(|space| saved_spaces.contains(space))
@@ -200,7 +208,12 @@ impl LayoutEngine {
                 .remove(source)
                 .expect("workspace sources were validated before installation");
             self.native_layouts.remove(&target);
-            let display = self.space_display_map.get(&self.workspaces[target].space);
+            let target_space = self
+                .workspaces
+                .reading(window_store.read())
+                .workspace_space(target)
+                .expect("a listed workspace has a Space");
+            let display = self.space_display_map.get(&target_space);
             let display = display.and_then(Option::as_deref);
             let workspace = &mut self.workspaces[target];
             workspace.restore_contents(saved);
@@ -208,7 +221,9 @@ impl LayoutEngine {
         }
         if request.scope != RestoreScope::Workspace {
             for (space, active) in actives {
-                if self.workspaces[active].space == space {
+                if self.workspaces.reading(window_store.read()).workspace_space(active)
+                    == Some(space)
+                {
                     self.workspaces.set_active_workspace(window_store, space, active);
                 }
             }
@@ -259,13 +274,22 @@ impl LayoutEngine {
             // runtime-only active entry, and a current window absent from the file needs a slot
             // in the replaced tree.
             let owner = window_store.read().workspace_for_window(live).unwrap_or(target);
-            let (from, space) = (self.workspaces[target].space, self.workspaces[owner].space);
+            let view = self.workspaces.reading(window_store.read());
+            let (from, space) = (
+                view.workspace_space(target).expect("a listed workspace has a Space"),
+                view.workspace_space(owner).expect("a listed workspace has a Space"),
+            );
             if from != space {
                 report.moved.push((live, from, space));
             }
             self.add_window_to_layout(window_store.read(), space, live);
             if self.focused_window == Some(live) {
-                self.workspaces.set_last_focused_window(space, owner, Some(live));
+                self.workspaces.set_last_focused_window(
+                    window_store.core.catalog(),
+                    space,
+                    owner,
+                    Some(live),
+                );
             }
         }
         let unmatched: Vec<_> = (self.persistence.pending.iter())

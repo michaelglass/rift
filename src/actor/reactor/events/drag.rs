@@ -269,7 +269,8 @@ pub fn handle_mouse_up(
         if let Some(workspace) = layout
             .layout_engine
             .workspaces()
-            .workspace_for_window(state.windows(), space, window)
+            .reading(state.windows())
+            .workspace_for_window(space, window)
             .or_else(|| {
                 layout
                     .layout_engine

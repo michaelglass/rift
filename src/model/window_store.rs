@@ -617,8 +617,7 @@ pub struct WindowStore {
 /// window, told every ownership change, and the workspace store's catalog and activations, told
 /// through [`WindowsMut::topology`] by the workspace store's topology writers), lent together
 /// for reading. The owner holds the two side by side; a view holds exactly those two.
-/// [`Windows::ownership_divergences`] and the workspace store's `workspace_divergences` hold
-/// them to agreeing.
+/// [`Windows::ownership_divergences`] holds the two to agreeing on ownership.
 #[derive(Clone, Copy)]
 pub(crate) struct Windows<'a> {
     pub(crate) records: &'a WindowStore,
@@ -2309,7 +2308,6 @@ impl WindowsMut<'_> {
     /// can become hidden without an unnecessary native membership query.
     pub(crate) fn reconcile_native_snapshot(
         &mut self,
-        workspaces: &crate::model::virtual_workspace::WorkspaceStore,
         observed: &[(WindowServerId, Option<SpaceId>)],
         active_spaces: &HashSet<SpaceId>,
     ) -> HashSet<WindowServerId> {
@@ -2340,10 +2338,10 @@ impl WindowsMut<'_> {
                 let record = self.read().record(*wid)?;
                 let wsid = record.window_server_id?;
                 (record.assignment().is_some_and(|assignment| {
-                    workspaces
-                        .workspaces
-                        .get(assignment)
-                        .is_some_and(|workspace| active_spaces.contains(&workspace.space))
+                    self.core
+                        .catalog()
+                        .iter()
+                        .any(|&(id, on)| id == assignment && active_spaces.contains(&on))
                 }) && self.records.native_fullscreen_record_for_window(*wid).is_none()
                     && !observed_ids.contains(&wsid))
                 .then_some(wsid)
@@ -2355,7 +2353,6 @@ impl WindowsMut<'_> {
     /// Confirmed moves reconcile location; a live AX window keeps its ownership.
     pub(crate) fn reconcile_native_absence(
         &mut self,
-        workspaces: &crate::model::virtual_workspace::WorkspaceStore,
         wsid: WindowServerId,
         active_spaces: &HashSet<SpaceId>,
         inactive_target: Option<SpaceId>,
@@ -2367,10 +2364,10 @@ impl WindowsMut<'_> {
         // Hiding, minimizing and fullscreen all retain ownership while suspended.
         if self.records.is_temporarily_unavailable(wid)
             || !record.assignment().is_some_and(|assignment| {
-                workspaces
-                    .workspaces
-                    .get(assignment)
-                    .is_some_and(|workspace| active_spaces.contains(&workspace.space))
+                self.core
+                    .catalog()
+                    .iter()
+                    .any(|&(id, on)| id == assignment && active_spaces.contains(&on))
             })
         {
             return None;

@@ -130,7 +130,7 @@ impl PersistedLayout {
                     "invalid workspace layouts: layout state references missing workspace {id:?}"
                 )
             })?;
-            if workspace.space != space {
+            if self.loaded.topology.space(id) != Some(space) {
                 return Err(anyhow::anyhow!(
                     "invalid workspace layouts: workspace {id:?} is stored under the wrong native space"
                 ));
@@ -166,13 +166,7 @@ impl PersistedLayout {
         let legacy = self.floating_positions.into_rust::<LegacyPositions>()?;
         let mut positions = FloatingPositionStore::default();
         for ((space, workspace, window), frame) in legacy.positions {
-            if self
-                .loaded
-                .store
-                .workspaces
-                .get(workspace)
-                .is_none_or(|owner| owner.space != space)
-            {
+            if self.loaded.topology.space(workspace) != Some(space) {
                 anyhow::bail!(
                     "invalid floating positions: legacy frame is stored under the wrong native Space"
                 );
@@ -285,7 +279,9 @@ impl LayoutEngine {
             // native-space observation is worse than no hint because it makes a portable file look
             // unambiguous.
             saved_active_space: active_space
-                .filter(|space| self.workspaces.layout_spaces().contains(space))
+                .filter(|space| {
+                    self.workspaces.reading(window_store).layout_spaces().contains(space)
+                })
                 .map(|space| space.get()),
             ..PersistedIdentities::default()
         };
@@ -304,10 +300,10 @@ impl LayoutEngine {
             if self.floating.is_floating(window) {
                 // A hidden window's live frame is its parked position, not its placement.
                 let stored = self.floating_positions.get(workspace, window).filter(|_| {
-                    self.workspaces
-                        .reading(window_store)
-                        .active_workspace(self.workspaces[workspace].space)
-                        != Some(workspace)
+                    let view = self.workspaces.reading(window_store);
+                    let space =
+                        view.workspace_space(workspace).expect("a listed workspace has a Space");
+                    view.active_workspace(space) != Some(workspace)
                 });
                 floating.store(workspace, window, stored.unwrap_or(state.frame_monotonic()));
             }

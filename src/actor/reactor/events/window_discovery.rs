@@ -111,7 +111,7 @@ fn should_emit_window_for_space(
     wid: WindowId,
 ) -> bool {
     let workspaces = layout.layout_engine.workspaces();
-    let assigned = workspaces.workspace_for_window(state.windows(), space, wid);
+    let assigned = workspaces.reading(state.windows()).workspace_for_window(space, wid);
     let active = crate::roc_path::Asked::new();
     let emits = rift_core::workspaces::emits_window(assigned, || {
         active.ask(|| workspaces.reading(state.windows()).active_workspace(space))
@@ -324,10 +324,13 @@ pub(crate) fn emit_layout_events(
     observations.sort_unstable();
     for (space, wid) in observations {
         let active = active_spaces.contains(&space);
-        let assigned_space = state
-            .windows()
-            .workspace_for_window(wid)
-            .and_then(|workspace| layout.layout_engine.workspaces().workspace_space(workspace));
+        let assigned_space = state.windows().workspace_for_window(wid).and_then(|workspace| {
+            layout
+                .layout_engine
+                .workspaces()
+                .reading(state.windows())
+                .workspace_space(workspace)
+        });
         if !active && resumed.contains(&wid) && assigned_space == Some(space) {
             // Back on its own, inactive workspace: it rejoins its slot there.
             outcome.memberships.push((wid, Some(space)));

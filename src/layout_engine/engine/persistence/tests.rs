@@ -70,7 +70,7 @@ fn fresh(
     for (space, display) in spaces {
         let size = CGSize::new(1200.0, 800.0);
         let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::SpaceExposed(*space, size));
-        engine.update_space_display(*space, Some(*display));
+        engine.update_space_display(store.view(), *space, Some(*display));
     }
     (engine, store)
 }
@@ -81,7 +81,11 @@ fn open(
     id: VirtualWorkspaceId,
     window: WindowId,
 ) {
-    let space = engine.workspaces[id].space;
+    let space = engine
+        .workspaces
+        .reading(store.read())
+        .workspace_space(id)
+        .expect("a listed workspace has a Space");
     store.insert_manageable_window(window, live_state(window));
     assert!(engine.workspaces.assign_window_to_workspace(store, space, window, id));
     engine.add_window_to_layout(store.read(), space, window);
@@ -108,7 +112,7 @@ fn load(saved: &str) -> (LayoutEngine, OwnedWindows) {
 
 fn boot(settings: &VirtualWorkspaceSettings, saved: &str) -> (LayoutEngine, OwnedWindows) {
     let (mut engine, mut store) = load(saved);
-    engine.await_topology();
+    engine.await_topology(store.view().core.catalog());
     engine
         .finish_loading(&mut store.view_mut(), settings, &LayoutSettings::default())
         .unwrap();
@@ -242,9 +246,19 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
             .iter()
             .for_each(|w| open(&mut engine, &mut store.view_mut(), id, *w));
         let saved = engine.serialize_to_string(store.view());
-        let (loaded, _) = load(&saved);
-        let ron_of = |engine: &LayoutEngine| ron::ser::to_string(&engine.workspaces[id]).unwrap();
-        assert_eq!(ron_of(&loaded), ron_of(&engine));
+        let (loaded, loaded_store) = load(&saved);
+        let ron_of = |engine: &LayoutEngine, windows: Windows<'_>| {
+            let space = engine
+                .workspaces
+                .reading(windows)
+                .workspace_space(id)
+                .expect("a listed workspace has a Space");
+            ron::ser::to_string(&engine.workspaces[id].saved(space)).unwrap()
+        };
+        assert_eq!(
+            ron_of(&loaded, loaded_store.view()),
+            ron_of(&engine, store.view())
+        );
 
         let system = VirtualWorkspace::create_layout_system(mode, &settings);
         let current = ron::ser::to_string(&system).unwrap();
@@ -405,7 +419,10 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         engine.workspaces[target].name, name,
         "contents replace, identity stays"
     );
-    assert_eq!(engine.workspaces[target].space, c);
+    assert_eq!(
+        engine.workspaces.reading(store.view()).workspace_space(target),
+        Some(c)
+    );
     assert!(engine.persistence.pending.is_empty());
 }
 
@@ -426,9 +443,9 @@ fn single_display_restore_keeps_the_surviving_desktops_catalog() {
             .ensure_visible_spaces(&mut store.view_mut(), &[current], 1, |_| None);
         engine.workspaces.ensure_space_initialized(&mut store.view_mut(), old);
         if exposed {
-            engine.update_space_display(old, Some("display"));
+            engine.update_space_display(store.view(), old, Some("display"));
         }
-        engine.update_space_display(current, Some("display"));
+        engine.update_space_display(store.view(), current, Some("display"));
         let expected = engine.workspaces.reading(store.view()).workspace_ids(current);
         let saved = engine.serialize_to_string(store.view());
         let (mut engine, mut store) = boot(&settings, &saved);
@@ -729,5 +746,46 @@ fn a_saved_topology_naming_what_it_cannot_hold_is_refused() {
         ),
     ] {
         assert_rejected(&broken, &format!("invalid workspace topology: {refusal}"));
+    }
+}
+
+/// A catalog keeps its removed slots across a save: over drawn stores in both modes (removals
+/// among the draws), the store a load gives back allocates the next workspace's id as the saving
+/// store does, and both then hold the same ids. The draws reach a reused slot (an id whose
+/// version is above 1) in each mode. (The loaded engine is not booted: the boot appends
+/// workspaces of its own, so the two would no longer allocate from the same table.)
+#[test]
+fn a_saved_catalog_allocates_after_a_removal_as_the_store_it_was_saved_from() {
+    let per_display = VirtualWorkspaceSettings::default();
+    let shared = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        default_workspace_count: 2,
+        ..Default::default()
+    };
+    for (mode, settings) in [("per-display", &per_display), ("shared", &shared)] {
+        let mut reused = 0;
+        for seed in 0..300 {
+            let (mut engine, mut store) = drawn(settings, seed);
+            let (mut loaded, mut joined) = load(&engine.serialize_to_string(store.view()));
+            let Some(on) = store.view().core.catalog().first().map(|&(_, on)| on) else {
+                continue;
+            };
+            let next = engine.workspaces.create_workspace(&mut store.view_mut(), on, None);
+            let after_load = loaded.workspaces.create_workspace(&mut joined.view_mut(), on, None);
+            assert_eq!(
+                after_load.ok(),
+                next.as_ref().ok().copied(),
+                "{mode}, seed {seed}"
+            );
+            if next.is_ok_and(|id| slotmap::Key::data(&id).as_ffi() >> 32 > 1) {
+                reused += 1;
+            }
+            assert_eq!(
+                loaded.workspaces.workspaces.keys().collect::<Vec<_>>(),
+                engine.workspaces.workspaces.keys().collect::<Vec<_>>(),
+                "{mode}, seed {seed}"
+            );
+        }
+        assert!(reused > 0, "{mode}: no draw reuses a removed slot");
     }
 }

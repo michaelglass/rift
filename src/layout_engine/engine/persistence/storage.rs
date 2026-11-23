@@ -91,7 +91,7 @@ impl LayoutEngine {
         let schema_version = snapshot.schema_version;
         let mut layout = snapshot.into_engine();
         let engine = &mut layout.engine;
-        engine.await_topology();
+        engine.await_topology(layout.topology.catalog());
         let unavailable_windows = engine.discard_unmatchable_startup_candidates(
             |window, id| {
                 crate::sys::window_server::get_window(
@@ -114,10 +114,9 @@ impl LayoutEngine {
     }
 
     /// Hold every saved destination until `resolve_saved_spaces` has proven it.
-    pub(super) fn await_topology(&mut self) {
+    pub(super) fn await_topology(&mut self, catalog: &[(VirtualWorkspaceId, SpaceId)]) {
         self.persistence.awaiting_topology = true;
-        self.persistence.unresolved_spaces =
-            self.workspaces.workspaces.values().map(|workspace| workspace.space).collect();
+        self.persistence.unresolved_spaces = catalog.iter().map(|&(_, space)| space).collect();
     }
 
     pub(crate) fn deserialize_from_str(buf: &str) -> anyhow::Result<StartingLayout> {
@@ -160,7 +159,7 @@ impl LayoutEngine {
             .workspaces
             .reading(windows.read())
             .plan_settings_names(virtual_workspace_config, true)?;
-        self.apply_layout_settings(layout_settings);
+        self.apply_layout_settings(windows.read(), layout_settings);
         self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
         self.workspaces
             .apply_settings(windows, virtual_workspace_config, layout_settings, plan);

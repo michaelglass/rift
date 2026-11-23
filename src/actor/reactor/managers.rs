@@ -400,11 +400,11 @@ impl LayoutManager {
                 .layout
                 .gaps
                 .effective_for_display(display_uuid_opt.as_deref());
-            reactor
-                .stores
-                .layout
-                .layout_engine
-                .update_space_display(space, display_uuid_opt.as_deref());
+            reactor.stores.layout.layout_engine.update_space_display(
+                reactor.stores.state.windows(),
+                space,
+                display_uuid_opt.as_deref(),
+            );
             let mut layout =
                 reactor.stores.layout.layout_engine.calculate_layout_with_virtual_workspaces(
                     reactor.stores.state.windows(),
