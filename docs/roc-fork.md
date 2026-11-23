@@ -410,6 +410,20 @@ A slice that needs a behaviour change stops and is reported.
   writers take the core as an argument from a `Stores` split borrow instead of reaching it
   through `WindowStore`; `Stores::joining` stays the only way to build them. Renames and
   arguments only: no read changes source, no behaviour changes. The tripwire is unchanged.
+- **Slice 1 done (2026-11-23).** 1a (b19cf57b): the reactor holds one `Stores` (the layout
+  manager and the `RiftState`), renames only. 1b (807cbcbf, the lead's ruling (d)): the core is
+  no longer in the window store; `RiftState` holds it beside the window records and lends the
+  two as borrowed views that hold exactly those two, `Windows<'a>` (read, `Copy`) and
+  `WindowsMut<'a>` (write), built by `RiftState::windows()` / `windows_mut()` from a split
+  borrow. The 58 core-dependent window-store methods live on the views (24 read, 34 write; both
+  views deref to the records, so record-only methods stay reachable); engine, workspace-store
+  and reactor-helper functions that took the window store take a view, never the whole state.
+  `window_store::joined_core` seeds the core from a workspace store (`Stores::joining`, and the
+  tests' `OwnedWindows` fixture). Handlers that needed more than an added argument: none beyond
+  binding the view to a local (the workspace rehome loop in reactor.rs, one window-store test).
+  23 functions that take the crate-private views went from `pub` to `pub(crate)` (nothing
+  outside the crate used them). A plant dropping one activation from the seeding fails the
+  load-agreement test.
 - **Slice 2, the workspace store's own reads.** The workspace store answers its topology reads
   (`active_workspace`, `workspace_space`, `workspaces_on`, catalog order, the activations) from
   the core it is lent; its `activations` map and catalog order become derived or go. Writers
