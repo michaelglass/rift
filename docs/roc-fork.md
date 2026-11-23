@@ -373,9 +373,10 @@ and counts) from the core's joined `Workspaces`; `set_ownership` only tells the 
 stays while the core owns its window, as it did while the record held the ownership.
 `workspace_windows` keeps its order: the core's per-workspace set is ordered by `WindowId`,
 whose derived order is the (pid, index) the store sorted by. **A deviation from the W4 plan,
-decided here:** a claim's flags and original id are not a platform-side projection beside the
-core (a second copy that must agree with the core's "claimed"); they ride in the core's opaque
-owner, `Claimant { owner, flags, original }`, so the core holds the whole claim. Only the owner
+decided here, accepted by the lead:** a claim's flags and original id are not a platform-side
+projection beside the core (a second copy that must agree with the core's "claimed"); they ride
+in the core's opaque owner, `Claimant { owner, flags, original }`, so the core holds the whole
+claim. Only the owner
 takes part in a decision, and the Roc twin sees only the owner's word. What stays platform-side
 is the claims-by-owner index (its order is the owner's); the `workspace-divergence:` check now
 compares it with the core's claimed windows, and checks every owned window has a record.
@@ -383,8 +384,56 @@ Plants: the core's index keeping a reassigned window (13 lib tests fail), a held
 unassigned (3), a claim left in the index when it ends (20, the fuzzer among them).
 
 **Next:**
-1. W4d (catalog and activations from the core, with the saved form).
-2. The core_geometry converters on the new layout trees.
+1. W4d with W6: catalog and activations answered from the core, the engine glue on it, and the
+   saved form written from it (plan below).
+
+### W4d + W6 plan (the lead's ruling: one owner, `Stores`)
+
+Goal: `Stores` is the one owner of the layout engine, the window store and the joined core
+(`TwinnedWorkspaces`). Neither store holds the core; whatever needs the workspaces' topology or
+ownership gets it from `Stores`, explicitly (a split borrow, never a shared handle). The
+workspace store keeps only what is keyed by workspace and is not the core's: name, home, rule
+standing, layout state, last focus. Today: the core lives in the window store (W4b/W4c), and the
+workspace store still holds the catalog order, each workspace's Space and every activation,
+which the core shadows. About 300 reads of that topology (`active_workspace`, `catalog`,
+`workspace_ids`, `workspaces_on`, `workspace_space`, `active_workspace_per_space`, ...): the
+workspace store itself 109 (tests among them), the engine 46, persistence 22, the reactor 45
+(commands, gestures, the IPC query, drag, discovery, lifecycle), reactor tests 77.
+
+Every slice is green (the full check set, with and without `roc-core`) and published on its own.
+A slice that needs a behaviour change stops and is reported.
+
+- **Slice 1, mechanical: one owner.** The reactor's `state: RiftState` and
+  `layout_manager.layout_engine` become one `stores: Stores` (the layout engine, the window
+  store, the reconciler and the pending store, and the joined core moved out of the window
+  store). The window store's ownership reads and writes and the workspace store's topology
+  writers take the core as an argument from a `Stores` split borrow instead of reaching it
+  through `WindowStore`; `Stores::joining` stays the only way to build them. Renames and
+  arguments only: no read changes source, no behaviour changes. The tripwire is unchanged.
+- **Slice 2, the workspace store's own reads.** The workspace store answers its topology reads
+  (`active_workspace`, `workspace_space`, `workspaces_on`, catalog order, the activations) from
+  the core it is lent; its `activations` map and catalog order become derived or go. Writers
+  still write the store's per-workspace data and tell the core. Its tests move with it. The
+  tripwire's topology half retires (one holder).
+- **Slice 3, the engine glue (W6):** the layout engine's workspace operations (activation,
+  transfer, remap, moving windows and workspaces between Spaces, focus by workspace) take the
+  topology from `Stores`.
+- **Slice 4, the reactor:** commands, gestures, the IPC query, drag, discovery and lifecycle
+  read the topology through `Stores`.
+- **Slice 5, persistence (W6):** the saved form (catalog order, each workspace's Space, the
+  activations) is written from the core and loaded into it at `Stores::joining`; old saved forms
+  keep loading (parsed at the load boundary, normalized with one `workspace-load: normalized`
+  line where W2b did). A round-trip test against files saved before the slice.
+- **Then:** the Roc twin decides (policy (a), as the lifecycle and main window), and core
+  geometry on upstream's layout systems (Next item 2).
+2. Core geometry on upstream's five layout systems (after W4d+W6, since the layout engine glue
+   moves there): merge (b) took upstream's layout systems, and the shape builders that fed the
+   core's geometry died with ours, so the converters were dead code and are deleted (the lead's
+   ruling; the core's layout modules and their Rust/Roc differentials stay). One slice per
+   system (BSP, traditional, master-stack and stack, scrolling, floating): a builder from
+   upstream's tree to the core's shape, and a bit-for-bit differential of the core's frames
+   against upstream's `calculate_layout`; a difference is a behaviour question, stopped and
+   reported.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
@@ -412,6 +461,10 @@ No call site is in `layout_engine/`; keep it that way.
   IPC needs the lead's go.
 - **Every differential needs a planted bug proven caught** (see Evidence); bias generators
   toward the deciding facts.
+- **One holder per fact (W4c, the lead's):** a claim's flags and original id are part of the
+  core's owner (`Claimant`), not a platform copy beside the core's "claimed": a projection that
+  must agree with the core is a second holder, and the core holding the whole claim is the
+  single holder we want.
 - **Saved files keep loading:** parse old forms at the load boundary into new types; an
   impossible saved state is normalized with one `workspace-load: normalized` warn line (the
   W2b ruling) or refused with a typed error where validation refused it before.
@@ -554,9 +607,10 @@ counts only under the `respect_min_size` app rule).
   type has its own allocation helper). `RocCore::step` steps the core; `focus`, `topology`,
   `lifecycle` and `workspaces` ask the questions; the allocator hooks count allocations.
 - In rift, `--features roc-core` makes the reactor's core `Shadowed` (the Roc core decides,
-  the Rust core steps beside it, and they must decide identical effects), puts the Roc layouts
-  under `layout_engine::core_geometry`, and puts the focus, topology and lifecycle decisions on
-  `roc_path::check`. `Plainly` is the one translation of the reactor's events both ways.
+  the Rust core steps beside it, and they must decide identical effects), and puts the focus,
+  topology and lifecycle decisions on `roc_path::check`. (The Roc layouts were on rift's path
+  through `layout_engine::core_geometry` until merge (b) took upstream's layout systems; see
+  Next item 2.) `Plainly` is the one translation of the reactor's events both ways.
 - `roc/core/Geometry.roc`, `Bsp.roc`, `Traditional.roc`, `Scrolling.roc`, `Floating.roc`: the
   geometry; the recursive nodes are the platform's (`Boundary.BspNode`,
   `Boundary.TraditionalNode`). Bit for bit means Rust's float semantics written out:
