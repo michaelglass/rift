@@ -21,11 +21,32 @@ both ways, fmt, and `cargo clippy --all-targets --features roc-core` compiles (n
 warnings stand, none on lines these slices touched); no build warnings beyond the two old
 test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`).
 
-**Next: the Roc twin decides (policy (a), as the lifecycle and main window), then core geometry
-(Next item 2).** Part of the twin step (the lead's ruling, 2026-11-23): the per-Space answers on
-`Workspaces<'a>` (`workspace_info`, `workspace_for_window`, `last_focused_window`, `active_layout`,
-`layout_spaces`, `resolve_window_index`) become the core's own queries. Building a view at each
-call site (`reading(windows)`) stays: it adds no holder.
+**Next: the Roc twin decides for the joined workspaces (policy (a)), then core geometry (Next
+item 2).** Ruled order (the lead, 2026-11-23): (1) the per-Space answers as core queries (done,
+below); (2) Roc holds the whole claim: the view could not re-seed a Rust shadow, since Roc kept
+only a claim's owner and the flags and original id exist only in the platform's `Claimant`. Roc's
+`Claim` becomes `{ owner : U64, flags : ClaimFlags, original : U64, destination }` with the flags a
+named type (not a raw word), the differential compares the whole claim, and a plant dropping a
+flag in Roc must fail as a divergence (re-seeding from a shadow's flags was rejected: a claim only
+Roc has would get made-up flags); (3) the flip, as the lifecycle's: Roc's answers are rift's, the
+Rust `Workspaces` its shadow, re-seeded from Roc's view on any difference and counted. Building a
+view at each call site (`reading(windows)`) stays: it adds no holder.
+
+**Per-Space answers as core queries (step 1).** `rift_core::workspaces::Workspaces` answers
+`space_of`, `is_on`, `assigned_on` (a window's workspace when it is on a Space) and
+`resolve_named` (the assigned window a name picks out: command Space, then visible, then any; a
+tie in the best scope is `Resolved::Ambiguous`, nothing `NotFound`). The view's `workspace_space`,
+`workspace_info`, `last_focused_window`, `workspace_for_window` and `resolve_window_index` answer
+through them, the writers `set_last_focused_window` and `rename_workspace` take the core (no
+catalog slice, no `listed_on`), and the native reconcile asks `space_of`. No behaviour change;
+`resolve_window_index` still answers `Option` at the platform edge (ambiguous and not found refuse
+alike). Plants (rift-core / lib failures): `is_on` ignoring the Space (1 / 8), `assigned_on`
+ignoring it (1 / 7), a visible Space ranked as the command Space (1 / 0), a tie kept as its first
+window (1 / 0): the last two only the core's unit test catches, as before the move (nothing on
+rift's path told those scopes apart). **Old-system bug, reported, not fixed (a behaviour change):**
+`MoveWindowToDisplay` with no window id, no main window and nothing under the cursor resolves
+`FirstOnCommandDisplay` as index 0, which no window has (`WindowId.idx` is non-zero), so it never
+moves anything.
 
 **Clippy fix (40a2b091).** `roc_realloc` and `roc_dealloc` (the Roc allocator's entries) failed
 clippy's deny-by-default `not_unsafe_ptr_arg_deref` since a159f227 (before W4d). They are
