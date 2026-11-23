@@ -279,13 +279,27 @@ in the Rust shadow and in `Lifecycle.roc`): 6 failures each, all roc-divergence.
 step (release): shadow + Roc step about 240 ns at 10 windows, 256 at 100, 280 at 1000; the views every
 32nd step add about 13, 38, 190 ns a step; a re-seed costs about one Roc view.
 
+**MainWindowTracker twinned (2026-11-23, not flipped).** Its fields typed (`NativeFocus`:
+NotYetReported | Reported(Option), `Standing`, the latest activation's `Initiator`), then the machine moved
+to the core (`rift_core::main_window::MainWindows`, events in, the window to focus out), with #702's
+main-window clearing as its own event (`Replaced { pid, window, replacement }`: a retired window clears
+the main window and the native focus, a rekeyed one moves them). `MainWindow.roc` mirrors it on a fifth
+platform model (`Mains`), with a differential (1,000 seeded runs of 60 steps, answers and the whole
+view every step; three plants caught). On rift's path `TwinnedMainWindows` compares every answer and,
+in tests every step, the whole state; plants caught from both sides (85 and 23 failures). The Rust
+machine stands until a flip is ruled.
+
 **Next:**
-1. The MainWindowTracker twin: its fields typed first, #702's main-window clearing included.
-2. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
-3. The core_geometry converters on the new layout trees.
-4. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
+1. The four reactor predicates, then W4b–d (the joined Workspaces twin replaces the three).
+2. The core_geometry converters on the new layout trees.
+3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
+
+- When the window store gets its single writer (upstream C1 step 2), its `invalidate_ax_identity` /
+  `validate_ax_identity` answer the core's named tags (`Invalidation`, `Revalidation`) instead of bools.
+- roc-lang/roc#13347 is fixed upstream (8712e637); the `S(m)` workaround goes after the next nightly that
+  includes it. No bump before then.
 
 No call site is in `layout_engine/`; keep it that way.
 
