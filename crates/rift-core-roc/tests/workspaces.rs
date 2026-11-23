@@ -14,15 +14,15 @@ use facts::{Coin, rust, typed};
 use rift_core::lifecycle::WorkspaceMode;
 use rift_core::plain::{Answers, wire};
 use rift_core::workspaces::plain::{
-    EligibleQuestion, EmitsQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion,
-    StepQuestion, TopologyQuestion, WorkspacesQuestion,
+    EligibleQuestion, EmitsQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
+    WorkspacesQuestion,
 };
 use rift_core::workspaces::{
-    Activation, Destination, Owned, Ownership, OwnershipEvent, Selector, SkipEmpty, Step,
-    Successor, TopologyEvent, WorkspacesEvent, Wrapping,
+    Activation, Destination, Owned, Ownership, Selector, SkipEmpty, Step, Successor,
+    WorkspacesEvent, Wrapping,
 };
 use rift_core_roc::AllocationCount;
-use rift_core_roc::workspaces::{JoinedView, OwnershipView, TopologyView};
+use rift_core_roc::workspaces::JoinedView;
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -212,97 +212,6 @@ fn the_roc_core_finds_a_workspace_reachable_as_the_rust_core_does() {
 }
 
 #[test]
-fn the_roc_core_steps_the_topology_as_the_rust_core_does() {
-    differential("topology", 0x7090_0000_0000_0032, |rng| {
-        let mut created: Vec<u64> = Vec::new();
-        let mut events = Vec::new();
-        for _ in 0..rng.below(25) {
-            // A known workspace usually; one never created sometimes.
-            let known = |rng: &mut Rng, created: &[u64]| match created.len() {
-                0 => 1 + rng.below(6),
-                n if rng.chance(85) => created[rng.below(n as u64) as usize],
-                _ => 1 + rng.below(6),
-            };
-            let maybe = |rng: &mut Rng| rng.chance(60).then(|| 1 + rng.below(6));
-            let event = match rng.below(100) {
-                0..25 => {
-                    // A fresh id usually; one already in the catalog rarely.
-                    let workspace = match (1..=6).find(|id| !created.contains(id)) {
-                        Some(fresh) if rng.chance(95) => fresh,
-                        _ => 1 + rng.below(6),
-                    };
-                    created.push(workspace);
-                    TopologyEvent::Created { workspace, space: rng.space() }
-                }
-                25..35 => TopologyEvent::Removed(known(rng, &created)),
-                35..55 => TopologyEvent::Moved {
-                    workspace: known(rng, &created),
-                    space: rng.space(),
-                },
-                55..90 => {
-                    let activation = if rng.chance(75) {
-                        Activation::Showing {
-                            current: known(rng, &created),
-                            previous: maybe(rng),
-                            remembered: maybe(rng),
-                        }
-                    } else {
-                        Activation::Vacant { remembered: maybe(rng) }
-                    };
-                    TopologyEvent::Activated { space: rng.space(), activation }
-                }
-                _ => TopologyEvent::Cleared(rng.space()),
-            };
-            events.push(event);
-        }
-        let question = TopologyQuestion { events };
-        let topology = question.answer();
-        let rust = TopologyView {
-            catalog: topology.catalog().to_vec(),
-            activations: topology.activations().to_vec(),
-        };
-        let roc = rift_core_roc::workspaces::topology(question.clone());
-        (format!("{question:?}"), roc, rust)
-    });
-}
-
-#[test]
-fn the_roc_core_steps_ownership_and_finds_orphans_as_the_rust_core_does() {
-    differential("ownership", 0x0E4E_0000_0000_0033, |rng| {
-        let events = (0..rng.below(25))
-            .map(|_| {
-                let window = 1 + rng.below(8);
-                let owned = match rng.below(100) {
-                    0..20 => Owned::Unowned,
-                    20..30 => Owned::Owner(Ownership::Held),
-                    30..65 => Owned::Owner(Ownership::Assigned(1 + rng.below(5))),
-                    _ => Owned::Owner(Ownership::Claimed {
-                        owner: 100 + rng.below(3),
-                        destination: if rng.chance(70) {
-                            Destination::Returns(1 + rng.below(5))
-                        } else {
-                            Destination::Nowhere
-                        },
-                    }),
-                };
-                OwnershipEvent::Owned { window, owned }
-            })
-            .collect();
-        let question = OwnershipQuestion {
-            events,
-            catalog: (1..=5).filter(|_| rng.chance(70)).collect(),
-        };
-        let (ownerships, orphans) = question.answer();
-        let rust = OwnershipView {
-            owners: ownerships.owners().collect(),
-            orphans,
-        };
-        let roc = rift_core_roc::workspaces::ownership(question.clone());
-        (format!("{question:?}"), roc, rust)
-    });
-}
-
-#[test]
 fn the_roc_core_steps_the_joined_workspaces_as_the_rust_core_does() {
     differential("joined", 0x7015_0000_0000_0034, |rng| {
         // Workspaces 1 to 5, usually ones created already; Spaces 10, 20, 30; windows 1 to 8.
@@ -391,132 +300,6 @@ fn target(answer: Option<(u64, u64)>) -> Vec<u64> {
         Some((workspace, space)) => vec![1, workspace, space],
         None => vec![0],
     }
-}
-
-/// Who places each window, kept between events: the Roc twin and the Rust ownerships take the
-/// same runs of ownership changes on a few windows (assigned, claimed with or without a
-/// destination, held under the user's hand, unowned), each run on one persistent model. After
-/// every change both must say the same of the changed window and keep the same owners.
-#[test]
-fn the_roc_ownerships_keep_owners_between_events_as_the_rust_ones_do() {
-    use rift_core::workspaces::{Destination, Owned, Ownership, OwnershipEvent, Ownerships};
-    use rift_core_roc::RocOwnerships;
-    let mut rng = Rng(0x0C4E_5000_0000_0037);
-    let before = AllocationCount::now();
-    let mut steps = 0;
-    let mut held = 0;
-    for run in 0..400 {
-        let mut rust = Ownerships::<u64, u64, u64>::default();
-        let mut roc = RocOwnerships::default();
-        for step in 0..60 {
-            let window = 1 + rng.below(6);
-            let owned = match rng.below(8) {
-                0 | 1 => Owned::Unowned,
-                2 | 3 => Owned::Owner(Ownership::Assigned(1 + rng.below(5))),
-                4 => Owned::Owner(Ownership::Claimed {
-                    owner: 1 + rng.below(3),
-                    destination: Destination::Returns(1 + rng.below(5)),
-                }),
-                5 => Owned::Owner(Ownership::Claimed {
-                    owner: 1 + rng.below(3),
-                    destination: Destination::Nowhere,
-                }),
-                _ => {
-                    held += 1;
-                    Owned::Owner(Ownership::Held)
-                }
-            };
-            let event = OwnershipEvent::Owned { window, owned };
-            rust.step(event);
-            assert_eq!(
-                roc.step(event),
-                rust.owned(window),
-                "run {run} step {step}: {event:?}"
-            );
-            let expected: Vec<_> = rust.owners().collect();
-            assert_eq!(
-                roc.view(),
-                expected,
-                "run {run} step {step}: owners after {event:?}"
-            );
-            steps += 1;
-        }
-    }
-    assert_eq!(
-        AllocationCount::now().live(),
-        before.live(),
-        "Roc allocations left live"
-    );
-    eprintln!(
-        "workspaces: {steps} kept-ownership steps identical ({held} held), owners compared after each"
-    );
-}
-
-/// The workspaces' topology, kept between events: the Roc twin and the Rust topology take the
-/// same runs of workspaces created, removed and moved (known and unknown ones) and Spaces
-/// activated and cleared, each run on one persistent model. After every change both must hold
-/// the same catalog and activations, in the same orders.
-#[test]
-fn the_roc_topology_keeps_workspaces_between_events_as_the_rust_one_does() {
-    use rift_core::workspaces::{Activation, Topology, TopologyEvent};
-    use rift_core_roc::RocTopology;
-    let mut rng = Rng(0x70B0_1000_0000_0038);
-    let before = AllocationCount::now();
-    let mut steps = 0;
-    for run in 0..400 {
-        let mut rust = Topology::<u64, u64>::default();
-        let mut roc = RocTopology::default();
-        let mut created = 0;
-        for step in 0..60 {
-            let maybe = |rng: &mut Rng| rng.chance(50).then(|| 1 + rng.below(8));
-            let event = match rng.below(10) {
-                0..=2 => {
-                    created += 1;
-                    // Now and then a workspace id the catalog already has.
-                    let workspace = if rng.chance(10) {
-                        1 + rng.below(created)
-                    } else {
-                        created
-                    };
-                    TopologyEvent::Created { workspace, space: rng.space() }
-                }
-                3 => TopologyEvent::Removed(1 + rng.below(created + 2)),
-                4 | 5 => TopologyEvent::Moved {
-                    workspace: 1 + rng.below(created + 2),
-                    space: rng.space(),
-                },
-                6..=8 => TopologyEvent::Activated {
-                    space: rng.space(),
-                    activation: if rng.chance(75) {
-                        Activation::Showing {
-                            current: 1 + rng.below(8),
-                            previous: maybe(&mut rng),
-                            remembered: maybe(&mut rng),
-                        }
-                    } else {
-                        Activation::Vacant { remembered: maybe(&mut rng) }
-                    },
-                },
-                _ => TopologyEvent::Cleared(rng.space()),
-            };
-            rust.step(event);
-            roc.step(event);
-            let expected = TopologyView {
-                catalog: rust.catalog().to_vec(),
-                activations: rust.activations().to_vec(),
-            };
-            assert_eq!(roc.view(), expected, "run {run} step {step}: after {event:?}");
-            steps += 1;
-        }
-    }
-    assert_eq!(
-        AllocationCount::now().live(),
-        before.live(),
-        "Roc allocations left live"
-    );
-    eprintln!(
-        "workspaces: {steps} kept-topology steps identical, catalog and activations compared after each"
-    );
 }
 
 #[test]

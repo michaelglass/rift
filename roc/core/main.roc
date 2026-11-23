@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, OwnershipEvent, Owned, WindowOwnership, TopologyEvent, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
+import pf.Boundary exposing [Event, MaybeWord, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
 import Bsp
 import Traditional
 import Scrolling
@@ -99,11 +99,6 @@ WindowFacts : { manageability : [Manageable, Unmanageable], rule : [NoRule, Mana
 ## (`Workspaces.Ownerships`, written out: the platform needs the name here).
 Owners : Dict(U64, [Assigned(U64), Claimed({ owner : U64, destination : [Returns(U64), Nowhere] }), Held])
 
-## The workspaces' topology kept between events: the catalog, in catalog order, and what each
-## Space shows, in the order the Spaces first got an activation (`Workspaces.Topology`, written
-## out: the platform needs the name here).
-Places : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : [Showing({ current : U64, previous : [Some(U64), Nothing], remembered : [Some(U64), Nothing] }), Vacant([Some(U64), Nothing])] }) }
-
 ## The workspaces joined, kept between events: the catalog, what each Space shows and who places
 ## each window (`Workspaces.Joined`, written out: the platform needs the name here).
 Joined : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : [Showing({ current : U64, previous : [Some(U64), Nothing], remembered : [Some(U64), Nothing] }), Vacant([Some(U64), Nothing])] }), owners : Owners }
@@ -127,7 +122,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, topology_steps, ownership_steps, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, ownerships_init, ownerships_step, ownerships_view, topology_init, topology_step, topology_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view }
+core = { init, step, bsp, traditional, strip, settle, floating, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view }
 
 # The layout questions, typed (`Boundary`). Each core's own types are structural, so the
 # platform's named ones pass straight in; the answers become the platform's.
@@ -296,33 +291,6 @@ lifecycle_revalidate = |windows, window| {
 lifecycle_view : Windows -> { model : Windows, windows : List(PresentWindow) }
 lifecycle_view = |windows| { model: windows, windows: Lifecycle.windows_view(windows) }
 
-## Who places each window, kept between events: nobody, at first.
-ownerships_init : {} -> Owners
-ownerships_init = |{}| Dict.empty()
-
-## A window's new owner, or that nobody places it.
-ownerships_step : Owners, OwnershipEvent -> { model : Owners, owned : Owned }
-ownerships_step = |owners, event| {
-	model = Workspaces.ownership_step(owners, event.window, event.owned)
-	{ model, owned: Workspaces.owned_in(model, event.window) }
-}
-
-## Every owned window.
-ownerships_view : Owners -> { model : Owners, owners : List(WindowOwnership) }
-ownerships_view = |owners| { model: owners, owners: Workspaces.in_order(owners) }
-
-## The workspaces' topology kept between events: no workspaces and no activations, at first.
-topology_init : {} -> Places
-topology_init = |{}| { catalog: [], activations: [] }
-
-## A change to the topology.
-topology_step : Places, TopologyEvent -> Places
-topology_step = |places, event| Workspaces.topology_step(places, event)
-
-## The catalog and every Space's activation.
-topology_view : Places -> { model : Places, catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
-topology_view = |places| { model: places, catalog: places.catalog, activations: places.activations }
-
 ## The workspaces joined, kept between events: none, at first.
 workspaces_init : {} -> Joined
 workspaces_init = |{}| { catalog: [], activations: [], owners: Dict.empty() }
@@ -341,11 +309,25 @@ workspaces_step = |joined, event| {
 ## assigned windows, in catalog order.
 workspaces_view : Joined -> { model : Joined, catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
 workspaces_view = |joined| {
-	model: joined,
-	catalog: joined.catalog,
-	activations: joined.activations,
-	owners: Workspaces.in_order(joined.owners),
-	windows: joined.catalog.map(|entry| { workspace: entry.workspace, windows: Workspaces.windows_on(joined, entry.workspace) }),
+	owners = Workspaces.in_order(joined.owners)
+	assigned_to = |workspace|
+		owners
+			.keep_if(
+				|entry|
+					match entry.ownership {
+						Assigned(id) => id == workspace
+						Claimed(_) => False
+						Held => False
+					},
+			)
+			.map(|entry| entry.window)
+	{
+		model: joined,
+		catalog: joined.catalog,
+		activations: joined.activations,
+		owners,
+		windows: joined.catalog.map(|entry| { workspace: entry.workspace, windows: assigned_to(entry.workspace) }),
+	}
 }
 
 ## Which window is the main one: no apps and no native focus, at first.
@@ -417,12 +399,6 @@ workspace_eligible = |q| Workspaces.eligible(global(q.mode), q.context, q.on)
 
 emits_window : EmitsQuestion -> VerdictAnswer
 emits_window = |q| decision_of(Workspaces.emits_window(q.assigned, q.active))
-
-topology_steps : TopologyQuestion -> TopologyView
-topology_steps = |q| Workspaces.topology_after(q.events)
-
-ownership_steps : OwnershipQuestion -> OwnershipView
-ownership_steps = |q| Workspaces.ownership_after(q.events, q.catalog)
 
 joined_steps : JoinedQuestion -> JoinedView
 joined_steps = |q| Workspaces.joined_after(q.events)

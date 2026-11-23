@@ -31,8 +31,8 @@ use rift_core::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
 };
 use rift_core::workspaces::{
-    self, Destination, Owned, Ownership, OwnershipEvent, Refused, Selector, SkipEmpty, Step,
-    Successor, TopologyEvent, WorkspacesEvent, Wrapping,
+    self, Destination, Owned, Ownership, Refused, Selector, SkipEmpty, Step, Successor,
+    WorkspacesEvent, Wrapping,
 };
 use rift_core::{
     Answer, Button, Desire, Effect, Event, Note, Plan, Release, Reply, Ungrip, Want, Write,
@@ -2188,49 +2188,6 @@ fn space_activation(space: u64, at: workspaces::Activation<u64>) -> abi::Boundar
     }
 }
 
-pub(crate) fn topology_question(
-    question: workspaces::plain::TopologyQuestion,
-    host: &abi::RocHost,
-) -> abi::BoundaryTopologyQuestion {
-    let events: Vec<_> = question.events.into_iter().map(topology_event).collect();
-    abi::BoundaryTopologyQuestion { events: list(&events, host) }
-}
-
-fn topology_event(event: TopologyEvent<u64, u64>) -> abi::BoundaryTopologyEvent {
-    use abi::BoundaryTopologyEventTag as Tag;
-    match event {
-        TopologyEvent::Created { workspace, space } => union!(
-            BoundaryTopologyEvent,
-            BoundaryTopologyEventPayload.created(workspace_space(workspace, space)),
-            Tag::Created
-        ),
-        TopologyEvent::Removed(workspace) => {
-            union!(
-                BoundaryTopologyEvent,
-                BoundaryTopologyEventPayload.removed(workspace),
-                Tag::Removed
-            )
-        }
-        TopologyEvent::Moved { workspace, space } => union!(
-            BoundaryTopologyEvent,
-            BoundaryTopologyEventPayload.moved(workspace_space(workspace, space)),
-            Tag::Moved
-        ),
-        TopologyEvent::Activated { space, activation: at } => union!(
-            BoundaryTopologyEvent,
-            BoundaryTopologyEventPayload.activated(space_activation(space, at)),
-            Tag::Activated
-        ),
-        TopologyEvent::Cleared(space) => {
-            union!(
-                BoundaryTopologyEvent,
-                BoundaryTopologyEventPayload.cleared(space),
-                Tag::Cleared
-            )
-        }
-    }
-}
-
 fn from_catalog(catalog: &abi::RocListWith<abi::BoundaryWorkspaceSpace, false>) -> Vec<(u64, u64)> {
     catalog.as_slice().iter().map(|entry| (entry.workspace, entry.space)).collect()
 }
@@ -2243,20 +2200,6 @@ fn from_activations(
         .iter()
         .map(|entry| (entry.space, from_activation(entry.activation)))
         .collect()
-}
-
-/// The topology Roc answered, read out and released.
-pub(crate) fn from_topology(
-    answer: abi::BoundaryTopologyView,
-    host: &abi::RocHost,
-) -> crate::workspaces::TopologyView {
-    let view = crate::workspaces::TopologyView {
-        catalog: from_catalog(&answer.catalog),
-        activations: from_activations(&answer.activations),
-    };
-    // SAFETY: the view is Roc's answer, owned here and read in full above.
-    unsafe { answer.decref(host) };
-    view
 }
 
 fn ownership(ownership: Ownership<u64, u64>) -> abi::BoundaryOwnership {
@@ -2340,40 +2283,6 @@ fn from_owners(
         .iter()
         .map(|entry| (entry.window, from_ownership(entry.ownership)))
         .collect()
-}
-
-pub(crate) fn ownership_question(
-    question: workspaces::plain::OwnershipQuestion,
-    host: &abi::RocHost,
-) -> abi::BoundaryOwnershipQuestion {
-    let events: Vec<_> = question
-        .events
-        .into_iter()
-        .map(|OwnershipEvent::Owned { window, owned: who }| owned(window, who))
-        .collect();
-    abi::BoundaryOwnershipQuestion {
-        events: list(&events, host),
-        catalog: list(&question.catalog, host),
-    }
-}
-
-/// The ownerships Roc answered, read out and released.
-pub(crate) fn from_ownerships(
-    answer: abi::BoundaryOwnershipView,
-    host: &abi::RocHost,
-) -> crate::workspaces::OwnershipView {
-    let view = crate::workspaces::OwnershipView {
-        owners: from_owners(&answer.owners),
-        orphans: answer
-            .orphans
-            .as_slice()
-            .iter()
-            .map(|orphan| (orphan.window, orphan.workspace))
-            .collect(),
-    };
-    // SAFETY: the view is Roc's answer, owned here and read in full above.
-    unsafe { answer.decref(host) };
-    view
 }
 
 pub(crate) fn joined_question(
@@ -2935,118 +2844,6 @@ fn from_present(presence: abi::BoundaryPresent) -> Presence {
         Tag::Invalidated => Presence::Invalidated(from_admission_facts(unsafe {
             *presence.borrow_payload_invalidated_unchecked()
         })),
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Who places each window, kept between events.
-
-/// The ownerships' box, which only Roc can read or free; only the `roc_ownerships_*` entries
-/// make and take one. Dropping it releases the ownerships.
-pub(crate) struct OwnershipsBox(abi::RocBox);
-
-impl OwnershipsBox {
-    pub(crate) fn empty() -> OwnershipsBox { OwnershipsBox(unsafe { abi::roc_ownerships_init() }) }
-
-    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
-    fn into_raw(self) -> abi::RocBox {
-        let raw = self.0;
-        std::mem::forget(self);
-        raw
-    }
-
-    /// `window`'s new owner, or that nobody places it: the ownerships after, and who places it
-    /// now.
-    pub(crate) fn step(
-        self,
-        window: u64,
-        who: Owned<u64, u64>,
-    ) -> (OwnershipsBox, Owned<u64, u64>) {
-        // SAFETY: the box is these ownerships', given to the step; its successor comes back.
-        let stepped = unsafe { abi::roc_ownerships_step(self.into_raw(), owned(window, who)) };
-        (OwnershipsBox(stepped.model), from_owned(stepped.owned))
-    }
-
-    /// Every owned window and its ownership, in window order.
-    pub(crate) fn view(
-        self,
-        host: &abi::RocHost,
-    ) -> (OwnershipsBox, Vec<(u64, Ownership<u64, u64>)>) {
-        // SAFETY: as in `step`; the list is Roc's answer, owned here, read in full, released.
-        let viewed = unsafe { abi::roc_ownerships_view(self.into_raw()) };
-        let owners = from_owners(&viewed.owners);
-        unsafe { viewed.owners.decref(host) };
-        (OwnershipsBox(viewed.model), owners)
-    }
-}
-
-impl Drop for OwnershipsBox {
-    fn drop(&mut self) {
-        // SAFETY: the box is these ownerships' and is never used again.
-        unsafe { abi::roc_ownerships_release(self.0) }
-    }
-}
-
-fn from_owned(owned: abi::BoundaryOwned) -> Owned<u64, u64> {
-    use abi::BoundaryOwnedTag as Tag;
-    match owned.tag {
-        Tag::Unowned => Owned::Unowned,
-        // SAFETY: the tag says the payload is the ownership.
-        Tag::Owner => Owned::Owner(from_ownership(unsafe {
-            *owned.borrow_payload_owner_unchecked()
-        })),
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// The workspaces' topology, kept between events.
-
-/// The topology's box, which only Roc can read or free; only the `roc_topology_*` entries make
-/// and take one. Dropping it releases the topology.
-pub(crate) struct TopologyBox(abi::RocBox);
-
-impl TopologyBox {
-    pub(crate) fn empty() -> TopologyBox { TopologyBox(unsafe { abi::roc_topology_init() }) }
-
-    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
-    fn into_raw(self) -> abi::RocBox {
-        let raw = self.0;
-        std::mem::forget(self);
-        raw
-    }
-
-    /// A change to the topology: the topology after it.
-    pub(crate) fn step(self, event: TopologyEvent<u64, u64>) -> (TopologyBox, ()) {
-        // SAFETY: the box is this topology's, given to the step; its successor comes back.
-        (
-            TopologyBox(unsafe { abi::roc_topology_step(self.into_raw(), topology_event(event)) }),
-            (),
-        )
-    }
-
-    /// The catalog and every Space's activation.
-    pub(crate) fn view(
-        self,
-        host: &abi::RocHost,
-    ) -> (TopologyBox, crate::workspaces::TopologyView) {
-        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
-        let viewed = unsafe { abi::roc_topology_view(self.into_raw()) };
-        let view = crate::workspaces::TopologyView {
-            catalog: from_catalog(&viewed.catalog),
-            activations: from_activations(&viewed.activations),
-        };
-        unsafe {
-            viewed.catalog.decref(host);
-            viewed.activations.decref(host);
-        }
-        (TopologyBox(viewed.model), view)
-    }
-}
-
-impl Drop for TopologyBox {
-    fn drop(&mut self) {
-        // SAFETY: the box is this topology's and is never used again.
-        unsafe { abi::roc_topology_release(self.0) }
     }
 }
 

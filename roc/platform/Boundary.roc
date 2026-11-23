@@ -573,16 +573,6 @@ Boundary := [].{
 
 	SpaceActivation := { space : U64, activation : Activation }
 
-	TopologyEvent := [Created(WorkspaceSpace), Removed(U64), Moved(WorkspaceSpace), Activated(SpaceActivation), Cleared(U64)]
-
-	TopologyQuestion := { events : List(TopologyEvent) }
-
-	## A topology: its catalog, and what each Space shows.
-	TopologyView := { catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
-
-	## The topology, unchanged, and what it holds: the catalog and every Space's activation.
-	TopologyViewed(model) := { model : Box(model), catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
-
 	# The main window (`rift_core::main_window`). Pids and windows are one word each.
 
 	## Whether an app is frontmost by its own AX activation events.
@@ -643,19 +633,6 @@ Boundary := [].{
 	Owned := [Unowned, Owner(Ownership)]
 
 	OwnershipEvent := { window : U64, owned : Owned }
-
-	OwnershipQuestion := { events : List(OwnershipEvent), catalog : List(U64) }
-
-	## A window owned by a workspace the catalog lacks.
-	Orphan := { window : U64, workspace : U64 }
-
-	OwnershipView := { owners : List(WindowOwnership), orphans : List(Orphan) }
-
-	## The ownerships after a change, and who places the changed window now.
-	OwnershipsStepped(model) := { model : Box(model), owned : Owned }
-
-	## The ownerships, unchanged, and every owned window.
-	OwnershipsViewed(model) := { model : Box(model), owners : List(WindowOwnership) }
 
 	## Who takes a removed workspace's windows and claims.
 	Successor := [Into(U64), Unassign]

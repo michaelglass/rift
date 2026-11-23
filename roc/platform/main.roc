@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Owners : owners, Places : places, Mains : mains, Joined : joined] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -45,20 +45,12 @@ platform ""
 			quarantines : QuarantineQuestion -> VerdictAnswer,
 			target_display : TargetQuestion -> TargetAnswer,
 			mouse_raise : RaiseQuestion -> RaiseAnswer,
-			topology_steps : TopologyQuestion -> TopologyView,
-			ownership_steps : OwnershipQuestion -> OwnershipView,
 			joined_steps : JoinedQuestion -> JoinedView,
 			lifecycle_init : {} -> windows,
 			lifecycle_step : windows, LifecycleEvent -> { model : windows, change : Change },
 			lifecycle_invalidate : windows, U64 -> { model : windows, invalidation : Invalidation },
 			lifecycle_revalidate : windows, U64 -> { model : windows, revalidation : Revalidation },
 			lifecycle_view : windows -> { model : windows, windows : List(PresentWindow) },
-			ownerships_init : {} -> owners,
-			ownerships_step : owners, OwnershipEvent -> { model : owners, owned : Owned },
-			ownerships_view : owners -> { model : owners, owners : List(WindowOwnership) },
-			topology_init : {} -> places,
-			topology_step : places, TopologyEvent -> places,
-			topology_view : places -> { model : places, catalog : List(WorkspaceSpace), activations : List(SpaceActivation) },
 			workspaces_init : {} -> joined,
 			workspaces_step : joined, JoinedEvent -> { model : joined, outcome : Outcome },
 			workspaces_view : joined -> { model : joined, catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) },
@@ -78,14 +70,6 @@ platform ""
 		"roc_lifecycle_revalidate": lifecycle_revalidate_for_host,
 		"roc_lifecycle_view": lifecycle_view_for_host,
 		"roc_lifecycle_release": lifecycle_release_for_host,
-		"roc_ownerships_init": ownerships_init_for_host,
-		"roc_ownerships_step": ownerships_step_for_host,
-		"roc_ownerships_view": ownerships_view_for_host,
-		"roc_ownerships_release": ownerships_release_for_host,
-		"roc_topology_init": topology_init_for_host,
-		"roc_topology_step": topology_step_for_host,
-		"roc_topology_view": topology_view_for_host,
-		"roc_topology_release": topology_release_for_host,
 		"roc_workspaces_init": workspaces_init_for_host,
 		"roc_workspaces_step": workspaces_step_for_host,
 		"roc_workspaces_view": workspaces_view_for_host,
@@ -134,8 +118,6 @@ platform ""
 		"roc_quarantines": quarantines_for_host,
 		"roc_target_display": target_display_for_host,
 		"roc_mouse_raise": mouse_raise_for_host,
-		"roc_topology_steps": topology_steps_for_host,
-		"roc_ownership_steps": ownership_steps_for_host,
 		"roc_joined_steps": joined_steps_for_host,
 	}
 	targets: {
@@ -145,7 +127,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed, JoinedEvent, Outcome, WorkspaceWindows, WorkspacesStepped, WorkspacesViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, WorkspacesStepped, WorkspacesViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -290,14 +272,6 @@ workspace_resolve_for_host = |question| (core.workspace_resolve)(question)
 workspace_previous_for_host : PreviousQuestion -> ReachedAnswer
 workspace_previous_for_host = |question| (core.workspace_previous)(question)
 
-## The topology an empty one becomes after a run of events.
-topology_steps_for_host : TopologyQuestion -> TopologyView
-topology_steps_for_host = |question| (core.topology_steps)(question)
-
-## The ownerships an empty one becomes after a run of events, and their orphans.
-ownership_steps_for_host : OwnershipQuestion -> OwnershipView
-ownership_steps_for_host = |question| (core.ownership_steps)(question)
-
 ## What each event of a run met, and the joined workspaces it leaves.
 joined_steps_for_host : JoinedQuestion -> JoinedView
 joined_steps_for_host = |question| (core.joined_steps)(question)
@@ -359,47 +333,6 @@ lifecycle_view_for_host = |boxed| {
 ## The host cannot release a `Box(Windows)`: only Roc knows its layout.
 lifecycle_release_for_host : Box(Windows) -> {}
 lifecycle_release_for_host = |_| {}
-
-## Who places each window (`rift_core::workspaces::Ownerships`), kept between events, empty.
-ownerships_init_for_host : {} -> Box(Owners)
-ownerships_init_for_host = |{}| Box.box((core.ownerships_init)({}))
-
-## A window's new owner, or that nobody places it: who places it now.
-ownerships_step_for_host : Box(Owners), OwnershipEvent -> OwnershipsStepped(Owners)
-ownerships_step_for_host = |boxed, event| {
-	stepped = (core.ownerships_step)(Box.unbox(boxed), event)
-	{ model: Box.box(stepped.model), owned: stepped.owned }
-}
-
-## Every owned window, and the ownerships back unchanged.
-ownerships_view_for_host : Box(Owners) -> OwnershipsViewed(Owners)
-ownerships_view_for_host = |boxed| {
-	viewed = (core.ownerships_view)(Box.unbox(boxed))
-	{ model: Box.box(viewed.model), owners: viewed.owners }
-}
-
-## The host cannot release a `Box(Owners)`: only Roc knows its layout.
-ownerships_release_for_host : Box(Owners) -> {}
-ownerships_release_for_host = |_| {}
-
-## The workspaces' topology (`rift_core::workspaces::Topology`), kept between events, empty.
-topology_init_for_host : {} -> Box(Places)
-topology_init_for_host = |{}| Box.box((core.topology_init)({}))
-
-## A change to the topology. Like the Rust step, it answers nothing.
-topology_step_for_host : Box(Places), TopologyEvent -> Box(Places)
-topology_step_for_host = |boxed, event| Box.box((core.topology_step)(Box.unbox(boxed), event))
-
-## The catalog and every Space's activation, and the topology back unchanged.
-topology_view_for_host : Box(Places) -> TopologyViewed(Places)
-topology_view_for_host = |boxed| {
-	viewed = (core.topology_view)(Box.unbox(boxed))
-	{ model: Box.box(viewed.model), catalog: viewed.catalog, activations: viewed.activations }
-}
-
-## The host cannot release a `Box(Places)`: only Roc knows its layout.
-topology_release_for_host : Box(Places) -> {}
-topology_release_for_host = |_| {}
 
 ## The workspaces joined (`rift_core::workspaces::Workspaces`), kept between events, empty.
 workspaces_init_for_host : {} -> Box(Joined)

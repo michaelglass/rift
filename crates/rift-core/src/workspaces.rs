@@ -150,80 +150,6 @@ pub enum Activation<K> {
     },
 }
 
-/// A change to the workspaces' topology, as the platform makes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopologyEvent<K, S> {
-    /// A workspace was created on a Space, at the end of the catalog.
-    Created {
-        workspace: K,
-        space: S,
-    },
-    Removed(K),
-    /// A workspace moved to another Space.
-    Moved {
-        workspace: K,
-        space: S,
-    },
-    /// What a Space shows now.
-    Activated {
-        space: S,
-        activation: Activation<K>,
-    },
-    /// A Space has no activation any more.
-    Cleared(S),
-}
-
-/// The workspaces' topology as the core keeps it: the catalog (each workspace with its Space,
-/// in catalog order) and what each Space shows.
-#[derive(Debug, Clone)]
-pub struct Topology<K, S> {
-    catalog: Vec<(K, S)>,
-    activations: Vec<(S, Activation<K>)>,
-}
-
-impl<K, S> Default for Topology<K, S> {
-    fn default() -> Self {
-        Topology {
-            catalog: Vec::new(),
-            activations: Vec::new(),
-        }
-    }
-}
-
-impl<K: Copy + PartialEq, S: Copy + PartialEq> Topology<K, S> {
-    pub fn step(&mut self, event: TopologyEvent<K, S>) {
-        match event {
-            TopologyEvent::Created { workspace, space } => self.catalog.push((workspace, space)),
-            TopologyEvent::Removed(workspace) => self.catalog.retain(|(id, _)| *id != workspace),
-            TopologyEvent::Moved { workspace, space } => {
-                if let Some(entry) = self.catalog.iter_mut().find(|(id, _)| *id == workspace) {
-                    entry.1 = space;
-                }
-            }
-            TopologyEvent::Activated { space, activation } => {
-                match self.activations.iter_mut().find(|(on, _)| *on == space) {
-                    Some(entry) => entry.1 = activation,
-                    None => self.activations.push((space, activation)),
-                }
-            }
-            TopologyEvent::Cleared(space) => self.activations.retain(|(on, _)| *on != space),
-        }
-    }
-
-    /// Each workspace with its Space, in catalog order.
-    pub fn catalog(&self) -> &[(K, S)] { &self.catalog }
-
-    pub fn activation(&self, space: S) -> Option<Activation<K>> {
-        self.activations
-            .iter()
-            .find(|(on, _)| *on == space)
-            .map(|(_, activation)| *activation)
-    }
-
-    /// Every Space with an activation, in the order they first got one.
-    pub fn activations(&self) -> &[(S, Activation<K>)] { &self.activations }
-}
-
 /// Who places a window, when somebody does: a workspace, or an external owner holding where
 /// the window returns to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,80 +176,6 @@ pub enum Destination<K> {
 pub enum Owned<K, O> {
     Unowned,
     Owner(Ownership<K, O>),
-}
-
-/// A change to who places a window, as the platform makes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnershipEvent<W, K, O> {
-    /// Who places the window now.
-    Owned { window: W, owned: Owned<K, O> },
-}
-
-/// Who places each window, as the core keeps it. A window without an entry is unowned.
-#[derive(Debug, Clone)]
-pub struct Ownerships<W, K, O> {
-    windows: std::collections::BTreeMap<W, Ownership<K, O>>,
-}
-
-impl<W, K, O> Default for Ownerships<W, K, O> {
-    fn default() -> Self {
-        Ownerships {
-            windows: std::collections::BTreeMap::new(),
-        }
-    }
-}
-
-impl<W: Copy + Ord, K: Copy, O: Copy> Ownerships<W, K, O> {
-    pub fn step(&mut self, event: OwnershipEvent<W, K, O>) {
-        match event {
-            OwnershipEvent::Owned { window, owned: Owned::Unowned } => {
-                self.windows.remove(&window);
-            }
-            OwnershipEvent::Owned {
-                window,
-                owned: Owned::Owner(ownership),
-            } => {
-                self.windows.insert(window, ownership);
-            }
-        }
-    }
-
-    pub fn owned(&self, window: W) -> Owned<K, O> {
-        match self.windows.get(&window) {
-            Some(ownership) => Owned::Owner(*ownership),
-            None => Owned::Unowned,
-        }
-    }
-
-    /// Every owned window and its ownership, in window order.
-    pub fn owners(&self) -> impl Iterator<Item = (W, Ownership<K, O>)> + '_ {
-        self.windows.iter().map(|(window, ownership)| (*window, *ownership))
-    }
-}
-
-/// Each owned window naming a workspace the topology's catalog lacks (as assigned to it, or as
-/// a claim's destination), with that workspace, in window order. While ownership and the
-/// catalog are separate values nothing rules this out; it is a disagreement to report.
-pub fn orphans<W: Copy + Ord, K: Copy + PartialEq, O: Copy, S>(
-    ownerships: &Ownerships<W, K, O>,
-    topology: &Topology<K, S>,
-) -> Vec<(W, K)> {
-    ownerships
-        .owners()
-        .filter_map(|(window, ownership)| match ownership {
-            Ownership::Assigned(workspace)
-            | Ownership::Claimed {
-                destination: Destination::Returns(workspace),
-                ..
-            } => Some((window, workspace)),
-            Ownership::Claimed {
-                destination: Destination::Nowhere,
-                ..
-            }
-            | Ownership::Held => None,
-        })
-        .filter(|(_, workspace)| !topology.catalog.iter().any(|(id, _)| id == workspace))
-        .collect()
 }
 
 /// Who takes a removed workspace's windows and claims.
@@ -583,8 +435,7 @@ impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
 pub mod plain {
     use super::{
-        Context, OwnershipEvent, Ownerships, Refused, Selector, SkipEmpty, Step, Topology,
-        TopologyEvent, Workspaces, WorkspacesEvent, Wrapping,
+        Context, Refused, Selector, SkipEmpty, Step, Workspaces, WorkspacesEvent, Wrapping,
     };
     use crate::lifecycle::WorkspaceMode;
     use crate::plain::{Answers, Fact, Reading, Unasked};
@@ -722,47 +573,6 @@ pub mod plain {
         }
     }
 
-    /// [`super::Topology::step`]: the topology an empty one becomes after these events, in
-    /// order (every topology is reached this way).
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct TopologyQuestion {
-        pub events: Vec<TopologyEvent<u64, u64>>,
-    }
-
-    impl TopologyQuestion {
-        pub fn answer(&self) -> Topology<u64, u64> {
-            let mut topology = Topology::default();
-            for event in &self.events {
-                topology.step(*event);
-            }
-            topology
-        }
-    }
-
-    /// [`super::Ownerships::step`] and [`super::orphans`]: the ownerships an empty one becomes
-    /// after these events, and the windows they leave owned by a workspace the catalog lacks.
-    /// Windows, workspaces and owners are one word each.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct OwnershipQuestion {
-        pub events: Vec<OwnershipEvent<u64, u64, u64>>,
-        pub catalog: Vec<u64>,
-    }
-
-    impl OwnershipQuestion {
-        pub fn answer(&self) -> (Ownerships<u64, u64, u64>, Vec<(u64, u64)>) {
-            let mut ownerships = Ownerships::default();
-            for event in &self.events {
-                ownerships.step(*event);
-            }
-            let mut topology = Topology::default();
-            for &workspace in &self.catalog {
-                topology.step(TopologyEvent::Created { workspace, space: 0 });
-            }
-            let orphans = super::orphans(&ownerships, &topology);
-            (ownerships, orphans)
-        }
-    }
-
     /// [`super::Workspaces::step`]: what each event of a run met (accepted, or refused) from
     /// empty workspaces, and the workspaces they leave. Windows, workspaces, Spaces and owners
     /// are one word each.
@@ -798,112 +608,6 @@ mod tests {
         assert!(emits_window(Some(1), || Some(1)));
         assert!(!emits_window(Some(1), || Some(2)));
         assert!(emits_window(Some(1), || None));
-    }
-
-    #[test]
-    fn the_topology_follows_the_catalog_and_what_each_space_shows() {
-        let mut topology = Topology::<u32, u32>::default();
-        topology.step(TopologyEvent::Created { workspace: 1, space: 10 });
-        topology.step(TopologyEvent::Created { workspace: 2, space: 10 });
-        topology.step(TopologyEvent::Created { workspace: 3, space: 20 });
-        topology.step(TopologyEvent::Moved { workspace: 2, space: 20 });
-        topology.step(TopologyEvent::Removed(1));
-        assert_eq!(topology.catalog(), &[(2, 20), (3, 20)]);
-        let showing = Activation::Showing {
-            current: 2,
-            previous: None,
-            remembered: None,
-        };
-        topology.step(TopologyEvent::Activated { space: 20, activation: showing });
-        topology.step(TopologyEvent::Activated {
-            space: 10,
-            activation: Activation::Vacant { remembered: Some(2) },
-        });
-        assert_eq!(topology.activation(20), Some(showing));
-        let next = Activation::Showing {
-            current: 3,
-            previous: Some(2),
-            remembered: None,
-        };
-        topology.step(TopologyEvent::Activated { space: 20, activation: next });
-        assert_eq!(topology.activation(20), Some(next));
-        topology.step(TopologyEvent::Cleared(10));
-        assert_eq!(topology.activation(10), None);
-        assert_eq!(topology.activations(), &[(20, next)]);
-        // A move or removal of an unknown workspace changes nothing.
-        topology.step(TopologyEvent::Moved { workspace: 9, space: 10 });
-        topology.step(TopologyEvent::Removed(9));
-        assert_eq!(topology.catalog(), &[(2, 20), (3, 20)]);
-    }
-
-    #[test]
-    fn ownerships_follow_who_places_each_window() {
-        let mut ownerships = Ownerships::<u32, u32, u32>::default();
-        let claimed = Ownership::Claimed {
-            owner: 7,
-            destination: Destination::Returns(2),
-        };
-        ownerships.step(OwnershipEvent::Owned {
-            window: 5,
-            owned: Owned::Owner(Ownership::Assigned(1)),
-        });
-        ownerships.step(OwnershipEvent::Owned {
-            window: 3,
-            owned: Owned::Owner(claimed),
-        });
-        ownerships.step(OwnershipEvent::Owned {
-            window: 5,
-            owned: Owned::Owner(Ownership::Assigned(2)),
-        });
-        assert_eq!(ownerships.owned(5), Owned::Owner(Ownership::Assigned(2)));
-        assert_eq!(ownerships.owners().collect::<Vec<_>>(), vec![
-            (3, claimed),
-            (5, Ownership::Assigned(2))
-        ]);
-        ownerships.step(OwnershipEvent::Owned {
-            window: 3,
-            owned: Owned::Unowned,
-        });
-        assert_eq!(ownerships.owned(3), Owned::Unowned);
-        // Disowning a window nobody owns changes nothing.
-        ownerships.step(OwnershipEvent::Owned {
-            window: 9,
-            owned: Owned::Unowned,
-        });
-        assert_eq!(ownerships.owners().collect::<Vec<_>>(), vec![(
-            5,
-            Ownership::Assigned(2)
-        )]);
-    }
-
-    #[test]
-    fn an_ownership_naming_a_workspace_the_catalog_lacks_is_an_orphan() {
-        let mut topology = Topology::<u32, u32>::default();
-        topology.step(TopologyEvent::Created { workspace: 1, space: 10 });
-        let mut ownerships = Ownerships::<u32, u32, u32>::default();
-        for (window, ownership) in [
-            (1, Ownership::Assigned(1)),
-            (2, Ownership::Assigned(2)),
-            (3, Ownership::Claimed {
-                owner: 7,
-                destination: Destination::Returns(1),
-            }),
-            (4, Ownership::Claimed {
-                owner: 7,
-                destination: Destination::Returns(3),
-            }),
-            (5, Ownership::Claimed {
-                owner: 7,
-                destination: Destination::Nowhere,
-            }),
-            (6, Ownership::Held),
-        ] {
-            ownerships.step(OwnershipEvent::Owned {
-                window,
-                owned: Owned::Owner(ownership),
-            });
-        }
-        assert_eq!(orphans(&ownerships, &topology), vec![(2, 2), (4, 3)]);
     }
 
     #[test]

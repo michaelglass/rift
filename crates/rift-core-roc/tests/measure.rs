@@ -527,14 +527,17 @@ fn measure_lifecycle_twin() {
     }
 }
 
-/// Who places each window, kept between events, Rust against the Roc twin: per change (drags
-/// holding and placing, claims, reassignments, windows going unowned and owned again) after
-/// owning `windows` windows; and reading every owner back.
+/// The workspaces joined, kept between events, Rust against the Roc twin: per ownership change
+/// (drags holding and placing, claims, reassignments, windows going unowned and owned again) over
+/// `windows` windows on a catalog of 9 workspaces, per topology change (activations as
+/// workspaces switch, moves between Spaces), and reading the whole view back.
 #[test]
 #[ignore]
-fn measure_ownerships_twin() {
-    use rift_core::workspaces::{Destination, Owned, Ownership, OwnershipEvent, Ownerships};
-    use rift_core_roc::RocOwnerships;
+fn measure_workspaces_twin() {
+    use rift_core::workspaces::{
+        Activation, Destination, Owned, Ownership, Workspaces, WorkspacesEvent,
+    };
+    use rift_core_roc::RocWorkspaces;
     for windows in [10u64, 100, 1000] {
         let mut seed = 0x2545_F491_4F6C_DD1Du64 ^ windows;
         let mut next = || {
@@ -543,7 +546,7 @@ fn measure_ownerships_twin() {
             seed ^= seed << 17;
             seed
         };
-        let events: Vec<OwnershipEvent<u64, u64, u64>> = (0..20_000)
+        let owned: Vec<WorkspacesEvent<u64, u64, u64, u64>> = (0..20_000)
             .map(|_| {
                 let window = 1 + next() % windows;
                 let owned = match next() % 6 {
@@ -556,111 +559,66 @@ fn measure_ownerships_twin() {
                     4 => Owned::Unowned,
                     _ => Owned::Owner(Ownership::Assigned(1)),
                 };
-                OwnershipEvent::Owned { window, owned }
+                WorkspacesEvent::Owned { window, owned }
             })
             .collect();
-        let mut rust = Ownerships::<u64, u64, u64>::default();
-        let mut roc = RocOwnerships::default();
-        for window in 1..=windows {
-            let event = OwnershipEvent::Owned {
-                window,
-                owned: Owned::Owner(Ownership::Assigned(1)),
-            };
-            rust.step(event);
-            roc.step(event);
-        }
-        let rust_times = time(&events, |&event| {
-            rust.step(event);
-            std::hint::black_box(rust.owned(1));
-        });
-        let before = AllocationCount::now();
-        let roc_times = time(&events, |&event| {
-            std::hint::black_box(roc.step(event));
-        });
-        let allocated = AllocationCount::now().allocated - before.allocated;
-        let views: Vec<()> = vec![(); 200];
-        let rust_views = time(&views, |_| {
-            std::hint::black_box(rust.owners().collect::<Vec<_>>());
-        });
-        let roc_views = time(&views, |_| {
-            std::hint::black_box(roc.view());
-        });
-        eprintln!(
-            "ownerships twin, {windows} windows ({:.2} Roc allocations per step):",
-            allocated as f64 / events.len() as f64
-        );
-        show("rust", &stats(rust_times));
-        show("roc", &stats(roc_times));
-        show("rust view", &stats(rust_views));
-        show("roc view", &stats(roc_views));
-    }
-}
-
-/// The workspaces' topology kept between events, Rust against the Roc twin: per change
-/// (activations as workspaces switch, moves between Spaces) on a catalog of `workspaces` over
-/// 3 Spaces; and reading the catalog and activations back.
-#[test]
-#[ignore]
-fn measure_topology_twin() {
-    use rift_core::workspaces::{Activation, Topology, TopologyEvent};
-    use rift_core_roc::RocTopology;
-    for workspaces in [5u64, 20, 100] {
-        let mut seed = 0xD1B5_4A32_D192_ED03u64 ^ workspaces;
-        let mut next = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        let events: Vec<TopologyEvent<u64, u64>> = (0..20_000)
+        let topology: Vec<WorkspacesEvent<u64, u64, u64, u64>> = (0..20_000)
             .map(|_| match next() % 4 {
-                0 => TopologyEvent::Moved {
-                    workspace: 1 + next() % workspaces,
-                    space: 1 + next() % 3,
+                0 => WorkspacesEvent::Moved {
+                    workspace: 1 + next() % 9,
+                    space: 10 * (1 + next() % 3),
                 },
-                _ => TopologyEvent::Activated {
-                    space: 1 + next() % 3,
+                _ => WorkspacesEvent::Activated {
+                    space: 10 * (1 + next() % 3),
                     activation: Activation::Showing {
-                        current: 1 + next() % workspaces,
-                        previous: Some(1 + next() % workspaces),
+                        current: 1 + next() % 9,
+                        previous: Some(1 + next() % 9),
                         remembered: None,
                     },
                 },
             })
             .collect();
-        let mut rust = Topology::<u64, u64>::default();
-        let mut roc = RocTopology::default();
-        for workspace in 1..=workspaces {
-            let event = TopologyEvent::Created {
+        let mut rust = Workspaces::<u64, u64, u64, u64>::default();
+        let mut roc = RocWorkspaces::default();
+        let setup = (1..=9)
+            .map(|workspace| WorkspacesEvent::Created {
                 workspace,
-                space: 1 + workspace % 3,
-            };
-            rust.step(event);
-            roc.step(event);
+                space: 10 * (1 + workspace % 3),
+            })
+            .chain((1..=windows).map(|window| WorkspacesEvent::Owned {
+                window,
+                owned: Owned::Owner(Ownership::Assigned(1)),
+            }));
+        for event in setup {
+            rust.step(event).unwrap();
+            roc.step(event).unwrap();
         }
-        let rust_times = time(&events, |&event| {
-            rust.step(event);
-            std::hint::black_box(&rust);
-        });
         let before = AllocationCount::now();
-        let roc_times = time(&events, |&event| {
-            roc.step(event);
+        let roc_owned = time(&owned, |&event| {
+            std::hint::black_box(roc.step(event)).unwrap();
+        });
+        let roc_topology = time(&topology, |&event| {
+            std::hint::black_box(roc.step(event)).unwrap();
         });
         let allocated = AllocationCount::now().allocated - before.allocated;
-        let views: Vec<()> = vec![(); 200];
-        let rust_views = time(&views, |_| {
-            std::hint::black_box((rust.catalog().to_vec(), rust.activations().to_vec()));
+        let rust_owned = time(&owned, |&event| {
+            std::hint::black_box(rust.step(event)).unwrap();
         });
+        let rust_topology = time(&topology, |&event| {
+            std::hint::black_box(rust.step(event)).unwrap();
+        });
+        let views: Vec<()> = vec![(); 200];
         let roc_views = time(&views, |_| {
             std::hint::black_box(roc.view());
         });
         eprintln!(
-            "topology twin, {workspaces} workspaces ({:.2} Roc allocations per step):",
-            allocated as f64 / events.len() as f64
+            "workspaces twin, {windows} windows ({:.2} Roc allocations per step):",
+            allocated as f64 / (owned.len() + topology.len()) as f64
         );
-        show("rust", &stats(rust_times));
-        show("roc", &stats(roc_times));
-        show("rust view", &stats(rust_views));
+        show("rust ownership", &stats(rust_owned));
+        show("roc ownership", &stats(roc_owned));
+        show("rust topology", &stats(rust_topology));
+        show("roc topology", &stats(roc_topology));
         show("roc view", &stats(roc_views));
     }
 }

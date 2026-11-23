@@ -246,76 +246,8 @@ impl RocLifecycle {
     }
 }
 
-/// Who places each window (`rift_core::workspaces::Ownerships`) kept in Roc between events:
-/// a workspace, a claim (its owner and where the window returns), or the user's hand (`Held`).
-/// Stepped beside the Rust ownerships, it must keep the same owners.
-pub struct RocOwnerships {
-    owners: boundary::OwnershipsBox,
-    host: abi::RocHost,
-}
-
 // SAFETY: as for `RocCore`.
-unsafe impl Send for RocOwnerships {}
-
-impl Default for RocOwnerships {
-    fn default() -> Self {
-        RocOwnerships {
-            owners: boundary::OwnershipsBox::empty(),
-            host: host(),
-        }
-    }
-}
-
-impl RocOwnerships {
-    /// As `Ownerships::step`, answering who places the window now (`Ownerships::owned`).
-    pub fn step(
-        &mut self,
-        event: rift_core::workspaces::OwnershipEvent<u64, u64, u64>,
-    ) -> rift_core::workspaces::Owned<u64, u64> {
-        let rift_core::workspaces::OwnershipEvent::Owned { window, owned } = event;
-        boundary::in_place(&mut self.owners, |owners| owners.step(window, owned))
-    }
-
-    /// As `Ownerships::owners`: every owned window and its ownership, in window order.
-    pub fn view(&mut self) -> Vec<(u64, rift_core::workspaces::Ownership<u64, u64>)> {
-        let host = &self.host;
-        boundary::in_place(&mut self.owners, |owners| owners.view(host))
-    }
-}
-
-/// The workspaces' topology (`rift_core::workspaces::Topology`) kept in Roc between events:
-/// the catalog and what each Space shows. Stepped beside the Rust topology, it must keep the
-/// same catalog and activations.
-pub struct RocTopology {
-    places: boundary::TopologyBox,
-    host: abi::RocHost,
-}
-
 // SAFETY: as for `RocCore`.
-unsafe impl Send for RocTopology {}
-
-impl Default for RocTopology {
-    fn default() -> Self {
-        RocTopology {
-            places: boundary::TopologyBox::empty(),
-            host: host(),
-        }
-    }
-}
-
-impl RocTopology {
-    /// As `Topology::step`.
-    pub fn step(&mut self, event: rift_core::workspaces::TopologyEvent<u64, u64>) {
-        boundary::in_place(&mut self.places, |places| places.step(event))
-    }
-
-    /// As `Topology::catalog` and `Topology::activations`.
-    pub fn view(&mut self) -> workspaces::TopologyView {
-        let host = &self.host;
-        boundary::in_place(&mut self.places, |places| places.view(host))
-    }
-}
-
 /// The workspaces joined (`rift_core::workspaces::Workspaces`) kept in Roc between events: the
 /// catalog, what each Space shows and who places each window. Stepped beside the Rust
 /// workspaces, it must meet each event the same way (accepted, or refused for the same reason)
@@ -713,26 +645,12 @@ pub mod lifecycle {
 pub mod workspaces {
     use rift_core::plain::Unasked;
     use rift_core::workspaces::plain::{
-        EligibleQuestion, EmitsQuestion, OwnershipQuestion, PreviousQuestion, ResolveQuestion,
-        StepQuestion, TopologyQuestion, WorkspacesQuestion,
+        EligibleQuestion, EmitsQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
+        WorkspacesQuestion,
     };
     use rift_core::workspaces::{Activation, Ownership, Refused};
 
     use crate::{abi, boundary, host};
-
-    /// A topology: its catalog (workspace, Space) and what each Space shows, in its own orders.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct TopologyView {
-        pub catalog: Vec<(u64, u64)>,
-        pub activations: Vec<(u64, Activation<u64>)>,
-    }
-
-    /// Ownerships: each owned window and its ownership in window order, and the orphans.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct OwnershipView {
-        pub owners: Vec<(u64, Ownership<u64, u64>)>,
-        pub orphans: Vec<(u64, u64)>,
-    }
 
     /// What each event of a run met, and the joined workspaces it leaves: catalog,
     /// activations, owners, and each catalogued workspace's assigned windows in catalog order.
@@ -784,18 +702,6 @@ pub mod workspaces {
         let host = host();
         let question = boundary::emits_question(question, &host);
         boundary::verdict_answer(unsafe { abi::roc_emits_window(question) })
-    }
-
-    pub fn topology(question: TopologyQuestion) -> TopologyView {
-        let host = host();
-        let question = boundary::topology_question(question, &host);
-        boundary::from_topology(unsafe { abi::roc_topology_steps(question) }, &host)
-    }
-
-    pub fn ownership(question: OwnershipQuestion) -> OwnershipView {
-        let host = host();
-        let question = boundary::ownership_question(question, &host);
-        boundary::from_ownerships(unsafe { abi::roc_ownership_steps(question) }, &host)
     }
 
     pub fn joined(question: WorkspacesQuestion) -> JoinedView {

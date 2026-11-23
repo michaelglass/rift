@@ -241,29 +241,6 @@ Workspaces := [].{
 			.sort_with(|(a, _), (b, _)| if a < b Before else if a > b After else Same)
 			.map(|(window, ownership)| { window, ownership })
 
-	## Each owned window naming a workspace the catalog lacks (assigned, or a claim's
-	## destination), with that workspace, in window order.
-	orphans : Ownerships, List(U64) -> List({ window : U64, workspace : U64 })
-	orphans = |ownerships, catalog| {
-		var $out = []
-		for entry in in_order(ownerships) {
-			named =
-				match entry.ownership {
-					Assigned(workspace) => Names(workspace)
-					Claimed({ destination: Returns(workspace), .. }) => Names(workspace)
-					Claimed({ destination: Nowhere, .. }) => NamesNone
-					Held => NamesNone
-				}
-			match named {
-				Names(workspace) if !catalog.contains(workspace) => {
-					$out = $out.append({ window: entry.window, workspace })
-				}
-				_ => {}
-			}
-		}
-		$out
-	}
-
 	known : Joined, U64 -> Bool
 	known = |joined, workspace| joined.catalog.any(|entry| entry.workspace == workspace)
 
@@ -434,33 +411,6 @@ Workspaces := [].{
 					Nothing => Ok(True)
 				}
 			}
-		}
-
-	## The topology an empty one becomes after `events`.
-	topology_after : List(TopologyEvent) -> Topology
-	topology_after = |events| events.fold({ catalog: [], activations: [] }, topology_step)
-
-	## The ownerships an empty one becomes after `events`, and their orphans against `catalog`.
-	ownership_after : List({ window : U64, owned : [Unowned, Owner(Ownership)] }), List(U64) -> { owners : List({ window : U64, ownership : Ownership }), orphans : List({ window : U64, workspace : U64 }) }
-	ownership_after = |events, catalog| {
-		owners = events.fold(Dict.empty(), |acc, event| ownership_step(acc, event.window, event.owned))
-		{ owners: in_order(owners), orphans: orphans(owners, catalog) }
-	}
-
-	## The ownerships after a window's new owner, or after nobody places it any more.
-	ownership_step : Ownerships, U64, [Unowned, Owner(Ownership)] -> Ownerships
-	ownership_step = |ownerships, window, owned|
-		match owned {
-			Unowned => ownerships.remove(window)
-			Owner(ownership) => ownerships.insert(window, ownership)
-		}
-
-	## Who places `window`, or that nobody does.
-	owned_in : Ownerships, U64 -> [Unowned, Owner(Ownership)]
-	owned_in = |ownerships, window|
-		match ownerships.get(window) {
-			Ok(ownership) => Owner(ownership)
-			Err(_) => Unowned
 		}
 
 	## What each event of a run met from empty workspaces, and the workspaces it leaves.
