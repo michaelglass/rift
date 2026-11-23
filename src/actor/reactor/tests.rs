@@ -5143,6 +5143,53 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
 }
 
 #[test]
+fn wake_during_mission_control_still_holds_activation_until_input() {
+    for wake_first in [true, false] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let activated = WindowId::new(2, 1);
+
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+        reactor.handle_test_layout_event(LayoutEvent::WindowFocused(space, activated));
+        reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+            workspace: WorkspaceSelector::Index(1),
+            follow: false,
+            window_id: None,
+        });
+        reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+        apps.simulate_until_quiet(&mut reactor);
+
+        // Mission Control and the wake are independent: either can come first.
+        if wake_first {
+            reactor.handle_event(Event::SystemWoke);
+            reactor.handle_event(Event::MissionControlNativeEntered);
+        } else {
+            reactor.handle_event(Event::MissionControlNativeEntered);
+            reactor.handle_event(Event::SystemWoke);
+        }
+        reactor.handle_event(Event::MissionControlNativeExited);
+        reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
+        reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
+
+        assert_eq!(
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+            Some(0),
+            "closing Mission Control must not end the wake's hold on activation (wake_first: {wake_first})"
+        );
+
+        reactor.handle_event(Event::KeyboardInput);
+        reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+            Some(1),
+            "auto workspace switching should resume after explicit user input"
+        );
+    }
+}
+
+#[test]
 fn dock_activation_does_not_reposition_visible_scrolling_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(600., 600.));
