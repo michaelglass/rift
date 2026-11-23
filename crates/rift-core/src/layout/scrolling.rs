@@ -275,7 +275,9 @@ impl<W: Copy, C: Copy> Strip<W, C> {
             width,
             anchor: self.anchor(x, width, position),
         };
-        (spot, x + width + self.column_gap, frames)
+        // Upstream's order (`x += width + gap`: the gap joins the width first); it must match
+        // upstream's `Geometry::build` bit for bit.
+        (spot, x + (width + self.column_gap), frames)
     }
 
     /// The column's width: what it asks for, within what its windows allow.
@@ -703,5 +705,45 @@ mod tests {
         assert_eq!(middle.fit(-900., VIEW.w), -390.);
         assert_eq!(middle.centered(VIEW.w), -40.);
         assert_eq!(placed.spot(9), None);
+    }
+
+    /// The case that showed the core adding a column's width and gap in another order than
+    /// upstream (`(x + width) + gap`): the third column sat one ulp short of upstream's
+    /// 1653.7266638402023, and every column after it, its frames, snaps and bounds with it.
+    #[test]
+    fn a_columns_x_adds_its_width_and_gap_in_upstreams_order() {
+        let widths = [
+            1494.0,
+            138.2473041445788,
+            359.0,
+            138.2473041445788,
+            138.2473041445788,
+        ];
+        let mut columns = widths
+            .iter()
+            .enumerate()
+            .map(|(id, &width)| column(id as u32, Width::Fixed(width), &[id as u32]));
+        let first = columns.next().unwrap();
+        let placed = Strip {
+            tiling: Rect {
+                x: 318.,
+                y: 883.,
+                w: 2969.,
+                h: 125.,
+            },
+            column_gap: 10.739679847811766,
+            first,
+            rest: columns.collect(),
+            ..strip(Navigation::Anchored, vec![column(0, Width::Default, &[0])])
+        }
+        .place();
+        assert_eq!(
+            placed.rest[1].world_x.to_bits(),
+            1653.7266638402023_f64.to_bits()
+        );
+        assert_eq!(
+            placed.rest[3].world_x.to_bits(),
+            2172.4533276804045_f64.to_bits()
+        );
     }
 }

@@ -408,6 +408,72 @@ fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
     column.world_x - (view - column.width).max(0.0) / 2.0
 }
 
+/// A scrolling layout's strip as the core's geometry takes it: the columns with a window that
+/// takes part, each with those windows (a window with no constraints is resizable), as
+/// `Geometry::build` reads them (none: no window takes part). Arguments as `build` takes them.
+#[cfg(test)]
+fn strip(
+    state: &LayoutState,
+    settings: &ScrollingLayoutSettings,
+    inactive: &HashSet<WindowId>,
+    screen: CGRect,
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    gaps: &GapSettings,
+) -> Option<rift_core::layout::scrolling::Strip<WindowId, u64>> {
+    use rift_core::layout::scrolling::{self as core, Alignment, Navigation, Width, Widths};
+
+    use crate::layout_engine::core_geometry::core_constraints;
+    use crate::layout_engine::{core_gaps, core_rect};
+    let row = |row: &Row| core::Row {
+        window: row.window,
+        constraints: core_constraints(constraints.get(&row.window).copied().unwrap_or(
+            WindowLayoutConstraints {
+                sizing: super::Sizing::Resizable,
+                ..Default::default()
+            },
+        )),
+        weight: row.height,
+    };
+    let mut columns = state.arrangement.columns.iter().filter_map(|column| {
+        let mut rows = column.rows.iter().filter(|row| !inactive.contains(&row.window)).map(row);
+        let first = rows.next()?;
+        Some(core::Column {
+            id: column.id.0,
+            width: match column.width {
+                ColumnWidth::Default => Width::Default,
+                ColumnWidth::Proportion(ratio) => Width::Proportion(ratio),
+                ColumnWidth::Fixed(width) => Width::Fixed(width),
+            },
+            first,
+            rest: rows.collect(),
+        })
+    });
+    let first = columns.next()?;
+    Some(core::Strip {
+        tiling: rift_core::layout::tiling_area(core_rect(screen), core_gaps(gaps)),
+        column_gap: gaps.inner.horizontal,
+        row_gap: gaps.inner.vertical,
+        widths: Widths {
+            ratio: settings.column_width_ratio,
+            min_ratio: settings.min_column_width_ratio,
+            max_ratio: settings.max_column_width_ratio,
+            preserve_window_sizes: settings.preserve_window_sizes,
+            expand_single_column: settings.expand_single_column,
+        },
+        alignment: match settings.alignment {
+            ScrollingAlignment::Left => Alignment::Left,
+            ScrollingAlignment::Center => Alignment::Center,
+            ScrollingAlignment::Right => Alignment::Right,
+        },
+        navigation: match settings.focus_navigation_style {
+            ScrollingFocusNavigationStyle::Anchored => Navigation::Anchored,
+            ScrollingFocusNavigationStyle::Niri => Navigation::Free,
+        },
+        first,
+        rest: columns.collect(),
+    })
+}
+
 impl Geometry {
     fn build(
         state: &LayoutState,
@@ -2736,5 +2802,204 @@ pub(crate) mod tests {
         );
         system.update(WindowChange::Add(layout, wid(3), None));
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
+    }
+}
+
+#[cfg(test)]
+mod core_geometry_tests {
+    use super::*;
+    use crate::layout_engine::systems::drawn::*;
+    use crate::layout_engine::systems::{GroupEdit, LayoutEdit};
+
+    fn drawn_settings(rng: &mut Rng) -> ScrollingLayoutSettings {
+        let ratio = |rng: &mut Rng| match rng.below(6) {
+            0 => f64::NAN,
+            1 => rng.length(0.0, 0.05),
+            _ => rng.length(0.05, 1.2),
+        };
+        ScrollingLayoutSettings {
+            column_width_ratio: ratio(rng),
+            min_column_width_ratio: ratio(rng),
+            max_column_width_ratio: ratio(rng),
+            preserve_window_sizes: rng.chance(40),
+            expand_single_column: rng.chance(50),
+            alignment: match rng.below(3) {
+                0 => ScrollingAlignment::Left,
+                1 => ScrollingAlignment::Center,
+                _ => ScrollingAlignment::Right,
+            },
+            focus_navigation_style: if rng.chance(50) {
+                ScrollingFocusNavigationStyle::Niri
+            } else {
+                ScrollingFocusNavigationStyle::Anchored
+            },
+            ..ScrollingLayoutSettings::default()
+        }
+    }
+
+    /// A scrolling system after random edits: windows added and removed, every focus, moves,
+    /// drops of every kind, joins, consume-or-expel, stacks, unstacks, unjoins, swaps, resizes,
+    /// preset widths, fullscreen, participation, settings changes, arranges (which fix a column's
+    /// width when the strip preserves window sizes).
+    fn drawn_system(rng: &mut Rng) -> (ScrollingLayoutSystem, LayoutId, Vec<WindowId>) {
+        use crate::common::config::StackDefaultOrientation;
+        let mut system = ScrollingLayoutSystem::new(&drawn_settings(rng));
+        let layout = system.create_layout();
+        let mut windows: Vec<WindowId> = Vec::new();
+        let mut next = 0;
+        let orientation = |rng: &mut Rng| match rng.below(4) {
+            0 => StackDefaultOrientation::Perpendicular,
+            1 => StackDefaultOrientation::Same,
+            2 => StackDefaultOrientation::Horizontal,
+            _ => StackDefaultOrientation::Vertical,
+        };
+        for _ in 0..rng.below(36) {
+            let pick = |rng: &mut Rng, windows: &[WindowId]| {
+                windows[rng.below(windows.len() as u64) as usize]
+            };
+            match rng.below(16) {
+                0..=3 => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+                _ if windows.is_empty() => {}
+                4 => {
+                    let window = pick(rng, &windows);
+                    windows.retain(|w| *w != window);
+                    system.update(WindowChange::Remove(window));
+                }
+                5 => {
+                    let focus = match rng.below(4) {
+                        0 => Focus::Select(pick(rng, &windows)),
+                        1 => Focus::Ascend,
+                        2 => Focus::Descend,
+                        _ => Focus::Direction(drawn_direction(rng)),
+                    };
+                    system.focus(layout, focus);
+                }
+                6 => {
+                    let within_gaps = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
+                }
+                7 => {
+                    let window = pick(rng, &windows);
+                    system.set_window_participation(window, rng.chance(40));
+                }
+                8 => {
+                    let direction = drawn_direction(rng);
+                    let has_display_neighbor = rng.chance(30);
+                    system.edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor,
+                    });
+                }
+                9 => {
+                    let (source, target) = (pick(rng, &windows), pick(rng, &windows));
+                    let action = match rng.below(5) {
+                        0 => WindowDropAction::Swap,
+                        1 => WindowDropAction::Stack,
+                        2 => WindowDropAction::Insert(drawn_direction(rng)),
+                        3 => WindowDropAction::Move(drawn_direction(rng)),
+                        _ => WindowDropAction::ConsumeOrExpel(drawn_direction(rng)),
+                    };
+                    system.edit(layout, LayoutEdit::Drop { source, target, action });
+                }
+                10 => {
+                    let edit = match rng.below(5) {
+                        0 => GroupEdit::Join(drawn_direction(rng)),
+                        1 => GroupEdit::ConsumeOrExpel(drawn_direction(rng)),
+                        2 => GroupEdit::Stack(orientation(rng)),
+                        3 => GroupEdit::Unstack(orientation(rng)),
+                        _ => GroupEdit::Unjoin,
+                    };
+                    system.edit(layout, LayoutEdit::Group(edit));
+                }
+                11 => {
+                    let (a, b) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::Swap(a, b));
+                }
+                12 => {
+                    let amount = rng.length(-0.6, 0.6);
+                    let orientation = match rng.below(3) {
+                        0 => ResizeOrientation::Horizontal,
+                        1 => ResizeOrientation::Vertical,
+                        _ => ResizeOrientation::Smart,
+                    };
+                    system.edit(layout, LayoutEdit::Resize { amount, orientation }).discard();
+                }
+                13 => {
+                    system.switch_preset_column_width(layout, rng.chance(50));
+                }
+                14 => {
+                    let screen = drawn_screen(rng);
+                    let constraints = drawn_constraints_for(rng, &windows);
+                    let gaps = drawn_gaps(rng);
+                    system.prepare(layout, screen, &constraints, None, &gaps);
+                }
+                _ => {
+                    system.update_settings(&drawn_settings(rng));
+                }
+            }
+        }
+        (system, layout, windows)
+    }
+
+    /// The core places a scrolling strip as upstream's `Geometry::build` does, bit for bit:
+    /// columns, world frames, the camera's resting points and bounds, over drawn systems,
+    /// settings, screens, gaps and window constraints.
+    #[test]
+    fn the_core_places_scrolling_strips_as_the_scrolling_system_does() {
+        let mut rng = Rng(0x5eed_5c01);
+        let (mut cases, mut frames_seen) = (0, 0);
+        for _ in 0..3000 {
+            let (system, layout, windows) = drawn_system(&mut rng);
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            let state = &system.layouts[layout];
+            let geometry = Geometry::build(
+                state,
+                &system.settings,
+                &system.inactive,
+                screen,
+                constraints.clone(),
+                None,
+                gaps.clone(),
+            );
+            let core = strip(
+                state,
+                &system.settings,
+                &system.inactive,
+                screen,
+                &constraints,
+                &gaps,
+            )
+            .map(|strip| strip.place());
+            let words =
+                |placed| crate::layout_engine::core_geometry::tests::placed_words_for_test(placed);
+            let theirs = crate::layout_engine::core_geometry::tests::placement_words_for_test(
+                &crate::layout_engine::core_geometry::StripPlacement {
+                    columns: geometry
+                        .columns
+                        .iter()
+                        .map(|c| (c.id.0, c.world_x, c.width))
+                        .collect(),
+                    frames: geometry.frames.clone(),
+                    snaps: geometry
+                        .snaps
+                        .iter()
+                        .map(|snap| (snap.offset, geometry.columns[snap.column].id.0))
+                        .collect(),
+                    bounds: geometry.bounds,
+                },
+            );
+            assert_eq!(words(core), theirs, "{}", system.draw_tree(layout));
+            cases += 1;
+            frames_seen += geometry.frames.len();
+        }
+        eprintln!("scrolling: {cases} strips, {frames_seen} frames identical");
+        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
     }
 }

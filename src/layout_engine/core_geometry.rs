@@ -108,6 +108,67 @@ pub(crate) fn check_bsp(
     check("bsp", &shape, upstream, rust, roc);
 }
 
+/// Where a scrolling layout's system placed its strip in world space: each column (id, x,
+/// width), each window's frame, the camera's resting points (offset, the column's id) and its
+/// bounds.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StripPlacement {
+    pub columns: Vec<(u64, f64, f64)>,
+    pub frames: Vec<(WindowId, CGRect)>,
+    pub snaps: Vec<(f64, u64)>,
+    pub bounds: (f64, f64),
+}
+
+/// The placement as words: ids as they are, floats as their bits.
+#[cfg(test)]
+fn placement_words<W: Copy>(
+    columns: impl Iterator<Item = (u64, f64, f64)>,
+    frames: &[(W, Rect)],
+    snaps: impl Iterator<Item = (f64, u64)>,
+    bounds: (f64, f64),
+    window: impl Fn(W) -> u64,
+) -> Vec<u64> {
+    let mut words = Vec::new();
+    for (id, x, width) in columns {
+        words.extend([id, x.to_bits(), width.to_bits()]);
+    }
+    words.push(u64::MAX);
+    for &(w, r) in frames {
+        words.push(window(w));
+        words.extend([r.x, r.y, r.w, r.h].map(f64::to_bits));
+    }
+    words.push(u64::MAX);
+    for (offset, column) in snaps {
+        words.extend([offset.to_bits(), column]);
+    }
+    words.extend([bounds.0.to_bits(), bounds.1.to_bits()]);
+    words
+}
+
+/// The core's placement of a scrolling `strip` (none: no window takes part, so no column, frame
+/// or resting point, and bounds at 0) as words.
+#[cfg(test)]
+fn placed_words<W: Copy>(
+    placed: Option<rift_core::layout::scrolling::Placed<W, u64>>,
+    window: impl Fn(W) -> u64,
+) -> Vec<u64> {
+    match placed {
+        None => placement_words(std::iter::empty(), &[], std::iter::empty(), (0.0, 0.0), window),
+        Some(placed) => placement_words(
+            std::iter::once(&placed.first)
+                .chain(&placed.rest)
+                .map(|spot| (spot.id, spot.world_x, spot.width)),
+            &placed.frames,
+            std::iter::once(&placed.snaps.0)
+                .chain(&placed.snaps.1)
+                .map(|snap| (snap.offset, snap.column)),
+            placed.bounds,
+            window,
+        ),
+    }
+}
+
 /// Holds the core's frames for a floating layout to the floating system's, as
 /// [`check_traditional`] does.
 #[cfg(any(test, feature = "roc-core"))]
@@ -159,6 +220,12 @@ fn check<E: std::fmt::Debug>(
     }
 }
 
+/// A window as one word (its pid's bits above its index).
+#[cfg(test)]
+fn window_word(window: WindowId) -> u64 {
+    (u64::from(window.pid as u32) << 32) | u64::from(window.idx.get())
+}
+
 #[cfg(any(test, feature = "roc-core"))]
 fn bits(frames: &[(WindowId, Rect)]) -> Vec<(WindowId, [u64; 4])> {
     frames
@@ -202,7 +269,32 @@ fn diverged(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use super::*;
+
+    /// The core's placement as the check compares it.
+    pub(crate) fn placed_words_for_test(
+        placed: Option<rift_core::layout::scrolling::Placed<WindowId, u64>>,
+    ) -> Vec<u64> {
+        placed_words(placed, window_word)
+    }
+
+    /// A system's placement as the check compares it.
+    pub(crate) fn placement_words_for_test(upstream: &StripPlacement) -> Vec<u64> {
+        let frames: Vec<(WindowId, Rect)> = upstream
+            .frames
+            .iter()
+            .map(|&(window, frame)| (window, core_rect(frame)))
+            .collect();
+        placement_words(
+            upstream.columns.iter().copied(),
+            &frames,
+            upstream.snaps.iter().copied(),
+            upstream.bounds,
+            window_word,
+        )
+    }
+
     use crate::layout_engine::systems::constraints as upstream;
     use crate::layout_engine::systems::drawn::Rng;
 

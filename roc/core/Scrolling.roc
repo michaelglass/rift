@@ -239,7 +239,9 @@ Scrolling := [].{
 				},
 			)
 		spot = { id: column.id, world_x: x, width, anchor: anchor(strip, x, width, position) }
-		(spot, x + width + strip.column_gap, frames)
+		# Upstream's order (`x += width + gap`: the gap joins the width first); it must match
+		# upstream's `Geometry::build` bit for bit.
+		(spot, x + (width + strip.column_gap), frames)
 	}
 
 	## Where the columns and windows go, and where the camera may rest.
