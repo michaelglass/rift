@@ -9,22 +9,49 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-23, after slice 2a): read this first
+## Handoff (2026-11-23, after slice 2b part 1): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. Since the slice 1 docs commit (1c68bc17):
-the slice 2 handoff (ed33e05a), then W4d+W6 slice 2a: its tests first (0fc40f84), the change
-(edb6dbca), and this docs commit. `rearch/roc-next@fork` carries everything through this docs
-commit once it is published (publish procedure: "Rulings that bind", Public-clean; the published
-tip's id is in the slice report). All checks green at every commit: 851 lib tests, 858 with
-`roc-core`, the fuzzer at 2000 × 40 both ways, zero build warnings beyond the two old test-build
-ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`).
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. After the slice 2a docs (f5b0fd1b) and the
+2b ruling (6729c58a): slice 2b part 1 (4d3afda4) and this docs commit. `rearch/roc-next@fork`
+carries everything through this docs commit once it is published (publish procedure: "Rulings
+that bind", Public-clean; the published tip's id is in the slice report). All checks green: 851
+lib tests, 858 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo check --locked`, fmt;
+no build warnings beyond the two old test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs`
+`button`).
 
-**The reorder (the lead's ruling (A), 2026-11-23).** Slice 2 as first planned could not take the
-topology out of the workspace store while the saved form still passed through it (loading built
-the store with the topology and seeded the core from the store). So the persistence boundary came
-first: slice 2a (done) parses the saved topology into its own type and seeds the core from it;
-slice 2b moves the store's reads onto the core and takes the topology out of the store. Slice 5
-shrinks to what is left of persistence (see the plan below).
+**Slice 2b part 1, done.** The workspace store keeps no catalog order and no activations: the
+core holds them. Its topology reads live on `Workspaces<'a>` (virtual_workspace.rs: the store and
+a `Windows<'a>`, `Copy`, deref to the store), built by `WorkspaceStore::reading(windows)`; reads
+that took a `Windows` argument dropped it (`step_workspace`, `window_counts`, the
+active-workspace window queries). Writers keep their shape (`&mut self` plus `&mut WindowsMut`,
+which carries the core), read through the view and tell the core; no `WorkspacesMut` was needed.
+`update_display_count` and `rename_workspace` take the core's catalog slice. Load-time code reads
+`SavedTopology` (`ids`, `workspace_ids`, `active_workspace`): `normalize_loaded_names(&topology)`,
+the runtime restore's saved side. A drag preview holds the window records mutably, so it reads
+the shown workspace from the core alone (`WorkspaceStore::active_layout_in`, which the view's
+`active_layout_for_space` also uses). About 25 engine and reactor functions gained a
+`windows: Windows<'_>` argument (slice 3/4 territory, done here because the store could no
+longer answer without the core); nine engine `pub fn`s went `pub(crate)` (they now take a
+crate-private view); `collect_group_containers_in_selection_path` was dead and went;
+`calculate_layout` is test-only. The tripwire's activation half retired; its catalog half (each
+workspace's `space` against the core's catalog, compared by id) stays until part 2. The overview
+engine-test fixture initialised its Space through an unrelated window store (harmless only while
+the store kept activations); fixed. Plants: `update_activation` not telling the core (4 lib tests
+fail), `clear_activation` not telling it (9), `workspaces_on` in reverse catalog order (62), the
+shown workspace read as the previous one (122), load-time names told apart in reverse catalog
+order (0: a new test, `duplicate_saved_names_are_told_apart_in_catalog_order`, now 1).
+
+**Next: slice 2b part 2.** Each `VirtualWorkspace`'s `space` leaves the store: the catalog moves
+onto `model::slot_table` (ruled below; the module and its differential test are written and
+proven against slotmap, set aside until this part wires it in: re-create
+`src/model/slot_table.rs` from the ruling if it is not in the tree) and writes `space` from the
+core; the load splits each saved record into the workspace and its Space (`SavedTopology`'s
+catalog); every `workspace.space` / `store[id].space` read goes to the core (the compiler finds
+them once the field is gone); the tripwire retires whole (`workspace_divergences`,
+`WorkspaceDivergence`, the reactor's `workspace-divergence:` catalog check). The 2a fixtures
+must keep passing byte for byte. Then the tests' re-joins via `topology()`, and the remaining
+bare-store tests onto a store+core fixture (most already build an `OwnedWindows` beside the
+store).
 
 **Slice 2a, done.** `SavedTopology` (virtual_workspace.rs): every workspace with its Space in
 catalog order, and the activations. A saved store deserializes as `LoadedWorkspaces { store,
@@ -65,6 +92,22 @@ at load, set on remove) and writes the slot sequence itself. A differential test
 to slotmap's own over generated catalogs, removals and id reuse included. Ruled out: writing
 vacant slots with version 0 (not compatible, and a reused id could collide with a removed one),
 and a scoped lookup of Spaces during serialization (it hides a dependency).
+**Ruled for 2b, loading (the lead, 2026-11-23): the catalog owns its slot table.** Reading the
+vacant versions at load means parsing the slot sequence ourselves, and slotmap takes no parsed
+slots back (no constructor; its free list, which decides the ids allocated after a load, is built
+only by its own `Deserialize`). So the catalog keeps its own table, `model::slot_table`
+(`Occupied { version, value } | Vacant { version }`), with slotmap 1.1's rules copied exactly:
+a new slot at version 1, a vacant one taken at `version | 1`, a removal bumping the version by one
+(wrapping) and pushing the slot on the free list, which a load rebuilds as slotmap does (the
+highest vacant slot taken first), slot 0 a sentinel held at version 0; keys via
+`KeyData::from_ffi`. The rules are small pure functions in their own module, apart from workspace
+logic. The authority is the differential test (`the_table_allocates_and_writes_as_slotmap_does`:
+500 generated runs of inserts, removals of live and stale ids, and saves each loaded by the other
+side, comparing ids allocated, lookups, slot order and the bytes written against a real
+`SlotMap`), with slotmap's refusals held alike. Plants: the removal's version bump (caught), the
+free list taken first-in-first-out (caught), the loaded free list's order reversed (caught),
+the sentinel's version kept as saved (caught), an occupied version with no value accepted
+(caught).
 
 **Not elsewhere in this doc yet:**
 - The old twins' per-step costs in "Measured" are the separate topology and ownerships
