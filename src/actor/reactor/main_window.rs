@@ -1,13 +1,13 @@
-use rift_core::main_window::{Initiator, MainWindowEvent, MainWindows, Standing};
+use rift_core::main_window::{Initiator, MainWindowEvent, Standing};
 
 use super::Event;
 use crate::actor::app::{Quiet, WindowId, pid_t};
 
-/// The main window, as the core's machine (`rift_core::main_window`) decides it from what the
-/// reactor observes: this only translates events.
+/// The main window, as the core's machine (`rift_core::main_window`, twinned in Roc under
+/// `roc-core`) decides it from what the reactor observes: this only translates events.
 #[derive(Default)]
 pub(crate) struct MainWindowTracker {
-    windows: MainWindows<pid_t, WindowId>,
+    windows: crate::roc_twin::TwinnedMainWindows,
 }
 
 fn initiator(quiet: Quiet) -> Initiator {

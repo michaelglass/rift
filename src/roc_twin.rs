@@ -17,9 +17,10 @@
 use std::ops::Deref;
 
 use rift_core::lifecycle::{Invalidation, Lifecycle, LifecycleEvent, Revalidation, Transition};
+use rift_core::main_window::{MainWindowEvent, MainWindows};
 use rift_core::workspaces::{OwnershipEvent, Ownerships, Topology, TopologyEvent};
 
-use crate::actor::app::WindowId;
+use crate::actor::app::{WindowId, pid_t};
 use crate::model::VirtualWorkspaceId;
 use crate::model::window_store::ClaimOwner;
 use crate::sys::screen::SpaceId;
@@ -367,6 +368,123 @@ impl TwinnedTopology {
             if rust != roc {
                 diverged("topology", &plain, &rust, &roc);
             }
+        }
+    }
+}
+
+/// The main window (each app's standing and main window, the globally frontmost app and the
+/// native focus), with its Roc twin under `roc-core`. Not flipped: the Rust machine stands.
+#[derive(Default)]
+pub(crate) struct TwinnedMainWindows {
+    rust: MainWindows<pid_t, WindowId>,
+    #[cfg(feature = "roc-core")]
+    twin: MainWindowsTwin,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct MainWindowsTwin {
+    roc: rift_core_roc::RocMainWindows,
+    steps: u64,
+}
+
+impl Deref for TwinnedMainWindows {
+    type Target = MainWindows<pid_t, WindowId>;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl TwinnedMainWindows {
+    /// As [`MainWindows::step`]: both must answer the same window, and, when due, keep the same
+    /// state.
+    pub(crate) fn step(&mut self, event: MainWindowEvent<pid_t, WindowId>) -> Option<WindowId> {
+        let answer = self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        {
+            use crate::roc_path::{Word, diverged};
+            let plain = match event {
+                MainWindowEvent::Launched { pid, standing, main_window } => {
+                    MainWindowEvent::Launched {
+                        pid: pid.word(),
+                        standing,
+                        main_window: main_window.map(Word::word),
+                    }
+                }
+                MainWindowEvent::Terminated(pid) => MainWindowEvent::Terminated(pid.word()),
+                MainWindowEvent::Activated(pid, initiator) => {
+                    MainWindowEvent::Activated(pid.word(), initiator)
+                }
+                MainWindowEvent::Deactivated(pid) => MainWindowEvent::Deactivated(pid.word()),
+                MainWindowEvent::GloballyActivated(pid) => {
+                    MainWindowEvent::GloballyActivated(pid.word())
+                }
+                MainWindowEvent::GloballyDeactivated(pid) => {
+                    MainWindowEvent::GloballyDeactivated(pid.word())
+                }
+                MainWindowEvent::MainWindowChanged(pid, window, initiator) => {
+                    MainWindowEvent::MainWindowChanged(
+                        pid.word(),
+                        window.map(Word::word),
+                        initiator,
+                    )
+                }
+                MainWindowEvent::NativeFocused { pid, window } => MainWindowEvent::NativeFocused {
+                    pid: pid.word(),
+                    window: window.word(),
+                },
+                MainWindowEvent::Replaced { pid, window, replacement } => {
+                    MainWindowEvent::Replaced {
+                        pid: pid.word(),
+                        window: window.word(),
+                        replacement: replacement.map(Word::word),
+                    }
+                }
+            };
+            let roc = self.twin.roc.step(plain);
+            let rust = answer.map(Word::word);
+            if rust != roc {
+                diverged("main window step", &plain, &rust, &roc);
+            }
+            self.twin.steps += 1;
+            if cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+                let rust = self.rust_view();
+                let roc = self.twin.roc.view();
+                if rust != roc {
+                    diverged("main windows", &plain, &rust, &roc);
+                }
+            }
+        }
+        answer
+    }
+
+    /// The Rust machine's whole state as words, as the Roc core views it (apps in pid order).
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&self) -> rift_core_roc::main_window::MainWindowsView {
+        use rift_core::main_window::{App, NativeFocus};
+
+        use crate::roc_path::Word;
+        let mut apps: Vec<_> = self
+            .rust
+            .apps()
+            .map(|(pid, app)| {
+                (pid.word(), App {
+                    standing: app.standing,
+                    last_activation: app.last_activation,
+                    main_window: app.main_window.map(Word::word),
+                })
+            })
+            .collect();
+        apps.sort_by_key(|&(pid, _)| pid);
+        rift_core_roc::main_window::MainWindowsView {
+            main_window: self.rust.main_window().map(Word::word),
+            native_focus: match self.rust.native_focus_state() {
+                NativeFocus::NotYetReported => NativeFocus::NotYetReported,
+                NativeFocus::Reported(focused) => {
+                    NativeFocus::Reported(focused.map(|(pid, window)| (pid.word(), window.word())))
+                }
+            },
+            apps,
+            global_frontmost: self.rust.global_frontmost().map(Word::word),
         }
     }
 }
