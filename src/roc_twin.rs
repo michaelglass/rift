@@ -7,8 +7,9 @@
 //!
 //! Which machine stands differs by machine. The lifecycle is flipped (the lead's policy (a)): the
 //! Roc core decides, its answers are rift's, and on a difference the Rust machine, now its shadow,
-//! is re-seeded from the Roc core's state (counted: [`lifecycle_reseeds`]). The ownerships and
-//! the topology are not flipped yet: their Rust machines stand.
+//! is re-seeded from the Roc core's state (counted: [`lifecycle_reseeds`]). The main window is
+//! flipped the same way ([`main_window_reseeds`]). The ownerships and the topology are not
+//! flipped yet: their Rust machines stand.
 //!
 //! A twinned machine reads as its Rust machine (`Deref`), and only its own methods change it:
 //! the Rust machine's changing methods take `&mut`, which `Deref` does not give, so no change
@@ -37,6 +38,17 @@ const VIEW_EVERY: u64 = 32;
 /// How many times a lifecycle's Rust shadow was re-seeded from the Roc core, process-wide.
 #[cfg(feature = "roc-core")]
 static LIFECYCLE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the main window's Rust shadow was re-seeded from the Roc core, process-wide.
+#[cfg(feature = "roc-core")]
+static MAIN_WINDOW_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the main window's Rust shadow has been re-seeded from the Roc core (each one a
+/// `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn main_window_reseeds() -> u64 {
+    MAIN_WINDOW_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// How many times a lifecycle's Rust shadow has been re-seeded from the Roc core (each one a
 /// `roc-divergence:` warned).
@@ -373,7 +385,9 @@ impl TwinnedTopology {
 }
 
 /// The main window (each app's standing and main window, the globally frontmost app and the
-/// native focus), with its Roc twin under `roc-core`. Not flipped: the Rust machine stands.
+/// native focus), with its Roc twin under `roc-core`. Flipped (policy (a)): under `roc-core` the
+/// Roc core decides and the Rust machine is its shadow, read through `Deref` and re-seeded on any
+/// difference.
 #[derive(Default)]
 pub(crate) struct TwinnedMainWindows {
     rust: MainWindows<pid_t, WindowId>,
@@ -442,19 +456,54 @@ impl TwinnedMainWindows {
             };
             let roc = self.twin.roc.step(plain);
             let rust = answer.map(Word::word);
-            if rust != roc {
+            let answer_differs = rust != roc;
+            if answer_differs {
                 diverged("main window step", &plain, &rust, &roc);
             }
             self.twin.steps += 1;
-            if cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+            if answer_differs || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
                 let rust = self.rust_view();
-                let roc = self.twin.roc.view();
-                if rust != roc {
-                    diverged("main windows", &plain, &rust, &roc);
+                let view = self.twin.roc.view();
+                if rust != view {
+                    diverged("main windows", &plain, &rust, &view);
+                }
+                if answer_differs || rust != view {
+                    self.reseed(view);
                 }
             }
+            // The Roc core decides.
+            return roc.and_then(crate::roc_path::window_of_word);
         }
+        #[cfg(not(feature = "roc-core"))]
         answer
+    }
+
+    /// Replace the Rust shadow with the Roc core's state, and count it.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, view: rift_core_roc::main_window::MainWindowsView) {
+        use rift_core::main_window::{App, NativeFocus};
+
+        use crate::roc_path::window_of_word;
+        let pid = |word: u64| word as i64 as pid_t;
+        let apps = view.apps.into_iter().map(|(word, app)| {
+            (pid(word), App {
+                standing: app.standing,
+                last_activation: app.last_activation,
+                main_window: app.main_window.and_then(window_of_word),
+            })
+        });
+        let native_focus = match view.native_focus {
+            NativeFocus::NotYetReported => NativeFocus::NotYetReported,
+            NativeFocus::Reported(focused) => NativeFocus::Reported(
+                focused.and_then(|(owner, window)| Some((pid(owner), window_of_word(window)?))),
+            ),
+        };
+        self.rust = MainWindows::from_parts(apps, view.global_frontmost.map(pid), native_focus);
+        let reseeds = MAIN_WINDOW_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the main window's Rust shadow was re-seeded from the Roc core"
+        );
     }
 
     /// The Rust machine's whole state as words, as the Roc core views it (apps in pid order).
@@ -526,6 +575,47 @@ mod tests {
         assert_eq!(lifecycle.rust_view(), roc);
         assert!(lifecycle.manages(window), "reads follow the Roc core");
         assert!(LIFECYCLE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// A main window machine whose Rust shadow lost the app the Roc core still has.
+    fn main_windows_knocked_out_of_step() -> super::TwinnedMainWindows {
+        use rift_core::main_window::{MainWindowEvent, Standing};
+        let mut mains = super::TwinnedMainWindows::default();
+        let window = WindowId::new(5, 1);
+        mains.step(MainWindowEvent::Launched {
+            pid: 5,
+            standing: Standing::Frontmost,
+            main_window: Some(window),
+        });
+        mains.step(MainWindowEvent::GloballyActivated(5));
+        mains.rust.step(MainWindowEvent::Terminated(5));
+        mains
+    }
+
+    /// Re-seeding gives the main window's Rust shadow exactly the Roc core's state, and is
+    /// counted.
+    #[test]
+    fn a_main_window_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        let mut mains = main_windows_knocked_out_of_step();
+        assert_eq!(mains.main_window(), None, "the shadow lost it");
+        let before = super::MAIN_WINDOW_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = mains.twin.roc.view();
+        mains.reseed(view.clone());
+        assert_eq!(mains.rust_view(), view);
+        assert_eq!(
+            mains.main_window(),
+            Some(WindowId::new(5, 1)),
+            "reads follow the Roc core"
+        );
+        assert!(super::MAIN_WINDOW_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// Tests still panic on a main window difference.
+    #[test]
+    #[should_panic(expected = "roc-divergence")]
+    fn a_main_window_shadow_out_of_step_panics_in_tests() {
+        let mut mains = main_windows_knocked_out_of_step();
+        mains.step(rift_core::main_window::MainWindowEvent::Deactivated(5));
     }
 
     /// Tests still panic on a difference (a running Rift warns and re-seeds).

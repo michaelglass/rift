@@ -204,6 +204,20 @@ impl<P: Copy + Ord, W: Copy + PartialEq> MainWindows<P, W> {
 
     pub fn global_frontmost(&self) -> Option<P> { self.global_frontmost }
 
+    /// The machine with exactly these apps, globally frontmost app and native focus (a shadow
+    /// re-seeded from the machine it shadows).
+    pub fn from_parts(
+        apps: impl IntoIterator<Item = (P, App<W>)>,
+        global_frontmost: Option<P>,
+        native_focus: NativeFocus<P, W>,
+    ) -> Self {
+        MainWindows {
+            apps: apps.into_iter().collect(),
+            global_frontmost,
+            native_focus,
+        }
+    }
+
     pub fn native_focus_state(&self) -> NativeFocus<P, W> { self.native_focus }
 }
 

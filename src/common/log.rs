@@ -72,6 +72,9 @@ fn show_roc_core() {
         let reseeds = crate::roc_twin::lifecycle_reseeds();
         println!("roc-core: lifecycle re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: lifecycle re-seeds");
+        let reseeds = crate::roc_twin::main_window_reseeds();
+        println!("roc-core: main-window re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: main-window re-seeds");
     }
 }
 
