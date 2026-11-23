@@ -49,23 +49,6 @@ Shape : { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_lin
 
 Traditional := [].{
 
-	## `f32::max` on arm64 (`fmaxnm`): a NaN loses, and +0 beats -0.
-	max32 : F32, F32 -> F32
-	max32 = |a, b|
-		if a > b {
-			a
-		} else if b > a {
-			b
-		} else if F32.is_nan(a) {
-			b
-		} else if F32.is_nan(b) {
-			a
-		} else if a == 0.0 {
-			a + b
-		} else {
-			a
-		}
-
 	## `f64::clamp`.
 	clamp : F64, F64, F64 -> F64
 	clamp = |value, low, high| {
@@ -257,19 +240,17 @@ Traditional := [].{
 	axis : Shape, Child, List(Child), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
 	axis = |shape, first, rest, horizontal, rect, out0| {
 		children = [first].concat(rest)
-		f32_epsilon = F32.from_bits(872415232)
-		min_size = F32.from_bits(1028443341)
-		var $total = 0.0
-		var $needs_normalization = False
-		for child in children {
-			$total = $total + child.size
-			if !F32.is_finite(child.size) or child.size < min_size - f32_epsilon {
-				$needs_normalization = True
-			}
-		}
-		total : F32
-		total = $total
-		normalize = !F32.is_finite(total) or total <= f32_epsilon or $needs_normalization
+		# Weights as upstream's `layout_axis` reads them (since #688): each as an F64, and equal
+		# weights only when one is negative or not finite, or they add up to nothing.
+		(total, invalid) =
+			children.fold(
+				(0.0, False),
+				|(sum_, bad), child| {
+					weight = F32.to_f64(child.size)
+					(sum_ + weight, bad or !F64.is_finite(weight) or weight < 0.0)
+				},
+			)
+		equal = invalid or !F64.is_finite(total) or total <= 0.0
 		gap = if (horizontal) shape.gaps.horizontal else shape.gaps.vertical
 		axis_len = if (horizontal) rect.w else rect.h
 		total_gap = rest.len().to_f64() * gap
@@ -278,7 +259,7 @@ Traditional := [].{
 			children.map(
 				|child| {
 					s = summary(shape, child.node, horizontal)
-					weight = if (normalize) 1.0 else F32.to_f64(max32(child.size, 0.0))
+					weight = if (equal) 1.0 else F32.to_f64(child.size)
 					{ min: s.min, fixed: s.fixed, max: s.max, weight, can_grow: s.can_grow }
 				},
 			)

@@ -637,9 +637,125 @@ pub(super) fn project_root(
     regions: Option<(NodeId, NodeId)>,
     active: &ConstraintCache,
 ) -> NodeId {
+    region_root(root, regions, |node| active.contains_key(&node))
+}
+
+/// The node a layout is laid out from: its master region when the stack region takes no
+/// space (`participates` says which nodes do), else its root.
+fn region_root(
+    root: NodeId,
+    regions: Option<(NodeId, NodeId)>,
+    participates: impl Fn(NodeId) -> bool,
+) -> NodeId {
     regions
-        .filter(|(_, stack)| !active.contains_key(stack))
+        .filter(|&(_, stack)| !participates(stack))
         .map_or(root, |(master, _)| master)
+}
+
+/// A tiled layout as the core's geometry takes it (test-only until a system checks its frames
+/// with it): the subtree `project` lays out from `node`
+/// (the master region when `regions` names one and the stack region takes no space), pruned to
+/// the nodes that participate (none: nothing takes space). Arguments as `project` takes them.
+#[cfg(test)]
+pub(super) fn shape(
+    tiles: &GroupLayouts,
+    node: NodeId,
+    regions: Option<(NodeId, NodeId)>,
+    screen: CGRect,
+    stack_offset: f64,
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    gaps: &crate::common::config::GapSettings,
+    stack_line: crate::common::config::StackLineReserve,
+) -> Option<rift_core::layout::traditional::Traditional<WindowId>> {
+    use crate::layout_engine::core_geometry::core_stack_line;
+    use crate::layout_engine::{core_gaps, core_rect};
+    let map = &tiles.tree.map;
+    let mut active = crate::common::collections::HashSet::default();
+    for child in node.traverse_postorder(map) {
+        if tiles.subtree_participates(child, |node| active.contains(&node)) {
+            active.insert(child);
+        }
+    }
+    let start = if map.is_effectively_fullscreen(node) {
+        node
+    } else {
+        region_root(node, regions, |node| active.contains(&node))
+    };
+    if !active.contains(&start) {
+        return None;
+    }
+    let screen = core_rect(screen);
+    let gaps = core_gaps(gaps);
+    Some(rift_core::layout::traditional::Traditional {
+        screen,
+        area: rift_core::layout::tiling_area(screen, gaps),
+        gaps,
+        stack_offset,
+        stack_line: core_stack_line(stack_line),
+        root: shape_node(tiles, start, &|node| active.contains(&node), constraints),
+    })
+}
+
+/// A participating node of a tiled layout as the core's geometry takes it.
+#[cfg(test)]
+fn shape_node(
+    tiles: &GroupLayouts,
+    node: NodeId,
+    participates: &impl Fn(NodeId) -> bool,
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+) -> rift_core::layout::traditional::Node<WindowId> {
+    use rift_core::layout::traditional::{Child, Fill, Node};
+
+    use crate::layout_engine::core_geometry::core_constraints;
+    let map = &tiles.tree.map;
+    let info = &map[node].layout;
+    let fill = if info.is_fullscreen {
+        Fill::Screen
+    } else if info.is_fullscreen_within_gaps {
+        Fill::WithinGaps
+    } else {
+        Fill::Tiled
+    };
+    if let Some(window) = map.window(node) {
+        return Node::Window {
+            window,
+            constraints: constraints.get(&window).copied().map(core_constraints),
+            fill,
+        };
+    }
+    let child = |child: NodeId| Child {
+        size: map[child].layout.size,
+        node: shape_node(tiles, child, participates, constraints),
+    };
+    let mut children: Vec<NodeId> = node.children(map).filter(|&c| participates(c)).collect();
+    match info.kind {
+        LayoutKind::HorizontalStack | LayoutKind::VerticalStack => {
+            let focused = map
+                .participating_child(node, false, participates)
+                .expect("a participating stack has a participating child");
+            let at = children.iter().position(|&c| c == focused).expect("one of its children");
+            let after = children.split_off(at + 1);
+            children.pop();
+            Node::Stack {
+                horizontal: info.kind == LayoutKind::HorizontalStack,
+                fill,
+                before: children.into_iter().map(child).collect(),
+                focused: Box::new(child(focused)),
+                after: after.into_iter().map(child).collect(),
+            }
+        }
+        LayoutKind::Horizontal | LayoutKind::Vertical => {
+            let rest = children.split_off(1);
+            let first =
+                children.pop().expect("a participating container has a participating child");
+            Node::Axis {
+                horizontal: info.kind == LayoutKind::Horizontal,
+                fill,
+                first: Box::new(child(first)),
+                rest: rest.into_iter().map(child).collect(),
+            }
+        }
+    }
 }
 
 pub(super) fn project(
@@ -697,4 +813,118 @@ pub(super) fn project(
         collect,
     );
     sizes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::{GapSettings, StackLineReserve};
+    use crate::layout_engine::TraditionalLayoutSystem;
+    use crate::layout_engine::systems::drawn::*;
+    use crate::layout_engine::systems::{LayoutSystem, WindowChange};
+
+    /// A traditional layout of `sizes.len()` windows side by side, each child's weight set.
+    fn weighed(sizes: &[f32]) -> (TraditionalLayoutSystem, NodeId) {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=sizes.len() as u32 {
+            system.update(WindowChange::Add(layout, WindowId::new(1, idx), None));
+        }
+        let root = system.tiles.root(layout);
+        let children: Vec<NodeId> = root.children(system.tiles.map()).collect();
+        for (child, &size) in children.into_iter().zip(sizes) {
+            system.tiles.tree.map[child].layout.size = size;
+        }
+        (system, root)
+    }
+
+    fn both(
+        system: &TraditionalLayoutSystem,
+        root: NodeId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+    ) -> (Vec<(WindowId, CGRect)>, Vec<(WindowId, CGRect)>) {
+        let line = StackLineReserve::default();
+        let upstream = project(
+            &system.tiles,
+            root,
+            |_| root,
+            screen,
+            0.0,
+            constraints,
+            gaps,
+            line,
+            true,
+            None,
+        );
+        let core = core_frames(shape(
+            &system.tiles,
+            root,
+            None,
+            screen,
+            0.0,
+            constraints,
+            gaps,
+            line,
+        ));
+        (upstream, core)
+    }
+
+    /// Small positive weights, which upstream's comment says splitting and promotion can leave,
+    /// stand: the axis is shared by them (the core once made them equal below 0.05).
+    #[test]
+    fn small_positive_weights_stand_as_upstream_reads_them() {
+        let (system, root) = weighed(&[0.01, 0.03, 1.0]);
+        let screen = CGRect::new(
+            objc2_core_foundation::CGPoint::new(0., 0.),
+            objc2_core_foundation::CGSize::new(1040., 800.),
+        );
+        let (upstream, core) = both(
+            &system,
+            root,
+            screen,
+            &HashMap::default(),
+            &GapSettings::default(),
+        );
+        let widths: Vec<f64> = upstream.iter().map(|(_, frame)| frame.size.width).collect();
+        assert_eq!(widths, [10., 30., 1000.]);
+        assert_eq!(bits(&core), bits(&upstream));
+    }
+
+    fn drawn_size(rng: &mut Rng) -> f32 {
+        match rng.below(12) {
+            0 => 0.0,
+            1 => -0.0,
+            2 => -(rng.length(0.0, 1.0) as f32),
+            3 => f32::NAN,
+            4 => f32::INFINITY,
+            5 => f32::MAX,
+            6 | 7 => rng.length(0.0, 0.05) as f32,
+            _ => rng.length(0.0, 3.0) as f32,
+        }
+    }
+
+    /// The core weighs an axis's children as upstream's `layout_axis` does, bit for bit: drawn
+    /// weights small, zero, negative, NaN, infinite and huge, with drawn screens, gaps and
+    /// constraints.
+    #[test]
+    fn the_core_weighs_an_axis_as_upstream_does() {
+        let mut rng = Rng(0x5eed_3e16);
+        let mut frames = 0;
+        for _ in 0..5000 {
+            let count = 1 + rng.below(6) as usize;
+            let sizes: Vec<f32> = (0..count).map(|_| drawn_size(&mut rng)).collect();
+            let (system, root) = weighed(&sizes);
+            let windows: Vec<WindowId> =
+                (1..=count as u32).map(|idx| WindowId::new(1, idx)).collect();
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            let (upstream, core) = both(&system, root, screen, &constraints, &gaps);
+            assert_eq!(bits(&core), bits(&upstream), "weights {sizes:?}");
+            frames += upstream.len();
+        }
+        eprintln!("axis weights: {frames} frames identical");
+    }
 }

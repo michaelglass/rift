@@ -164,11 +164,14 @@ fn tnode(rng: &mut Rng, depth: u32, next_window: &mut u32) -> traditional::Node<
     let count = 1 + rng.below(4) as usize;
     let mut children: Vec<traditional::Child<WindowId>> = (0..count)
         .map(|_| traditional::Child {
-            size: match rng.below(12) {
+            size: match rng.below(14) {
                 0 => 0.0,
                 1 => 0.01,
                 2 => f32::NAN,
                 3 => 1.0,
+                4 => -(rng.float(0.0, 1.0) as f32),
+                5 => f32::INFINITY,
+                6 => rng.float(0.0, 0.05) as f32,
                 _ => rng.float(0.05, 3.0) as f32,
             },
             node: tnode(rng, depth - 1, next_window),

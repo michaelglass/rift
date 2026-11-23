@@ -334,17 +334,17 @@ impl<W: Copy> Traditional<W> {
         out: &mut Vec<(W, Rect)>,
     ) {
         let children: Vec<&Child<W>> = std::iter::once(first).chain(rest).collect();
-        let min_size = 0.05_f32;
-        let mut needs_normalization = false;
-        let mut actual_total = 0.0_f32;
+        // Weights as upstream's `layout_axis` reads them (since #688): each as an f64, and
+        // equal weights only when one is negative or not finite, or they add up to nothing (a
+        // small positive weight, which splitting and promotion can leave, stands).
+        let mut total = 0.0;
+        let mut invalid = false;
         for child in &children {
-            actual_total += child.size;
-            if !child.size.is_finite() || child.size < min_size - f32::EPSILON {
-                needs_normalization = true;
-            }
+            let weight = f64::from(child.size);
+            total += weight;
+            invalid |= !weight.is_finite() || weight < 0.0;
         }
-        let normalize =
-            !actual_total.is_finite() || actual_total <= f32::EPSILON || needs_normalization;
+        let equal = invalid || !total.is_finite() || total <= 0.0;
         let gap = if horizontal {
             self.gaps.horizontal
         } else {
@@ -361,7 +361,7 @@ impl<W: Copy> Traditional<W> {
             .iter()
             .map(|child| {
                 let (min, fixed, max, can_grow) = self.summary(&child.node, horizontal);
-                let weight = f64::from(if normalize { 1.0 } else { child.size.max(0.0) });
+                let weight = if equal { 1.0 } else { f64::from(child.size) };
                 AxisConstraints {
                     min,
                     fixed,
