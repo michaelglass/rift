@@ -1,5 +1,7 @@
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
+#[cfg(any(test, feature = "roc-core"))]
+use rift_core::layout::traditional::{self, Fill, Traditional};
 use serde::{Deserialize, Deserializer, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
 
@@ -12,9 +14,13 @@ use crate::common::config::{
     GapSettings, StackDefaultOrientation, StackLineReserve, WindowInsertionPoint,
     default_stack_orientation,
 };
+#[cfg(any(test, feature = "roc-core"))]
+use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
+#[cfg(any(test, feature = "roc-core"))]
+use crate::layout_engine::{core_gaps, core_rect};
 use crate::model::tree::{NodeId, Tree};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -377,6 +383,8 @@ impl LayoutSystem for StackLayoutSystem {
         gaps: &GapSettings,
         line: StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
+        #[cfg(any(test, feature = "roc-core"))]
+        let offset_setting = offset;
         let stack = &self.layouts[layout];
         let count = stack.members.iter().filter(|m| self.window_participates(m.window)).count();
         let Some(active) = stack.visible_index(&self.inactive) else {
@@ -397,7 +405,7 @@ impl LayoutSystem for StackLayoutSystem {
             rect, horizontal, count, offset, required,
         );
         let geometry = super::tiles::stack_layout_result(rect, count, offset, horizontal, line);
-        stack
+        let frames: Vec<(WindowId, CGRect)> = stack
             .members
             .iter()
             .filter(|m| self.window_participates(m.window))
@@ -417,7 +425,14 @@ impl LayoutSystem for StackLayoutSystem {
                 });
                 (m.window, frame)
             })
-            .collect()
+            .collect();
+        #[cfg(any(test, feature = "roc-core"))]
+        crate::layout_engine::core_geometry::check_traditional(
+            "stack",
+            self.shape(layout, screen, offset_setting, constraints, gaps, line),
+            &frames,
+        );
+        frames
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -594,6 +609,64 @@ impl LayoutSystem for StackLayoutSystem {
 }
 
 impl StackLayoutSystem {
+    #[cfg(any(test, feature = "roc-core"))]
+    /// A stack layout as the core's geometry takes it: one stack of the participating members,
+    /// the visible one on top (none when no member participates). `offset` is the configured
+    /// stack offset, as `calculate_layout` takes it.
+    pub(crate) fn shape(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+        line: StackLineReserve,
+    ) -> Option<Traditional<WindowId>> {
+        let stack = &self.layouts[layout];
+        let visible = stack.visible_index(&self.inactive)?;
+        let child = |member: &Member| traditional::Child {
+            size: member.weight as f32,
+            node: traditional::Node::Window {
+                window: member.window,
+                constraints: constraints.get(&member.window).copied().map(core_constraints),
+                fill: if member.fullscreen {
+                    Fill::Screen
+                } else if member.within_gaps {
+                    Fill::WithinGaps
+                } else {
+                    Fill::Tiled
+                },
+            },
+        };
+        let participating = |members: &[Member]| -> Vec<traditional::Child<WindowId>> {
+            members
+                .iter()
+                .filter(|m| self.window_participates(m.window))
+                .map(child)
+                .collect()
+        };
+        let screen_rect = core_rect(screen);
+        let gaps = core_gaps(gaps);
+        Some(Traditional {
+            screen: screen_rect,
+            area: rift_core::layout::tiling_area(screen_rect, gaps),
+            gaps,
+            stack_offset: offset,
+            stack_line: core_stack_line(line),
+            root: traditional::Node::Stack {
+                horizontal: stack.kind == LayoutKind::HorizontalStack,
+                fill: if stack.fullscreen {
+                    Fill::Screen
+                } else {
+                    Fill::Tiled
+                },
+                before: participating(&stack.members[..visible]),
+                focused: Box::new(child(&stack.members[visible])),
+                after: participating(&stack.members[visible + 1..]),
+            },
+        })
+    }
+
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         self.layouts[layout].members.iter().map(|m| m.window).collect()
     }
@@ -892,5 +965,225 @@ mod tests {
             StackLineReserve::default(),
         );
         assert_eq!(frames[0].1.size.width, 200.0);
+    }
+
+    /// xorshift64*: deterministic, no dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 { self.next() % n }
+
+        fn chance(&mut self, percent: u64) -> bool { self.below(100) < percent }
+
+        /// Mostly round numbers, sometimes halves, sometimes anything in `low..high`.
+        fn length(&mut self, low: f64, high: f64) -> f64 {
+            let value = low + (high - low) * (self.next() >> 11) as f64 / (1u64 << 53) as f64;
+            match self.below(3) {
+                0 => value.round(),
+                1 => (value * 2.).round() / 2.,
+                _ => value,
+            }
+        }
+
+        fn maybe(&mut self, high: f64) -> f64 {
+            if self.chance(50) {
+                0.
+            } else {
+                self.length(1., high)
+            }
+        }
+    }
+
+    fn drawn_constraints(rng: &mut Rng) -> WindowLayoutConstraints {
+        let sizing = match rng.below(3) {
+            0 => super::super::Sizing::Fixed,
+            1 => super::super::Sizing::Resizable,
+            _ => super::super::Sizing::ResizableAtLeastMin,
+        };
+        let mut c = WindowLayoutConstraints {
+            sizing,
+            locked_width: rng.maybe(1500.),
+            locked_height: rng.maybe(1000.),
+            min_width: rng.maybe(900.),
+            min_height: rng.maybe(700.),
+            max_width: rng.maybe(1800.),
+            max_height: rng.maybe(1200.),
+        };
+        if rng.chance(10) {
+            // An axis the app locks (min = max).
+            c.max_width = c.min_width;
+        }
+        if rng.chance(5) {
+            c.min_height = f64::NAN;
+        }
+        c
+    }
+
+    fn drawn_gaps(rng: &mut Rng) -> GapSettings {
+        let mut gaps = GapSettings::default();
+        if rng.chance(80) {
+            gaps.outer.top = rng.length(0., 40.);
+            gaps.outer.left = rng.length(0., 40.);
+            gaps.outer.bottom = rng.length(0., 40.);
+            gaps.outer.right = rng.length(0., 40.);
+            gaps.inner.horizontal = rng.length(0., 30.);
+            gaps.inner.vertical = rng.length(0., 30.);
+        }
+        gaps
+    }
+
+    fn drawn_line(rng: &mut Rng) -> StackLineReserve {
+        use crate::common::config::{HorizontalPlacement, VerticalPlacement};
+        StackLineReserve {
+            thickness: if rng.chance(40) {
+                0.
+            } else {
+                rng.length(1., 12.)
+            },
+            spacing: rng.maybe(10.),
+            horiz: if rng.chance(50) {
+                HorizontalPlacement::Top
+            } else {
+                HorizontalPlacement::Bottom
+            },
+            vert: if rng.chance(50) {
+                VerticalPlacement::Left
+            } else {
+                VerticalPlacement::Right
+            },
+        }
+    }
+
+    /// A stack system after random edits: windows added, removed, selected, made fullscreen,
+    /// left out of the layout, the stack's orientation turned, the root selected.
+    fn drawn_system(rng: &mut Rng) -> (StackLayoutSystem, LayoutId, Vec<WindowId>) {
+        let orientation = match rng.below(4) {
+            0 => StackDefaultOrientation::Perpendicular,
+            1 => StackDefaultOrientation::Same,
+            2 => StackDefaultOrientation::Horizontal,
+            _ => StackDefaultOrientation::Vertical,
+        };
+        let mut system = StackLayoutSystem::new(orientation);
+        let layout = system.create_layout();
+        let mut windows: Vec<WindowId> = Vec::new();
+        let mut next = 0;
+        for _ in 0..rng.below(32) {
+            let pick = |rng: &mut Rng, windows: &[WindowId]| {
+                windows[rng.below(windows.len() as u64) as usize]
+            };
+            match rng.below(11) {
+                0..=3 => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+                _ if windows.is_empty() => {}
+                4 => {
+                    let window = pick(rng, &windows);
+                    windows.retain(|w| *w != window);
+                    system.update(WindowChange::Remove(window));
+                }
+                5 => {
+                    let window = pick(rng, &windows);
+                    system.focus(layout, Focus::Select(window));
+                }
+                6 => {
+                    let focus = if rng.chance(50) {
+                        Focus::Ascend
+                    } else {
+                        Focus::Descend
+                    };
+                    system.focus(layout, focus);
+                }
+                7 => {
+                    let within_gaps = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
+                }
+                8 => {
+                    let window = pick(rng, &windows);
+                    let participates = rng.chance(40);
+                    system.set_window_participation(window, participates);
+                }
+                9 => {
+                    system.edit(layout, LayoutEdit::ToggleOrientation);
+                }
+                _ => {
+                    let direction = match rng.below(4) {
+                        0 => Direction::Left,
+                        1 => Direction::Right,
+                        2 => Direction::Up,
+                        _ => Direction::Down,
+                    };
+                    let has_display_neighbor = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor,
+                    });
+                }
+            }
+        }
+        (system, layout, windows)
+    }
+
+    /// The core's frames for a stack layout are upstream's `calculate_layout`'s, bit for bit,
+    /// over drawn stacks, screens, gaps, offsets, bars and window constraints.
+    #[test]
+    fn the_core_tiles_stack_layouts_as_the_stack_system_does() {
+        let mut rng = Rng(0x5eed_57ac);
+        let (mut cases, mut frames_seen) = (0, 0);
+        for _ in 0..3000 {
+            let (system, layout, windows) = drawn_system(&mut rng);
+            let screen = CGRect::new(
+                objc2_core_foundation::CGPoint::new(
+                    rng.length(-2000., 2000.),
+                    rng.length(-50., 1000.),
+                ),
+                objc2_core_foundation::CGSize::new(rng.length(40., 3000.), rng.length(40., 2000.)),
+            );
+            let mut constraints = HashMap::default();
+            for &window in &windows {
+                if rng.chance(60) {
+                    constraints.insert(window, drawn_constraints(&mut rng));
+                }
+            }
+            let gaps = drawn_gaps(&mut rng);
+            let offset = if rng.chance(20) {
+                rng.length(0., 900.)
+            } else {
+                rng.length(0., 60.)
+            };
+            let line = drawn_line(&mut rng);
+            let upstream =
+                system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
+            let core = system
+                .shape(layout, screen, offset, &constraints, &gaps, line)
+                .map_or_else(Vec::new, |shape| shape.frames());
+            let bits = |frames: Vec<(WindowId, [f64; 4])>| -> Vec<(WindowId, [u64; 4])> {
+                frames.into_iter().map(|(w, f)| (w, f.map(f64::to_bits))).collect()
+            };
+            assert_eq!(
+                bits(core.iter().map(|&(w, r)| (w, [r.x, r.y, r.w, r.h])).collect()),
+                bits(
+                    upstream
+                        .iter()
+                        .map(|&(w, r)| (w, [r.origin.x, r.origin.y, r.size.width, r.size.height]))
+                        .collect()
+                ),
+                "{}",
+                system.draw_tree(layout)
+            );
+            cases += 1;
+            frames_seen += upstream.len();
+        }
+        eprintln!("stack: {cases} layouts, {frames_seen} frames identical");
+        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
     }
 }
