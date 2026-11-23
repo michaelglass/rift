@@ -57,12 +57,14 @@ restore in `persistence/restore.rs`, which reads the file's `loaded.store` topol
 `LoadedWorkspaces::checked`'s copy into the store, and the two reactor tests that swap
 `layout_engine` for a reloaded one in place (they keep the old core; a reload re-joins). The 43
 store tests built on `WorkspaceStore::new*` move to a store+core fixture.
-**Open design point for 2b (to the lead first):** each workspace's `space` is written inside the
-workspace's record in the slotmap's own serde format (a sequence of `(value, version)` slots,
-vacant ones included, whose versions slotmap does not expose). Writing `space` from the core
-keeps the file byte-compatible only if the save writes that slot sequence itself, which needs the
-vacant slots' versions (the catalog would track them: read at load, set on remove). See the
-slice 2a report.
+**Ruled for 2b (the lead, 2026-11-23): the catalog owns its saved format.** Each workspace's
+`space` is written inside its record in the slotmap's serde format: a sequence of `(value,
+version)` slots, vacant ones included, whose versions slotmap does not expose. To write `space`
+from the core and keep files byte-compatible, the catalog tracks the vacant slots' versions (read
+at load, set on remove) and writes the slot sequence itself. A differential test holds its writer
+to slotmap's own over generated catalogs, removals and id reuse included. Ruled out: writing
+vacant slots with version 0 (not compatible, and a reused id could collide with a removed one),
+and a scoped lookup of Spaces during serialization (it hides a dependency).
 
 **Not elsewhere in this doc yet:**
 - The old twins' per-step costs in "Measured" are the separate topology and ownerships
