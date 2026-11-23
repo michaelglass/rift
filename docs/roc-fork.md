@@ -21,16 +21,31 @@ both ways, fmt, and `cargo clippy --all-targets --features roc-core` compiles (n
 warnings stand, none on lines these slices touched); no build warnings beyond the two old
 test-build ones (`tests/fuzz.rs` `mouse`, `tests.rs` `button`).
 
-**Next: the Roc twin decides for the joined workspaces (policy (a)), then core geometry (Next
-item 2).** Ruled order (the lead, 2026-11-23): (1) the per-Space answers as core queries (done,
-below); (2) Roc holds the whole claim: the view could not re-seed a Rust shadow, since Roc kept
-only a claim's owner and the flags and original id exist only in the platform's `Claimant`. Roc's
-`Claim` becomes `{ owner : U64, flags : ClaimFlags, original : U64, destination }` with the flags a
-named type (not a raw word), the differential compares the whole claim, and a plant dropping a
-flag in Roc must fail as a divergence (re-seeding from a shadow's flags was rejected: a claim only
-Roc has would get made-up flags); (3) the flip, as the lifecycle's: Roc's answers are rift's, the
-Rust `Workspaces` its shadow, re-seeded from Roc's view on any difference and counted. Building a
-view at each call site (`reading(windows)`) stays: it adds no holder.
+**Next: core geometry on upstream's layout systems (Next item 2).** The joined workspaces are
+flipped (step 3, below): with them, the lifecycle and the main window, every machine kept between
+events now has the Roc core deciding under `roc-core`.
+
+**Joined workspaces flipped (step 3, policy (a)).** `TwinnedWorkspaces::step` reports the Roc
+core's outcome (a refusal is `workspace-refused:` as before), and the Rust `Workspaces` is its
+shadow, read through `Deref`. An outcome that differs, or a view that differs when due (every
+topology change; every ownership change in tests, every 32nd in a running Rift), warns
+`roc-divergence:` (tests panic) and re-seeds the shadow from the Roc core's view:
+`Workspaces::from_view` (new in the core) rebuilds it by stepping the view's catalog, activations
+and owners, so the step's refusals hold a re-seed too, and the words go back to rift's types
+(`workspace_of_word`, `window_of_word`, `Claimant::from_plain`, the inverse of step 2's
+`Claimant::plain`). A view the shadow cannot hold leaves it as it was, warned. Counted
+process-wide and printed by `rift-cli metrics show-timing` (`roc-core: workspaces re-seeds: N`).
+Tests: `a_workspaces_reseed_makes_the_shadow_the_roc_cores_and_is_counted` (a claim lost by the
+shadow comes back whole, flags and original id), `a_workspaces_shadow_out_of_step_panics_in_tests`,
+`workspaces_from_a_view_hold_that_view_and_refuse_one_naming_what_it_lacks` (core). Plants (a
+removed workspace's windows unassigned instead of handed to the heir; roc-core lib failures): in
+`Workspaces.roc`, 5 by roc-divergence, and with the divergence panic off 4 behaviour tests fail on
+what rift does (the reactor's remap onto a Space holding workspaces, the store's two remap tests,
+and removing a Space): rift follows the Roc core; in the Rust shadow, 5 by roc-divergence, and with
+the panic off none on behaviour (only the 4 tests that expect the panic). No added cost per step:
+the twin already compared outcomes and views; a re-seed costs one Roc view and one rebuild. Also
+`WorkspaceStore::rename_workspace` is `#[cfg(test)]`: nothing in rift calls it (making it
+`pub(crate)` in step 1 showed it dead).
 
 **Per-Space answers as core queries (step 1).** `rift_core::workspaces::Workspaces` answers
 `space_of`, `is_on`, `assigned_on` (a window's workspace when it is on a Space) and
@@ -43,17 +58,17 @@ catalog slice, no `listed_on`), and the native reconcile asks `space_of`. No beh
 alike). Plants (rift-core / lib failures): `is_on` ignoring the Space (1 / 8), `assigned_on`
 ignoring it (1 / 7), a visible Space ranked as the command Space (1 / 0), a tie kept as its first
 window (1 / 0): the last two only the core's unit test catches, as before the move (nothing on
-rift's path told those scopes apart). **Old-system bug, fixed (the lead's go):**
-`MoveWindowToDisplay` with no window id, no main window and nothing under the cursor resolved
-`FirstOnCommandDisplay` as index 0, which no window has (`WindowId.idx` is non-zero), so it never
-moved anything. It now moves the first window in layout order on the workspace the command
-display shows (`LayoutEngine::first_window_on`; the docs say only "the command display's first").
-Regression test, written first:
-`moving_to_a_display_with_no_window_named_moves_the_command_displays_first_window`; plant (the
-last window in layout order) fails it. Ours alone: the fallback came with merge (b)'s event-flow
-resolution (178c9657), which put our old `find_window_by_idx(space, 0)` fallback on #702's index
-resolution; upstream main has no such fallback (it ignores the command), so not an upstream
-candidate.
+rift's path told those scopes apart). **Merge leftover, removed to match upstream (the lead's ruling):**
+`MoveWindowToDisplay` with no window id, no main window and nothing under the cursor fell back to
+`FirstOnCommandDisplay`, index 0 on the command display, which no window has (`WindowId.idx` is
+non-zero), so it never moved anything. Merge (b)'s event-flow resolution (178c9657) introduced it,
+putting our old `find_window_by_idx(space, 0)` fallback on #702's index resolution; upstream main
+has no fallback and ignores the command. A first fix (f38cfa4e) moved the first window in layout
+order instead; it is replaced by the removal (the fork matches upstream here): the command is
+ignored with a warning, `WindowToMove::FirstOnCommandDisplay` and `LayoutEngine::first_window_on`
+are gone. Regression test:
+`moving_to_a_display_with_no_window_named_and_none_under_the_cursor_moves_nothing`; a planted
+fallback (window index 1) fails it. Not an upstream candidate.
 
 **Roc holds the whole claim (step 2).** `rift_core::workspaces::plain::Claimant { owner, flags:
 ClaimFlags { focus_follows_mouse: FocusFollowsMouse::{Followed, Suppressed} }, original }` is the
@@ -651,7 +666,8 @@ A slice that needs a behaviour change stops and is reported.
   normalized with one `workspace-load: normalized` line where W2b did) and the 2a fixtures still
   passing. Done 2026-11-23, tests only: the runtime restore reads the file's topology as data and
   writes the live core through the writers, so it needs no join (Handoff).
-- **Then:** the Roc twin decides (policy (a), as the lifecycle and main window), and core
+- **Then:** the Roc twin decides (policy (a), as the lifecycle and main window): done
+  2026-11-23 (the per-Space queries, the whole claim in Roc, the flip; Handoff). Next, core
   geometry on upstream's layout systems (Next item 2).
 2. Core geometry on upstream's five layout systems (after W4d+W6, since the layout engine glue
    moves there): merge (b) took upstream's layout systems, and the shape builders that fed the
