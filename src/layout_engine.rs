@@ -10,7 +10,7 @@ pub(crate) use core_geometry::{cg_rect, core_gaps, core_rect};
 pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
     EventResponse, LayoutCommand, LayoutEngine, LayoutEvent, LayoutEventOutcome, ResolvedWindow,
-    RestoreReport, RestoreRequest, RestoreScope, RestoreSource,
+    RestoreReport, RestoreRequest, RestoreScope, RestoreSource, StartingLayout,
 };
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};

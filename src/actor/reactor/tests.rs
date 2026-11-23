@@ -10220,7 +10220,7 @@ fn disconnect_does_not_erase_display_layout_memory() {
         .layout
         .layout_engine
         .serialize_to_string(reactor.stores.state.windows());
-    let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
+    let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap().engine;
     assert_eq!(loaded.last_space_for_display_uuid(&display), Some(b));
 
     let mut screens = make_screen_snapshots(vec![left, right], vec![Some(a), Some(returned)]);
@@ -12166,7 +12166,7 @@ fn named_pin_reload_moves_immediately_without_creating_workspaces() {
                         "rule_overridden:false,display_fallback:true",
                     );
                 reactor.stores.layout.layout_engine =
-                    LayoutEngine::deserialize_from_str(&snapshot).unwrap();
+                    LayoutEngine::deserialize_from_str(&snapshot).unwrap().engine;
                 reactor.handle_event(Event::ConfigUpdated(reactor.config.clone()));
             }
         }
@@ -12518,7 +12518,7 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                     .layout_engine
                     .serialize_to_string(reactor.stores.state.windows());
                 reactor.stores.layout.layout_engine =
-                    LayoutEngine::deserialize_from_str(&snapshot).unwrap();
+                    LayoutEngine::deserialize_from_str(&snapshot).unwrap().engine;
                 reactor
                     .stores
                     .layout

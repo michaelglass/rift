@@ -257,6 +257,27 @@ pub struct LayoutEngine {
     evicted: HashMap<WindowId, EvictedWindow>,
 }
 
+/// A layout engine and the topology its workspaces start with, joined into the stores by
+/// [`crate::model::Stores::joining`]: an engine loaded from a file brings the file's topology, a
+/// new one none.
+pub struct StartingLayout {
+    pub(crate) engine: LayoutEngine,
+    pub(crate) topology: crate::model::virtual_workspace::SavedTopology,
+}
+
+impl StartingLayout {
+    /// A new engine, with no workspaces yet.
+    pub fn new(
+        virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) -> StartingLayout {
+        StartingLayout {
+            engine: LayoutEngine::new(virtual_workspace_config, layout_settings),
+            topology: Default::default(),
+        }
+    }
+}
+
 /// Where a display departure moved a window from, so the display's return can put it back
 /// at the same workspace position instead of the active one.
 #[derive(Debug)]

@@ -594,6 +594,21 @@ impl SpaceActivation {
     }
 }
 
+impl SpaceActivation {
+    /// The core's activation in the platform's terms.
+    pub(crate) fn from_core(
+        activation: rift_core::workspaces::Activation<VirtualWorkspaceId>,
+    ) -> Self {
+        use rift_core::workspaces::Activation;
+        match activation {
+            Activation::Showing { current, previous, remembered } => {
+                SpaceActivation::Showing { current, previous, remembered }
+            }
+            Activation::Vacant { remembered } => SpaceActivation::Vacant { remembered },
+        }
+    }
+}
+
 impl Default for SpaceActivation {
     fn default() -> Self { SpaceActivation::Vacant { remembered: None } }
 }
@@ -959,41 +974,180 @@ struct SavedStore {
     active_workspace_per_space: HashMap<SpaceId, SpaceActivation>,
 }
 
-/// [`SavedStore`] borrowed from a store, for writing.
+/// [`SavedStore`] written from a store and the core: the store's workspaces, and the topology
+/// (the catalog order and the activations) as the core holds it.
 #[derive(Serialize)]
 #[serde(rename = "WorkspaceStore")]
-struct SavedStoreRef<'a> {
+pub(crate) struct SavedStoreRef<'a> {
     workspaces: &'a SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
-    order: &'a [VirtualWorkspaceId],
+    order: Vec<VirtualWorkspaceId>,
     single_display: bool,
-    active_workspace_per_space: &'a HashMap<SpaceId, SpaceActivation>,
+    active_workspace_per_space: HashMap<SpaceId, SpaceActivation>,
 }
 
-impl Serialize for WorkspaceStore {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+/// The core's joined workspaces, as the platform's types hold them.
+pub(crate) type CoreWorkspaces =
+    rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>;
+
+impl WorkspaceStore {
+    /// The store as it is saved: its workspaces, with the topology written from `core`.
+    pub(crate) fn saved<'a>(&'a self, core: &CoreWorkspaces) -> SavedStoreRef<'a> {
         SavedStoreRef {
             workspaces: &self.workspaces.workspaces,
-            order: &self.workspaces.order,
+            order: core.catalog().iter().map(|&(id, _)| id).collect(),
             single_display: self.single_display,
-            active_workspace_per_space: &self.activations,
+            active_workspace_per_space: core
+                .activations()
+                .iter()
+                .map(|&(space, activation)| (space, SpaceActivation::from_core(activation)))
+                .collect(),
         }
-        .serialize(serializer)
     }
 }
 
-impl<'de> Deserialize<'de> for WorkspaceStore {
+/// The workspaces' topology as a saved file holds it, parsed at the load boundary: every
+/// workspace with its Space, in catalog order, and what each initialised Space shows. The core is
+/// seeded from it when the stores join ([`crate::model::Stores::joining`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SavedTopology {
+    catalog: Vec<(VirtualWorkspaceId, SpaceId)>,
+    activations: HashMap<SpaceId, SpaceActivation>,
+}
+
+impl SavedTopology {
+    /// Every workspace with its Space, in catalog order.
+    pub(crate) fn catalog(&self) -> &[(VirtualWorkspaceId, SpaceId)] { &self.catalog }
+
+    /// What each initialised Space shows.
+    pub(crate) fn activations(&self) -> &HashMap<SpaceId, SpaceActivation> { &self.activations }
+
+    fn space(&self, id: VirtualWorkspaceId) -> Option<SpaceId> {
+        self.catalog.iter().find(|&&(listed, _)| listed == id).map(|&(_, space)| space)
+    }
+
+    fn contains(&self, id: VirtualWorkspaceId) -> bool { self.space(id).is_some() }
+
+    /// Normalizes the loaded activations, at load: a Space showing a workspace that moved away
+    /// (`home` says where each workspace's home is) remembers it and shows its own first one, if
+    /// it has one; a Space's history never names what it shows.
+    pub(crate) fn migrate_legacy_activation(
+        &mut self,
+        home: impl Fn(VirtualWorkspaceId) -> Option<SpaceId>,
+    ) {
+        let spaces: Vec<_> = self.activations.keys().copied().collect();
+        for space in spaces {
+            let mut activation = self.activations[&space];
+            if let Some(id) = activation.current()
+                && self.space(id).is_some_and(|on| on != space && home(id) == Some(space))
+            {
+                let previous = activation.previous();
+                let first = self.catalog.iter().find(|&&(_, on)| on == space).map(|&(id, _)| id);
+                activation = match first {
+                    Some(current) => SpaceActivation::Showing {
+                        current,
+                        previous,
+                        remembered: Some(id),
+                    },
+                    None => {
+                        if let Some(previous) = previous {
+                            warn!(
+                                space = space.get(),
+                                ?previous,
+                                "workspace-load: normalized: dropped navigation history on a Space showing nothing"
+                            );
+                        }
+                        SpaceActivation::Vacant { remembered: Some(id) }
+                    }
+                };
+            }
+            if let SpaceActivation::Showing { current, previous, .. } = &mut activation
+                && *previous == Some(*current)
+            {
+                *previous = None;
+            }
+            self.activations.insert(space, activation);
+        }
+    }
+
+    /// Validate the saved topology before layout code indexes into slotmaps.
+    ///
+    /// Persistence files are user-visible and may be old, truncated, or manually edited. Loading
+    /// malformed topology must return a useful error instead of panicking later through indexing.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for (&space, activation) in &self.activations {
+            for (kind, id) in [
+                ("active", activation.current()),
+                ("previous", activation.previous()),
+            ] {
+                if id.is_some_and(|id| {
+                    !self.contains(id)
+                        || (kind == "active" && self.space(id) != Some(space))
+                        || (kind == "previous" && Some(id) == activation.current())
+                }) {
+                    return Err(format!(
+                        "native space {} has an invalid {kind} workspace",
+                        space.get()
+                    ));
+                }
+            }
+            if activation.remembered().is_some_and(|id| !self.contains(id)) {
+                return Err(format!(
+                    "native space {} remembers a missing workspace",
+                    space.get()
+                ));
+            }
+        }
+
+        for &(workspace, space) in &self.catalog {
+            if !self.activations.contains_key(&space) {
+                return Err(format!(
+                    "workspace {workspace:?} for native space {} is not indexed",
+                    space.get()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A saved store, parsed: the workspace store, and the topology the core is seeded from.
+pub(crate) struct LoadedWorkspaces {
+    pub(crate) store: WorkspaceStore,
+    pub(crate) topology: SavedTopology,
+}
+
+impl<'de> Deserialize<'de> for LoadedWorkspaces {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let saved = SavedStore::deserialize(deserializer)?;
         let workspaces =
             Catalog::parse(saved.workspaces, saved.order).map_err(serde::de::Error::custom)?;
+        let topology = SavedTopology {
+            catalog: workspaces.order().iter().map(|&id| (id, workspaces[id].space)).collect(),
+            activations: saved.active_workspace_per_space,
+        };
         let store = WorkspaceStore {
             workspaces,
             single_display: saved.single_display,
-            activations: saved.active_workspace_per_space,
+            activations: HashMap::default(),
             settings: VirtualWorkspaceSettings::default(),
             layout_settings: LayoutSettings::default(),
         };
-        Ok(store)
+        Ok(LoadedWorkspaces { store, topology })
+    }
+}
+
+impl LoadedWorkspaces {
+    /// Runs the load-time checks on the saved topology (normalizing, then validating it), and
+    /// gives the store its copy of the activations: until the store's topology reads move onto
+    /// the core (slice 2b), it holds them beside the core, which its tripwire holds agreeing.
+    pub(crate) fn checked(mut self) -> Result<LoadedWorkspaces, String> {
+        let store = &self.store;
+        self.topology.migrate_legacy_activation(|id| {
+            store.workspaces.get(id).and_then(|workspace| workspace.home.space())
+        });
+        self.topology.validate()?;
+        self.store.activations = self.topology.activations.clone();
+        Ok(self)
     }
 }
 
@@ -1374,56 +1528,6 @@ impl WorkspaceStore {
                 let name = self.available_name(workspace.space, base);
                 self.workspaces[id].name = name;
             }
-        }
-    }
-
-    /// Normalizes a loaded store's activations, at load, before the store joins a window store:
-    /// it writes the activations directly, and the joined shadow takes the whole store when it
-    /// does ([`crate::model::window_store::joined_core`]).
-    pub(crate) fn migrate_legacy_activation(&mut self) {
-        let spaces: Vec<_> = self.activations.keys().copied().collect();
-        for space in spaces {
-            let mut activation = self.activations[&space];
-            let activation = &mut activation;
-            if let Some(id) = activation.current()
-                && self.workspaces.get(id).is_some_and(|workspace| {
-                    workspace.space != space && workspace.home.space() == Some(space)
-                })
-            {
-                // A Space showing a workspace that moved away remembers it and shows its own
-                // first one, if it has one.
-                let previous = activation.previous();
-                *activation = match self
-                    .workspaces
-                    .order()
-                    .iter()
-                    .copied()
-                    .find(|id| self.workspaces[*id].space == space)
-                {
-                    Some(current) => SpaceActivation::Showing {
-                        current,
-                        previous,
-                        remembered: Some(id),
-                    },
-                    None => {
-                        if let Some(previous) = previous {
-                            warn!(
-                                space = space.get(),
-                                ?previous,
-                                "workspace-load: normalized: dropped navigation history on a Space showing nothing"
-                            );
-                        }
-                        SpaceActivation::Vacant { remembered: Some(id) }
-                    }
-                };
-            }
-            if let SpaceActivation::Showing { current, previous, .. } = activation
-                && *previous == Some(*current)
-            {
-                *previous = None;
-            }
-            let migrated = *activation;
-            self.activations.insert(space, migrated);
         }
     }
 
@@ -1821,44 +1925,19 @@ impl WorkspaceStore {
         spaces
     }
 
-    /// Validate the serialized workspace graph before layout code indexes into slotmaps.
-    ///
-    /// Persistence files are user-visible and may be old, truncated, or manually edited. Loading
-    /// malformed topology must return a useful error instead of panicking later through indexing.
-    pub(crate) fn validate_persisted_topology(&self) -> Result<(), String> {
-        for (&space, activation) in &self.activations {
-            for (kind, id) in [
-                ("active", activation.current()),
-                ("previous", activation.previous()),
-            ] {
-                if id.is_some_and(|id| {
-                    !self.workspaces.contains_key(id)
-                        || (kind == "active" && self.workspace_space(id) != Some(space))
-                        || (kind == "previous" && Some(id) == activation.current())
-                }) {
-                    return Err(format!(
-                        "native space {} has an invalid {kind} workspace",
-                        space.get()
-                    ));
-                }
-            }
-            if activation.remembered().is_some_and(|id| !self.workspaces.contains_key(id)) {
-                return Err(format!(
-                    "native space {} remembers a missing workspace",
-                    space.get()
-                ));
-            }
+    /// The store's topology in its saved shape: the store's own copy, which the core shadows
+    /// until the store's topology reads move onto the core (slice 2b).
+    pub(crate) fn topology(&self) -> SavedTopology {
+        SavedTopology {
+            catalog: self.workspaces.order().iter().map(|&id| (id, self[id].space)).collect(),
+            activations: self.activations.clone(),
         }
+    }
 
-        for (workspace, entry) in &self.workspaces {
-            if !self.activations.contains_key(&entry.space) {
-                return Err(format!(
-                    "workspace {workspace:?} for native space {} is not indexed",
-                    entry.space.get()
-                ));
-            }
-        }
-        Ok(())
+    /// Validate the workspace graph before layout code indexes into slotmaps (as a loaded file's
+    /// is, [`SavedTopology::validate`]).
+    pub(crate) fn validate_persisted_topology(&self) -> Result<(), String> {
+        self.topology().validate()
     }
 
     /// Moves `old_space`'s workspaces onto `new_space` and returns the workspaces that were
@@ -2666,6 +2745,16 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
+
+    /// `saved`, a saved store, loaded and checked as a file's is.
+    fn load_store(saved: &str) -> LoadedWorkspaces {
+        ron::from_str::<LoadedWorkspaces>(saved).unwrap().checked().unwrap()
+    }
+
+    /// `store` as it is saved, its topology written from `windows`' core.
+    fn save_store(store: &WorkspaceStore, windows: &OwnedWindows) -> String {
+        ron::ser::to_string(&store.saved(windows.view().core_workspaces())).unwrap()
+    }
     use crate::actor::app::WindowId;
     use crate::model::window_store::OwnedWindows;
     use crate::model::{HiddenWindowPlacement, HideCorner};
@@ -2757,8 +2846,12 @@ mod tests {
             plan,
         );
         // Loading before the first screen snapshot must preserve independent names.
-        let saved = serde_json::to_string(&store).unwrap();
-        let mut loaded: WorkspaceStore = serde_json::from_str(&saved).unwrap();
+        let saved = serde_json::to_string(&store.saved(windows.view().core_workspaces())).unwrap();
+        let mut loaded = serde_json::from_str::<LoadedWorkspaces>(&saved)
+            .unwrap()
+            .checked()
+            .unwrap()
+            .store;
         let plan = loaded.plan_settings_names(&settings, true).unwrap();
         loaded.apply_settings(
             &mut windows.view_mut(),
@@ -2824,7 +2917,7 @@ mod tests {
         assert_eq!(store.active_workspace(b), Some(original));
         // Rediscovery must retain a non-default assignment even on another display.
         let assigned = catalog[1];
-        let mut windows = OwnedWindows::joining(&store);
+        let mut windows = OwnedWindows::joining(&store.topology());
         let window = WindowId::new(90, 1);
         store.assign_window_to_workspace(&mut windows.view_mut(), b, window, assigned);
         assert_eq!(
@@ -2881,7 +2974,7 @@ mod tests {
                 }
             }
             let ids: Vec<_> = store.catalog().collect();
-            let mut windows = OwnedWindows::joining(&store);
+            let mut windows = OwnedWindows::joining(&store.topology());
             windows.view_mut().assign_window_to_workspace(WindowId::new(90, 1), ids[3]);
             windows.view_mut().assign_window_to_workspace(WindowId::new(90, 2), ids[4]);
             let context = WorkspaceContext {
@@ -4005,12 +4098,13 @@ mod tests {
     fn a_store_saved_before_the_catalog_type_loads_and_saves_unchanged() {
         // Written by the code before Catalog: two Spaces, two workspaces each.
         let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
-        let store: WorkspaceStore = ron::from_str(saved).unwrap();
+        let LoadedWorkspaces { store, topology } = load_store(saved);
+        let windows = OwnedWindows::joining(&topology);
         assert_eq!(store.workspaces.order().len(), 4);
         assert_eq!(store.workspaces.len(), 4);
         // Unchanged but for upstream's `display_manually_selected`, written on every workspace.
         assert_eq!(
-            ron::ser::to_string(&store).unwrap(),
+            save_store(&store, &windows),
             saved.replace(
                 ",rule_overridden:",
                 ",display_manually_selected:false,rule_overridden:"
@@ -4061,7 +4155,7 @@ mod tests {
         let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
         let broken = saved.replace(",(idx:4,version:1)]", "]");
         assert_ne!(broken, saved);
-        let error = ron::from_str::<WorkspaceStore>(&broken).unwrap_err().to_string();
+        let error = ron::from_str::<LoadedWorkspaces>(&broken).err().unwrap().to_string();
         assert!(error.contains("is not indexed"), "{error}");
     }
 
@@ -4082,7 +4176,7 @@ mod tests {
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let mut windows = OwnedWindows::joining(&store);
+        let mut windows = OwnedWindows::joining(&store.topology());
         let spaces = [SpaceId::new(71), SpaceId::new(72), SpaceId::new(73)];
         for space in spaces {
             store.ensure_space_initialized(&mut windows.view_mut(), space);
@@ -4221,7 +4315,7 @@ mod tests {
                 ..Default::default()
             };
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-            let mut windows = OwnedWindows::joining(&store);
+            let mut windows = OwnedWindows::joining(&store.topology());
             for _ in 0..8 {
                 let visible: Vec<SpaceId> =
                     spaces.iter().copied().filter(|_| draw(2) == 0).collect();
@@ -4264,7 +4358,7 @@ mod tests {
                 ..Default::default()
             };
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-            let mut windows = OwnedWindows::joining(&store);
+            let mut windows = OwnedWindows::joining(&store.topology());
             store.ensure_visible_spaces(&mut windows.view_mut(), &[shown, vacant], 2, |_| None);
             (store, windows)
         };
@@ -4284,7 +4378,7 @@ mod tests {
                 store.workspace_divergences(windows.view().core_workspaces()),
                 vec![]
             );
-            ron::ser::to_string(&store).unwrap()
+            save_store(&store, &windows)
         };
         assert_eq!(saved_after_remap(false), saved_after_remap(true));
     }
@@ -4297,7 +4391,7 @@ mod tests {
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let mut windows = OwnedWindows::joining(&store);
+        let mut windows = OwnedWindows::joining(&store.topology());
         let (a, b) = (SpaceId::new(61), SpaceId::new(62));
         let ids: Vec<_> = store
             .listed_after_init(&mut windows.view_mut(), a)
@@ -4322,10 +4416,10 @@ mod tests {
             vec![]
         );
         // A store saved and loaded starts in agreement with a window store joining it.
-        let loaded: WorkspaceStore = ron::from_str(&ron::ser::to_string(&store).unwrap()).unwrap();
-        let joined = OwnedWindows::joining(&loaded);
+        let loaded = load_store(&save_store(&store, &windows));
+        let joined = OwnedWindows::joining(&loaded.topology);
         assert_eq!(
-            loaded.workspace_divergences(joined.view().core_workspaces()),
+            loaded.store.workspace_divergences(joined.view().core_workspaces()),
             vec![]
         );
         // A write around the store is caught.
@@ -4349,7 +4443,7 @@ mod tests {
         let ids = store.listed_after_init(&mut windows.view_mut(), space);
         let mut reversed = store.workspace_ids(space);
         reversed.reverse();
-        let serialized = ron::ser::to_string(&store).unwrap();
+        let serialized = save_store(&store, &windows);
         let current = format!(
             "order:{}",
             ron::ser::to_string(store.workspaces.order()).unwrap()
@@ -4358,8 +4452,7 @@ mod tests {
             "workspaces_by_space:{}",
             ron::ser::to_string(&HashMap::from_iter([(space, reversed.clone())])).unwrap()
         );
-        let restored: WorkspaceStore =
-            ron::from_str(&serialized.replace(&current, &legacy)).unwrap();
+        let restored = load_store(&serialized.replace(&current, &legacy)).store;
         assert_eq!(restored.workspace_ids(space), reversed);
         assert_eq!(restored.catalog().collect::<Vec<_>>(), reversed);
         assert_eq!(restored[ids[0].0].name, ids[0].1);

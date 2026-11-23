@@ -22,7 +22,7 @@ use rift_wm::common::config::{Config, config_file, restore_file};
 use rift_wm::common::log;
 use rift_wm::common::util::execute_startup_commands;
 use rift_wm::ipc;
-use rift_wm::layout_engine::LayoutEngine;
+use rift_wm::layout_engine::{LayoutEngine, StartingLayout};
 use rift_wm::model::tx_store::WindowTxStore;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
@@ -220,11 +220,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
                     "Could not restore master file at {}; starting with a fresh layout: {error:#}",
                     path.display()
                 );
-                LayoutEngine::new(&config.virtual_workspaces, &config.settings.layout)
+                StartingLayout::new(&config.virtual_workspaces, &config.settings.layout)
             }
         }
     } else {
-        LayoutEngine::new(&config.virtual_workspaces, &config.settings.layout)
+        StartingLayout::new(&config.virtual_workspaces, &config.settings.layout)
     };
     let mut stores = rift_wm::model::Stores::joining(layout);
     if let Err(error) = stores.finish_loading(&config.virtual_workspaces, &config.settings.layout) {

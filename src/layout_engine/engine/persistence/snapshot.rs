@@ -43,8 +43,9 @@ pub(super) struct PersistedLayout {
     workspace_layouts: LegacyWorkspaceLayouts,
     floating: FloatingManager,
     floating_positions: Box<ron::value::RawValue>,
+    /// The saved store, and the topology the core is seeded from.
     #[serde(rename = "virtual_workspace_manager")]
-    pub(super) workspaces: WorkspaceStore,
+    pub(super) loaded: LoadedWorkspaces,
     #[serde(default)]
     space_display_map: HashMap<SpaceId, Option<String>>,
     #[serde(default)]
@@ -63,7 +64,7 @@ struct PersistedLayoutRef<'a> {
     floating: &'a FloatingManager,
     floating_positions: &'a FloatingPositionStore,
     #[serde(rename = "virtual_workspace_manager")]
-    workspaces: &'a WorkspaceStore,
+    workspaces: SavedStoreRef<'a>,
     space_display_map: &'a HashMap<SpaceId, Option<String>>,
     display_last_space: &'a HashMap<String, SpaceId>,
     #[serde(flatten)]
@@ -97,15 +98,14 @@ impl PersistedLayout {
                 CURRENT_SCHEMA_VERSION,
             ));
         }
-        persisted.workspaces.migrate_legacy_activation();
-        persisted
-            .workspaces
-            .validate_persisted_topology()
+        persisted.loaded = persisted
+            .loaded
+            .checked()
             .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
         // Unknown preview-only metadata (including display_fallback) is ignored
         // by serde. Keep its workspace identity rather than guessing whether it
         // has since become intentional user state.
-        persisted.workspaces.normalize_loaded_names();
+        persisted.loaded.store.normalize_loaded_names();
         persisted.migrate_workspace_layouts()?;
         if let Some((window, _)) = persisted.identities.windows.iter().find(|(_, saved)| {
             !saved.width.is_finite()
@@ -117,7 +117,7 @@ impl PersistedLayout {
         }
         let positions = persisted.migrate_floating_positions()?;
         positions
-            .validate_persisted(&persisted.workspaces)
+            .validate_persisted(&persisted.loaded.store)
             .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
         persisted.resolve_locations(positions);
         Ok(persisted)
@@ -125,7 +125,7 @@ impl PersistedLayout {
 
     fn migrate_workspace_layouts(&mut self) -> anyhow::Result<()> {
         for ((space, id), state) in std::mem::take(&mut self.workspace_layouts.map) {
-            let workspace = self.workspaces.workspaces.get_mut(id).ok_or_else(|| {
+            let workspace = self.loaded.store.workspaces.get_mut(id).ok_or_else(|| {
                 anyhow::anyhow!(
                     "invalid workspace layouts: layout state references missing workspace {id:?}"
                 )
@@ -142,7 +142,8 @@ impl PersistedLayout {
             }
             workspace.layout_state = state;
         }
-        self.workspaces
+        self.loaded
+            .store
             .validate_layouts()
             .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))
     }
@@ -166,7 +167,8 @@ impl PersistedLayout {
         let mut positions = FloatingPositionStore::default();
         for ((space, workspace, window), frame) in legacy.positions {
             if self
-                .workspaces
+                .loaded
+                .store
                 .workspaces
                 .get(workspace)
                 .is_none_or(|owner| owner.space != space)
@@ -202,8 +204,8 @@ impl PersistedLayout {
                 });
             }
         }
-        for workspace in self.workspaces.catalog().collect::<Vec<_>>() {
-            let entry = &mut self.workspaces[workspace];
+        for workspace in self.loaded.store.catalog().collect::<Vec<_>>() {
+            let entry = &mut self.loaded.store[workspace];
             let members: Vec<_> = (entry.layout_state.all_layouts())
                 .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
                 .collect();
@@ -241,8 +243,8 @@ impl PersistedLayout {
         }
     }
 
-    pub(super) fn into_engine(self) -> LayoutEngine {
-        LayoutEngine {
+    pub(super) fn into_engine(self) -> StartingLayout {
+        let engine = LayoutEngine {
             scroll_boundary: None,
             native_layouts: HashMap::default(),
             native_reconcile_batch: None,
@@ -253,7 +255,7 @@ impl PersistedLayout {
             focused_window: None,
             window_layout_constraints: Default::default(),
             app_min_sizes: Default::default(),
-            workspaces: self.workspaces,
+            workspaces: self.loaded.store,
             layout_settings: LayoutSettings::default(),
             space_display_map: self.space_display_map,
             display_last_space: self.display_last_space,
@@ -261,6 +263,10 @@ impl PersistedLayout {
                 pending: self.pending,
                 ..PersistenceState::default()
             },
+        };
+        StartingLayout {
+            engine,
+            topology: self.loaded.topology,
         }
     }
 }
@@ -308,7 +314,7 @@ impl LayoutEngine {
             schema_version: CURRENT_SCHEMA_VERSION,
             floating: &self.floating.persisted_view(floating.positioned_windows()),
             floating_positions: &floating,
-            workspaces: &self.workspaces,
+            workspaces: self.workspaces.saved(window_store.core_workspaces()),
             space_display_map: &self.space_display_map,
             display_last_space: &self.display_last_space,
             identities: &identities,

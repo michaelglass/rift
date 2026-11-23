@@ -86,10 +86,11 @@ impl LayoutEngine {
     }
 
     /// Load the master snapshot used for process startup and report its persisted coverage.
-    pub fn load_for_startup_restore(path: PathBuf) -> anyhow::Result<Self> {
+    pub fn load_for_startup_restore(path: PathBuf) -> anyhow::Result<StartingLayout> {
         let snapshot = PersistedLayout::read(&path)?;
         let schema_version = snapshot.schema_version;
-        let mut engine = snapshot.into_engine();
+        let mut layout = snapshot.into_engine();
+        let engine = &mut layout.engine;
         engine.await_topology();
         let unavailable_windows = engine.discard_unmatchable_startup_candidates(
             |window, id| {
@@ -109,7 +110,7 @@ impl LayoutEngine {
             unavailable_windows_ignored = unavailable_windows,
             "Loaded persisted layout for startup restore"
         );
-        Ok(engine)
+        Ok(layout)
     }
 
     /// Hold every saved destination until `resolve_saved_spaces` has proven it.
@@ -119,7 +120,7 @@ impl LayoutEngine {
             self.workspaces.workspaces.values().map(|workspace| workspace.space).collect();
     }
 
-    pub(crate) fn deserialize_from_str(buf: &str) -> anyhow::Result<Self> {
+    pub(crate) fn deserialize_from_str(buf: &str) -> anyhow::Result<StartingLayout> {
         Ok(PersistedLayout::parse(buf)?.into_engine())
     }
 

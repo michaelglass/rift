@@ -7,7 +7,7 @@ impl PersistedLayout {
     /// SpaceIds even though startup already repaired the live engine; display identity bridges
     /// that interval until the next master save.
     fn entry_for_space(&self, engine: &LayoutEngine, space: SpaceId) -> Option<SpaceId> {
-        let saved_spaces = self.workspaces.layout_spaces();
+        let saved_spaces = self.loaded.store.layout_spaces();
         Some(space).filter(|space| saved_spaces.contains(space)).or_else(|| {
             engine
                 .display_uuid_for_space(space)
@@ -47,7 +47,7 @@ impl PersistedLayout {
         &self,
         engine: &LayoutEngine,
     ) -> anyhow::Result<Vec<(VirtualWorkspaceId, VirtualWorkspaceId)>> {
-        let sources: Vec<_> = self.workspaces.catalog().collect();
+        let sources: Vec<_> = self.loaded.store.catalog().collect();
         let targets: Vec<_> = engine.workspaces.catalog().collect();
         if sources.len() != targets.len() {
             anyhow::bail!("saved and current catalogs have different workspace counts");
@@ -55,7 +55,7 @@ impl PersistedLayout {
         Ok(sources
             .into_iter()
             .zip(targets)
-            .filter(|(source, _)| self.workspaces[*source].active_layout().is_some())
+            .filter(|(source, _)| self.loaded.store[*source].active_layout().is_some())
             .collect())
     }
 
@@ -64,7 +64,7 @@ impl PersistedLayout {
         engine: &LayoutEngine,
         request: RestoreRequest,
     ) -> anyhow::Result<SpaceId> {
-        let saved_spaces = self.workspaces.layout_spaces();
+        let saved_spaces = self.loaded.store.layout_spaces();
         let preferred = match request.source {
             RestoreSource::SavedActiveSpace => (self.saved_active_space())
                 .filter(|space| saved_spaces.contains(space))
@@ -95,7 +95,7 @@ impl PersistedLayout {
         request: RestoreRequest,
         source_space: SpaceId,
     ) -> anyhow::Result<Vec<(VirtualWorkspaceId, VirtualWorkspaceId)>> {
-        let sources = self.workspaces.workspace_ids(source_space);
+        let sources = self.loaded.store.workspace_ids(source_space);
         let targets = engine.workspaces.workspace_ids(request.active_space);
         let mappings: Vec<_> = match request.scope {
             RestoreScope::Space | RestoreScope::Displays => {
@@ -116,7 +116,8 @@ impl PersistedLayout {
                 let source = match request.source {
                     // A portable workspace file represents what was active when it was saved.
                     RestoreSource::SavedActiveSpace => self
-                        .workspaces
+                        .loaded
+                        .store
                         .active_workspace(source_space)
                         .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?,
                     // A master file represents the complete workspace catalog. Restoring S must
@@ -139,7 +140,7 @@ impl PersistedLayout {
         };
         if mappings
             .iter()
-            .any(|(source, _)| self.workspaces.workspaces[*source].active_layout().is_none())
+            .any(|(source, _)| self.loaded.store.workspaces[*source].active_layout().is_none())
         {
             return Err(anyhow::anyhow!("saved workspace layout is incomplete"));
         }
@@ -175,7 +176,7 @@ impl LayoutEngine {
         };
         let actives: Vec<_> = (pairs.iter())
             .filter_map(|(source, space)| {
-                let source_active = snapshot.workspaces.active_workspace(*source)?;
+                let source_active = snapshot.loaded.store.active_workspace(*source)?;
                 let (_, active) = mappings.iter().find(|(source, _)| *source == source_active)?;
                 Some((*space, *active))
             })
@@ -185,7 +186,8 @@ impl LayoutEngine {
         self.persistence.pending.retain(|_, saved| !targets.contains(&saved.workspace));
         for &(source, target) in &mappings {
             let saved = snapshot
-                .workspaces
+                .loaded
+                .store
                 .workspaces
                 .remove(source)
                 .expect("workspace sources were validated before installation");

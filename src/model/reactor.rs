@@ -19,12 +19,12 @@ pub struct Stores {
 }
 
 impl Stores {
-    /// A layout engine (fresh, or loaded from a saved layout) and the core's workspaces joining
-    /// its workspace store.
-    pub fn joining(layout_engine: crate::layout_engine::LayoutEngine) -> Stores {
-        let workspaces = crate::model::window_store::joined_core(layout_engine.workspaces());
+    /// A layout engine (new, or loaded from a saved layout) and the core's workspaces seeded
+    /// from the topology it starts with.
+    pub fn joining(layout: crate::layout_engine::StartingLayout) -> Stores {
+        let workspaces = crate::model::window_store::joined_core(&layout.topology);
         Stores {
-            layout: crate::actor::reactor::managers::LayoutManager { layout_engine },
+            layout: crate::actor::reactor::managers::LayoutManager { layout_engine: layout.engine },
             state: RiftState {
                 workspaces,
                 ..RiftState::default()

@@ -5,7 +5,7 @@ use super::*;
 use crate::actor::app::WindowInfo;
 use crate::common::config::LayoutMode;
 use crate::layout_engine::systems::WindowQuery;
-use crate::layout_engine::{LayoutEvent, LayoutSystemKind};
+use crate::layout_engine::{LayoutEvent, LayoutSystemKind, StartingLayout};
 use crate::model::VirtualWorkspace;
 use crate::model::virtual_workspace::WorkspaceTransferReason;
 use crate::model::window_store::OwnedWindows;
@@ -95,10 +95,15 @@ fn session(settings: &VirtualWorkspaceSettings, spaces: &[(SpaceId, &str, &[Wind
     engine.serialize_to_string(store.view())
 }
 
+/// `saved` loaded, and the core seeded from its topology.
+fn load(saved: &str) -> (LayoutEngine, OwnedWindows) {
+    let StartingLayout { engine, topology } = LayoutEngine::deserialize_from_str(saved).unwrap();
+    (engine, OwnedWindows::joining(&topology))
+}
+
 fn boot(settings: &VirtualWorkspaceSettings, saved: &str) -> (LayoutEngine, OwnedWindows) {
-    let mut engine = LayoutEngine::deserialize_from_str(saved).unwrap();
+    let (mut engine, mut store) = load(saved);
     engine.await_topology();
-    let mut store = OwnedWindows::joining(engine.workspaces());
     engine
         .finish_loading(&mut store.view_mut(), settings, &LayoutSettings::default())
         .unwrap();
@@ -232,7 +237,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
             .iter()
             .for_each(|w| open(&mut engine, &mut store.view_mut(), id, *w));
         let saved = engine.serialize_to_string(store.view());
-        let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
+        let (loaded, _) = load(&saved);
         let ron_of = |engine: &LayoutEngine| ron::ser::to_string(&engine.workspaces[id]).unwrap();
         assert_eq!(ron_of(&loaded), ron_of(&engine));
 
@@ -252,16 +257,16 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     for version in [None, Some(1), Some(2)] {
         let header = version.map(|v| format!("\"schema_version\":{v},")).unwrap_or_default();
         let old = LEGACY_V2.replacen("\"schema_version\":2,", &header, 1);
-        let mut loaded = LayoutEngine::deserialize_from_str(&old).unwrap();
+        let (mut loaded, joined) = load(&old);
         let id = loaded.workspaces.active_workspace(SpaceId::new(901)).unwrap();
         assert_eq!(loaded.workspaces[id].layout_mode, LayoutMode::Stack);
         assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 2);
         assert_eq!(loaded.workspaces[id].last_focused(), Some(win(9, 2)));
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
         assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 1);
-        let canonical = loaded.serialize_to_string(OwnedWindows::default().view());
+        let canonical = loaded.serialize_to_string(joined.view());
         assert!(!canonical.contains("\"workspace_layouts\":"));
-        let reloaded = LayoutEngine::deserialize_from_str(&canonical).unwrap();
+        let (reloaded, _) = load(&canonical);
         assert_eq!(reloaded.persistence.pending[&win(9, 3)].workspace, id);
         assert_eq!(
             reloaded.persistence.pending[&win(9, 3)].frame,
@@ -278,16 +283,15 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         WorkspaceTransferReason::DisplayDeparture,
     );
     let replacement = engine.workspaces.active_workspace(a);
-    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space()).unwrap();
+    let saved = engine.serialize_to_string(store.view());
+    let current = &saved[activations_at(&saved)];
     let old = ron::ser::to_string(&HashMap::from_iter([
         (a, (None::<VirtualWorkspaceId>, moved)),
         (b, (None, engine.workspaces.active_workspace(b).unwrap())),
     ]))
     .unwrap();
-    let file = engine
-        .serialize_to_string(OwnedWindows::default().view())
-        .replacen(&current, &old, 1);
-    let loaded = LayoutEngine::deserialize_from_str(&file).unwrap();
+    let file = saved.replacen(current, &old, 1);
+    let (loaded, _) = load(&file);
     assert_eq!(loaded.workspaces.active_workspace(a), replacement);
     assert_eq!(
         loaded.workspaces.active_workspace_per_space()[&a].remembered(),
@@ -296,7 +300,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
 
     // Validation: a bad file fails whole and leaves the live engine exactly as it was.
     let good = session(&per_display, &[(a, "x", &[w1])]);
-    let id = LayoutEngine::deserialize_from_str(&good).unwrap().workspaces.workspace_ids(a)[0];
+    let id = load(&good).0.workspaces.workspace_ids(a)[0];
     let negative = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(-1.0, 1.0));
     assert_rejected(
         &good.replacen("width:800.0", "width:-1.0", 1),
@@ -404,7 +408,7 @@ fn single_display_restore_keeps_the_surviving_desktops_catalog() {
         }
         engine.update_space_display(current, Some("display"));
         let expected = engine.workspaces.workspace_ids(current);
-        let saved = engine.serialize_to_string(OwnedWindows::default().view());
+        let saved = engine.serialize_to_string(store.view());
         let (mut engine, mut store) = boot(&settings, &saved);
         resolve(&mut engine, &mut store.view_mut(), &[(current, "display")], &[(
             "display",
@@ -584,8 +588,7 @@ fn a_saved_topology_seeds_the_core_it_was_saved_from() {
             let saving = topology_of(&store.core);
             shapes.extend(saving.1.iter().map(|(_, activation)| shape(activation)));
             let saved = engine.serialize_to_string(store.view());
-            let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
-            let joined = OwnedWindows::joining(loaded.workspaces());
+            let (_, joined) = load(&saved);
             assert_eq!(topology_of(&joined.core), saving, "{mode}, seed {seed}");
         }
         assert_eq!(shapes.len(), 6, "{mode}: the draws reach only {shapes:?}");
@@ -612,9 +615,8 @@ fn fixture_state(mode: &str) -> (LayoutEngine, OwnedWindows) {
     (engine, store)
 }
 
-/// `file` with its saved activations in Space order: written from a hash map, their order is the
-/// map's, so two writers agree on the activations as a map, not on their order.
-fn activations_in_order(file: &str) -> String {
+/// Where `file` holds its saved activations (the map, braces and all).
+fn activations_at(file: &str) -> std::ops::Range<usize> {
     let key = "active_workspace_per_space:";
     let start = file.find(key).expect("a saved store has its activations") + key.len();
     let mut depth = 0;
@@ -630,12 +632,19 @@ fn activations_in_order(file: &str) -> String {
                 (depth == 0).then_some(at + 1)
             })
             .unwrap();
-    let activations: BTreeMap<SpaceId, ron::Value> = ron::from_str(&file[start..end]).unwrap();
+    start..end
+}
+
+/// `file` with its saved activations in Space order: written from a hash map, their order is the
+/// map's, so two writers agree on the activations as a map, not on their order.
+fn activations_in_order(file: &str) -> String {
+    let at = activations_at(file);
+    let activations: BTreeMap<SpaceId, ron::Value> = ron::from_str(&file[at.clone()]).unwrap();
     format!(
         "{}{}{}",
-        &file[..start],
+        &file[..at.start],
         ron::ser::to_string(&activations).unwrap(),
-        &file[end..]
+        &file[at.end..]
     )
 }
 
@@ -653,8 +662,7 @@ fn files_saved_before_the_topology_boundary_load_and_are_written_alike() {
         ("shared", include_str!("fixtures/saved-before-2a-shared.ron")),
     ] {
         let (engine, store) = fixture_state(mode);
-        let loaded = LayoutEngine::deserialize_from_str(file).unwrap();
-        let joined = OwnedWindows::joining(loaded.workspaces());
+        let (_, joined) = load(file);
         assert_eq!(topology_of(&joined.core), topology_of(&store.core), "{mode}");
         let saved = engine.serialize_to_string(store.view());
         assert_eq!(

@@ -863,7 +863,7 @@ fn resizing_during_a_native_space_switch_preserves_both_workspace_catalogs() {
     let mut base = sample(vec![screen(1, "left", 1)]);
     base.inventory.get_mut("left").unwrap().push(SpaceId::new(2));
     let initial = rig.tick(0, Some(base.clone())).unwrap();
-    let mut reactor = Reactor::new_for_test(crate::layout_engine::LayoutEngine::new(
+    let mut reactor = Reactor::new_for_test(crate::layout_engine::StartingLayout::new(
         &Default::default(),
         &Default::default(),
     ));
@@ -891,7 +891,7 @@ fn removing_native_desktops_during_display_changes_keeps_one_workspace_catalog()
         ..Default::default()
     };
     let mut rig = Rig::new();
-    let mut reactor = Reactor::new_for_test(crate::layout_engine::LayoutEngine::new(
+    let mut reactor = Reactor::new_for_test(crate::layout_engine::StartingLayout::new(
         &settings,
         &Default::default(),
     ));

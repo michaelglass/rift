@@ -7,14 +7,14 @@ use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
-use crate::layout_engine::{LayoutCommand, LayoutEngine};
+use crate::layout_engine::LayoutCommand;
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 impl Reactor {
-    pub fn new_for_test(layout: LayoutEngine) -> Reactor {
+    pub fn new_for_test(layout: crate::layout_engine::StartingLayout) -> Reactor {
         // Simulated reactors must not query the live WindowServer session.
         crate::sys::event::TEST_MOUSE_STATE
             .with(|state| state.set(Some(crate::sys::event::MouseState::Up)));
@@ -324,7 +324,7 @@ pub fn test_reactor() -> Reactor {
 pub fn test_reactor_with_workspace_settings(
     workspace_settings: &crate::common::config::VirtualWorkspaceSettings,
 ) -> Reactor {
-    Reactor::new_for_test(LayoutEngine::new(
+    Reactor::new_for_test(crate::layout_engine::StartingLayout::new(
         workspace_settings,
         &crate::common::config::LayoutSettings::default(),
     ))

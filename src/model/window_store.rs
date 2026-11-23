@@ -9,7 +9,6 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
 use crate::model::drag::Session;
 use crate::model::reactor::WindowState;
-use crate::model::virtual_workspace::WorkspaceStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -658,15 +657,17 @@ impl WindowsMut<'_> {
     }
 }
 
-/// The core's workspaces joining `workspaces`, the live workspace store they are built beside:
-/// told the store's whole catalog, in order, and every Space's activation.
-pub(crate) fn joined_core(workspaces: &WorkspaceStore) -> crate::roc_twin::TwinnedWorkspaces {
+/// The core's workspaces seeded from `saved`, the topology the stores start with: told its whole
+/// catalog, in order, and every Space's activation.
+pub(crate) fn joined_core(
+    saved: &crate::model::virtual_workspace::SavedTopology,
+) -> crate::roc_twin::TwinnedWorkspaces {
     let mut core = crate::roc_twin::TwinnedWorkspaces::default();
     let mut topology = TopologyChanges(&mut core);
-    for (id, space) in workspaces.catalog().map(|id| (id, workspaces[id].space)) {
+    for &(id, space) in saved.catalog() {
         topology.created(id, space);
     }
-    for (&space, activation) in workspaces.active_workspace_per_space() {
+    for (&space, activation) in saved.activations() {
         topology.activation(space, Some(activation.to_core()));
     }
     core
@@ -683,11 +684,11 @@ pub(crate) struct OwnedWindows {
 
 #[cfg(test)]
 impl OwnedWindows {
-    /// The two halves, the core joining `workspaces`.
-    pub(crate) fn joining(workspaces: &WorkspaceStore) -> OwnedWindows {
+    /// The two halves, the core seeded from `saved`.
+    pub(crate) fn joining(saved: &crate::model::virtual_workspace::SavedTopology) -> OwnedWindows {
         OwnedWindows {
             records: WindowStore::default(),
-            core: joined_core(workspaces),
+            core: joined_core(saved),
         }
     }
 
@@ -3843,7 +3844,7 @@ mod tests {
             ),
         ];
         for (case, (from_side, to_side, assigned, claimed)) in cases.into_iter().enumerate() {
-            let mut store = OwnedWindows::joining(&workspaces);
+            let mut store = OwnedWindows::joining(&workspaces.topology());
             setup(&mut store, from, from_side);
             setup(&mut store, to, to_side);
             store.view_mut().transfer_persistent_window_metadata(from, to);

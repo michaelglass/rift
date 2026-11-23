@@ -8,14 +8,15 @@ use objc2_core_foundation::{CGRect, CGSize};
 pub use rift_protocol::{RestoreScope, RestoreSource};
 use serde::{Deserialize, Serialize};
 
-use super::{FloatingManager, LayoutEngine};
+use super::{FloatingManager, LayoutEngine, StartingLayout};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings, WorkspaceMode};
 use crate::layout_engine::LayoutSystem;
 use crate::model::reactor::WindowState;
+use crate::model::virtual_workspace::{LoadedWorkspaces, SavedStoreRef};
 use crate::model::window_store::{Windows, WindowsMut};
-use crate::model::{AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WorkspaceStore};
+use crate::model::{AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId};
 use crate::sys::screen::SpaceId;
 
 static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
