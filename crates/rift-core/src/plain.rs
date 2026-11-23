@@ -19,6 +19,13 @@ pub struct WindowId {
     pub idx: u32,
 }
 
+/// A point on the screens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,

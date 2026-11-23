@@ -163,6 +163,12 @@ pub(crate) fn window_free(
     })
 }
 
+/// A point, as the plain questions carry it.
+#[cfg(feature = "roc-core")]
+pub(crate) fn point(point: objc2_core_foundation::CGPoint) -> rift_core::plain::Point {
+    rift_core::plain::Point { x: point.x, y: point.y }
+}
+
 /// A window with its app, as the plain questions carry it.
 #[cfg(feature = "roc-core")]
 pub(crate) fn window(window: crate::actor::app::WindowId) -> rift_core::plain::WindowId {

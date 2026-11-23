@@ -7,8 +7,8 @@ mod facts;
 
 use facts::{Coin, rust, typed};
 use rift_core::modes::Topology;
-use rift_core::plain::{WindowId, wire};
-use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery, Quarantine};
+use rift_core::plain::{Point, WindowId, wire};
+use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery, Quarantine, Target};
 use rift_core::topology::{
     DiscoveryStanding, Displays, EventClass, Incoming, MissionControl, Standing,
 };
@@ -212,6 +212,63 @@ fn the_roc_core_quarantines_events_as_the_rust_core_does() {
                 wire::encode_verdict,
             );
             let expected = rust(question.answer(), wire::encode_verdict);
+            (format!("{question:?}"), roc, expected)
+        },
+    );
+}
+
+/// A target display's answer as words: the display and its Space, or why there is none.
+fn target(answer: Result<(u64, u64), rift_core::topology::NoTarget>) -> Vec<u64> {
+    use rift_core::topology::NoTarget;
+    match answer {
+        Ok((display, space)) => vec![0, display, space],
+        Err(NoTarget::DisplayNotFound) => vec![1],
+        Err(NoTarget::SpaceUnavailable) => vec![2],
+    }
+}
+
+#[test]
+fn the_roc_core_finds_a_target_display_as_the_rust_core_does() {
+    // A few origins (screen centers, one of them -0.0 against 0.0), so the source's and the
+    // current center often coincide; each origin finds a display, with or without a Space.
+    let origins = [
+        None,
+        Some(Point { x: 0.0, y: 0.0 }),
+        Some(Point { x: -0.0, y: 0.0 }),
+        Some(Point { x: 500.0, y: 400.5 }),
+        Some(Point { x: 1500.0, y: -400.0 }),
+    ];
+    typed(
+        "topology",
+        "target_display",
+        Rng(0x7A26_0000_0000_0043),
+        |rng, blank| {
+            let pick = |rng: &mut Rng| origins[rng.below(origins.len() as u64) as usize];
+            let source_center = pick(rng);
+            let current = pick(rng);
+            let found: Vec<_> = origins
+                .iter()
+                .map(|_| {
+                    rng.chance(80)
+                        .then(|| (rng.below(3), rng.chance(80).then(|| 10 + rng.below(3))))
+                })
+                .collect();
+            let found_at = |origin: Option<Point>| {
+                found[origins.iter().position(|o| *o == origin).expect("an origin")]
+            };
+            let screen_keys: Vec<_> = (0..1 + rng.below(3))
+                .map(|_| pick(rng))
+                .chain([source_center, current])
+                .collect();
+            let actives: Vec<bool> = (0..3).map(|_| rng.chance(70)).collect();
+            let question = Target {
+                source_center,
+                current_center: blank.fact(rng, current),
+                screen: blank.answers(rng, screen_keys, found_at),
+                active: blank.answers(rng, [10, 11, 12], |space| actives[(space - 10) as usize]),
+            };
+            let roc = rust(rift_core_roc::topology::target_display(question.clone()), target);
+            let expected = rust(question.answer(), target);
             (format!("{question:?}"), roc, expected)
         },
     );

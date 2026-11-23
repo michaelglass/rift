@@ -229,6 +229,31 @@ pub fn quarantines(topology: crate::modes::Topology, class: impl FnOnce() -> Eve
     }
 }
 
+/// Why a display selector reaches no display to act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoTarget {
+    /// No display is where the selector points.
+    DisplayNotFound,
+    /// The display it points at has no Space, or its Space is not active.
+    SpaceUnavailable,
+}
+
+/// The display a selector names, and its active Space. The selector is looked up (`screen`:
+/// the display and its Space) from an origin: the source Space's display's center, else the
+/// current display's center (asked only then). The display's Space must be active (asked only
+/// for a display with a Space).
+pub fn target_display<P: Copy, D, S: Copy>(
+    source_center: Option<P>,
+    current_center: impl FnOnce() -> Option<P>,
+    screen: impl FnOnce(Option<P>) -> Option<(D, Option<S>)>,
+    active: impl FnOnce(S) -> bool,
+) -> Result<(D, S), NoTarget> {
+    let origin = source_center.or_else(current_center);
+    let (display, space) = screen(origin).ok_or(NoTarget::DisplayNotFound)?;
+    let space = space.filter(|&space| active(space)).ok_or(NoTarget::SpaceUnavailable)?;
+    Ok((display, space))
+}
+
 /// The windows whose app rules an activation re-applies, by app in the order their first
 /// window is seen: the tracked windows live on a Space that just became active whose admission
 /// can still be reconciled.
@@ -262,10 +287,10 @@ pub fn app_rule_candidates<V, S: PartialEq, W: Copy, P: Copy + PartialEq>(
 pub mod plain {
     use super::{
         Admission, DiscoveredSpace, DiscoveryStanding, Displays, EventClass, Incoming,
-        MissionControl, Standing,
+        MissionControl, NoTarget, Standing,
     };
     use crate::modes::Topology;
-    use crate::plain::{Answers, Fact, Reading, Unasked, WindowId};
+    use crate::plain::{Answers, Fact, Point, Reading, Unasked, WindowId};
 
     /// [`super::discovered_space`]: the window's Spaces, whether a Space is fullscreen or a
     /// display's, its recorded Space and what the platform resolves for it.
@@ -334,6 +359,32 @@ pub mod plain {
         }
     }
 
+    /// [`super::target_display`]: the current display's center (asked only without the
+    /// source's), the display found from an origin (one word) and its Space, whether a Space is
+    /// active.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Target {
+        pub source_center: Option<Point>,
+        pub current_center: Fact<Option<Point>>,
+        pub screen: Answers<Option<Point>, Option<(u64, Option<u64>)>>,
+        pub active: Answers<u64, bool>,
+    }
+
+    impl Target {
+        pub const FACTS: &[&str] = &["current_center", "screen", "active"];
+
+        pub fn answer(&self) -> Result<Result<(u64, u64), NoTarget>, Unasked> {
+            let reading = Reading::new();
+            let answer = super::target_display(
+                self.source_center,
+                || reading.fact(&self.current_center, 0, None),
+                |origin| reading.about(&self.screen, &origin, 1, None),
+                |space| reading.about(&self.active, &space, 2, false),
+            );
+            reading.answer(answer)
+        }
+    }
+
     /// [`super::admit_space_snapshot`]: it asks for no fact.
     #[derive(Debug, Clone, PartialEq)]
     pub struct Admit {
@@ -381,6 +432,34 @@ pub mod plain {
 mod tests {
     use super::*;
     use crate::plain::WindowId;
+
+    #[test]
+    fn a_target_display_is_found_from_the_source_else_the_current_center_with_an_active_space() {
+        let found = |at: Option<u32>| at.map(|at| (at, Some(at * 10)));
+        let active = |space: u32| space != 20;
+        assert_eq!(
+            target_display(Some(1), || panic!("not asked"), found, active),
+            Ok((1, 10))
+        );
+        assert_eq!(target_display(None, || Some(3), found, active), Ok((3, 30)));
+        assert_eq!(
+            target_display(None, || None, found, |_| panic!("not asked")),
+            Err(NoTarget::DisplayNotFound)
+        );
+        assert_eq!(
+            target_display(Some(2), || panic!("not asked"), found, active),
+            Err(NoTarget::SpaceUnavailable)
+        );
+        assert_eq!(
+            target_display(
+                Some(1),
+                || None,
+                |_| Some((1, None::<u32>)),
+                |_| panic!("not asked")
+            ),
+            Err(NoTarget::SpaceUnavailable)
+        );
+    }
 
     #[test]
     fn an_unsettled_topology_quarantines_window_reports_and_window_input() {

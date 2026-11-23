@@ -514,7 +514,9 @@ pub mod focus {
 /// The topology decisions (`rift_core::topology`) decided by the Roc core.
 pub mod topology {
     use rift_core::plain::{Unasked, WindowId};
-    use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery, Quarantine};
+    use rift_core::topology::plain::{
+        Admit, Candidates, Discovered, Discovery, Quarantine, Target,
+    };
     use rift_core::topology::{Admission, DiscoveredSpace};
 
     use crate::{abi, boundary, host};
@@ -535,6 +537,14 @@ pub mod topology {
         let host = host();
         let question = boundary::quarantine_question(question, &host);
         boundary::verdict_answer(unsafe { abi::roc_quarantines(question) })
+    }
+
+    pub fn target_display(
+        question: Target,
+    ) -> Result<Result<(u64, u64), rift_core::topology::NoTarget>, Unasked> {
+        let host = host();
+        let question = boundary::target_question(question, &host);
+        boundary::target_answer(unsafe { abi::roc_target_display(question) })
     }
 
     /// It asks for no fact.

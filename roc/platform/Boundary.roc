@@ -222,6 +222,31 @@ Boundary := [].{
 	## Whether to quarantine an event: whether the topology is settled, the event's class.
 	QuarantineQuestion := { topology : TopologyNow, class : FactEventClass }
 
+	## A point on the screens.
+	Point := { x : F64, y : F64 }
+
+	## Where a display selector is looked up from, if anywhere.
+	LookupOrigin := [At(Point), Nowhere]
+
+	FactOrigin := [Asked(LookupOrigin), Unasked]
+
+	## A display a selector found (one word) and its Space.
+	FoundScreen := { display : U64, space : MaybeWord }
+
+	ScreenFound := [Found(FoundScreen), NotFound]
+
+	OriginScreen := { key : LookupOrigin, answer : ScreenFound }
+
+	TargetQuestion := { source_center : LookupOrigin, current_center : FactOrigin, screens : List(OriginScreen), active : List(WordBool) }
+
+	## A display and its active Space.
+	TargetSpace := { display : U64, space : U64 }
+
+	## The display a selector names, or why there is none.
+	Target := [Display(TargetSpace), DisplayNotFound, SpaceUnavailable]
+
+	TargetAnswer := [Decided(Target), Unasked(U64)]
+
 	FactSpace := [Asked(MaybeSpace), Unasked]
 
 	## Where an app inventory finds a window, by what the platform already knows of it.

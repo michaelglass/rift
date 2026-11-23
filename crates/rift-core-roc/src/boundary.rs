@@ -24,7 +24,7 @@ use rift_core::lifecycle::{
 use rift_core::main_window::{
     App, Initiator, MainWindowEvent, NativeFocus, Standing as MainStanding,
 };
-use rift_core::plain::{Answers, Fact, Nanos, Plain, Rect, RequestId, Unasked, WindowId};
+use rift_core::plain::{Answers, Fact, Nanos, Plain, Point, Rect, RequestId, Unasked, WindowId};
 use rift_core::topology::{
     self, Admission, DiscoveredSpace, DiscoveryStanding, Displays, Hold, MissionControl, Standing,
 };
@@ -713,6 +713,14 @@ fact!(
     }
 );
 fact!(
+    fact_origin,
+    Option<Point>,
+    BoundaryFactOrigin,
+    BoundaryFactOriginPayload,
+    BoundaryFactOriginTag,
+    |v, host| lookup_origin(v)
+);
+fact!(
     fact_known,
     Option<(i32, u64)>,
     BoundaryFactKnown,
@@ -1004,6 +1012,73 @@ pub(crate) fn quarantine_question(
         topology: topology_now(question.topology),
         class: fact_event_class(question.class, host),
     }
+}
+
+fn lookup_origin(origin: Option<Point>) -> abi::BoundaryLookupOrigin {
+    use abi::BoundaryLookupOriginTag as Tag;
+    match origin {
+        Some(Point { x, y }) => union!(
+            BoundaryLookupOrigin,
+            BoundaryLookupOriginPayload.at(abi::BoundaryPoint { x, y }),
+            Tag::At
+        ),
+        None => union!(
+            BoundaryLookupOrigin,
+            BoundaryLookupOriginPayload.nowhere,
+            Tag::Nowhere
+        ),
+    }
+}
+
+pub(crate) fn target_question(
+    question: topology::plain::Target,
+    host: &abi::RocHost,
+) -> abi::BoundaryTargetQuestion {
+    use abi::BoundaryScreenFoundTag as Tag;
+    let screens: Vec<_> = question
+        .screen
+        .0
+        .into_iter()
+        .map(|(origin, found)| abi::BoundaryOriginScreen {
+            key: lookup_origin(origin),
+            answer: match found {
+                Some((display, space)) => union!(
+                    BoundaryScreenFound,
+                    BoundaryScreenFoundPayload.found(abi::BoundaryFoundScreen {
+                        display,
+                        space: maybe_word(space),
+                    }),
+                    Tag::Found
+                ),
+                None => union!(
+                    BoundaryScreenFound,
+                    BoundaryScreenFoundPayload.not_found,
+                    Tag::NotFound
+                ),
+            },
+        })
+        .collect();
+    abi::BoundaryTargetQuestion {
+        source_center: lookup_origin(question.source_center),
+        current_center: fact_origin(question.current_center, host),
+        screens: list(&screens, host),
+        active: word_bools(question.active, host),
+    }
+}
+
+pub(crate) fn target_answer(
+    answer: abi::BoundaryTargetAnswer,
+) -> Result<Result<(u64, u64), topology::NoTarget>, Unasked> {
+    use abi::BoundaryTargetTag as Tag;
+    decision!(answer, BoundaryTargetAnswerTag, |target| match target.tag {
+        Tag::Display => {
+            // SAFETY: the tag says the payload is the display and its Space.
+            let found = unsafe { target.borrow_payload_display_unchecked() };
+            Ok((found.display, found.space))
+        }
+        Tag::DisplayNotFound => Err(topology::NoTarget::DisplayNotFound),
+        Tag::SpaceUnavailable => Err(topology::NoTarget::SpaceUnavailable),
+    })
 }
 
 fn maybe_space(space: Option<u64>) -> abi::BoundaryMaybeSpace {

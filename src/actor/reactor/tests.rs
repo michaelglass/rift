@@ -5370,6 +5370,33 @@ fn per_display_workspace_to_display_moves_contents_to_corresponding_ordinal() {
     assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
 }
 
+/// A display whose Space rift is deactivated on is no target: moving a workspace there leaves
+/// it (and its window) where it was.
+#[test]
+fn a_workspace_is_not_moved_to_a_display_whose_space_is_inactive() {
+    let (mut apps, mut reactor, a, b) = two_displays(Default::default());
+    let window = WindowId::new(1, 1);
+    reactor.space_state.command_space = Some(b);
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
+        ReactorCommand::ToggleSpaceActivated,
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(!reactor.is_space_active(b));
+    assert!(reactor.is_space_active(a));
+    reactor.space_state.command_space = Some(a);
+    let source = reactor.state.windows.workspace_for_window(window);
+
+    reactor.handle_loop_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(a));
+    assert_eq!(reactor.state.windows.workspace_for_window(window), source);
+}
+
 #[test]
 fn moving_workspace_direction_wrap_is_opt_in() {
     let horizontal = [

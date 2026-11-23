@@ -7120,23 +7120,60 @@ impl Reactor {
         selector: &DisplaySelector,
         wrap: bool,
     ) -> Result<(ScreenInfo, SpaceId), Refusal> {
-        let origin = self
-            .space_state
-            .screen_by_space(source)
-            .map(|screen| screen.frame.mid())
-            .or_else(|| self.current_screen_center());
-        let screen = if wrap {
-            self.screen_for_selector_wrapping(selector, origin)
-        } else {
-            self.screen_for_selector(selector, origin)
+        let source_center =
+            self.space_state.screen_by_space(source).map(|screen| screen.frame.mid());
+        let (current_center, screens, active) =
+            (Asked::new(), AskedAbout::new(), AskedAbout::new());
+        let target = rift_core::topology::target_display(
+            source_center,
+            || current_center.ask(|| self.current_screen_center()),
+            |origin| {
+                screens
+                    .ask(origin, |origin| {
+                        if wrap {
+                            self.screen_for_selector_wrapping(selector, origin)
+                        } else {
+                            self.screen_for_selector(selector, origin)
+                        }
+                    })
+                    .map(|screen| (screen, screen.space))
+            },
+            |space| active.ask(space, |space| self.is_space_active(space)),
+        );
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::topology::plain::Target;
+
+            use crate::roc_path::point;
+            let question = Target {
+                source_center: source_center.map(point),
+                current_center: current_center.fact(|center| center.map(point)),
+                screen: screens.answers(
+                    |origin| origin.map(point),
+                    |screen| {
+                        screen.map(|screen| {
+                            (u64::from(screen.id.as_u32()), screen.space.map(Word::word))
+                        })
+                    },
+                ),
+                active: active.answers(Word::word, |active| active),
+            };
+            let answer = target
+                .as_ref()
+                .map(|(screen, space)| (u64::from(screen.id.as_u32()), space.word()))
+                .map_err(|why| *why);
+            let roc = rift_core_roc::topology::target_display(question.clone());
+            crate::roc_path::check("target_display", Target::FACTS, &question, &answer, roc);
         }
-        .cloned()
-        .ok_or(Refusal::Warn("target display not found"))?;
-        let space = screen
-            .space
-            .filter(|space| self.is_space_active(*space))
-            .ok_or(Refusal::Warn("target space unavailable"))?;
-        Ok((screen, space))
+        match target {
+            Ok((screen, space)) => Ok((screen.clone(), space)),
+            Err(rift_core::topology::NoTarget::DisplayNotFound) => {
+                Err(Refusal::Warn("target display not found"))
+            }
+            Err(rift_core::topology::NoTarget::SpaceUnavailable) => {
+                Err(Refusal::Warn("target space unavailable"))
+            }
+        }
     }
 
     /// The display `selector` names, whether it is active, and the window focusing it would

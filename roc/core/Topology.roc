@@ -9,6 +9,9 @@ WindowId : { pid : I32, idx : U32 }
 ## A Space, or none.
 MaybeSpace : [Space(U64), NoSpace]
 
+## A point on the screens, or none.
+Origin : [At({ x : F64, y : F64 }), Nowhere]
+
 ## Where an app inventory finds a window, by what the platform already knows of it.
 Standing : [RecoveringFullscreen, Untracked, Tracked]
 
@@ -118,6 +121,59 @@ Topology := [].{
 					Other => Ok(False)
 				}
 			}
+		}
+
+	## The display a selector names, and its active Space. Facts: 0 the current display's
+	## center (asked only without the source's), 1 the display found from an origin and its
+	## Space, 2 whether a Space is active (asked only for a display with a Space).
+	target_display : Origin, Fact(Origin), List({ key : Origin, answer : [Found({ display : U64, space : [Some(U64), Nothing] }), NotFound] }), Answers(U64, Bool) -> Read([Display({ display : U64, space : U64 }), DisplayNotFound, SpaceUnavailable])
+	target_display = |source_center, current_center, screens, active| {
+		origin =
+			match source_center {
+				At(center) => At(center)
+				Nowhere => ask(current_center, 0)?
+			}
+		found = ask_origin(screens, origin, 1)?
+		match found {
+			NotFound => Ok(DisplayNotFound)
+			Found(screen) =>
+				match screen.space {
+					Nothing => Ok(SpaceUnavailable)
+					Some(space) => {
+						is_active = ask_word(active, space, 2)?
+						if is_active Ok(Display({ display: screen.display, space })) else Ok(SpaceUnavailable)
+					}
+				}
+		}
+	}
+
+	## The `fact`-th fact's answer for an origin.
+	ask_origin : List({ key : Origin, answer : v }), Origin, U64 -> Read(v)
+	ask_origin = |answers, key, fact| {
+		var $found = Err(Unasked(fact))
+		for entry in answers {
+			match $found {
+				Err(Unasked(_)) => if (same_origin(entry.key, key)) { $found = Ok(entry.answer) } else {}
+				Ok(_) => {}
+			}
+		}
+		$found
+	}
+
+	## Whether two origins are the same point (or both none).
+	same_origin : Origin, Origin -> Bool
+	same_origin = |a, b|
+		match a {
+			At(p) =>
+				match b {
+					At(q) => p.x == q.x and p.y == q.y
+					Nowhere => False
+				}
+			Nowhere =>
+				match b {
+					At(_) => False
+					Nowhere => True
+				}
 		}
 
 	or_space : MaybeSpace, MaybeSpace -> MaybeSpace
