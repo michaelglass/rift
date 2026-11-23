@@ -1963,10 +1963,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         match focus {
             Focus::Select(window) => FocusResult::selection(self.select_window(layout, window)),
             Focus::Ascend => {
-                FocusResult::selection({ self.move_focus(layout, Direction::Up).0.is_some() })
+                FocusResult::selection(self.move_focus(layout, Direction::Up).0.is_some())
             }
             Focus::Descend => {
-                FocusResult::selection({ self.move_focus(layout, Direction::Down).0.is_some() })
+                FocusResult::selection(self.move_focus(layout, Direction::Down).0.is_some())
             }
             Focus::Direction(direction) => {
                 FocusResult::movement(self.move_focus(layout, direction))
