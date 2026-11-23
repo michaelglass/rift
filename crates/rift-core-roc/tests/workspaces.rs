@@ -541,3 +541,110 @@ fn the_roc_core_emits_a_discovered_window_as_the_rust_core_does() {
         },
     );
 }
+
+/// The workspaces joined, kept between events: the Roc twin and the Rust workspaces take the
+/// same runs of changes, each run on one persistent model. The runs lean on what the step turns
+/// on: workspaces created twice, unknown ones named, a workspace succeeding itself, a shown one
+/// removed, and removals with windows and claims to hand on. After every change both must meet it
+/// the same way (accepted, or refused for the same reason) and keep the same catalog,
+/// activations, owners and windows per workspace.
+#[test]
+fn the_roc_workspaces_keep_the_joined_workspaces_between_events_as_the_rust_ones_do() {
+    use rift_core::workspaces::Workspaces;
+    use rift_core_roc::RocWorkspaces;
+    use rift_core_roc::workspaces::WorkspacesView;
+    let mut rng = Rng(0x0701_4ED0_0000_0039);
+    let before = AllocationCount::now();
+    let (mut steps, mut refused, mut handed) = (0, 0, 0);
+    for run in 0..400 {
+        let mut rust = Workspaces::<u64, u64, u64, u64>::default();
+        let mut roc = RocWorkspaces::default();
+        for step in 0..60 {
+            // Workspaces 1 to 6, mostly ones in the catalog; windows 1 to 8.
+            let catalog: Vec<u64> = rust.catalog().iter().map(|&(id, _)| id).collect();
+            let known = |rng: &mut Rng| match catalog.len() {
+                n if n > 0 && rng.chance(85) => catalog[rng.below(n as u64) as usize],
+                _ => 1 + rng.below(6),
+            };
+            let maybe = |rng: &mut Rng| rng.chance(60).then(|| known(rng));
+            let event = match rng.below(100) {
+                0..15 => WorkspacesEvent::Created {
+                    workspace: 1 + rng.below(6),
+                    space: rng.space(),
+                },
+                15..27 => {
+                    let workspace = known(&mut rng);
+                    WorkspacesEvent::Removed {
+                        workspace,
+                        successor: match rng.below(10) {
+                            0 => Successor::Into(workspace),
+                            1..=6 => Successor::Into(known(&mut rng)),
+                            _ => Successor::Unassign,
+                        },
+                    }
+                }
+                27..33 => WorkspacesEvent::Moved {
+                    workspace: known(&mut rng),
+                    space: rng.space(),
+                },
+                33..53 => WorkspacesEvent::Activated {
+                    space: rng.space(),
+                    activation: if rng.chance(70) {
+                        Activation::Showing {
+                            current: known(&mut rng),
+                            previous: maybe(&mut rng),
+                            remembered: maybe(&mut rng),
+                        }
+                    } else {
+                        Activation::Vacant { remembered: maybe(&mut rng) }
+                    },
+                },
+                53..60 => WorkspacesEvent::Cleared(rng.space()),
+                _ => WorkspacesEvent::Owned {
+                    window: 1 + rng.below(8),
+                    owned: match rng.below(100) {
+                        0..10 => Owned::Unowned,
+                        10..20 => Owned::Owner(Ownership::Held),
+                        20..70 => Owned::Owner(Ownership::Assigned(known(&mut rng))),
+                        _ => Owned::Owner(Ownership::Claimed {
+                            owner: 100 + rng.below(3),
+                            destination: if rng.chance(75) {
+                                Destination::Returns(known(&mut rng))
+                            } else {
+                                Destination::Nowhere
+                            },
+                        }),
+                    },
+                },
+            };
+            let owners_before = rust.owners().count();
+            let met = rust.step(event);
+            if met.is_err() {
+                refused += 1;
+            } else if matches!(event, WorkspacesEvent::Removed { .. }) && owners_before > 0 {
+                handed += 1;
+            }
+            assert_eq!(roc.step(event), met, "run {run} step {step}: {event:?}");
+            let expected = WorkspacesView {
+                catalog: rust.catalog().to_vec(),
+                activations: rust.activations().to_vec(),
+                owners: rust.owners().collect(),
+                windows: rust
+                    .catalog()
+                    .iter()
+                    .map(|&(workspace, _)| rust.windows_on(workspace).collect())
+                    .collect(),
+            };
+            assert_eq!(roc.view(), expected, "run {run} step {step}: after {event:?}");
+            steps += 1;
+        }
+    }
+    assert_eq!(
+        AllocationCount::now().live(),
+        before.live(),
+        "Roc allocations left live"
+    );
+    eprintln!(
+        "workspaces: {steps} kept-joined steps identical ({refused} refused, {handed} removals with owners), views compared after each"
+    );
+}

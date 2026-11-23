@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Owners : owners, Places : places, Mains : mains] for core : {
+		[Model : model, Windows : windows, Owners : owners, Places : places, Mains : mains, Joined : joined] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -59,6 +59,9 @@ platform ""
 			topology_init : {} -> places,
 			topology_step : places, TopologyEvent -> places,
 			topology_view : places -> { model : places, catalog : List(WorkspaceSpace), activations : List(SpaceActivation) },
+			workspaces_init : {} -> joined,
+			workspaces_step : joined, JoinedEvent -> { model : joined, outcome : Outcome },
+			workspaces_view : joined -> { model : joined, catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) },
 			mode_verdict : ModesQuestion -> ModeVerdict,
 			main_window_init : {} -> mains,
 			main_window_step : mains, MainWindowEvent -> { model : mains, focus : MaybeWord },
@@ -83,6 +86,10 @@ platform ""
 		"roc_topology_step": topology_step_for_host,
 		"roc_topology_view": topology_view_for_host,
 		"roc_topology_release": topology_release_for_host,
+		"roc_workspaces_init": workspaces_init_for_host,
+		"roc_workspaces_step": workspaces_step_for_host,
+		"roc_workspaces_view": workspaces_view_for_host,
+		"roc_workspaces_release": workspaces_release_for_host,
 		"roc_main_window_init": main_window_init_for_host,
 		"roc_main_window_step": main_window_step_for_host,
 		"roc_main_window_view": main_window_view_for_host,
@@ -138,7 +145,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
+import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, OwnershipQuestion, OwnershipView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, TopologyQuestion, TopologyView, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, OwnershipsStepped, OwnershipsViewed, TopologyEvent, WorkspaceSpace, SpaceActivation, TopologyViewed, JoinedEvent, Outcome, WorkspaceWindows, WorkspacesStepped, WorkspacesViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -393,6 +400,30 @@ topology_view_for_host = |boxed| {
 ## The host cannot release a `Box(Places)`: only Roc knows its layout.
 topology_release_for_host : Box(Places) -> {}
 topology_release_for_host = |_| {}
+
+## The workspaces joined (`rift_core::workspaces::Workspaces`), kept between events, empty.
+workspaces_init_for_host : {} -> Box(Joined)
+workspaces_init_for_host = |{}| Box.box((core.workspaces_init)({}))
+
+## A change to the joined workspaces: the workspaces after it (unchanged if refused), and what
+## the event met.
+workspaces_step_for_host : Box(Joined), JoinedEvent -> WorkspacesStepped(Joined)
+workspaces_step_for_host = |boxed, event| {
+	stepped = (core.workspaces_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), outcome: stepped.outcome }
+}
+
+## The catalog, every Space's activation, every owned window and each workspace's windows, and
+## the workspaces back unchanged.
+workspaces_view_for_host : Box(Joined) -> WorkspacesViewed(Joined)
+workspaces_view_for_host = |boxed| {
+	viewed = (core.workspaces_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), catalog: viewed.catalog, activations: viewed.activations, owners: viewed.owners, windows: viewed.windows }
+}
+
+## The host cannot release a `Box(Joined)`: only Roc knows its layout.
+workspaces_release_for_host : Box(Joined) -> {}
+workspaces_release_for_host = |_| {}
 
 ## Which window is the main one (`rift_core::main_window::MainWindows`), kept between events:
 ## no apps, no frontmost app, and no native focus reported yet.

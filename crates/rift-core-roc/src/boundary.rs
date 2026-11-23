@@ -2380,62 +2380,63 @@ pub(crate) fn joined_question(
     question: workspaces::plain::WorkspacesQuestion,
     host: &abi::RocHost,
 ) -> abi::BoundaryJoinedQuestion {
-    use abi::{BoundaryJoinedEventTag as Tag, BoundarySuccessorTag as Heir};
-    let events: Vec<_> = question
-        .events
-        .into_iter()
-        .map(|event| match event {
-            WorkspacesEvent::Created { workspace, space } => union!(
-                BoundaryJoinedEvent,
-                BoundaryJoinedEventPayload.created(workspace_space(workspace, space)),
-                Tag::Created
-            ),
-            WorkspacesEvent::Removed { workspace, successor } => union!(
-                BoundaryJoinedEvent,
-                BoundaryJoinedEventPayload.removed(abi::BoundaryWorkspaceRemoved {
-                    workspace,
-                    successor: match successor {
-                        Successor::Unassign => union!(
-                            BoundarySuccessor,
-                            BoundarySuccessorPayload.unassign,
-                            Heir::Unassign
-                        ),
-                        Successor::Into(heir) => union!(
-                            BoundarySuccessor,
-                            BoundarySuccessorPayload.into(heir),
-                            Heir::Into
-                        ),
-                    },
-                }),
-                Tag::Removed
-            ),
-            WorkspacesEvent::Moved { workspace, space } => union!(
-                BoundaryJoinedEvent,
-                BoundaryJoinedEventPayload.moved(workspace_space(workspace, space)),
-                Tag::Moved
-            ),
-            WorkspacesEvent::Activated { space, activation: at } => union!(
-                BoundaryJoinedEvent,
-                BoundaryJoinedEventPayload.activated(space_activation(space, at)),
-                Tag::Activated
-            ),
-            WorkspacesEvent::Cleared(space) => {
-                union!(
-                    BoundaryJoinedEvent,
-                    BoundaryJoinedEventPayload.cleared(space),
-                    Tag::Cleared
-                )
-            }
-            WorkspacesEvent::Owned { window, owned: who } => {
-                union!(
-                    BoundaryJoinedEvent,
-                    BoundaryJoinedEventPayload.owned(owned(window, who)),
-                    Tag::Owned
-                )
-            }
-        })
-        .collect();
+    let events: Vec<_> = question.events.into_iter().map(joined_event).collect();
     abi::BoundaryJoinedQuestion { events: list(&events, host) }
+}
+
+/// A change to the joined workspaces.
+pub(crate) fn joined_event(event: WorkspacesEvent<u64, u64, u64, u64>) -> abi::BoundaryJoinedEvent {
+    use abi::{BoundaryJoinedEventTag as Tag, BoundarySuccessorTag as Heir};
+    match event {
+        WorkspacesEvent::Created { workspace, space } => union!(
+            BoundaryJoinedEvent,
+            BoundaryJoinedEventPayload.created(workspace_space(workspace, space)),
+            Tag::Created
+        ),
+        WorkspacesEvent::Removed { workspace, successor } => union!(
+            BoundaryJoinedEvent,
+            BoundaryJoinedEventPayload.removed(abi::BoundaryWorkspaceRemoved {
+                workspace,
+                successor: match successor {
+                    Successor::Unassign => union!(
+                        BoundarySuccessor,
+                        BoundarySuccessorPayload.unassign,
+                        Heir::Unassign
+                    ),
+                    Successor::Into(heir) => union!(
+                        BoundarySuccessor,
+                        BoundarySuccessorPayload.into(heir),
+                        Heir::Into
+                    ),
+                },
+            }),
+            Tag::Removed
+        ),
+        WorkspacesEvent::Moved { workspace, space } => union!(
+            BoundaryJoinedEvent,
+            BoundaryJoinedEventPayload.moved(workspace_space(workspace, space)),
+            Tag::Moved
+        ),
+        WorkspacesEvent::Activated { space, activation: at } => union!(
+            BoundaryJoinedEvent,
+            BoundaryJoinedEventPayload.activated(space_activation(space, at)),
+            Tag::Activated
+        ),
+        WorkspacesEvent::Cleared(space) => {
+            union!(
+                BoundaryJoinedEvent,
+                BoundaryJoinedEventPayload.cleared(space),
+                Tag::Cleared
+            )
+        }
+        WorkspacesEvent::Owned { window, owned: who } => {
+            union!(
+                BoundaryJoinedEvent,
+                BoundaryJoinedEventPayload.owned(owned(window, who)),
+                Tag::Owned
+            )
+        }
+    }
 }
 
 /// The joined workspaces Roc answered, read out and released.
@@ -2443,33 +2444,8 @@ pub(crate) fn from_joined(
     answer: abi::BoundaryJoinedView,
     host: &abi::RocHost,
 ) -> crate::workspaces::JoinedView {
-    use abi::BoundaryOutcomeTag as Tag;
     let view = crate::workspaces::JoinedView {
-        outcomes: answer
-            .outcomes
-            .as_slice()
-            .iter()
-            .map(|outcome| match outcome.tag {
-                Tag::Accepted => Ok(()),
-                // SAFETY (each arm): the tag says what the payload is.
-                Tag::Exists => Err(Refused::Exists(unsafe {
-                    *outcome.borrow_payload_exists_unchecked()
-                })),
-                Tag::Unknown => Err(Refused::Unknown(unsafe {
-                    *outcome.borrow_payload_unknown_unchecked()
-                })),
-                Tag::OwnSuccessor => Err(Refused::OwnSuccessor(unsafe {
-                    *outcome.borrow_payload_own_successor_unchecked()
-                })),
-                Tag::Shown => {
-                    let at = unsafe { outcome.borrow_payload_shown_unchecked() };
-                    Err(Refused::Shown {
-                        workspace: at.workspace,
-                        space: at.space,
-                    })
-                }
-            })
-            .collect(),
+        outcomes: answer.outcomes.as_slice().iter().map(from_outcome).collect(),
         catalog: from_catalog(&answer.catalog),
         activations: from_activations(&answer.activations),
         owners: from_owners(&answer.owners),
@@ -2483,6 +2459,31 @@ pub(crate) fn from_joined(
     // SAFETY: the view is Roc's answer, owned here and read in full above.
     unsafe { answer.decref(host) };
     view
+}
+
+/// What an event met: accepted, or why the workspaces refused it.
+fn from_outcome(outcome: &abi::BoundaryOutcome) -> Result<(), Refused<u64, u64>> {
+    use abi::BoundaryOutcomeTag as Tag;
+    match outcome.tag {
+        Tag::Accepted => Ok(()),
+        // SAFETY (each arm): the tag says what the payload is.
+        Tag::Exists => Err(Refused::Exists(unsafe {
+            *outcome.borrow_payload_exists_unchecked()
+        })),
+        Tag::Unknown => Err(Refused::Unknown(unsafe {
+            *outcome.borrow_payload_unknown_unchecked()
+        })),
+        Tag::OwnSuccessor => Err(Refused::OwnSuccessor(unsafe {
+            *outcome.borrow_payload_own_successor_unchecked()
+        })),
+        Tag::Shown => {
+            let at = unsafe { outcome.borrow_payload_shown_unchecked() };
+            Err(Refused::Shown {
+                workspace: at.workspace,
+                space: at.space,
+            })
+        }
+    }
 }
 
 // The core's events and effects.
@@ -3046,6 +3047,70 @@ impl Drop for TopologyBox {
     fn drop(&mut self) {
         // SAFETY: the box is this topology's and is never used again.
         unsafe { abi::roc_topology_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The workspaces joined, kept between events.
+
+/// The joined workspaces' box, which only Roc can read or free; only the `roc_workspaces_*`
+/// entries make and take one. Dropping it releases the workspaces.
+pub(crate) struct WorkspacesBox(abi::RocBox);
+
+impl WorkspacesBox {
+    pub(crate) fn empty() -> WorkspacesBox { WorkspacesBox(unsafe { abi::roc_workspaces_init() }) }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// A change to the workspaces: the workspaces after it (unchanged if refused), and what the
+    /// event met.
+    pub(crate) fn step(
+        self,
+        event: WorkspacesEvent<u64, u64, u64, u64>,
+    ) -> (WorkspacesBox, Result<(), Refused<u64, u64>>) {
+        // SAFETY: the box is these workspaces', given to the step; its successor comes back.
+        let stepped = unsafe { abi::roc_workspaces_step(self.into_raw(), joined_event(event)) };
+        (WorkspacesBox(stepped.model), from_outcome(&stepped.outcome))
+    }
+
+    /// The catalog, every Space's activation, every owned window and each catalogued
+    /// workspace's assigned windows.
+    pub(crate) fn view(
+        self,
+        host: &abi::RocHost,
+    ) -> (WorkspacesBox, crate::workspaces::WorkspacesView) {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_workspaces_view(self.into_raw()) };
+        let view = crate::workspaces::WorkspacesView {
+            catalog: from_catalog(&viewed.catalog),
+            activations: from_activations(&viewed.activations),
+            owners: from_owners(&viewed.owners),
+            windows: viewed
+                .windows
+                .as_slice()
+                .iter()
+                .map(|entry| entry.windows.as_slice().to_vec())
+                .collect(),
+        };
+        unsafe {
+            viewed.catalog.decref(host);
+            viewed.activations.decref(host);
+            viewed.owners.decref(host);
+            abi::decref_list_of_boundary_workspace_windows(viewed.windows, host);
+        }
+        (WorkspacesBox(viewed.model), view)
+    }
+}
+
+impl Drop for WorkspacesBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is these workspaces' and is never used again.
+        unsafe { abi::roc_workspaces_release(self.0) }
     }
 }
 

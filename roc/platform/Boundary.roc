@@ -675,6 +675,13 @@ Boundary := [].{
 	## each catalogued workspace's assigned windows, in catalog order.
 	JoinedView := { outcomes : List(Outcome), catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
 
+	## The joined workspaces after an event, and what the event met.
+	WorkspacesStepped(model) := { model : Box(model), outcome : Outcome }
+
+	## The joined workspaces, unchanged: the catalog, every Space's activation, every owned window
+	## and each catalogued workspace's assigned windows, in catalog order.
+	WorkspacesViewed(model) := { model : Box(model), catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
+
 	# The core's events and effects (`rift_core::Event`, `rift_core::Effect`).
 
 	Button := [Left, Right]

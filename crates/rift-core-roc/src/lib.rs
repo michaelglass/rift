@@ -316,6 +316,44 @@ impl RocTopology {
     }
 }
 
+/// The workspaces joined (`rift_core::workspaces::Workspaces`) kept in Roc between events: the
+/// catalog, what each Space shows and who places each window. Stepped beside the Rust
+/// workspaces, it must meet each event the same way (accepted, or refused for the same reason)
+/// and keep the same workspaces.
+pub struct RocWorkspaces {
+    joined: boundary::WorkspacesBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocWorkspaces {}
+
+impl Default for RocWorkspaces {
+    fn default() -> Self {
+        RocWorkspaces {
+            joined: boundary::WorkspacesBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocWorkspaces {
+    /// As `Workspaces::step`: what the event met (a refused event changes nothing).
+    pub fn step(
+        &mut self,
+        event: rift_core::workspaces::WorkspacesEvent<u64, u64, u64, u64>,
+    ) -> Result<(), rift_core::workspaces::Refused<u64, u64>> {
+        boundary::in_place(&mut self.joined, |joined| joined.step(event))
+    }
+
+    /// As `Workspaces::catalog`, `activations`, `owners` and `windows_on` for each catalogued
+    /// workspace.
+    pub fn view(&mut self) -> workspaces::WorkspacesView {
+        let host = &self.host;
+        boundary::in_place(&mut self.joined, |joined| joined.view(host))
+    }
+}
+
 /// Which window is the main one (`rift_core::main_window::MainWindows`) kept in Roc between
 /// events: every app by pid, the globally frontmost app and the native focus. Stepped beside the
 /// Rust machine, it must answer the same window to focus and hold the same state. Pids and
@@ -701,6 +739,16 @@ pub mod workspaces {
     #[derive(Debug, Clone, PartialEq)]
     pub struct JoinedView {
         pub outcomes: Vec<Result<(), Refused<u64, u64>>>,
+        pub catalog: Vec<(u64, u64)>,
+        pub activations: Vec<(u64, Activation<u64>)>,
+        pub owners: Vec<(u64, Ownership<u64, u64>)>,
+        pub windows: Vec<Vec<u64>>,
+    }
+
+    /// The joined workspaces kept between events (`RocWorkspaces::view`): catalog, activations,
+    /// owners, and each catalogued workspace's assigned windows in catalog order.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct WorkspacesView {
         pub catalog: Vec<(u64, u64)>,
         pub activations: Vec<(u64, Activation<u64>)>,
         pub owners: Vec<(u64, Ownership<u64, u64>)>,
