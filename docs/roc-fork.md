@@ -344,14 +344,31 @@ questions each way, no Roc allocation left live), and a planted Roc bug caught:
   46 us at 10, 100 and 1000 windows, compared after every topology change (rare: switches,
   moves) and every 32nd ownership change in a running Rift.
 
+**No getter initialises a Space (2026-11-23, the lead's ruling A).** A Space is initialised by
+the events that bring it: its exposure (`ensure_visible_spaces`) and a window placed on it (app
+rule placement, a window or workspace moved onto it). `list_workspaces`, `workspace_id_at` and
+`get_default_workspace` take `&self`; the list answers `Listing::Known(..) | NotYetKnown`, and the
+IPC state query (`serialize_state`, now `&self`) warns `workspace-unknown:` on `NotYetKnown`.
+`WorkspaceStore::initialized` names the state: showing a workspace, or (global mode) showing
+nothing with no workspace of its own and others to show. Proofs: a property test
+(`every_space_ensure_visible_spaces_exposes_is_initialised`, 400 stores, both modes, displays
+coming and going) and a test-time tripwire after every reactor event (every active screen's
+Space initialised); a planted `initialized` fails 401 lib tests. The property test found the one
+gap, and ruling A closed it: in global mode with more displays than workspaces, the first
+exposure left a display without a workspace with no activation at all; the first IPC query (the
+menu bar, `rift-cli`) then wrote `Vacant { remembered: None }` as a side effect. Now the exposure
+writes it. `remap_and_the_saved_store_do_not_depend_on_a_query_having_run` shows the remap and
+the saved store are the same with and without a query first (without the exposure fix, it and
+the property test fail).
+- **Upstream candidate (a small standalone PR against main):** a query's side effect changed
+  remap and the saved file. Upstream's workspace query initialises Spaces lazily; in global
+  mode with more displays than workspaces, whether a vacant display had an activation (so
+  whether `remap_space` carried it along, and what the saved layout held) depended on whether a
+  query had run first.
+
 **Next:**
-1. The getters that initialise lazily (the lead's ruling, its own slice): Spaces are initialised
-   at the events that bring them (exposure, a window placed on one); `list_workspaces`,
-   `workspace_id_at` and the rest become `&self` and answer a typed not-yet-known (the IPC list
-   warns with a stable prefix); a test proves every Space `ensure_visible_spaces` exposes is
-   initialised before a query sees it; an engine path that needs a Space initialised is a
-   writer and goes through the placement event. Then W4c (the window store answers ownership
-   from the core) and W4d (catalog and activations from the core, with the saved form).
+1. W4c (the window store answers ownership from the core) and W4d (catalog and activations from
+   the core, with the saved form).
 2. The core_geometry converters on the new layout trees.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
