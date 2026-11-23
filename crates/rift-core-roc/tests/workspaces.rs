@@ -14,8 +14,8 @@ use facts::{Coin, rust, typed};
 use rift_core::lifecycle::WorkspaceMode;
 use rift_core::plain::{Answers, wire};
 use rift_core::workspaces::plain::{
-    EligibleQuestion, EmitsQuestion, PreviousQuestion, ResolveQuestion, StepQuestion,
-    WorkspacesQuestion,
+    ClaimFlags, Claimant, EligibleQuestion, EmitsQuestion, FocusFollowsMouse, PreviousQuestion,
+    ResolveQuestion, StepQuestion, WorkspacesQuestion,
 };
 use rift_core::workspaces::{
     Activation, Destination, Owned, Ownership, Selector, SkipEmpty, Step, Successor,
@@ -38,6 +38,21 @@ impl Rng {
     fn below(&mut self, n: u64) -> u64 { self.next() % n }
 
     fn chance(&mut self, percent: u64) -> bool { self.below(100) < percent }
+
+    /// A claim's holder: one of three owners, either flag, and the id it claimed.
+    fn claimant(&mut self) -> Claimant {
+        Claimant {
+            owner: 100 + self.below(3),
+            flags: ClaimFlags {
+                focus_follows_mouse: if self.chance(50) {
+                    FocusFollowsMouse::Suppressed
+                } else {
+                    FocusFollowsMouse::Followed
+                },
+            },
+            original: 1 + self.below(8),
+        }
+    }
 
     fn mode(&mut self) -> WorkspaceMode {
         if self.chance(70) {
@@ -264,7 +279,7 @@ fn the_roc_core_steps_the_joined_workspaces_as_the_rust_core_does() {
                         15..25 => Owned::Owner(Ownership::Held),
                         25..65 => Owned::Owner(Ownership::Assigned(known(rng, &created))),
                         _ => Owned::Owner(Ownership::Claimed {
-                            owner: 100 + rng.below(3),
+                            owner: rng.claimant(),
                             destination: if rng.chance(70) {
                                 Destination::Returns(known(rng, &created))
                             } else {
@@ -340,7 +355,7 @@ fn the_roc_workspaces_keep_the_joined_workspaces_between_events_as_the_rust_ones
     let before = AllocationCount::now();
     let (mut steps, mut refused, mut handed) = (0, 0, 0);
     for run in 0..400 {
-        let mut rust = Workspaces::<u64, u64, u64, u64>::default();
+        let mut rust = Workspaces::<u64, u64, u64, Claimant>::default();
         let mut roc = RocWorkspaces::default();
         for step in 0..60 {
             // Workspaces 1 to 6, mostly ones in the catalog; windows 1 to 8.
@@ -390,7 +405,7 @@ fn the_roc_workspaces_keep_the_joined_workspaces_between_events_as_the_rust_ones
                         10..20 => Owned::Owner(Ownership::Held),
                         20..70 => Owned::Owner(Ownership::Assigned(known(&mut rng))),
                         _ => Owned::Owner(Ownership::Claimed {
-                            owner: 100 + rng.below(3),
+                            owner: rng.claimant(),
                             destination: if rng.chance(75) {
                                 Destination::Returns(known(&mut rng))
                             } else {

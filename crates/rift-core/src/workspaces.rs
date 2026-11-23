@@ -644,18 +644,40 @@ pub mod plain {
         }
     }
 
+    /// Who holds a claim, whole: the owner (the one part a decision reads), how it claimed, and
+    /// the id it claimed (which its release names across identity changes).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Claimant {
+        pub owner: u64,
+        pub flags: ClaimFlags,
+        pub original: u64,
+    }
+
+    /// What a claim asks of rift besides holding the window.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ClaimFlags {
+        pub focus_follows_mouse: FocusFollowsMouse,
+    }
+
+    /// Whether focus follows the mouse while the claimed window is focused.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FocusFollowsMouse {
+        Followed,
+        Suppressed,
+    }
+
     /// [`super::Workspaces::step`]: what each event of a run met (accepted, or refused) from
-    /// empty workspaces, and the workspaces they leave. Windows, workspaces, Spaces and owners
-    /// are one word each.
+    /// empty workspaces, and the workspaces they leave. Windows, workspaces and Spaces are one
+    /// word each; a claim's holder is a [`Claimant`].
     #[derive(Debug, Clone, PartialEq)]
     pub struct WorkspacesQuestion {
-        pub events: Vec<WorkspacesEvent<u64, u64, u64, u64>>,
+        pub events: Vec<WorkspacesEvent<u64, u64, u64, Claimant>>,
     }
 
     /// Each event's outcome, and the workspaces after the run.
     pub type WorkspacesAnswer = (
         Vec<Result<(), Refused<u64, u64>>>,
-        Workspaces<u64, u64, u64, u64>,
+        Workspaces<u64, u64, u64, Claimant>,
     );
 
     impl WorkspacesQuestion {

@@ -283,7 +283,12 @@ impl RocWorkspaces {
     /// As `Workspaces::step`: what the event met (a refused event changes nothing).
     pub fn step(
         &mut self,
-        event: rift_core::workspaces::WorkspacesEvent<u64, u64, u64, u64>,
+        event: rift_core::workspaces::WorkspacesEvent<
+            u64,
+            u64,
+            u64,
+            rift_core::workspaces::plain::Claimant,
+        >,
     ) -> Result<(), rift_core::workspaces::Refused<u64, u64>> {
         boundary::in_place(&mut self.joined, |joined| joined.step(event))
     }
@@ -669,7 +674,7 @@ pub mod workspaces {
         pub outcomes: Vec<Result<(), Refused<u64, u64>>>,
         pub catalog: Vec<(u64, u64)>,
         pub activations: Vec<(u64, Activation<u64>)>,
-        pub owners: Vec<(u64, Ownership<u64, u64>)>,
+        pub owners: Vec<(u64, Ownership<u64, rift_core::workspaces::plain::Claimant>)>,
         pub windows: Vec<Vec<u64>>,
     }
 
@@ -679,7 +684,7 @@ pub mod workspaces {
     pub struct WorkspacesView {
         pub catalog: Vec<(u64, u64)>,
         pub activations: Vec<(u64, Activation<u64>)>,
-        pub owners: Vec<(u64, Ownership<u64, u64>)>,
+        pub owners: Vec<(u64, Ownership<u64, rift_core::workspaces::plain::Claimant>)>,
         pub windows: Vec<Vec<u64>>,
     }
 

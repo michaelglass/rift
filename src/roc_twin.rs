@@ -334,7 +334,9 @@ impl TwinnedWorkspaces {
 
 /// A joined event with its windows, workspaces, Spaces and owners as words.
 #[cfg(feature = "roc-core")]
-fn plain_joined_event(event: JoinedEvent) -> WorkspacesEvent<u64, u64, u64, u64> {
+fn plain_joined_event(
+    event: JoinedEvent,
+) -> WorkspacesEvent<u64, u64, u64, rift_core::workspaces::plain::Claimant> {
     use rift_core::workspaces::{Owned, Successor};
 
     use crate::roc_path::Word;
@@ -392,14 +394,14 @@ fn plain_activation(
 #[cfg(feature = "roc-core")]
 fn plain_ownership(
     ownership: rift_core::workspaces::Ownership<VirtualWorkspaceId, Claimant>,
-) -> rift_core::workspaces::Ownership<u64, u64> {
+) -> rift_core::workspaces::Ownership<u64, rift_core::workspaces::plain::Claimant> {
     use rift_core::workspaces::{Destination, Ownership};
 
     use crate::roc_path::Word;
     match ownership {
         Ownership::Assigned(workspace) => Ownership::Assigned(workspace.word()),
         Ownership::Claimed { owner, destination } => Ownership::Claimed {
-            owner: owner.word(),
+            owner: owner.plain(),
             destination: match destination {
                 Destination::Returns(workspace) => Destination::Returns(workspace.word()),
                 Destination::Nowhere => Destination::Nowhere,

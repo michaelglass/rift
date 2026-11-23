@@ -97,7 +97,7 @@ WindowFacts : { manageability : [Manageable, Unmanageable], rule : [NoRule, Mana
 
 ## Who places each window, kept between events, keyed by window, so no window has two owners
 ## (`Workspaces.Ownerships`, written out: the platform needs the name here).
-Owners : Dict(U64, [Assigned(U64), Claimed({ owner : U64, destination : [Returns(U64), Nowhere] }), Held])
+Owners : Dict(U64, [Assigned(U64), Claimed({ owner : U64, flags : { focus_follows_mouse : [Followed, Suppressed] }, original : U64, destination : [Returns(U64), Nowhere] }), Held])
 
 ## The workspaces joined, kept between events: the catalog, what each Space shows and who places
 ## each window (`Workspaces.Joined`, written out: the platform needs the name here).

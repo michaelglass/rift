@@ -30,7 +30,11 @@ Destination : [Returns(U64), Nowhere]
 
 ## Who places a window, when somebody does: a workspace, an external owner, or (held under the
 ## user's hand, a workspace transfer having left it) nobody until the drop.
-Ownership : [Assigned(U64), Claimed({ owner : U64, destination : Destination }), Held]
+## A claim, whole: its owner (the one part a decision reads), how it claimed, the id it claimed,
+## and where the window returns when it ends.
+Claim : { owner : U64, flags : { focus_follows_mouse : [Followed, Suppressed] }, original : U64, destination : Destination }
+
+Ownership : [Assigned(U64), Claimed(Claim), Held]
 
 ## Who places each window, keyed by window, so no window has two owners; a window without
 ## an entry is unowned. Views give them in window order (`in_order`).
@@ -337,11 +341,11 @@ Workspaces := [].{
 						(Assigned(id), Unassign) if id == gone => {
 							$owners = $owners.remove(window)
 						}
-						(Claimed({ owner, destination: Returns(id) }), Into(heir)) if id == gone => {
-							$owners = $owners.insert(window, Claimed({ owner, destination: Returns(heir) }))
+						(Claimed(claim), Into(heir)) if claim.destination == Returns(gone) => {
+							$owners = $owners.insert(window, Claimed({ ..claim, destination: Returns(heir) }))
 						}
-						(Claimed({ owner, destination: Returns(id) }), Unassign) if id == gone => {
-							$owners = $owners.insert(window, Claimed({ owner, destination: Nowhere }))
+						(Claimed(claim), Unassign) if claim.destination == Returns(gone) => {
+							$owners = $owners.insert(window, Claimed({ ..claim, destination: Nowhere }))
 						}
 						_ => {}
 					}

@@ -623,7 +623,15 @@ Boundary := [].{
 	## Where a claimed window returns to when its claim ends.
 	Destination := [Returns(U64), Nowhere]
 
-	Claim := { owner : U64, destination : Destination }
+	## Whether focus follows the mouse while the claimed window is focused.
+	FocusFollowsMouse := [Followed, Suppressed]
+
+	## What a claim asks of rift besides holding the window.
+	ClaimFlags := { focus_follows_mouse : FocusFollowsMouse }
+
+	## A claim, whole: its owner (the one part a decision reads), how it claimed, the id it
+	## claimed, and where the window returns when it ends.
+	Claim := { owner : U64, flags : ClaimFlags, original : U64, destination : Destination }
 
 	## Who places a window.
 	Ownership := [Assigned(U64), Claimed(Claim), Held]

@@ -546,14 +546,22 @@ fn measure_workspaces_twin() {
             seed ^= seed << 17;
             seed
         };
-        let owned: Vec<WorkspacesEvent<u64, u64, u64, u64>> = (0..20_000)
+        let owned: Vec<WorkspacesEvent<u64, u64, u64, rift_core::workspaces::plain::Claimant>> = (0
+            ..20_000)
             .map(|_| {
                 let window = 1 + next() % windows;
                 let owned = match next() % 6 {
                     0 => Owned::Owner(Ownership::Held),
                     1 | 2 => Owned::Owner(Ownership::Assigned(1 + next() % 9)),
                     3 => Owned::Owner(Ownership::Claimed {
-                        owner: 1,
+                        owner: rift_core::workspaces::plain::Claimant {
+                            owner: 1,
+                            flags: rift_core::workspaces::plain::ClaimFlags {
+                                focus_follows_mouse:
+                                    rift_core::workspaces::plain::FocusFollowsMouse::Followed,
+                            },
+                            original: window,
+                        },
                         destination: Destination::Returns(1 + next() % 9),
                     }),
                     4 => Owned::Unowned,
@@ -562,23 +570,25 @@ fn measure_workspaces_twin() {
                 WorkspacesEvent::Owned { window, owned }
             })
             .collect();
-        let topology: Vec<WorkspacesEvent<u64, u64, u64, u64>> = (0..20_000)
-            .map(|_| match next() % 4 {
-                0 => WorkspacesEvent::Moved {
-                    workspace: 1 + next() % 9,
-                    space: 10 * (1 + next() % 3),
-                },
-                _ => WorkspacesEvent::Activated {
-                    space: 10 * (1 + next() % 3),
-                    activation: Activation::Showing {
-                        current: 1 + next() % 9,
-                        previous: Some(1 + next() % 9),
-                        remembered: None,
+        let topology: Vec<WorkspacesEvent<u64, u64, u64, rift_core::workspaces::plain::Claimant>> =
+            (0..20_000)
+                .map(|_| match next() % 4 {
+                    0 => WorkspacesEvent::Moved {
+                        workspace: 1 + next() % 9,
+                        space: 10 * (1 + next() % 3),
                     },
-                },
-            })
-            .collect();
-        let mut rust = Workspaces::<u64, u64, u64, u64>::default();
+                    _ => WorkspacesEvent::Activated {
+                        space: 10 * (1 + next() % 3),
+                        activation: Activation::Showing {
+                            current: 1 + next() % 9,
+                            previous: Some(1 + next() % 9),
+                            remembered: None,
+                        },
+                    },
+                })
+                .collect();
+        let mut rust =
+            Workspaces::<u64, u64, u64, rift_core::workspaces::plain::Claimant>::default();
         let mut roc = RocWorkspaces::default();
         let setup = (1..=9)
             .map(|workspace| WorkspacesEvent::Created {

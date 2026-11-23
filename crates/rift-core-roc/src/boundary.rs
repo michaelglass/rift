@@ -2202,7 +2202,9 @@ fn from_activations(
         .collect()
 }
 
-fn ownership(ownership: Ownership<u64, u64>) -> abi::BoundaryOwnership {
+use rift_core::workspaces::plain::{ClaimFlags, Claimant, FocusFollowsMouse};
+
+fn ownership(ownership: Ownership<u64, Claimant>) -> abi::BoundaryOwnership {
     use abi::{BoundaryDestinationTag as Destination_, BoundaryOwnershipTag as Tag};
     match ownership {
         Ownership::Held => union!(BoundaryOwnership, BoundaryOwnershipPayload.held, Tag::Held),
@@ -2216,7 +2218,14 @@ fn ownership(ownership: Ownership<u64, u64>) -> abi::BoundaryOwnership {
         Ownership::Claimed { owner, destination } => union!(
             BoundaryOwnership,
             BoundaryOwnershipPayload.claimed(abi::BoundaryClaim {
-                owner,
+                owner: owner.owner,
+                flags: abi::BoundaryClaimFlags {
+                    focus_follows_mouse: match owner.flags.focus_follows_mouse {
+                        FocusFollowsMouse::Followed => abi::BoundaryFocusFollowsMouse::Followed,
+                        FocusFollowsMouse::Suppressed => abi::BoundaryFocusFollowsMouse::Suppressed,
+                    },
+                },
+                original: owner.original,
                 destination: match destination {
                     Destination::Nowhere => union!(
                         BoundaryDestination,
@@ -2235,7 +2244,7 @@ fn ownership(ownership: Ownership<u64, u64>) -> abi::BoundaryOwnership {
     }
 }
 
-fn from_ownership(ownership: abi::BoundaryOwnership) -> Ownership<u64, u64> {
+fn from_ownership(ownership: abi::BoundaryOwnership) -> Ownership<u64, Claimant> {
     use abi::{BoundaryDestinationTag as Destination_, BoundaryOwnershipTag as Tag};
     match ownership.tag {
         Tag::Held => Ownership::Held,
@@ -2247,7 +2256,18 @@ fn from_ownership(ownership: abi::BoundaryOwnership) -> Ownership<u64, u64> {
             // SAFETY: the tag says the payload is the claim.
             let claim = unsafe { ownership.borrow_payload_claimed_unchecked() };
             Ownership::Claimed {
-                owner: claim.owner,
+                owner: Claimant {
+                    owner: claim.owner,
+                    flags: ClaimFlags {
+                        focus_follows_mouse: match claim.flags.focus_follows_mouse {
+                            abi::BoundaryFocusFollowsMouse::Followed => FocusFollowsMouse::Followed,
+                            abi::BoundaryFocusFollowsMouse::Suppressed => {
+                                FocusFollowsMouse::Suppressed
+                            }
+                        },
+                    },
+                    original: claim.original,
+                },
                 destination: match claim.destination.tag {
                     Destination_::Nowhere => Destination::Nowhere,
                     // SAFETY: the tag says the payload is the workspace.
@@ -2260,7 +2280,7 @@ fn from_ownership(ownership: abi::BoundaryOwnership) -> Ownership<u64, u64> {
     }
 }
 
-fn owned(window: u64, owned: Owned<u64, u64>) -> abi::BoundaryOwnershipEvent {
+fn owned(window: u64, owned: Owned<u64, Claimant>) -> abi::BoundaryOwnershipEvent {
     use abi::BoundaryOwnedTag as Tag;
     abi::BoundaryOwnershipEvent {
         window,
@@ -2277,7 +2297,7 @@ fn owned(window: u64, owned: Owned<u64, u64>) -> abi::BoundaryOwnershipEvent {
 
 fn from_owners(
     owners: &abi::RocListWith<abi::BoundaryWindowOwnership, false>,
-) -> Vec<(u64, Ownership<u64, u64>)> {
+) -> Vec<(u64, Ownership<u64, Claimant>)> {
     owners
         .as_slice()
         .iter()
@@ -2294,7 +2314,9 @@ pub(crate) fn joined_question(
 }
 
 /// A change to the joined workspaces.
-pub(crate) fn joined_event(event: WorkspacesEvent<u64, u64, u64, u64>) -> abi::BoundaryJoinedEvent {
+pub(crate) fn joined_event(
+    event: WorkspacesEvent<u64, u64, u64, Claimant>,
+) -> abi::BoundaryJoinedEvent {
     use abi::{BoundaryJoinedEventTag as Tag, BoundarySuccessorTag as Heir};
     match event {
         WorkspacesEvent::Created { workspace, space } => union!(
@@ -2868,7 +2890,7 @@ impl WorkspacesBox {
     /// event met.
     pub(crate) fn step(
         self,
-        event: WorkspacesEvent<u64, u64, u64, u64>,
+        event: WorkspacesEvent<u64, u64, u64, Claimant>,
     ) -> (WorkspacesBox, Result<(), Refused<u64, u64>>) {
         // SAFETY: the box is these workspaces', given to the step; its successor comes back.
         let stepped = unsafe { abi::roc_workspaces_step(self.into_raw(), joined_event(event)) };

@@ -139,13 +139,6 @@ impl Word for crate::model::window_store::ClaimOwner {
     fn word(self) -> u64 { u64::from(self.0) }
 }
 
-/// A claimant as the Roc core sees it: its owner (the claim's flags and original id take no
-/// part in a workspace decision).
-#[cfg(feature = "roc-core")]
-impl Word for crate::model::window_store::Claimant {
-    fn word(self) -> u64 { self.owner.word() }
-}
-
 #[cfg(feature = "roc-core")]
 impl Word for crate::sys::window_server::WindowServerId {
     fn word(self) -> u64 { u64::from(self.0) }

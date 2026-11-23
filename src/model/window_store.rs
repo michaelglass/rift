@@ -469,6 +469,31 @@ pub(crate) struct Claimant {
     original: WindowId,
 }
 
+#[cfg(feature = "roc-core")]
+impl Claimant {
+    /// The claimant whole, as the Roc core holds it: the owner, the flags and the id claimed.
+    pub(crate) fn plain(self) -> rift_core::workspaces::plain::Claimant {
+        use rift_core::workspaces::plain::{ClaimFlags, Claimant as Plain, FocusFollowsMouse};
+
+        use crate::roc_path::Word;
+        Plain {
+            owner: self.owner.word(),
+            flags: ClaimFlags {
+                // A claim holds only supported flags (`claim_window` refuses the rest), and focus
+                // follows mouse is the one there is.
+                focus_follows_mouse: match self
+                    .flags
+                    .contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+                {
+                    true => FocusFollowsMouse::Suppressed,
+                    false => FocusFollowsMouse::Followed,
+                },
+            },
+            original: self.original.word(),
+        }
+    }
+}
+
 /// The Mach client port (session) holding external claims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClaimOwner(pub u32);
