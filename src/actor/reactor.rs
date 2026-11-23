@@ -444,7 +444,7 @@ impl Reactor {
         stack_line_tx: stack_line::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
-        native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        drag_gate: crate::actor::drag::SharedDragGate,
     ) -> (ReactorHandle, oneshot::Receiver<()>) {
         let (events_tx, events) = actor::channel();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -458,7 +458,7 @@ impl Reactor {
             one_space,
         );
         reactor.startup_ready = Some(ready_tx);
-        reactor.drag_manager.native_motion_active = native_motion_active;
+        reactor.drag_manager.gate = drag_gate;
         reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
         reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
@@ -504,7 +504,7 @@ impl Reactor {
             mouse_inventory_hit: None,
             drag_manager: managers::DragManager {
                 actor: crate::actor::drag::DragActor::new(config.settings.drag_drop),
-                native_motion_active: std::sync::Arc::default(),
+                gate: Default::default(),
                 preview: None,
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
@@ -1006,10 +1006,14 @@ impl Reactor {
         self.drag_manager.actor.source().is_some_and(|source| source.window == window)
     }
 
+    /// Whether a drag could start on some window: the part of `can_start_drag` that does not
+    /// depend on which window is under the cursor.
+    fn can_start_any_drag(&self) -> bool {
+        !self.is_in_drag() && !self.is_mission_control_active() && !self.refreshes_blocked()
+    }
+
     fn can_start_drag(&self, window: WindowId) -> bool {
-        !self.is_in_drag()
-            && !self.is_mission_control_active()
-            && !self.refreshes_blocked()
+        self.can_start_any_drag()
             && self.state.windows.is_admitted(window)
             && self.state.windows.can_place_window(window)
     }
@@ -1400,7 +1404,7 @@ impl Reactor {
         {
             let _ = tx.send(());
         }
-        self.drag_manager.sync_motion_gate();
+        self.drag_manager.sync_gate(self.can_start_any_drag());
     }
 
     fn dispatch(&mut self, mut event: Event, changes: &mut Changes) -> anyhow::Result<()> {

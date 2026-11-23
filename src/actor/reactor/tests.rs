@@ -3830,12 +3830,10 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.ensure_active_drag(wid, &frame);
 
     assert!(reactor.drag_manager.actor.is_active());
-    reactor.drag_manager.sync_motion_gate();
-    assert!(
-        reactor
-            .drag_manager
-            .native_motion_active
-            .load(std::sync::atomic::Ordering::Acquire)
+    reactor.drag_manager.sync_gate(true);
+    assert_eq!(
+        reactor.drag_manager.gate.get(),
+        crate::actor::drag::DragGate::NativeMove
     );
 
     let (input_tx, _input_rx) = actor::channel();
@@ -3843,14 +3841,41 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.handle_event(Event::MissionControlNativeEntered);
 
     assert!(!reactor.drag_manager.actor.is_active());
-    assert!(
-        !reactor
-            .drag_manager
-            .native_motion_active
-            .load(std::sync::atomic::Ordering::Acquire)
+    assert_eq!(
+        reactor.drag_manager.gate.get(),
+        crate::actor::drag::DragGate::Closed
     );
 
     reactor.handle_event(Event::MissionControlNativeExited);
+}
+
+#[test]
+fn a_modifier_press_the_reactor_refuses_leaves_the_gate_open_and_owned_by_no_button() {
+    use crate::actor::drag::{DragGate, MouseButton};
+    let mut reactor = test_reactor();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
+    assert_eq!(reactor.drag_manager.gate.get(), DragGate::Open);
+
+    // No tracked window is under the cursor, so the reactor refuses the drag.
+    reactor.handle_event(Event::ModifierMouseDown {
+        button: MouseButton::Left,
+        point: CGPoint::new(500., 500.),
+        action: crate::common::config::MouseAction::Move,
+    });
+
+    assert!(!reactor.drag_manager.actor.is_active());
+    assert_eq!(reactor.drag_manager.gate.get(), DragGate::Open);
+}
+
+#[test]
+fn the_gate_stays_closed_while_the_topology_is_unsettled() {
+    let reactor = test_reactor();
+    reactor.drag_manager.sync_gate(reactor.can_start_any_drag());
+    assert_eq!(
+        reactor.drag_manager.gate.get(),
+        crate::actor::drag::DragGate::Closed
+    );
 }
 
 #[test]

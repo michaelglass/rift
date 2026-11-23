@@ -1,6 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use objc2_core_foundation::CGRect;
 use rift_protocol::StackInfo;
 use tracing::trace;
@@ -45,7 +42,7 @@ impl AppManager {
 /// Manages drag operations and window swapping
 pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
-    pub native_motion_active: Arc<AtomicBool>,
+    pub gate: crate::actor::drag::SharedDragGate,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) haptics_enabled: bool,
@@ -70,15 +67,9 @@ impl DragManager {
         }
     }
 
-    /// The input thread's copy of whether a native move is live. Synced once at the end of
-    /// every reactor event, after whatever started or ended a drag.
-    pub fn sync_motion_gate(&self) {
-        let active = self.actor.drop_enabled()
-            && self.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove);
-        if self.native_motion_active.load(Ordering::Relaxed) != active {
-            self.native_motion_active.store(active, Ordering::Release);
-        }
-    }
+    /// Publish the drag state to the input thread. Synced once at the end of every reactor
+    /// event, after whatever started, refused or ended a drag.
+    pub fn sync_gate(&self, can_start: bool) { self.gate.set(self.actor.gate(can_start)); }
 
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
