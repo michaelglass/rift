@@ -921,8 +921,11 @@ impl Reactor {
 
         for screen in &self.space_state.screens {
             if let Some(space) = screen.space.filter(|space| self.is_space_active(*space)) {
-                let workspaces =
-                    self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
+                let workspaces = self
+                    .layout_manager
+                    .layout_engine
+                    .workspaces_mut()
+                    .list_workspaces(&mut self.state.windows, space);
                 let active_ws =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space);
 

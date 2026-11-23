@@ -610,7 +610,7 @@ pub struct Reactor {
 impl Reactor {
     pub fn spawn(
         config: Config,
-        layout_engine: LayoutEngine,
+        stores: crate::model::Stores,
         record: Record,
         input_tx: input::Sender,
         broadcast_tx: BroadcastSender,
@@ -622,14 +622,8 @@ impl Reactor {
         let (events_tx, events) = actor::channel();
         let (ready_tx, ready_rx) = oneshot::channel();
         let events_tx_clone = events_tx.clone();
-        let mut reactor = Reactor::new(
-            config,
-            layout_engine,
-            record,
-            broadcast_tx,
-            window_notify,
-            one_space,
-        );
+        let mut reactor =
+            Reactor::new(config, stores, record, broadcast_tx, window_notify, one_space);
         reactor.startup_ready = Some(ready_tx);
         reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
@@ -647,12 +641,13 @@ impl Reactor {
 
     pub fn new(
         config: Config,
-        layout_engine: LayoutEngine,
+        stores: crate::model::Stores,
         mut record: Record,
         broadcast_tx: BroadcastSender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
     ) -> Reactor {
+        let crate::model::Stores { layout_engine, windows } = stores;
         // FIXME: Remove apps that are no longer running from restored state.
         record.start(&config, &layout_engine);
         let (raise_manager_tx, _rx) = actor::channel();
@@ -667,6 +662,7 @@ impl Reactor {
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             state: RiftState {
+                windows,
                 tx: window_tx_store.clone(),
                 ..RiftState::default()
             },
@@ -1619,15 +1615,11 @@ impl Reactor {
         {
             let divergences = self.state.windows.lifecycle_divergences();
             assert!(divergences.is_empty(), "lifecycle-divergence: {divergences:?}");
-            let divergences = workspaces.workspace_divergences();
+            let divergences =
+                workspaces.workspace_divergences(self.state.windows.core_workspaces());
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
             let divergences = self.state.windows.ownership_divergences();
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
-            let orphans = rift_core::workspaces::orphans(
-                self.state.windows.core_ownerships(),
-                workspaces.core_topology(),
-            );
-            assert!(orphans.is_empty(), "workspace-divergence: orphans {orphans:?}");
         }
         #[cfg(not(test))]
         if tracing::enabled!(tracing::Level::DEBUG) {
@@ -1637,7 +1629,8 @@ impl Reactor {
                     "lifecycle-divergence: store and core disagree on admission"
                 );
             }
-            for divergence in workspaces.workspace_divergences() {
+            for divergence in workspaces.workspace_divergences(self.state.windows.core_workspaces())
+            {
                 debug!(
                     ?divergence,
                     "workspace-divergence: store and core disagree on workspaces"
@@ -1647,16 +1640,6 @@ impl Reactor {
                 debug!(
                     ?divergence,
                     "workspace-divergence: store and core disagree on a window's ownership"
-                );
-            }
-            for (window, workspace) in rift_core::workspaces::orphans(
-                self.state.windows.core_ownerships(),
-                workspaces.core_topology(),
-            ) {
-                debug!(
-                    ?window,
-                    ?workspace,
-                    "workspace-divergence: a window is owned by a workspace the catalog lacks"
                 );
             }
         }
@@ -3593,8 +3576,10 @@ impl Reactor {
             .workspace_command_space()
             .or_else(|| spaces.iter().copied().flatten().find(|space| self.is_space_active(*space)))
         {
-            if let Some((workspace_id, workspace_name)) =
-                self.layout_manager.layout_engine.ensure_active_workspace_info(space)
+            if let Some((workspace_id, workspace_name)) = self
+                .layout_manager
+                .layout_engine
+                .ensure_active_workspace_info(&mut self.state.windows, space)
             {
                 let display_uuid = self.display_uuid_for_space(space);
                 let broadcast_event = BroadcastEvent::WorkspaceChanged {
@@ -4209,11 +4194,12 @@ impl Reactor {
                 if workspaces.active_workspace_per_space().get(&old).is_some_and(|activation| {
                     activation.remembered().or(activation.current()) == Some(id)
                 }) {
-                    workspaces.update_activation(old, SpaceActivation::forget_memory);
+                    let windows = &mut self.state.windows;
+                    workspaces.update_activation(windows, old, SpaceActivation::forget_memory);
                     if workspaces[id].space == target {
-                        workspaces.set_active_workspace(target, id);
+                        workspaces.set_active_workspace(windows, target, id);
                     } else {
-                        workspaces.remember_on(target, id);
+                        workspaces.remember_on(windows, target, id);
                     }
                 }
             }
@@ -5334,6 +5320,7 @@ impl Reactor {
             .and_then(|screen| screen.space)
         };
         self.layout_manager.layout_engine.workspaces_mut().ensure_visible_spaces(
+            &mut self.state.windows,
             &spaces,
             screens.len(),
             rule_space,
@@ -6930,7 +6917,7 @@ impl Reactor {
         if workspaces.effective_mode() != crate::common::config::WorkspaceMode::Global {
             return None;
         }
-        match workspaces.create_workspace(space, None) {
+        match workspaces.create_workspace(&mut self.state.windows, space, None) {
             Ok(id) => {
                 self.expose_space_if_known(space);
                 Some(id)

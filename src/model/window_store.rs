@@ -9,6 +9,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
 use crate::model::drag::Session;
 use crate::model::reactor::WindowState;
+use crate::model::virtual_workspace::WorkspaceStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -599,10 +600,62 @@ pub struct WindowStore {
     /// The core's lifecycle, in shadow: every live window's admission facts, told each change
     /// the store makes. [`Self::lifecycle_divergences`] holds the two to agreeing.
     lifecycle: crate::roc_twin::TwinnedLifecycle,
-    /// The core's ownerships, in shadow: who places each window, told every ownership change
-    /// (only [`Self::set_ownership`] writes one). [`Self::ownership_divergences`] holds the two
-    /// to agreeing.
-    ownerships: crate::roc_twin::TwinnedOwnerships,
+    /// The core's workspaces, joined, in shadow: who places each window, told every ownership
+    /// change (only [`Self::set_ownership`] writes one), and the workspace store's catalog and
+    /// activations, told through [`Self::topology`] by the workspace store's topology writers.
+    /// [`Self::ownership_divergences`] and the workspace store's `workspace_divergences` hold
+    /// them to agreeing.
+    workspaces: crate::roc_twin::TwinnedWorkspaces,
+}
+
+/// The joined shadow, lent to the workspace store's topology writers: it takes the catalog's and
+/// the activations' changes only (a removal, which hands windows on, is
+/// [`WindowStore::remove_workspace`]).
+pub(crate) struct TopologyChanges<'a>(&'a mut crate::roc_twin::TwinnedWorkspaces);
+
+impl TopologyChanges<'_> {
+    /// A workspace created on a Space, at the end of the catalog.
+    pub(crate) fn created(&mut self, workspace: VirtualWorkspaceId, space: SpaceId) {
+        self.0
+            .step(rift_core::workspaces::WorkspacesEvent::Created { workspace, space });
+    }
+
+    pub(crate) fn moved(&mut self, workspace: VirtualWorkspaceId, space: SpaceId) {
+        self.0.step(rift_core::workspaces::WorkspacesEvent::Moved { workspace, space });
+    }
+
+    /// What `space` shows now, or that it has no activation any more.
+    pub(crate) fn activation(
+        &mut self,
+        space: SpaceId,
+        activation: Option<rift_core::workspaces::Activation<VirtualWorkspaceId>>,
+    ) {
+        self.0.step(match activation {
+            Some(activation) => {
+                rift_core::workspaces::WorkspacesEvent::Activated { space, activation }
+            }
+            None => rift_core::workspaces::WorkspacesEvent::Cleared(space),
+        });
+    }
+}
+
+/// A removal's hand-off the store cannot follow: the core decided something a removal never
+/// makes of a window the removed workspace placed (or of a claim returning to it). A bug:
+/// tests panic, a running Rift says so (`workspace-divergence:`) and leaves the record.
+fn removal_unfollowed(
+    window: WindowId,
+    removed: VirtualWorkspaceId,
+    decided: rift_core::workspaces::Owned<VirtualWorkspaceId, ClaimOwner>,
+) {
+    #[cfg(test)]
+    panic!("workspace-divergence: removing {removed:?} left {window:?} {decided:?}");
+    #[cfg(not(test))]
+    tracing::debug!(
+        ?window,
+        ?removed,
+        ?decided,
+        "workspace-divergence: the store cannot follow the core's hand-off of a removed workspace"
+    );
 }
 
 /// Whether a window that leaves the layout is away for now or for good.
@@ -844,17 +897,38 @@ impl WindowStore {
     }
 
     fn tell_ownership(&mut self, window: WindowId, ownership: Ownership) {
-        self.ownerships.step(rift_core::workspaces::OwnershipEvent::Owned {
+        self.workspaces.step(rift_core::workspaces::WorkspacesEvent::Owned {
             window,
             owned: ownership.core(),
         });
     }
 
-    /// The core's ownerships (the shadow).
-    pub(crate) fn core_ownerships(
+    /// A window store joining `workspaces`, the live workspace store it is built beside: no
+    /// windows yet, and the joined shadow told the store's whole catalog, in order, and every
+    /// Space's activation.
+    pub(crate) fn joining(workspaces: &WorkspaceStore) -> WindowStore {
+        let mut store = WindowStore::default();
+        let mut topology = store.topology();
+        for (id, space) in workspaces.catalog().map(|id| (id, workspaces[id].space)) {
+            topology.created(id, space);
+        }
+        for (&space, activation) in workspaces.active_workspace_per_space() {
+            topology.activation(space, Some(activation.to_core()));
+        }
+        store
+    }
+
+    /// The core's workspaces, joined (the shadow).
+    pub(crate) fn core_workspaces(
         &self,
-    ) -> &rift_core::workspaces::Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner> {
-        &self.ownerships
+    ) -> &rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner> {
+        &self.workspaces
+    }
+
+    /// Where the workspace store's topology writers tell the joined shadow each change: only
+    /// topology changes go through it, never a window's ownership.
+    pub(crate) fn topology(&mut self) -> TopologyChanges<'_> {
+        TopologyChanges(&mut self.workspaces)
     }
 
     /// Every window whose ownership the store and the core's shadow disagree on. Empty unless
@@ -865,7 +939,7 @@ impl WindowStore {
             .iter()
             .filter(|(_, record)| record.ownership != Ownership::Unassigned)
             .map(|(window, _)| *window)
-            .chain(self.ownerships.owners().map(|(window, _)| window))
+            .chain(self.workspaces.owners().map(|(window, _)| window))
             .collect();
         windows.sort_by_key(|window| (window.pid, window.idx.get()));
         windows.dedup();
@@ -877,7 +951,7 @@ impl WindowStore {
                     .get(&window)
                     .map_or(Ownership::Unassigned, |record| record.ownership)
                     .core();
-                let core = self.ownerships.owned(window);
+                let core = self.workspaces.owned(window);
                 (store != core).then_some(OwnershipDivergence { window, store, core })
             })
             .collect()
@@ -2444,37 +2518,57 @@ impl WindowStore {
         self.windows.values().filter(|record| record.assignment().is_some()).count()
     }
 
-    /// Native desktop replacement retires a catalog identity, including history
-    /// whose AX window is currently suspended in native fullscreen.
-    pub(crate) fn remap_workspace(
+    /// A workspace the workspace store removed: the core's shadow takes it out of the catalog,
+    /// handing its windows and claims to `successor`, and the records follow what the core
+    /// decided for each window the workspace placed and each claim returning to it. A native
+    /// fullscreen record naming it takes the same successor (it is not the core's).
+    pub(crate) fn remove_workspace(
         &mut self,
-        old: VirtualWorkspaceId,
-        replacement: Option<VirtualWorkspaceId>,
+        removed: VirtualWorkspaceId,
+        successor: rift_core::workspaces::Successor<VirtualWorkspaceId>,
     ) {
-        for window in self.workspace_windows(old) {
-            if let Some(id) = replacement {
-                self.assign_window_to_workspace(window, id);
-            } else {
-                self.remove_window_assignment(window);
+        use rift_core::workspaces::{
+            Destination, Owned, Ownership as Core, Successor, WorkspacesEvent,
+        };
+        let assigned = self.workspace_windows(removed);
+        let claimed: Vec<WindowId> = (self.claims.values().flatten().copied())
+            .filter(|&wid| self.claim(wid).is_some_and(|claim| claim.workspace == Some(removed)))
+            .collect();
+        self.workspaces.step(WorkspacesEvent::Removed { workspace: removed, successor });
+        for window in assigned {
+            match self.workspaces.owned(window) {
+                Owned::Owner(Core::Assigned(heir)) => {
+                    self.assign_window_to_workspace(window, heir);
+                }
+                Owned::Unowned => {
+                    self.remove_window_assignment(window);
+                }
+                decided @ Owned::Owner(Core::Claimed { .. } | Core::Held) => {
+                    removal_unfollowed(window, removed, decided);
+                }
             }
         }
+        for window in claimed {
+            let Some(claim) = self.claim(window) else { continue };
+            let workspace = match self.workspaces.owned(window) {
+                Owned::Owner(Core::Claimed { destination, .. }) => match destination {
+                    Destination::Returns(heir) => Some(heir),
+                    Destination::Nowhere => None,
+                },
+                decided @ (Owned::Unowned | Owned::Owner(Core::Assigned(_) | Core::Held)) => {
+                    removal_unfollowed(window, removed, decided);
+                    continue;
+                }
+            };
+            self.set_ownership(window, Ownership::Claimed(WindowClaim { workspace, ..claim }));
+        }
+        let heir = match successor {
+            Successor::Into(heir) => Some(heir),
+            Successor::Unassign => None,
+        };
         for record in self.native_fullscreen_records_by_original_window.values_mut() {
-            if record.workspace == Some(old) {
-                record.workspace = replacement;
-            }
-        }
-        let claimed: Vec<WindowId> = self.claims.values().flatten().copied().collect();
-        for wid in claimed {
-            if let Some(claim) = self.claim(wid)
-                && claim.workspace == Some(old)
-            {
-                self.set_ownership(
-                    wid,
-                    Ownership::Claimed(WindowClaim {
-                        workspace: replacement,
-                        ..claim
-                    }),
-                );
+            if record.workspace == Some(removed) {
+                record.workspace = heir;
             }
         }
     }
@@ -2696,6 +2790,8 @@ impl WindowStore {
 
 #[cfg(test)]
 mod tests {
+    use rift_core::workspaces::Successor;
+
     use super::*;
     use crate::model::virtual_workspace::WorkspaceStore;
 
@@ -2841,7 +2937,7 @@ mod tests {
     fn minimized_membership_survives_reconciliation_until_permanent_removal() {
         let mut store = WindowStore::default();
         let mut workspaces = WorkspaceStore::new();
-        let home = workspaces.create_workspace(SpaceId::new(10), None).unwrap();
+        let home = workspaces.create_workspace(&mut store, SpaceId::new(10), None).unwrap();
         let wid = WindowId::new(1, 1);
         store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
         store.assign_window_to_workspace(wid, home);
@@ -2869,7 +2965,7 @@ mod tests {
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
         let [home, moved, replaced] = ["Home", "Moved", "Replaced"]
-            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+            .map(|name| workspaces.create_workspace(&mut store, space, Some(name.into())).unwrap());
         let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
         let (wid, rekeyed, sibling) =
             (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
@@ -2887,7 +2983,7 @@ mod tests {
         // Placement while claimed only updates the destination.
         assert_eq!(store.assign_window_to_workspace(wid, moved), Some(home));
         assert!(store.workspace_windows(moved).is_empty());
-        store.remap_workspace(moved, Some(replaced));
+        store.remove_workspace(moved, Successor::Into(replaced));
         assert_eq!(store.claim(wid).unwrap().workspace(), Some(replaced));
         store.debug_assert_invariants();
 
@@ -2916,7 +3012,7 @@ mod tests {
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
         let [home, provisional] = ["Home", "Provisional"]
-            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+            .map(|name| workspaces.create_workspace(&mut store, space, Some(name.into())).unwrap());
         let (a, b, c) = (ClaimOwner(1), ClaimOwner(2), ClaimOwner(3));
         let id = |idx| WindowId::new(1, idx);
         let wsid = WindowServerId::new;
@@ -2975,7 +3071,7 @@ mod tests {
         store.debug_assert_invariants();
 
         // A deleted workspace leaves claims to be rehomed on release.
-        store.remap_workspace(home, None);
+        store.remove_workspace(home, Successor::Unassign);
         assert_eq!(store.claim(id(3)).unwrap().workspace(), None);
         assert_eq!(store.claim(id(4)).unwrap().workspace(), None);
 
@@ -2992,10 +3088,10 @@ mod tests {
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
         let source_workspace = workspaces
-            .create_workspace(space, Some("Source".to_string()))
+            .create_workspace(&mut window_store, space, Some("Source".to_string()))
             .expect("source workspace");
         let target_workspace = workspaces
-            .create_workspace(space, Some("Target".to_string()))
+            .create_workspace(&mut window_store, space, Some("Target".to_string()))
             .expect("target workspace");
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
@@ -3017,7 +3113,7 @@ mod tests {
         let fullscreen_space = SpaceId::new(0x400000000 + space.get());
         let mut workspaces = WorkspaceStore::new();
         let workspace_id = workspaces
-            .create_workspace(space, Some("Fullscreen".to_string()))
+            .create_workspace(&mut window_store, space, Some("Fullscreen".to_string()))
             .expect("workspace");
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
@@ -3231,7 +3327,7 @@ mod tests {
         let (old, replacement) = (WindowId::new(30, 1), WindowId::new(30, 2));
         let server = WindowServerId::new(70);
         let mut workspaces = WorkspaceStore::new();
-        let workspace = workspaces.create_workspace(SpaceId::new(8), None).unwrap();
+        let workspace = workspaces.create_workspace(&mut store, SpaceId::new(8), None).unwrap();
         store.assign_window_to_workspace(old, workspace);
         store.replace_rule_floating(old, true);
         store.track_window_server_id(server, old);
@@ -3525,8 +3621,10 @@ mod tests {
     fn ownership_moves_to_a_rekeyed_identity_and_a_claim_wins_keeping_a_destination() {
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
-        let [a, b, c] = ["A", "B", "C"]
-            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+        let mut joined = WindowStore::default();
+        let [a, b, c] = ["A", "B", "C"].map(|name| {
+            workspaces.create_workspace(&mut joined, space, Some(name.into())).unwrap()
+        });
         let (from, to) = (WindowId::new(1, 1), WindowId::new(1, 2));
         let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
         #[derive(Clone, Copy)]
@@ -3599,7 +3697,7 @@ mod tests {
             ),
         ];
         for (case, (from_side, to_side, assigned, claimed)) in cases.into_iter().enumerate() {
-            let mut store = WindowStore::default();
+            let mut store = WindowStore::joining(&workspaces);
             setup(&mut store, from, from_side);
             setup(&mut store, to, to_side);
             store.transfer_persistent_window_metadata(from, to);
@@ -3641,7 +3739,7 @@ mod tests {
         let wsid = WindowServerId::new(55);
         let mut workspaces = WorkspaceStore::new();
         let workspace = workspaces
-            .create_workspace(SpaceId::new(9), Some("Slot".to_string()))
+            .create_workspace(&mut state.windows, SpaceId::new(9), Some("Slot".to_string()))
             .expect("workspace");
         state.windows.track_window_server_id(wsid, wid);
         state.windows.assign_window_to_workspace(wid, workspace);
@@ -3691,7 +3789,7 @@ mod tests {
         let (old, new) = (WindowId::new(30, 1), WindowId::new(30, 2));
         let mut workspaces = WorkspaceStore::new();
         let workspace = workspaces
-            .create_workspace(SpaceId::new(9), Some("Rekey".to_string()))
+            .create_workspace(&mut state.windows, SpaceId::new(9), Some("Rekey".to_string()))
             .expect("workspace");
         state.windows.assign_window_to_workspace(old, workspace);
         state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
@@ -3760,7 +3858,7 @@ mod tests {
         let wsid = WindowServerId::new(55);
         let mut workspaces = WorkspaceStore::new();
         let workspace_id = workspaces
-            .create_workspace(SpaceId::new(9), Some("Cleanup".to_string()))
+            .create_workspace(&mut store, SpaceId::new(9), Some("Cleanup".to_string()))
             .expect("workspace");
         store.track_window_server_id(wsid, wid);
         store.assign_window_to_workspace(wid, workspace_id);
@@ -3779,7 +3877,9 @@ mod tests {
         let mut store = WindowStore::default();
         let (old, new) = (SpaceId::new(1), SpaceId::new(2));
         let mut workspaces = WorkspaceStore::new();
-        let workspace_id = workspaces.create_workspace(old, Some("Shared".to_string())).unwrap();
+        let workspace_id = workspaces
+            .create_workspace(&mut store, old, Some("Shared".to_string()))
+            .unwrap();
         let (moved, present) = (WindowId::new(5, 1), WindowId::new(5, 2));
         store.assign_window_to_workspace(moved, workspace_id);
         // The window server placed this one on the incoming id before rift heard of it.
@@ -3824,8 +3924,9 @@ mod tests {
         let mut store = WindowStore::default();
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
-        let [a, b, c] = ["A", "B", "C"]
-            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+        // Removed workspaces are gone for good: each step after one uses a workspace still there.
+        let [a, b, c, d, e, f] = ["A", "B", "C", "D", "E", "F"]
+            .map(|name| workspaces.create_workspace(&mut store, space, Some(name.into())).unwrap());
         let id = |idx| WindowId::new(1, idx);
         let wsid = WindowServerId::new;
         let owner = ClaimOwner(7);
@@ -3844,27 +3945,27 @@ mod tests {
         agree(&store, "a claimed window's destination");
         store.set_claim_flags(id(1), WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
         agree(&store, "claim flags");
-        store.remap_workspace(c, Some(a));
-        agree(&store, "a claim's destination remapped");
-        store.remap_workspace(a, None);
+        store.remove_workspace(c, Successor::Into(a));
+        agree(&store, "a claim's destination handed on");
+        store.remove_workspace(a, Successor::Unassign);
         agree(&store, "a claim's destination removed");
         store.remove_claim(id(1));
         agree(&store, "release");
 
         store.insert_window(id(2), admitted(id(2), wsid(2)));
         store.assign_window_to_workspace(id(2), b);
-        store.remap_workspace(b, Some(c));
-        agree(&store, "an assignment remapped");
-        store.remap_workspace(c, None);
+        store.remove_workspace(b, Successor::Into(d));
+        agree(&store, "an assignment handed on");
+        store.remove_workspace(d, Successor::Unassign);
         agree(&store, "an assignment removed");
-        store.assign_window_to_workspace(id(2), b);
+        store.assign_window_to_workspace(id(2), e);
         store.remove_window_assignment(id(2));
         agree(&store, "unassign");
 
         // An identity merge moves ownership to the recognized identity.
-        store.assign_window_to_workspace(id(2), b);
+        store.assign_window_to_workspace(id(2), e);
         store.insert_window(id(3), admitted(id(3), wsid(3)));
-        store.assign_window_to_workspace(id(3), a);
+        store.assign_window_to_workspace(id(3), f);
         store.insert_claim(id(3), owner, WindowClaimFlags::empty());
         store.reconcile_ax_identity(id(3), Some(wsid(2)));
         agree(&store, "identity merge");
@@ -3874,7 +3975,7 @@ mod tests {
 
         // A write around the store is caught.
         store.insert_window(id(4), admitted(id(4), wsid(4)));
-        store.windows.get_mut(&id(4)).unwrap().ownership = Ownership::Assigned(b);
+        store.windows.get_mut(&id(4)).unwrap().ownership = Ownership::Assigned(e);
         assert!(matches!(store.ownership_divergences().as_slice(), [
             OwnershipDivergence { window, .. }
         ] if *window == id(4)));

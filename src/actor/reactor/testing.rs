@@ -24,7 +24,14 @@ impl Reactor {
         config.settings.animate = false;
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (broadcast_tx, _) = actor::channel();
-        Reactor::new(config, layout, record, broadcast_tx, None, false)
+        Reactor::new(
+            config,
+            crate::model::Stores::joining(layout),
+            record,
+            broadcast_tx,
+            None,
+            false,
+        )
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -40,7 +47,7 @@ impl Reactor {
         self.layout_manager
             .layout_engine
             .workspaces_mut()
-            .list_workspaces(space)
+            .list_workspaces(&mut self.state.windows, space)
             .iter()
             .map(|(id, _)| *id)
             .collect()
@@ -132,10 +139,11 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
-        self.layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .set_active_workspace(space, workspace)
+        self.layout_manager.layout_engine.workspaces_mut().set_active_workspace(
+            &mut self.state.windows,
+            space,
+            workspace,
+        )
     }
 
     pub fn handle_test_workspace_command(&mut self, space: SpaceId, command: &LayoutCommand) {

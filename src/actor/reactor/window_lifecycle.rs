@@ -258,7 +258,7 @@ impl Reactor {
             let returning = engine.eviction_ordinal(&self.state.windows, wid, space);
             // Resolve the destination before touching the source: a global-mode Space can own
             // no workspace, and then the current owner is kept.
-            engine.workspaces_mut().ensure_space_initialized(space);
+            engine.workspaces_mut().ensure_space_initialized(&mut self.state.windows, space);
             let workspaces = engine.workspaces();
             let remembered =
                 returning.and_then(|ordinal| workspaces.workspaces_on(space).nth(ordinal));
@@ -267,7 +267,9 @@ impl Reactor {
             } else if preserve_workspace_ordinal {
                 workspaces.workspace_at_window_ordinal(&self.state.windows, space, wid)
             } else {
-                engine.ensure_active_workspace_info(space).map(|(id, _)| id)
+                engine
+                    .ensure_active_workspace_info(&mut self.state.windows, space)
+                    .map(|(id, _)| id)
             };
             let Some(workspace) = destination else {
                 debug!(

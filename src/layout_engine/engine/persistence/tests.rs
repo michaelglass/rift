@@ -58,7 +58,7 @@ fn fresh(
     let mut engine = LayoutEngine::new(settings, &LayoutSettings::default());
     let mut store = WindowStore::default();
     let all: Vec<_> = spaces.iter().map(|(space, _)| *space).collect();
-    engine.workspaces.ensure_visible_spaces(&all, all.len(), |_| None);
+    engine.workspaces.ensure_visible_spaces(&mut store, &all, all.len(), |_| None);
     for (space, display) in spaces {
         let size = CGSize::new(1200.0, 800.0);
         let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(*space, size));
@@ -95,8 +95,9 @@ fn session(settings: &VirtualWorkspaceSettings, spaces: &[(SpaceId, &str, &[Wind
 fn boot(settings: &VirtualWorkspaceSettings, saved: &str) -> (LayoutEngine, WindowStore) {
     let mut engine = LayoutEngine::deserialize_from_str(saved).unwrap();
     engine.await_topology();
-    engine.finish_loading(settings, &LayoutSettings::default()).unwrap();
-    (engine, WindowStore::default())
+    let mut store = WindowStore::joining(engine.workspaces());
+    engine.finish_loading(&mut store, settings, &LayoutSettings::default()).unwrap();
+    (engine, store)
 }
 
 fn resolve(
@@ -260,11 +261,15 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
             Some(CGRect::new(CGPoint::new(12.0, 34.0), CGSize::new(400.0, 300.0))),
         );
     }
-    let (mut engine, _) = fresh(&shared, &[(a, "x"), (b, "y")]);
+    let (mut engine, mut store) = fresh(&shared, &[(a, "x"), (b, "y")]);
     let moved = engine.workspaces.active_workspace(a).unwrap();
-    engine
-        .workspaces
-        .transfer_workspace(moved, b, None, WorkspaceTransferReason::DisplayDeparture);
+    engine.workspaces.transfer_workspace(
+        &mut store,
+        moved,
+        b,
+        None,
+        WorkspaceTransferReason::DisplayDeparture,
+    );
     let replacement = engine.workspaces.active_workspace(a);
     let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space()).unwrap();
     let old = ron::ser::to_string(&HashMap::from_iter([
@@ -380,8 +385,9 @@ fn single_display_restore_keeps_the_surviving_desktops_catalog() {
     let (old, current) = (SpaceId::new(801), SpaceId::new(802));
     for exposed in [true, false] {
         let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
-        engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
-        engine.workspaces.ensure_space_initialized(old);
+        let mut store = WindowStore::default();
+        engine.workspaces.ensure_visible_spaces(&mut store, &[current], 1, |_| None);
+        engine.workspaces.ensure_space_initialized(&mut store, old);
         if exposed {
             engine.update_space_display(old, Some("display"));
         }
@@ -412,7 +418,7 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
             "display",
             &[a, b],
         )]);
-        engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
+        engine.workspaces.ensure_visible_spaces(&mut store, &[current], 1, |_| None);
         let target = ws(&engine, current, 0);
         open(&mut engine, &mut store, target, window);
         assert_eq!(

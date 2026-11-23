@@ -306,7 +306,7 @@ pub fn handle_config_updated(
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
     layout.layout_engine.update_virtual_workspace_settings(
-        &state.windows,
+        &mut state.windows,
         &config.virtual_workspaces,
         migration,
     );

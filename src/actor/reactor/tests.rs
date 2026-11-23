@@ -10877,11 +10877,11 @@ fn workspace_commands_follow_workspace_mode() {
         settings.default_workspace_count = if mode == Global { 4 } else { 2 };
         let (_, mut reactor, a, b) = two_displays(settings);
         let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
-        reactor
-            .layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .set_active_workspace(a, ids[1]);
+        reactor.layout_manager.layout_engine.workspaces_mut().set_active_workspace(
+            &mut reactor.state.windows,
+            a,
+            ids[1],
+        );
         reactor.space_state.command_space = Some(a);
         let outcome = reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(None));
         if mode == Global {
@@ -11427,6 +11427,7 @@ fn native_return_waits_for_a_global_destination_without_losing_eviction() {
     for &workspace in &original_workspaces {
         assert!(
             reactor.layout_manager.layout_engine.workspaces_mut().transfer_workspace(
+                &mut reactor.state.windows,
                 workspace,
                 dormant,
                 None,
@@ -11462,6 +11463,7 @@ fn native_return_waits_for_a_global_destination_without_losing_eviction() {
     for &workspace in &original_workspaces {
         assert!(
             reactor.layout_manager.layout_engine.workspaces_mut().transfer_workspace(
+                &mut reactor.state.windows,
                 workspace,
                 original,
                 None,
@@ -11513,6 +11515,7 @@ fn native_return_preserves_normal_restoration_and_missing_ordinal_fallback() {
         if missing_ordinal {
             assert!(
                 reactor.layout_manager.layout_engine.workspaces_mut().transfer_workspace(
+                    &mut reactor.state.windows,
                     remembered,
                     SpaceId::new(99),
                     None,
@@ -11870,7 +11873,9 @@ fn named_pin_reload_moves_immediately_without_creating_workspaces() {
                 let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
                 assert_eq!(workspaces.active_workspace(b), Some(ids[0]));
                 if create_scratch {
-                    workspaces.create_workspace(b, Some("scratch".into())).unwrap();
+                    workspaces
+                        .create_workspace(&mut reactor.state.windows, b, Some("scratch".into()))
+                        .unwrap();
                 }
                 let snapshot = reactor
                     .layout_manager
@@ -12068,7 +12073,7 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
         if at_capacity {
             let store = reactor.layout_manager.layout_engine.workspaces_mut();
             for _ in 1..MAX_WORKSPACES {
-                store.create_workspace(a, None).unwrap();
+                store.create_workspace(&mut reactor.state.windows, a, None).unwrap();
             }
         }
         let before = model(&reactor);

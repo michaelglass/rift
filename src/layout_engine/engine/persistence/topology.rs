@@ -102,8 +102,10 @@ impl LayoutEngine {
             } else if display.is_some() && live_display.is_none() {
                 self.persistence.unresolved_spaces.insert(space);
             } else {
-                for id in self.workspaces.remove_space(space) {
-                    window_store.remap_workspace(id, None);
+                let removed = self.workspaces.remove_space(window_store, space, |_| {
+                    rift_core::workspaces::Successor::Unassign
+                });
+                for id in removed {
                     self.forget_workspace(id);
                 }
                 self.space_display_map.remove(&space);

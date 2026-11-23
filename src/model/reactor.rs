@@ -8,6 +8,36 @@ use crate::model::WindowStore;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 
+/// The layout engine and a window store joined to its workspace store, as a reactor takes them:
+/// the window store's shadow of the workspaces holds the workspace store's whole topology from
+/// the start, so neither can go live without the other.
+pub struct Stores {
+    pub(crate) layout_engine: crate::layout_engine::LayoutEngine,
+    pub(crate) windows: WindowStore,
+}
+
+impl Stores {
+    /// A layout engine (fresh, or loaded from a saved layout) and a window store joining its
+    /// workspace store.
+    pub fn joining(layout_engine: crate::layout_engine::LayoutEngine) -> Stores {
+        let windows = WindowStore::joining(layout_engine.workspaces());
+        Stores { layout_engine, windows }
+    }
+
+    /// As [`crate::layout_engine::LayoutEngine::finish_loading`], telling the window store.
+    pub fn finish_loading(
+        &mut self,
+        virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
+        layout_settings: &crate::common::config::LayoutSettings,
+    ) -> Result<(), String> {
+        self.layout_engine.finish_loading(
+            &mut self.windows,
+            virtual_workspace_config,
+            layout_settings,
+        )
+    }
+}
+
 /// All mutable domain state is owned by the reactor thread.
 ///
 /// Workspace topology is still carried by the layout coordinator during this

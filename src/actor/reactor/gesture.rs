@@ -489,7 +489,13 @@ mod tests {
         ));
         // Contiguous allocation: a owns [0, 1], b owns [2, 3]; a shows 1, b shows 2.
         let ids: Vec<_> = r.layout_manager.layout_engine.workspaces().catalog().collect();
-        assert!(r.layout_manager.layout_engine.workspaces_mut().set_active_workspace(a, ids[1]));
+        assert!(
+            r.layout_manager.layout_engine.workspaces_mut().set_active_workspace(
+                &mut r.state.windows,
+                a,
+                ids[1]
+            )
+        );
         let mut config = Config::default();
         config.settings.layout.scrolling.gestures.enabled = true;
         config.settings.layout.scrolling.animate = Some(false);

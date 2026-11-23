@@ -226,7 +226,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     } else {
         LayoutEngine::new(&config.virtual_workspaces, &config.settings.layout)
     };
-    if let Err(error) = layout.finish_loading(&config.virtual_workspaces, &config.settings.layout) {
+    let mut stores = rift_wm::model::Stores::joining(layout);
+    if let Err(error) = stores.finish_loading(&config.virtual_workspaces, &config.settings.layout) {
         eprintln!("Could not apply workspace settings to restored layout: {error}");
         process::exit(1);
     }
@@ -237,7 +238,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let window_tx_store = WindowTxStore::new();
     let (reactor, startup_ready) = Reactor::spawn(
         config.clone(),
-        layout,
+        stores,
         reactor::Record::new(opt.record.as_deref()),
         input_tx.clone(),
         broadcast_tx.clone(),

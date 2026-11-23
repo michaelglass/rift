@@ -8,8 +8,8 @@
 //! Which machine stands differs by machine. The lifecycle is flipped (the lead's policy (a)): the
 //! Roc core decides, its answers are rift's, and on a difference the Rust machine, now its shadow,
 //! is re-seeded from the Roc core's state (counted: [`lifecycle_reseeds`]). The main window is
-//! flipped the same way ([`main_window_reseeds`]). The ownerships and the topology are not
-//! flipped yet: their Rust machines stand.
+//! flipped the same way ([`main_window_reseeds`]). The joined workspaces are not flipped yet:
+//! their Rust machine stands.
 //!
 //! A twinned machine reads as its Rust machine (`Deref`), and only its own methods change it:
 //! the Rust machine's changing methods take `&mut`, which `Deref` does not give, so no change
@@ -19,7 +19,9 @@ use std::ops::Deref;
 
 use rift_core::lifecycle::{Invalidation, Lifecycle, LifecycleEvent, Revalidation, Transition};
 use rift_core::main_window::{MainWindowEvent, MainWindows};
-use rift_core::workspaces::{OwnershipEvent, Ownerships, Topology, TopologyEvent};
+#[cfg(feature = "roc-core")]
+use rift_core::workspaces::Refused;
+use rift_core::workspaces::{Workspaces, WorkspacesEvent};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::model::VirtualWorkspaceId;
@@ -212,72 +214,177 @@ impl TwinnedLifecycle {
     }
 }
 
-/// Who places each window (a workspace, a claim, or the user's hand), with its Roc twin under
-/// `roc-core`.
+/// The workspaces joined: the catalog (each workspace with its Space), what each Space shows and
+/// who places each window (a workspace, a claim, or the user's hand), with its Roc twin under
+/// `roc-core`. Not flipped: the Rust machine stands. A refused event is a bug in the caller
+/// (`workspace-refused:`, a panic in tests, a warning in a running Rift) and changes nothing.
+/// Under `roc-core` both must meet every event the same way, and keep the same workspaces:
+/// compared after every topology change (they are rare, and the view is small without many
+/// windows), and after every [`VIEW_EVERY`]th ownership change in a running Rift (every one in
+/// tests).
 #[derive(Default)]
-pub(crate) struct TwinnedOwnerships {
-    rust: Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner>,
+pub(crate) struct TwinnedWorkspaces {
+    rust: Workspaces<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>,
     #[cfg(feature = "roc-core")]
-    twin: OwnershipsTwin,
+    twin: WorkspacesTwin,
 }
 
 #[cfg(feature = "roc-core")]
 #[derive(Default)]
-struct OwnershipsTwin {
-    roc: rift_core_roc::RocOwnerships,
+struct WorkspacesTwin {
+    roc: rift_core_roc::RocWorkspaces,
     steps: u64,
 }
 
-impl std::fmt::Debug for TwinnedOwnerships {
+impl std::fmt::Debug for TwinnedWorkspaces {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
 }
 
-impl Deref for TwinnedOwnerships {
-    type Target = Ownerships<WindowId, VirtualWorkspaceId, ClaimOwner>;
+impl Deref for TwinnedWorkspaces {
+    type Target = Workspaces<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>;
 
     fn deref(&self) -> &Self::Target { &self.rust }
 }
 
-impl TwinnedOwnerships {
-    /// As [`Ownerships::step`]. The step answers nothing, so what both must agree on after it
-    /// is who places the window now; and, when due, every owner.
-    pub(crate) fn step(&mut self, event: OwnershipEvent<WindowId, VirtualWorkspaceId, ClaimOwner>) {
-        self.rust.step(event);
+/// A change to the joined workspaces, as the platform's types make it.
+pub(crate) type JoinedEvent = WorkspacesEvent<WindowId, VirtualWorkspaceId, SpaceId, ClaimOwner>;
+
+impl TwinnedWorkspaces {
+    /// As [`Workspaces::step`]; a refusal is reported here.
+    pub(crate) fn step(&mut self, event: JoinedEvent) {
+        let met = self.rust.step(event);
+        if let Err(refused) = met {
+            #[cfg(test)]
+            panic!("workspace-refused: {refused:?} by {event:?}");
+            #[cfg(not(test))]
+            tracing::warn!(
+                ?refused,
+                ?event,
+                "workspace-refused: the workspaces refused a change (a bug in its caller)"
+            );
+        }
         #[cfg(feature = "roc-core")]
         {
-            use rift_core::workspaces::Owned;
-
             use crate::roc_path::{Word, diverged};
-            let OwnershipEvent::Owned { window, owned } = event;
-            let plain = OwnershipEvent::Owned {
-                window: window.word(),
-                owned: match owned {
-                    Owned::Unowned => Owned::Unowned,
-                    Owned::Owner(ownership) => Owned::Owner(plain_ownership(ownership)),
-                },
-            };
+            let plain = plain_joined_event(event);
             let roc = self.twin.roc.step(plain);
-            let rust = match self.rust.owned(window) {
-                Owned::Unowned => Owned::Unowned,
-                Owned::Owner(ownership) => Owned::Owner(plain_ownership(ownership)),
-            };
+            let rust = met.map_err(|refused| match refused {
+                Refused::Exists(workspace) => Refused::Exists(workspace.word()),
+                Refused::Unknown(workspace) => Refused::Unknown(workspace.word()),
+                Refused::OwnSuccessor(workspace) => Refused::OwnSuccessor(workspace.word()),
+                Refused::Shown { workspace, space } => Refused::Shown {
+                    workspace: workspace.word(),
+                    space: space.word(),
+                },
+            });
             if rust != roc {
-                diverged("ownerships step", &plain, &rust, &roc);
+                diverged("workspaces step", &plain, &rust, &roc);
             }
             self.twin.steps += 1;
-            if cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
-                let mut rust: Vec<_> = self
-                    .rust
-                    .owners()
-                    .map(|(window, ownership)| (window.word(), plain_ownership(ownership)))
-                    .collect();
-                rust.sort_by_key(|&(window, _)| window);
+            let topology = !matches!(event, WorkspacesEvent::Owned { .. });
+            if topology || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+                let rust = self.rust_view();
                 let roc = self.twin.roc.view();
                 if rust != roc {
-                    diverged("ownerships owners", &plain, &rust, &roc);
+                    diverged("workspaces view", &plain, &rust, &roc);
                 }
             }
         }
+    }
+
+    /// The Rust workspaces as the Roc core's view: owners and each workspace's windows in word
+    /// order.
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&self) -> rift_core_roc::workspaces::WorkspacesView {
+        use crate::roc_path::Word;
+        let mut owners: Vec<_> = self
+            .rust
+            .owners()
+            .map(|(window, ownership)| (window.word(), plain_ownership(ownership)))
+            .collect();
+        owners.sort_by_key(|&(window, _)| window);
+        rift_core_roc::workspaces::WorkspacesView {
+            catalog: self
+                .rust
+                .catalog()
+                .iter()
+                .map(|&(workspace, space)| (workspace.word(), space.word()))
+                .collect(),
+            activations: self
+                .rust
+                .activations()
+                .iter()
+                .map(|&(space, shown)| (space.word(), plain_activation(shown)))
+                .collect(),
+            owners,
+            windows: self
+                .rust
+                .catalog()
+                .iter()
+                .map(|&(workspace, _)| {
+                    let mut windows: Vec<u64> =
+                        self.rust.windows_on(workspace).map(Word::word).collect();
+                    windows.sort_unstable();
+                    windows
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A joined event with its windows, workspaces, Spaces and owners as words.
+#[cfg(feature = "roc-core")]
+fn plain_joined_event(event: JoinedEvent) -> WorkspacesEvent<u64, u64, u64, u64> {
+    use rift_core::workspaces::{Owned, Successor};
+
+    use crate::roc_path::Word;
+    match event {
+        WorkspacesEvent::Created { workspace, space } => WorkspacesEvent::Created {
+            workspace: workspace.word(),
+            space: space.word(),
+        },
+        WorkspacesEvent::Removed { workspace, successor } => WorkspacesEvent::Removed {
+            workspace: workspace.word(),
+            successor: match successor {
+                Successor::Into(heir) => Successor::Into(heir.word()),
+                Successor::Unassign => Successor::Unassign,
+            },
+        },
+        WorkspacesEvent::Moved { workspace, space } => WorkspacesEvent::Moved {
+            workspace: workspace.word(),
+            space: space.word(),
+        },
+        WorkspacesEvent::Activated { space, activation } => WorkspacesEvent::Activated {
+            space: space.word(),
+            activation: plain_activation(activation),
+        },
+        WorkspacesEvent::Cleared(space) => WorkspacesEvent::Cleared(space.word()),
+        WorkspacesEvent::Owned { window, owned } => WorkspacesEvent::Owned {
+            window: window.word(),
+            owned: match owned {
+                Owned::Unowned => Owned::Unowned,
+                Owned::Owner(ownership) => Owned::Owner(plain_ownership(ownership)),
+            },
+        },
+    }
+}
+
+/// An activation with its workspaces as words.
+#[cfg(feature = "roc-core")]
+fn plain_activation(
+    activation: rift_core::workspaces::Activation<VirtualWorkspaceId>,
+) -> rift_core::workspaces::Activation<u64> {
+    use rift_core::workspaces::Activation;
+
+    use crate::roc_path::Word;
+    let word = |workspace: Option<VirtualWorkspaceId>| workspace.map(Word::word);
+    match activation {
+        Activation::Showing { current, previous, remembered } => Activation::Showing {
+            current: current.word(),
+            previous: word(previous),
+            remembered: word(remembered),
+        },
+        Activation::Vacant { remembered } => Activation::Vacant { remembered: word(remembered) },
     }
 }
 
@@ -299,88 +406,6 @@ fn plain_ownership(
             },
         },
         Ownership::Held => Ownership::Held,
-    }
-}
-
-/// The workspaces' topology (the catalog and what each Space shows), with its Roc twin under
-/// `roc-core`. Its step answers nothing, so what it comes to is the topology itself, compared
-/// after every step, in a running Rift too: it changes only as workspaces are created, moved,
-/// removed and switched, and both views together cost about 0.5 µs (measured in release, at
-/// 5 to 100 workspaces).
-#[derive(Default)]
-pub(crate) struct TwinnedTopology {
-    rust: Topology<VirtualWorkspaceId, SpaceId>,
-    #[cfg(feature = "roc-core")]
-    roc: rift_core_roc::RocTopology,
-}
-
-impl std::fmt::Debug for TwinnedTopology {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
-}
-
-impl Deref for TwinnedTopology {
-    type Target = Topology<VirtualWorkspaceId, SpaceId>;
-
-    fn deref(&self) -> &Self::Target { &self.rust }
-}
-
-impl TwinnedTopology {
-    /// As [`Topology::step`].
-    pub(crate) fn step(&mut self, event: TopologyEvent<VirtualWorkspaceId, SpaceId>) {
-        self.rust.step(event);
-        #[cfg(feature = "roc-core")]
-        {
-            use rift_core::workspaces::Activation;
-            use rift_core_roc::workspaces::TopologyView;
-
-            use crate::roc_path::{Word, diverged};
-            let word = |workspace: Option<VirtualWorkspaceId>| workspace.map(Word::word);
-            let activation = |activation: Activation<VirtualWorkspaceId>| match activation {
-                Activation::Showing { current, previous, remembered } => Activation::Showing {
-                    current: current.word(),
-                    previous: word(previous),
-                    remembered: word(remembered),
-                },
-                Activation::Vacant { remembered } => {
-                    Activation::Vacant { remembered: word(remembered) }
-                }
-            };
-            let plain = match event {
-                TopologyEvent::Created { workspace, space } => TopologyEvent::Created {
-                    workspace: workspace.word(),
-                    space: space.word(),
-                },
-                TopologyEvent::Removed(workspace) => TopologyEvent::Removed(workspace.word()),
-                TopologyEvent::Moved { workspace, space } => TopologyEvent::Moved {
-                    workspace: workspace.word(),
-                    space: space.word(),
-                },
-                TopologyEvent::Activated { space, activation: shown } => TopologyEvent::Activated {
-                    space: space.word(),
-                    activation: activation(shown),
-                },
-                TopologyEvent::Cleared(space) => TopologyEvent::Cleared(space.word()),
-            };
-            self.roc.step(plain);
-            let rust = TopologyView {
-                catalog: self
-                    .rust
-                    .catalog()
-                    .iter()
-                    .map(|&(workspace, space)| (workspace.word(), space.word()))
-                    .collect(),
-                activations: self
-                    .rust
-                    .activations()
-                    .iter()
-                    .map(|&(space, shown)| (space.word(), activation(shown)))
-                    .collect(),
-            };
-            let roc = self.roc.view();
-            if rust != roc {
-                diverged("topology", &plain, &rust, &roc);
-            }
-        }
     }
 }
 

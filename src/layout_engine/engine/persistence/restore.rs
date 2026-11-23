@@ -199,7 +199,7 @@ impl LayoutEngine {
         if request.scope != RestoreScope::Workspace {
             for (space, active) in actives {
                 if self.workspaces[active].space == space {
-                    self.workspaces.set_active_workspace(space, active);
+                    self.workspaces.set_active_workspace(window_store, space, active);
                 }
             }
         }
