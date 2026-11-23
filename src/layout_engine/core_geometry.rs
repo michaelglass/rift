@@ -90,6 +90,24 @@ pub(crate) fn check_traditional(
     check(what, &shape, upstream, rust, roc);
 }
 
+/// Holds the core's frames for a BSP `shape` (none: nothing takes space) to the BSP system's, as
+/// [`check_traditional`] does.
+#[cfg(any(test, feature = "roc-core"))]
+pub(crate) fn check_bsp(
+    shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
+    upstream: &[(WindowId, CGRect)],
+) {
+    let rust = shape.as_ref().map_or_else(Vec::new, rift_core::layout::bsp::Bsp::frames);
+    #[cfg(feature = "roc-core")]
+    let roc = || match &shape {
+        None => Ok(Vec::new()),
+        Some(shape) => rift_core_roc::tile_bsp(shape.clone().map(&to_plain)),
+    };
+    #[cfg(not(feature = "roc-core"))]
+    let roc = no_roc;
+    check("bsp", &shape, upstream, rust, roc);
+}
+
 /// Holds the core's frames for a floating layout to the floating system's, as
 /// [`check_traditional`] does.
 #[cfg(any(test, feature = "roc-core"))]

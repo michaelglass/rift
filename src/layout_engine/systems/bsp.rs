@@ -1238,6 +1238,8 @@ impl LayoutSystem for BspLayoutSystem {
                 gaps,
             }
             .apply(state.root, rect, &mut out);
+            #[cfg(any(test, feature = "roc-core"))]
+            let shape = self.shape(state.root, screen, constraints, gaps);
             if let (Some(ratio), [(_, frame)]) =
                 (self.single_window_aspect_ratio, out.as_mut_slice())
                 && matches!(self.kind(state.root), NodeKind::Leaf {
@@ -1256,6 +1258,8 @@ impl LayoutSystem for BspLayoutSystem {
                 frame.origin.y = rect.origin.y + (rect.size.height - height) / 2.0;
                 frame.size = CGSize::new(width, height);
             }
+            #[cfg(any(test, feature = "roc-core"))]
+            crate::layout_engine::core_geometry::check_bsp(shape, &out);
         }
         out
     }
@@ -2021,5 +2025,261 @@ impl BspLayoutSystem {
             slot.push(members.iter().position(|&member| member == window)?);
         }
         Some(slot)
+    }
+}
+
+impl BspLayoutSystem {
+    /// A BSP layout as the core's geometry takes it, from `root`, pruned as `prepare_geometry`
+    /// prunes it (none: nothing takes space). Arguments as `calculate_layout` takes them.
+    #[cfg(any(test, feature = "roc-core"))]
+    pub(crate) fn shape(
+        &self,
+        root: NodeId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+    ) -> Option<rift_core::layout::bsp::Bsp<WindowId>> {
+        use crate::layout_engine::{core_gaps, core_rect};
+        Some(rift_core::layout::bsp::Bsp {
+            screen: core_rect(screen),
+            gaps: core_gaps(gaps),
+            root: self.shape_node(root, constraints)?,
+            aspect: self.single_window_aspect_ratio,
+        })
+    }
+
+    /// A node as the core's geometry takes it: a leaf shows its participating member; a leaf
+    /// with none is left out, except an empty leaf while no window is left out of the system; a
+    /// split keeps the children that remain.
+    #[cfg(any(test, feature = "roc-core"))]
+    fn shape_node(
+        &self,
+        node: NodeId,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    ) -> Option<rift_core::layout::bsp::Node<WindowId>> {
+        use rift_core::layout::bsp::{Children, Fill, Node, Slot};
+
+        use crate::layout_engine::core_geometry::core_constraints;
+        match self.kind(node) {
+            NodeKind::Leaf {
+                members,
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            } => {
+                let slot = match self.participating_member(members) {
+                    Some(window) => Slot::Window {
+                        window,
+                        constraints: constraints.get(&window).copied().map(core_constraints),
+                    },
+                    None if self.inactive.is_empty() && matches!(members, LeafMembers::Empty) => {
+                        Slot::Empty
+                    }
+                    None => return None,
+                };
+                let fill = if *fullscreen {
+                    Fill::Screen
+                } else if *fullscreen_within_gaps {
+                    Fill::WithinGaps
+                } else {
+                    Fill::Tiled
+                };
+                Some(Node::Leaf {
+                    slot,
+                    fill,
+                    stacked: matches!(members, LeafMembers::Stack { .. }),
+                })
+            }
+            NodeKind::Split {
+                orientation,
+                ratio,
+                children: [first, second],
+                ..
+            } => {
+                let children = match (
+                    self.shape_node(*first, constraints),
+                    self.shape_node(*second, constraints),
+                ) {
+                    (None, None) => return None,
+                    (Some(only), None) | (None, Some(only)) => Children::One(Box::new(only)),
+                    (Some(first), Some(second)) => Children::Two(Box::new(first), Box::new(second)),
+                };
+                Some(Node::Split {
+                    horizontal: *orientation == Orientation::Horizontal,
+                    ratio: *ratio,
+                    children,
+                })
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod core_geometry_tests {
+    use super::*;
+    use crate::layout_engine::systems::drawn::*;
+    use crate::layout_engine::{ResizeOrientation, WindowDropAction};
+
+    /// A BSP system after random edits: windows added and removed, closed apps, every focus,
+    /// splits of every kind, joins, unjoins, consume-or-expel, moves, drops of every kind (stacks
+    /// among them), resizes, swaps, rebalances, orientation toggles, fullscreen of a leaf or a
+    /// split, participation, a single window's aspect ratio.
+    fn drawn_system(rng: &mut Rng) -> (BspLayoutSystem, LayoutId, Vec<WindowId>) {
+        let insertion = if rng.chance(50) {
+            WindowInsertionPoint::NextToSelection
+        } else {
+            WindowInsertionPoint::EndOfTree
+        };
+        let mut system = BspLayoutSystem::new(insertion);
+        if rng.chance(30) {
+            system.set_single_window_aspect_ratio(Some(rng.length(0.3, 3.0)));
+        }
+        let layout = system.create_layout();
+        let mut windows: Vec<WindowId> = Vec::new();
+        let mut next = 0;
+        for _ in 0..rng.below(40) {
+            let pick = |rng: &mut Rng, windows: &[WindowId]| {
+                windows[rng.below(windows.len() as u64) as usize]
+            };
+            match rng.below(17) {
+                0..=3 => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+                _ if windows.is_empty() => {}
+                4 => {
+                    let window = pick(rng, &windows);
+                    windows.retain(|w| *w != window);
+                    system.update(WindowChange::Remove(window));
+                }
+                5 => {
+                    let focus = match rng.below(4) {
+                        0 => Focus::Select(pick(rng, &windows)),
+                        1 => Focus::Ascend,
+                        2 => Focus::Descend,
+                        _ => Focus::Direction(drawn_direction(rng)),
+                    };
+                    system.focus(layout, focus);
+                }
+                6 => {
+                    for _ in 0..rng.below(3) {
+                        system.focus(layout, Focus::Ascend);
+                    }
+                    let within_gaps = rng.chance(50);
+                    system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
+                }
+                7 => {
+                    let window = pick(rng, &windows);
+                    system.set_window_participation(window, rng.chance(40));
+                }
+                8 => {
+                    let direction = drawn_direction(rng);
+                    let has_display_neighbor = rng.chance(30);
+                    system.edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor,
+                    });
+                }
+                9 => {
+                    let (source, target) = (pick(rng, &windows), pick(rng, &windows));
+                    let action = match rng.below(5) {
+                        0 => WindowDropAction::Swap,
+                        1 | 2 => WindowDropAction::Stack,
+                        3 => WindowDropAction::Insert(drawn_direction(rng)),
+                        _ => WindowDropAction::Move(drawn_direction(rng)),
+                    };
+                    system.edit(layout, LayoutEdit::Drop { source, target, action });
+                }
+                10 => {
+                    let amount = rng.length(-0.6, 0.6);
+                    let orientation = match rng.below(3) {
+                        0 => ResizeOrientation::Horizontal,
+                        1 => ResizeOrientation::Vertical,
+                        _ => ResizeOrientation::Smart,
+                    };
+                    system.edit(layout, LayoutEdit::Resize { amount, orientation }).discard();
+                }
+                11 => {
+                    let (a, b) = (pick(rng, &windows), pick(rng, &windows));
+                    system.edit(layout, LayoutEdit::Swap(a, b));
+                }
+                12 => {
+                    let kind = match rng.below(4) {
+                        0 => LayoutKind::Horizontal,
+                        1 => LayoutKind::Vertical,
+                        2 => LayoutKind::HorizontalStack,
+                        _ => LayoutKind::VerticalStack,
+                    };
+                    system.edit(layout, LayoutEdit::Split(kind));
+                }
+                13 => {
+                    let edit = match rng.below(3) {
+                        0 => GroupEdit::Join(drawn_direction(rng)),
+                        1 => GroupEdit::ConsumeOrExpel(drawn_direction(rng)),
+                        _ => GroupEdit::Unjoin,
+                    };
+                    system.edit(layout, LayoutEdit::Group(edit));
+                }
+                14 => {
+                    system.edit(layout, LayoutEdit::ToggleOrientation);
+                }
+                15 => {
+                    system.edit(layout, LayoutEdit::Rebalance);
+                }
+                _ if rng.chance(15) => {
+                    // Every window stacked onto one: the layout is a single stacked leaf.
+                    let target = windows[0];
+                    for &source in &windows[1..] {
+                        system.edit(layout, LayoutEdit::Drop {
+                            source,
+                            target,
+                            action: WindowDropAction::Stack,
+                        });
+                    }
+                }
+                _ if rng.chance(25) => {
+                    let window = pick(rng, &windows);
+                    system.update(WindowChange::CloseApp(window.pid));
+                    windows.retain(|w| w.pid != window.pid);
+                }
+                _ => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
+            }
+        }
+        (system, layout, windows)
+    }
+
+    /// The core's frames for a BSP layout are upstream's `calculate_layout`'s, bit for bit, over
+    /// drawn systems, screens, gaps and window constraints.
+    #[test]
+    fn the_core_tiles_bsp_layouts_as_the_bsp_system_does() {
+        let mut rng = Rng(0x5eed_b5b5);
+        let (mut cases, mut frames_seen) = (0, 0);
+        for _ in 0..3000 {
+            let (system, layout, windows) = drawn_system(&mut rng);
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            let line = drawn_line(&mut rng);
+            let upstream = system.calculate_layout(layout, screen, 0.0, &constraints, &gaps, line);
+            let root = system.layouts[layout].root;
+            let core: Vec<(WindowId, CGRect)> = system
+                .shape(root, screen, &constraints, &gaps)
+                .map_or_else(Vec::new, |shape| shape.frames())
+                .into_iter()
+                .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
+                .collect();
+            assert_eq!(bits(&core), bits(&upstream));
+            cases += 1;
+            frames_seen += upstream.len();
+        }
+        eprintln!("bsp: {cases} layouts, {frames_seen} frames identical");
+        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
     }
 }
