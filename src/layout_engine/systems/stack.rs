@@ -839,6 +839,7 @@ mod tests {
     use super::*;
     use crate::layout_engine::TraditionalLayoutSystem;
     use crate::layout_engine::systems::LayoutEdit;
+    use crate::layout_engine::systems::drawn::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -967,100 +968,6 @@ mod tests {
         assert_eq!(frames[0].1.size.width, 200.0);
     }
 
-    /// xorshift64*: deterministic, no dependency.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 >> 12;
-            self.0 ^= self.0 << 25;
-            self.0 ^= self.0 >> 27;
-            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-        }
-
-        fn below(&mut self, n: u64) -> u64 { self.next() % n }
-
-        fn chance(&mut self, percent: u64) -> bool { self.below(100) < percent }
-
-        /// Mostly round numbers, sometimes halves, sometimes anything in `low..high`.
-        fn length(&mut self, low: f64, high: f64) -> f64 {
-            let value = low + (high - low) * (self.next() >> 11) as f64 / (1u64 << 53) as f64;
-            match self.below(3) {
-                0 => value.round(),
-                1 => (value * 2.).round() / 2.,
-                _ => value,
-            }
-        }
-
-        fn maybe(&mut self, high: f64) -> f64 {
-            if self.chance(50) {
-                0.
-            } else {
-                self.length(1., high)
-            }
-        }
-    }
-
-    fn drawn_constraints(rng: &mut Rng) -> WindowLayoutConstraints {
-        let sizing = match rng.below(3) {
-            0 => super::super::Sizing::Fixed,
-            1 => super::super::Sizing::Resizable,
-            _ => super::super::Sizing::ResizableAtLeastMin,
-        };
-        let mut c = WindowLayoutConstraints {
-            sizing,
-            locked_width: rng.maybe(1500.),
-            locked_height: rng.maybe(1000.),
-            min_width: rng.maybe(900.),
-            min_height: rng.maybe(700.),
-            max_width: rng.maybe(1800.),
-            max_height: rng.maybe(1200.),
-        };
-        if rng.chance(10) {
-            // An axis the app locks (min = max).
-            c.max_width = c.min_width;
-        }
-        if rng.chance(5) {
-            c.min_height = f64::NAN;
-        }
-        c
-    }
-
-    fn drawn_gaps(rng: &mut Rng) -> GapSettings {
-        let mut gaps = GapSettings::default();
-        if rng.chance(80) {
-            gaps.outer.top = rng.length(0., 40.);
-            gaps.outer.left = rng.length(0., 40.);
-            gaps.outer.bottom = rng.length(0., 40.);
-            gaps.outer.right = rng.length(0., 40.);
-            gaps.inner.horizontal = rng.length(0., 30.);
-            gaps.inner.vertical = rng.length(0., 30.);
-        }
-        gaps
-    }
-
-    fn drawn_line(rng: &mut Rng) -> StackLineReserve {
-        use crate::common::config::{HorizontalPlacement, VerticalPlacement};
-        StackLineReserve {
-            thickness: if rng.chance(40) {
-                0.
-            } else {
-                rng.length(1., 12.)
-            },
-            spacing: rng.maybe(10.),
-            horiz: if rng.chance(50) {
-                HorizontalPlacement::Top
-            } else {
-                HorizontalPlacement::Bottom
-            },
-            vert: if rng.chance(50) {
-                VerticalPlacement::Left
-            } else {
-                VerticalPlacement::Right
-            },
-        }
-    }
-
     /// A stack system after random edits: windows added, removed, selected, made fullscreen,
     /// left out of the layout, the stack's orientation turned, the root selected.
     fn drawn_system(rng: &mut Rng) -> (StackLayoutSystem, LayoutId, Vec<WindowId>) {
@@ -1141,45 +1048,15 @@ mod tests {
         let (mut cases, mut frames_seen) = (0, 0);
         for _ in 0..3000 {
             let (system, layout, windows) = drawn_system(&mut rng);
-            let screen = CGRect::new(
-                objc2_core_foundation::CGPoint::new(
-                    rng.length(-2000., 2000.),
-                    rng.length(-50., 1000.),
-                ),
-                objc2_core_foundation::CGSize::new(rng.length(40., 3000.), rng.length(40., 2000.)),
-            );
-            let mut constraints = HashMap::default();
-            for &window in &windows {
-                if rng.chance(60) {
-                    constraints.insert(window, drawn_constraints(&mut rng));
-                }
-            }
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
             let gaps = drawn_gaps(&mut rng);
-            let offset = if rng.chance(20) {
-                rng.length(0., 900.)
-            } else {
-                rng.length(0., 60.)
-            };
+            let offset = drawn_offset(&mut rng);
             let line = drawn_line(&mut rng);
             let upstream =
                 system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
-            let core = system
-                .shape(layout, screen, offset, &constraints, &gaps, line)
-                .map_or_else(Vec::new, |shape| shape.frames());
-            let bits = |frames: Vec<(WindowId, [f64; 4])>| -> Vec<(WindowId, [u64; 4])> {
-                frames.into_iter().map(|(w, f)| (w, f.map(f64::to_bits))).collect()
-            };
-            assert_eq!(
-                bits(core.iter().map(|&(w, r)| (w, [r.x, r.y, r.w, r.h])).collect()),
-                bits(
-                    upstream
-                        .iter()
-                        .map(|&(w, r)| (w, [r.origin.x, r.origin.y, r.size.width, r.size.height]))
-                        .collect()
-                ),
-                "{}",
-                system.draw_tree(layout)
-            );
+            let core = core_frames(system.shape(layout, screen, offset, &constraints, &gaps, line));
+            assert_eq!(bits(&core), bits(&upstream), "{}", system.draw_tree(layout));
             cases += 1;
             frames_seen += upstream.len();
         }

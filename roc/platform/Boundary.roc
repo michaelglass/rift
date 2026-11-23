@@ -53,6 +53,19 @@ Boundary := [].{
 
 	BspShape := { screen : Rect, gaps : Gaps, aspect : Aspect, root : BspNode }
 
+	# One axis (`rift_core::layout::axis`).
+
+	## A segment's fixed length, if it has one.
+	AxisFixed := [Fixed(F64), Free]
+
+	## A segment's maximum, if it has one.
+	AxisMax := [Max(F64), NoMax]
+
+	AxisItem := { min : F64, fixed : AxisFixed, max : AxisMax, weight : F64, can_grow : Bool }
+
+	## Segments along one axis and the length they share (`solve_axis_lengths`).
+	AxisQuestion := { items : List(AxisItem), usable : F64 }
+
 	# Traditional (`rift_core::layout::traditional`).
 
 	TraditionalWindow := { window : WindowId, constraints : Constraints, fill : Fill }

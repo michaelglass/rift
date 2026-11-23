@@ -240,6 +240,72 @@ fn the_roc_core_tiles_traditional_layouts_as_the_rust_core_does() {
     eprintln!("layout: {cases} traditional shapes, {windows} frames identical");
 }
 
+/// A bound as an app or a container may give it: mostly plain, sometimes 0, negative, infinite
+/// or NaN.
+fn axis_bound(rng: &mut Rng, high: f64) -> f64 {
+    match rng.below(12) {
+        0 => 0.,
+        1 => -rng.length(1., high),
+        2 => f64::INFINITY,
+        3 => f64::NAN,
+        _ => rng.length(0., high),
+    }
+}
+
+fn axis_weight(rng: &mut Rng) -> f64 {
+    match rng.below(10) {
+        0 => 0.,
+        1 => rng.float(0., 0.05),
+        2 => -rng.float(0., 1.),
+        3 => f64::NAN,
+        4..=6 => 1.,
+        _ => rng.length(0., 3.),
+    }
+}
+
+/// The Roc core's axis solver against the Rust core's, length for length (frames would round
+/// most differences away): minima, fixed lengths and maxima that fit or overcommit, weights
+/// small, zero, negative and NaN.
+#[test]
+fn the_roc_core_solves_axis_lengths_as_the_rust_core_does() {
+    use rift_core::layout::axis::{AxisConstraints, solve_axis_lengths};
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0x5EED_A415_0C0F_FEE5);
+    let before = AllocationCount::now();
+    let mut lengths = 0;
+    for case in 0..cases {
+        let count = 1 + rng.below(6);
+        let items: Vec<AxisConstraints> = (0..count)
+            .map(|_| AxisConstraints {
+                min: if rng.chance(50) {
+                    0.
+                } else {
+                    axis_bound(&mut rng, 900.)
+                },
+                fixed: rng.chance(25).then(|| axis_bound(&mut rng, 900.)),
+                max: rng.chance(40).then(|| axis_bound(&mut rng, 900.)),
+                weight: axis_weight(&mut rng),
+                can_grow: rng.chance(80),
+            })
+            .collect();
+        let usable = if rng.chance(5) {
+            axis_bound(&mut rng, 3000.)
+        } else {
+            rng.length(0., 3000.)
+        };
+        let rust = solve_axis_lengths(&items, usable);
+        let roc = rift_core_roc::solve_axis_lengths(&items, usable).expect("lengths");
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        if bits(&roc) != bits(&rust) {
+            panic!("case {case}: {items:?} in {usable}\n  roc:  {roc:?}\n  rust: {rust:?}");
+        }
+        lengths += rust.len();
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} axes, {lengths} lengths identical");
+}
+
 #[test]
 fn the_roc_core_tiles_what_the_rust_core_tiles() {
     let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());

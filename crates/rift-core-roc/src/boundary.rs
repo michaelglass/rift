@@ -595,6 +595,52 @@ pub(crate) fn from_settled(answer: abi::BoundarySettled) -> Settled<u64> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// One axis.
+
+pub(crate) fn axis_question(
+    items: &[rift_core::layout::axis::AxisConstraints],
+    usable: f64,
+    host: &abi::RocHost,
+) -> abi::BoundaryAxisQuestion {
+    use abi::{BoundaryAxisFixedTag as FixedTag, BoundaryAxisMaxTag as MaxTag};
+    let items: Vec<abi::BoundaryAxisItem> = items
+        .iter()
+        .map(|item| abi::BoundaryAxisItem {
+            min: item.min,
+            fixed: match item.fixed {
+                Some(length) => {
+                    union!(
+                        BoundaryAxisFixed,
+                        BoundaryAxisFixedPayload.fixed(length),
+                        FixedTag::Fixed
+                    )
+                }
+                None => union!(BoundaryAxisFixed, BoundaryAxisFixedPayload.free, FixedTag::Free),
+            },
+            max: match item.max {
+                Some(length) => {
+                    union!(BoundaryAxisMax, BoundaryAxisMaxPayload.max(length), MaxTag::Max)
+                }
+                None => union!(BoundaryAxisMax, BoundaryAxisMaxPayload.no_max, MaxTag::NoMax),
+            },
+            weight: item.weight,
+            can_grow: item.can_grow,
+        })
+        .collect();
+    abi::BoundaryAxisQuestion {
+        items: list(&items, host),
+        usable,
+    }
+}
+
+pub(crate) fn lengths(answer: abi::RocListWith<f64, false>, host: &abi::RocHost) -> Vec<f64> {
+    let lengths = answer.as_slice().to_vec();
+    // SAFETY: the list is Roc's answer, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    lengths
+}
+
+// ---------------------------------------------------------------------------------------------
 // Floating.
 
 pub(crate) fn floating_question(

@@ -74,7 +74,8 @@ pub struct AxisConstraints {
 
 fn sanitize(v: f64) -> f64 { if v.is_finite() { v.max(0.0) } else { 0.0 } }
 
-/// Solve 1D segment lengths for a container axis.
+/// Solve 1D segment lengths for a container axis (upstream's solver since #688, step for step,
+/// so the lengths are its bit for bit).
 ///
 /// Rules:
 /// - never negative
@@ -88,117 +89,126 @@ pub fn solve_axis_lengths(items: &[AxisConstraints], usable: f64) -> Vec<f64> {
     let usable = sanitize(usable);
     let segments: Vec<Segment> = items.iter().map(Segment::of).collect();
     let fixed_sum: f64 = segments.iter().filter_map(|segment| segment.fixed).sum();
-    if fixed_sum > usable && fixed_sum > 0.0 {
+    if fixed_sum > usable {
         let scale = usable / fixed_sum;
-        return segments
-            .iter()
-            .map(|segment| segment.fixed.map_or(0.0, |v| v * scale))
-            .collect();
+        return segments.iter().map(|segment| segment.fixed.unwrap_or(0.0) * scale).collect();
     }
 
-    let min_sum: f64 = segments.iter().filter(|s| s.fixed.is_none()).map(|s| s.low).sum();
+    let min_sum: f64 = segments.iter().filter(|s| s.fixed.is_none()).map(|s| s.min).sum();
     let remaining_for_mins = (usable - fixed_sum).max(0.0);
-    let scale =
-        (min_sum > remaining_for_mins && min_sum > 0.0).then(|| remaining_for_mins / min_sum);
-    let segments = segments.into_iter().map(|segment| match (segment.fixed, scale) {
-        (None, Some(scale)) => Segment {
-            low: segment.low * scale,
-            ..segment
-        },
-        (Some(_), _) | (None, None) => segment,
-    });
+    let segments: Vec<Segment> = if min_sum > remaining_for_mins {
+        let scale = remaining_for_mins / min_sum;
+        segments
+            .into_iter()
+            .map(|segment| match segment.fixed {
+                None => Segment {
+                    min: segment.min * scale,
+                    ..segment
+                },
+                Some(_) => segment,
+            })
+            .collect()
+    } else {
+        segments
+    };
 
-    // Fixed lengths first, in order.
+    // Fixed segments first, in order; then each non-growable segment gets its minimum, in order.
     let mut remaining = usable;
-    let mut placed: Vec<(Segment, State)> = segments
+    let mut states: Vec<State> = segments
+        .iter()
         .map(|segment| match segment.fixed {
             Some(v) => {
-                let assigned = v.min(remaining);
-                remaining = (remaining - assigned).max(0.0);
-                (segment, State::Set(assigned))
+                let length = v.min(remaining);
+                remaining = (remaining - length).max(0.0);
+                State::Set(length)
             }
-            None => (segment, State::Growing),
+            None => State::Growing,
         })
         .collect();
-    // Non-growable segments stay at their minimum, in order. Growable segments are solved from
-    // their *final* weighted sizes, clamped to their bounds. Seeding every segment with its
-    // minimum and distributing only the remainder would skew equal-weight splits whenever the
-    // minima differ.
-    for (segment, state) in &mut placed {
-        if let (State::Growing, None, false) = (*state, segment.fixed, segment.grows) {
-            let assigned = segment.low.min(remaining);
-            remaining = (remaining - assigned).max(0.0);
-            *state = State::Set(assigned);
+    for (segment, state) in segments.iter().zip(&mut states) {
+        if let (State::Growing, false) = (*state, segment.grows) {
+            let length = segment.min.min(remaining);
+            remaining = (remaining - length).max(0.0);
+            *state = State::Set(length);
         }
     }
 
-    while remaining > f64::EPSILON && placed.iter().any(|(_, state)| *state == State::Growing) {
-        let growing = || placed.iter().filter(|(_, state)| *state == State::Growing);
-        let total_weight: f64 = growing().map(|(segment, _)| segment.weight).sum();
-        let use_equal_weights = total_weight <= f64::EPSILON;
-        let divisor = if use_equal_weights {
-            growing().count() as f64
-        } else {
-            total_weight
-        };
-        let share = |segment: &Segment| {
-            let weight = if use_equal_weights {
-                1.0
-            } else {
-                segment.weight
-            };
-            remaining * weight / divisor
-        };
-        let clamps: Vec<Option<f64>> = placed
+    // Clamp one side at a time. A binding maximum raises the remaining shares, which can make a
+    // tentative minimum unnecessary, and vice versa.
+    loop {
+        let growing: Vec<&Segment> = segments
             .iter()
-            .map(|(segment, state)| match state {
-                State::Growing => segment.clamp(share(segment), remaining),
-                State::Set(_) => None,
-            })
+            .zip(&states)
+            .filter(|(_, state)| **state == State::Growing)
+            .map(|(segment, _)| segment)
             .collect();
-        if clamps.iter().all(Option::is_none) {
-            for (segment, state) in &mut placed {
-                if *state == State::Growing {
-                    *state = State::Set(share(segment));
-                }
-            }
-            remaining = 0.0;
+        if growing.is_empty() || remaining <= f64::EPSILON {
             break;
         }
-        let clamped_sum: f64 = clamps.iter().flatten().sum();
-        remaining = (remaining - clamped_sum).max(0.0);
-        for ((_, state), clamp) in placed.iter_mut().zip(clamps) {
-            if let Some(length) = clamp {
-                *state = State::Set(length);
+        let count = growing.len();
+        let total_weight: f64 = growing.iter().map(|segment| segment.weight).sum();
+        let proposed = |segment: &Segment| {
+            if total_weight == 0.0 {
+                remaining / count as f64
+            } else {
+                remaining * (segment.weight / total_weight)
+            }
+        };
+        let bounded = |segment: &Segment| {
+            proposed(segment).clamp(
+                segment.min,
+                segment.max.unwrap_or(f64::INFINITY).max(segment.min),
+            )
+        };
+        let total: f64 = growing.iter().map(|segment| bounded(segment)).sum();
+        let tolerance = remaining * f64::EPSILON * count as f64;
+        let settle_all = |states: &mut Vec<State>| {
+            for (segment, state) in segments.iter().zip(states.iter_mut()) {
+                if *state == State::Growing {
+                    *state = State::Set(bounded(segment));
+                }
+            }
+        };
+        if (total - remaining).abs() <= tolerance {
+            settle_all(&mut states);
+            break;
+        }
+        let mut assigned = 0.0;
+        let mut clamped_any = false;
+        for (segment, state) in segments.iter().zip(states.iter_mut()) {
+            if *state != State::Growing {
+                continue;
+            }
+            let (share, bound) = (proposed(segment), bounded(segment));
+            if (total > remaining && bound > share) || (total < remaining && bound < share) {
+                *state = State::Set(bound);
+                assigned += bound;
+                clamped_any = true;
             }
         }
+        if !clamped_any {
+            settle_all(&mut states);
+            break;
+        }
+        remaining = (remaining - assigned).max(0.0);
     }
 
-    let mut lengths: Vec<f64> = placed
-        .iter()
-        .map(|(_, state)| match state {
-            State::Set(length) => *length,
+    states
+        .into_iter()
+        .map(|state| match state {
+            State::Set(length) => length,
             State::Growing => 0.0,
         })
-        .collect();
-    if remaining <= f64::EPSILON {
-        let used: f64 = lengths.iter().sum();
-        let drift = usable - used;
-        if drift.abs() > f64::EPSILON
-            && let Some(last) = lengths.iter_mut().rev().find(|length| **length > 0.0)
-        {
-            *last = (*last + drift).max(0.0);
-        }
-    }
-    lengths
+        .collect()
 }
 
-/// One segment's bounds, sanitized.
+/// One segment's bounds, sanitized as the solver reads them.
 #[derive(Debug, Clone, Copy)]
 struct Segment {
-    low: f64,
+    min: f64,
     fixed: Option<f64>,
-    high: Option<f64>,
+    /// A positive maximum (none: no limit).
+    max: Option<f64>,
     weight: f64,
     grows: bool,
 }
@@ -212,38 +222,72 @@ enum State {
 
 impl Segment {
     fn of(item: &AxisConstraints) -> Self {
-        let low = sanitize(item.min);
-        let high = item.max.map(sanitize).filter(|v| *v > 0.0 && v.is_finite());
+        let min = sanitize(item.min);
+        let max = item.max.map(sanitize).filter(|&v| v > 0.0);
         // A fixed length within the segment's bounds.
-        let fixed = item.fixed.map(sanitize).filter(|v| v.is_finite()).map(|v| {
-            let v = if v < low { low } else { v };
-            match high {
-                Some(high) if v > high => high,
-                Some(_) | None => v,
-            }
+        let fixed = item.fixed.map(|v| {
+            let v = sanitize(v).max(min);
+            max.map_or(v, |max| v.min(max))
         });
         Segment {
-            low,
+            min,
             fixed,
-            high,
+            max,
             weight: sanitize(item.weight),
             grows: item.can_grow,
         }
-    }
-
-    /// The length a bound holds a growing segment to, if its share breaks one.
-    fn clamp(&self, proposed: f64, remaining: f64) -> Option<f64> {
-        if proposed + f64::EPSILON < self.low {
-            return Some(self.low.min(remaining));
-        }
-        let high = self.high.map(|value| value.max(self.low))?;
-        (proposed > high + f64::EPSILON).then(|| high.min(remaining))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{AxisConstraints, solve_axis_lengths};
+
+    /// The case that showed the core's solver predated upstream's #688: a minimum that fits
+    /// holds, and the rest is shared under the maxima (the pre-#688 solver gave 105, 0, 814).
+    #[test]
+    fn a_minimum_that_fits_holds_while_maxima_share_the_rest() {
+        let grows = |min, max| AxisConstraints {
+            min,
+            fixed: None,
+            max,
+            weight: 1.0,
+            can_grow: true,
+        };
+        let solved = solve_axis_lengths(
+            &[
+                grows(0.0, Some(105.0)),
+                grows(0.0, Some(1746.0)),
+                grows(869.0, None),
+            ],
+            919.0,
+        );
+        assert_eq!(solved, [25.0, 25.0, 869.0]);
+    }
+
+    #[test]
+    fn mixed_bounds_only_clamp_segments_that_need_it() {
+        let flexible = AxisConstraints {
+            min: 0.0,
+            fixed: None,
+            max: None,
+            weight: 1.0,
+            can_grow: true,
+        };
+        for (min, expected) in [(40.0, [45.0, 10.0, 45.0]), (60.0, [60.0, 10.0, 30.0])] {
+            assert_eq!(
+                solve_axis_lengths(
+                    &[
+                        AxisConstraints { min, ..flexible },
+                        AxisConstraints { max: Some(10.0), ..flexible },
+                        flexible,
+                    ],
+                    100.0,
+                ),
+                expected,
+            );
+        }
+    }
 
     #[test]
     fn scales_non_fixed_minima_after_reserving_fixed_segments() {

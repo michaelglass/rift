@@ -432,6 +432,17 @@ pub fn settle(
     Ok(boundary::from_settled(unsafe { abi::roc_settle(question) }))
 }
 
+/// The lengths of segments along one axis, as `rift_core::layout::axis::solve_axis_lengths`
+/// solves them, solved by the Roc core.
+pub fn solve_axis_lengths(
+    items: &[rift_core::layout::axis::AxisConstraints],
+    usable: f64,
+) -> Result<Vec<f64>, RocError> {
+    let host = host();
+    let question = boundary::axis_question(items, usable, &host);
+    Ok(boundary::lengths(unsafe { abi::roc_axis(question) }, &host))
+}
+
 /// A floating layout's first frames, as `Floating::first_frames` places them, placed by the Roc
 /// core.
 pub fn first_frames(floating: Floating, windows: Vec<Newcomer>) -> Result<Vec<Rect>, RocError> {

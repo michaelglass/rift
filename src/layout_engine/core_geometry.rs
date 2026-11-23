@@ -146,3 +146,81 @@ fn diverged(
         "{label}: the core's frames differ from the layout system's"
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::layout_engine::systems::constraints as upstream;
+    use crate::layout_engine::systems::drawn::Rng;
+
+    /// A bound as an app or a container may give it: mostly plain, sometimes 0, negative,
+    /// infinite or NaN.
+    fn bound(rng: &mut Rng, high: f64) -> f64 {
+        match rng.below(12) {
+            0 => 0.0,
+            1 => -rng.length(1., high),
+            2 => f64::INFINITY,
+            3 => f64::NAN,
+            _ => rng.length(0., high),
+        }
+    }
+
+    fn weight(rng: &mut Rng) -> f64 {
+        match rng.below(10) {
+            0 => 0.0,
+            1 => rng.length(0., 0.05),
+            2 => -rng.length(0., 1.),
+            3 => f64::NAN,
+            4..=6 => 1.0,
+            _ => rng.length(0., 3.),
+        }
+    }
+
+    /// The core's axis solver is upstream's, bit for bit, over drawn segments: minima, fixed
+    /// lengths and maxima that fit or overcommit, weights small, zero, negative and NaN.
+    #[test]
+    fn the_cores_axis_solver_is_upstreams() {
+        let mut rng = Rng(0x5eed_a415);
+        let mut lengths = 0;
+        for _ in 0..20000 {
+            let count = 1 + rng.below(6) as usize;
+            let items: Vec<upstream::AxisConstraints> = (0..count)
+                .map(|_| upstream::AxisConstraints {
+                    min: if rng.chance(50) {
+                        0.0
+                    } else {
+                        bound(&mut rng, 900.)
+                    },
+                    fixed: rng.chance(25).then(|| bound(&mut rng, 900.)),
+                    max: rng.chance(40).then(|| bound(&mut rng, 900.)),
+                    weight: weight(&mut rng),
+                    can_grow: rng.chance(80),
+                })
+                .collect();
+            let usable = if rng.chance(5) {
+                bound(&mut rng, 3000.)
+            } else {
+                rng.length(0., 3000.)
+            };
+            let core: Vec<rift_core::layout::axis::AxisConstraints> = items
+                .iter()
+                .map(|item| rift_core::layout::axis::AxisConstraints {
+                    min: item.min,
+                    fixed: item.fixed,
+                    max: item.max,
+                    weight: item.weight,
+                    can_grow: item.can_grow,
+                })
+                .collect();
+            let theirs = upstream::solve_axis_lengths(items.clone(), usable);
+            let ours = rift_core::layout::axis::solve_axis_lengths(&core, usable);
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                bits(&ours),
+                bits(&theirs),
+                "{items:?} in {usable}: {ours:?} vs {theirs:?}"
+            );
+            lengths += count;
+        }
+        eprintln!("axis solver: {lengths} lengths identical");
+    }
+}

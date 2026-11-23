@@ -13,6 +13,7 @@ platform ""
 			strip : Strip -> Placed,
 			settle : SettleQuestion -> Settled,
 			floating : FloatingQuestion -> List(Rect),
+			axis : AxisQuestion -> List(F64),
 			removal_focus : RemovalQuestion -> RemovalAnswer,
 			focus_candidate : CandidateQuestion -> WordAnswer,
 			hides_focus : HidesQuestion -> VerdictAnswer,
@@ -86,6 +87,7 @@ platform ""
 		"roc_strip": strip_for_host,
 		"roc_settle": settle_for_host,
 		"roc_floating": floating_for_host,
+		"roc_axis": axis_for_host,
 		"roc_removal_focus": removal_focus_for_host,
 		"roc_focus_candidate": focus_candidate_for_host,
 		"roc_hides_focus": hides_focus_for_host,
@@ -127,7 +129,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [Stepped, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, WorkspacesStepped, WorkspacesViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
+import Boundary exposing [Stepped, AxisQuestion, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, LifecycleStepped, LifecycleInvalidated, LifecycleRevalidated, Invalidation, Revalidation, LifecycleViewed, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, WorkspacesStepped, WorkspacesViewed, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, MainWindowsStepped, MainWindowsViewed, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -163,6 +165,10 @@ settle_for_host = |question| (core.settle)(question)
 ## A floating layout's newcomers' first frames.
 floating_for_host : FloatingQuestion -> List(Rect)
 floating_for_host = |question| (core.floating)(question)
+
+## The lengths of the segments along one axis.
+axis_for_host : AxisQuestion -> List(F64)
+axis_for_host = |question| (core.axis)(question)
 
 ## What a removal does to focus.
 removal_focus_for_host : RemovalQuestion -> RemovalAnswer

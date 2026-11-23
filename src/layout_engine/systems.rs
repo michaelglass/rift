@@ -539,6 +539,8 @@ mod tests {
 }
 mod floating;
 pub use floating::FloatingLayoutSystem;
+#[cfg(test)]
+pub(crate) mod drawn;
 mod stack;
 pub use stack::StackLayoutSystem;
 
