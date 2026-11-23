@@ -1225,11 +1225,7 @@ impl Reactor {
             } else {
                 modes::WorkspaceSwitch::Idle
             },
-            topology: if self.refreshes_blocked() {
-                modes::Topology::Unsettled
-            } else {
-                modes::Topology::Settled
-            },
+            topology: self.topology(),
         }
     }
 
@@ -1519,30 +1515,30 @@ impl Reactor {
     }
 
     fn should_quarantine_unstable_topology(&self, event: &Event) -> bool {
-        if !self.refreshes_blocked() {
-            return false;
+        let topology = self.topology();
+        let class = Asked::new();
+        let quarantines =
+            rift_core::topology::quarantines(topology, || class.ask(|| event_class(event)));
+        #[cfg(feature = "roc-core")]
+        {
+            use rift_core::topology::plain::Quarantine;
+            let question = Quarantine {
+                topology,
+                class: class.fact(|class| class),
+            };
+            let roc = rift_core_roc::topology::quarantines(question);
+            crate::roc_path::check("quarantines", Quarantine::FACTS, &question, &quarantines, roc);
         }
+        quarantines
+    }
 
-        matches!(
-            event,
-            Event::WindowCreated(..)
-                | Event::WindowDestroyed(..)
-                | Event::WindowInvalidated(..)
-                | Event::WindowServerDestroyed(..)
-                | Event::WindowServerAppeared(..)
-                | Event::WindowFrameChanged(..)
-                | Event::WindowMinimized(..)
-                | Event::WindowDeminiaturized(..)
-                | Event::WindowTitleChanged(..)
-                | Event::WindowClosed(..)
-                | Event::WindowServerHidden(..)
-                | Event::WindowServerUnhidden(..)
-                | Event::WindowServerFocusChanged(..)
-                | Event::DragMotion(..)
-                | Event::ModifierMouseDown { .. }
-                | Event::PointerPressed { .. }
-                | Event::Gesture(..)
-        )
+    /// Whether Rift's model of Spaces is authoritative (see [`Self::refreshes_blocked`]).
+    fn topology(&self) -> modes::Topology {
+        if self.refreshes_blocked() {
+            modes::Topology::Unsettled
+        } else {
+            modes::Topology::Settled
+        }
     }
 
     fn refreshes_blocked(&self) -> bool {
@@ -7590,6 +7586,31 @@ impl rift_core::focus::ActivationFacts for AskedActivation<'_> {
     }
 
     fn blacklisted(&self) -> Option<bool> { self.blacklisted.ask(|| self.query.blacklisted()) }
+}
+
+/// What an event is, to an unsettled topology's quarantine.
+fn event_class(event: &Event) -> rift_core::topology::EventClass {
+    use rift_core::topology::EventClass;
+    match event {
+        Event::WindowCreated(..)
+        | Event::WindowDestroyed(..)
+        | Event::WindowInvalidated(..)
+        | Event::WindowServerDestroyed(..)
+        | Event::WindowServerAppeared(..)
+        | Event::WindowFrameChanged(..)
+        | Event::WindowMinimized(..)
+        | Event::WindowDeminiaturized(..)
+        | Event::WindowTitleChanged(..)
+        | Event::WindowClosed(..)
+        | Event::WindowServerHidden(..)
+        | Event::WindowServerUnhidden(..)
+        | Event::WindowServerFocusChanged(..) => EventClass::WindowReport,
+        Event::DragMotion(..)
+        | Event::ModifierMouseDown { .. }
+        | Event::PointerPressed { .. }
+        | Event::Gesture(..) => EventClass::WindowInput,
+        _ => EventClass::Other,
+    }
 }
 
 /// Where a transient entry's evidence came from.

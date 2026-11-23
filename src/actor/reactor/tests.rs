@@ -4966,6 +4966,34 @@ fn carbon_activation_is_forwarded_during_refresh_quarantine() {
     ));
 }
 
+/// While the topology is unsettled, input that acts on windows is quarantined like the windows'
+/// reports: a press on a tracked, admitted window presses nothing. Once a snapshot settles the
+/// topology, the same press presses it.
+#[test]
+fn a_press_during_an_unsettled_topology_is_quarantined() {
+    use crate::model::window_store::Pointer;
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 7, make_windows(1));
+    let wid = WindowId::new(7, 1);
+    let frame = reactor.state.windows.window(wid).unwrap().frame_monotonic();
+
+    reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+    reactor.handle_loop_event(Event::PointerPressed { point: frame.mid() });
+    assert_eq!(reactor.state.windows.pointer(), Pointer::Idle, "quarantined");
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_loop_event(Event::PointerPressed { point: frame.mid() });
+    assert_eq!(
+        reactor.state.windows.pointer(),
+        Pointer::Pressing(wid),
+        "settled"
+    );
+}
+
 #[test]
 fn focus_follows_mouse_emits_focus_without_explicit_arrange() {
     let reactor = test_reactor();

@@ -214,6 +214,14 @@ Boundary := [].{
 	## A Space, or none.
 	MaybeSpace := [Space(U64), NoSpace]
 
+	## What an event is, to an unsettled topology's quarantine.
+	EventClass := [WindowReport, WindowInput, Other]
+
+	FactEventClass := [Asked(EventClass), Unasked]
+
+	## Whether to quarantine an event: whether the topology is settled, the event's class.
+	QuarantineQuestion := { topology : TopologyNow, class : FactEventClass }
+
 	FactSpace := [Asked(MaybeSpace), Unasked]
 
 	## Where an app inventory finds a window, by what the platform already knows of it.

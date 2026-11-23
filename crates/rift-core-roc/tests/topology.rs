@@ -6,9 +6,12 @@
 mod facts;
 
 use facts::{Coin, rust, typed};
+use rift_core::modes::Topology;
 use rift_core::plain::{WindowId, wire};
-use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery};
-use rift_core::topology::{DiscoveryStanding, Displays, Incoming, MissionControl, Standing};
+use rift_core::topology::plain::{Admit, Candidates, Discovered, Discovery, Quarantine};
+use rift_core::topology::{
+    DiscoveryStanding, Displays, EventClass, Incoming, MissionControl, Standing,
+};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -180,6 +183,36 @@ fn the_roc_core_picks_app_rule_candidates_as_the_rust_core_does() {
             );
             let rust = rust(question.answer(), wire::encode_app_windows);
             (format!("{question:?}"), roc, rust)
+        },
+    );
+}
+
+#[test]
+fn the_roc_core_quarantines_events_as_the_rust_core_does() {
+    typed(
+        "topology",
+        "quarantines",
+        Rng(0x9A2A_0000_0000_0041),
+        |rng, blank| {
+            let class = [
+                EventClass::WindowReport,
+                EventClass::WindowInput,
+                EventClass::Other,
+            ][rng.below(3) as usize];
+            let question = Quarantine {
+                topology: if rng.chance(50) {
+                    Topology::Settled
+                } else {
+                    Topology::Unsettled
+                },
+                class: blank.fact(rng, class),
+            };
+            let roc = rust(
+                rift_core_roc::topology::quarantines(question),
+                wire::encode_verdict,
+            );
+            let expected = rust(question.answer(), wire::encode_verdict);
+            (format!("{question:?}"), roc, expected)
         },
     );
 }

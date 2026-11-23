@@ -701,6 +701,18 @@ fact!(
     |v, host| listing(v)
 );
 fact!(
+    fact_event_class,
+    topology::EventClass,
+    BoundaryFactEventClass,
+    BoundaryFactEventClassPayload,
+    BoundaryFactEventClassTag,
+    |v, host| match v {
+        topology::EventClass::WindowReport => abi::BoundaryEventClass::WindowReport,
+        topology::EventClass::WindowInput => abi::BoundaryEventClass::WindowInput,
+        topology::EventClass::Other => abi::BoundaryEventClass::Other,
+    }
+);
+fact!(
     fact_known,
     Option<(i32, u64)>,
     BoundaryFactKnown,
@@ -983,6 +995,16 @@ pub(crate) fn desktop_question(
 }
 
 // Topology.
+
+pub(crate) fn quarantine_question(
+    question: topology::plain::Quarantine,
+    host: &abi::RocHost,
+) -> abi::BoundaryQuarantineQuestion {
+    abi::BoundaryQuarantineQuestion {
+        topology: topology_now(question.topology),
+        class: fact_event_class(question.class, host),
+    }
+}
 
 fn maybe_space(space: Option<u64>) -> abi::BoundaryMaybeSpace {
     use abi::BoundaryMaybeSpaceTag as Tag;
@@ -3124,8 +3146,7 @@ pub(crate) fn modes_question(
     asked: rift_core::Initiative,
 ) -> abi::BoundaryModesQuestion {
     use rift_core::modes::{
-        FocusClaim, Menu, MissionControl, Modal, Topology, UserSpaces, Viewport, Wake,
-        WorkspaceSwitch,
+        FocusClaim, Menu, MissionControl, Modal, UserSpaces, Viewport, Wake, WorkspaceSwitch,
     };
     abi::BoundaryModesQuestion {
         initiative: initiative(asked),
@@ -3162,10 +3183,15 @@ pub(crate) fn modes_question(
             WorkspaceSwitch::Idle => abi::BoundaryWorkspaceSwitchNow::Idle,
             WorkspaceSwitch::Switching => abi::BoundaryWorkspaceSwitchNow::Switching,
         },
-        topology: match modes.topology {
-            Topology::Settled => abi::BoundaryTopologyNow::Settled,
-            Topology::Unsettled => abi::BoundaryTopologyNow::Unsettled,
-        },
+        topology: topology_now(modes.topology),
+    }
+}
+
+fn topology_now(topology: rift_core::modes::Topology) -> abi::BoundaryTopologyNow {
+    use rift_core::modes::Topology;
+    match topology {
+        Topology::Settled => abi::BoundaryTopologyNow::Settled,
+        Topology::Unsettled => abi::BoundaryTopologyNow::Unsettled,
     }
 }
 

@@ -203,6 +203,32 @@ pub fn admit_space_snapshot<D: Copy + PartialEq, S: Copy + PartialEq>(
     }
 }
 
+/// What an event is, as far as an unsettled topology is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventClass {
+    /// A report about a window, from its app or the window server: created, destroyed,
+    /// invalidated, moved, (de)minimized, retitled, closed, hidden, shown, focused.
+    WindowReport,
+    /// Input that acts on windows: a drag's motion, a modifier click, a press, a gesture.
+    WindowInput,
+    /// Anything else.
+    Other,
+}
+
+/// Whether to quarantine an event: while the topology is unsettled (no authoritative sample
+/// accepted, or a topology invalidation newer than it), window reports and the input that acts
+/// on windows are held back. The event's class is asked only then.
+pub fn quarantines(topology: crate::modes::Topology, class: impl FnOnce() -> EventClass) -> bool {
+    use crate::modes::Topology;
+    match topology {
+        Topology::Settled => false,
+        Topology::Unsettled => match class() {
+            EventClass::WindowReport | EventClass::WindowInput => true,
+            EventClass::Other => false,
+        },
+    }
+}
+
 /// The windows whose app rules an activation re-applies, by app in the order their first
 /// window is seen: the tracked windows live on a Space that just became active whose admission
 /// can still be reconciled.
@@ -235,8 +261,10 @@ pub fn app_rule_candidates<V, S: PartialEq, W: Copy, P: Copy + PartialEq>(
 /// carry is [`Unasked`]. Spaces, window-server ids and displays are one word each.
 pub mod plain {
     use super::{
-        Admission, DiscoveredSpace, DiscoveryStanding, Displays, Incoming, MissionControl, Standing,
+        Admission, DiscoveredSpace, DiscoveryStanding, Displays, EventClass, Incoming,
+        MissionControl, Standing,
     };
+    use crate::modes::Topology;
     use crate::plain::{Answers, Fact, Reading, Unasked, WindowId};
 
     /// [`super::discovered_space`]: the window's Spaces, whether a Space is fullscreen or a
@@ -282,6 +310,25 @@ pub mod plain {
             let reading = Reading::new();
             let answer = super::discovery_spaces(self.standing, self.native, self.assigned, || {
                 reading.fact(&self.by_frame, 0, None)
+            });
+            reading.answer(answer)
+        }
+    }
+
+    /// [`super::quarantines`]: the event's class (asked only while the topology is unsettled).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Quarantine {
+        pub topology: Topology,
+        pub class: Fact<EventClass>,
+    }
+
+    impl Quarantine {
+        pub const FACTS: &[&str] = &["class"];
+
+        pub fn answer(&self) -> Result<bool, Unasked> {
+            let reading = Reading::new();
+            let answer = super::quarantines(self.topology, || {
+                reading.fact(&self.class, 0, EventClass::Other)
             });
             reading.answer(answer)
         }
@@ -334,6 +381,15 @@ pub mod plain {
 mod tests {
     use super::*;
     use crate::plain::WindowId;
+
+    #[test]
+    fn an_unsettled_topology_quarantines_window_reports_and_window_input() {
+        use crate::modes::Topology::{Settled, Unsettled};
+        assert!(!quarantines(Settled, || panic!("not asked")));
+        assert!(quarantines(Unsettled, || EventClass::WindowReport));
+        assert!(quarantines(Unsettled, || EventClass::WindowInput));
+        assert!(!quarantines(Unsettled, || EventClass::Other));
+    }
 
     #[test]
     fn a_discovered_windows_native_space_is_its_one_live_space_or_a_fallback_by_its_standing() {

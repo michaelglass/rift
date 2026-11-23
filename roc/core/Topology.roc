@@ -103,6 +103,23 @@ Topology := [].{
 		}
 	}
 
+	## Whether to quarantine an event: while the topology is unsettled, window reports and the
+	## input that acts on windows are held back. Fact: 0 the event's class (asked only while
+	## unsettled).
+	quarantines : [Settled, Unsettled], Fact([WindowReport, WindowInput, Other]) -> Read(Bool)
+	quarantines = |topology, class|
+		match topology {
+			Settled => Ok(False)
+			Unsettled => {
+				event = ask(class, 0)?
+				match event {
+					WindowReport => Ok(True)
+					WindowInput => Ok(True)
+					Other => Ok(False)
+				}
+			}
+		}
+
 	or_space : MaybeSpace, MaybeSpace -> MaybeSpace
 	or_space = |first, second|
 		match first {
