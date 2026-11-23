@@ -441,7 +441,7 @@ impl LayoutEngine {
             self.store_floating_position(destination, drop.window, frame);
         }
         self.workspaces.set_last_focused_window(
-            windows.core.catalog(),
+            &windows.core,
             space,
             destination,
             Some(drop.window),
@@ -994,7 +994,7 @@ impl LayoutEngine {
         if let Some(wid) = focus_window {
             self.focused_window = Some(wid);
             self.workspaces.set_last_focused_window(
-                window_store.core.catalog(),
+                &window_store.core,
                 space,
                 workspace_id,
                 Some(wid),
@@ -1011,12 +1011,8 @@ impl LayoutEngine {
             }
         } else {
             self.focused_window = None;
-            self.workspaces.set_last_focused_window(
-                window_store.core.catalog(),
-                space,
-                workspace_id,
-                None,
-            );
+            self.workspaces
+                .set_last_focused_window(&window_store.core, space, workspace_id, None);
         }
     }
 
@@ -1174,7 +1170,7 @@ impl LayoutEngine {
                 let _ =
                     self.workspaces[ws_id].layout_system.focus(layout, Focus::Select(wid)).handled;
                 self.workspaces.set_last_focused_window(
-                    window_store.core.catalog(),
+                    &window_store.core,
                     space,
                     ws_id,
                     Some(wid),
@@ -2403,7 +2399,7 @@ impl LayoutEngine {
                             .handled;
                     }
                     self.workspaces.set_last_focused_window(
-                        window_store.core.catalog(),
+                        &window_store.core,
                         space,
                         ws_id,
                         Some(wid),
@@ -3493,7 +3489,7 @@ impl LayoutEngine {
                 } else if Some(current_workspace_id) == active_workspace {
                     self.focused_window = None;
                     self.workspaces.set_last_focused_window(
-                        window_store.core.catalog(),
+                        &window_store.core,
                         op_space,
                         current_workspace_id,
                         None,
@@ -3516,7 +3512,7 @@ impl LayoutEngine {
                 }
 
                 self.workspaces.set_last_focused_window(
-                    window_store.core.catalog(),
+                    &window_store.core,
                     op_space,
                     target_workspace_id,
                     Some(focused_window),
@@ -3742,7 +3738,7 @@ impl LayoutEngine {
             };
         }
         self.workspaces.set_last_focused_window(
-            window_store.core.catalog(),
+            &window_store.core,
             target_space,
             target_workspace_id,
             Some(window_id),

@@ -285,7 +285,7 @@ impl LayoutEngine {
             self.add_window_to_layout(window_store.read(), space, live);
             if self.focused_window == Some(live) {
                 self.workspaces.set_last_focused_window(
-                    window_store.core.catalog(),
+                    &window_store.core,
                     space,
                     owner,
                     Some(live),

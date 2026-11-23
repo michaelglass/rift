@@ -430,6 +430,77 @@ impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K
     pub fn windows_on(&self, workspace: K) -> impl Iterator<Item = W> + '_ {
         self.assigned.get(&workspace).into_iter().flatten().copied()
     }
+
+    /// The Space `workspace` is on.
+    pub fn space_of(&self, workspace: K) -> Option<S> {
+        self.catalog
+            .iter()
+            .find(|(listed, _)| *listed == workspace)
+            .map(|(_, space)| *space)
+    }
+
+    /// Whether `workspace` is on `space`.
+    pub fn is_on(&self, workspace: K, space: S) -> bool { self.space_of(workspace) == Some(space) }
+
+    /// The workspace `window` is assigned to, when that workspace is on `space`.
+    pub fn assigned_on(&self, window: W, space: S) -> Option<K> {
+        match self.owners.get(&window)? {
+            Ownership::Assigned(workspace) if self.is_on(*workspace, space) => Some(*workspace),
+            Ownership::Assigned(_) | Ownership::Claimed { .. } | Ownership::Held => None,
+        }
+    }
+
+    /// The assigned window `named` picks out: one on the command Space before one on another
+    /// visible Space before one anywhere else; two in the best such scope make it ambiguous.
+    pub fn resolve_named(
+        &self,
+        named: impl Fn(W) -> bool,
+        command_space: Option<S>,
+        visible: impl Fn(S) -> bool,
+    ) -> Resolved<W> {
+        let mut best = None::<(Scope, Resolved<W>)>;
+        for (&window, ownership) in &self.owners {
+            let Ownership::Assigned(workspace) = ownership else {
+                continue;
+            };
+            if !named(window) {
+                continue;
+            }
+            let Some(space) = self.space_of(*workspace) else {
+                continue;
+            };
+            let scope = if Some(space) == command_space {
+                Scope::CommandSpace
+            } else if visible(space) {
+                Scope::Visible
+            } else {
+                Scope::Retained
+            };
+            best = match best {
+                Some((held, _)) if held > scope => best,
+                Some((held, _)) if held == scope => Some((scope, Resolved::Ambiguous)),
+                Some(_) | None => Some((scope, Resolved::Window(window))),
+            };
+        }
+        best.map_or(Resolved::NotFound, |(_, resolved)| resolved)
+    }
+}
+
+/// Where a named window was found, worst first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Scope {
+    Retained,
+    Visible,
+    CommandSpace,
+}
+
+/// What a name picks out among the assigned windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved<W> {
+    Window(W),
+    /// Two windows in the best scope.
+    Ambiguous,
+    NotFound,
 }
 
 /// Each decision as a question on plain data. Workspaces, Spaces and names are one word each.
@@ -608,6 +679,94 @@ mod tests {
         assert!(emits_window(Some(1), || Some(1)));
         assert!(!emits_window(Some(1), || Some(2)));
         assert!(emits_window(Some(1), || None));
+    }
+
+    #[test]
+    fn per_space_answers_come_from_the_catalog_and_the_owners() {
+        use WorkspacesEvent::{Created, Owned as Own};
+        let mut workspaces = Workspaces::<u32, u32, u32, u32>::default();
+        let assigned = |workspace| Owned::Owner(Ownership::Assigned(workspace));
+        for event in [
+            Created { workspace: 1, space: 10 },
+            Created { workspace: 2, space: 20 },
+            Created { workspace: 3, space: 30 },
+            Own {
+                window: 100,
+                owned: assigned(1),
+            },
+            Own {
+                window: 200,
+                owned: assigned(2),
+            },
+            Own {
+                window: 201,
+                owned: Owned::Owner(Ownership::Claimed {
+                    owner: 7,
+                    destination: Destination::Returns(2),
+                }),
+            },
+            Own {
+                window: 300,
+                owned: assigned(3),
+            },
+            Own {
+                window: 301,
+                owned: assigned(3),
+            },
+        ] {
+            assert_eq!(workspaces.step(event), Ok(()), "{event:?}");
+        }
+        assert_eq!(workspaces.space_of(2), Some(20));
+        assert_eq!(workspaces.space_of(9), None);
+        assert!(workspaces.is_on(2, 20) && !workspaces.is_on(2, 10));
+        assert_eq!(workspaces.assigned_on(200, 20), Some(2));
+        assert_eq!(workspaces.assigned_on(200, 10), None, "on another Space");
+        assert_eq!(workspaces.assigned_on(201, 20), None, "claimed, not assigned");
+
+        // One window in each scope: the command Space's, then a visible one, then any.
+        let all = |_| true;
+        let visible = |space| space == 20;
+        assert_eq!(
+            workspaces.resolve_named(all, Some(10), visible),
+            Resolved::Window(100)
+        );
+        let not_100 = |window| window != 100;
+        assert_eq!(
+            workspaces.resolve_named(not_100, Some(10), visible),
+            Resolved::Window(200)
+        );
+        let only_3 = |window| window >= 300;
+        assert_eq!(
+            workspaces.resolve_named(only_3, Some(10), visible),
+            Resolved::Ambiguous
+        );
+        let only_300 = |window| window == 300;
+        assert_eq!(
+            workspaces.resolve_named(only_300, Some(10), visible),
+            Resolved::Window(300)
+        );
+        let low = |window| window < 300;
+        assert_eq!(
+            workspaces.resolve_named(low, Some(10), visible),
+            Resolved::Window(100)
+        );
+        assert_eq!(
+            workspaces.resolve_named(low, None, visible),
+            Resolved::Window(200)
+        );
+        assert_eq!(
+            workspaces.resolve_named(low, None, |_| false),
+            Resolved::Ambiguous
+        );
+        assert_eq!(
+            workspaces.resolve_named(|_| false, None, visible),
+            Resolved::NotFound
+        );
+        // A claimed window is never named.
+        assert_eq!(
+            workspaces.resolve_named(|window| window == 201, None, visible),
+            Resolved::NotFound
+        );
     }
 
     #[test]

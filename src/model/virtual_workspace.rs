@@ -973,15 +973,6 @@ impl Serialize for SavedRecords<'_> {
     }
 }
 
-/// Whether `catalog` lists `id` on `space`.
-fn listed_on(
-    catalog: &[(VirtualWorkspaceId, SpaceId)],
-    id: VirtualWorkspaceId,
-    space: SpaceId,
-) -> bool {
-    catalog.contains(&(id, space))
-}
-
 /// The core's joined workspaces, as the platform's types hold them.
 pub(crate) type CoreWorkspaces =
     rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>;
@@ -1277,45 +1268,26 @@ impl<'a> Workspaces<'a> {
 
     /// The Space `id` is on.
     pub(crate) fn workspace_space(&self, id: VirtualWorkspaceId) -> Option<SpaceId> {
-        self.core()
-            .catalog()
-            .iter()
-            .find(|&&(listed, _)| listed == id)
-            .map(|&(_, space)| space)
+        self.core().space_of(id)
     }
 
-    /// Resolve an index in the command Space, then other visible Spaces,
-    /// then retained workspaces. A tie in the best matching scope is ambiguous.
+    /// The assigned window with `index`, as the core resolves it (the command Space, then other
+    /// visible Spaces, then retained workspaces); `None` when none has it or two tie.
     pub(crate) fn resolve_window_index(
         &self,
         command_space: Option<SpaceId>,
         is_visible: impl Fn(SpaceId) -> bool,
         index: u32,
     ) -> Option<WindowId> {
-        let mut best_rank = 0;
-        let mut resolved = None;
-        for (window, workspace) in self.windows.iter_workspace_assignments() {
-            if window.idx.get() != index {
-                continue;
-            }
-            let Some(space) = self.workspace_space(workspace) else {
-                continue;
-            };
-            let rank = if Some(space) == command_space {
-                3
-            } else if is_visible(space) {
-                2
-            } else {
-                1
-            };
-            if rank > best_rank {
-                best_rank = rank;
-                resolved = Some(window);
-            } else if rank == best_rank {
-                resolved = None;
-            }
+        match self.core().resolve_named(
+            |window| window.idx.get() == index,
+            command_space,
+            is_visible,
+        ) {
+            rift_core::workspaces::Resolved::Window(window) => Some(window),
+            rift_core::workspaces::Resolved::Ambiguous
+            | rift_core::workspaces::Resolved::NotFound => None,
         }
-        resolved
     }
 
     pub fn last_focused_window(
@@ -1323,10 +1295,9 @@ impl<'a> Workspaces<'a> {
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
     ) -> Option<WindowId> {
-        if self.workspace_space(workspace_id) == Some(space) {
-            self.store.workspaces.get(workspace_id)?.last_focused()
-        } else {
-            None
+        match self.core().is_on(workspace_id, space) {
+            true => self.store.workspaces.get(workspace_id)?.last_focused(),
+            false => None,
         }
     }
 
@@ -1339,7 +1310,7 @@ impl<'a> Workspaces<'a> {
         store
             .workspaces
             .get(workspace_id)
-            .filter(|_| self.workspace_space(workspace_id) == Some(space))
+            .filter(|_| self.core().is_on(workspace_id, space))
     }
 
     pub(crate) fn workspace_for_window(
@@ -1347,9 +1318,9 @@ impl<'a> Workspaces<'a> {
         space: SpaceId,
         window: WindowId,
     ) -> Option<VirtualWorkspaceId> {
-        self.windows
-            .workspace_for_window(window)
-            .filter(|&assignment| self.workspace_space(assignment) == Some(space))
+        // A window rift has no record of is in no workspace, whatever the core holds.
+        self.windows.record(window)?;
+        self.core().assigned_on(window, space)
     }
 
     pub(crate) fn active_layout(
@@ -2647,14 +2618,14 @@ impl WorkspaceStore {
         window_store.clear_rule_floating(window_id);
     }
 
-    pub fn set_last_focused_window(
+    pub(crate) fn set_last_focused_window(
         &mut self,
-        catalog: &[(VirtualWorkspaceId, SpaceId)],
+        core: &CoreWorkspaces,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         window_id: Option<WindowId>,
     ) {
-        if listed_on(catalog, workspace_id, space) {
+        if core.is_on(workspace_id, space) {
             if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
                 workspace.set_last_focused(window_id);
             }
@@ -2691,19 +2662,19 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn rename_workspace(
+    pub(crate) fn rename_workspace(
         &mut self,
-        catalog: &[(VirtualWorkspaceId, SpaceId)],
+        core: &CoreWorkspaces,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         new_name: String,
     ) -> bool {
-        if !listed_on(catalog, workspace_id, space) {
+        if !core.is_on(workspace_id, space) {
             return false;
         }
         if new_name.is_empty()
             || self
-                .scope_in(catalog, space)
+                .scope_in(core.catalog(), space)
                 .any(|id| id != workspace_id && self[id].name == new_name)
         {
             return false;
@@ -3281,7 +3252,7 @@ mod tests {
         store.ensure_visible_spaces(&mut windows.view_mut(), &[a, b], 2, |_| None);
         let ids: Vec<_> = store.reading(windows.view()).catalog().collect();
         assert!(!store.rename_workspace(
-            windows.view().core.catalog(),
+            windows.view().core,
             b,
             ids[1],
             store[ids[0]].name.clone()
@@ -3394,7 +3365,7 @@ mod tests {
         let name = manager[generated].name.clone();
         assert_ne!(name, "Workspace 1");
         assert!(!manager.rename_workspace(
-            windows.view().core.catalog(),
+            windows.view().core,
             space,
             generated,
             "Workspace 1".into()
@@ -3494,13 +3465,13 @@ mod tests {
             .unwrap();
         let window = WindowId::new(9, 1);
 
-        store.set_last_focused_window(windows.view().core.catalog(), other, id, Some(window));
+        store.set_last_focused_window(windows.view().core, other, id, Some(window));
         assert_eq!(
             store[id].last_focused(),
             None,
             "focus told on another Space is ignored"
         );
-        store.set_last_focused_window(windows.view().core.catalog(), on, id, Some(window));
+        store.set_last_focused_window(windows.view().core, on, id, Some(window));
         assert_eq!(
             store.reading(windows.view()).last_focused_window(on, id),
             Some(window)
@@ -3513,10 +3484,9 @@ mod tests {
         assert!(store.reading(windows.view()).workspace_info(on, id).is_some());
         assert!(store.reading(windows.view()).workspace_info(other, id).is_none());
 
-        let catalog = windows.view().core.catalog().to_vec();
-        assert!(!store.rename_workspace(&catalog, other, id, "Elsewhere".into()));
+        assert!(!store.rename_workspace(windows.view().core, other, id, "Elsewhere".into()));
         assert_eq!(store[id].name, "Here");
-        assert!(store.rename_workspace(&catalog, on, id, "There".into()));
+        assert!(store.rename_workspace(windows.view().core, on, id, "There".into()));
         assert_eq!(store[id].name, "There");
     }
 
@@ -3539,12 +3509,7 @@ mod tests {
             window,
             ws1_id
         ));
-        manager.set_last_focused_window(
-            window_store.view().core.catalog(),
-            space,
-            ws1_id,
-            Some(window),
-        );
+        manager.set_last_focused_window(window_store.view().core, space, ws1_id, Some(window));
 
         assert!(manager.assign_window_to_workspace(
             &mut window_store.view_mut(),

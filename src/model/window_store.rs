@@ -2338,10 +2338,7 @@ impl WindowsMut<'_> {
                 let record = self.read().record(*wid)?;
                 let wsid = record.window_server_id?;
                 (record.assignment().is_some_and(|assignment| {
-                    self.core
-                        .catalog()
-                        .iter()
-                        .any(|&(id, on)| id == assignment && active_spaces.contains(&on))
+                    self.core.space_of(assignment).is_some_and(|on| active_spaces.contains(&on))
                 }) && self.records.native_fullscreen_record_for_window(*wid).is_none()
                     && !observed_ids.contains(&wsid))
                 .then_some(wsid)
@@ -2364,10 +2361,7 @@ impl WindowsMut<'_> {
         // Hiding, minimizing and fullscreen all retain ownership while suspended.
         if self.records.is_temporarily_unavailable(wid)
             || !record.assignment().is_some_and(|assignment| {
-                self.core
-                    .catalog()
-                    .iter()
-                    .any(|&(id, on)| id == assignment && active_spaces.contains(&on))
+                self.core.space_of(assignment).is_some_and(|on| active_spaces.contains(&on))
             })
         {
             return None;
