@@ -653,7 +653,6 @@ impl Reactor {
         space: SpaceId,
         animate: bool,
         gesture: Option<(Context, Control, f64, Duration)>,
-        skip: Option<WindowId>,
         bound: Option<ScrollingDisplayBounds>,
     ) -> Option<HashSet<WindowId>> {
         if self.animation_tx.is_none() && gesture.is_none() && self.viewport_gesture.is_none() {
@@ -689,7 +688,7 @@ impl Reactor {
         let windows = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
-                if Some(wid) == skip {
+                if self.is_dragging_window(wid) {
                     return None;
                 }
                 let window = self.state.windows.window(wid)?;
@@ -1047,7 +1046,6 @@ impl AnimationManager {
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
         presentation: Presentation,
-        skip_wid: Option<WindowId>,
         bounds: Option<ScrollingDisplayBounds>,
     ) -> bool {
         match presentation {
@@ -1056,11 +1054,10 @@ impl AnimationManager {
                 space,
                 layout,
                 presentation == Presentation::Resize,
-                skip_wid,
                 bounds,
             ),
             Presentation::WorkspaceSwitch | Presentation::Instant | Presentation::Force => {
-                Self::instant_layout(reactor, space, layout, skip_wid, bounds, presentation)
+                Self::instant_layout(reactor, space, layout, bounds, presentation)
             }
         }
     }
@@ -1070,21 +1067,20 @@ impl AnimationManager {
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
-        skip_wid: Option<WindowId>,
         bounds: Option<ScrollingDisplayBounds>,
     ) -> bool {
         let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
         let animate_camera = !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
-        let presentation = reactor.present_camera(space, animate_camera, None, skip_wid, bounds);
+        let presentation = reactor.present_camera(space, animate_camera, None, bounds);
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
             let windows = layout
                 .iter()
                 .map(|(wid, _)| *wid)
-                .filter(|wid| Some(*wid) != skip_wid && !presented.contains(wid))
+                .filter(|wid| !reactor.is_dragging_window(*wid) && !presented.contains(wid))
                 .collect();
             reactor.cancel_window_presentations(windows);
         }
@@ -1108,7 +1104,7 @@ impl AnimationManager {
                 anim.mark_handled(wid);
                 continue;
             }
-            if skip_wid == Some(wid) {
+            if reactor.is_dragging_window(wid) {
                 anim.mark_handled(wid);
                 trace!(
                     ?wid,
@@ -1195,7 +1191,6 @@ impl AnimationManager {
         reactor: &mut Reactor,
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
-        skip_wid: Option<WindowId>,
         bounds: Option<ScrollingDisplayBounds>,
         presentation: Presentation,
     ) -> bool {
@@ -1204,7 +1199,7 @@ impl AnimationManager {
             layout
                 .iter()
                 .map(|(wid, _)| *wid)
-                .filter(|wid| Some(*wid) != skip_wid)
+                .filter(|wid| !reactor.is_dragging_window(*wid))
                 .collect(),
         );
         let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
@@ -1212,7 +1207,7 @@ impl AnimationManager {
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
-            if skip_wid == Some(wid) {
+            if reactor.is_dragging_window(wid) {
                 trace!(?wid, "Skipping layout update for window currently being dragged");
                 continue;
             }
@@ -2439,7 +2434,6 @@ mod tests {
                 .present_camera(
                     spaces[source],
                     true,
-                    None,
                     None,
                     scrolling_bounds(&reactor, spaces[source]),
                 )

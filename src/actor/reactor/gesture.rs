@@ -143,7 +143,7 @@ impl Reactor {
             let space = s.context.space;
             let gesture = (!s.released)
                 .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
-            let _ = self.present_camera(space, true, gesture, None, scrolling_bounds(self, space));
+            let _ = self.present_camera(space, true, gesture, scrolling_bounds(self, space));
         }
     }
 
@@ -171,7 +171,7 @@ impl Reactor {
     fn apply_viewport_frames(&mut self) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
-            let _ = self.present_camera(space, false, None, None, scrolling_bounds(self, space));
+            let _ = self.present_camera(space, false, None, scrolling_bounds(self, space));
             self.commit_presentations();
         }
     }
@@ -740,6 +740,50 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a_viewport_scroll_during_a_drag_leaves_the_dragged_window_under_the_pointer() {
+        let (mut apps, mut r) = test_context();
+        let space = SpaceId::new(1);
+        r.handle_loop_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+            vec![Some(space)],
+        ));
+        r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.make_app_and_settle(&mut r, 1, make_windows(4));
+        let dragged = WindowId::new(1, 1);
+        r.handle_test_layout_event(crate::layout_engine::LayoutEvent::WindowFocused(
+            space, dragged,
+        ));
+        apps.simulate_until_quiet(&mut r);
+        let held = r.state.windows.window(dragged).unwrap().frame_monotonic;
+        r.ensure_active_drag(dragged, &held);
+        apps.requests();
+
+        let mut config = Config::default();
+        config.settings.layout.scrolling.gestures.enabled = true;
+        config.settings.layout.scrolling.animate = Some(false);
+        let (_, _, motion) = begin(&mut r, &config, space);
+        for (total_x, time) in [(20.0, 10), (40.0, 20)] {
+            motion.publish(sample(1, total_x, time));
+            r.gesture_tick();
+        }
+
+        assert!(r.is_dragging_window(dragged));
+        assert!(held.same_as(r.state.windows.window(dragged).unwrap().frame_monotonic));
+        for request in apps.requests() {
+            match request {
+                Request::BeginWindowAnimation(wid, _) => assert_ne!(wid, dragged),
+                Request::InteractiveFramesPending(queue) => {
+                    queue.drain_with(|wid, _, _, _, _, _, _| assert_ne!(wid, dragged));
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn gesture_flushes_final_sample_and_ignores_stale_motion() {
         let (mut r, ctx, _, m) = setup_options_threshold(false, false, false, 0.25);

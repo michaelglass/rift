@@ -2123,7 +2123,6 @@ fn failed_frame_write_retries_full_geometry_on_next_arrange() {
                 space,
                 &layout,
                 Presentation::Instant,
-                None,
                 bounds,
             )
         });
@@ -2147,7 +2146,6 @@ fn failed_frame_write_retries_full_geometry_on_next_arrange() {
                         space,
                         &layout,
                         Presentation::Animated,
-                        None,
                         bounds,
                     )
                 }
@@ -2159,7 +2157,6 @@ fn failed_frame_write_retries_full_geometry_on_next_arrange() {
                         space,
                         &layout,
                         Presentation::WorkspaceSwitch,
-                        None,
                         bounds,
                     )
                 }
@@ -2194,7 +2191,6 @@ fn accepted_frame_settles_the_write_without_retrying_an_adjusted_size() {
             space,
             &[(wid, target)],
             Presentation::Instant,
-            None,
             bounds,
         )
     };
@@ -4075,7 +4071,6 @@ fn non_workspace_instant_layout_keeps_full_frame_batch() {
             space,
             &[(wid, target)],
             Presentation::Instant,
-            None,
             bounds,
         )
     });
@@ -4116,7 +4111,6 @@ fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
             space,
             &[(wid, target)],
             Presentation::WorkspaceSwitch,
-            None,
             bounds,
         )
     });
@@ -6165,7 +6159,6 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
             space,
             &[(left, frame(228.)), (right, frame(1284.))],
             Presentation::Animated,
-            None,
             bounds,
         )
     });
@@ -6196,7 +6189,6 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
             space,
             &[(left, frame(-1056.)), (right, frame(228.))],
             Presentation::Animated,
-            None,
             bounds,
         )
     });
@@ -6256,7 +6248,6 @@ fn animated_layout_handles_windows_without_server_ids() {
             space,
             &[(WindowId::new(1, 1), target)],
             Presentation::Resize,
-            None,
             bounds,
         )
     });

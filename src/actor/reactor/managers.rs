@@ -324,7 +324,6 @@ impl LayoutManager {
         };
         let has_windows = reactor.state.windows.tracked_window_count() != 0;
         let mut any_frame_changed = false;
-        let skip_wid = reactor.drag_manager.actor.source().map(|source| source.window);
         let mut inline = [None, None];
         let mut rest = Vec::new();
 
@@ -456,7 +455,6 @@ impl LayoutManager {
                 update.space,
                 &update.frames[update.placed..],
                 update.presentation,
-                skip_wid,
                 update.bounds,
             );
             any_frame_changed |= changed;
