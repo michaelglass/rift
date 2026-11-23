@@ -26,14 +26,14 @@ impl Reactor {
         let wid = self
             .stores
             .state
-            .windows
+            .windows()
             .resolve_claim_target(owner, wid)
             .ok_or("Window not found")?;
-        match self.stores.state.windows.claim(wid) {
+        match self.stores.state.windows().claim(wid) {
             Some(claim) if claim.owner != owner => return Err(OWNED_ELSEWHERE),
             // Flags only affect focus policy (the mode table reads them), never layout.
             Some(_) => {
-                self.stores.state.windows.set_claim_flags(wid, flags);
+                self.stores.state.windows_mut().set_claim_flags(wid, flags);
                 return Ok(());
             }
             None => {}
@@ -52,9 +52,9 @@ impl Reactor {
                 .stores
                 .layout
                 .layout_engine
-                .handle_event(&mut reactor.stores.state.windows, removal)
+                .handle_event(&mut reactor.stores.state.windows_mut(), removal)
                 .changed;
-            reactor.stores.state.windows.insert_claim(wid, owner, flags);
+            reactor.stores.state.windows_mut().insert_claim(wid, owner, flags);
             if removed {
                 reactor.update_layout_or_warn(false, false, space);
             }
@@ -71,10 +71,10 @@ impl Reactor {
         let wid = self
             .stores
             .state
-            .windows
+            .windows()
             .resolve_claim_target(owner, wid)
             .ok_or("Window not found")?;
-        match self.stores.state.windows.claim(wid) {
+        match self.stores.state.windows().claim(wid) {
             None => Ok(()),
             Some(claim) if claim.owner != owner => Err(OWNED_ELSEWHERE),
             Some(_) => {
@@ -106,12 +106,12 @@ impl Reactor {
 
     /// Replays normal reconciliation for a released window; returns an active space to arrange.
     fn readmit(&mut self, wid: WindowId) -> Option<SpaceId> {
-        let claim = self.stores.state.windows.remove_claim(wid)?;
+        let claim = self.stores.state.windows_mut().remove_claim(wid)?;
         let engine = &mut self.stores.layout.layout_engine;
         if let Some(workspace) =
             claim.workspace().filter(|id| engine.workspaces().workspaces.contains_key(*id))
         {
-            self.stores.state.windows.assign_window_to_workspace(wid, workspace);
+            self.stores.state.windows_mut().assign_window_to_workspace(wid, workspace);
             // The owner may have changed the claim's destination. Reconcile only
             // at release; an ordinary return keeps its canonical slot untouched.
             for (id, current) in engine.workspaces_mut().workspaces.iter_mut() {

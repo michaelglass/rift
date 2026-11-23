@@ -389,7 +389,7 @@ pub struct WindowRecord {
     floating_display_geometry: Option<FloatingDisplayGeometry>,
 }
 
-/// Who places a window, in the store's terms: the core's answer (`WindowStore::ownership`),
+/// Who places a window, in the store's terms: the core's answer (`Windows::ownership`),
 /// with a claim read as a [`WindowClaim`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum Ownership {
@@ -404,7 +404,7 @@ enum Ownership {
 }
 
 /// The window the user holds, as one of a workspace's windows: what a transfer of that
-/// workspace must leave behind ([`WindowStore::held_member`]).
+/// workspace must leave behind ([`Windows::held_member`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HeldMember(WindowId);
 
@@ -612,17 +612,124 @@ pub struct WindowStore {
     /// The core's lifecycle, in shadow: every live window's admission facts, told each change
     /// the store makes. [`Self::lifecycle_divergences`] holds the two to agreeing.
     lifecycle: crate::roc_twin::TwinnedLifecycle,
-    /// The core's workspaces, joined, in shadow: who places each window, told every ownership
-    /// change (only [`Self::set_ownership`] writes one), and the workspace store's catalog and
-    /// activations, told through [`Self::topology`] by the workspace store's topology writers.
-    /// [`Self::ownership_divergences`] and the workspace store's `workspace_divergences` hold
-    /// them to agreeing.
-    workspaces: crate::roc_twin::TwinnedWorkspaces,
+}
+
+/// The window store's records and the core's workspaces (the joined shadow: who places each
+/// window, told every ownership change, and the workspace store's catalog and activations, told
+/// through [`WindowsMut::topology`] by the workspace store's topology writers), lent together
+/// for reading. The owner holds the two side by side; a view holds exactly those two.
+/// [`Windows::ownership_divergences`] and the workspace store's `workspace_divergences` hold
+/// them to agreeing.
+#[derive(Clone, Copy)]
+pub(crate) struct Windows<'a> {
+    pub(crate) records: &'a WindowStore,
+    pub(crate) core: &'a crate::roc_twin::TwinnedWorkspaces,
+}
+
+/// [`Windows`], lent for writing: only [`WindowsMut::set_ownership`] writes an ownership.
+pub(crate) struct WindowsMut<'a> {
+    pub(crate) records: &'a mut WindowStore,
+    pub(crate) core: &'a mut crate::roc_twin::TwinnedWorkspaces,
+}
+
+impl std::ops::Deref for Windows<'_> {
+    type Target = WindowStore;
+
+    fn deref(&self) -> &WindowStore { self.records }
+}
+
+impl std::ops::Deref for WindowsMut<'_> {
+    type Target = WindowStore;
+
+    fn deref(&self) -> &WindowStore { self.records }
+}
+
+impl std::ops::DerefMut for WindowsMut<'_> {
+    fn deref_mut(&mut self) -> &mut WindowStore { self.records }
+}
+
+impl WindowsMut<'_> {
+    /// The same two, lent for reading.
+    pub(crate) fn read(&self) -> Windows<'_> {
+        Windows {
+            records: self.records,
+            core: self.core,
+        }
+    }
+
+    /// The same two, lent on for writing.
+    #[allow(dead_code)] // for a holder of a view lending it on by value
+    pub(crate) fn reborrow(&mut self) -> WindowsMut<'_> {
+        WindowsMut {
+            records: self.records,
+            core: self.core,
+        }
+    }
+}
+
+/// The core's workspaces joining `workspaces`, the live workspace store they are built beside:
+/// told the store's whole catalog, in order, and every Space's activation.
+pub(crate) fn joined_core(workspaces: &WorkspaceStore) -> crate::roc_twin::TwinnedWorkspaces {
+    let mut core = crate::roc_twin::TwinnedWorkspaces::default();
+    let mut topology = TopologyChanges(&mut core);
+    for (id, space) in workspaces.catalog().map(|id| (id, workspaces[id].space)) {
+        topology.created(id, space);
+    }
+    for (&space, activation) in workspaces.active_workspace_per_space() {
+        topology.activation(space, Some(activation.to_core()));
+    }
+    core
+}
+
+/// A test's owner of the two halves, side by side, as [`crate::model::reactor::RiftState`]
+/// holds them.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct OwnedWindows {
+    pub(crate) records: WindowStore,
+    pub(crate) core: crate::roc_twin::TwinnedWorkspaces,
+}
+
+#[cfg(test)]
+impl OwnedWindows {
+    /// The two halves, the core joining `workspaces`.
+    pub(crate) fn joining(workspaces: &WorkspaceStore) -> OwnedWindows {
+        OwnedWindows {
+            records: WindowStore::default(),
+            core: joined_core(workspaces),
+        }
+    }
+
+    pub(crate) fn view(&self) -> Windows<'_> {
+        Windows {
+            records: &self.records,
+            core: &self.core,
+        }
+    }
+
+    pub(crate) fn view_mut(&mut self) -> WindowsMut<'_> {
+        WindowsMut {
+            records: &mut self.records,
+            core: &mut self.core,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for OwnedWindows {
+    type Target = WindowStore;
+
+    fn deref(&self) -> &WindowStore { &self.records }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for OwnedWindows {
+    fn deref_mut(&mut self) -> &mut WindowStore { &mut self.records }
 }
 
 /// The joined shadow, lent to the workspace store's topology writers: it takes the catalog's and
 /// the activations' changes only (a removal, which hands windows on, is
-/// [`WindowStore::remove_workspace`]).
+/// [`WindowsMut::remove_workspace`]).
 pub(crate) struct TopologyChanges<'a>(&'a mut crate::roc_twin::TwinnedWorkspaces);
 
 impl TopologyChanges<'_> {
@@ -752,111 +859,12 @@ impl WindowStore {
         }
     }
 
-    /// Rift manages a valid AX window when admission passes and no external owner holds it.
-    pub(crate) fn is_admitted(&self, wid: WindowId) -> bool {
-        self.record(wid)
-            .is_some_and(|record| record.claim().is_none() && self.lifecycle.manages(wid))
-    }
-
-    /// An explicit move can change retained ownership independently of placement: a window
-    /// with valid AX state, unclaimed and assigned, that nothing but minimizing or the
-    /// manageability heuristic keeps out (#702's `allows_management`).
-    pub(crate) fn can_move_assigned_window(&self, wid: WindowId) -> bool {
-        use rift_core::lifecycle::{Admission, AdmissionFacts, Minimize, Veto, admission};
-        self.record(wid).is_some_and(|record| {
-            !self.lifecycle.is_invalidated(wid)
-                && record.claim().is_none()
-                && record.assignment().is_some()
-                && self.lifecycle.facts(wid).is_some_and(|facts| {
-                    matches!(
-                        admission(AdmissionFacts {
-                            minimize: Minimize::Shown,
-                            ..facts
-                        }),
-                        Admission::Admitted | Admission::Vetoed(Veto::Unmanageable)
-                    )
-                })
-        })
-    }
-
-    /// Rules and admission are reconciled only for windows Rift may manage.
-    pub(crate) fn can_reconcile_admission(&self, wid: WindowId) -> bool {
-        self.record(wid).is_some_and(|record| {
-            !self.lifecycle.is_invalidated(wid)
-                && record.claim().is_none()
-                && record.state.as_ref().is_some_and(|window| {
-                    window.minimize() == rift_core::lifecycle::Minimize::Shown
-                })
-        })
-    }
-
-    pub fn claim(&self, wid: WindowId) -> Option<WindowClaim> {
-        self.record(wid).and_then(|record| record.claim())
-    }
-
-    pub fn is_claimed(&self, wid: WindowId) -> bool {
-        self.record(wid).is_some_and(|record| record.claim().is_some())
-    }
-
     pub fn claimed_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
         self.claims.values().flatten().copied()
     }
 
     pub fn owner_claims(&self, owner: ClaimOwner) -> &[WindowId] {
         self.claims.get(&owner).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn suppresses_focus_follows_mouse(&self, wid: Option<WindowId>) -> bool {
-        !self.claims.is_empty()
-            && wid.and_then(|wid| self.claim(wid)).is_some_and(|claim| {
-                claim.flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
-            })
-    }
-
-    /// The window `owner` means by `wid`: its own claim by current, then original, id (an
-    /// id reused after a rekey still reaches the claim), otherwise the window tracked as `wid`.
-    pub fn resolve_claim_target(&self, owner: ClaimOwner, wid: WindowId) -> Option<WindowId> {
-        let owned = self.owner_claims(owner);
-        if owned.contains(&wid) {
-            return Some(wid);
-        }
-        let original = owned
-            .iter()
-            .copied()
-            .find(|current| self.claim(*current).is_some_and(|claim| claim.original == wid));
-        original.or_else(|| self.contains_window(wid).then_some(wid))
-    }
-
-    /// Claim a tracked window, holding its assignment until release.
-    pub fn insert_claim(&mut self, wid: WindowId, owner: ClaimOwner, flags: WindowClaimFlags) {
-        debug_assert!(self.contains_window(wid) && !self.is_claimed(wid));
-        let workspace = self.take_assignment(wid);
-        self.set_ownership(
-            wid,
-            Ownership::Claimed(WindowClaim {
-                owner,
-                flags,
-                original: wid,
-                workspace,
-            }),
-        );
-        self.claims.entry(owner).or_default().push(wid);
-    }
-
-    pub fn set_claim_flags(&mut self, wid: WindowId, flags: WindowClaimFlags) {
-        if let Some(claim) = self.claim(wid) {
-            self.set_ownership(wid, Ownership::Claimed(WindowClaim { flags, ..claim }));
-        }
-    }
-
-    /// End a claim. The caller restores the returned assignment if it is still valid.
-    pub fn remove_claim(&mut self, wid: WindowId) -> Option<WindowClaim> {
-        self.windows.get(&wid)?;
-        let claim = self.ownership(wid).claim()?;
-        self.set_ownership(wid, Ownership::Unassigned);
-        self.unindex_claim(claim.owner, wid);
-        self.prune_window_record(wid);
-        Some(claim)
     }
 
     fn unindex_claim(&mut self, owner: ClaimOwner, wid: WindowId) {
@@ -866,118 +874,6 @@ impl WindowStore {
                 self.claims.remove(&owner);
             }
         }
-    }
-
-    /// Takes a window's ownership out of the record and out of the indexes it is in, leaving
-    /// it unassigned.
-    fn take_ownership(&mut self, wid: WindowId) -> Ownership {
-        if self.windows.get(&wid).is_none() {
-            return Ownership::Unassigned;
-        }
-        let ownership = self.ownership(wid);
-        self.set_ownership(wid, Ownership::Unassigned);
-        match ownership {
-            Ownership::Unassigned | Ownership::Held | Ownership::Assigned(_) => {}
-            Ownership::Claimed(claim) => self.unindex_claim(claim.owner, wid),
-        }
-        ownership
-    }
-
-    /// Gives an unassigned window `ownership`, and puts it in the index that goes with it.
-    fn give_ownership(&mut self, wid: WindowId, ownership: Ownership) {
-        self.set_ownership(wid, ownership);
-        match ownership {
-            Ownership::Unassigned | Ownership::Held | Ownership::Assigned(_) => {}
-            Ownership::Claimed(claim) => self.claims.entry(claim.owner).or_default().push(wid),
-        }
-    }
-
-    fn take_assignment(&mut self, wid: WindowId) -> Option<VirtualWorkspaceId> {
-        self.windows.get(&wid)?;
-        let assignment = self.ownership(wid).assignment()?;
-        self.set_ownership(wid, Ownership::Unassigned);
-        Some(assignment)
-    }
-
-    /// The only writer of a window's ownership, which the core keeps; the window has a record
-    /// while it is owned.
-    fn set_ownership(&mut self, wid: WindowId, ownership: Ownership) {
-        self.windows.entry_or_default(wid);
-        self.tell_ownership(wid, ownership);
-    }
-
-    fn tell_ownership(&mut self, window: WindowId, ownership: Ownership) {
-        self.workspaces.step(rift_core::workspaces::WorkspacesEvent::Owned {
-            window,
-            owned: ownership.core(),
-        });
-    }
-
-    /// A window store joining `workspaces`, the live workspace store it is built beside: no
-    /// windows yet, and the joined shadow told the store's whole catalog, in order, and every
-    /// Space's activation.
-    pub(crate) fn joining(workspaces: &WorkspaceStore) -> WindowStore {
-        let mut store = WindowStore::default();
-        let mut topology = store.topology();
-        for (id, space) in workspaces.catalog().map(|id| (id, workspaces[id].space)) {
-            topology.created(id, space);
-        }
-        for (&space, activation) in workspaces.active_workspace_per_space() {
-            topology.activation(space, Some(activation.to_core()));
-        }
-        store
-    }
-
-    /// The core's workspaces, joined (the shadow).
-    pub(crate) fn core_workspaces(
-        &self,
-    ) -> &rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant> {
-        &self.workspaces
-    }
-
-    /// Where the workspace store's topology writers tell the joined shadow each change: only
-    /// topology changes go through it, never a window's ownership.
-    pub(crate) fn topology(&mut self) -> TopologyChanges<'_> {
-        TopologyChanges(&mut self.workspaces)
-    }
-
-    /// Every window the store's claims index and the core disagree on, or that the core owns
-    /// with no record in the store. The core keeps who places each window; the store keeps only
-    /// the claims by owner (their order is the owner's), so the two must name the same claimed
-    /// windows. Empty unless a write bypassed [`Self::set_ownership`].
-    pub(crate) fn ownership_divergences(&self) -> Vec<OwnershipDivergence> {
-        use rift_core::workspaces::{Owned, Ownership as Core};
-        let indexed = |window: WindowId| {
-            self.claims
-                .iter()
-                .find(|(_, windows)| windows.contains(&window))
-                .map(|(owner, _)| *owner)
-        };
-        let mut windows: Vec<WindowId> = (self.claims.values().flatten().copied())
-            .chain(self.workspaces.owners().map(|(window, _)| window))
-            .collect();
-        windows.sort_unstable();
-        windows.dedup();
-        windows
-            .into_iter()
-            .filter_map(|window| {
-                let core = self.workspaces.owned(window);
-                let claimed_by = match core {
-                    Owned::Owner(Core::Claimed { owner, .. }) => Some(owner.owner),
-                    Owned::Unowned | Owned::Owner(Core::Assigned(_) | Core::Held) => None,
-                };
-                let recorded = self.windows.get(&window).is_some();
-                let owned = core != Owned::Unowned;
-                (indexed(window) != claimed_by || (owned && !recorded)).then_some(
-                    OwnershipDivergence {
-                        window,
-                        indexed: indexed(window),
-                        recorded,
-                        core,
-                    },
-                )
-            })
-            .collect()
     }
 
     /// The window's AX element was invalidated: it keeps its ownership, facts and place until
@@ -1002,97 +898,6 @@ impl WindowStore {
                     || (self.rule(wid) != Some(Rule::Ignore) && !self.is_admitted_state(wid))
             })
             || self.is_window_native_fullscreen_suspended(wid)
-    }
-
-    pub(crate) fn is_visible_admitted(&self, wid: WindowId) -> bool {
-        self.is_admitted(wid)
-            && self
-                .record(wid)
-                .and_then(|record| record.window_server_id())
-                .is_some_and(|wsid| self.is_window_visible(wsid))
-    }
-
-    /// Restore identity for native presence or a return to the recorded user Space.
-    pub(crate) fn restore_native_identity(
-        &self,
-        wsid: Option<WindowServerId>,
-        original: WindowId,
-    ) -> Option<NativeFullscreenRestoration> {
-        let record = wsid
-            .and_then(|wsid| self.native_fullscreen_record_for_window_server_id(wsid))
-            .or_else(|| self.native_fullscreen_record_for_window(original))?;
-        if !matches!(record.transition, NativeFullscreenTransition::ExitObserved(_)) {
-            return None;
-        }
-        let bound = record.window_server_id.and_then(|id| self.tracked_window_id(id));
-        // A specific appearance follows the record's current AX identity first;
-        // a Space return follows its surviving native binding first.
-        let window = [
-            wsid.map(|_| record.current_window_id),
-            bound,
-            Some(record.current_window_id),
-            wsid.and_then(|id| self.tracked_window_id(id)),
-            wsid.map(|_| original),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|wid| self.is_admitted(*wid));
-        let previous_assignment = window
-            .is_some_and(|wid| wid != original && self.workspace_for_window(original).is_some())
-            .then_some(original);
-        Some(NativeFullscreenRestoration {
-            record,
-            window,
-            previous_assignment,
-        })
-    }
-
-    /// Native fullscreen suspends admission while retaining identity and ownership.
-    /// Only positive entry/discovery evidence may establish this suspension.
-    pub(crate) fn observe_native_fullscreen(
-        &mut self,
-        wsid: WindowServerId,
-        space: SpaceId,
-        fallback_user_space: Option<SpaceId>,
-        pid: Option<i32>,
-    ) -> Option<WindowId> {
-        let lifecycle = self
-            .native_fullscreen_record_for_window_server_id(wsid)
-            .map(|record| (record.fullscreen_space, record.transition))
-            .or_else(|| {
-                self.pending_native_fullscreen_record_for_window_server_id(wsid)
-                    .map(|record| (record.fullscreen_space, record.transition))
-            });
-        if lifecycle.is_some_and(|(fullscreen, transition)| {
-            fullscreen == space && matches!(transition, NativeFullscreenTransition::ExitObserved(_))
-        }) {
-            return None;
-        }
-        self.set_window_server_space(wsid, Some(space));
-        if let Some(wid) = self.tracked_window_id(wsid) {
-            let assignment = self.workspace_for_window(wid);
-            self.suspend_window_to_native_fullscreen(
-                wid,
-                Some(wsid),
-                fallback_user_space,
-                space,
-                NativeFullscreenTransition::Suspended,
-            );
-            assignment.map(|_| wid)
-        } else {
-            if let Some(pid) =
-                pid.or_else(|| self.get_window_server_info(wsid).map(|info| info.pid))
-            {
-                self.suspend_window_server_to_native_fullscreen(
-                    pid,
-                    wsid,
-                    fallback_user_space,
-                    space,
-                    NativeFullscreenTransition::Suspended,
-                );
-            }
-            None
-        }
     }
 
     pub(crate) fn observe_native_departure(
@@ -1125,46 +930,6 @@ impl WindowStore {
         NativeDeparture::Hidden(window)
     }
 
-    /// Bind a positive AX observation to its stable native identity. Persistent
-    /// membership survives AX replacement; only projection rekeying is external.
-    pub(crate) fn reconcile_ax_identity(
-        &mut self,
-        wid: WindowId,
-        wsid: Option<WindowServerId>,
-    ) -> Option<WindowId> {
-        if let Some(old) = self.record(wid).and_then(|record| record.window_server_id())
-            && Some(old) != wsid
-        {
-            self.remove_window_server_state(old);
-            self.windows.clear_transfer(&wid);
-        }
-        let wsid = wsid?;
-        let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
-        if let Some(old) = previous {
-            if !self.contains_window(wid) {
-                let state = self.windows.get_mut(&old).and_then(|record| record.state.take());
-                let facts = self.lifecycle.facts(old);
-                if state.is_some() {
-                    self.lifecycle.step(LifecycleEvent::Gone(old));
-                }
-                if let Some(state) = state {
-                    // The same window under a new identity keeps its heuristic verdict, rule
-                    // and native transience; its AX snapshot says the rest.
-                    match facts {
-                        Some(facts) => {
-                            self.insert_window_as(wid, state, facts.manageability, facts.rule);
-                            self.set_native_transient(wid, facts.native == NativeKind::Transient);
-                        }
-                        None => self.insert_window(wid, state),
-                    }
-                }
-            }
-            self.replace_window_identity(old, wid);
-        }
-        self.clear_window_server_observed(wsid);
-        previous
-    }
-
     pub(crate) fn observe_native_space(
         &mut self,
         wsid: WindowServerId,
@@ -1180,19 +945,6 @@ impl WindowStore {
         wid
     }
 
-    pub(crate) fn set_minimized_visibility(&mut self, wid: WindowId, minimized: bool) {
-        if let Some(wsid) = self.record(wid).and_then(|record| record.window_server_id()) {
-            self.set_native_visibility(wsid, !minimized);
-        }
-        if let Some(record) = self.windows.get_mut(&wid) {
-            record.visibility = if minimized {
-                WindowVisibility::Minimized
-            } else {
-                WindowVisibility::Visible
-            };
-        }
-    }
-
     /// Hidden is visibility evidence, never destruction. Return the owning PID
     /// for a targeted, coalesced AX refresh (including pending native identity).
     pub(crate) fn observe_native_visibility(
@@ -1206,193 +958,6 @@ impl WindowStore {
         self.tracked_window_id(wsid)
             .map(|wid| wid.pid)
             .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid))
-    }
-
-    /// A current successful AX omission is destructive only with native negative evidence:
-    /// the windows to retire. The caller removes them (`RiftState::remove_window`), so a grip
-    /// on one ends through the core.
-    pub(crate) fn inventory_retirements(
-        &self,
-        pid: i32,
-        observed: impl IntoIterator<Item = WindowId>,
-        mut inactive: impl FnMut(WindowId) -> bool,
-        mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
-    ) -> Vec<WindowId> {
-        use rift_core::lifecycle::{
-            AxValidity, FullscreenRecord, InventoryFacts, InventoryView, NativeEvidence,
-            NativeIdentity, NativeLook, Ordering, Report, Retirement, Suitability,
-        };
-        let observed: HashSet<_> = observed.into_iter().collect();
-        self.window_ids_for_pid(pid)
-            .filter_map(|wid| {
-                let record = self.record(wid)?;
-                let wsid = record.window_server_id;
-                let facts = InventoryFacts {
-                    report: if observed.contains(&wid) {
-                        Report::Reported
-                    } else {
-                        Report::Omitted
-                    },
-                    view: if inactive(wid) {
-                        InventoryView::OutOfView
-                    } else {
-                        InventoryView::InView
-                    },
-                    minimize: record.state.as_ref().map(WindowState::minimize),
-                    fullscreen: if self.native_fullscreen_record_for_window(wid).is_some() {
-                        FullscreenRecord::Recorded
-                    } else {
-                        FullscreenRecord::NotRecorded
-                    },
-                    identity: wsid.map_or(NativeIdentity::Unknown, NativeIdentity::Known),
-                    validity: if self.lifecycle.is_invalidated(wid) {
-                        AxValidity::Invalidated
-                    } else {
-                        AxValidity::Valid
-                    },
-                };
-                let asked = crate::roc_path::Asked::new();
-                let verdict = rift_core::lifecycle::retirement(facts, |wsid| {
-                    asked.ask(|| {
-                        let observation = observe(wsid, self.get_window_server_info(wsid));
-                        NativeEvidence {
-                            suitability: observation.suitable.map(|suitable| {
-                                if suitable {
-                                    Suitability::Suitable
-                                } else {
-                                    Suitability::Unsuitable
-                                }
-                            }),
-                            ordering: observation.ordered_in.map(|ordered_in| {
-                                if ordered_in {
-                                    Ordering::OrderedIn
-                                } else {
-                                    Ordering::OrderedOut
-                                }
-                            }),
-                            look: observation.info.map(|info| {
-                                if info.layer != 0
-                                    || info.frame.size.width.abs() < 2.0
-                                    || info.frame.size.height.abs() < 2.0
-                                {
-                                    NativeLook::NotAWindow
-                                } else {
-                                    NativeLook::Window
-                                }
-                            }),
-                        }
-                    })
-                });
-                #[cfg(feature = "roc-core")]
-                {
-                    use crate::roc_path::Word;
-                    let question = rift_core::lifecycle::plain::Inventory {
-                        facts: InventoryFacts {
-                            identity: match facts.identity {
-                                NativeIdentity::Known(wsid) => NativeIdentity::Known(wsid.word()),
-                                NativeIdentity::Unknown => NativeIdentity::Unknown,
-                            },
-                            report: facts.report,
-                            view: facts.view,
-                            minimize: facts.minimize,
-                            fullscreen: facts.fullscreen,
-                            validity: facts.validity,
-                        },
-                        evidence: asked.fact(|evidence| evidence),
-                    };
-                    let roc = rift_core_roc::lifecycle::retirement(question);
-                    crate::roc_path::check(
-                        "retirement",
-                        rift_core::lifecycle::plain::Inventory::FACTS,
-                        &question,
-                        &verdict,
-                        roc,
-                    );
-                }
-                (verdict == Retirement::Retire).then_some(wid)
-            })
-            .collect()
-    }
-
-    /// Apply native presence and visibility, returning only affected logical
-    /// ownership requiring location confirmation. Unmapped/inactive windows
-    /// can become hidden without an unnecessary native membership query.
-    pub(crate) fn reconcile_native_snapshot(
-        &mut self,
-        workspaces: &crate::model::virtual_workspace::WorkspaceStore,
-        observed: &[(WindowServerId, Option<SpaceId>)],
-        active_spaces: &HashSet<SpaceId>,
-    ) -> HashSet<WindowServerId> {
-        let observed_ids: HashSet<_> = observed.iter().map(|(wsid, _)| *wsid).collect();
-        let hidden: Vec<_> = self
-            .iter_visible_window_server_ids()
-            .filter(|wsid| !observed_ids.contains(wsid))
-            .collect();
-        for wsid in hidden {
-            self.mark_window_hidden(wsid);
-        }
-        for &(wsid, space) in observed {
-            if let Some(space) = space {
-                self.observe_native_space(wsid, space, true);
-            } else {
-                self.mark_window_visible(wsid);
-            }
-        }
-        self.workspaces
-            .owners()
-            .filter_map(|(wid, ownership)| match ownership {
-                rift_core::workspaces::Ownership::Assigned(_) => Some(wid),
-                rift_core::workspaces::Ownership::Claimed { .. }
-                | rift_core::workspaces::Ownership::Held => None,
-            })
-            .filter_map(|wid| {
-                let wid = &wid;
-                let record = self.record(*wid)?;
-                let wsid = record.window_server_id?;
-                (record.assignment().is_some_and(|assignment| {
-                    workspaces
-                        .workspaces
-                        .get(assignment)
-                        .is_some_and(|workspace| active_spaces.contains(&workspace.space))
-                }) && self.native_fullscreen_record_for_window(*wid).is_none()
-                    && !observed_ids.contains(&wsid))
-                .then_some(wsid)
-            })
-            .collect()
-    }
-
-    /// Native absence may reflect ordering rather than an AX lifecycle change.
-    /// Confirmed moves reconcile location; a live AX window keeps its ownership.
-    pub(crate) fn reconcile_native_absence(
-        &mut self,
-        workspaces: &crate::model::virtual_workspace::WorkspaceStore,
-        wsid: WindowServerId,
-        active_spaces: &HashSet<SpaceId>,
-        inactive_target: Option<SpaceId>,
-        preserve_assignment: bool,
-    ) -> Option<(WindowId, Option<SpaceId>)> {
-        self.mark_window_hidden(wsid);
-        let wid = self.tracked_window_id(wsid)?;
-        let record = self.record(wid)?;
-        // Hiding, minimizing and fullscreen all retain ownership while suspended.
-        if self.is_temporarily_unavailable(wid)
-            || !record.assignment().is_some_and(|assignment| {
-                workspaces
-                    .workspaces
-                    .get(assignment)
-                    .is_some_and(|workspace| active_spaces.contains(&workspace.space))
-            })
-        {
-            return None;
-        }
-        if let Some(space) = inactive_target {
-            self.set_window_server_space(wsid, Some(space));
-            return Some((wid, Some(space)));
-        }
-        if preserve_assignment || self.is_admitted(wid) {
-            return None;
-        }
-        Some((wid, None))
     }
 
     fn native_fullscreen_original_window(&self, window_id: WindowId) -> Option<WindowId> {
@@ -1621,67 +1186,6 @@ impl WindowStore {
             .collect()
     }
 
-    /// Gives a window minimal AX state, manageable and under no rule, as a real window has
-    /// before macOS can invalidate its AX element (tests that build windows from layout events
-    /// alone).
-    #[cfg(test)]
-    pub(crate) fn insert_test_ax_state(&mut self, window: WindowId) {
-        let info = crate::sys::app::WindowInfo {
-            has_native_tabs: false,
-            is_standard: true,
-            is_root: true,
-            is_minimized: false,
-            is_resizable: true,
-            min_size: None,
-            max_size: None,
-            title: format!("{window:?}"),
-            frame: objc2_core_foundation::CGRect::ZERO,
-            sys_id: None,
-            bundle_id: None,
-            path: None,
-            ax_role: None,
-            ax_subrole: None,
-        };
-        self.insert_manageable_window(window, WindowState::from(info));
-    }
-
-    /// Tracks a window's AX state as the heuristic's manageable window under no rule.
-    #[cfg(test)]
-    pub(crate) fn insert_manageable_window(&mut self, window_id: WindowId, window: WindowState) {
-        self.insert_window_as(window_id, window, Manageability::Manageable, Rule::NoRule);
-    }
-
-    /// Tracks a window's AX state, read afresh: unmanageable until the heuristic says
-    /// otherwise, under no rule, not a native transient.
-    pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
-        self.insert_window_as(window_id, window, Manageability::Unmanageable, Rule::NoRule);
-    }
-
-    /// Tracks a window's AX state, read afresh, with the heuristic's verdict and a rule already
-    /// known (an identity replacing another keeps its rule).
-    pub(crate) fn insert_window_as(
-        &mut self,
-        window_id: WindowId,
-        window: WindowState,
-        manageability: Manageability,
-        rule: Rule,
-    ) {
-        let wsid = window.info.sys_id;
-        let facts = AdmissionFacts {
-            manageability,
-            rule,
-            ax: window.ax_kind(),
-            native: NativeKind::Ordinary,
-            minimize: window.minimize(),
-        };
-        self.lifecycle.step(LifecycleEvent::Live { window: window_id, facts });
-        self.windows.entry_or_default(window_id).state = Some(window);
-        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-        if let Some(wsid) = wsid {
-            self.track_window_server_id(wsid, window_id);
-        }
-    }
-
     pub(crate) fn project_floating_frame(
         &mut self,
         window: WindowId,
@@ -1714,33 +1218,6 @@ impl WindowStore {
     pub(crate) fn clear_floating_display_geometry(&mut self, window: WindowId) {
         if let Some(record) = self.windows.get_mut(&window) {
             record.floating_display_geometry = None;
-        }
-    }
-
-    pub fn record(&self, window_id: WindowId) -> Option<RecordRef<'_>> {
-        Some(RecordRef {
-            record: self.windows.get(&window_id)?,
-            transfer: self.windows.transfer(&window_id),
-            ownership: self.ownership(window_id),
-        })
-    }
-
-    /// Who places `window`, as the core answers: the store keeps no ownership of its own.
-    fn ownership(&self, window: WindowId) -> Ownership {
-        use rift_core::workspaces::{Destination, Owned, Ownership as Core};
-        match self.workspaces.owned(window) {
-            Owned::Unowned => Ownership::Unassigned,
-            Owned::Owner(Core::Assigned(workspace)) => Ownership::Assigned(workspace),
-            Owned::Owner(Core::Held) => Ownership::Held,
-            Owned::Owner(Core::Claimed { owner, destination }) => Ownership::Claimed(WindowClaim {
-                owner: owner.owner,
-                flags: owner.flags,
-                original: owner.original,
-                workspace: match destination {
-                    Destination::Returns(workspace) => Some(workspace),
-                    Destination::Nowhere => None,
-                },
-            }),
         }
     }
 
@@ -1791,29 +1268,6 @@ impl WindowStore {
         self.window_servers.entry(wsid).or_default()
     }
 
-    fn prune_window_record(&mut self, window_id: WindowId) {
-        let should_remove = self.windows.get(&window_id).is_some_and(|record| {
-            record.state.is_none()
-                && record.window_server_id.is_none()
-                && self.ownership(window_id) == Ownership::Unassigned
-                && !record.rule_floating
-                // The user's hand keeps its window's record until it lets go.
-                && self.windows.gripped_window() != Some(window_id)
-        });
-        if should_remove {
-            self.windows.remove(&window_id);
-            if let Some((_, session)) = self.drag_mut() {
-                session.forget_target(window_id);
-            }
-            if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
-                windows.remove(&window_id);
-                if windows.is_empty() {
-                    self.app_windows.remove(&window_id.pid);
-                }
-            }
-        }
-    }
-
     fn prune_window_server_record(&mut self, wsid: WindowServerId) {
         let should_remove =
             self.window_servers.get(&wsid).is_some_and(WindowServerRecord::is_empty);
@@ -1824,59 +1278,6 @@ impl WindowStore {
 
     pub fn tracked_window_id(&self, wsid: WindowServerId) -> Option<WindowId> {
         self.window_servers.get(&wsid).and_then(|record| record.window_id)
-    }
-
-    pub fn track_window_server_id(
-        &mut self,
-        wsid: WindowServerId,
-        window_id: WindowId,
-    ) -> Option<WindowId> {
-        let (old, pending_record) = {
-            let record = self.server_record_mut(wsid);
-            let old = record.window_id;
-            record.window_id = Some(window_id);
-            let pending = record.pending_native_fullscreen.take();
-            (old, pending)
-        };
-        if let Some(old) = old.filter(|old| *old != window_id)
-            && let Some(record) = self.windows.get_mut(&old)
-        {
-            record.window_server_id = None;
-        }
-        if let Some(previous_wsid) = self
-            .windows
-            .get(&window_id)
-            .and_then(|record| record.window_server_id)
-            .filter(|previous| *previous != wsid)
-            && let Some(record) = self.window_servers.get_mut(&previous_wsid)
-        {
-            record.window_id = None;
-            self.prune_window_server_record(previous_wsid);
-        }
-        let window = self.windows.entry_or_default(window_id);
-        window.window_server_id = Some(wsid);
-        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-        if let Some(pending_record) = pending_record {
-            if pending_record.pid != window_id.pid {
-                self.prune_window_server_record(wsid);
-                return old;
-            }
-            let _ = self.suspend_window_to_native_fullscreen(
-                window_id,
-                Some(wsid),
-                pending_record.last_known_user_space,
-                pending_record.fullscreen_space,
-                pending_record.transition,
-            );
-        } else if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
-            && let Some(mut native_record) =
-                self.remove_native_fullscreen_record_by_original_window(original_window_id)
-        {
-            native_record.window_server_id = Some(wsid);
-            self.upsert_native_fullscreen_record(native_record);
-        }
-        self.prune_window_server_record(wsid);
-        old
     }
 
     pub fn track_window_server_info(&mut self, info: WindowServerInfo) -> Option<WindowServerInfo> {
@@ -2006,37 +1407,6 @@ impl WindowStore {
         }
         self.prune_window_server_record(wsid);
         wid
-    }
-
-    pub fn suspend_window_to_native_fullscreen(
-        &mut self,
-        window_id: WindowId,
-        window_server_id: Option<WindowServerId>,
-        fallback_last_known_user_space: Option<SpaceId>,
-        fullscreen_space: SpaceId,
-        transition: NativeFullscreenTransition,
-    ) -> NativeFullscreenRecord {
-        let original_window_id =
-            self.native_fullscreen_original_window(window_id).unwrap_or(window_id);
-        let existing = self
-            .native_fullscreen_records_by_original_window
-            .get(&original_window_id)
-            .copied();
-        let workspace = self.workspace_for_window(window_id);
-        let record = NativeFullscreenRecord {
-            original_window_id,
-            current_window_id: window_id,
-            window_server_id: window_server_id
-                .or_else(|| existing.and_then(|record| record.window_server_id)),
-            workspace: workspace.or_else(|| existing.and_then(|record| record.workspace)),
-            last_known_user_space: fallback_last_known_user_space
-                .or_else(|| existing.and_then(|record| record.last_known_user_space)),
-            fullscreen_space,
-            transition,
-        };
-        self.windows.entry_or_default(window_id);
-        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-        self.upsert_native_fullscreen_record(record)
     }
 
     pub fn suspend_window_server_to_native_fullscreen(
@@ -2223,352 +1593,8 @@ impl WindowStore {
             .map(|record| record.pid)
     }
 
-    pub fn assign_window_to_workspace(
-        &mut self,
-        window_id: WindowId,
-        assignment: VirtualWorkspaceId,
-    ) -> Option<VirtualWorkspaceId> {
-        // A held window a workspace transfer left is placed only by the drop.
-        if self.windows.get(&window_id).is_some() && self.ownership(window_id) == Ownership::Held {
-            tracing::debug!(
-                ?window_id,
-                ?assignment,
-                "assignment refused: the window is held, unplaced"
-            );
-            return None;
-        }
-        // A claimed window never enters the index; any placement updates its destination.
-        if let Some(claim) = self.claim(window_id) {
-            self.set_ownership(
-                window_id,
-                Ownership::Claimed(WindowClaim {
-                    workspace: Some(assignment),
-                    ..claim
-                }),
-            );
-            return claim.workspace;
-        }
-        let old = self.workspace_for_window(window_id);
-        if old == Some(assignment) {
-            return old;
-        }
-        self.set_ownership(window_id, Ownership::Assigned(assignment));
-        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-        if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
-            && let Some(mut record) =
-                self.remove_native_fullscreen_record_by_original_window(original_window_id)
-        {
-            record.workspace = Some(assignment);
-            self.upsert_native_fullscreen_record(record);
-        }
-        old
-    }
-
-    pub fn workspace_for_window(&self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
-        self.windows.get(&window_id)?;
-        self.ownership(window_id).assignment()
-    }
-
-    /// The windows assigned to a workspace, by (pid, index), as the core answers.
-    pub fn workspace_windows(&self, workspace_id: VirtualWorkspaceId) -> Vec<WindowId> {
-        self.workspaces.windows_on(workspace_id).collect()
-    }
-
-    /// The window the user holds, if `workspace_id` has it. Once it leaves
-    /// ([`Self::leave_workspace_held`]) it is in no workspace's windows: a transfer can't carry it.
-    pub(crate) fn held_member(&self, workspace_id: VirtualWorkspaceId) -> Option<HeldMember> {
-        self.windows
-            .gripped_window()
-            .filter(|&window| self.workspace_for_window(window) == Some(workspace_id))
-            .map(HeldMember)
-    }
-
-    /// The held window leaves its workspace, placed by nothing until the hand lets go.
-    pub(crate) fn leave_workspace_held(&mut self, held: HeldMember) {
-        let window = held.window();
-        self.windows.clear_transfer(&window);
-        self.take_assignment(window);
-        self.set_ownership(window, Ownership::Held);
-    }
-
-    /// Whether `window` is held and placed by no workspace (a transfer left it).
-    #[cfg(test)]
-    pub(crate) fn is_held_unplaced(&self, window: WindowId) -> bool {
-        self.windows.get(&window).is_some() && self.ownership(window) == Ownership::Held
-    }
-
-    /// The hand let go of `window`: placed by nothing, it is unassigned now, for whoever let go
-    /// to place.
-    pub(crate) fn release_held(&mut self, window: WindowId) -> Placed {
-        match self.windows.get(&window).map(|_| self.ownership(window)) {
-            Some(Ownership::Held) => {
-                self.set_ownership(window, Ownership::Unassigned);
-                Placed::Unplaced
-            }
-            Some(Ownership::Unassigned | Ownership::Assigned(_) | Ownership::Claimed(_)) | None => {
-                Placed::ByWorkspace
-            }
-        }
-    }
-
-    pub fn workspace_window_count(&self, workspace_id: VirtualWorkspaceId) -> usize {
-        self.workspaces.windows_on(workspace_id).count()
-    }
-
-    pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
-        // A claim keeps its saved workspace until release; only workspace removal clears it.
-        self.windows.clear_transfer(&window_id);
-        let old = self.take_assignment(window_id);
-        self.prune_window_record(window_id);
-        old
-    }
-
-    /// Move workspace/rule metadata from an old AX window id to a new one when
-    /// macOS rekeys the same WindowServer window across sleep/wake or similar
-    /// churn. The caller remains responsible for replacing any layout/window
-    /// state that still references `from`.
-    pub(crate) fn replace_window_identity(&mut self, from: WindowId, to: WindowId) {
-        self.transfer_persistent_window_metadata(from, to);
-        self.remove_window(from);
-    }
-
-    fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
-        if from == to {
-            return;
-        }
-
-        let (rule_floating, visibility, geom) = match self.windows.get(&from) {
-            Some(record) => (
-                record.rule_floating,
-                record.visibility,
-                record.floating_display_geometry,
-            ),
-            None => return,
-        };
-        // The workspace an assigned predecessor had, for its fullscreen record below.
-        let workspace = self.workspace_for_window(from);
-
-        // Ownership moves to the new identity. The recognized identity's claim wins over one
-        // taken on the provisional replacement (that one ends, and its owner's requests resolve
-        // to the surviving claim); a claim keeps the other side's workspace as its destination
-        // when it has none.
-        let from_ownership = self.take_ownership(from);
-        let to_ownership = self.take_ownership(to);
-        let ownership = match (from_ownership, to_ownership) {
-            // The window under the hand stays placed by nothing until it is let go.
-            (Ownership::Held, _) | (_, Ownership::Held) => Ownership::Held,
-            (Ownership::Unassigned, kept) => kept,
-            (Ownership::Assigned(workspace), Ownership::Unassigned | Ownership::Assigned(_)) => {
-                Ownership::Assigned(workspace)
-            }
-            (Ownership::Assigned(workspace), Ownership::Claimed(claim)) => {
-                Ownership::Claimed(WindowClaim {
-                    workspace: claim.workspace.or(Some(workspace)),
-                    ..claim
-                })
-            }
-            (Ownership::Claimed(claim), Ownership::Unassigned) => Ownership::Claimed(claim),
-            (Ownership::Claimed(claim), Ownership::Assigned(workspace)) => {
-                Ownership::Claimed(WindowClaim {
-                    workspace: claim.workspace.or(Some(workspace)),
-                    ..claim
-                })
-            }
-            (Ownership::Claimed(claim), Ownership::Claimed(displaced)) => {
-                if displaced.owner != claim.owner {
-                    tracing::warn!(
-                        ?from,
-                        ?to,
-                        ?displaced,
-                        "Identity merge ended a conflicting claim"
-                    );
-                }
-                Ownership::Claimed(WindowClaim {
-                    workspace: claim.workspace.or(displaced.workspace),
-                    ..claim
-                })
-            }
-        };
-        self.give_ownership(to, ownership);
-
-        let target = self.windows.entry_or_default(to);
-        target.rule_floating |= rule_floating;
-        target.visibility = visibility;
-        target.floating_display_geometry = geom;
-        self.app_windows.entry(to.pid).or_default().insert(to);
-        // The user's grip moved with the identity already (the core re-keyed it first). A
-        // transfer moves too, unless the replacement is the window under the user's hand.
-        debug_assert_ne!(
-            self.windows.gripped_window(),
-            Some(from),
-            "re-key the grip first"
-        );
-        let transfer = self.windows.transfer(&from);
-        self.windows.set_transfer(&to, transfer);
-
-        // An invalidation moves with the identity, to a window with AX state.
-        self.lifecycle.carry_invalidation(from, to);
-        if let Some(source) = self.windows.get_mut(&from) {
-            source.rule_floating = false;
-            source.floating_display_geometry = None;
-        }
-        self.windows.clear_transfer(&from);
-
-        if let Some(original_window_id) = self.native_fullscreen_original_window(from)
-            && let Some(mut record) =
-                self.remove_native_fullscreen_record_by_original_window(original_window_id)
-        {
-            if record.current_window_id == from {
-                record.current_window_id = to;
-            }
-            if record.workspace.is_none() {
-                record.workspace = workspace;
-            }
-            if record.last_known_user_space.is_none() {
-                record.last_known_user_space = self.native_space(to);
-            }
-            self.upsert_native_fullscreen_record(record);
-        }
-
-        self.prune_window_record(from);
-    }
-
-    pub fn replace_rule_floating(&mut self, window_id: WindowId, value: bool) -> bool {
-        let record = self.windows.entry_or_default(window_id);
-        let previous = std::mem::replace(&mut record.rule_floating, value);
-        self.prune_window_record(window_id);
-        previous
-    }
-
-    pub fn clear_rule_floating(&mut self, window_id: WindowId) {
-        if let Some(record) = self.windows.get_mut(&window_id) {
-            record.rule_floating = false;
-        }
-        self.prune_window_record(window_id);
-    }
-
     pub fn rule_floating(&self, window_id: WindowId) -> bool {
         self.windows.get(&window_id).is_some_and(|record| record.rule_floating)
-    }
-
-    pub fn remove_window(&mut self, window_id: WindowId) -> Option<WindowRecord> {
-        let Some(record) = self.windows.remove(&window_id) else {
-            return None;
-        };
-        if record.state.is_some() {
-            self.lifecycle.step(LifecycleEvent::Gone(window_id));
-        }
-        // A drag holding the window ends with it; one elsewhere can no longer drop onto it.
-        if let Some((_, session)) = self.drag_mut() {
-            session.forget_target(window_id);
-        }
-        if let Some(claim) = self.ownership(window_id).claim() {
-            self.unindex_claim(claim.owner, window_id);
-        }
-        self.tell_ownership(window_id, Ownership::Unassigned);
-        if let Some(wsid) = record.window_server_id {
-            self.remove_window_server_state(wsid);
-        }
-        if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
-            windows.remove(&window_id);
-            if windows.is_empty() {
-                self.app_windows.remove(&window_id.pid);
-            }
-        }
-        Some(record)
-    }
-
-    pub fn remove_windows_for_app(&mut self, pid: i32) {
-        for window_id in self.app_windows.remove(&pid).into_iter().flatten() {
-            self.remove_window(window_id);
-        }
-
-        let fullscreen_keys: Vec<_> = self
-            .native_fullscreen_records_by_original_window
-            .keys()
-            .copied()
-            .filter(|window_id| window_id.pid == pid)
-            .collect();
-        for original_window_id in fullscreen_keys {
-            let _ = self.remove_native_fullscreen_record_by_original_window(original_window_id);
-        }
-
-        self.window_servers.retain(|_, record| {
-            if record.info.is_some_and(|info| info.pid == pid) {
-                return false;
-            }
-            if record.pending_native_fullscreen.is_some_and(|pending| pending.pid == pid) {
-                record.pending_native_fullscreen = None;
-            }
-            !record.is_empty()
-        });
-    }
-
-    pub fn iter_workspace_assignments(
-        &self,
-    ) -> impl Iterator<Item = (WindowId, VirtualWorkspaceId)> + '_ {
-        self.workspaces.owners().filter_map(|(window, ownership)| match ownership {
-            rift_core::workspaces::Ownership::Assigned(workspace) => Some((window, workspace)),
-            rift_core::workspaces::Ownership::Claimed { .. }
-            | rift_core::workspaces::Ownership::Held => None,
-        })
-    }
-
-    pub fn workspace_assignment_count(&self) -> usize { self.iter_workspace_assignments().count() }
-
-    /// A workspace the workspace store removed: the core's shadow takes it out of the catalog,
-    /// handing its windows and claims to `successor`, and the records follow what the core
-    /// decided for each window the workspace placed and each claim returning to it. A native
-    /// fullscreen record naming it takes the same successor (it is not the core's).
-    pub(crate) fn remove_workspace(
-        &mut self,
-        removed: VirtualWorkspaceId,
-        successor: rift_core::workspaces::Successor<VirtualWorkspaceId>,
-    ) {
-        use rift_core::workspaces::{
-            Destination, Owned, Ownership as Core, Successor, WorkspacesEvent,
-        };
-        let assigned = self.workspace_windows(removed);
-        let claimed: Vec<WindowId> = (self.claims.values().flatten().copied())
-            .filter(|&wid| self.claim(wid).is_some_and(|claim| claim.workspace == Some(removed)))
-            .collect();
-        self.workspaces.step(WorkspacesEvent::Removed { workspace: removed, successor });
-        for window in assigned {
-            match self.workspaces.owned(window) {
-                Owned::Owner(Core::Assigned(heir)) => {
-                    self.assign_window_to_workspace(window, heir);
-                }
-                Owned::Unowned => {
-                    self.remove_window_assignment(window);
-                }
-                decided @ Owned::Owner(Core::Claimed { .. } | Core::Held) => {
-                    removal_unfollowed(window, removed, decided);
-                }
-            }
-        }
-        for window in claimed {
-            let Some(claim) = self.claim(window) else { continue };
-            let workspace = match self.workspaces.owned(window) {
-                Owned::Owner(Core::Claimed { destination, .. }) => match destination {
-                    Destination::Returns(heir) => Some(heir),
-                    Destination::Nowhere => None,
-                },
-                decided @ (Owned::Unowned | Owned::Owner(Core::Assigned(_) | Core::Held)) => {
-                    removal_unfollowed(window, removed, decided);
-                    continue;
-                }
-            };
-            self.set_ownership(window, Ownership::Claimed(WindowClaim { workspace, ..claim }));
-        }
-        let heir = match successor {
-            Successor::Into(heir) => Some(heir),
-            Successor::Unassign => None,
-        };
-        for record in self.native_fullscreen_records_by_original_window.values_mut() {
-            if record.workspace == Some(removed) {
-                record.workspace = heir;
-            }
-        }
     }
 
     pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
@@ -2611,25 +1637,9 @@ impl WindowStore {
         }
     }
 
-    pub fn native_space(&self, window: WindowId) -> Option<SpaceId> {
-        self.window_server_space(self.record(window)?.window_server_id?)
-    }
-
     pub fn set_visibility(&mut self, window_id: WindowId, visibility: WindowVisibility) {
         self.windows.entry_or_default(window_id).visibility = visibility;
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-    }
-
-    pub(crate) fn can_place_window(&self, window: WindowId) -> bool {
-        self.record(window).is_none_or(|record| {
-            !self.lifecycle.is_invalidated(window)
-                && record.claim().is_none()
-                && (record.state.is_none() || self.is_admitted_state(window))
-                && !matches!(
-                    record.visibility,
-                    WindowVisibility::Hidden | WindowVisibility::Minimized
-                )
-        }) && self.native_fullscreen_record_for_window(window).is_none()
     }
 
     /// The drag holding `window`, if the user is dragging it.
@@ -2701,17 +1711,13 @@ impl WindowStore {
 
     /// Effect `Ungrip`: the gripped record goes back among the loose ones. A drag's session is
     /// returned.
-    /// Its record is pruned only once the whole step is projected ([`Self::prune_ungripped`]):
+    /// Its record is pruned only once the whole step is projected ([`WindowsMut::prune_ungripped`]):
     /// a re-press of the held window is an ungrip and a grip in one step, and the record must
     /// still be there for the grip.
     pub(crate) fn project_ungrip(&mut self) -> Option<Session> {
         let (_, session) = self.windows.let_go().expect("the core ungrips only a grip");
         session
     }
-
-    /// After a step's effects: prunes the record of a window the step ungripped, if it holds
-    /// nothing and the hand is not on it again.
-    pub(crate) fn prune_ungripped(&mut self, window: WindowId) { self.prune_window_record(window); }
 
     /// Effect `Regrip`: the grip moves with its window's new identity.
     pub(crate) fn project_regrip(
@@ -2720,19 +1726,6 @@ impl WindowStore {
         to: WindowId,
     ) -> Result<(), GripRefused> {
         self.windows.regrip(from, to)
-    }
-
-    /// `window` as Rift may place it, tracking it if need be; `None` while the user's hand is
-    /// on it: the slot it is in has no transfer.
-    pub(crate) fn unheld(&mut self, window: WindowId) -> Option<Unheld<'_>> {
-        let placeable = self.can_place_window(window);
-        let transfer = self.windows.loose_or_new(window)?;
-        self.app_windows.entry(window.pid).or_default().insert(window);
-        Some(Unheld {
-            transfer,
-            placeable,
-            topology_revision: self.topology_revision,
-        })
     }
 
     /// Every window with a transfer, and the transfer.
@@ -2744,34 +1737,1160 @@ impl WindowStore {
     pub(crate) fn end_transfer(&mut self, window_id: WindowId) {
         self.windows.clear_transfer(&window_id);
     }
+}
+
+impl<'a> Windows<'a> {
+    /// Rift manages a valid AX window when admission passes and no external owner holds it.
+    pub(crate) fn is_admitted(self, wid: WindowId) -> bool {
+        self.record(wid)
+            .is_some_and(|record| record.claim().is_none() && self.records.lifecycle.manages(wid))
+    }
+
+    /// An explicit move can change retained ownership independently of placement: a window
+    /// with valid AX state, unclaimed and assigned, that nothing but minimizing or the
+    /// manageability heuristic keeps out (#702's `allows_management`).
+    pub(crate) fn can_move_assigned_window(self, wid: WindowId) -> bool {
+        use rift_core::lifecycle::{Admission, AdmissionFacts, Minimize, Veto, admission};
+        self.record(wid).is_some_and(|record| {
+            !self.records.lifecycle.is_invalidated(wid)
+                && record.claim().is_none()
+                && record.assignment().is_some()
+                && self.records.lifecycle.facts(wid).is_some_and(|facts| {
+                    matches!(
+                        admission(AdmissionFacts {
+                            minimize: Minimize::Shown,
+                            ..facts
+                        }),
+                        Admission::Admitted | Admission::Vetoed(Veto::Unmanageable)
+                    )
+                })
+        })
+    }
+
+    /// Rules and admission are reconciled only for windows Rift may manage.
+    pub(crate) fn can_reconcile_admission(self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| {
+            !self.records.lifecycle.is_invalidated(wid)
+                && record.claim().is_none()
+                && record.state.as_ref().is_some_and(|window| {
+                    window.minimize() == rift_core::lifecycle::Minimize::Shown
+                })
+        })
+    }
+
+    pub fn claim(self, wid: WindowId) -> Option<WindowClaim> {
+        self.record(wid).and_then(|record| record.claim())
+    }
+
+    pub fn is_claimed(self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| record.claim().is_some())
+    }
+
+    pub fn suppresses_focus_follows_mouse(self, wid: Option<WindowId>) -> bool {
+        !self.records.claims.is_empty()
+            && wid.and_then(|wid| self.claim(wid)).is_some_and(|claim| {
+                claim.flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+            })
+    }
+
+    /// The window `owner` means by `wid`: its own claim by current, then original, id (an
+    /// id reused after a rekey still reaches the claim), otherwise the window tracked as `wid`.
+    pub fn resolve_claim_target(self, owner: ClaimOwner, wid: WindowId) -> Option<WindowId> {
+        let owned = self.records.owner_claims(owner);
+        if owned.contains(&wid) {
+            return Some(wid);
+        }
+        let original = owned
+            .iter()
+            .copied()
+            .find(|current| self.claim(*current).is_some_and(|claim| claim.original == wid));
+        original.or_else(|| self.records.contains_window(wid).then_some(wid))
+    }
+
+    /// The core's workspaces, joined (the shadow).
+    pub(crate) fn core_workspaces(
+        self,
+    ) -> &'a rift_core::workspaces::Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>
+    {
+        self.core
+    }
+
+    /// Every window the store's claims index and the core disagree on, or that the core owns
+    /// with no record in the store. The core keeps who places each window; the store keeps only
+    /// the claims by owner (their order is the owner's), so the two must name the same claimed
+    /// windows. Empty unless a write bypassed [`WindowsMut::set_ownership`].
+    pub(crate) fn ownership_divergences(self) -> Vec<OwnershipDivergence> {
+        use rift_core::workspaces::{Owned, Ownership as Core};
+        let indexed = |window: WindowId| {
+            self.records
+                .claims
+                .iter()
+                .find(|(_, windows)| windows.contains(&window))
+                .map(|(owner, _)| *owner)
+        };
+        let mut windows: Vec<WindowId> = (self.records.claims.values().flatten().copied())
+            .chain(self.core.owners().map(|(window, _)| window))
+            .collect();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+            .into_iter()
+            .filter_map(|window| {
+                let core = self.core.owned(window);
+                let claimed_by = match core {
+                    Owned::Owner(Core::Claimed { owner, .. }) => Some(owner.owner),
+                    Owned::Unowned | Owned::Owner(Core::Assigned(_) | Core::Held) => None,
+                };
+                let recorded = self.records.windows.get(&window).is_some();
+                let owned = core != Owned::Unowned;
+                (indexed(window) != claimed_by || (owned && !recorded)).then_some(
+                    OwnershipDivergence {
+                        window,
+                        indexed: indexed(window),
+                        recorded,
+                        core,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn is_visible_admitted(self, wid: WindowId) -> bool {
+        self.is_admitted(wid)
+            && self
+                .record(wid)
+                .and_then(|record| record.window_server_id())
+                .is_some_and(|wsid| self.records.is_window_visible(wsid))
+    }
+
+    /// Restore identity for native presence or a return to the recorded user Space.
+    pub(crate) fn restore_native_identity(
+        self,
+        wsid: Option<WindowServerId>,
+        original: WindowId,
+    ) -> Option<NativeFullscreenRestoration> {
+        let record = wsid
+            .and_then(|wsid| self.records.native_fullscreen_record_for_window_server_id(wsid))
+            .or_else(|| self.records.native_fullscreen_record_for_window(original))?;
+        if !matches!(record.transition, NativeFullscreenTransition::ExitObserved(_)) {
+            return None;
+        }
+        let bound = record.window_server_id.and_then(|id| self.records.tracked_window_id(id));
+        // A specific appearance follows the record's current AX identity first;
+        // a Space return follows its surviving native binding first.
+        let window = [
+            wsid.map(|_| record.current_window_id),
+            bound,
+            Some(record.current_window_id),
+            wsid.and_then(|id| self.records.tracked_window_id(id)),
+            wsid.map(|_| original),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|wid| self.is_admitted(*wid));
+        let previous_assignment = window
+            .is_some_and(|wid| wid != original && self.workspace_for_window(original).is_some())
+            .then_some(original);
+        Some(NativeFullscreenRestoration {
+            record,
+            window,
+            previous_assignment,
+        })
+    }
+
+    /// A current successful AX omission is destructive only with native negative evidence:
+    /// the windows to retire. The caller removes them (`RiftState::remove_window`), so a grip
+    /// on one ends through the core.
+    pub(crate) fn inventory_retirements(
+        self,
+        pid: i32,
+        observed: impl IntoIterator<Item = WindowId>,
+        mut inactive: impl FnMut(WindowId) -> bool,
+        mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
+    ) -> Vec<WindowId> {
+        use rift_core::lifecycle::{
+            AxValidity, FullscreenRecord, InventoryFacts, InventoryView, NativeEvidence,
+            NativeIdentity, NativeLook, Ordering, Report, Retirement, Suitability,
+        };
+        let observed: HashSet<_> = observed.into_iter().collect();
+        self.records
+            .window_ids_for_pid(pid)
+            .filter_map(|wid| {
+                let record = self.record(wid)?;
+                let wsid = record.window_server_id;
+                let facts = InventoryFacts {
+                    report: if observed.contains(&wid) {
+                        Report::Reported
+                    } else {
+                        Report::Omitted
+                    },
+                    view: if inactive(wid) {
+                        InventoryView::OutOfView
+                    } else {
+                        InventoryView::InView
+                    },
+                    minimize: record.state.as_ref().map(WindowState::minimize),
+                    fullscreen: if self.records.native_fullscreen_record_for_window(wid).is_some() {
+                        FullscreenRecord::Recorded
+                    } else {
+                        FullscreenRecord::NotRecorded
+                    },
+                    identity: wsid.map_or(NativeIdentity::Unknown, NativeIdentity::Known),
+                    validity: if self.records.lifecycle.is_invalidated(wid) {
+                        AxValidity::Invalidated
+                    } else {
+                        AxValidity::Valid
+                    },
+                };
+                let asked = crate::roc_path::Asked::new();
+                let verdict = rift_core::lifecycle::retirement(facts, |wsid| {
+                    asked.ask(|| {
+                        let observation = observe(wsid, self.records.get_window_server_info(wsid));
+                        NativeEvidence {
+                            suitability: observation.suitable.map(|suitable| {
+                                if suitable {
+                                    Suitability::Suitable
+                                } else {
+                                    Suitability::Unsuitable
+                                }
+                            }),
+                            ordering: observation.ordered_in.map(|ordered_in| {
+                                if ordered_in {
+                                    Ordering::OrderedIn
+                                } else {
+                                    Ordering::OrderedOut
+                                }
+                            }),
+                            look: observation.info.map(|info| {
+                                if info.layer != 0
+                                    || info.frame.size.width.abs() < 2.0
+                                    || info.frame.size.height.abs() < 2.0
+                                {
+                                    NativeLook::NotAWindow
+                                } else {
+                                    NativeLook::Window
+                                }
+                            }),
+                        }
+                    })
+                });
+                #[cfg(feature = "roc-core")]
+                {
+                    use crate::roc_path::Word;
+                    let question = rift_core::lifecycle::plain::Inventory {
+                        facts: InventoryFacts {
+                            identity: match facts.identity {
+                                NativeIdentity::Known(wsid) => NativeIdentity::Known(wsid.word()),
+                                NativeIdentity::Unknown => NativeIdentity::Unknown,
+                            },
+                            report: facts.report,
+                            view: facts.view,
+                            minimize: facts.minimize,
+                            fullscreen: facts.fullscreen,
+                            validity: facts.validity,
+                        },
+                        evidence: asked.fact(|evidence| evidence),
+                    };
+                    let roc = rift_core_roc::lifecycle::retirement(question);
+                    crate::roc_path::check(
+                        "retirement",
+                        rift_core::lifecycle::plain::Inventory::FACTS,
+                        &question,
+                        &verdict,
+                        roc,
+                    );
+                }
+                (verdict == Retirement::Retire).then_some(wid)
+            })
+            .collect()
+    }
+
+    pub fn record(self, window_id: WindowId) -> Option<RecordRef<'a>> {
+        Some(RecordRef {
+            record: self.records.windows.get(&window_id)?,
+            transfer: self.records.windows.transfer(&window_id),
+            ownership: self.ownership(window_id),
+        })
+    }
+
+    /// Who places `window`, as the core answers: the store keeps no ownership of its own.
+    fn ownership(self, window: WindowId) -> Ownership {
+        use rift_core::workspaces::{Destination, Owned, Ownership as Core};
+        match self.core.owned(window) {
+            Owned::Unowned => Ownership::Unassigned,
+            Owned::Owner(Core::Assigned(workspace)) => Ownership::Assigned(workspace),
+            Owned::Owner(Core::Held) => Ownership::Held,
+            Owned::Owner(Core::Claimed { owner, destination }) => Ownership::Claimed(WindowClaim {
+                owner: owner.owner,
+                flags: owner.flags,
+                original: owner.original,
+                workspace: match destination {
+                    Destination::Returns(workspace) => Some(workspace),
+                    Destination::Nowhere => None,
+                },
+            }),
+        }
+    }
+
+    pub fn workspace_for_window(self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
+        self.records.windows.get(&window_id)?;
+        self.ownership(window_id).assignment()
+    }
+
+    /// The windows assigned to a workspace, by (pid, index), as the core answers.
+    pub fn workspace_windows(self, workspace_id: VirtualWorkspaceId) -> Vec<WindowId> {
+        self.core.windows_on(workspace_id).collect()
+    }
+
+    /// The window the user holds, if `workspace_id` has it. Once it leaves
+    /// ([`WindowsMut::leave_workspace_held`]) it is in no workspace's windows: a transfer can't carry it.
+    pub(crate) fn held_member(self, workspace_id: VirtualWorkspaceId) -> Option<HeldMember> {
+        self.records
+            .windows
+            .gripped_window()
+            .filter(|&window| self.workspace_for_window(window) == Some(workspace_id))
+            .map(HeldMember)
+    }
+
+    /// Whether `window` is held and placed by no workspace (a transfer left it).
+    #[cfg(test)]
+    pub(crate) fn is_held_unplaced(self, window: WindowId) -> bool {
+        self.records.windows.get(&window).is_some() && self.ownership(window) == Ownership::Held
+    }
+
+    pub fn workspace_window_count(self, workspace_id: VirtualWorkspaceId) -> usize {
+        self.core.windows_on(workspace_id).count()
+    }
+
+    pub fn iter_workspace_assignments(
+        self,
+    ) -> impl Iterator<Item = (WindowId, VirtualWorkspaceId)> + 'a {
+        self.core.owners().filter_map(|(window, ownership)| match ownership {
+            rift_core::workspaces::Ownership::Assigned(workspace) => Some((window, workspace)),
+            rift_core::workspaces::Ownership::Claimed { .. }
+            | rift_core::workspaces::Ownership::Held => None,
+        })
+    }
+
+    pub fn workspace_assignment_count(self) -> usize { self.iter_workspace_assignments().count() }
+
+    pub fn native_space(self, window: WindowId) -> Option<SpaceId> {
+        self.records.window_server_space(self.record(window)?.window_server_id?)
+    }
+
+    pub(crate) fn can_place_window(self, window: WindowId) -> bool {
+        self.record(window).is_none_or(|record| {
+            !self.records.lifecycle.is_invalidated(window)
+                && record.claim().is_none()
+                && (record.state.is_none() || self.records.is_admitted_state(window))
+                && !matches!(
+                    record.visibility,
+                    WindowVisibility::Hidden | WindowVisibility::Minimized
+                )
+        }) && self.records.native_fullscreen_record_for_window(window).is_none()
+    }
 
     #[cfg(any(test, debug_assertions))]
-    pub fn debug_assert_invariants(&self) {
-        for (&wid, record) in self.windows.iter() {
-            debug_assert!(self.app_windows.get(&wid.pid).is_some_and(|ids| ids.contains(&wid)));
+    pub fn debug_assert_invariants(self) {
+        for (&wid, record) in self.records.windows.iter() {
+            debug_assert!(
+                self.records.app_windows.get(&wid.pid).is_some_and(|ids| ids.contains(&wid))
+            );
             if let Some(wsid) = record.window_server_id {
-                debug_assert_eq!(self.tracked_window_id(wsid), Some(wid));
+                debug_assert_eq!(self.records.tracked_window_id(wsid), Some(wid));
             }
             let _ = record;
             if let Some(claim) = self.ownership(wid).claim() {
-                debug_assert!(self.owner_claims(claim.owner).contains(&wid));
+                debug_assert!(self.records.owner_claims(claim.owner).contains(&wid));
             }
         }
-        for (&owner, ids) in &self.claims {
+        for (&owner, ids) in &self.records.claims {
             debug_assert!(!ids.is_empty());
             debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));
         }
-        for (&pid, ids) in &self.app_windows {
-            debug_assert!(ids.iter().all(|wid| wid.pid == pid && self.windows.get(wid).is_some()));
+        for (&pid, ids) in &self.records.app_windows {
+            debug_assert!(
+                ids.iter().all(|wid| wid.pid == pid && self.records.windows.get(wid).is_some())
+            );
         }
-        for (&wsid, server) in &self.window_servers {
+        for (&wsid, server) in &self.records.window_servers {
             if let Some(wid) = server.window_id {
                 debug_assert_eq!(
-                    self.windows.get(&wid).and_then(|record| record.window_server_id),
+                    self.records.windows.get(&wid).and_then(|record| record.window_server_id),
                     Some(wsid)
                 );
             }
         }
+    }
+}
+
+impl WindowsMut<'_> {
+    /// Claim a tracked window, holding its assignment until release.
+    pub fn insert_claim(&mut self, wid: WindowId, owner: ClaimOwner, flags: WindowClaimFlags) {
+        debug_assert!(self.records.contains_window(wid) && !self.read().is_claimed(wid));
+        let workspace = self.take_assignment(wid);
+        self.set_ownership(
+            wid,
+            Ownership::Claimed(WindowClaim {
+                owner,
+                flags,
+                original: wid,
+                workspace,
+            }),
+        );
+        self.records.claims.entry(owner).or_default().push(wid);
+    }
+
+    pub fn set_claim_flags(&mut self, wid: WindowId, flags: WindowClaimFlags) {
+        if let Some(claim) = self.read().claim(wid) {
+            self.set_ownership(wid, Ownership::Claimed(WindowClaim { flags, ..claim }));
+        }
+    }
+
+    /// End a claim. The caller restores the returned assignment if it is still valid.
+    pub fn remove_claim(&mut self, wid: WindowId) -> Option<WindowClaim> {
+        self.records.windows.get(&wid)?;
+        let claim = self.read().ownership(wid).claim()?;
+        self.set_ownership(wid, Ownership::Unassigned);
+        self.records.unindex_claim(claim.owner, wid);
+        self.prune_window_record(wid);
+        Some(claim)
+    }
+
+    /// Takes a window's ownership out of the record and out of the indexes it is in, leaving
+    /// it unassigned.
+    fn take_ownership(&mut self, wid: WindowId) -> Ownership {
+        if self.records.windows.get(&wid).is_none() {
+            return Ownership::Unassigned;
+        }
+        let ownership = self.read().ownership(wid);
+        self.set_ownership(wid, Ownership::Unassigned);
+        match ownership {
+            Ownership::Unassigned | Ownership::Held | Ownership::Assigned(_) => {}
+            Ownership::Claimed(claim) => self.records.unindex_claim(claim.owner, wid),
+        }
+        ownership
+    }
+
+    /// Gives an unassigned window `ownership`, and puts it in the index that goes with it.
+    fn give_ownership(&mut self, wid: WindowId, ownership: Ownership) {
+        self.set_ownership(wid, ownership);
+        match ownership {
+            Ownership::Unassigned | Ownership::Held | Ownership::Assigned(_) => {}
+            Ownership::Claimed(claim) => {
+                self.records.claims.entry(claim.owner).or_default().push(wid)
+            }
+        }
+    }
+
+    fn take_assignment(&mut self, wid: WindowId) -> Option<VirtualWorkspaceId> {
+        self.records.windows.get(&wid)?;
+        let assignment = self.read().ownership(wid).assignment()?;
+        self.set_ownership(wid, Ownership::Unassigned);
+        Some(assignment)
+    }
+
+    /// The only writer of a window's ownership, which the core keeps; the window has a record
+    /// while it is owned.
+    fn set_ownership(&mut self, wid: WindowId, ownership: Ownership) {
+        self.records.windows.entry_or_default(wid);
+        self.tell_ownership(wid, ownership);
+    }
+
+    fn tell_ownership(&mut self, window: WindowId, ownership: Ownership) {
+        self.core.step(rift_core::workspaces::WorkspacesEvent::Owned {
+            window,
+            owned: ownership.core(),
+        });
+    }
+
+    /// Where the workspace store's topology writers tell the joined shadow each change: only
+    /// topology changes go through it, never a window's ownership.
+    pub(crate) fn topology(&mut self) -> TopologyChanges<'_> { TopologyChanges(&mut *self.core) }
+
+    /// Native fullscreen suspends admission while retaining identity and ownership.
+    /// Only positive entry/discovery evidence may establish this suspension.
+    pub(crate) fn observe_native_fullscreen(
+        &mut self,
+        wsid: WindowServerId,
+        space: SpaceId,
+        fallback_user_space: Option<SpaceId>,
+        pid: Option<i32>,
+    ) -> Option<WindowId> {
+        let lifecycle = self
+            .native_fullscreen_record_for_window_server_id(wsid)
+            .map(|record| (record.fullscreen_space, record.transition))
+            .or_else(|| {
+                self.records
+                    .pending_native_fullscreen_record_for_window_server_id(wsid)
+                    .map(|record| (record.fullscreen_space, record.transition))
+            });
+        if lifecycle.is_some_and(|(fullscreen, transition)| {
+            fullscreen == space && matches!(transition, NativeFullscreenTransition::ExitObserved(_))
+        }) {
+            return None;
+        }
+        self.records.set_window_server_space(wsid, Some(space));
+        if let Some(wid) = self.records.tracked_window_id(wsid) {
+            let assignment = self.read().workspace_for_window(wid);
+            self.suspend_window_to_native_fullscreen(
+                wid,
+                Some(wsid),
+                fallback_user_space,
+                space,
+                NativeFullscreenTransition::Suspended,
+            );
+            assignment.map(|_| wid)
+        } else {
+            if let Some(pid) =
+                pid.or_else(|| self.records.get_window_server_info(wsid).map(|info| info.pid))
+            {
+                self.records.suspend_window_server_to_native_fullscreen(
+                    pid,
+                    wsid,
+                    fallback_user_space,
+                    space,
+                    NativeFullscreenTransition::Suspended,
+                );
+            }
+            None
+        }
+    }
+
+    /// Bind a positive AX observation to its stable native identity. Persistent
+    /// membership survives AX replacement; only projection rekeying is external.
+    pub(crate) fn reconcile_ax_identity(
+        &mut self,
+        wid: WindowId,
+        wsid: Option<WindowServerId>,
+    ) -> Option<WindowId> {
+        if let Some(old) = self.read().record(wid).and_then(|record| record.window_server_id())
+            && Some(old) != wsid
+        {
+            self.records.remove_window_server_state(old);
+            self.records.windows.clear_transfer(&wid);
+        }
+        let wsid = wsid?;
+        let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
+        if let Some(old) = previous {
+            if !self.records.contains_window(wid) {
+                let state =
+                    self.records.windows.get_mut(&old).and_then(|record| record.state.take());
+                let facts = self.records.lifecycle.facts(old);
+                if state.is_some() {
+                    self.records.lifecycle.step(LifecycleEvent::Gone(old));
+                }
+                if let Some(state) = state {
+                    // The same window under a new identity keeps its heuristic verdict, rule
+                    // and native transience; its AX snapshot says the rest.
+                    match facts {
+                        Some(facts) => {
+                            self.insert_window_as(wid, state, facts.manageability, facts.rule);
+                            self.records
+                                .set_native_transient(wid, facts.native == NativeKind::Transient);
+                        }
+                        None => self.insert_window(wid, state),
+                    }
+                }
+            }
+            self.replace_window_identity(old, wid);
+        }
+        self.records.clear_window_server_observed(wsid);
+        previous
+    }
+
+    pub(crate) fn set_minimized_visibility(&mut self, wid: WindowId, minimized: bool) {
+        if let Some(wsid) = self.read().record(wid).and_then(|record| record.window_server_id()) {
+            self.records.set_native_visibility(wsid, !minimized);
+        }
+        if let Some(record) = self.records.windows.get_mut(&wid) {
+            record.visibility = if minimized {
+                WindowVisibility::Minimized
+            } else {
+                WindowVisibility::Visible
+            };
+        }
+    }
+
+    /// Apply native presence and visibility, returning only affected logical
+    /// ownership requiring location confirmation. Unmapped/inactive windows
+    /// can become hidden without an unnecessary native membership query.
+    pub(crate) fn reconcile_native_snapshot(
+        &mut self,
+        workspaces: &crate::model::virtual_workspace::WorkspaceStore,
+        observed: &[(WindowServerId, Option<SpaceId>)],
+        active_spaces: &HashSet<SpaceId>,
+    ) -> HashSet<WindowServerId> {
+        let observed_ids: HashSet<_> = observed.iter().map(|(wsid, _)| *wsid).collect();
+        let hidden: Vec<_> = self
+            .iter_visible_window_server_ids()
+            .filter(|wsid| !observed_ids.contains(wsid))
+            .collect();
+        for wsid in hidden {
+            self.records.mark_window_hidden(wsid);
+        }
+        for &(wsid, space) in observed {
+            if let Some(space) = space {
+                self.records.observe_native_space(wsid, space, true);
+            } else {
+                self.records.mark_window_visible(wsid);
+            }
+        }
+        self.core
+            .owners()
+            .filter_map(|(wid, ownership)| match ownership {
+                rift_core::workspaces::Ownership::Assigned(_) => Some(wid),
+                rift_core::workspaces::Ownership::Claimed { .. }
+                | rift_core::workspaces::Ownership::Held => None,
+            })
+            .filter_map(|wid| {
+                let wid = &wid;
+                let record = self.read().record(*wid)?;
+                let wsid = record.window_server_id?;
+                (record.assignment().is_some_and(|assignment| {
+                    workspaces
+                        .workspaces
+                        .get(assignment)
+                        .is_some_and(|workspace| active_spaces.contains(&workspace.space))
+                }) && self.records.native_fullscreen_record_for_window(*wid).is_none()
+                    && !observed_ids.contains(&wsid))
+                .then_some(wsid)
+            })
+            .collect()
+    }
+
+    /// Native absence may reflect ordering rather than an AX lifecycle change.
+    /// Confirmed moves reconcile location; a live AX window keeps its ownership.
+    pub(crate) fn reconcile_native_absence(
+        &mut self,
+        workspaces: &crate::model::virtual_workspace::WorkspaceStore,
+        wsid: WindowServerId,
+        active_spaces: &HashSet<SpaceId>,
+        inactive_target: Option<SpaceId>,
+        preserve_assignment: bool,
+    ) -> Option<(WindowId, Option<SpaceId>)> {
+        self.records.mark_window_hidden(wsid);
+        let wid = self.records.tracked_window_id(wsid)?;
+        let record = self.read().record(wid)?;
+        // Hiding, minimizing and fullscreen all retain ownership while suspended.
+        if self.records.is_temporarily_unavailable(wid)
+            || !record.assignment().is_some_and(|assignment| {
+                workspaces
+                    .workspaces
+                    .get(assignment)
+                    .is_some_and(|workspace| active_spaces.contains(&workspace.space))
+            })
+        {
+            return None;
+        }
+        if let Some(space) = inactive_target {
+            self.records.set_window_server_space(wsid, Some(space));
+            return Some((wid, Some(space)));
+        }
+        if preserve_assignment || self.read().is_admitted(wid) {
+            return None;
+        }
+        Some((wid, None))
+    }
+
+    /// Gives a window minimal AX state, manageable and under no rule, as a real window has
+    /// before macOS can invalidate its AX element (tests that build windows from layout events
+    /// alone).
+    #[cfg(test)]
+    pub(crate) fn insert_test_ax_state(&mut self, window: WindowId) {
+        let info = crate::sys::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: format!("{window:?}"),
+            frame: objc2_core_foundation::CGRect::ZERO,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+        self.insert_manageable_window(window, WindowState::from(info));
+    }
+
+    /// Tracks a window's AX state as the heuristic's manageable window under no rule.
+    #[cfg(test)]
+    pub(crate) fn insert_manageable_window(&mut self, window_id: WindowId, window: WindowState) {
+        self.insert_window_as(window_id, window, Manageability::Manageable, Rule::NoRule);
+    }
+
+    /// Tracks a window's AX state, read afresh: unmanageable until the heuristic says
+    /// otherwise, under no rule, not a native transient.
+    pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
+        self.insert_window_as(window_id, window, Manageability::Unmanageable, Rule::NoRule);
+    }
+
+    /// Tracks a window's AX state, read afresh, with the heuristic's verdict and a rule already
+    /// known (an identity replacing another keeps its rule).
+    pub(crate) fn insert_window_as(
+        &mut self,
+        window_id: WindowId,
+        window: WindowState,
+        manageability: Manageability,
+        rule: Rule,
+    ) {
+        let wsid = window.info.sys_id;
+        let facts = AdmissionFacts {
+            manageability,
+            rule,
+            ax: window.ax_kind(),
+            native: NativeKind::Ordinary,
+            minimize: window.minimize(),
+        };
+        self.records.lifecycle.step(LifecycleEvent::Live { window: window_id, facts });
+        self.records.windows.entry_or_default(window_id).state = Some(window);
+        self.records.app_windows.entry(window_id.pid).or_default().insert(window_id);
+        if let Some(wsid) = wsid {
+            self.track_window_server_id(wsid, window_id);
+        }
+    }
+
+    fn prune_window_record(&mut self, window_id: WindowId) {
+        let should_remove = self.records.windows.get(&window_id).is_some_and(|record| {
+            record.state.is_none()
+                && record.window_server_id.is_none()
+                && self.read().ownership(window_id) == Ownership::Unassigned
+                && !record.rule_floating
+                // The user's hand keeps its window's record until it lets go.
+                && self.records.windows.gripped_window() != Some(window_id)
+        });
+        if should_remove {
+            self.records.windows.remove(&window_id);
+            if let Some((_, session)) = self.records.drag_mut() {
+                session.forget_target(window_id);
+            }
+            if let Some(windows) = self.records.app_windows.get_mut(&window_id.pid) {
+                windows.remove(&window_id);
+                if windows.is_empty() {
+                    self.records.app_windows.remove(&window_id.pid);
+                }
+            }
+        }
+    }
+
+    pub fn track_window_server_id(
+        &mut self,
+        wsid: WindowServerId,
+        window_id: WindowId,
+    ) -> Option<WindowId> {
+        let (old, pending_record) = {
+            let record = self.records.server_record_mut(wsid);
+            let old = record.window_id;
+            record.window_id = Some(window_id);
+            let pending = record.pending_native_fullscreen.take();
+            (old, pending)
+        };
+        if let Some(old) = old.filter(|old| *old != window_id)
+            && let Some(record) = self.records.windows.get_mut(&old)
+        {
+            record.window_server_id = None;
+        }
+        if let Some(previous_wsid) = self
+            .windows
+            .get(&window_id)
+            .and_then(|record| record.window_server_id)
+            .filter(|previous| *previous != wsid)
+            && let Some(record) = self.records.window_servers.get_mut(&previous_wsid)
+        {
+            record.window_id = None;
+            self.records.prune_window_server_record(previous_wsid);
+        }
+        let window = self.records.windows.entry_or_default(window_id);
+        window.window_server_id = Some(wsid);
+        self.records.app_windows.entry(window_id.pid).or_default().insert(window_id);
+        if let Some(pending_record) = pending_record {
+            if pending_record.pid != window_id.pid {
+                self.records.prune_window_server_record(wsid);
+                return old;
+            }
+            let _ = self.suspend_window_to_native_fullscreen(
+                window_id,
+                Some(wsid),
+                pending_record.last_known_user_space,
+                pending_record.fullscreen_space,
+                pending_record.transition,
+            );
+        } else if let Some(original_window_id) =
+            self.records.native_fullscreen_original_window(window_id)
+            && let Some(mut native_record) = self
+                .records
+                .remove_native_fullscreen_record_by_original_window(original_window_id)
+        {
+            native_record.window_server_id = Some(wsid);
+            self.records.upsert_native_fullscreen_record(native_record);
+        }
+        self.records.prune_window_server_record(wsid);
+        old
+    }
+
+    pub fn suspend_window_to_native_fullscreen(
+        &mut self,
+        window_id: WindowId,
+        window_server_id: Option<WindowServerId>,
+        fallback_last_known_user_space: Option<SpaceId>,
+        fullscreen_space: SpaceId,
+        transition: NativeFullscreenTransition,
+    ) -> NativeFullscreenRecord {
+        let original_window_id =
+            self.records.native_fullscreen_original_window(window_id).unwrap_or(window_id);
+        let existing = self
+            .native_fullscreen_records_by_original_window
+            .get(&original_window_id)
+            .copied();
+        let workspace = self.read().workspace_for_window(window_id);
+        let record = NativeFullscreenRecord {
+            original_window_id,
+            current_window_id: window_id,
+            window_server_id: window_server_id
+                .or_else(|| existing.and_then(|record| record.window_server_id)),
+            workspace: workspace.or_else(|| existing.and_then(|record| record.workspace)),
+            last_known_user_space: fallback_last_known_user_space
+                .or_else(|| existing.and_then(|record| record.last_known_user_space)),
+            fullscreen_space,
+            transition,
+        };
+        self.records.windows.entry_or_default(window_id);
+        self.records.app_windows.entry(window_id.pid).or_default().insert(window_id);
+        self.records.upsert_native_fullscreen_record(record)
+    }
+
+    pub fn assign_window_to_workspace(
+        &mut self,
+        window_id: WindowId,
+        assignment: VirtualWorkspaceId,
+    ) -> Option<VirtualWorkspaceId> {
+        // A held window a workspace transfer left is placed only by the drop.
+        if self.records.windows.get(&window_id).is_some()
+            && self.read().ownership(window_id) == Ownership::Held
+        {
+            tracing::debug!(
+                ?window_id,
+                ?assignment,
+                "assignment refused: the window is held, unplaced"
+            );
+            return None;
+        }
+        // A claimed window never enters the index; any placement updates its destination.
+        if let Some(claim) = self.read().claim(window_id) {
+            self.set_ownership(
+                window_id,
+                Ownership::Claimed(WindowClaim {
+                    workspace: Some(assignment),
+                    ..claim
+                }),
+            );
+            return claim.workspace;
+        }
+        let old = self.read().workspace_for_window(window_id);
+        if old == Some(assignment) {
+            return old;
+        }
+        self.set_ownership(window_id, Ownership::Assigned(assignment));
+        self.records.app_windows.entry(window_id.pid).or_default().insert(window_id);
+        if let Some(original_window_id) = self.records.native_fullscreen_original_window(window_id)
+            && let Some(mut record) = self
+                .records
+                .remove_native_fullscreen_record_by_original_window(original_window_id)
+        {
+            record.workspace = Some(assignment);
+            self.records.upsert_native_fullscreen_record(record);
+        }
+        old
+    }
+
+    /// The held window leaves its workspace, placed by nothing until the hand lets go.
+    pub(crate) fn leave_workspace_held(&mut self, held: HeldMember) {
+        let window = held.window();
+        self.records.windows.clear_transfer(&window);
+        self.take_assignment(window);
+        self.set_ownership(window, Ownership::Held);
+    }
+
+    /// The hand let go of `window`: placed by nothing, it is unassigned now, for whoever let go
+    /// to place.
+    pub(crate) fn release_held(&mut self, window: WindowId) -> Placed {
+        match self.records.windows.get(&window).map(|_| self.read().ownership(window)) {
+            Some(Ownership::Held) => {
+                self.set_ownership(window, Ownership::Unassigned);
+                Placed::Unplaced
+            }
+            Some(Ownership::Unassigned | Ownership::Assigned(_) | Ownership::Claimed(_)) | None => {
+                Placed::ByWorkspace
+            }
+        }
+    }
+
+    pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
+        // A claim keeps its saved workspace until release; only workspace removal clears it.
+        self.records.windows.clear_transfer(&window_id);
+        let old = self.take_assignment(window_id);
+        self.prune_window_record(window_id);
+        old
+    }
+
+    /// Move workspace/rule metadata from an old AX window id to a new one when
+    /// macOS rekeys the same WindowServer window across sleep/wake or similar
+    /// churn. The caller remains responsible for replacing any layout/window
+    /// state that still references `from`.
+    pub(crate) fn replace_window_identity(&mut self, from: WindowId, to: WindowId) {
+        self.transfer_persistent_window_metadata(from, to);
+        self.remove_window(from);
+    }
+
+    fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+
+        let (rule_floating, visibility, geom) = match self.records.windows.get(&from) {
+            Some(record) => (
+                record.rule_floating,
+                record.visibility,
+                record.floating_display_geometry,
+            ),
+            None => return,
+        };
+        // The workspace an assigned predecessor had, for its fullscreen record below.
+        let workspace = self.read().workspace_for_window(from);
+
+        // Ownership moves to the new identity. The recognized identity's claim wins over one
+        // taken on the provisional replacement (that one ends, and its owner's requests resolve
+        // to the surviving claim); a claim keeps the other side's workspace as its destination
+        // when it has none.
+        let from_ownership = self.take_ownership(from);
+        let to_ownership = self.take_ownership(to);
+        let ownership = match (from_ownership, to_ownership) {
+            // The window under the hand stays placed by nothing until it is let go.
+            (Ownership::Held, _) | (_, Ownership::Held) => Ownership::Held,
+            (Ownership::Unassigned, kept) => kept,
+            (Ownership::Assigned(workspace), Ownership::Unassigned | Ownership::Assigned(_)) => {
+                Ownership::Assigned(workspace)
+            }
+            (Ownership::Assigned(workspace), Ownership::Claimed(claim)) => {
+                Ownership::Claimed(WindowClaim {
+                    workspace: claim.workspace.or(Some(workspace)),
+                    ..claim
+                })
+            }
+            (Ownership::Claimed(claim), Ownership::Unassigned) => Ownership::Claimed(claim),
+            (Ownership::Claimed(claim), Ownership::Assigned(workspace)) => {
+                Ownership::Claimed(WindowClaim {
+                    workspace: claim.workspace.or(Some(workspace)),
+                    ..claim
+                })
+            }
+            (Ownership::Claimed(claim), Ownership::Claimed(displaced)) => {
+                if displaced.owner != claim.owner {
+                    tracing::warn!(
+                        ?from,
+                        ?to,
+                        ?displaced,
+                        "Identity merge ended a conflicting claim"
+                    );
+                }
+                Ownership::Claimed(WindowClaim {
+                    workspace: claim.workspace.or(displaced.workspace),
+                    ..claim
+                })
+            }
+        };
+        self.give_ownership(to, ownership);
+
+        let target = self.records.windows.entry_or_default(to);
+        target.rule_floating |= rule_floating;
+        target.visibility = visibility;
+        target.floating_display_geometry = geom;
+        self.records.app_windows.entry(to.pid).or_default().insert(to);
+        // The user's grip moved with the identity already (the core re-keyed it first). A
+        // transfer moves too, unless the replacement is the window under the user's hand.
+        debug_assert_ne!(
+            self.records.windows.gripped_window(),
+            Some(from),
+            "re-key the grip first"
+        );
+        let transfer = self.records.windows.transfer(&from);
+        self.records.windows.set_transfer(&to, transfer);
+
+        // An invalidation moves with the identity, to a window with AX state.
+        self.records.lifecycle.carry_invalidation(from, to);
+        if let Some(source) = self.records.windows.get_mut(&from) {
+            source.rule_floating = false;
+            source.floating_display_geometry = None;
+        }
+        self.records.windows.clear_transfer(&from);
+
+        if let Some(original_window_id) = self.records.native_fullscreen_original_window(from)
+            && let Some(mut record) = self
+                .records
+                .remove_native_fullscreen_record_by_original_window(original_window_id)
+        {
+            if record.current_window_id == from {
+                record.current_window_id = to;
+            }
+            if record.workspace.is_none() {
+                record.workspace = workspace;
+            }
+            if record.last_known_user_space.is_none() {
+                record.last_known_user_space = self.read().native_space(to);
+            }
+            self.records.upsert_native_fullscreen_record(record);
+        }
+
+        self.prune_window_record(from);
+    }
+
+    pub fn replace_rule_floating(&mut self, window_id: WindowId, value: bool) -> bool {
+        let record = self.records.windows.entry_or_default(window_id);
+        let previous = std::mem::replace(&mut record.rule_floating, value);
+        self.prune_window_record(window_id);
+        previous
+    }
+
+    pub fn clear_rule_floating(&mut self, window_id: WindowId) {
+        if let Some(record) = self.records.windows.get_mut(&window_id) {
+            record.rule_floating = false;
+        }
+        self.prune_window_record(window_id);
+    }
+
+    pub fn remove_window(&mut self, window_id: WindowId) -> Option<WindowRecord> {
+        let Some(record) = self.records.windows.remove(&window_id) else {
+            return None;
+        };
+        if record.state.is_some() {
+            self.records.lifecycle.step(LifecycleEvent::Gone(window_id));
+        }
+        // A drag holding the window ends with it; one elsewhere can no longer drop onto it.
+        if let Some((_, session)) = self.records.drag_mut() {
+            session.forget_target(window_id);
+        }
+        if let Some(claim) = self.read().ownership(window_id).claim() {
+            self.records.unindex_claim(claim.owner, window_id);
+        }
+        self.tell_ownership(window_id, Ownership::Unassigned);
+        if let Some(wsid) = record.window_server_id {
+            self.records.remove_window_server_state(wsid);
+        }
+        if let Some(windows) = self.records.app_windows.get_mut(&window_id.pid) {
+            windows.remove(&window_id);
+            if windows.is_empty() {
+                self.records.app_windows.remove(&window_id.pid);
+            }
+        }
+        Some(record)
+    }
+
+    pub fn remove_windows_for_app(&mut self, pid: i32) {
+        for window_id in self.records.app_windows.remove(&pid).into_iter().flatten() {
+            self.remove_window(window_id);
+        }
+
+        let fullscreen_keys: Vec<_> = self
+            .native_fullscreen_records_by_original_window
+            .keys()
+            .copied()
+            .filter(|window_id| window_id.pid == pid)
+            .collect();
+        for original_window_id in fullscreen_keys {
+            let _ = self
+                .records
+                .remove_native_fullscreen_record_by_original_window(original_window_id);
+        }
+
+        self.records.window_servers.retain(|_, record| {
+            if record.info.is_some_and(|info| info.pid == pid) {
+                return false;
+            }
+            if record.pending_native_fullscreen.is_some_and(|pending| pending.pid == pid) {
+                record.pending_native_fullscreen = None;
+            }
+            !record.is_empty()
+        });
+    }
+
+    /// A workspace the workspace store removed: the core's shadow takes it out of the catalog,
+    /// handing its windows and claims to `successor`, and the records follow what the core
+    /// decided for each window the workspace placed and each claim returning to it. A native
+    /// fullscreen record naming it takes the same successor (it is not the core's).
+    pub(crate) fn remove_workspace(
+        &mut self,
+        removed: VirtualWorkspaceId,
+        successor: rift_core::workspaces::Successor<VirtualWorkspaceId>,
+    ) {
+        use rift_core::workspaces::{
+            Destination, Owned, Ownership as Core, Successor, WorkspacesEvent,
+        };
+        let assigned = self.read().workspace_windows(removed);
+        let claimed: Vec<WindowId> = (self.records.claims.values().flatten().copied())
+            .filter(|&wid| {
+                self.read().claim(wid).is_some_and(|claim| claim.workspace == Some(removed))
+            })
+            .collect();
+        self.core.step(WorkspacesEvent::Removed { workspace: removed, successor });
+        for window in assigned {
+            match self.core.owned(window) {
+                Owned::Owner(Core::Assigned(heir)) => {
+                    self.assign_window_to_workspace(window, heir);
+                }
+                Owned::Unowned => {
+                    self.remove_window_assignment(window);
+                }
+                decided @ Owned::Owner(Core::Claimed { .. } | Core::Held) => {
+                    removal_unfollowed(window, removed, decided);
+                }
+            }
+        }
+        for window in claimed {
+            let Some(claim) = self.read().claim(window) else {
+                continue;
+            };
+            let workspace = match self.core.owned(window) {
+                Owned::Owner(Core::Claimed { destination, .. }) => match destination {
+                    Destination::Returns(heir) => Some(heir),
+                    Destination::Nowhere => None,
+                },
+                decided @ (Owned::Unowned | Owned::Owner(Core::Assigned(_) | Core::Held)) => {
+                    removal_unfollowed(window, removed, decided);
+                    continue;
+                }
+            };
+            self.set_ownership(window, Ownership::Claimed(WindowClaim { workspace, ..claim }));
+        }
+        let heir = match successor {
+            Successor::Into(heir) => Some(heir),
+            Successor::Unassign => None,
+        };
+        for record in self.records.native_fullscreen_records_by_original_window.values_mut() {
+            if record.workspace == Some(removed) {
+                record.workspace = heir;
+            }
+        }
+    }
+
+    /// After a step's effects: prunes the record of a window the step ungripped, if it holds
+    /// nothing and the hand is not on it again.
+    pub(crate) fn prune_ungripped(&mut self, window: WindowId) { self.prune_window_record(window); }
+
+    /// `window` as Rift may place it, tracking it if need be; `None` while the user's hand is
+    /// on it: the slot it is in has no transfer.
+    pub(crate) fn unheld(&mut self, window: WindowId) -> Option<Unheld<'_>> {
+        let placeable = self.read().can_place_window(window);
+        let transfer = self.records.windows.loose_or_new(window)?;
+        self.records.app_windows.entry(window.pid).or_default().insert(window);
+        Some(Unheld {
+            transfer,
+            placeable,
+            topology_revision: self.records.topology_revision,
+        })
     }
 }
 
@@ -2784,15 +2903,19 @@ mod tests {
 
     #[test]
     fn transfer_retries_once_per_revision_then_refuses_until_begun_again() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let window = WindowId::new(42, 1);
         let (a, b) = (SpaceId::new(1), SpaceId::new(2));
-        let transfer = |store: &WindowStore| store.record(window).unwrap().transfer();
-        let retry = |store: &mut WindowStore, revision, available| {
-            store.unheld(window).unwrap().retry_transfer(revision, available, Some(a))
+        let transfer = |store: &OwnedWindows| store.view().record(window).unwrap().transfer();
+        let retry = |store: &mut OwnedWindows, revision, available| {
+            store
+                .view_mut()
+                .unheld(window)
+                .unwrap()
+                .retry_transfer(revision, available, Some(a))
         };
         store.accept_topology_revision(10);
-        assert!(store.unheld(window).unwrap().begin_transfer(true));
+        assert!(store.view_mut().unheld(window).unwrap().begin_transfer(true));
         assert_eq!(
             transfer(&store),
             Some(Transfer::Moving { retries: 0, revision: 10 })
@@ -2822,7 +2945,7 @@ mod tests {
             Some(Transfer::Moving { retries: 1, revision: 15 })
         );
         // A new move always starts afresh; it waits while its destination is unavailable.
-        assert!(!store.unheld(window).unwrap().begin_transfer(false));
+        assert!(!store.view_mut().unheld(window).unwrap().begin_transfer(false));
         assert_eq!(transfer(&store), Some(Transfer::Waiting));
         store.end_transfer(window);
         assert_eq!(transfer(&store), None);
@@ -2830,7 +2953,7 @@ mod tests {
 
     #[test]
     fn app_termination_clears_stale_pending_fullscreen_without_erasing_another_pid() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let wsid = WindowServerId::new(42);
         store.track_window_server_info(WindowServerInfo {
             id: wsid,
@@ -2847,15 +2970,15 @@ mod tests {
             SpaceId::new(99),
             NativeFullscreenTransition::Suspended,
         );
-        store.remove_windows_for_app(7);
+        store.view_mut().remove_windows_for_app(7);
         assert_eq!(store.get_window_server_info(wsid).unwrap().pid, 8);
         assert!(store.pending_native_fullscreen_record_for_window_server_id(wsid).is_none());
-        store.debug_assert_invariants();
+        store.view().debug_assert_invariants();
     }
 
     #[test]
     fn pending_registration_requires_visible_unmapped_window_for_pid() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let wsid = WindowServerId::new(77);
         store.track_window_server_info(WindowServerInfo {
             id: wsid,
@@ -2870,13 +2993,13 @@ mod tests {
         store.mark_window_visible(wsid);
         assert!(store.has_pending_window_for_pid(2));
         assert!(!store.has_pending_window_for_pid(3));
-        store.track_window_server_id(wsid, WindowId::new(2, 1));
+        store.view_mut().track_window_server_id(wsid, WindowId::new(2, 1));
         assert!(!store.has_pending_window_for_pid(2));
     }
 
     #[test]
     fn authoritative_space_only_record_is_not_pruned() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let wsid = WindowServerId::new(77);
         let space = SpaceId::new(9);
 
@@ -2890,7 +3013,7 @@ mod tests {
 
     #[test]
     fn authoritative_space_record_is_pruned_when_space_is_cleared() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let wsid = WindowServerId::new(78);
 
         window_store.set_window_server_space(wsid, Some(SpaceId::new(10)));
@@ -2922,192 +3045,222 @@ mod tests {
 
     #[test]
     fn minimized_membership_survives_reconciliation_until_permanent_removal() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let mut workspaces = WorkspaceStore::new();
-        let home = workspaces.create_workspace(&mut store, SpaceId::new(10), None).unwrap();
+        let home = workspaces
+            .create_workspace(&mut store.view_mut(), SpaceId::new(10), None)
+            .unwrap();
         let wid = WindowId::new(1, 1);
-        store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
-        store.assign_window_to_workspace(wid, home);
+        store
+            .view_mut()
+            .insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
+        store.view_mut().assign_window_to_workspace(wid, home);
 
         for _ in 0..2 {
             store.set_minimized(wid, true);
-            store.set_minimized_visibility(wid, true);
-            assert!(!store.is_admitted(wid));
-            assert_eq!(store.workspace_for_window(wid), Some(home));
-            assert_eq!(store.workspace_windows(home), vec![wid]);
-            store.debug_assert_invariants();
+            store.view_mut().set_minimized_visibility(wid, true);
+            assert!(!store.view().is_admitted(wid));
+            assert_eq!(store.view().workspace_for_window(wid), Some(home));
+            assert_eq!(store.view().workspace_windows(home), vec![wid]);
+            store.view().debug_assert_invariants();
         }
 
-        store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
-        assert!(store.is_admitted(wid));
-        assert_eq!(store.workspace_for_window(wid), Some(home));
-        store.remove_window(wid);
-        assert_eq!(store.workspace_for_window(wid), None);
-        assert!(store.workspace_windows(home).is_empty());
+        store
+            .view_mut()
+            .insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
+        assert!(store.view().is_admitted(wid));
+        assert_eq!(store.view().workspace_for_window(wid), Some(home));
+        store.view_mut().remove_window(wid);
+        assert_eq!(store.view().workspace_for_window(wid), None);
+        assert!(store.view().workspace_windows(home).is_empty());
     }
 
     #[test]
     fn claims_hold_assignment_outside_the_index_and_follow_identity() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
-        let [home, moved, replaced] = ["Home", "Moved", "Replaced"]
-            .map(|name| workspaces.create_workspace(&mut store, space, Some(name.into())).unwrap());
+        let [home, moved, replaced] = ["Home", "Moved", "Replaced"].map(|name| {
+            workspaces
+                .create_workspace(&mut store.view_mut(), space, Some(name.into()))
+                .unwrap()
+        });
         let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
         let (wid, rekeyed, sibling) =
             (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
-        store.insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
-        store.insert_manageable_window(sibling, admitted(sibling, WindowServerId::new(3)));
-        store.assign_window_to_workspace(wid, home);
-        store.assign_window_to_workspace(sibling, home);
+        store
+            .view_mut()
+            .insert_manageable_window(wid, admitted(wid, WindowServerId::new(1)));
+        store
+            .view_mut()
+            .insert_manageable_window(sibling, admitted(sibling, WindowServerId::new(3)));
+        store.view_mut().assign_window_to_workspace(wid, home);
+        store.view_mut().assign_window_to_workspace(sibling, home);
 
-        store.insert_claim(wid, owner, WindowClaimFlags::empty());
-        assert!(!store.is_admitted(wid) && !store.can_reconcile_admission(wid));
+        store.view_mut().insert_claim(wid, owner, WindowClaimFlags::empty());
+        assert!(!store.view().is_admitted(wid) && !store.view().can_reconcile_admission(wid));
         assert!(store.is_admitted_state(wid), "native admission is untouched");
-        assert_eq!(store.workspace_for_window(wid), None);
-        assert_eq!(store.workspace_windows(home), vec![sibling]);
-        assert_eq!(store.iter_workspace_assignments().count(), 1);
+        assert_eq!(store.view().workspace_for_window(wid), None);
+        assert_eq!(store.view().workspace_windows(home), vec![sibling]);
+        assert_eq!(store.view().iter_workspace_assignments().count(), 1);
         // Placement while claimed only updates the destination.
-        assert_eq!(store.assign_window_to_workspace(wid, moved), Some(home));
-        assert!(store.workspace_windows(moved).is_empty());
-        store.remove_workspace(moved, Successor::Into(replaced));
-        assert_eq!(store.claim(wid).unwrap().workspace(), Some(replaced));
-        store.debug_assert_invariants();
+        assert_eq!(
+            store.view_mut().assign_window_to_workspace(wid, moved),
+            Some(home)
+        );
+        assert!(store.view().workspace_windows(moved).is_empty());
+        store.view_mut().remove_workspace(moved, Successor::Into(replaced));
+        assert_eq!(store.view().claim(wid).unwrap().workspace(), Some(replaced));
+        store.view().debug_assert_invariants();
 
         // An AX rekey carries the claim; a replacement assignment folds into it.
-        store.insert_manageable_window(rekeyed, admitted(rekeyed, WindowServerId::new(2)));
-        store.assign_window_to_workspace(rekeyed, home);
+        store
+            .view_mut()
+            .insert_manageable_window(rekeyed, admitted(rekeyed, WindowServerId::new(2)));
+        store.view_mut().assign_window_to_workspace(rekeyed, home);
         assert_eq!(
-            store.reconcile_ax_identity(rekeyed, Some(WindowServerId::new(1))),
+            store.view_mut().reconcile_ax_identity(rekeyed, Some(WindowServerId::new(1))),
             Some(wid)
         );
         assert_eq!(store.owner_claims(owner), &[rekeyed]);
-        assert_eq!(store.claim(rekeyed).unwrap().workspace(), Some(replaced));
-        assert_eq!(store.workspace_windows(home), vec![sibling]);
-        assert_eq!(store.resolve_claim_target(owner, wid), Some(rekeyed));
-        assert_eq!(store.resolve_claim_target(other, wid), None);
-        store.debug_assert_invariants();
+        assert_eq!(store.view().claim(rekeyed).unwrap().workspace(), Some(replaced));
+        assert_eq!(store.view().workspace_windows(home), vec![sibling]);
+        assert_eq!(store.view().resolve_claim_target(owner, wid), Some(rekeyed));
+        assert_eq!(store.view().resolve_claim_target(other, wid), None);
+        store.view().debug_assert_invariants();
 
-        let claim = store.remove_claim(rekeyed).unwrap();
+        let claim = store.view_mut().remove_claim(rekeyed).unwrap();
         assert_eq!((claim.owner, claim.workspace()), (owner, Some(replaced)));
-        assert!(store.is_admitted(rekeyed) && store.owner_claims(owner).is_empty());
+        assert!(store.view().is_admitted(rekeyed) && store.owner_claims(owner).is_empty());
     }
 
     #[test]
     fn claims_survive_id_reuse_and_merged_identities() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
-        let [home, provisional] = ["Home", "Provisional"]
-            .map(|name| workspaces.create_workspace(&mut store, space, Some(name.into())).unwrap());
+        let [home, provisional] = ["Home", "Provisional"].map(|name| {
+            workspaces
+                .create_workspace(&mut store.view_mut(), space, Some(name.into()))
+                .unwrap()
+        });
         let (a, b, c) = (ClaimOwner(1), ClaimOwner(2), ClaimOwner(3));
         let id = |idx| WindowId::new(1, idx);
         let wsid = WindowServerId::new;
-        let add = |store: &mut WindowStore, idx: u32, server: u32, workspace| {
-            store.insert_window(id(idx), admitted(id(idx), wsid(server)));
-            store.assign_window_to_workspace(id(idx), workspace);
+        let add = |store: &mut OwnedWindows, idx: u32, server: u32, workspace| {
+            store.view_mut().insert_window(id(idx), admitted(id(idx), wsid(server)));
+            store.view_mut().assign_window_to_workspace(id(idx), workspace);
         };
         let flags = WindowClaimFlags::empty();
 
         // A's window is rekeyed and its old id reused by an unrelated window B claims.
         add(&mut store, 1, 1, home);
-        store.insert_claim(id(1), a, flags);
+        store.view_mut().insert_claim(id(1), a, flags);
         add(&mut store, 2, 2, provisional);
-        store.reconcile_ax_identity(id(2), Some(wsid(1)));
+        store.view_mut().reconcile_ax_identity(id(2), Some(wsid(1)));
         add(&mut store, 1, 9, home);
-        assert_eq!(store.resolve_claim_target(a, id(1)), Some(id(2)));
-        assert_eq!(store.resolve_claim_target(c, id(1)), Some(id(1)));
-        store.insert_claim(id(1), b, flags);
-        assert_eq!(store.resolve_claim_target(a, id(1)), Some(id(2)));
-        assert_eq!(store.resolve_claim_target(b, id(1)), Some(id(1)));
-        assert_eq!(store.resolve_claim_target(a, id(2)), Some(id(2)));
-        assert_eq!(store.claim(id(2)).unwrap().workspace(), Some(home));
-        store.debug_assert_invariants();
+        assert_eq!(store.view().resolve_claim_target(a, id(1)), Some(id(2)));
+        assert_eq!(store.view().resolve_claim_target(c, id(1)), Some(id(1)));
+        store.view_mut().insert_claim(id(1), b, flags);
+        assert_eq!(store.view().resolve_claim_target(a, id(1)), Some(id(2)));
+        assert_eq!(store.view().resolve_claim_target(b, id(1)), Some(id(1)));
+        assert_eq!(store.view().resolve_claim_target(a, id(2)), Some(id(2)));
+        assert_eq!(store.view().claim(id(2)).unwrap().workspace(), Some(home));
+        store.view().debug_assert_invariants();
 
         // Both identities of one window claimed by different owners: the recognized
         // identity's claim survives with its original id and workspace; the other ends.
         add(&mut store, 3, 3, provisional);
-        store.insert_claim(id(3), a, flags);
-        store.reconcile_ax_identity(id(3), Some(wsid(9)));
-        let merged = store.claim(id(3)).unwrap();
+        store.view_mut().insert_claim(id(3), a, flags);
+        store.view_mut().reconcile_ax_identity(id(3), Some(wsid(9)));
+        let merged = store.view().claim(id(3)).unwrap();
         assert_eq!((merged.owner, merged.workspace()), (b, Some(home)));
         assert_eq!(store.owner_claims(a), &[id(2)]);
         assert_eq!(store.owner_claims(b), &[id(3)]);
-        assert_eq!(store.resolve_claim_target(b, id(1)), Some(id(3)));
+        assert_eq!(store.view().resolve_claim_target(b, id(1)), Some(id(3)));
         assert_eq!(
-            store.resolve_claim_target(a, id(3)),
+            store.view().resolve_claim_target(a, id(3)),
             Some(id(3)),
             "B's, so rejected"
         );
-        store.debug_assert_invariants();
+        store.view().debug_assert_invariants();
 
         // The same owner on both identities keeps one claim reachable by either id.
         add(&mut store, 4, 4, provisional);
-        store.insert_claim(id(4), a, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
-        store.reconcile_ax_identity(id(4), Some(wsid(1)));
+        store
+            .view_mut()
+            .insert_claim(id(4), a, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
+        store.view_mut().reconcile_ax_identity(id(4), Some(wsid(1)));
         assert_eq!(store.owner_claims(a), &[id(4)]);
-        assert_eq!(store.claim(id(4)).unwrap().flags, flags);
+        assert_eq!(store.view().claim(id(4)).unwrap().flags, flags);
         for requested in [id(1), id(4)] {
-            assert_eq!(store.resolve_claim_target(a, requested), Some(id(4)));
+            assert_eq!(store.view().resolve_claim_target(a, requested), Some(id(4)));
         }
         assert_eq!(
-            store.resolve_claim_target(a, id(2)),
+            store.view().resolve_claim_target(a, id(2)),
             None,
             "retired, never claimed"
         );
-        store.debug_assert_invariants();
+        store.view().debug_assert_invariants();
 
         // A deleted workspace leaves claims to be rehomed on release.
-        store.remove_workspace(home, Successor::Unassign);
-        assert_eq!(store.claim(id(3)).unwrap().workspace(), None);
-        assert_eq!(store.claim(id(4)).unwrap().workspace(), None);
+        store.view_mut().remove_workspace(home, Successor::Unassign);
+        assert_eq!(store.view().claim(id(3)).unwrap().workspace(), None);
+        assert_eq!(store.view().claim(id(4)).unwrap().workspace(), None);
 
         // Destruction ends a claim and its original-id mapping.
-        store.remove_window(id(3));
+        store.view_mut().remove_window(id(3));
         assert!(store.owner_claims(b).is_empty());
-        assert_eq!(store.resolve_claim_target(b, id(1)), None);
-        store.debug_assert_invariants();
+        assert_eq!(store.view().resolve_claim_target(b, id(1)), None);
+        store.view().debug_assert_invariants();
     }
 
     #[test]
     fn transfer_persistent_metadata_replaces_existing_target_workspace_assignment() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
         let source_workspace = workspaces
-            .create_workspace(&mut window_store, space, Some("Source".to_string()))
+            .create_workspace(&mut window_store.view_mut(), space, Some("Source".to_string()))
             .expect("source workspace");
         let target_workspace = workspaces
-            .create_workspace(&mut window_store, space, Some("Target".to_string()))
+            .create_workspace(&mut window_store.view_mut(), space, Some("Target".to_string()))
             .expect("target workspace");
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
 
-        window_store.assign_window_to_workspace(from, source_workspace);
-        window_store.assign_window_to_workspace(to, target_workspace);
+        window_store.view_mut().assign_window_to_workspace(from, source_workspace);
+        window_store.view_mut().assign_window_to_workspace(to, target_workspace);
 
-        window_store.transfer_persistent_window_metadata(from, to);
+        window_store.view_mut().transfer_persistent_window_metadata(from, to);
 
-        assert_eq!(window_store.workspace_for_window(to), Some(source_workspace));
-        assert!(window_store.workspace_windows(target_workspace).is_empty());
-        assert_eq!(window_store.workspace_windows(source_workspace), vec![to]);
+        assert_eq!(
+            window_store.view().workspace_for_window(to),
+            Some(source_workspace)
+        );
+        assert!(window_store.view().workspace_windows(target_workspace).is_empty());
+        assert_eq!(window_store.view().workspace_windows(source_workspace), vec![to]);
     }
 
     #[test]
     fn transfer_persistent_metadata_rekeys_native_fullscreen_record() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let space = SpaceId::new(10);
         let fullscreen_space = SpaceId::new(0x400000000 + space.get());
         let mut workspaces = WorkspaceStore::new();
         let workspace_id = workspaces
-            .create_workspace(&mut window_store, space, Some("Fullscreen".to_string()))
+            .create_workspace(
+                &mut window_store.view_mut(),
+                space,
+                Some("Fullscreen".to_string()),
+            )
             .expect("workspace");
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
         let wsid = WindowServerId::new(77);
 
-        window_store.assign_window_to_workspace(from, workspace_id);
-        let _ = window_store.suspend_window_to_native_fullscreen(
+        window_store.view_mut().assign_window_to_workspace(from, workspace_id);
+        let _ = window_store.view_mut().suspend_window_to_native_fullscreen(
             from,
             Some(wsid),
             Some(space),
@@ -3115,7 +3268,7 @@ mod tests {
             NativeFullscreenTransition::Suspended,
         );
 
-        window_store.transfer_persistent_window_metadata(from, to);
+        window_store.view_mut().transfer_persistent_window_metadata(from, to);
 
         let record = window_store
             .native_fullscreen_record_for_window(to)
@@ -3134,13 +3287,13 @@ mod tests {
 
     #[test]
     fn native_fullscreen_record_preserves_explicit_fallback_user_space_without_assignment() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let wid = WindowId::new(1, 1);
         let wsid = WindowServerId::new(91);
         let user_space = SpaceId::new(11);
         let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
 
-        let record = window_store.suspend_window_to_native_fullscreen(
+        let record = window_store.view_mut().suspend_window_to_native_fullscreen(
             wid,
             Some(wsid),
             Some(user_space),
@@ -3157,18 +3310,18 @@ mod tests {
                 .last_known_user_space,
             Some(user_space)
         );
-        window_store.replace_rule_floating(wid, true);
+        window_store.view_mut().replace_rule_floating(wid, true);
         assert!(
-            !window_store.unheld(wid).unwrap().begin_transfer(true),
+            !window_store.view_mut().unheld(wid).unwrap().begin_transfer(true),
             "rule reapplication must not override native fullscreen suspension"
         );
         window_store.restore_window_from_native_fullscreen(wid).unwrap();
-        assert!(window_store.unheld(wid).unwrap().begin_transfer(true));
+        assert!(window_store.view_mut().unheld(wid).unwrap().begin_transfer(true));
     }
 
     #[test]
     fn remove_window_preserves_native_fullscreen_record_until_app_cleanup() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let wid = WindowId::new(7, 1);
         let wsid = WindowServerId::new(92);
         let user_space = SpaceId::new(12);
@@ -3178,7 +3331,7 @@ mod tests {
             objc2_core_foundation::CGPoint::new(0.0, 0.0),
             objc2_core_foundation::CGSize::new(100.0, 100.0),
         );
-        window_store.insert_window(
+        window_store.view_mut().insert_window(
             wid,
             WindowState::from(crate::sys::app::WindowInfo {
                 has_native_tabs: false,
@@ -3197,7 +3350,7 @@ mod tests {
                 ax_subrole: None,
             }),
         );
-        let _ = window_store.suspend_window_to_native_fullscreen(
+        let _ = window_store.view_mut().suspend_window_to_native_fullscreen(
             wid,
             Some(wsid),
             Some(user_space),
@@ -3205,14 +3358,14 @@ mod tests {
             NativeFullscreenTransition::Suspended,
         );
 
-        window_store.remove_window(wid);
+        window_store.view_mut().remove_window(wid);
 
         assert!(
             window_store.native_fullscreen_record_for_window(wid).is_some(),
             "transient AX removal should not drop the fullscreen lifecycle record"
         );
 
-        window_store.remove_windows_for_app(wid.pid);
+        window_store.view_mut().remove_windows_for_app(wid.pid);
 
         assert!(
             window_store.native_fullscreen_record_for_window(wid).is_none(),
@@ -3222,7 +3375,7 @@ mod tests {
 
     #[test]
     fn track_window_server_id_binds_pending_native_fullscreen_record() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let wid = WindowId::new(8, 1);
         let wsid = WindowServerId::new(93);
         let user_space = SpaceId::new(13);
@@ -3237,7 +3390,7 @@ mod tests {
         );
         assert_eq!(pending.pid, wid.pid);
 
-        window_store.track_window_server_id(wsid, wid);
+        window_store.view_mut().track_window_server_id(wsid, wid);
 
         assert!(
             window_store
@@ -3256,7 +3409,7 @@ mod tests {
 
     #[test]
     fn track_window_server_id_discards_stale_pending_native_fullscreen_record_on_pid_mismatch() {
-        let mut window_store = WindowStore::default();
+        let mut window_store = OwnedWindows::default();
         let pending_wid = WindowId::new(8, 1);
         let rebound_wid = WindowId::new(9, 1);
         let wsid = WindowServerId::new(94);
@@ -3272,7 +3425,7 @@ mod tests {
         );
         assert_eq!(pending.pid, pending_wid.pid);
 
-        window_store.track_window_server_id(wsid, rebound_wid);
+        window_store.view_mut().track_window_server_id(wsid, rebound_wid);
 
         assert!(
             window_store
@@ -3288,45 +3441,58 @@ mod tests {
 
     #[test]
     fn rebinding_server_identity_keeps_both_indexes_unique() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let first = WindowId::new(1, 1);
         let second = WindowId::new(1, 2);
         let wsid = WindowServerId::new(44);
 
-        store.track_window_server_id(wsid, first);
-        assert_eq!(store.track_window_server_id(wsid, second), Some(first));
+        store.view_mut().track_window_server_id(wsid, first);
+        assert_eq!(
+            store.view_mut().track_window_server_id(wsid, second),
+            Some(first)
+        );
 
         assert_eq!(
-            store.record(first).and_then(|record| record.window_server_id()),
+            store.view().record(first).and_then(|record| record.window_server_id()),
             None
         );
         assert_eq!(
-            store.record(second).and_then(|record| record.window_server_id()),
+            store.view().record(second).and_then(|record| record.window_server_id()),
             Some(wsid)
         );
         assert_eq!(store.tracked_window_id(wsid), Some(second));
-        store.debug_assert_invariants();
+        store.view().debug_assert_invariants();
     }
 
     #[test]
     fn native_identity_change_retires_transfer_but_ax_rekey_preserves_it() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let (old, replacement) = (WindowId::new(30, 1), WindowId::new(30, 2));
         let server = WindowServerId::new(70);
         let mut workspaces = WorkspaceStore::new();
-        let workspace = workspaces.create_workspace(&mut store, SpaceId::new(8), None).unwrap();
-        store.assign_window_to_workspace(old, workspace);
-        store.replace_rule_floating(old, true);
-        store.track_window_server_id(server, old);
-        store.unheld(old).unwrap().begin_transfer(true);
-        let pending = store.record(old).unwrap().transfer().unwrap();
-        assert_eq!(store.reconcile_ax_identity(replacement, Some(server)), Some(old));
-        assert_eq!(store.record(replacement).unwrap().transfer(), Some(pending));
+        let workspace = workspaces
+            .create_workspace(&mut store.view_mut(), SpaceId::new(8), None)
+            .unwrap();
+        store.view_mut().assign_window_to_workspace(old, workspace);
+        store.view_mut().replace_rule_floating(old, true);
+        store.view_mut().track_window_server_id(server, old);
+        store.view_mut().unheld(old).unwrap().begin_transfer(true);
+        let pending = store.view().record(old).unwrap().transfer().unwrap();
+        assert_eq!(
+            store.view_mut().reconcile_ax_identity(replacement, Some(server)),
+            Some(old)
+        );
+        assert_eq!(
+            store.view().record(replacement).unwrap().transfer(),
+            Some(pending)
+        );
         assert!(store.rule_floating(replacement));
-        assert_eq!(store.workspace_windows(workspace), vec![replacement]);
-        store.reconcile_ax_identity(replacement, Some(WindowServerId::new(71)));
-        assert!(store.record(replacement).unwrap().transfer().is_none());
-        store.debug_assert_invariants();
+        assert_eq!(store.view().workspace_windows(workspace), vec![replacement]);
+        store
+            .view_mut()
+            .reconcile_ax_identity(replacement, Some(WindowServerId::new(71)));
+        assert!(store.view().record(replacement).unwrap().transfer().is_none());
+        store.view().debug_assert_invariants();
     }
 
     #[test]
@@ -3380,10 +3546,10 @@ mod tests {
         assert_eq!(state.windows.window_ids_for_pid(4).collect::<Vec<_>>(), vec![
             window
         ]);
-        state.windows.debug_assert_invariants();
+        state.windows().debug_assert_invariants();
         // Let go, and the empty record is pruned as before.
         state.let_go();
-        assert!(state.windows.record(window).is_none());
+        assert!(state.windows().record(window).is_none());
     }
 
     #[test]
@@ -3408,7 +3574,7 @@ mod tests {
             // pruned as empty while it lives.
             let track = |state: &mut crate::model::RiftState, window: WindowId| {
                 state
-                    .windows
+                    .windows_mut()
                     .track_window_server_id(WindowServerId::new(100 + window.idx.get()), window);
             };
             for window in &live {
@@ -3421,7 +3587,7 @@ mod tests {
                     // The reactor presses only windows it has a record of (or nothing).
                     0 | 1 => {
                         let window =
-                            window.filter(|window| state.windows.record(*window).is_some());
+                            window.filter(|window| state.windows().record(*window).is_some());
                         state.step(CoreEvent::Press { window, button: left() });
                     }
                     2 => {
@@ -3448,7 +3614,7 @@ mod tests {
                             let to = WindowId::new(9, fresh);
                             fresh += 1;
                             state.step(CoreEvent::Rekeyed { from, to });
-                            state.windows.transfer_persistent_window_metadata(from, to);
+                            state.windows_mut().transfer_persistent_window_metadata(from, to);
                             track(&mut state, to);
                             live.retain(|window| *window != from);
                             live.push(to);
@@ -3461,8 +3627,8 @@ mod tests {
                         }
                     }
                     _ => {
-                        if let Some(unheld) = window.and_then(|window| state.windows.unheld(window))
-                        {
+                        let mut windows = state.windows_mut();
+                        if let Some(unheld) = window.and_then(|window| windows.unheld(window)) {
                             unheld.begin_transfer(true);
                         }
                     }
@@ -3481,9 +3647,9 @@ mod tests {
                 );
                 if let Some(held) = held {
                     assert_eq!(state.windows.windows.transfer(&held), None);
-                    assert!(state.windows.unheld(held).is_none());
+                    assert!(state.windows_mut().unheld(held).is_none());
                 }
-                state.windows.debug_assert_invariants();
+                state.windows().debug_assert_invariants();
             }
         }
     }
@@ -3493,7 +3659,7 @@ mod tests {
         // Suspended as an AXDialog window, a fresh reading finds ordinary roles (admitting it)
         // and the window minimized (suspending it again): one reading, no change.
         let wid = WindowId::new(3, 1);
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let info = crate::sys::app::WindowInfo {
             has_native_tabs: false,
             is_standard: true,
@@ -3510,7 +3676,7 @@ mod tests {
             ax_role: Some("AXWindow".into()),
             ax_subrole: Some("AXDialog".into()),
         };
-        store.insert_manageable_window(wid, WindowState::from(info.clone()));
+        store.view_mut().insert_manageable_window(wid, WindowState::from(info.clone()));
         assert!(!store.is_admitted_state(wid));
         let reading = crate::sys::app::WindowInfo {
             ax_subrole: Some("AXStandardWindow".into()),
@@ -3524,7 +3690,7 @@ mod tests {
     #[test]
     fn the_lifecycle_shadow_agrees_through_the_setters_and_catches_a_write_around_them() {
         let wid = WindowId::new(3, 1);
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let info = crate::sys::app::WindowInfo {
             has_native_tabs: false,
             is_standard: true,
@@ -3541,7 +3707,7 @@ mod tests {
             ax_role: Some("AXWindow".into()),
             ax_subrole: Some("AXStandardWindow".into()),
         };
-        store.insert_manageable_window(wid, WindowState::from(info.clone()));
+        store.view_mut().insert_manageable_window(wid, WindowState::from(info.clone()));
         assert_eq!(store.lifecycle_divergences(), vec![]);
         store.set_minimized(wid, true);
         store.set_minimized(wid, false);
@@ -3556,7 +3722,7 @@ mod tests {
         store.replace_info(wid, dialog);
         assert_eq!(store.lifecycle_divergences(), vec![]);
         store.replace_info(wid, info);
-        assert!(store.is_admitted(wid));
+        assert!(store.view().is_admitted(wid));
         assert_eq!(store.lifecycle_divergences(), vec![]);
 
         // A write around the setters is caught.
@@ -3573,34 +3739,34 @@ mod tests {
         assert_eq!(store.lifecycle_divergences(), vec![]);
 
         // Removing the window leaves neither side holding it.
-        store.remove_window(wid);
+        store.view_mut().remove_window(wid);
         assert_eq!(store.lifecycle_divergences(), vec![]);
     }
 
     #[test]
     fn an_invalidated_window_is_unmanaged_until_fresh_ax_and_its_invalidation_moves_with_it() {
         let (wid, tab) = (WindowId::new(5, 1), WindowId::new(5, 2));
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         // No AX state: nothing to invalidate.
         store.invalidate_ax_identity(wid);
         assert!(!store.is_temporarily_unavailable(wid));
-        store.insert_test_ax_state(wid);
-        assert!(store.is_admitted(wid) && store.can_reconcile_admission(wid));
+        store.view_mut().insert_test_ax_state(wid);
+        assert!(store.view().is_admitted(wid) && store.view().can_reconcile_admission(wid));
         store.invalidate_ax_identity(wid);
-        assert!(!store.is_admitted(wid) && !store.can_reconcile_admission(wid));
+        assert!(!store.view().is_admitted(wid) && !store.view().can_reconcile_admission(wid));
         assert!(store.is_temporarily_unavailable(wid));
         assert!(store.is_admitted_state(wid), "its facts still admit it");
         assert!(store.validate_ax_identity(wid));
         assert!(!store.validate_ax_identity(wid));
-        assert!(store.is_admitted(wid));
+        assert!(store.view().is_admitted(wid));
         // A native tab taking over an invalidated window inherits the invalidation.
         store.invalidate_ax_identity(wid);
-        store.insert_test_ax_state(tab);
-        store.transfer_persistent_window_metadata(wid, tab);
+        store.view_mut().insert_test_ax_state(tab);
+        store.view_mut().transfer_persistent_window_metadata(wid, tab);
         assert!(store.window(wid).is_some() && !store.is_temporarily_unavailable(wid));
-        assert!(store.is_temporarily_unavailable(tab) && !store.is_admitted(tab));
+        assert!(store.is_temporarily_unavailable(tab) && !store.view().is_admitted(tab));
         assert!(store.validate_ax_identity(tab));
-        assert!(store.is_admitted(tab));
+        assert!(store.view().is_admitted(tab));
         assert_eq!(store.lifecycle_divergences(), vec![]);
     }
 
@@ -3608,9 +3774,11 @@ mod tests {
     fn ownership_moves_to_a_rekeyed_identity_and_a_claim_wins_keeping_a_destination() {
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
-        let mut joined = WindowStore::default();
+        let mut joined = OwnedWindows::default();
         let [a, b, c] = ["A", "B", "C"].map(|name| {
-            workspaces.create_workspace(&mut joined, space, Some(name.into())).unwrap()
+            workspaces
+                .create_workspace(&mut joined.view_mut(), space, Some(name.into()))
+                .unwrap()
         });
         let (from, to) = (WindowId::new(1, 1), WindowId::new(1, 2));
         let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
@@ -3620,18 +3788,18 @@ mod tests {
             Assigned(VirtualWorkspaceId),
             Claimed(ClaimOwner, Option<VirtualWorkspaceId>),
         }
-        let setup = |store: &mut WindowStore, window: WindowId, side: Side| {
-            store.insert_test_ax_state(window);
+        let setup = |store: &mut OwnedWindows, window: WindowId, side: Side| {
+            store.view_mut().insert_test_ax_state(window);
             match side {
                 Side::Unassigned => {}
                 Side::Assigned(workspace) => {
-                    store.assign_window_to_workspace(window, workspace);
+                    store.view_mut().assign_window_to_workspace(window, workspace);
                 }
                 Side::Claimed(owner, held) => {
                     if let Some(workspace) = held {
-                        store.assign_window_to_workspace(window, workspace);
+                        store.view_mut().assign_window_to_workspace(window, workspace);
                     }
-                    store.insert_claim(window, owner, WindowClaimFlags::empty());
+                    store.view_mut().insert_claim(window, owner, WindowClaimFlags::empty());
                 }
             }
         };
@@ -3684,21 +3852,21 @@ mod tests {
             ),
         ];
         for (case, (from_side, to_side, assigned, claimed)) in cases.into_iter().enumerate() {
-            let mut store = WindowStore::joining(&workspaces);
+            let mut store = OwnedWindows::joining(&workspaces);
             setup(&mut store, from, from_side);
             setup(&mut store, to, to_side);
-            store.transfer_persistent_window_metadata(from, to);
-            assert_eq!(store.workspace_for_window(to), assigned, "case {case}");
+            store.view_mut().transfer_persistent_window_metadata(from, to);
+            assert_eq!(store.view().workspace_for_window(to), assigned, "case {case}");
             assert_eq!(
-                store.claim(to).map(|claim| (claim.owner, claim.workspace())),
+                store.view().claim(to).map(|claim| (claim.owner, claim.workspace())),
                 claimed,
                 "case {case}"
             );
-            assert_eq!(store.workspace_for_window(from), None, "case {case}");
-            assert!(!store.is_claimed(from), "case {case}");
+            assert_eq!(store.view().workspace_for_window(from), None, "case {case}");
+            assert!(!store.view().is_claimed(from), "case {case}");
             for workspace in [a, b, c] {
                 assert_eq!(
-                    store.workspace_windows(workspace),
+                    store.view().workspace_windows(workspace),
                     if assigned == Some(workspace) {
                         vec![to]
                     } else {
@@ -3713,7 +3881,7 @@ mod tests {
                 if claimed.is_some() { vec![to] } else { vec![] },
                 "case {case}"
             );
-            store.debug_assert_invariants();
+            store.view().debug_assert_invariants();
         }
     }
 
@@ -3726,21 +3894,25 @@ mod tests {
         let wsid = WindowServerId::new(55);
         let mut workspaces = WorkspaceStore::new();
         let workspace = workspaces
-            .create_workspace(&mut state.windows, SpaceId::new(9), Some("Slot".to_string()))
+            .create_workspace(
+                &mut state.windows_mut(),
+                SpaceId::new(9),
+                Some("Slot".to_string()),
+            )
             .expect("workspace");
-        state.windows.track_window_server_id(wsid, wid);
-        state.windows.assign_window_to_workspace(wid, workspace);
-        state.windows.assign_window_to_workspace(other, workspace);
-        let assignments = |store: &WindowStore| {
+        state.windows_mut().track_window_server_id(wsid, wid);
+        state.windows_mut().assign_window_to_workspace(wid, workspace);
+        state.windows_mut().assign_window_to_workspace(other, workspace);
+        let assignments = |store: Windows<'_>| {
             let mut all: Vec<_> = store.iter_workspace_assignments().collect();
             all.sort_by_key(|(window, _)| window.idx.get());
             all
         };
         let before = (
-            state.windows.workspace_assignment_count(),
-            assignments(&state.windows),
-            state.windows.workspace_for_window(wid),
-            state.windows.record(wid).unwrap().window_server_id(),
+            state.windows().workspace_assignment_count(),
+            assignments(state.windows()),
+            state.windows().workspace_for_window(wid),
+            state.windows().record(wid).unwrap().window_server_id(),
             state.windows.window_ids_for_pid(4).count(),
         );
 
@@ -3750,14 +3922,14 @@ mod tests {
         });
         assert_eq!(state.windows.gripped(), Some(wid));
         let pressed = (
-            state.windows.workspace_assignment_count(),
-            assignments(&state.windows),
-            state.windows.workspace_for_window(wid),
-            state.windows.record(wid).unwrap().window_server_id(),
+            state.windows().workspace_assignment_count(),
+            assignments(state.windows()),
+            state.windows().workspace_for_window(wid),
+            state.windows().record(wid).unwrap().window_server_id(),
             state.windows.window_ids_for_pid(4).count(),
         );
         assert_eq!(pressed, before);
-        state.windows.debug_assert_invariants();
+        state.windows().debug_assert_invariants();
 
         // One slot: pressing another window lets go of the first.
         state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
@@ -3765,9 +3937,9 @@ mod tests {
             button: crate::model::drag::MouseButton::Left.into(),
         });
         assert_eq!(state.windows.gripped(), Some(other));
-        assert!(state.windows.unheld(wid).is_some());
-        assert!(state.windows.unheld(other).is_none());
-        state.windows.debug_assert_invariants();
+        assert!(state.windows_mut().unheld(wid).is_some());
+        assert!(state.windows_mut().unheld(other).is_none());
+        state.windows().debug_assert_invariants();
     }
 
     #[test]
@@ -3776,9 +3948,13 @@ mod tests {
         let (old, new) = (WindowId::new(30, 1), WindowId::new(30, 2));
         let mut workspaces = WorkspaceStore::new();
         let workspace = workspaces
-            .create_workspace(&mut state.windows, SpaceId::new(9), Some("Rekey".to_string()))
+            .create_workspace(
+                &mut state.windows_mut(),
+                SpaceId::new(9),
+                Some("Rekey".to_string()),
+            )
             .expect("workspace");
-        state.windows.assign_window_to_workspace(old, workspace);
+        state.windows_mut().assign_window_to_workspace(old, workspace);
         state.step(crate::actor::reactor::reconciler::CoreEvent::Press {
             window: Some(old),
             button: crate::model::drag::MouseButton::Left.into(),
@@ -3786,16 +3962,16 @@ mod tests {
 
         // Same window, new identity: the core re-keys the grip, then the store moves the rest.
         state.step(crate::actor::reactor::reconciler::CoreEvent::Rekeyed { from: old, to: new });
-        state.windows.transfer_persistent_window_metadata(old, new);
+        state.windows_mut().transfer_persistent_window_metadata(old, new);
         assert_eq!(state.windows.gripped(), Some(new));
-        assert_eq!(state.windows.workspace_for_window(new), Some(workspace));
-        assert!(state.windows.unheld(new).is_none());
-        state.windows.debug_assert_invariants();
+        assert_eq!(state.windows().workspace_for_window(new), Some(workspace));
+        assert!(state.windows_mut().unheld(new).is_none());
+        state.windows().debug_assert_invariants();
 
         state.remove_window(new);
         assert_eq!(state.windows.gripped(), None);
-        assert!(state.windows.record(new).is_none());
-        state.windows.debug_assert_invariants();
+        assert!(state.windows().record(new).is_none());
+        state.windows().debug_assert_invariants();
     }
 
     #[test]
@@ -3833,46 +4009,50 @@ mod tests {
 
             assert_eq!(state.windows.gripped(), None, "dragging: {dragging}");
             assert_eq!(state.windows.pointer(), Pointer::Idle);
-            assert!(state.windows.record(wid).is_none());
-            state.windows.debug_assert_invariants();
+            assert!(state.windows().record(wid).is_none());
+            state.windows().debug_assert_invariants();
         }
     }
 
     #[test]
     fn app_cleanup_removes_all_indexes_and_pending_transfers() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let wid = WindowId::new(4, 1);
         let wsid = WindowServerId::new(55);
         let mut workspaces = WorkspaceStore::new();
         let workspace_id = workspaces
-            .create_workspace(&mut store, SpaceId::new(9), Some("Cleanup".to_string()))
+            .create_workspace(
+                &mut store.view_mut(),
+                SpaceId::new(9),
+                Some("Cleanup".to_string()),
+            )
             .expect("workspace");
-        store.track_window_server_id(wsid, wid);
-        store.assign_window_to_workspace(wid, workspace_id);
-        store.unheld(wid).unwrap().begin_transfer(true);
+        store.view_mut().track_window_server_id(wsid, wid);
+        store.view_mut().assign_window_to_workspace(wid, workspace_id);
+        store.view_mut().unheld(wid).unwrap().begin_transfer(true);
 
-        store.remove_windows_for_app(wid.pid);
+        store.view_mut().remove_windows_for_app(wid.pid);
 
-        assert!(store.record(wid).is_none());
+        assert!(store.view().record(wid).is_none());
         assert_eq!(store.tracked_window_id(wsid), None);
         assert!(store.window_ids_for_pid(wid.pid).next().is_none());
-        store.debug_assert_invariants();
+        store.view().debug_assert_invariants();
     }
 
     #[test]
     fn remap_space_merges_into_windows_already_on_the_new_space() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let (old, new) = (SpaceId::new(1), SpaceId::new(2));
         let mut workspaces = WorkspaceStore::new();
         let workspace_id = workspaces
-            .create_workspace(&mut store, old, Some("Shared".to_string()))
+            .create_workspace(&mut store.view_mut(), old, Some("Shared".to_string()))
             .unwrap();
         let (moved, present) = (WindowId::new(5, 1), WindowId::new(5, 2));
-        store.assign_window_to_workspace(moved, workspace_id);
+        store.view_mut().assign_window_to_workspace(moved, workspace_id);
         // The window server placed this one on the incoming id before rift heard of it.
-        store.assign_window_to_workspace(present, workspace_id);
+        store.view_mut().assign_window_to_workspace(present, workspace_id);
 
-        store.suspend_window_to_native_fullscreen(
+        store.view_mut().suspend_window_to_native_fullscreen(
             moved,
             None,
             Some(old),
@@ -3888,8 +4068,8 @@ mod tests {
         );
         store.remap_space(old, new);
 
-        assert_eq!(store.workspace_for_window(moved), Some(workspace_id));
-        assert_eq!(store.workspace_for_window(present), Some(workspace_id));
+        assert_eq!(store.view().workspace_for_window(moved), Some(workspace_id));
+        assert_eq!(store.view().workspace_for_window(present), Some(workspace_id));
         let bound = store.native_fullscreen_record_for_window(moved).unwrap();
         let pending = store
             .pending_native_fullscreen_record_for_window_server_id(WindowServerId::new(43))
@@ -3903,68 +4083,73 @@ mod tests {
                 (Some(new), NativeFullscreenTransition::ExitObserved(Some(new)))
             );
         }
-        assert_eq!(store.workspace_window_count(workspace_id), 2);
+        assert_eq!(store.view().workspace_window_count(workspace_id), 2);
     }
 
     #[test]
     fn the_core_follows_every_ownership_the_store_gives() {
-        let mut store = WindowStore::default();
+        let mut store = OwnedWindows::default();
         let space = SpaceId::new(10);
         let mut workspaces = WorkspaceStore::new();
         // Removed workspaces are gone for good: each step after one uses a workspace still there.
-        let [a, b, c, d, e, f] = ["A", "B", "C", "D", "E", "F"]
-            .map(|name| workspaces.create_workspace(&mut store, space, Some(name.into())).unwrap());
+        let [a, b, c, d, e, f] = ["A", "B", "C", "D", "E", "F"].map(|name| {
+            workspaces
+                .create_workspace(&mut store.view_mut(), space, Some(name.into()))
+                .unwrap()
+        });
         let id = |idx| WindowId::new(1, idx);
         let wsid = WindowServerId::new;
         let owner = ClaimOwner(7);
-        let agree = |store: &WindowStore, step: &str| {
-            assert_eq!(store.ownership_divergences(), vec![], "after {step}");
+        let agree = |store: &OwnedWindows, step: &str| {
+            assert_eq!(store.view().ownership_divergences(), vec![], "after {step}");
         };
 
-        store.insert_window(id(1), admitted(id(1), wsid(1)));
-        store.assign_window_to_workspace(id(1), a);
+        store.view_mut().insert_window(id(1), admitted(id(1), wsid(1)));
+        store.view_mut().assign_window_to_workspace(id(1), a);
         agree(&store, "assign");
-        store.assign_window_to_workspace(id(1), b);
+        store.view_mut().assign_window_to_workspace(id(1), b);
         agree(&store, "reassign");
-        store.insert_claim(id(1), owner, WindowClaimFlags::empty());
+        store.view_mut().insert_claim(id(1), owner, WindowClaimFlags::empty());
         agree(&store, "claim");
-        store.assign_window_to_workspace(id(1), c);
+        store.view_mut().assign_window_to_workspace(id(1), c);
         agree(&store, "a claimed window's destination");
-        store.set_claim_flags(id(1), WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
+        store
+            .view_mut()
+            .set_claim_flags(id(1), WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
         agree(&store, "claim flags");
-        store.remove_workspace(c, Successor::Into(a));
+        store.view_mut().remove_workspace(c, Successor::Into(a));
         agree(&store, "a claim's destination handed on");
-        store.remove_workspace(a, Successor::Unassign);
+        store.view_mut().remove_workspace(a, Successor::Unassign);
         agree(&store, "a claim's destination removed");
-        store.remove_claim(id(1));
+        store.view_mut().remove_claim(id(1));
         agree(&store, "release");
 
-        store.insert_window(id(2), admitted(id(2), wsid(2)));
-        store.assign_window_to_workspace(id(2), b);
-        store.remove_workspace(b, Successor::Into(d));
+        store.view_mut().insert_window(id(2), admitted(id(2), wsid(2)));
+        store.view_mut().assign_window_to_workspace(id(2), b);
+        store.view_mut().remove_workspace(b, Successor::Into(d));
         agree(&store, "an assignment handed on");
-        store.remove_workspace(d, Successor::Unassign);
+        store.view_mut().remove_workspace(d, Successor::Unassign);
         agree(&store, "an assignment removed");
-        store.assign_window_to_workspace(id(2), e);
-        store.remove_window_assignment(id(2));
+        store.view_mut().assign_window_to_workspace(id(2), e);
+        store.view_mut().remove_window_assignment(id(2));
         agree(&store, "unassign");
 
         // An identity merge moves ownership to the recognized identity.
-        store.assign_window_to_workspace(id(2), e);
-        store.insert_window(id(3), admitted(id(3), wsid(3)));
-        store.assign_window_to_workspace(id(3), f);
-        store.insert_claim(id(3), owner, WindowClaimFlags::empty());
-        store.reconcile_ax_identity(id(3), Some(wsid(2)));
+        store.view_mut().assign_window_to_workspace(id(2), e);
+        store.view_mut().insert_window(id(3), admitted(id(3), wsid(3)));
+        store.view_mut().assign_window_to_workspace(id(3), f);
+        store.view_mut().insert_claim(id(3), owner, WindowClaimFlags::empty());
+        store.view_mut().reconcile_ax_identity(id(3), Some(wsid(2)));
         agree(&store, "identity merge");
-        store.remove_window(id(3));
-        store.remove_window(id(2));
+        store.view_mut().remove_window(id(3));
+        store.view_mut().remove_window(id(2));
         agree(&store, "removal");
 
         // A write around the store is caught: the claims index naming a window the core does
         // not hold as claimed.
-        store.insert_window(id(4), admitted(id(4), wsid(4)));
+        store.view_mut().insert_window(id(4), admitted(id(4), wsid(4)));
         store.claims.entry(ClaimOwner(9)).or_default().push(id(4));
-        assert!(matches!(store.ownership_divergences().as_slice(), [
+        assert!(matches!(store.view().ownership_divergences().as_slice(), [
             OwnershipDivergence { window, .. }
         ] if *window == id(4)));
     }

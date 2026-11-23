@@ -1361,7 +1361,7 @@ impl Sim {
         ) && let Some(held) = &self.held
             && self.live.contains(&held.window)
             // A claimed window is its owner's: rift does not drag it.
-            && self.reactor.stores.state.windows.claim(held.window).is_none()
+            && self.reactor.stores.state.windows().claim(held.window).is_none()
             && self.moved == Some(held.window)
             && !frames_written(&self.pending).iter().any(|(wid, frame)| {
                 *wid == held.window && frame.same_as(self.os_frame(held.window))
@@ -1396,7 +1396,7 @@ impl Sim {
             // transfer would have carried it off: then it is placed by no workspace instead.
             let now = self.reactor.assigned_space_for_window_id(wid);
             let left_unplaced =
-                now.is_none() && self.reactor.stores.state.windows.is_held_unplaced(wid);
+                now.is_none() && self.reactor.stores.state.windows().is_held_unplaced(wid);
             if now != held.assigned_at_start && !left_unplaced {
                 let invariant = if held.command_during_drag {
                     "held-window-keeps-assignment (after a command)"
@@ -1596,9 +1596,9 @@ impl Sim {
         // native fullscreen one is in its fullscreen space, a held one a transfer left is the
         // drop's to place).
         for &wid in &self.live {
-            if self.reactor.stores.state.windows.claim(wid).is_none()
+            if self.reactor.stores.state.windows().claim(wid).is_none()
                 && !self.fullscreen.contains_key(&wid)
-                && !self.reactor.stores.state.windows.is_held_unplaced(wid)
+                && !self.reactor.stores.state.windows().is_held_unplaced(wid)
                 && self.reactor.assigned_space_for_window_id(wid).is_none()
             {
                 return fail(
@@ -2310,7 +2310,10 @@ fn a_display_returning_mid_drag_leaves_the_held_window_where_it_is() {
             sim.pending.extend(emitted);
         }
         let held = sim.held_window().unwrap();
-        assert_eq!(sim.reactor.stores.state.windows.workspace_for_window(held), None);
+        assert_eq!(
+            sim.reactor.stores.state.windows().workspace_for_window(held),
+            None
+        );
     }
     let setup = Setup {
         displays: 3,
@@ -2354,7 +2357,7 @@ fn a_held_window_left_by_its_workspace_is_placed_by_the_drop_or_its_space() {
         let shown = sim.reactor.stores.layout.layout_engine.workspaces().active_workspace(on);
         assert!(shown.is_some(), "{end:?}");
         assert_eq!(
-            sim.reactor.stores.state.windows.workspace_for_window(held),
+            sim.reactor.stores.state.windows().workspace_for_window(held),
             shown,
             "{end:?}"
         );
@@ -2372,10 +2375,16 @@ fn app_rules_mid_drag_leave_a_held_window_alone() {
         sim.pending.extend(emitted);
     }
     let held = sim.held_window().unwrap();
-    assert_eq!(sim.reactor.stores.state.windows.workspace_for_window(held), None);
+    assert_eq!(
+        sim.reactor.stores.state.windows().workspace_for_window(held),
+        None
+    );
     let info = sim.reactor.app_manager.apps[&held.pid].info.clone();
     sim.reactor.process_windows_for_app_rules(vec![held], info, true);
-    assert_eq!(sim.reactor.stores.state.windows.workspace_for_window(held), None);
+    assert_eq!(
+        sim.reactor.stores.state.windows().workspace_for_window(held),
+        None
+    );
 }
 
 /// A workspace switch, then a departure that takes every workspace off the Space: the Space

@@ -496,7 +496,7 @@ mod tests {
         let ids: Vec<_> = r.stores.layout.layout_engine.workspaces().catalog().collect();
         assert!(
             r.stores.layout.layout_engine.workspaces_mut().set_active_workspace(
-                &mut r.stores.state.windows,
+                &mut r.stores.state.windows_mut(),
                 a,
                 ids[1]
             )
@@ -873,7 +873,7 @@ mod tests {
                     before
                 } else {
                     store.step_workspace(
-                        &r.stores.state.windows,
+                        r.stores.state.windows(),
                         ctx.space,
                         before.unwrap(),
                         Some(false),

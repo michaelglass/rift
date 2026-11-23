@@ -1168,7 +1168,7 @@ impl AnimationManager {
                 anim.mark_handled(wid);
                 continue;
             }
-            if reactor.stores.state.windows.workspace_for_window(wid) != Some(active_ws) {
+            if reactor.stores.state.windows().workspace_for_window(wid) != Some(active_ws) {
                 // A hidden window has nothing to animate: an ordinary desire.
                 anim.mark_handled(wid);
                 hidden.push((wid, target_frame));

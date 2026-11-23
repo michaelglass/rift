@@ -270,7 +270,7 @@ impl LayoutEngine {
     /// store, and pending windows keep their saved evidence until they are matched or discarded.
     pub(super) fn snapshot_string(
         &self,
-        window_store: &WindowStore,
+        window_store: Windows<'_>,
         active_space: Option<SpaceId>,
     ) -> String {
         let mut floating = FloatingPositionStore::default();

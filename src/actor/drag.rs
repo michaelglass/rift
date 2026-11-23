@@ -971,6 +971,7 @@ mod tests {
     fn hand(windows: &[WindowId]) -> crate::model::RiftState {
         crate::model::RiftState {
             windows: tracked(windows),
+            workspaces: Default::default(),
             core: Default::default(),
             tx: Default::default(),
         }

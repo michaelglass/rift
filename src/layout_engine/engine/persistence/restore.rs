@@ -151,12 +151,12 @@ impl LayoutEngine {
     /// Everything fallible happens before the first mutation. After that, a window absent from the
     /// file keeps its assignment and floating state, a saved window with no live match leaves no
     /// trace, and anything outside the mapped workspaces is not touched.
-    pub fn restore_layout(
+    pub(crate) fn restore_layout(
         &mut self,
         path: PathBuf,
         request: RestoreRequest,
         visible_spaces: &[SpaceId],
-        window_store: &mut WindowStore,
+        window_store: &mut WindowsMut<'_>,
         layout_settings: &LayoutSettings,
     ) -> anyhow::Result<RestoreReport> {
         let mut snapshot = PersistedLayout::read(&path)?;
@@ -227,7 +227,11 @@ impl LayoutEngine {
         // again there, where it would take the slot of a same-titled window.
         let live_windows: Vec<_> = (targets.iter())
             .flat_map(|target| {
-                window_store.workspace_windows(*target).into_iter().map(|live| (*target, live))
+                window_store
+                    .read()
+                    .workspace_windows(*target)
+                    .into_iter()
+                    .map(|live| (*target, live))
             })
             .collect();
         for (target, live) in live_windows {
@@ -244,12 +248,12 @@ impl LayoutEngine {
             // Rebuild the projection for both outcomes: a matched floating window needs its
             // runtime-only active entry, and a current window absent from the file needs a slot
             // in the replaced tree.
-            let owner = window_store.workspace_for_window(live).unwrap_or(target);
+            let owner = window_store.read().workspace_for_window(live).unwrap_or(target);
             let (from, space) = (self.workspaces[target].space, self.workspaces[owner].space);
             if from != space {
                 report.moved.push((live, from, space));
             }
-            self.add_window_to_layout(window_store, space, live);
+            self.add_window_to_layout(window_store.read(), space, live);
             if self.focused_window == Some(live) {
                 self.workspaces.set_last_focused_window(space, owner, Some(live));
             }

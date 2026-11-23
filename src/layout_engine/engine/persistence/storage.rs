@@ -125,10 +125,10 @@ impl LayoutEngine {
 
     /// Capture and atomically save one coherent snapshot, leaving the engine untouched. A file
     /// that would not load is never committed.
-    pub fn save_current_layout(
+    pub(crate) fn save_current_layout(
         &self,
         path: PathBuf,
-        window_store: &WindowStore,
+        window_store: Windows<'_>,
         active_space: Option<SpaceId>,
     ) -> std::io::Result<()> {
         // Until the topology is known, a live window can sit in a different workspace from its own
@@ -145,13 +145,13 @@ impl LayoutEngine {
         write_atomically(&path, &serialized)
     }
 
-    pub fn serialize_to_string(&self, window_store: &WindowStore) -> String {
+    pub(crate) fn serialize_to_string(&self, window_store: Windows<'_>) -> String {
         self.snapshot_string(window_store, None)
     }
 
-    pub fn finish_loading(
+    pub(crate) fn finish_loading(
         &mut self,
-        windows: &mut WindowStore,
+        windows: &mut WindowsMut<'_>,
         virtual_workspace_config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
     ) -> Result<(), String> {

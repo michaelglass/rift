@@ -59,7 +59,7 @@ fn hover_admitted(reactor: &Reactor) -> bool {
 #[test]
 fn claim_detaches_without_destroying_and_release_restores_the_slot() {
     let (mut apps, mut reactor, space) = settled(3);
-    let workspace = reactor.stores.state.windows.workspace_for_window(wid(2)).unwrap();
+    let workspace = reactor.stores.state.windows().workspace_for_window(wid(2)).unwrap();
     let before = tiled(&mut reactor, space);
     let parked = apps.windows[&wid(2)].frame;
 
@@ -76,9 +76,9 @@ fn claim_detaches_without_destroying_and_release_restores_the_slot() {
         "Rift never moves a claimed window"
     );
     assert!(reactor.stores.state.windows.contains_window(wid(2)));
-    assert_eq!(reactor.stores.state.windows.workspace_for_window(wid(2)), None);
+    assert_eq!(reactor.stores.state.windows().workspace_for_window(wid(2)), None);
     assert_eq!(
-        reactor.stores.state.windows.claim(wid(2)).unwrap().workspace(),
+        reactor.stores.state.windows().claim(wid(2)).unwrap().workspace(),
         Some(workspace)
     );
 
@@ -105,11 +105,11 @@ fn claim_detaches_without_destroying_and_release_restores_the_slot() {
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), before);
     assert_eq!(
-        reactor.stores.state.windows.workspace_for_window(wid(2)),
+        reactor.stores.state.windows().workspace_for_window(wid(2)),
         Some(workspace)
     );
     assert!(!reactor.query_window_info(wid(2)).unwrap().externally_managed);
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
@@ -137,7 +137,10 @@ fn ownership_is_exclusive_idempotent_and_validated() {
         Ok(()),
         "releasing an unclaimed window"
     );
-    assert_eq!(reactor.stores.state.windows.claim(wid(1)).unwrap().owner, OWNER);
+    assert_eq!(
+        reactor.stores.state.windows().claim(wid(1)).unwrap().owner,
+        OWNER
+    );
     assert_eq!(reactor.stores.state.windows.owner_claims(OWNER), &[wid(1)]);
     assert!(reactor.stores.state.windows.owner_claims(OTHER).is_empty());
 }
@@ -157,7 +160,7 @@ fn claims_cost_one_arrangement_and_flag_updates_cost_none() {
             0
         );
     }
-    assert_eq!(reactor.stores.state.windows.claim(wid(1)).unwrap().flags, NONE);
+    assert_eq!(reactor.stores.state.windows().claim(wid(1)).unwrap().flags, NONE);
     assert!(apps.requests().is_empty());
     assert_eq!(apps.windows, frames);
 
@@ -179,7 +182,7 @@ fn claims_cost_one_arrangement_and_flag_updates_cost_none() {
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
     assert!(reactor.stores.state.windows.owner_claims(OWNER).is_empty());
     assert!(
-        !reactor.stores.state.windows.is_admitted(wid(2)),
+        !reactor.stores.state.windows().is_admitted(wid(2)),
         "rules still govern a released window"
     );
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 0);
@@ -193,17 +196,20 @@ fn disconnect_releases_only_that_owners_claims() {
     reactor.release_claims(OWNER);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
-    assert_eq!(reactor.stores.state.windows.claim(wid(2)).unwrap().owner, OTHER);
+    assert_eq!(
+        reactor.stores.state.windows().claim(wid(2)).unwrap().owner,
+        OTHER
+    );
     assert_eq!(reactor.stores.state.windows.owner_claims(OTHER), &[wid(2)]);
 }
 
 #[test]
 fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() {
     let (mut reactor, wid, space, _, floating_frame) = reactor_with_floating_window();
-    let workspace = reactor.stores.state.windows.workspace_for_window(wid).unwrap();
+    let workspace = reactor.stores.state.windows().workspace_for_window(wid).unwrap();
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     assert!(reactor.stores.layout.layout_engine.is_window_floating(wid));
-    assert_eq!(reactor.stores.state.windows.workspace_for_window(wid), None);
+    assert_eq!(reactor.stores.state.windows().workspace_for_window(wid), None);
 
     // The owner moves it; Rift neither records nor fights the geometry.
     let moved = CGRect::new(CGPoint::new(300., 200.), floating_frame.size);
@@ -270,7 +276,7 @@ fn claim_follows_ax_rekey_and_release_accepts_the_original_id() {
     let info = reactor.stores.state.windows.window(wid(1)).unwrap().info.clone();
     reactor.discover_test_windows(1, vec![(replacement, info)], vec![replacement, wid(2)]);
     apps.simulate_until_quiet(&mut reactor);
-    let claim = reactor.stores.state.windows.claim(replacement).unwrap();
+    let claim = reactor.stores.state.windows().claim(replacement).unwrap();
     assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
     assert!(!reactor.stores.state.windows.contains_window(wid(1)));
     assert!(!tiled(&mut reactor, space).contains(&replacement));
@@ -279,14 +285,14 @@ fn claim_follows_ax_rekey_and_release_accepts_the_original_id() {
     // The client only knows the id it claimed.
     assert_eq!(reactor.claim_window(wid(1), OWNER, NONE), Ok(()));
     assert_eq!(
-        reactor.stores.state.windows.claim(replacement).unwrap().flags,
+        reactor.stores.state.windows().claim(replacement).unwrap().flags,
         NONE
     );
     assert_eq!(reactor.release_window(wid(1), OTHER), Err("Window not found"));
     assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
@@ -299,7 +305,7 @@ fn destroying_a_claimed_window_ends_its_claim() {
     assert_eq!(reactor.release_window(wid(1), OWNER), Err("Window not found"));
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 0);
     assert_eq!(tiled(&mut reactor, space), vec![wid(2)]);
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
@@ -326,10 +332,10 @@ fn claimed_window_keeps_its_workspace_across_workspace_switches() {
     reactor.release_window(wid(1), OWNER).unwrap();
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(
-        reactor.stores.state.windows.workspace_for_window(wid(1)),
+        reactor.stores.state.windows().workspace_for_window(wid(1)),
         Some(home)
     );
-    assert!(reactor.stores.state.windows.workspace_windows(home).contains(&wid(1)));
+    assert!(reactor.stores.state.windows().workspace_windows(home).contains(&wid(1)));
     assert!(!tiled(&mut reactor, space).contains(&wid(1)));
     assert_ne!(
         apps.windows[&wid(1)].frame,
@@ -338,11 +344,11 @@ fn claimed_window_keeps_its_workspace_across_workspace_switches() {
     );
 
     reactor.claim_window(wid(1), OWNER, NONE).unwrap();
-    reactor.stores.state.windows.assign_window_to_workspace(wid(1), other);
+    reactor.stores.state.windows_mut().assign_window_to_workspace(wid(1), other);
     reactor.release_window(wid(1), OWNER).unwrap();
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(
-        reactor.stores.state.windows.workspace_for_window(wid(1)),
+        reactor.stores.state.windows().workspace_for_window(wid(1)),
         Some(other)
     );
     for (id, workspace) in reactor.stores.layout.layout_engine.workspaces().workspaces.iter() {
@@ -365,23 +371,23 @@ fn display_churn_while_claimed_rehomes_the_window_on_release() {
     reactor.stores.state.windows.set_window_server_space(wsid, Some(space2));
     reactor.handle_event(space_state_event(vec![screen2], vec![Some(space2)]));
     reactor.reassign_window_to_authoritative_space(wid, space2, true);
-    assert!(reactor.stores.state.windows.is_claimed(wid));
+    assert!(reactor.stores.state.windows().is_claimed(wid));
     assert!(!reactor.test_active_workspace_windows(space2).contains(&wid));
 
     reactor.release_window(wid, OWNER).unwrap();
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert!(reactor.test_active_workspace_windows(space2).contains(&wid));
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
 fn fullscreen_exit_while_claimed_waits_for_release() {
     let (mut reactor, wid, wsid, space, _, _) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-    let workspace = reactor.stores.state.windows.workspace_for_window(wid).unwrap();
+    let workspace = reactor.stores.state.windows().workspace_for_window(wid).unwrap();
     reactor.claim_window(wid, OWNER, NONE).unwrap();
     let fullscreen = SpaceId::new(0x400000001);
-    reactor.stores.state.windows.suspend_window_to_native_fullscreen(
+    reactor.stores.state.windows_mut().suspend_window_to_native_fullscreen(
         wid,
         Some(wsid),
         Some(space),
@@ -391,14 +397,14 @@ fn fullscreen_exit_while_claimed_waits_for_release() {
 
     let outcome = reactor.restore_native_fullscreen(Some(wsid), wid, Some(space));
     reactor.apply_event_outcome(outcome);
-    assert!(reactor.stores.state.windows.is_claimed(wid));
+    assert!(reactor.stores.state.windows().is_claimed(wid));
     assert!(reactor.stores.state.windows.native_fullscreen_record_for_window(wid).is_some());
     assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
 
     reactor.release_window(wid, OWNER).unwrap();
     assert!(reactor.stores.state.windows.native_fullscreen_record_for_window(wid).is_none());
     assert_eq!(
-        reactor.stores.state.windows.workspace_for_window(wid),
+        reactor.stores.state.windows().workspace_for_window(wid),
         Some(workspace)
     );
     assert!(reactor.test_active_workspace_windows(space).contains(&wid));
@@ -483,14 +489,14 @@ fn original_id_reused_by_another_window_still_reaches_the_owners_claim() {
     // The owner's id still means its own window, never the newcomer.
     reactor.claim_window(wid(1), OWNER, SUPPRESS).unwrap();
     assert_eq!(
-        reactor.stores.state.windows.claim(replacement).unwrap().flags,
+        reactor.stores.state.windows().claim(replacement).unwrap().flags,
         SUPPRESS
     );
     assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
     apps.simulate_until_quiet(&mut reactor);
-    assert!(!reactor.stores.state.windows.is_claimed(replacement));
+    assert!(!reactor.stores.state.windows().is_claimed(replacement));
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
-    let other = reactor.stores.state.windows.claim(wid(1)).unwrap();
+    let other = reactor.stores.state.windows().claim(wid(1)).unwrap();
     assert_eq!((other.owner, other.flags), (OTHER, NONE));
 
     // With the owner's claim gone the id names the newcomer, which only its owner may release.
@@ -498,7 +504,7 @@ fn original_id_reused_by_another_window_still_reaches_the_owners_claim() {
         assert_eq!(reactor.release_window(wid(1), session), Err(OWNED_ELSEWHERE));
     }
     assert_eq!(reactor.release_window(wid(1), OTHER), Ok(()));
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
@@ -517,11 +523,11 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
     reactor.discover_test_windows(1, vec![(replacement, info)], vec![replacement, wid(2)]);
     apps.simulate_until_quiet(&mut reactor);
     assert!(!reactor.stores.state.windows.contains_window(wid(1)));
-    let claim = reactor.stores.state.windows.claim(replacement).unwrap();
+    let claim = reactor.stores.state.windows().claim(replacement).unwrap();
     assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
     assert!(reactor.stores.state.windows.owner_claims(OTHER).is_empty());
     assert!(!tiled(&mut reactor, space).contains(&replacement));
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 
     // The displaced session's requests fail rather than act on a window it no longer holds.
     assert_eq!(reactor.release_window(replacement, OTHER), Err(OWNED_ELSEWHERE));
@@ -534,13 +540,13 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
     // Its disconnect touches nothing; the surviving owner's returns the window.
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OTHER)), 0);
     assert_eq!(
-        reactor.stores.state.windows.claim(replacement).unwrap().owner,
+        reactor.stores.state.windows().claim(replacement).unwrap().owner,
         OWNER
     );
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 1);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
@@ -580,7 +586,7 @@ fn window_queries_place_claimed_windows_from_cached_spaces_only() {
     }
 
     // Suspended in native fullscreen it is on no user Space, like any other window.
-    reactor.stores.state.windows.suspend_window_to_native_fullscreen(
+    reactor.stores.state.windows_mut().suspend_window_to_native_fullscreen(
         wid,
         Some(wsid),
         Some(space1),
@@ -608,7 +614,7 @@ fn rekeying_a_claimed_window_schedules_no_rift_work() {
     assert_eq!(window_server::window_space_query_count(), window_server_queries);
     assert!(apps.requests().is_empty());
     assert_eq!(apps.windows, frames);
-    let claim = reactor.stores.state.windows.claim(replacement).unwrap();
+    let claim = reactor.stores.state.windows().claim(replacement).unwrap();
     assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
     assert!(!tiled(&mut reactor, space).contains(&replacement));
 
@@ -616,7 +622,7 @@ fn rekeying_a_claimed_window_schedules_no_rift_work() {
     reactor.release_window(wid(1), OWNER).unwrap();
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
@@ -635,7 +641,10 @@ fn discovering_an_owner_moved_claimed_window_arranges_nothing() {
         apps.simulate_until_quiet(&mut reactor);
         assert_eq!(arrangements, 0, "{previous:?} -> {window:?}");
         assert!(apps.requests().is_empty());
-        assert_eq!(reactor.stores.state.windows.claim(window).unwrap().owner, OWNER);
+        assert_eq!(
+            reactor.stores.state.windows().claim(window).unwrap().owner,
+            OWNER
+        );
         assert!(
             reactor
                 .stores
@@ -671,13 +680,13 @@ fn release_arranges_each_affected_space_once_through_the_visible_path() {
         layout_updates(&mut reactor, |r| r.release_window(c, OWNER).unwrap()),
         1
     );
-    assert!(reactor.stores.state.windows.is_visible_admitted(c));
+    assert!(reactor.stores.state.windows().is_visible_admitted(c));
     reactor.claim_window(c, OWNER, NONE).unwrap();
     assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 2);
     for (window, space) in [(a, space1), (b, space1), (c, space2)] {
         assert!(reactor.test_active_workspace_windows(space).contains(&window));
     }
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 /// Minimize/restore, then losing and regaining native admission through window-server
@@ -714,13 +723,13 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
         reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
     }
     assert!(reactor.stores.state.windows.is_admitted_state(window));
-    assert!(reactor.stores.state.windows.is_claimed(window));
+    assert!(reactor.stores.state.windows().is_claimed(window));
 }
 
 #[test]
 fn claimed_tiled_window_keeps_its_slot_through_minimize_and_admission_changes() {
     let (mut apps, mut reactor, space) = settled(3);
-    let workspace = reactor.stores.state.windows.workspace_for_window(wid(2)).unwrap();
+    let workspace = reactor.stores.state.windows().workspace_for_window(wid(2)).unwrap();
     let before = tiled(&mut reactor, space);
     reactor.claim_window(wid(2), OWNER, NONE).unwrap();
     apps.simulate_until_quiet(&mut reactor);
@@ -729,20 +738,20 @@ fn claimed_tiled_window_keeps_its_slot_through_minimize_and_admission_changes() 
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
     assert_eq!(
-        reactor.stores.state.windows.claim(wid(2)).unwrap().workspace(),
+        reactor.stores.state.windows().claim(wid(2)).unwrap().workspace(),
         Some(workspace)
     );
 
     reactor.release_window(wid(2), OWNER).unwrap();
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), before);
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 #[test]
 fn claimed_floating_window_stays_floating_through_minimize_and_admission_changes() {
     let (mut reactor, window, space, _, floating_frame) = reactor_with_floating_window();
-    let workspace = reactor.stores.state.windows.workspace_for_window(window).unwrap();
+    let workspace = reactor.stores.state.windows().workspace_for_window(window).unwrap();
     reactor.claim_window(window, OWNER, NONE).unwrap();
 
     minimize_and_lose_admission_while_claimed(&mut reactor, window);
@@ -753,18 +762,18 @@ fn claimed_floating_window_stays_floating_through_minimize_and_admission_changes
         Some(floating_frame)
     );
     assert_eq!(
-        reactor.stores.state.windows.claim(window).unwrap().workspace(),
+        reactor.stores.state.windows().claim(window).unwrap().workspace(),
         Some(workspace)
     );
 
     reactor.release_window(window, OWNER).unwrap();
     assert!(reactor.stores.layout.layout_engine.is_window_floating(window));
     assert_eq!(
-        reactor.stores.state.windows.workspace_for_window(window),
+        reactor.stores.state.windows().workspace_for_window(window),
         Some(workspace)
     );
     assert!(reactor.test_active_workspace_windows(space).contains(&window));
-    reactor.stores.state.windows.debug_assert_invariants();
+    reactor.stores.state.windows().debug_assert_invariants();
 }
 
 /// macOS replaces `old`'s accessibility identity by `new` (same window-server window) while a

@@ -14,9 +14,9 @@ impl LayoutEngine {
     ///
     /// Normal space switches never reach the body: a new current Space on a display is ordinarily
     /// a distinct layout, not a renamed old Space.
-    pub fn resolve_saved_spaces(
+    pub(crate) fn resolve_saved_spaces(
         &mut self,
-        window_store: &mut WindowStore,
+        window_store: &mut WindowsMut<'_>,
         current_spaces: &[(SpaceId, String, CGSize)],
         expected_display_count: usize,
         inventory: &HashMap<String, Vec<SpaceId>>,

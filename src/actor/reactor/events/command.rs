@@ -91,7 +91,7 @@ pub fn handle_command_layout(
         command_space
             .map(|space| {
                 layout.layout_engine.handle_virtual_workspace_command(
-                    &mut state.windows,
+                    &mut state.windows_mut(),
                     crate::model::virtual_workspace::WorkspaceContext {
                         space,
                         visible: &visible_spaces,
@@ -106,7 +106,7 @@ pub fn handle_command_layout(
             return Ok(EventOutcome::no_change());
         }
         layout.layout_engine.handle_command(
-            &mut state.windows,
+            &mut state.windows_mut(),
             command_space,
             &visible_spaces,
             &visible_space_frames,
@@ -132,7 +132,7 @@ pub fn handle_command_layout(
         .transferred_windows
         .iter()
         .filter_map(|&window| {
-            let assignment = state.windows.workspace_for_window(window)?;
+            let assignment = state.windows().workspace_for_window(window)?;
             let screen =
                 visible_space_frames.get(&layout.layout_engine.workspaces()[assignment].space)?;
             let frame = state.windows.window(window)?.frame_monotonic();
@@ -153,7 +153,7 @@ pub fn handle_command_layout(
     let focus_moves_geometry = || {
         response
             .focus_window
-            .and_then(|window| state.windows.workspace_for_window(window))
+            .and_then(|window| state.windows().workspace_for_window(window))
             .map(|workspace| layout.layout_engine.workspaces()[workspace].space)
             .or(command_space)
             .is_none_or(|space| layout.layout_engine.focus_changes_geometry(space))
@@ -205,7 +205,7 @@ pub(in crate::actor::reactor) fn request_window_transfer(
 ) -> EventOutcome {
     // A window the user is dragging has no transfer to begin: the drop places it.
     if state
-        .windows
+        .windows_mut()
         .unheld(window)
         .is_some_and(|window| window.begin_transfer(available))
         && let Some(frame) = frame
@@ -213,7 +213,9 @@ pub(in crate::actor::reactor) fn request_window_transfer(
         if state.windows.window(window).is_some() {
             state.step(CoreEvent::Seen { window, frame });
         }
-        layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
+        layout
+            .layout_engine
+            .prepare_window_placement(&mut state.windows_mut(), window, frame);
         EventOutcome::no_change().with_placement(window, frame)
     } else {
         EventOutcome::no_change()
@@ -230,7 +232,7 @@ fn current_floating_positions(
     layout
         .layout_engine
         .workspaces()
-        .windows_in_active_workspace(&state.windows, space)
+        .windows_in_active_workspace(state.windows(), space)
         .into_iter()
         .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
@@ -306,7 +308,7 @@ pub fn handle_config_updated(
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
     layout.layout_engine.update_virtual_workspace_settings(
-        &mut state.windows,
+        &mut state.windows_mut(),
         &config.virtual_workspaces,
         migration,
     );
@@ -364,7 +366,7 @@ fn save_layout(
     path: std::path::PathBuf,
     active_space: Option<SpaceId>,
 ) -> std::io::Result<()> {
-    layout.layout_engine.save_current_layout(path, &state.windows, active_space)
+    layout.layout_engine.save_current_layout(path, state.windows(), active_space)
 }
 
 pub fn handle_command_reactor_save_layout(
@@ -535,7 +537,7 @@ pub fn handle_command_reactor_move_workspace_to_display(
     } = payload;
 
     let response = layout.layout_engine.move_active_workspace_to_space(
-        &mut state.windows,
+        &mut state.windows_mut(),
         source_space,
         target_space,
         target_screen.size,
@@ -551,7 +553,7 @@ pub fn handle_command_reactor_move_workspace_to_display(
         if layout
             .layout_engine
             .workspaces()
-            .workspace_for_window(&state.windows, target_space, window_move.window)
+            .workspace_for_window(state.windows(), target_space, window_move.window)
             .is_some()
         {
             outcome.absorb(request_window_transfer(

@@ -55,11 +55,11 @@ pub fn handle_window_created(
     // A re-keyed window is arranged whatever its admission (unless an outside owner holds it):
     // anything pending for the old identity died with it, and the core writes the desire again
     // for the new one.
-    let arrange =
-        state.windows.is_admitted(wid) || (rekeyed.is_some() && state.windows.claim(wid).is_none());
+    let arrange = state.windows().is_admitted(wid)
+        || (rekeyed.is_some() && state.windows().claim(wid).is_none());
     let outcome =
         EventOutcome::window_membership_changed(false, true).with_arrange_passes(arrange.into());
-    Ok(if state.windows.can_reconcile_admission(wid) {
+    Ok(if state.windows().can_reconcile_admission(wid) {
         outcome.with_created_window_finalization(wid)
     } else {
         outcome
@@ -82,7 +82,7 @@ pub fn handle_window_destroyed(
     // Retired at the reactor's edge (#702's retire_window): the store, the layout and every
     // tracker naming the window (the main window, a pending refocus) let go of it together.
     let mut outcome = EventOutcome::no_change();
-    if state.windows.record(wid).is_some() {
+    if state.windows().record(wid).is_some() {
         outcome.retirements.push(wid);
     }
     outcome
@@ -125,7 +125,7 @@ pub fn handle_window_visibility_changed(
     // Minimizing orders the window out and restoring orders it back in: without native
     // visibility, inventory treats it as an AX-only fallback and skips it while other windows
     // of the app are visible.
-    state.windows.set_minimized_visibility(wid, minimized);
+    state.windows_mut().set_minimized_visibility(wid, minimized);
     let _ = utils::refresh_heuristic(state, wid);
     if minimized {
         let mut outcome =
@@ -135,12 +135,12 @@ pub fn handle_window_visibility_changed(
     }
     // Minimized AX snapshots can have stale admission metadata: inventory refreshes them.
     let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-    if state.windows.can_reconcile_admission(wid) {
+    if state.windows().can_reconcile_admission(wid) {
         // Admission keeps the existing workspace and layout slot; a claimed window returns on
         // release. The restore transition owns the arrange pass.
         outcome = outcome
             .with_created_window_finalization(wid)
-            .with_arrange_passes(state.windows.is_admitted(wid).into());
+            .with_arrange_passes(state.windows().is_admitted(wid).into());
     }
     Ok(outcome)
 }
@@ -193,7 +193,7 @@ pub fn handle_window_frame_changed(
     }
     state.step(CoreEvent::Seen { window: wid, frame: new_frame });
     // The external owner has geometry authority; keep only native facts current.
-    if state.windows.is_claimed(wid) {
+    if state.windows().is_claimed(wid) {
         if old_space != new_space
             && let Some(server) = server_id
         {
@@ -219,7 +219,7 @@ pub fn handle_window_frame_changed(
             layout
                 .layout_engine
                 .workspaces()
-                .workspace_for_window(&state.windows, space, wid)
+                .workspace_for_window(state.windows(), space, wid)
         && layout.layout_engine.is_window_floating(wid)
     {
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
@@ -228,7 +228,7 @@ pub fn handle_window_frame_changed(
     // This change isn't Rift's echo (the classifier filtered those). Whose it is depends on the
     // user's hand: on this window and not yet moved, it starts the drag; dragging it, the drag
     // follows; anywhere else, the app moved the window.
-    let admitted = state.windows.is_admitted(wid);
+    let admitted = state.windows().is_admitted(wid);
     let tiled = !layout.layout_engine.is_window_floating(wid);
     let native_resize = !old_frame.size.same_as(new_frame.size);
     // A drag that starts here needs the drop scene, built before the hand is borrowed.
@@ -263,7 +263,7 @@ pub fn handle_window_frame_changed(
                     ),
                 );
                 // The start of a user drag is intent, even when no workspace changes.
-                layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
+                layout.layout_engine.forget_native_layout_for_window(state.windows(), wid);
                 true
             }
             Pointer::Pressing(_) | Pointer::Dragging(_) | Pointer::Idle => false,

@@ -8,6 +8,7 @@ use crate::layout_engine::systems::WindowQuery;
 use crate::layout_engine::{LayoutEvent, LayoutSystemKind};
 use crate::model::VirtualWorkspace;
 use crate::model::virtual_workspace::WorkspaceTransferReason;
+use crate::model::window_store::OwnedWindows;
 use crate::sys::window_server::WindowServerId;
 
 type Inventory<'a> = &'a [(&'a str, &'a [SpaceId])];
@@ -54,14 +55,16 @@ fn live_state(window: WindowId) -> WindowState {
 fn fresh(
     settings: &VirtualWorkspaceSettings,
     spaces: &[(SpaceId, &str)],
-) -> (LayoutEngine, WindowStore) {
+) -> (LayoutEngine, OwnedWindows) {
     let mut engine = LayoutEngine::new(settings, &LayoutSettings::default());
-    let mut store = WindowStore::default();
+    let mut store = OwnedWindows::default();
     let all: Vec<_> = spaces.iter().map(|(space, _)| *space).collect();
-    engine.workspaces.ensure_visible_spaces(&mut store, &all, all.len(), |_| None);
+    engine
+        .workspaces
+        .ensure_visible_spaces(&mut store.view_mut(), &all, all.len(), |_| None);
     for (space, display) in spaces {
         let size = CGSize::new(1200.0, 800.0);
-        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(*space, size));
+        let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::SpaceExposed(*space, size));
         engine.update_space_display(*space, Some(*display));
     }
     (engine, store)
@@ -69,14 +72,14 @@ fn fresh(
 
 fn open(
     engine: &mut LayoutEngine,
-    store: &mut WindowStore,
+    store: &mut WindowsMut<'_>,
     id: VirtualWorkspaceId,
     window: WindowId,
 ) {
     let space = engine.workspaces[id].space;
     store.insert_manageable_window(window, live_state(window));
     assert!(engine.workspaces.assign_window_to_workspace(store, space, window, id));
-    engine.add_window_to_layout(store, space, window);
+    engine.add_window_to_layout(store.read(), space, window);
 }
 
 /// A file saved by a session with `windows` tiled on each Space's first workspace.
@@ -86,23 +89,25 @@ fn session(settings: &VirtualWorkspaceSettings, spaces: &[(SpaceId, &str, &[Wind
     for (space, _, windows) in spaces {
         let id = ws(&engine, *space, 0);
         for window in *windows {
-            open(&mut engine, &mut store, id, *window);
+            open(&mut engine, &mut store.view_mut(), id, *window);
         }
     }
-    engine.serialize_to_string(&store)
+    engine.serialize_to_string(store.view())
 }
 
-fn boot(settings: &VirtualWorkspaceSettings, saved: &str) -> (LayoutEngine, WindowStore) {
+fn boot(settings: &VirtualWorkspaceSettings, saved: &str) -> (LayoutEngine, OwnedWindows) {
     let mut engine = LayoutEngine::deserialize_from_str(saved).unwrap();
     engine.await_topology();
-    let mut store = WindowStore::joining(engine.workspaces());
-    engine.finish_loading(&mut store, settings, &LayoutSettings::default()).unwrap();
+    let mut store = OwnedWindows::joining(engine.workspaces());
+    engine
+        .finish_loading(&mut store.view_mut(), settings, &LayoutSettings::default())
+        .unwrap();
     (engine, store)
 }
 
 fn resolve(
     engine: &mut LayoutEngine,
-    store: &mut WindowStore,
+    store: &mut WindowsMut<'_>,
     current: &[(SpaceId, &str)],
     inventory: Inventory<'_>,
 ) {
@@ -114,7 +119,7 @@ fn resolve(
 
 fn observe(
     engine: &mut LayoutEngine,
-    store: &mut WindowStore,
+    store: &mut WindowsMut<'_>,
     space: SpaceId,
     window: WindowId,
     live: &WindowFingerprint,
@@ -125,7 +130,7 @@ fn observe(
 
 fn restore(
     engine: &mut LayoutEngine,
-    store: &mut WindowStore,
+    store: &mut WindowsMut<'_>,
     file: &str,
     scope: RestoreScope,
     active_space: SpaceId,
@@ -136,7 +141,7 @@ fn restore(
 
 fn restore_on(
     engine: &mut LayoutEngine,
-    store: &mut WindowStore,
+    store: &mut WindowsMut<'_>,
     file: &str,
     scope: RestoreScope,
     active_space: SpaceId,
@@ -222,9 +227,11 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     ] {
         let (mut engine, mut store) = fresh(&per_display, &[(a, "x")]);
         let id = ws(&engine, a, 0);
-        let _ = engine.switch_workspace_layout_mode(&store, a, id, mode);
-        [w1, w2, w3].iter().for_each(|w| open(&mut engine, &mut store, id, *w));
-        let saved = engine.serialize_to_string(&store);
+        let _ = engine.switch_workspace_layout_mode(store.view(), a, id, mode);
+        [w1, w2, w3]
+            .iter()
+            .for_each(|w| open(&mut engine, &mut store.view_mut(), id, *w));
+        let saved = engine.serialize_to_string(store.view());
         let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
         let ron_of = |engine: &LayoutEngine| ron::ser::to_string(&engine.workspaces[id]).unwrap();
         assert_eq!(ron_of(&loaded), ron_of(&engine));
@@ -252,7 +259,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         assert_eq!(loaded.workspaces[id].last_focused(), Some(win(9, 2)));
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
         assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 1);
-        let canonical = loaded.serialize_to_string(&WindowStore::default());
+        let canonical = loaded.serialize_to_string(OwnedWindows::default().view());
         assert!(!canonical.contains("\"workspace_layouts\":"));
         let reloaded = LayoutEngine::deserialize_from_str(&canonical).unwrap();
         assert_eq!(reloaded.persistence.pending[&win(9, 3)].workspace, id);
@@ -264,7 +271,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     let (mut engine, mut store) = fresh(&shared, &[(a, "x"), (b, "y")]);
     let moved = engine.workspaces.active_workspace(a).unwrap();
     engine.workspaces.transfer_workspace(
-        &mut store,
+        &mut store.view_mut(),
         moved,
         b,
         None,
@@ -277,7 +284,9 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         (b, (None, engine.workspaces.active_workspace(b).unwrap())),
     ]))
     .unwrap();
-    let file = engine.serialize_to_string(&WindowStore::default()).replacen(&current, &old, 1);
+    let file = engine
+        .serialize_to_string(OwnedWindows::default().view())
+        .replacen(&current, &old, 1);
     let loaded = LayoutEngine::deserialize_from_str(&file).unwrap();
     assert_eq!(loaded.workspaces.active_workspace(a), replacement);
     assert_eq!(
@@ -319,8 +328,8 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     dangling.replace_range(version..version + 9, "version:9999");
     assert_rejected(&dangling, "references missing layout");
     let (mut engine, mut store) = boot(&per_display, &good);
-    resolve(&mut engine, &mut store, &[(a, "x")], &[("x", &[a])]);
-    let before = engine.serialize_to_string(&store);
+    resolve(&mut engine, &mut store.view_mut(), &[(a, "x")], &[("x", &[a])]);
+    let before = engine.serialize_to_string(store.view());
     for bad in [
         good[..good.len() - 20].to_owned(),
         good.replacen("\"schema_version\":5", "\"schema_version\":99", 1),
@@ -328,8 +337,8 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     ] {
         for scope in [RestoreScope::Space, RestoreScope::Workspace] {
             let source = RestoreSource::CurrentSpace;
-            assert!(restore(&mut engine, &mut store, &bad, scope, a, source).is_err());
-            assert_eq!(engine.serialize_to_string(&store), before);
+            assert!(restore(&mut engine, &mut store.view_mut(), &bad, scope, a, source).is_err());
+            assert_eq!(engine.serialize_to_string(store.view()), before);
         }
     }
 
@@ -343,13 +352,13 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     let name = engine.workspaces[target].name.clone();
     let absent = win(9, 1);
     let outsider = win(7, 2);
-    open(&mut engine, &mut store, target, absent);
-    open(&mut engine, &mut store, target, w1);
+    open(&mut engine, &mut store.view_mut(), target, absent);
+    open(&mut engine, &mut store.view_mut(), target, w1);
     let sibling = ws(&engine, c, 1);
-    open(&mut engine, &mut store, sibling, outsider);
+    open(&mut engine, &mut store.view_mut(), sibling, outsider);
     let report = restore(
         &mut engine,
-        &mut store,
+        &mut store.view_mut(),
         &portable,
         RestoreScope::Workspace,
         c,
@@ -385,17 +394,19 @@ fn single_display_restore_keeps_the_surviving_desktops_catalog() {
     let (old, current) = (SpaceId::new(801), SpaceId::new(802));
     for exposed in [true, false] {
         let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
-        let mut store = WindowStore::default();
-        engine.workspaces.ensure_visible_spaces(&mut store, &[current], 1, |_| None);
-        engine.workspaces.ensure_space_initialized(&mut store, old);
+        let mut store = OwnedWindows::default();
+        engine
+            .workspaces
+            .ensure_visible_spaces(&mut store.view_mut(), &[current], 1, |_| None);
+        engine.workspaces.ensure_space_initialized(&mut store.view_mut(), old);
         if exposed {
             engine.update_space_display(old, Some("display"));
         }
         engine.update_space_display(current, Some("display"));
         let expected = engine.workspaces.workspace_ids(current);
-        let saved = engine.serialize_to_string(&WindowStore::default());
+        let saved = engine.serialize_to_string(OwnedWindows::default().view());
         let (mut engine, mut store) = boot(&settings, &saved);
-        resolve(&mut engine, &mut store, &[(current, "display")], &[(
+        resolve(&mut engine, &mut store.view_mut(), &[(current, "display")], &[(
             "display",
             &[current],
         )]);
@@ -414,17 +425,25 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
     let file = session(&settings, &[(a, "display", &[window])]);
     for current in [a, b] {
         let (mut engine, mut store) = boot(&settings, &file);
-        resolve(&mut engine, &mut store, &[(current, "display")], &[(
+        resolve(&mut engine, &mut store.view_mut(), &[(current, "display")], &[(
             "display",
             &[a, b],
         )]);
-        engine.workspaces.ensure_visible_spaces(&mut store, &[current], 1, |_| None);
+        engine
+            .workspaces
+            .ensure_visible_spaces(&mut store.view_mut(), &[current], 1, |_| None);
         let target = ws(&engine, current, 0);
-        open(&mut engine, &mut store, target, window);
+        open(&mut engine, &mut store.view_mut(), target, window);
         assert_eq!(
-            observe(&mut engine, &mut store, current, window, &evidence(window)),
+            observe(
+                &mut engine,
+                &mut store.view_mut(),
+                current,
+                window,
+                &evidence(window)
+            ),
             current == a
         );
-        assert_eq!(store.workspace_for_window(window), Some(target));
+        assert_eq!(store.view().workspace_for_window(window), Some(target));
     }
 }

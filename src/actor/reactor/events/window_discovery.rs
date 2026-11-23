@@ -21,7 +21,7 @@ fn sync_existing_window_state(
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
 
     let is_minimized = info.is_minimized;
-    let claimed = state.windows.is_claimed(wid);
+    let claimed = state.windows().is_claimed(wid);
     let frame = info.frame;
     let Some(existing) = state.windows.window(wid) else {
         return Ok((crate::actor::reactor::events::EventOutcome::default(), false));
@@ -82,7 +82,7 @@ fn sync_existing_window_state(
         }
     };
     if (needs_arrange || admission_changed || ax_returned)
-        && state.windows.is_admitted(wid)
+        && state.windows().is_admitted(wid)
         && was_minimized == is_minimized
     {
         outcome.absorb(crate::actor::reactor::events::EventOutcome::layout_changed(
@@ -111,7 +111,7 @@ fn should_emit_window_for_space(
     wid: WindowId,
 ) -> bool {
     let workspaces = layout.layout_engine.workspaces();
-    let assigned = workspaces.workspace_for_window(&state.windows, space, wid);
+    let assigned = workspaces.workspace_for_window(state.windows(), space, wid);
     let active = crate::roc_path::Asked::new();
     let emits = rift_core::workspaces::emits_window(assigned, || {
         active.ask(|| workspaces.active_workspace(space))
@@ -162,7 +162,7 @@ pub(crate) fn process_window_list(
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
             // Anything pending for the old identity died with it: arrange, so the core writes
             // the desire again for the new one (an outside owner's window is never arranged).
-            if state.windows.claim(wid).is_none() {
+            if state.windows().claim(wid).is_none() {
                 let arrange = crate::actor::reactor::events::EventOutcome::layout_changed(false);
                 outcome.absorb(arrange);
             }
@@ -217,7 +217,7 @@ pub(crate) fn assign_window<'a>(
             window.info.ax_subrole.clone(),
         );
         layout.layout_engine.assign_window_with_app_info(
-            &mut state.windows,
+            &mut state.windows_mut(),
             wid,
             context,
             WindowRuleContext {
@@ -286,7 +286,7 @@ pub(crate) fn emit_layout_events(
     // window that came back is observed regardless.
     let native_visible = |wid: WindowId| {
         state
-            .windows
+            .windows()
             .record(wid)
             .and_then(|record| record.window_server_id())
             .is_some_and(|wsid| state.windows.is_window_visible(wsid))
@@ -294,7 +294,7 @@ pub(crate) fn emit_layout_events(
     let has_visible = state
         .windows
         .window_ids_for_pid(pid)
-        .any(|wid| native_visible(wid) && state.windows.can_reconcile_admission(wid));
+        .any(|wid| native_visible(wid) && state.windows().can_reconcile_admission(wid));
     let known_visible: HashSet<_> = known_visible.iter().copied().collect();
     let mut observations: Vec<(SpaceId, WindowId)> = state
         .windows
@@ -302,10 +302,10 @@ pub(crate) fn emit_layout_events(
         .filter_map(|wid| {
             let (native, discovery) = *window_spaces.get(&wid)?;
             let window = state.windows.window(wid)?;
-            if window.info.is_minimized && !state.windows.is_claimed(wid) {
+            if window.info.is_minimized && !state.windows().is_claimed(wid) {
                 return Some((native.or(discovery)?, wid));
             }
-            if !state.windows.can_reconcile_admission(wid) {
+            if !state.windows().can_reconcile_admission(wid) {
                 return None;
             }
             let space = discovery?;
@@ -325,7 +325,7 @@ pub(crate) fn emit_layout_events(
     for (space, wid) in observations {
         let active = active_spaces.contains(&space);
         let assigned_space = state
-            .windows
+            .windows()
             .workspace_for_window(wid)
             .and_then(|workspace| layout.layout_engine.workspaces().workspace_space(workspace));
         if !active && resumed.contains(&wid) && assigned_space == Some(space) {

@@ -76,7 +76,7 @@ impl Reactor {
         );
         // Same window, new identity: a grip on it moves first, through the core.
         self.stores.state.step(CoreEvent::Rekeyed { from: old, to: incoming });
-        self.stores.state.windows.replace_window_identity(old, incoming);
+        self.stores.state.windows_mut().replace_window_identity(old, incoming);
         self.replace_window_identity(old, incoming, Some(old_wsid));
         debug!(?old, ?incoming, "Replaced native tab in existing layout slot");
     }
@@ -91,7 +91,7 @@ impl Reactor {
         let Some(space) = self.stores.layout.layout_engine.space_with_window(old) else {
             return false;
         };
-        if self.stores.state.windows.is_claimed(old)
+        if self.stores.state.windows().is_claimed(old)
             || !self.is_space_active(space)
             || self.window_in_non_active_workspace(space, old)
         {

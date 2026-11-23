@@ -5,7 +5,7 @@
 use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
-use crate::model::window_store::WindowStore;
+use crate::model::window_store::Windows;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{self, WindowServerId};
 
@@ -23,7 +23,7 @@ pub(crate) trait Native {
     /// The window under the cursor (Rift's own windows aside).
     fn window_under_cursor(&self) -> Option<WindowServerId> { window_server::window_under_cursor() }
     /// The tracked window at a point.
-    fn tracked_window_at(&self, point: CGPoint, windows: &WindowStore) -> Option<WindowId>;
+    fn tracked_window_at(&self, point: CGPoint, windows: Windows<'_>) -> Option<WindowId>;
 }
 
 /// The window server.
@@ -50,7 +50,7 @@ impl Native for System {
         window_server::get_window(wsid).map(|window| window.frame)
     }
 
-    fn tracked_window_at(&self, point: CGPoint, windows: &WindowStore) -> Option<WindowId> {
+    fn tracked_window_at(&self, point: CGPoint, windows: Windows<'_>) -> Option<WindowId> {
         windows.tracked_window_id(window_server::get_window_at_point(point)?)
     }
 }
@@ -84,7 +84,7 @@ impl Native for Fixture {
     }
 
     /// The window whose known frame contains the point.
-    fn tracked_window_at(&self, point: CGPoint, windows: &WindowStore) -> Option<WindowId> {
+    fn tracked_window_at(&self, point: CGPoint, windows: Windows<'_>) -> Option<WindowId> {
         windows.window_at(point)
     }
 }

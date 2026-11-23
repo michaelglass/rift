@@ -54,7 +54,11 @@ impl Record {
     pub(super) fn start(&mut self, config: &Config, layout: &LayoutEngine) {
         let Some(file) = self.file() else { return };
         let config = ron::ser::to_string(&config).unwrap();
-        let layout = layout.serialize_to_string(&Default::default());
+        let (records, core) = (Default::default(), Default::default());
+        let layout = layout.serialize_to_string(crate::model::window_store::Windows {
+            records: &records,
+            core: &core,
+        });
         write!(file, "{config}\n{layout}\n").unwrap();
     }
 

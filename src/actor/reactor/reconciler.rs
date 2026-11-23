@@ -399,7 +399,7 @@ impl Reactor {
     /// Whether a frame may be written to `window` at all: not while the display topology is
     /// being re-read, and not to a hidden, minimized or native-fullscreen window.
     fn may_write(&self, window: WindowId) -> bool {
-        !self.refreshes_blocked() && self.stores.state.windows.can_place_window(window)
+        !self.refreshes_blocked() && self.stores.state.windows().can_place_window(window)
     }
 
     /// Rift places `window` at `frame` (a transfer, a cancelled drag's way back, an app rule):
@@ -426,7 +426,7 @@ impl Reactor {
     /// Whether a write to `window` is held to `space`'s scrolling bounds (when its layout has
     /// them): a tiled window of the space's active workspace.
     fn in_scrolling_bounds(&self, window: WindowId, space: SpaceId) -> bool {
-        self.stores.state.windows.workspace_for_window(window)
+        self.stores.state.windows().workspace_for_window(window)
             == self.stores.layout.layout_engine.workspaces().active_workspace(space)
             && !self.stores.layout.layout_engine.is_window_floating(window)
     }
@@ -577,7 +577,7 @@ impl RiftState {
             match *effect {
                 Effect::Ungrip { window, ref changed, .. } => {
                     let session = self.windows.project_ungrip();
-                    let placed = self.windows.release_held(window);
+                    let placed = self.windows_mut().release_held(window);
                     ungripped = Some(Ungripped {
                         window,
                         session,
@@ -593,7 +593,7 @@ impl RiftState {
                 // by window-server id, taken from the record: a suspended identity has no AX
                 // state, but its record (and its server id) remains.
                 Effect::Pending { window, target } => {
-                    let record = self.windows.record(window);
+                    let record = self.windows().record(window);
                     if let Some(server_id) = record.and_then(|record| record.window_server_id()) {
                         self.tx.project_target(server_id, target);
                     }
@@ -619,7 +619,7 @@ impl RiftState {
             }
         }
         if let Some(Ungripped { window, .. }) = &ungripped {
-            self.windows.prune_ungripped(*window);
+            self.windows_mut().prune_ungripped(*window);
         }
         debug_assert_eq!(
             self.windows.pointer(),
@@ -776,7 +776,7 @@ impl RiftState {
         state: crate::model::reactor::WindowState,
     ) {
         let frame = state.frame_monotonic();
-        self.windows.insert_window(window, state);
+        self.windows_mut().insert_window(window, state);
         self.step(Event::Seen { window, frame });
     }
 
@@ -789,7 +789,7 @@ impl RiftState {
         rule: rift_core::lifecycle::Rule,
     ) {
         let frame = state.frame_monotonic();
-        self.windows.insert_window_as(window, state, manageability, rule);
+        self.windows_mut().insert_window_as(window, state, manageability, rule);
         self.step(Event::Seen { window, frame });
     }
 
@@ -843,7 +843,7 @@ impl RiftState {
     /// Removes `window`'s record; a grip on it ends first, through the core.
     pub(crate) fn remove_window(&mut self, window: WindowId) -> Option<WindowRecord> {
         self.step(Event::Gone { window });
-        self.windows.remove_window(window)
+        self.windows_mut().remove_window(window)
     }
 
     /// Removes every window of `pid`; a grip on one ends first, through the core.
@@ -852,7 +852,7 @@ impl RiftState {
         for window in windows {
             self.step(Event::Gone { window });
         }
-        self.windows.remove_windows_for_app(pid);
+        self.windows_mut().remove_windows_for_app(pid);
     }
 
     /// An outside owner took a window (a claim): a grip on it ends, and it is no longer a drop
@@ -867,7 +867,7 @@ impl RiftState {
     /// Binds an AX observation to its native identity. When that identity belonged to another
     /// window id (macOS replaced it), a grip moves to the new id first, through the core.
     /// Retires the windows of `pid` that an inventory no longer reports (see
-    /// `WindowStore::inventory_retirements`); a grip on one ends first, through the core.
+    /// `Windows::inventory_retirements`); a grip on one ends first, through the core.
     pub(crate) fn reconcile_app_inventory(
         &mut self,
         pid: pid_t,
@@ -878,7 +878,7 @@ impl RiftState {
             Option<crate::sys::window_server::WindowServerInfo>,
         ) -> crate::model::window_store::InventoryWindowObservation,
     ) -> Vec<(WindowId, Option<WindowServerId>)> {
-        let retired = self.windows.inventory_retirements(
+        let retired = self.windows().inventory_retirements(
             pid,
             observed.iter().copied(),
             |window| inactive.contains(&window),
@@ -904,6 +904,6 @@ impl RiftState {
         {
             self.step(Event::Rekeyed { from: previous, to: window });
         }
-        self.windows.reconcile_ax_identity(window, server_id)
+        self.windows_mut().reconcile_ax_identity(window, server_id)
     }
 }

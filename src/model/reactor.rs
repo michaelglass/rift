@@ -5,27 +5,28 @@ use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{LayoutCommand, WindowLayoutInfo};
 use crate::model::WindowStore;
+use crate::model::window_store::{Windows, WindowsMut};
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 
 /// The one owner of the reactor's domain state: the layout engine (with its workspace store)
-/// and the [`RiftState`] (the window store, the reconciler, the pending store). Built joined: the
-/// window store's shadow of the workspaces holds the workspace store's whole topology from the
-/// start, so neither can go live without the other.
+/// and the [`RiftState`] (the window store and the core's workspaces beside it, the reconciler,
+/// the pending store). Built joined: the core's workspaces hold the workspace store's whole
+/// topology from the start, so neither can go live without the other.
 pub struct Stores {
     pub(crate) layout: crate::actor::reactor::managers::LayoutManager,
     pub(crate) state: RiftState,
 }
 
 impl Stores {
-    /// A layout engine (fresh, or loaded from a saved layout) and a window store joining its
-    /// workspace store.
+    /// A layout engine (fresh, or loaded from a saved layout) and the core's workspaces joining
+    /// its workspace store.
     pub fn joining(layout_engine: crate::layout_engine::LayoutEngine) -> Stores {
-        let windows = WindowStore::joining(layout_engine.workspaces());
+        let workspaces = crate::model::window_store::joined_core(layout_engine.workspaces());
         Stores {
             layout: crate::actor::reactor::managers::LayoutManager { layout_engine },
             state: RiftState {
-                windows,
+                workspaces,
                 ..RiftState::default()
             },
         }
@@ -38,7 +39,7 @@ impl Stores {
         layout_settings: &crate::common::config::LayoutSettings,
     ) -> Result<(), String> {
         self.layout.layout_engine.finish_loading(
-            &mut self.state.windows,
+            &mut self.state.windows_mut(),
             virtual_workspace_config,
             layout_settings,
         )
@@ -54,12 +55,33 @@ impl Stores {
 #[derive(Debug, Default)]
 pub struct RiftState {
     pub windows: WindowStore,
+    /// The core's workspaces, joined (who places each window; the catalog and activations),
+    /// beside the window store's records: lent with them as [`Windows`] / [`WindowsMut`].
+    pub(crate) workspaces: crate::roc_twin::TwinnedWorkspaces,
     /// The decisions: the core, stepped through its applier. Beside the window store so a
     /// workflow that changes windows can tell the core in the same breath.
     pub(crate) core: crate::actor::reactor::reconciler::Reconciler,
     /// The pending store the app actors read across threads: its targets are the projection of
     /// the core's pending frames (`Effect::Pending`), shared with the transaction manager.
     pub(crate) tx: crate::model::tx_store::WindowTxStore,
+}
+
+impl RiftState {
+    /// The window store and the core's workspaces, lent for reading.
+    pub(crate) fn windows(&self) -> Windows<'_> {
+        Windows {
+            records: &self.windows,
+            core: &self.workspaces,
+        }
+    }
+
+    /// The window store and the core's workspaces, lent for writing.
+    pub(crate) fn windows_mut(&mut self) -> WindowsMut<'_> {
+        WindowsMut {
+            records: &mut self.windows,
+            core: &mut self.workspaces,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -70,7 +70,7 @@ fn place_on_its_space(
         return EventOutcome::no_change();
     };
     if !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-        &mut state.windows,
+        &mut state.windows_mut(),
         space,
         window,
         workspace,
@@ -156,7 +156,7 @@ pub fn handle_mouse_up(
         &commit,
         placed,
         final_space,
-        state.windows.is_admitted(window),
+        state.windows().is_admitted(window),
         |target| state.windows.contains_window(target),
     );
     trace!(?window, ?plan, "drop");
@@ -189,7 +189,7 @@ pub fn handle_mouse_up(
                 // (its position on the source display is forgotten).
                 workspace.is_some_and(|workspace| {
                     layout.layout_engine.relocate_window_with_drop(
-                        &mut state.windows,
+                        &mut state.windows_mut(),
                         &crate::layout_engine::WorkspaceDropRequest {
                             window,
                             workspace,
@@ -203,7 +203,7 @@ pub fn handle_mouse_up(
                 // the layout the preview was computed against is the one the window joins.
                 onto.zip(workspace).is_some_and(|(intent, workspace)| {
                     layout.layout_engine.relocate_window_with_drop(
-                        &mut state.windows,
+                        &mut state.windows_mut(),
                         &crate::layout_engine::WorkspaceDropRequest {
                             window,
                             workspace,
@@ -224,7 +224,7 @@ pub fn handle_mouse_up(
                 }
                 if let Some(workspace) = workspace
                     && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-                        &mut state.windows,
+                        &mut state.windows_mut(),
                         space,
                         window,
                         workspace,
@@ -254,7 +254,7 @@ pub fn handle_mouse_up(
         if let Some(workspace) = layout
             .layout_engine
             .workspaces()
-            .workspace_for_window(&state.windows, space, window)
+            .workspace_for_window(state.windows(), space, window)
             .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
         {
             layout.layout_engine.store_floating_position(

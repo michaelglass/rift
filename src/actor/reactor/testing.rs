@@ -48,7 +48,7 @@ impl Reactor {
             .layout
             .layout_engine
             .workspaces_mut()
-            .listed_after_init(&mut self.stores.state.windows, space)
+            .listed_after_init(&mut self.stores.state.windows_mut(), space)
             .iter()
             .map(|(id, _)| *id)
             .collect()
@@ -68,7 +68,7 @@ impl Reactor {
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
         self.stores.layout.layout_engine.workspaces().workspace_for_window(
-            &self.stores.state.windows,
+            self.stores.state.windows(),
             space,
             wid,
         )
@@ -93,7 +93,7 @@ impl Reactor {
             .layout
             .layout_engine
             .workspaces()
-            .windows_in_active_workspace(&self.stores.state.windows, space)
+            .windows_in_active_workspace(self.stores.state.windows(), space)
     }
 
     pub fn test_workspace_windows(
@@ -102,7 +102,7 @@ impl Reactor {
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
         if self.stores.layout.layout_engine.workspaces()[workspace].space == space {
-            self.stores.state.windows.workspace_windows(workspace)
+            self.stores.state.windows().workspace_windows(workspace)
         } else {
             Vec::new()
         }
@@ -129,7 +129,7 @@ impl Reactor {
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
         self.stores.layout.layout_engine.workspaces_mut().assign_window_to_workspace(
-            &mut self.stores.state.windows,
+            &mut self.stores.state.windows_mut(),
             space,
             wid,
             workspace,
@@ -142,7 +142,7 @@ impl Reactor {
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
         self.stores.layout.layout_engine.workspaces_mut().set_active_workspace(
-            &mut self.stores.state.windows,
+            &mut self.stores.state.windows_mut(),
             space,
             workspace,
         )
@@ -150,7 +150,7 @@ impl Reactor {
 
     pub fn handle_test_workspace_command(&mut self, space: SpaceId, command: &LayoutCommand) {
         let _ = self.stores.layout.layout_engine.handle_virtual_workspace_command(
-            &mut self.stores.state.windows,
+            &mut self.stores.state.windows_mut(),
             space,
             command,
         );
@@ -271,7 +271,7 @@ impl Reactor {
         frame: CGRect,
         is_manageable: bool,
     ) {
-        self.stores.state.windows.track_window_server_id(wsid, wid);
+        self.stores.state.windows_mut().track_window_server_id(wsid, wid);
         self.stores.state.windows.set_window_server_space(wsid, space);
         self.insert_test_window_state(wid, frame, Some(wsid), is_manageable);
     }

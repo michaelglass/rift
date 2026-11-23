@@ -14,9 +14,8 @@ use crate::common::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings, WorkspaceMode};
 use crate::layout_engine::LayoutSystem;
 use crate::model::reactor::WindowState;
-use crate::model::{
-    AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WindowStore, WorkspaceStore,
-};
+use crate::model::window_store::{Windows, WindowsMut};
+use crate::model::{AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WorkspaceStore};
 use crate::sys::screen::SpaceId;
 
 static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -146,7 +145,7 @@ impl LayoutEngine {
 
     pub(super) fn observe_window_for_persistence(
         &mut self,
-        window_store: &mut WindowStore,
+        window_store: &mut WindowsMut<'_>,
         space: SpaceId,
         window: WindowId,
         title: Option<&str>,

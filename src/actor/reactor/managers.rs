@@ -266,7 +266,7 @@ impl LayoutManager {
                                 window_server_id: reactor
                                     .stores
                                     .state
-                                    .windows
+                                    .windows()
                                     .record(window_id)
                                     .and_then(|record| record.window_server_id()),
                             }
@@ -403,7 +403,7 @@ impl LayoutManager {
                 .update_space_display(space, display_uuid_opt.as_deref());
             let mut layout =
                 reactor.stores.layout.layout_engine.calculate_layout_with_virtual_workspaces(
-                    &reactor.stores.state.windows,
+                    reactor.stores.state.windows(),
                     space,
                     frame,
                     &gaps,
@@ -421,7 +421,7 @@ impl LayoutManager {
                     .layout
                     .layout_engine
                     .workspaces()
-                    .windows_in_active_workspace(&reactor.stores.state.windows, space)
+                    .windows_in_active_workspace(reactor.stores.state.windows(), space)
                     .into_iter()
                     .collect();
                 bound_scrolling_tiled_frames_to_screen(

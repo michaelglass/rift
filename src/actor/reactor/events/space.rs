@@ -325,7 +325,9 @@ pub fn handle_window_server_appeared(
             return Ok(outcome);
         }
         if let Some(wid) =
-            state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, pid)
+            state
+                .windows_mut()
+                .observe_native_fullscreen(wsid, sid, last_known_user_space, pid)
         {
             outcome.memberships.push((wid, None));
         }

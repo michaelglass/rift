@@ -63,13 +63,13 @@ impl LayoutEngine {
     /// window's own id that it did not select describes a different window it must not inherit.
     pub(super) fn reconcile_saved_window(
         &mut self,
-        window_store: &mut WindowStore,
+        window_store: &mut WindowsMut<'_>,
         window: WindowId,
         live: &WindowFingerprint,
         scope: MatchScope<'_>,
     ) -> bool {
         let pending = &self.persistence.pending;
-        let assigned = window_store.workspace_for_window(window);
+        let assigned = window_store.read().workspace_for_window(window);
         let direct = pending
             .get(&window)
             .is_some_and(|saved| saved.fingerprint.same_process_window(live));
@@ -113,13 +113,15 @@ impl LayoutEngine {
 
     fn adopt_saved_window(
         &mut self,
-        window_store: &mut WindowStore,
+        window_store: &mut WindowsMut<'_>,
         old: WindowId,
         live: WindowId,
         saved: SavedWindow,
     ) {
-        if let Some(previous) =
-            window_store.workspace_for_window(live).filter(|id| *id != saved.workspace)
+        if let Some(previous) = window_store
+            .read()
+            .workspace_for_window(live)
+            .filter(|id| *id != saved.workspace)
         {
             self.workspaces[previous].layout_system.update(WindowChange::Remove(live));
             self.floating_positions.remove_workspace_window(previous, live);
@@ -191,10 +193,10 @@ impl LayoutEngine {
 
     /// Catch up on what happened while the topology was unknown: windows assigned then, in
     /// discovery's own terms, and then the discoveries that finished.
-    pub(super) fn settle_awaited_windows(&mut self, window_store: &mut WindowStore) {
+    pub(super) fn settle_awaited_windows(&mut self, window_store: &mut WindowsMut<'_>) {
         let assigned: Vec<_> = (window_store.iter_windows())
             .filter_map(|(window, state)| {
-                let workspace = window_store.workspace_for_window(window)?;
+                let workspace = window_store.read().workspace_for_window(window)?;
                 Some((window, WindowFingerprint::of(window, state), workspace))
             })
             .collect();
@@ -203,8 +205,12 @@ impl LayoutEngine {
             if self.is_restoring()
                 && self.reconcile_saved_window(window_store, window, &live, scope)
             {
-                let owner = window_store.workspace_for_window(window).unwrap_or(workspace);
-                self.add_window_to_layout(window_store, self.workspaces[owner].space, window);
+                let owner = window_store.read().workspace_for_window(window).unwrap_or(workspace);
+                self.add_window_to_layout(
+                    window_store.read(),
+                    self.workspaces[owner].space,
+                    window,
+                );
             }
         }
         for (pid, app_id, spaces) in std::mem::take(&mut self.persistence.awaited_discoveries) {
