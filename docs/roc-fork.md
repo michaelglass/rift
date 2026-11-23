@@ -87,8 +87,8 @@ ship.
    Spaces; ignoring it in the Rust decision changes nothing visible (S3 found it; the reactor
    test `a_title_change_reapplies_rules_only_on_an_active_space` reaches the branch).
 
-1. **W3b's shadow** is `rift_core::workspaces::Ownerships`, held by the window store and
-   written only through `set_ownership`; it joins `Topology` at W4.
+1. **W3b's shadow** was `rift_core::workspaces::Ownerships`, held by the window store and
+   written only through `set_ownership`; W4b joined it with `Topology` (both retired).
 2. **W4, the flip (plan approved).** The joined `rift_core::workspaces::Workspaces` (W4a,
    202c536c) holds the catalog, activations and ownership; its step refuses (typed `Refused`, no
    change) a workspace created twice, anything naming a workspace the catalog lacks, a workspace
@@ -96,7 +96,7 @@ ship.
    Into(K) | Unassign }` hands windows and claims on and drops the workspace from every Space's
    history and memory in the same step (the W4 obligation). Rulings: it lives in the window
    store (placement A); a refused event is a bug: `workspace-refused:` at **warn** in a running
-   Rift, a panic in tests. **W4b and W4c wait for #688 too** (ruled after W4a): the workspace
+   Rift, a panic in tests. **W4b and W4c waited for #688 too** (ruled after W4a; #688 is merged, W4b is done): the workspace
    store's topology writers sit under about 100 call sites, many in engine glue #688 rewrites,
    and a saved workspace store loads without a window store. Plumbing `&mut WindowStore` through
    them (A1) would churn that glue twice. A shared `Rc<RefCell<Workspaces>>` handle in both
@@ -316,8 +316,42 @@ questions each way, no Roc allocation left live), and a planted Roc bug caught:
   unadmitted window treated as outside admission was caught by nothing; the new reactor test
   `mouse_raises_a_floating_window_whose_admission_is_suspended` catches it (1 failure).
 
+**W4b, one joined shadow (2026-11-23, not flipped).**
+- d4494458 (Roc): the joined workspaces kept in Roc between events (`RocWorkspaces`, a model
+  `Joined`; `roc_workspaces_init/_step/_view/_release`), the step answering what each event met.
+  Differential on persistent models: 24,000 steps identical (6,284 refused, 854 removals with
+  owners); three plants caught.
+- bb610794 (Rust): the window store holds the core's joined `Workspaces` (`TwinnedWorkspaces`)
+  in place of the ownerships and topology twins. Ownership reaches it through `set_ownership`;
+  the workspace store's topology writers take `&mut WindowStore` and tell it through
+  `WindowStore::topology` (topology changes only). A refused change is `workspace-refused:` (a
+  panic in tests, a warning in a running Rift). A removal is one call,
+  `WindowStore::remove_workspace(id, successor)`: the core hands windows and claims on and the
+  records follow what it decided (native fullscreen records take the same successor).
+  `remap_space` computes each heir before anything moves; `remove_space` clears the Space and
+  drops other Spaces' history and memory of the removed workspaces before removing them
+  (`removing_a_space_clears_it_first_and_ends_where_removing_first_did`: 500 drawn stores, same
+  end state as the old order). A loaded workspace store goes live only joined: `Stores::joining`
+  builds the window store from the whole catalog and activations; `Reactor::new`/`spawn` take
+  `Stores`. Plants: removing before clearing (6, workspace-refused), handing to nobody in
+  `remap_space` (3 behaviour tests), the Rust core sending claims nowhere (2), `Workspaces.roc`
+  dropping heirs under roc-core (4, roc-divergence).
+- a159f227 retires tags 32 and 33 and the separate topology and ownerships machines (Rust
+  `Topology`, `Ownerships`, `orphans`; the Roc machines `Owners`/`Places` and their entries);
+  `measure_workspaces_twin` replaces their measurements.
+- Cost (release, `measure_workspaces_twin`): Roc step about 100-180 ns per ownership change and
+  190-240 ns per topology change at 10 to 1000 windows (Rust 20-140 ns); the whole view 1, 5 and
+  46 us at 10, 100 and 1000 windows, compared after every topology change (rare: switches,
+  moves) and every 32nd ownership change in a running Rift.
+
 **Next:**
-1. W4b–d (the joined Workspaces twin replaces the topology and ownerships twins).
+1. The getters that initialise lazily (the lead's ruling, its own slice): Spaces are initialised
+   at the events that bring them (exposure, a window placed on one); `list_workspaces`,
+   `workspace_id_at` and the rest become `&self` and answer a typed not-yet-known (the IPC list
+   warns with a stable prefix); a test proves every Space `ensure_visible_spaces` exposes is
+   initialised before a query sees it; an engine path that needs a Space initialised is a
+   writer and goes through the placement event. Then W4c (the window store answers ownership
+   from the core) and W4d (catalog and activations from the core, with the saved form).
 2. The core_geometry converters on the new layout trees.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
@@ -350,8 +384,26 @@ No call site is in `layout_engine/`; keep it that way.
   impossible saved state is normalized with one `workspace-load: normalized` warn line (the
   W2b ruling) or refused with a typed error where validation refused it before.
 - **Public-clean:** roc-2 is published (a copy, as `rearch/roc` on the owner's fork, linked
-  from upstream issue #697). No private paths or references in files or commit messages, no
-  session trailers; keep the `Co-Authored-By` line.
+  from upstream issue #697; the current line as `rearch/roc-next`). No private paths or
+  references in files or commit messages, no session trailers; keep the `Co-Authored-By` line.
+  Publishing `rearch/roc-next` (the local line and the published copy have the same trees, not
+  the same commits):
+  1. `jj log -r 'rearch/roc-next@fork'` and find the local commit with the same tree (`jj diff
+     --from <local> --to <published> --stat` is empty); everything after it is new.
+  2. `jj duplicate -r '<local>+::experiment/roc-2' -d <published>` copies the new commits onto
+     the published tip.
+  3. Check the copy: `jj diff --from experiment/roc-2 --to <copy tip> --stat` is empty; `jj log
+     -r '<published>..<copy tip>' --no-graph -T description` has no session trailer, no home
+     directory path and no name of a private repository; neither do the `+` lines of `jj diff
+     --git --from <published> --to <copy tip>`. A commit that has them gets `jj describe` on the
+     copy.
+  4. `jj bookmark set rearch/roc-next -r <copy tip> --allow-backwards` (the bookmark tracks
+     `rearch/roc-next@fork`; `jj bookmark track rearch/roc-next@fork` once if it does not).
+  5. Push over HTTPS: `T=$(gh auth token) && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=1
+     GIT_CONFIG_KEY_0="url.https://x-access-token:${T}@github.com/.insteadOf"
+     GIT_CONFIG_VALUE_0="git@github.com:" jj git push --remote fork -b rearch/roc-next`. jj
+     signs the copies on push, so the published tip's id is the one `jj log -r
+     rearch/roc-next@fork` shows afterwards. `experiment/roc-2` stays on the local line.
 - **Never install or push;** never open a PR or comment upstream. One clean commit per slice;
   never `jj rebase`/`squash` to tidy history.
 - **Old-system bugs** found on the way: fix each in its own commit with a literal regression
@@ -480,8 +532,9 @@ counts only under the `respect_min_size` app rule).
   `max`/`min` as arm64's `fmaxnm`/`fminnm` (+0 beats -0 for max), `sum` from -0.
 - `roc/core/Topology.roc`, `Lifecycle.roc`, `Focus.roc`, `Workspaces.roc`: the decisions, each
   reading its facts through `Asking.roc` (a fact, or that it was not asked, read in order).
-- The machines kept between events: the platform requires `Windows` (the lifecycle), `Owners`
-  (who places each window) and `Places` (the topology) beside `Model`, each with
+- The machines kept between events: the platform requires `Windows` (the lifecycle), `Joined`
+  (the workspaces: catalog, activations, who places each window) and `Mains` (the main window)
+  beside `Model`, each with
   `roc_<machine>_init`, `_step` (and the lifecycle's `_invalidate`, `_revalidate`), `_view`
   and `_release`; a step unboxes and boxes again, as the core's does, so each stays unique.
 - Pinned nightly: `roc/NIGHTLY`. The glue is generated on every build of the Roc core, from
@@ -525,7 +578,8 @@ counts only under the `respect_min_size` app rule).
 **Twins (2026-11-20, release), per step / whole view:** lifecycle 75 ns at 10 to 1000
 windows / 0.15, 0.36, 3 us at 10, 100, 1000; ownerships 160-200 ns at 10 to 1000 windows (on a
 `Dict`; on a list it was 153 ns, 641 ns, 7 us at 10, 100, 1000) / 0.1 to 0.7 us; topology 210-300 ns at 5 to 100 workspaces / about 0.25 us. Rust's
-steps are 20-81 ns.
+steps are 20-81 ns. (Ownerships and topology were joined at W4b; see there for the joined
+twin's costs.)
 
 **Typed boundary (2026-11-20, release):** `RocCore::step` with the event's and effects'
 conversions, 480-510 ns per step (p50 about 290 ns) against the Rust core's 120 ns, 3.5 Roc
