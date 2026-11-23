@@ -9,6 +9,63 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
+## Handoff (2026-11-23): read this first
+
+**State.** Workspace `rift-roc`, line `experiment/roc-2` at 1c68bc17 (the slice 1 docs commit);
+this handoff is the commit on top of it, not published. `rearch/roc-next@fork` is 127180c0, a
+stripped copy of everything through 1c68bc17 (publish procedure: "Rulings that bind",
+Public-clean). Since the last handover, in order: the four reactor predicates (reviewed, done);
+W4b (one joined shadow, d4494458, bb610794; tags 32 and 33 retired, a159f227); no getter
+initialises a Space (833c7c2c, ruling A); W4c (ownership from the core, 7d6132f2; the `Claimant`
+decision); the dead core-geometry converters deleted (e17a835a); W4d+W6 slice 1 (b19cf57b,
+807cbcbf, ee8416c1). Each is described where its section is below. All checks green at every
+commit: 848 lib tests, 855 with `roc-core`, the fuzzer at 2000 × 40 both ways, zero build
+warnings (two old unused-variable warnings remain in test builds: `tests/fuzz.rs` `mouse`,
+`tests.rs` `button`).
+
+**Next: W4d+W6 slice 2, design ruled (the lead, 2026-11-23).** The workspace store answers its
+topology reads from the core through a second pair of views, the same pattern as slice 1's
+(ruling (d)): `Workspaces<'a> { store: &'a WorkspaceStore, core: &'a TwinnedWorkspaces }` (read,
+`Copy`) and `WorkspacesMut<'a>`, built from a split borrow of `Stores` (the layout engine's
+workspace store and `RiftState`'s core). The topology reads (`active_workspace` about 138
+callers, catalog order about 48, `workspace_ids` about 27, `workspaces_on`, `workspace_space`,
+`active_workspace_per_space`, `last_workspace`, ...) and the store's topology writers move onto
+the views; the workspace store keeps only what is per workspace (name, home, rule standing,
+layout state, last focus), and its `activations` map and catalog order become derived from the
+core or go. The layout engine reads the topology itself (46 sites): that borrow is a real
+dependency, so threading it is fine (what was ruled out is a borrow we'd undo later). **Where an
+engine method already holds a `WindowsMut`, build the `Workspaces` view from it (it carries the
+core) plus `&self.workspaces`, rather than adding a second argument.** Same rules: no behaviour
+change; a handler that needs restructuring beyond an added argument or a local binding is
+listed in the report, not worked around; each slice green and published. The mechanical work
+went well delegated to a helper with an exact brief (1b: 33 files, about 2,700 lines, 62 tool
+calls), then reviewed and re-checked here: drive it with `cargo check --tests --message-format
+json` and small scripts.
+
+**Flagged for slice 5 (persistence): the core's seeding is weakly checked.** A plant in
+`window_store::joined_core` that drops one activation from the seeding failed only one lib
+test (`the_workspace_shadow_agrees_through_the_store_and_catches_a_write_around_it`, the
+saved-and-loaded agreement check). When slice 5 loads the saved form into the core, add a
+stronger check: a round trip over drawn stores (every activation shape, both modes) whose loaded
+core must equal the saving store's, and a planted seeding bug that fails it.
+
+**Not elsewhere in this doc yet:**
+- The old twins' per-step costs in "Measured" are the separate topology and ownerships
+  machines'; the joined twin's are in the W4b section (`measure_workspaces_twin`).
+- `WindowStore::remove_workspace` (W4b) still re-sends each handed-on window's ownership after
+  the core's `Removed` (now redundant: the core already holds it). It is kept because
+  `remove_window_assignment` also clears a transfer and prunes the record, and
+  `assign_window_to_workspace` updates `app_windows` and native fullscreen records; slice 2 or
+  later can split those record-side effects from the ownership re-send.
+- `OwnershipDivergence` now means "the claims index (or a missing record) disagrees with the
+  core", not store-vs-core ownership (W4c); the reactor's `workspace-divergence:` lines keep
+  their text.
+- `WorkspaceStore::initialized` is the one definition of "a Space is initialised" (the IPC's
+  `NotYetKnown` and the reactor tripwire both use it); keep it when slice 2 moves activations
+  into the core.
+- Helper scripts used for the plumbing lived in the session scratchpad and are gone; the pattern
+  is in this doc (compiler JSON → insert the argument, or the field rename by span).
+
 ## Handover (2026-11-19): read this first
 
 Workspace: jj workspace `rift-roc` (not colocated; jj only), bookmark `experiment/roc-2`. Every
