@@ -43,10 +43,29 @@ catalog slice, no `listed_on`), and the native reconcile asks `space_of`. No beh
 alike). Plants (rift-core / lib failures): `is_on` ignoring the Space (1 / 8), `assigned_on`
 ignoring it (1 / 7), a visible Space ranked as the command Space (1 / 0), a tie kept as its first
 window (1 / 0): the last two only the core's unit test catches, as before the move (nothing on
-rift's path told those scopes apart). **Old-system bug, reported, not fixed (a behaviour change):**
-`MoveWindowToDisplay` with no window id, no main window and nothing under the cursor resolves
+rift's path told those scopes apart). **Old-system bug, fixed (the lead's go):**
+`MoveWindowToDisplay` with no window id, no main window and nothing under the cursor resolved
 `FirstOnCommandDisplay` as index 0, which no window has (`WindowId.idx` is non-zero), so it never
-moves anything.
+moved anything. It now moves the first window in layout order on the workspace the command
+display shows (`LayoutEngine::first_window_on`; the docs say only "the command display's first").
+Regression test, written first:
+`moving_to_a_display_with_no_window_named_moves_the_command_displays_first_window`; plant (the
+last window in layout order) fails it. Ours alone: the fallback came with merge (b)'s event-flow
+resolution (178c9657), which put our old `find_window_by_idx(space, 0)` fallback on #702's index
+resolution; upstream main has no such fallback (it ignores the command), so not an upstream
+candidate.
+
+**Roc holds the whole claim (step 2).** `rift_core::workspaces::plain::Claimant { owner, flags:
+ClaimFlags { focus_follows_mouse: FocusFollowsMouse::{Followed, Suppressed} }, original }` is the
+plain owner of a claim (it replaces the bare owner word); Boundary.roc's `Claim := { owner : U64,
+flags : ClaimFlags, original : U64, destination : Destination }` with `ClaimFlags := {
+focus_follows_mouse : FocusFollowsMouse }` and `FocusFollowsMouse := [Followed, Suppressed]`;
+Workspaces.roc keeps the whole claim and hands it on whole when its workspace is removed (`{
+..claim, destination }`). The platform's `Claimant::plain` maps the flag bitset to the tag (a claim
+holds only supported flags: `claim_window` refuses the rest), and `Word for Claimant` is gone. The
+differential draws both flags and an original id, and both views (the differential's and rift's
+path) compare the whole claim. Plants (Roc crate / roc-core lib failures, each a `roc-divergence`):
+Roc dropping the flag as it records a claim (2 / 11), as it hands a claim on (2 / 1).
 
 **Clippy fix (40a2b091).** `roc_realloc` and `roc_dealloc` (the Roc allocator's entries) failed
 clippy's deny-by-default `not_unsafe_ptr_arg_deref` since a159f227 (before W4d). They are
