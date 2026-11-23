@@ -381,7 +381,7 @@ impl Reactor {
 /// The senders. Each takes a [`Write`], so each sends only what the reconciler decided.
 impl Reactor {
     pub(super) fn owner(&self, window: WindowId) -> Owner {
-        self.state.windows.pointer().owner(window)
+        self.stores.state.windows.pointer().owner(window)
     }
 
     fn send_one(&mut self, write: Write, handle: AppThreadHandle) {
@@ -392,14 +392,14 @@ impl Reactor {
             true,
         )) {
             warn!(window = ?write.window(), %error, "failed to write window frame");
-            self.state.step(CoreEvent::Forget { window: write.window() });
+            self.stores.state.step(CoreEvent::Forget { window: write.window() });
         }
     }
 
     /// Whether a frame may be written to `window` at all: not while the display topology is
     /// being re-read, and not to a hidden, minimized or native-fullscreen window.
     fn may_write(&self, window: WindowId) -> bool {
-        !self.refreshes_blocked() && self.state.windows.can_place_window(window)
+        !self.refreshes_blocked() && self.stores.state.windows.can_place_window(window)
     }
 
     /// Rift places `window` at `frame` (a transfer, a cancelled drag's way back, an app rule):
@@ -412,9 +412,9 @@ impl Reactor {
             return;
         };
         let handle = app.handle.clone();
-        let request = self.state.tx.next_id();
+        let request = self.stores.state.tx.next_id();
         let desire = rift_core::Desire { window, frame, request };
-        let (plans, _) = self.state.arrange(Want::Arrange, vec![desire]);
+        let (plans, _) = self.stores.state.arrange(Want::Arrange, vec![desire]);
         for write in plans.into_iter().flat_map(|plan| {
             let (_, positions, frames) = plan.into_parts();
             positions.into_iter().chain(frames)
@@ -426,16 +426,16 @@ impl Reactor {
     /// Whether a write to `window` is held to `space`'s scrolling bounds (when its layout has
     /// them): a tiled window of the space's active workspace.
     fn in_scrolling_bounds(&self, window: WindowId, space: SpaceId) -> bool {
-        self.state.windows.workspace_for_window(window)
-            == self.layout_manager.layout_engine.workspaces().active_workspace(space)
-            && !self.layout_manager.layout_engine.is_window_floating(window)
+        self.stores.state.windows.workspace_for_window(window)
+            == self.stores.layout.layout_engine.workspaces().active_workspace(space)
+            && !self.stores.layout.layout_engine.is_window_floating(window)
     }
 
     /// Sends a write layout asked for: the model takes the window to be there from now on.
     pub(super) fn send_arranged(&mut self, write: Write) {
         let window = write.window();
         let Some(app) = self.app_manager.apps.get(&window.pid) else {
-            self.state.step(CoreEvent::Forget { window });
+            self.stores.state.step(CoreEvent::Forget { window });
             return;
         };
         let bounds = self
@@ -465,8 +465,8 @@ impl Reactor {
     /// Stops waiting for writes whose apps did not answer in time, and sends what waited
     /// behind them.
     pub(super) fn expire_writes(&mut self) {
-        let request = self.state.tx.next_id();
-        let queued = self.state.expire(request);
+        let request = self.stores.state.tx.next_id();
+        let queued = self.stores.state.expire(request);
         for write in queued {
             self.send_arranged(write);
         }
@@ -484,7 +484,7 @@ impl Reactor {
         let Some(app) = self.app_manager.apps.get(&pid) else {
             debug!(?pid, "Skipping layout update for app - app no longer exists");
             for write in positions.iter().chain(&frames) {
-                self.state.step(CoreEvent::Forget { window: write.window() });
+                self.stores.state.step(CoreEvent::Forget { window: write.window() });
             }
             return;
         };
@@ -520,12 +520,12 @@ impl Reactor {
             .map(|&(window, frame)| {
                 let constrained = bounds.is_some() && self.in_scrolling_bounds(window, space);
                 let key = (window.pid, constrained);
-                let request = *batches.entry(key).or_insert_with(|| self.state.tx.next_id());
+                let request = *batches.entry(key).or_insert_with(|| self.stores.state.tx.next_id());
                 keys.insert(request, key);
                 rift_core::Desire { window, frame, request }
             })
             .collect();
-        let (plans, any_desire_new) = self.state.arrange(want, desires);
+        let (plans, any_desire_new) = self.stores.state.arrange(want, desires);
         for plan in plans {
             let (pid, constrained) = keys[&plan.request()];
             self.send_batch(pid, bounds.filter(|_| constrained), plan);

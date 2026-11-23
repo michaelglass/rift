@@ -226,7 +226,7 @@ fn bound_scrolling_tiled_frames_to_screen(
 ) {
     for (wid, frame) in layout.iter_mut() {
         if !active_workspace_windows.contains(wid)
-            || reactor.layout_manager.layout_engine.is_window_floating(*wid)
+            || reactor.stores.layout.layout_engine.is_window_floating(*wid)
         {
             continue;
         }
@@ -257,12 +257,14 @@ impl LayoutManager {
                         .window_ids
                         .iter()
                         .map(|&window_id| {
-                            let info = reactor.state.windows.window(window_id).map(|w| &w.info);
+                            let info =
+                                reactor.stores.state.windows.window(window_id).map(|w| &w.info);
                             crate::actor::stack_line::TabInfo {
                                 window_id,
                                 title: info.map(|i| i.title.clone()).unwrap_or_default(),
                                 bundle_id: info.and_then(|i| i.bundle_id.clone()),
                                 window_server_id: reactor
+                                    .stores
                                     .state
                                     .windows
                                     .record(window_id)
@@ -304,14 +306,15 @@ impl LayoutManager {
             .layout
             .gaps
             .effective_for_display(screen.display_uuid_owned().as_deref());
-        let groups = reactor.layout_manager.layout_engine.collect_group_containers(
+        let groups = reactor.stores.layout.layout_engine.collect_group_containers(
             space,
             frame,
             &gaps,
             reactor.config.settings.ui.stack_line.reserve(),
         );
         let fullscreen = reactor
-            .layout_manager
+            .stores
+            .layout
             .layout_engine
             .active_workspace_for_space_has_fullscreen(space);
         Self::publish_stack_tabs(reactor, space, &groups, fullscreen, true);
@@ -349,7 +352,7 @@ impl LayoutManager {
         // Finish the logical scrolling viewport here, without queueing a second
         // animation behind the overview's own transition.
         for &(space, _) in &layout {
-            let engine = &mut reactor.layout_manager.layout_engine;
+            let engine = &mut reactor.stores.layout.layout_engine;
             if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
                 && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
                     &mut engine.workspaces_mut().workspaces[workspace].layout_system
@@ -368,7 +371,7 @@ impl LayoutManager {
         reactor: &mut Reactor,
         space_scope: Option<SpaceId>,
     ) -> LayoutResult {
-        if reactor.state.windows.tracked_window_count() == 0 {
+        if reactor.stores.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
         let all_screen_frames: Vec<CGRect> =
@@ -394,29 +397,31 @@ impl LayoutManager {
                 .gaps
                 .effective_for_display(display_uuid_opt.as_deref());
             reactor
-                .layout_manager
+                .stores
+                .layout
                 .layout_engine
                 .update_space_display(space, display_uuid_opt.as_deref());
             let mut layout =
-                reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
-                    &reactor.state.windows,
+                reactor.stores.layout.layout_engine.calculate_layout_with_virtual_workspaces(
+                    &reactor.stores.state.windows,
                     space,
                     frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic()),
+                    |wid| reactor.stores.state.windows.window(wid).map(|w| w.frame_monotonic()),
                     &all_screen_frames,
                 );
-            if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+            if reactor.stores.layout.layout_engine.active_layout_mode_at(space)
                 == LayoutMode::Scrolling
                 && let Some(bounds) =
                     ScrollingDisplayBounds::for_screen(frame, all_screen_frames.iter().copied())
             {
                 let active_workspace_windows: HashSet<WindowId> = reactor
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .workspaces()
-                    .windows_in_active_workspace(&reactor.state.windows, space)
+                    .windows_in_active_workspace(&reactor.stores.state.windows, space)
                     .into_iter()
                     .collect();
                 bound_scrolling_tiled_frames_to_screen(
@@ -464,12 +469,13 @@ impl LayoutManager {
                     .gaps
                     .effective_for_display(display_uuid.as_deref());
                 let stack_has_fullscreen = reactor
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .active_workspace_for_space_has_fullscreen(space);
                 let active_workspace_for_space_has_fullscreen =
                     active_space == Some(space) && stack_has_fullscreen;
-                let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
+                let group_infos = reactor.stores.layout.layout_engine.collect_group_containers(
                     space,
                     screen_frame,
                     &gaps,
@@ -510,8 +516,8 @@ impl LayoutManager {
                     AnimationManager::animate_layout(reactor, space, &desired, is_resize, true);
             }
             if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
-                && let Some(window) = reactor.layout_manager.layout_engine.focused_window()
-                && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                && let Some(window) = reactor.stores.layout.layout_engine.focused_window()
+                && reactor.stores.layout.layout_engine.active_layout_mode_at(space)
                     == LayoutMode::Scrolling
                 && let Some((_, frame)) = desired.frames().iter().find(|(wid, _)| *wid == window)
             {

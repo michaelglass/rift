@@ -44,10 +44,11 @@ impl Reactor {
         &mut self,
         space: crate::sys::screen::SpaceId,
     ) -> Vec<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.layout_manager
+        self.stores
+            .layout
             .layout_engine
             .workspaces_mut()
-            .listed_after_init(&mut self.state.windows, space)
+            .listed_after_init(&mut self.stores.state.windows, space)
             .iter()
             .map(|(id, _)| *id)
             .collect()
@@ -66,8 +67,8 @@ impl Reactor {
         space: crate::sys::screen::SpaceId,
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.layout_manager.layout_engine.workspaces().workspace_for_window(
-            &self.state.windows,
+        self.stores.layout.layout_engine.workspaces().workspace_for_window(
+            &self.stores.state.windows,
             space,
             wid,
         )
@@ -75,22 +76,24 @@ impl Reactor {
 
     /// Time passes: every unanswered write is past its deadline, and Rift stops waiting for it.
     pub fn test_expire_all_writes(&mut self) {
-        self.state.core.clock.advance(std::time::Duration::from_secs(1));
+        self.stores.state.core.clock.advance(std::time::Duration::from_secs(1));
         self.expire_writes();
     }
 
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
-        self.state
+        self.stores
+            .state
             .windows
             .server_id(wid)
             .expect("test window should have a WindowServer identity")
     }
 
     pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
-        self.layout_manager
+        self.stores
+            .layout
             .layout_engine
             .workspaces()
-            .windows_in_active_workspace(&self.state.windows, space)
+            .windows_in_active_workspace(&self.stores.state.windows, space)
     }
 
     pub fn test_workspace_windows(
@@ -98,8 +101,8 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        if self.layout_manager.layout_engine.workspaces()[workspace].space == space {
-            self.state.windows.workspace_windows(workspace)
+        if self.stores.layout.layout_engine.workspaces()[workspace].space == space {
+            self.stores.state.windows.workspace_windows(workspace)
         } else {
             Vec::new()
         }
@@ -112,8 +115,7 @@ impl Reactor {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
-        let Some(workspace) =
-            self.layout_manager.layout_engine.workspaces().active_workspace(space)
+        let Some(workspace) = self.stores.layout.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
@@ -126,8 +128,8 @@ impl Reactor {
         wid: WindowId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
-        self.layout_manager.layout_engine.workspaces_mut().assign_window_to_workspace(
-            &mut self.state.windows,
+        self.stores.layout.layout_engine.workspaces_mut().assign_window_to_workspace(
+            &mut self.stores.state.windows,
             space,
             wid,
             workspace,
@@ -139,16 +141,16 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
-        self.layout_manager.layout_engine.workspaces_mut().set_active_workspace(
-            &mut self.state.windows,
+        self.stores.layout.layout_engine.workspaces_mut().set_active_workspace(
+            &mut self.stores.state.windows,
             space,
             workspace,
         )
     }
 
     pub fn handle_test_workspace_command(&mut self, space: SpaceId, command: &LayoutCommand) {
-        let _ = self.layout_manager.layout_engine.handle_virtual_workspace_command(
-            &mut self.state.windows,
+        let _ = self.stores.layout.layout_engine.handle_virtual_workspace_command(
+            &mut self.stores.state.windows,
             space,
             command,
         );
@@ -164,8 +166,8 @@ impl Reactor {
     }
 
     pub fn mark_test_window_visible_in_space(&mut self, wsid: WindowServerId, space: SpaceId) {
-        self.state.windows.set_window_server_space(wsid, Some(space));
-        self.state.windows.mark_window_visible(wsid);
+        self.stores.state.windows.set_window_server_space(wsid, Some(space));
+        self.stores.state.windows.mark_window_visible(wsid);
     }
 
     pub fn discover_test_windows(
@@ -241,7 +243,7 @@ impl Reactor {
         is_manageable: bool,
     ) {
         self.track_test_window_server_info(wsid, wid.pid, frame);
-        self.state.windows.mark_window_visible(wsid);
+        self.stores.state.windows.mark_window_visible(wsid);
         self.insert_test_window(wid, wsid, space, frame, is_manageable);
     }
 
@@ -251,7 +253,7 @@ impl Reactor {
         pid: pid_t,
         frame: CGRect,
     ) {
-        self.state.windows.track_window_server_info(WindowServerInfo {
+        self.stores.state.windows.track_window_server_info(WindowServerInfo {
             id: wsid,
             pid,
             layer: 0,
@@ -269,8 +271,8 @@ impl Reactor {
         frame: CGRect,
         is_manageable: bool,
     ) {
-        self.state.windows.track_window_server_id(wsid, wid);
-        self.state.windows.set_window_server_space(wsid, space);
+        self.stores.state.windows.track_window_server_id(wsid, wid);
+        self.stores.state.windows.set_window_server_space(wsid, space);
         self.insert_test_window_state(wid, frame, Some(wsid), is_manageable);
     }
 
@@ -286,7 +288,7 @@ impl Reactor {
         } else {
             rift_core::lifecycle::Manageability::Unmanageable
         };
-        self.state.insert_window_as(
+        self.stores.state.insert_window_as(
             wid,
             {
                 let state = super::WindowState::from(WindowInfo {

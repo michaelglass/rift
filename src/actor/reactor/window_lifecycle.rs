@@ -23,12 +23,12 @@ impl Reactor {
         wid: WindowId,
         placement: Option<SpaceId>,
     ) {
-        let windows = &self.state.windows;
+        let windows = &self.stores.state.windows;
         let event = if windows.is_claimed(wid) {
             return;
         } else if windows.rule(wid) == Some(rift_core::lifecycle::Rule::Ignore) {
             if windows.workspace_for_window(wid).is_none()
-                && !self.layout_manager.layout_engine.is_window_floating(wid)
+                && !self.stores.layout.layout_engine.is_window_floating(wid)
             {
                 return;
             }
@@ -46,24 +46,25 @@ impl Reactor {
     /// The window is gone for good: out of every tracker, then out of the store (through the
     /// state, so a grip on it ends through the core).
     pub(super) fn retire_window(&mut self, wid: WindowId) {
-        if self.state.windows.record(wid).is_none() {
+        if self.stores.state.windows.record(wid).is_none() {
             return;
         }
-        self.state.windows.restore_window_from_native_fullscreen(wid);
-        let Some(record) = self.state.remove_window(wid) else {
+        self.stores.state.windows.restore_window_from_native_fullscreen(wid);
+        let Some(record) = self.stores.state.remove_window(wid) else {
             return;
         };
         let wsid = record.window_server_id();
         self.discard_window_activity(wid, wsid);
         self.replace_window_references(wid, None);
-        let retired = super::events::window::apply_window_retirement(&self.state.tx, (wid, wsid));
+        let retired =
+            super::events::window::apply_window_retirement(&self.stores.state.tx, (wid, wsid));
         self.apply_event_outcome(retired);
     }
 
     fn discard_window_activity(&mut self, _wid: WindowId, obsolete_native: Option<WindowServerId>) {
         if let Some(wsid) = obsolete_native {
             self.transient_focus.windows.remove(&wsid);
-            self.state.tx.remove(&wsid);
+            self.stores.state.tx.remove(&wsid);
         }
     }
 
@@ -76,7 +77,8 @@ impl Reactor {
         obsolete_native: Option<WindowServerId>,
     ) {
         self.discard_window_activity(old, obsolete_native);
-        self.layout_manager
+        self.stores
+            .layout
             .layout_engine
             .transfer_persistent_window_identity(old, replacement);
         self.replace_window_references(old, Some(replacement));
@@ -106,14 +108,14 @@ impl Reactor {
 
     /// Every window of an app that quit.
     pub(super) fn retire_app_windows(&mut self, pid: pid_t) {
-        let windows: Vec<_> = self.state.windows.window_ids_for_pid(pid).collect();
+        let windows: Vec<_> = self.stores.state.windows.window_ids_for_pid(pid).collect();
         for &wid in &windows {
-            let wsid = self.state.windows.record(wid).and_then(|r| r.window_server_id());
+            let wsid = self.stores.state.windows.record(wid).and_then(|r| r.window_server_id());
             self.discard_window_activity(wid, wsid);
             self.replace_window_references(wid, None);
         }
         self.transient_focus.windows.retain(|_, transient| transient.pid != pid);
-        self.state.remove_windows_for_app(pid);
+        self.stores.state.remove_windows_for_app(pid);
         self.send_layout_event(LayoutEvent::AppClosed(pid));
     }
 
@@ -121,7 +123,7 @@ impl Reactor {
     /// evidence or confirmed retirement, and sits out of layout meanwhile.
     pub(super) fn invalidate_window_identity(&mut self, wid: WindowId) -> EventOutcome {
         let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-        if self.state.windows.invalidate_ax_identity(wid) {
+        if self.stores.state.windows.invalidate_ax_identity(wid) {
             outcome.memberships.push((wid, None));
             outcome.refresh_window_notifications = true;
         }
@@ -138,9 +140,9 @@ impl Reactor {
         observed: Option<SpaceId>,
     ) -> EventOutcome {
         if let Some(space) = observed {
-            self.state.windows.note_fullscreen_exit(window, space);
+            self.stores.state.windows.note_fullscreen_exit(window, space);
         }
-        let Some(restored) = self.state.windows.restore_native_identity(wsid, window) else {
+        let Some(restored) = self.stores.state.windows.restore_native_identity(wsid, window) else {
             return EventOutcome::no_change();
         };
         let mut outcome = EventOutcome::no_change();
@@ -157,25 +159,25 @@ impl Reactor {
             NativeFullscreenTransition::ExitObserved(space) => space,
             _ => None,
         });
-        let engine = &mut self.layout_manager.layout_engine;
-        let Some((workspace, target)) = (self.state.windows.workspace_for_window(window))
+        let engine = &mut self.stores.layout.layout_engine;
+        let Some((workspace, target)) = (self.stores.state.windows.workspace_for_window(window))
             .or(restored.record.workspace)
             .and_then(|id| Some((id, engine.workspaces().workspace_space(id)?)))
         else {
             let Some(space) = native else { return outcome };
-            self.state.windows.restore_window_from_native_fullscreen(window);
+            self.stores.state.windows.restore_window_from_native_fullscreen(window);
             self.reassign_window_to_authoritative_space(window, space, false);
             return outcome;
         };
         engine.workspaces_mut().assign_window_to_workspace(
-            &mut self.state.windows,
+            &mut self.stores.state.windows,
             target,
             window,
             workspace,
         );
         // Ownership is recovered before releasing suspension to the existing placement and
         // projection paths. History never confirms physical placement.
-        self.state.windows.restore_window_from_native_fullscreen(window);
+        self.stores.state.windows.restore_window_from_native_fullscreen(window);
         let available = self.is_space_active(target);
         if native != Some(target) {
             outcome.absorb(self.request_window_transfer(window, target, None));
@@ -196,8 +198,13 @@ impl Reactor {
         space: SpaceId,
         window: WindowId,
     ) -> EventOutcome {
-        if self.state.windows.native_fullscreen_record_for_window_server_id(wsid).is_some()
-            || self.state.windows.native_fullscreen_record_for_window(window).is_some()
+        if self
+            .stores
+            .state
+            .windows
+            .native_fullscreen_record_for_window_server_id(wsid)
+            .is_some()
+            || self.stores.state.windows.native_fullscreen_record_for_window(window).is_some()
         {
             return self.restore_native_fullscreen(Some(wsid), window, Some(space));
         }
@@ -208,8 +215,8 @@ impl Reactor {
         // Appearance can restore participation, but is not an authoritative move.
         let owner = self.assigned_space_for_window_id(window).unwrap_or(space);
         let mut outcome = EventOutcome::no_change();
-        if self.is_space_active(owner) && self.state.windows.is_visible_admitted(window) {
-            if self.state.windows.workspace_for_window(window).is_some() {
+        if self.is_space_active(owner) && self.stores.state.windows.is_visible_admitted(window) {
+            if self.stores.state.windows.workspace_for_window(window).is_some() {
                 outcome.memberships.push((window, Some(owner)));
             } else {
                 outcome = outcome.with_created_window_finalization(window);
@@ -226,9 +233,10 @@ impl Reactor {
     ) {
         // A claim holds the destination; release replays this reconciliation. So does a hand
         // on the window, and a transfer that keeps its assignment.
-        if self.state.windows.is_claimed(wid)
-            || self.state.windows.drag_on(wid).is_some()
+        if self.stores.state.windows.is_claimed(wid)
+            || self.stores.state.windows.drag_on(wid).is_some()
             || self
+                .stores
                 .state
                 .windows
                 .record(wid)
@@ -237,8 +245,8 @@ impl Reactor {
         {
             return;
         }
-        if !self.state.windows.is_admitted(wid)
-            || self.state.windows.is_temporarily_unavailable(wid)
+        if !self.stores.state.windows.is_admitted(wid)
+            || self.stores.state.windows.is_temporarily_unavailable(wid)
         {
             self.reconcile_window_membership(wid, None);
             return;
@@ -252,23 +260,25 @@ impl Reactor {
             return;
         }
         if owner != Some(space) {
-            let departed_from = self.state.windows.workspace_for_window(wid);
-            let engine = &mut self.layout_manager.layout_engine;
+            let departed_from = self.stores.state.windows.workspace_for_window(wid);
+            let engine = &mut self.stores.layout.layout_engine;
             // A window a departure moved off this display goes back where it was.
-            let returning = engine.eviction_ordinal(&self.state.windows, wid, space);
+            let returning = engine.eviction_ordinal(&self.stores.state.windows, wid, space);
             // Resolve the destination before touching the source: a global-mode Space can own
             // no workspace, and then the current owner is kept.
-            engine.workspaces_mut().ensure_space_initialized(&mut self.state.windows, space);
+            engine
+                .workspaces_mut()
+                .ensure_space_initialized(&mut self.stores.state.windows, space);
             let workspaces = engine.workspaces();
             let remembered =
                 returning.and_then(|ordinal| workspaces.workspaces_on(space).nth(ordinal));
             let destination = if remembered.is_some() {
                 remembered
             } else if preserve_workspace_ordinal {
-                workspaces.workspace_at_window_ordinal(&self.state.windows, space, wid)
+                workspaces.workspace_at_window_ordinal(&self.stores.state.windows, space, wid)
             } else {
                 engine
-                    .ensure_active_workspace_info(&mut self.state.windows, space)
+                    .ensure_active_workspace_info(&mut self.stores.state.windows, space)
                     .map(|(id, _)| id)
             };
             let Some(workspace) = destination else {
@@ -280,9 +290,9 @@ impl Reactor {
                 return;
             };
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-            let engine = &mut self.layout_manager.layout_engine;
+            let engine = &mut self.stores.layout.layout_engine;
             if !engine.workspaces_mut().assign_window_to_workspace(
-                &mut self.state.windows,
+                &mut self.stores.state.windows,
                 space,
                 wid,
                 workspace,
@@ -296,7 +306,7 @@ impl Reactor {
                 && preserve_workspace_ordinal
                 && let Some(from) = departed_from
             {
-                engine.note_eviction(&self.state.windows, wid, from);
+                engine.note_eviction(&self.stores.state.windows, wid, from);
             }
         }
         if self.is_space_active(space) {

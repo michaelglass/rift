@@ -4030,7 +4030,7 @@ mod tests {
             }
         }
         let all: Vec<_> = store.catalog().collect();
-        let mut any = |draw: &mut dyn FnMut(u64) -> u64| {
+        let any = |draw: &mut dyn FnMut(u64) -> u64| {
             (draw(3) > 0).then(|| all[draw(all.len() as u64) as usize])
         };
         for space in spaces {

@@ -8,12 +8,13 @@ use crate::model::WindowStore;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 
-/// The layout engine and a window store joined to its workspace store, as a reactor takes them:
-/// the window store's shadow of the workspaces holds the workspace store's whole topology from
-/// the start, so neither can go live without the other.
+/// The one owner of the reactor's domain state: the layout engine (with its workspace store)
+/// and the [`RiftState`] (the window store, the reconciler, the pending store). Built joined: the
+/// window store's shadow of the workspaces holds the workspace store's whole topology from the
+/// start, so neither can go live without the other.
 pub struct Stores {
-    pub(crate) layout_engine: crate::layout_engine::LayoutEngine,
-    pub(crate) windows: WindowStore,
+    pub(crate) layout: crate::actor::reactor::managers::LayoutManager,
+    pub(crate) state: RiftState,
 }
 
 impl Stores {
@@ -21,7 +22,13 @@ impl Stores {
     /// workspace store.
     pub fn joining(layout_engine: crate::layout_engine::LayoutEngine) -> Stores {
         let windows = WindowStore::joining(layout_engine.workspaces());
-        Stores { layout_engine, windows }
+        Stores {
+            layout: crate::actor::reactor::managers::LayoutManager { layout_engine },
+            state: RiftState {
+                windows,
+                ..RiftState::default()
+            },
+        }
     }
 
     /// As [`crate::layout_engine::LayoutEngine::finish_loading`], telling the window store.
@@ -30,8 +37,8 @@ impl Stores {
         virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
         layout_settings: &crate::common::config::LayoutSettings,
     ) -> Result<(), String> {
-        self.layout_engine.finish_loading(
-            &mut self.windows,
+        self.layout.layout_engine.finish_loading(
+            &mut self.state.windows,
             virtual_workspace_config,
             layout_settings,
         )

@@ -160,7 +160,7 @@ impl IpcRequestHandler {
         };
         let owner = ClaimOwner(port);
         let result = change(&mut reactor, owner);
-        if reactor.state.windows.owner_claims(owner).is_empty() {
+        if reactor.stores.state.windows.owner_claims(owner).is_empty() {
             self.server_state.set_lease(port, PortLease::Claims, false);
         }
         match result {

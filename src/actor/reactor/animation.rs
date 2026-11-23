@@ -516,8 +516,12 @@ impl Reactor {
     /// takes it to be, and its animation settles there.
     fn settle_stopped(&mut self, stopped: Vec<(WindowId, CGRect, TransactionId)>) {
         for (window, at, request) in stopped {
-            if self.state.windows.window(window).is_some() {
-                self.state.step(CoreEvent::AnimationStopped { window, request, at: Some(at) });
+            if self.stores.state.windows.window(window).is_some() {
+                self.stores.state.step(CoreEvent::AnimationStopped {
+                    window,
+                    request,
+                    at: Some(at),
+                });
             }
         }
     }
@@ -567,7 +571,8 @@ impl Reactor {
             let state = camera.state.lock();
             let identity = &camera.identity;
             if let Some(ws) = self
-                .layout_manager
+                .stores
+                .layout
                 .layout_engine
                 .workspaces_mut()
                 .workspaces
@@ -594,7 +599,7 @@ impl Reactor {
                 };
                 // The camera moves the window; its size is what the app has.
                 if let Some(frame) = frame
-                    && let Some(window) = self.state.windows.window(wid)
+                    && let Some(window) = self.stores.state.windows.window(wid)
                 {
                     let known = window.frame_monotonic();
                     let frame = CGRect::new(frame.origin, known.size);
@@ -617,11 +622,11 @@ impl Reactor {
         }
         drop(control);
         for (window, frame) in moved {
-            self.state.step(CoreEvent::Seen { window, frame });
+            self.stores.state.step(CoreEvent::Seen { window, frame });
         }
         for space in completed {
             if let Some(camera) = self.presentations.remove(&space) {
-                self.state.animation_ended(camera.request);
+                self.stores.state.animation_ended(camera.request);
             }
             if self
                 .viewport_gesture
@@ -646,7 +651,7 @@ impl Reactor {
                 Vec::new()
             };
             self.settle_stopped(frames);
-            self.state.animation_ended(camera.request);
+            self.stores.state.animation_ended(camera.request);
             if let Some(tx) = &self.animation_tx {
                 let _ = tx.send(Message::StopCamera(space));
             }
@@ -655,11 +660,11 @@ impl Reactor {
 
     pub(super) fn retire_presentations(&mut self) {
         let invalid: Vec<_> = self.presentations.iter().filter_map(|(space, camera)| {
-            let valid = self.layout_manager.layout_engine.workspaces().active_layout_for_space(*space)
+            let valid = self.stores.layout.layout_engine.workspaces().active_layout_for_space(*space)
                 == Some((camera.identity.workspace, camera.identity.layout))
                 && self.active_spaces.contains(space)
                 && self.space_state.screen_by_space(*space).is_some()
-                && self.layout_manager.layout_engine.workspaces().workspaces.get(camera.identity.workspace)
+                && self.stores.layout.layout_engine.workspaces().workspaces.get(camera.identity.workspace)
                     .is_some_and(|ws| matches!(&ws.layout_system, LayoutSystemKind::Scrolling(system) if system.contains_layout(camera.identity.layout)))
                 && matches!(self.mission_control_manager.mission_control_state, super::MissionControlState::Inactive);
             (!valid).then_some(*space)
@@ -688,15 +693,16 @@ impl Reactor {
             screen_frames.iter().copied(),
         );
         let (workspace, layout) =
-            self.layout_manager.layout_engine.workspaces().active_layout_for_space(space)?;
+            self.stores.layout.layout_engine.workspaces().active_layout_for_space(space)?;
         let LayoutSystemKind::Scrolling(system) =
-            &self.layout_manager.layout_engine.workspaces()[workspace].layout_system
+            &self.stores.layout.layout_engine.workspaces()[workspace].layout_system
         else {
             return None;
         };
         let (mut presentation, frames) = system.presentation(layout)?;
         let previous = self.presentations.remove(&space);
-        let request = previous.as_ref().map_or_else(|| self.state.tx.next_id(), |p| p.request);
+        let request =
+            previous.as_ref().map_or_else(|| self.stores.state.tx.next_id(), |p| p.request);
         let previous = previous.and_then(|p| p.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
@@ -718,7 +724,7 @@ impl Reactor {
                 if self.owner(wid) == Owner::User {
                     return None;
                 }
-                let window = self.state.windows.window(wid)?;
+                let window = self.stores.state.windows.window(wid)?;
                 let app = self.app_manager.apps.get(&wid.pid)?;
                 let frame = control.as_ref().map_or(window.frame_monotonic(), |control| {
                     control.frame(wid, window.frame_monotonic())
@@ -753,7 +759,7 @@ impl Reactor {
                     rift_core::Desire { window: w.wid, frame, request }
                 })
                 .collect();
-            let animated = self.state.animate(desires);
+            let animated = self.stores.state.animate(desires);
             let written: HashSet<_> = animated.writes.iter().map(|write| write.window()).collect();
             let animating: HashSet<_> = animated.animations.iter().map(|&(wid, ..)| wid).collect();
             windows.retain(|w| !written.contains(&w.wid));
@@ -773,9 +779,9 @@ impl Reactor {
             // under the request, outside the core, which is told so (reads stamped with it are
             // Rift's own).
             for window in &windows {
-                self.state.step(CoreEvent::SentOutside { window: window.wid, request });
+                self.stores.state.step(CoreEvent::SentOutside { window: window.wid, request });
                 if let Some(wsid) = window.wsid {
-                    self.state.tx.sent(wsid, request);
+                    self.stores.state.tx.sent(wsid, request);
                 }
             }
         }
@@ -836,7 +842,7 @@ pub(super) fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
 ) -> Option<super::managers::ScrollingDisplayBounds> {
-    if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+    if reactor.stores.layout.layout_engine.active_layout_mode_at(space)
         != crate::common::config::LayoutMode::Scrolling
     {
         return None;
@@ -1107,9 +1113,9 @@ impl AnimationManager {
         let layout = desired.frames();
         // The animated path's own bookkeeping still names the dragged window: a replaced
         // animation must not carry it over.
-        let dragged = reactor.state.windows.drag().map(|(window, _)| window);
+        let dragged = reactor.stores.state.windows.drag().map(|(window, _)| window);
         reactor.retire_presentations();
-        let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
+        let setting = reactor.stores.layout.layout_engine.layout_specific_animate_settings(space);
         let animate_camera = allow_animation
             && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
@@ -1131,7 +1137,7 @@ impl AnimationManager {
             return reactor.arrange_frames(space, &frames, Want::Arrange) || camera;
         }
         let Some(active_ws) =
-            reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+            reactor.stores.layout.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
@@ -1153,7 +1159,7 @@ impl AnimationManager {
             anim.mark_handled(dragged);
         }
 
-        let request = reactor.state.tx.next_id();
+        let request = reactor.stores.state.tx.next_id();
         let mut hidden = Vec::new();
         let mut desires = Vec::new();
         for &(wid, target_frame) in layout {
@@ -1162,7 +1168,7 @@ impl AnimationManager {
                 anim.mark_handled(wid);
                 continue;
             }
-            if reactor.state.windows.workspace_for_window(wid) != Some(active_ws) {
+            if reactor.stores.state.windows.workspace_for_window(wid) != Some(active_ws) {
                 // A hidden window has nothing to animate: an ordinary desire.
                 anim.mark_handled(wid);
                 hidden.push((wid, target_frame));
@@ -1178,7 +1184,7 @@ impl AnimationManager {
                 request,
             });
         }
-        let animated = reactor.state.animate(desires);
+        let animated = reactor.stores.state.animate(desires);
         // A window the core writes instead is no longer presented by an older animation.
         reactor.stop_window_presentations(animated.writes.iter().map(|w| w.window()).collect());
         for write in animated.writes {
@@ -1192,7 +1198,7 @@ impl AnimationManager {
                 continue;
             };
             let handle = app_state.handle.with_scrolling_bounds(
-                bounds.filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
+                bounds.filter(|_| !reactor.stores.layout.layout_engine.is_window_floating(wid)),
             );
             anim.add_window(&handle, wid, from, to, request);
         }
@@ -1226,7 +1232,7 @@ impl AnimationManager {
             };
             // Applied at once instead of animated: the animation is over as soon as it began.
             if !presented {
-                reactor.state.animation_ended(request);
+                reactor.stores.state.animation_ended(request);
             }
         }
 
@@ -1255,7 +1261,7 @@ impl AnimationManager {
     /// Restore native geometry after a display change invalidated cached frames.
     pub fn reapply_layout(reactor: &mut Reactor, space: SpaceId, desired: &Desired) -> bool {
         reactor.cancel_window_presentations(desired.windows());
-        reactor.state.step(CoreEvent::Distrust { windows: desired.windows() });
+        reactor.stores.state.step(CoreEvent::Distrust { windows: desired.windows() });
         reactor.arrange_frames(space, desired.frames(), Want::Arrange)
     }
 }
@@ -2459,7 +2465,7 @@ mod tests {
             );
             assert!(window.frame.origin.y >= screens[target].origin.y);
             assert!(window.frame.origin.y < screens[target].max().y);
-            let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+            let wsid = reactor.stores.state.windows.window(wid).unwrap().info.sys_id.unwrap();
             reactor.handle_event(Event::WindowServerAppeared(
                 wsid,
                 spaces[source],
@@ -2468,7 +2474,7 @@ mod tests {
             assert_eq!(reactor.assigned_space_for_window_id(wid), Some(spaces[target]));
             for (index, space) in spaces.into_iter().enumerate() {
                 let gaps = reactor.config.settings.layout.gaps.clone();
-                let layout = reactor.layout_manager.layout_engine.calculate_layout(
+                let layout = reactor.stores.layout.layout_engine.calculate_layout(
                     space,
                     screens[index],
                     &gaps,

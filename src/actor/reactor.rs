@@ -10,7 +10,7 @@ mod events;
 mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
-mod managers;
+pub(crate) mod managers;
 mod native;
 use native::Native;
 mod native_tabs;
@@ -102,7 +102,6 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::expecting::{Echo, Expecting};
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
-use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
@@ -563,8 +562,9 @@ pub struct Reactor {
     pub one_space: bool,
     pub(crate) binding_mode: String,
     app_manager: managers::AppManager,
-    layout_manager: managers::LayoutManager,
-    pub(crate) state: RiftState,
+    /// The one owner of the domain state: the layout engine and the window store, the
+    /// reconciler and the pending store ([`crate::model::Stores`]).
+    pub(crate) stores: crate::model::Stores,
     space_state: ForwardedSpaceState,
     // Presentation geometry survives empty/dormant topology samples; it is not ownership evidence.
     last_screen_frames: HashMap<SpaceId, CGRect>,
@@ -647,9 +647,9 @@ impl Reactor {
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
     ) -> Reactor {
-        let crate::model::Stores { layout_engine, windows } = stores;
+        let mut stores = stores;
         // FIXME: Remove apps that are no longer running from restored state.
-        record.start(&config, &layout_engine);
+        record.start(&config, &stores.layout.layout_engine);
         let (raise_manager_tx, _rx) = actor::channel();
         let (window_notify_tx, window_tx_store) = match window_notify {
             Some((tx, store)) => (Some(tx), store),
@@ -660,11 +660,9 @@ impl Reactor {
             one_space,
             binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
-            layout_manager: managers::LayoutManager { layout_engine },
-            state: RiftState {
-                windows,
-                tx: window_tx_store.clone(),
-                ..RiftState::default()
+            stores: {
+                stores.state.tx = window_tx_store.clone();
+                stores
             },
             space_state: ForwardedSpaceState::default(),
             last_screen_frames: HashMap::default(),
@@ -782,26 +780,26 @@ impl Reactor {
     }
 
     fn window_needs_inventory(&self, wid: WindowId) -> bool {
-        self.state.windows.window(wid).is_none_or(|window| {
+        self.stores.state.windows.window(wid).is_none_or(|window| {
             // A rejected window is stale only if it now passes the normal
             // eligibility checks. Minimized, rule-excluded, and heuristic-
             // excluded windows must not trigger an AX scan just for focus.
-            !self.state.windows.is_admitted_state(wid)
-                && self.state.windows.manage_override(wid) != Some(false)
+            !self.stores.state.windows.is_admitted_state(wid)
+                && self.stores.state.windows.manage_override(wid) != Some(false)
                 && utils::compute_window_info_manageability(&window.info, |wsid| {
-                    self.state.windows.get_window_server_info(wsid)
+                    self.stores.state.windows.get_window_server_info(wsid)
                 })
         })
     }
 
     fn app_needs_window_inventory(&self, pid: pid_t) -> bool {
-        let mut windows = self.state.windows.window_ids_for_pid(pid).peekable();
+        let mut windows = self.stores.state.windows.window_ids_for_pid(pid).peekable();
         if windows.peek().is_none() {
             return true;
         }
         let mut has_stale_window = false;
         for wid in windows {
-            if self.state.windows.is_admitted_state(wid) {
+            if self.stores.state.windows.is_admitted_state(wid) {
                 return false;
             }
             has_stale_window |= self.window_needs_inventory(wid);
@@ -906,9 +904,7 @@ impl Reactor {
         let size = screen.frame.size;
         let display = screen.display_uuid_owned();
         self.send_layout_event(LayoutEvent::SpaceExposed(space, size));
-        self.layout_manager
-            .layout_engine
-            .update_space_display(space, display.as_deref());
+        self.stores.layout.layout_engine.update_space_display(space, display.as_deref());
     }
 
     fn recompute_and_set_active_spaces(&mut self, spaces: &[Option<SpaceId>]) {
@@ -965,10 +961,14 @@ impl Reactor {
                 .iter()
                 .map(|(&wsid, &space)| (wsid, space)),
             activated,
-            |wsid| tracked.ask(wsid, |wsid| self.state.windows.tracked_window_id(wsid)),
+            |wsid| tracked.ask(wsid, |wsid| self.stores.state.windows.tracked_window_id(wsid)),
             |wid| {
                 reconcilable.ask(wid, |wid| {
-                    self.state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
+                    self.stores
+                        .state
+                        .windows
+                        .window(wid)
+                        .is_some_and(WindowState::can_reconcile_admission)
                 })
             },
             |wid| wid.pid,
@@ -1019,7 +1019,7 @@ impl Reactor {
     }
 
     fn defer_native_space_move(&mut self, wsid: WindowServerId, space: SpaceId) -> bool {
-        let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
+        let Some(wid) = self.stores.state.windows.tracked_window_id(wsid) else {
             return false;
         };
         if self.is_known_fullscreen_window(wsid)
@@ -1027,7 +1027,8 @@ impl Reactor {
         {
             return false;
         }
-        self.state
+        self.stores
+            .state
             .windows
             .observe_native_space(wsid, space, self.is_space_active(space));
         self.request_space_snapshot();
@@ -1063,8 +1064,8 @@ impl Reactor {
                 (wsid, if pending { observed } else { resolved })
             })
             .collect();
-        let missing = self.state.windows.reconcile_native_snapshot(
-            self.layout_manager.layout_engine.workspaces(),
+        let missing = self.stores.state.windows.reconcile_native_snapshot(
+            self.stores.layout.layout_engine.workspaces(),
             &native,
             &self.active_spaces,
         );
@@ -1091,12 +1092,16 @@ impl Reactor {
                 Missing::Keep => continue,
                 Missing::Fullscreen(fullscreen) => {
                     let user = self
+                        .stores
                         .state
                         .windows
                         .tracked_window_id(wsid)
                         .and_then(|wid| self.assigned_space_for_window_id(wid));
-                    if let Some(wid) =
-                        self.state.windows.observe_native_fullscreen(wsid, fullscreen, user, None)
+                    if let Some(wid) = self
+                        .stores
+                        .state
+                        .windows
+                        .observe_native_fullscreen(wsid, fullscreen, user, None)
                     {
                         self.send_layout_event(LayoutEvent::WindowSuspended(wid));
                     }
@@ -1104,8 +1109,8 @@ impl Reactor {
                 }
                 Missing::Absent { inactive_target } => inactive_target,
             };
-            if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
-                self.layout_manager.layout_engine.workspaces(),
+            if let Some((wid, target)) = self.stores.state.windows.reconcile_native_absence(
+                self.stores.layout.layout_engine.workspaces(),
                 wsid,
                 &self.active_spaces,
                 inactive_target,
@@ -1128,12 +1133,12 @@ impl Reactor {
         // Confirming a transfer is finding nothing owed: the window is on its workspace's
         // Space, by Rift's move or because the user's placement became its assignment.
         for &(wsid, observed) in &active_windows {
-            if let Some(window) = self.state.windows.tracked_window_id(wsid)
+            if let Some(window) = self.stores.state.windows.tracked_window_id(wsid)
                 && self.space_state.membership_complete
                 && observed.is_some()
                 && observed == self.assigned_space_for_window_id(window)
             {
-                self.state.windows.end_transfer(window);
+                self.stores.state.windows.end_transfer(window);
             }
         }
     }
@@ -1145,6 +1150,7 @@ impl Reactor {
 
     fn clear_pending_hidden_window_targets(&mut self) {
         let hidden: Vec<_> = self
+            .stores
             .state
             .windows
             .iter_windows()
@@ -1154,7 +1160,7 @@ impl Reactor {
         // Whatever a parked window answered before the topology changed no longer holds. A
         // write still with its app does: the core keeps it, and sends nothing equal over it.
         if !hidden.is_empty() {
-            self.state.step(CoreEvent::Distrust { windows: hidden });
+            self.stores.state.step(CoreEvent::Distrust { windows: hidden });
         }
     }
 
@@ -1184,7 +1190,7 @@ impl Reactor {
     /// The modes Rift is in, read from the facts now.
     fn modes(&self) -> modes::Modes<WindowId> {
         modes::Modes {
-            pointer: self.state.windows.pointer(),
+            pointer: self.stores.state.windows.pointer(),
             menu: match self.menu_manager.menu_state {
                 MenuState::Open(_) => modes::Menu::Open,
                 MenuState::Closed => modes::Menu::Closed,
@@ -1203,7 +1209,12 @@ impl Reactor {
             } else {
                 modes::Viewport::Free
             },
-            focus_claim: if self.state.windows.suppresses_focus_follows_mouse(self.main_window()) {
+            focus_claim: if self
+                .stores
+                .state
+                .windows
+                .suppresses_focus_follows_mouse(self.main_window())
+            {
                 modes::FocusClaim::PausesHover
             } else {
                 modes::FocusClaim::Free
@@ -1244,7 +1255,7 @@ impl Reactor {
 
     #[cfg(test)]
     fn user_is_dragging(&self) -> bool {
-        matches!(self.state.windows.pointer(), Pointer::Dragging(_))
+        matches!(self.stores.state.windows.pointer(), Pointer::Dragging(_))
     }
 
     fn is_native_mission_control_active(&self) -> bool {
@@ -1283,7 +1294,7 @@ impl Reactor {
         let mut deadline_timer = crate::sys::timer::Timer::manual();
         let mut armed = None;
         loop {
-            let deadline = reactor.borrow_mut().state.core.next_deadline();
+            let deadline = reactor.borrow_mut().stores.state.core.next_deadline();
             if deadline != armed {
                 armed = deadline;
                 deadline_timer.set_next_fire(armed.map_or(Duration::MAX, |deadline| {
@@ -1328,7 +1339,7 @@ impl Reactor {
                 // The tap publishes every mouse drag (text selection too); only a window drag
                 // follows it.
                 if let Some(motion) = motion
-                    && reactor.state.windows.drag().is_some()
+                    && reactor.stores.state.windows.drag().is_some()
                 {
                     reactor.handle_loop_event(Event::DragMotion(motion));
                 }
@@ -1414,10 +1425,10 @@ impl Reactor {
             }
             Event::MouseMoved(wsid) => {
                 self.wake = modes::Wake::UserPresent;
-                if let Some(window) = self.state.windows.tracked_window_id(wsid)
+                if let Some(window) = self.stores.state.windows.tracked_window_id(wsid)
                     && (self.main_window() == Some(window)
                         || crate::sys::app::is_own_window_focused(window))
-                    && self.layout_manager.layout_engine.focused_window() == Some(window)
+                    && self.stores.layout.layout_engine.focused_window() == Some(window)
                 {
                     if let Some(space) = self.assigned_space_for_window_id(window)
                         && self.is_space_active(space)
@@ -1439,7 +1450,7 @@ impl Reactor {
         self.handle_event(event);
         #[cfg(any(test, debug_assertions))]
         if !high_frequency {
-            self.state.windows.debug_assert_invariants();
+            self.stores.state.windows.debug_assert_invariants();
         }
     }
 
@@ -1610,15 +1621,15 @@ impl Reactor {
     /// must agree. A disagreement is a write that bypassed the store's setters. Tests fail on
     /// it; a running Rift logs it (`lifecycle-divergence:`, at debug) and goes on.
     fn check_lifecycle_shadow(&self) {
-        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let workspaces = self.stores.layout.layout_engine.workspaces();
         #[cfg(test)]
         {
-            let divergences = self.state.windows.lifecycle_divergences();
+            let divergences = self.stores.state.windows.lifecycle_divergences();
             assert!(divergences.is_empty(), "lifecycle-divergence: {divergences:?}");
             let divergences =
-                workspaces.workspace_divergences(self.state.windows.core_workspaces());
+                workspaces.workspace_divergences(self.stores.state.windows.core_workspaces());
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
-            let divergences = self.state.windows.ownership_divergences();
+            let divergences = self.stores.state.windows.ownership_divergences();
             assert!(divergences.is_empty(), "workspace-divergence: {divergences:?}");
             // A query never initialises a Space (`WorkspaceStore::list_workspaces`): every Space
             // a query can list, each active screen's, is initialised by the events that bring it.
@@ -1633,20 +1644,21 @@ impl Reactor {
         }
         #[cfg(not(test))]
         if tracing::enabled!(tracing::Level::DEBUG) {
-            for divergence in self.state.windows.lifecycle_divergences() {
+            for divergence in self.stores.state.windows.lifecycle_divergences() {
                 debug!(
                     ?divergence,
                     "lifecycle-divergence: store and core disagree on admission"
                 );
             }
-            for divergence in workspaces.workspace_divergences(self.state.windows.core_workspaces())
+            for divergence in
+                workspaces.workspace_divergences(self.stores.state.windows.core_workspaces())
             {
                 debug!(
                     ?divergence,
                     "workspace-divergence: store and core disagree on workspaces"
                 );
             }
-            for divergence in self.state.windows.ownership_divergences() {
+            for divergence in self.stores.state.windows.ownership_divergences() {
                 debug!(
                     ?divergence,
                     "workspace-divergence: store and core disagree on a window's ownership"
@@ -1660,7 +1672,7 @@ impl Reactor {
 
     fn handle_event_inner(&mut self, event: Event) {
         if let Event::WindowFrameChanged(wid, ..) = &event
-            && self.state.windows.is_gripped(*wid)
+            && self.stores.state.windows.is_gripped(*wid)
         {
             self.release_if_missed();
         }
@@ -1694,7 +1706,12 @@ impl Reactor {
         }
         self.retire_presentations();
         // Mission Control shows thumbnails, not the windows a preview would outline.
-        let held = self.state.windows.drag().filter(|_| !self.is_native_mission_control_active());
+        let held = self
+            .stores
+            .state
+            .windows
+            .drag()
+            .filter(|_| !self.is_native_mission_control_active());
         self.drag_manager.sync_preview(held);
     }
 
@@ -1708,8 +1725,8 @@ impl Reactor {
         let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
         let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
         let outcome = command_workflow::handle_command_layout(
-            &mut self.state,
-            &mut self.layout_manager,
+            &mut self.stores.state,
+            &mut self.stores.layout,
             &mut self.workspace_switch_manager,
             command_workflow::LayoutCommandPayload {
                 command,
@@ -1744,10 +1761,12 @@ impl Reactor {
             let windows = match cancelled {
                 Cancelled::Window(wid) => vec![wid],
                 Cancelled::Closed(wsid) => {
-                    self.state.windows.tracked_window_id(wsid).into_iter().collect()
+                    self.stores.state.windows.tracked_window_id(wsid).into_iter().collect()
                 }
-                Cancelled::App(pid) => self.state.windows.window_ids_for_pid(pid).collect(),
-                Cancelled::All => self.state.windows.iter_windows().map(|(wid, _)| wid).collect(),
+                Cancelled::App(pid) => self.stores.state.windows.window_ids_for_pid(pid).collect(),
+                Cancelled::All => {
+                    self.stores.state.windows.iter_windows().map(|(wid, _)| wid).collect()
+                }
             };
             self.cancel_window_presentations(windows);
         }
@@ -1867,13 +1886,14 @@ impl Reactor {
                     // AX admission can leave the previous main window cached.
                     // Some apps leave AXMainWindow unset, so a sole admitted
                     // window is the only target Rift can follow.
-                    let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
-                        None
-                    } else {
-                        self.main_window_tracker
-                            .app_main_window(pid)
-                            .or_else(|| self.sole_admitted_window(pid))
-                    };
+                    let activation_window =
+                        if self.stores.state.windows.has_pending_window_for_pid(pid) {
+                            None
+                        } else {
+                            self.main_window_tracker
+                                .app_main_window(pid)
+                                .or_else(|| self.sole_admitted_window(pid))
+                        };
                     if let Some(window) = activation_window {
                         outcome.absorb(self.auto_switch_to_window_workspace(window));
                     }
@@ -1915,7 +1935,7 @@ impl Reactor {
                     // fast path as well, without rescanning excluded windows.
                     self.request_window_inventory(window.pid);
                 }
-                if self.state.windows.contains_window(window)
+                if self.stores.state.windows.contains_window(window)
                     && self.is_space_active(reported_space)
                     && self.space_state.screen_by_space(reported_space).is_some()
                 {
@@ -1931,14 +1951,14 @@ impl Reactor {
                         }
                     }
                 }
-                if self.layout_manager.layout_engine.focused_window() == Some(window) {
+                if self.stores.layout.layout_engine.focused_window() == Some(window) {
                     LayoutManager::refresh_stack_tabs(self, reported_space);
                     if let Some(input_tx) = &self.communication_manager.input_tx {
                         _ = input_tx.send(crate::actor::input::Request::EnforceHidden);
                     }
                     return Ok(EventOutcome::default());
                 }
-                if !self.state.windows.contains_window(window) {
+                if !self.stores.state.windows.contains_window(window) {
                     return Ok(EventOutcome::default());
                 }
                 return Ok(if self.is_space_active(reported_space) {
@@ -1998,8 +2018,8 @@ impl Reactor {
                 // a frame observation like any other, and it comes before anything below
                 // decides where the window belongs.
                 let moved = new.iter().find_map(|(wid, info)| {
-                    let known = self.state.windows.window(*wid)?;
-                    (self.state.windows.is_gripped(*wid)
+                    let known = self.stores.state.windows.window(*wid)?;
+                    (self.stores.state.windows.is_gripped(*wid)
                         && !known.frame_monotonic().same_as(info.frame))
                     .then_some((*wid, info.frame))
                 });
@@ -2029,8 +2049,8 @@ impl Reactor {
             Event::WindowCreated(wid, mut window, ws_info) => {
                 self.replace_native_tab(wid, &mut window);
                 let mut outcome = window_workflow::handle_window_created(
-                    &mut self.state,
-                    &mut self.layout_manager,
+                    &mut self.stores.state,
+                    &mut self.stores.layout,
                     window_workflow::WindowCreatedPayload {
                         window_id: wid,
                         window,
@@ -2054,24 +2074,24 @@ impl Reactor {
                 }
 
                 let mut outcome = window_workflow::handle_window_destroyed(
-                    &mut self.state,
+                    &mut self.stores.state,
                     window_workflow::WindowDestroyedPayload { window: wid },
                 );
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
             Event::WindowClosed(wsid) => {
-                let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
-                    self.state.windows.mark_window_hidden(wsid);
+                let Some(wid) = self.stores.state.windows.tracked_window_id(wsid) else {
+                    self.stores.state.windows.mark_window_hidden(wsid);
                     return Ok(EventOutcome::default());
                 };
                 if self.retain_native_tab_slot_on_departure(wid) {
                     return Ok(EventOutcome::default());
                 }
                 // This is a native window close, unlike AX identity destruction.
-                self.state.windows.restore_window_from_native_fullscreen(wid);
+                self.stores.state.windows.restore_window_from_native_fullscreen(wid);
                 let mut outcome = window_workflow::handle_window_destroyed(
-                    &mut self.state,
+                    &mut self.stores.state,
                     window_workflow::WindowDestroyedPayload { window: wid },
                 );
                 outcome.focused_window = raised_window;
@@ -2082,7 +2102,9 @@ impl Reactor {
                 // WindowServer hidden/unhidden means ordered out/in, not AX
                 // minimization or application hiding. Keep lifecycle suspension
                 // independent of this native visibility evidence.
-                if let Some(pid) = self.state.windows.observe_native_visibility(wsid, visible) {
+                if let Some(pid) =
+                    self.stores.state.windows.observe_native_visibility(wsid, visible)
+                {
                     self.request_window_inventory(pid);
                 }
                 return Ok(EventOutcome::default());
@@ -2114,7 +2136,7 @@ impl Reactor {
                 {
                     return Ok(EventOutcome::no_change());
                 }
-                let tracked_window = self.state.windows.tracked_window_id(wsid);
+                let tracked_window = self.stores.state.windows.tracked_window_id(wsid);
                 if matches!(kind, SpaceEventKind::User)
                     && tracked_window
                         .is_some_and(|wid| self.retain_native_tab_slot_on_departure(wid))
@@ -2133,7 +2155,7 @@ impl Reactor {
                         .flatten(),
                 };
                 return topology_workflow::handle_window_server_destroyed(
-                    &mut self.state,
+                    &mut self.stores.state,
                     topology_workflow::WindowServerLifecyclePayload {
                         window_server_id: wsid,
                         space: sid,
@@ -2147,7 +2169,7 @@ impl Reactor {
                 let queried = window_server::get_window_with_transient(wsid);
                 if let Some((info, native)) = queried {
                     let space = resolved.unwrap_or(sid);
-                    let windows = &self.state.windows;
+                    let windows = &self.stores.state.windows;
                     self.transient_focus.native(info.id, info.pid, space, native);
                     if !native
                         && let Some(wid) =
@@ -2158,7 +2180,7 @@ impl Reactor {
                     }
                     self.transient_focus.visibility(wsid, true);
                 }
-                if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                if let Some(wid) = self.stores.state.windows.tracked_window_id(wsid) {
                     self.sync_native_admission(wid);
                 }
                 if matches!(kind, SpaceEventKind::User)
@@ -2167,7 +2189,7 @@ impl Reactor {
                 {
                     return Ok(EventOutcome::no_change());
                 }
-                let tracked_window = self.state.windows.tracked_window_id(wsid);
+                let tracked_window = self.stores.state.windows.tracked_window_id(wsid);
                 let last_known_user_space = tracked_window
                     .and_then(|window| self.best_space_for_window_id(window))
                     .or_else(|| self.space_state.iter_known_spaces().next());
@@ -2191,7 +2213,7 @@ impl Reactor {
                     running_app_info,
                 };
                 return topology_workflow::handle_window_server_appeared(
-                    &mut self.state,
+                    &mut self.stores.state,
                     topology_workflow::WindowServerLifecyclePayload {
                         window_server_id: wsid,
                         space: sid,
@@ -2201,13 +2223,13 @@ impl Reactor {
                 );
             }
             Event::WindowMinimized(wid) | Event::WindowDeminiaturized(wid) => {
-                let was_unavailable = self.state.windows.is_temporarily_unavailable(wid);
+                let was_unavailable = self.stores.state.windows.is_temporarily_unavailable(wid);
                 let mut outcome = window_workflow::handle_window_visibility_changed(
-                    &mut self.state,
+                    &mut self.stores.state,
                     wid,
                     matches!(event, Event::WindowDeminiaturized(_)),
                 )?;
-                if was_unavailable != self.state.windows.is_temporarily_unavailable(wid) {
+                if was_unavailable != self.stores.state.windows.is_temporarily_unavailable(wid) {
                     outcome.wm_events.push(WmEvent::OverviewChanged);
                 }
                 return Ok(outcome);
@@ -2224,8 +2246,8 @@ impl Reactor {
                 // The write never reached the app: the core counts the failure, and the next
                 // arrange writes the frame again (given up after three in a row). A desire
                 // waiting behind it goes out now.
-                let request = self.state.tx.next_id();
-                if let Some(write) = self.state.write_failed(request, wid, failed) {
+                let request = self.stores.state.tx.next_id();
+                if let Some(write) = self.stores.state.write_failed(request, wid, failed) {
                     self.send_arranged(write);
                 }
                 return Ok(EventOutcome::no_change());
@@ -2237,7 +2259,7 @@ impl Reactor {
                     tx.send(stack_line::Event::TitleChanged(wid, new_title.clone()));
                 }
                 let mut outcome = window_workflow::handle_window_title_changed(
-                    &mut self.state,
+                    &mut self.stores.state,
                     window_workflow::WindowTitleChangedPayload { window: wid, title: new_title },
                 )?;
                 outcome.focused_window = raised_window;
@@ -2278,11 +2300,11 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::AnimationEnded(request) => {
-                self.state.animation_ended(request);
+                self.stores.state.animation_ended(request);
                 return Ok(EventOutcome::no_change());
             }
             Event::DragMotion(motion) => {
-                let Some((window, session)) = self.state.windows.drag() else {
+                let Some((window, session)) = self.stores.state.windows.drag() else {
                     return Ok(EventOutcome::no_change());
                 };
                 // The display under the pointer is where the drag drops, a native drag's as a
@@ -2296,7 +2318,7 @@ impl Reactor {
                         scene_space.map(|s| self.drag_scene(window, s)).unwrap_or_default(),
                     )
                 });
-                let Some(session) = self.state.windows.drag_on_mut(window) else {
+                let Some(session) = self.stores.state.windows.drag_on_mut(window) else {
                     return Ok(EventOutcome::no_change());
                 };
                 let mut intent_changed = false;
@@ -2310,12 +2332,7 @@ impl Reactor {
                     session.resolve_preview(
                         window,
                         settings,
-                        drop_previews(
-                            window,
-                            &self.space_state,
-                            &self.layout_manager,
-                            &self.config,
-                        ),
+                        drop_previews(window, &self.space_state, &self.stores.layout, &self.config),
                     );
                 }
                 // The session is in hand, so this is the dragged window's own frame: the one
@@ -2323,33 +2340,34 @@ impl Reactor {
                 let Some(frame) = session.interactive_frame() else {
                     return Ok(EventOutcome::no_change());
                 };
-                let request = self.state.tx.next_id();
-                let write = self.state.follow(request, window, frame);
+                let request = self.stores.state.tx.next_id();
+                let write = self.stores.state.follow(request, window, frame);
                 self.send_interactive(write);
                 return Ok(EventOutcome::no_change());
             }
             Event::DragCancel => {
                 return Ok(interaction_workflow::handle_cancel(
-                    &mut self.state,
-                    &mut self.layout_manager,
+                    &mut self.stores.state,
+                    &mut self.stores.layout,
                 ));
             }
             Event::ModifierMouseDown { button, point, action } => {
                 // A modifier press is a press: the window under it is pressed, and only that
                 // press can become the drag.
                 self.pointer_pressed(point, button);
-                let source = self.state.windows.gripped().and_then(|window| {
-                    let state = self.state.windows.window(window)?;
+                let source = self.stores.state.windows.gripped().and_then(|window| {
+                    let state = self.stores.state.windows.window(window)?;
                     Some((window, state.frame_monotonic(), state.info.sys_id))
                 });
                 let Some((window, frame, server_id)) = source else {
                     return Ok(EventOutcome::no_change());
                 };
-                self.layout_manager
+                self.stores
+                    .layout
                     .layout_engine
-                    .forget_native_layout_for_window(&self.state.windows, window);
+                    .forget_native_layout_for_window(&self.stores.state.windows, window);
                 let space = self.best_space_for_window(&frame, server_id);
-                let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
+                let tiled = !self.stores.layout.layout_engine.is_window_floating(window);
                 let scene = if tiled && action == crate::common::config::MouseAction::Move {
                     space.map(|space| self.drag_scene(window, space)).unwrap_or_default()
                 } else {
@@ -2369,9 +2387,9 @@ impl Reactor {
                 ) {
                     Some(session) => {
                         debug!(?window, "drag-evidence: drag started (modifier press)");
-                        self.state.begin_drag(window, session);
+                        self.stores.state.begin_drag(window, session);
                     }
-                    None => _ = self.state.let_go(),
+                    None => _ = self.stores.state.let_go(),
                 }
                 return Ok(EventOutcome::no_change());
             }
@@ -2386,7 +2404,8 @@ impl Reactor {
                 transition,
             } => {
                 let Some(space) = self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .workspaces()
                     .workspaces
@@ -2398,9 +2417,8 @@ impl Reactor {
                 if !self.is_space_active(space) {
                     return Ok(EventOutcome::no_change());
                 }
-                let changed =
-                    self.layout_manager.layout_engine.workspaces().active_workspace(space)
-                        != Some(workspace);
+                let changed = self.stores.layout.layout_engine.workspaces().active_workspace(space)
+                    != Some(workspace);
                 if let Some(stamp) = transition {
                     self.overview_focus =
                         window.map(|window| Expecting::since((space, window), stamp));
@@ -2411,15 +2429,15 @@ impl Reactor {
                     self.stop_camera(space);
                 }
                 self.store_current_floating_positions(space);
-                let mut response = self.layout_manager.layout_engine.activate_workspace(
-                    &mut self.state.windows,
+                let mut response = self.stores.layout.layout_engine.activate_workspace(
+                    &mut self.stores.state.windows,
                     space,
                     workspace,
                     window,
                 );
                 if window.is_some() {
-                    self.layout_manager.layout_engine.commit_workspace_focus(
-                        &mut self.state.windows,
+                    self.stores.layout.layout_engine.commit_workspace_focus(
+                        &mut self.stores.state.windows,
                         space,
                         response.focus_window,
                     );
@@ -2454,11 +2472,11 @@ impl Reactor {
                     // Workspace fallback focus can reject a parked window using
                     // stale native visibility and silently refocus its neighbour.
                     outcome.absorb(command_workflow::handle_command_reactor_focus_window(
-                        &self.state,
+                        &self.stores.state,
                         &self.app_manager,
                         command_workflow::FocusWindowPayload {
                             window_id: window,
-                            window_server_id: self.state.windows.server_id(window),
+                            window_server_id: self.stores.state.windows.server_id(window),
                             resolved_space: Some(space),
                             space_is_active: true,
                         },
@@ -2468,21 +2486,22 @@ impl Reactor {
                 return Ok(outcome.with_layout_response(response, Some(space)));
             }
             Event::OverviewDrop { intent, reply } => {
-                let source = self.state.windows.workspace_for_window(intent.window);
+                let source = self.stores.state.windows.workspace_for_window(intent.window);
                 let destination = self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .workspaces()
                     .workspaces
                     .get(intent.workspace)
                     .map(|ws| ws.space);
-                let valid = self.state.windows.window(intent.window).is_some_and(|window| {
-                    self.state.windows.is_admitted(intent.window)
+                let valid = self.stores.state.windows.window(intent.window).is_some_and(|window| {
+                    self.stores.state.windows.is_admitted(intent.window)
                         && window.info.is_standard
                         && !window.info.is_minimized
                 }) && source.zip(destination).is_some_and(|(source, destination)| {
                     [
-                        self.layout_manager.layout_engine.workspaces()[source].space,
+                        self.stores.layout.layout_engine.workspaces()[source].space,
                         destination,
                     ]
                     .into_iter()
@@ -2493,15 +2512,16 @@ impl Reactor {
                 });
                 let changed = valid
                     && self
-                        .layout_manager
+                        .stores
+                        .layout
                         .layout_engine
-                        .relocate_window_with_drop(&mut self.state.windows, &intent);
+                        .relocate_window_with_drop(&mut self.stores.state.windows, &intent);
                 let _ = reply.send(changed);
                 if !changed {
                     return Ok(EventOutcome::no_change());
                 }
                 let source_space =
-                    self.layout_manager.layout_engine.workspaces()[source.unwrap()].space;
+                    self.stores.layout.layout_engine.workspaces()[source.unwrap()].space;
                 let destination = destination.unwrap();
                 let mut outcome = EventOutcome::layout_changed(false);
                 outcome = outcome.with_arrange_space_scope(Some(destination));
@@ -2524,15 +2544,20 @@ impl Reactor {
                             .find(|s| s.space == Some(source_space))
                             .map(|s| s.frame)
                             .unwrap_or(destination);
-                        let mut frame =
-                            self.state.windows.window(intent.window).unwrap().frame_monotonic();
+                        let mut frame = self
+                            .stores
+                            .state
+                            .windows
+                            .window(intent.window)
+                            .unwrap()
+                            .frame_monotonic();
                         frame.origin.x += destination.origin.x - source.origin.x;
                         frame.origin.y += destination.origin.y - source.origin.y;
                         frame
                     });
                     outcome.absorb(command_workflow::request_window_transfer(
-                        &mut self.state,
-                        &mut self.layout_manager,
+                        &mut self.stores.state,
+                        &mut self.stores.layout,
                         intent.window,
                         Some(frame),
                         true,
@@ -2541,7 +2566,7 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::PointerReleased(button) => {
-                debug!(?button, gripped = ?self.state.windows.gripped(), "drag-evidence: release");
+                debug!(?button, gripped = ?self.stores.state.windows.gripped(), "drag-evidence: release");
                 return self.pointer_released(rift_core::Release::Button(button.into()));
             }
             Event::MenuOpened(pid) => {
@@ -2551,7 +2576,7 @@ impl Reactor {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
             Event::MouseMoved(wsid) => {
-                let window = self.state.windows.tracked_window_id(wsid);
+                let window = self.stores.state.windows.tracked_window_id(wsid);
                 if window.is_some_and(|window| {
                     self.pending_mouse_focus.as_ref().and_then(|focus| focus.live(now))
                         == Some(&window)
@@ -2565,6 +2590,7 @@ impl Reactor {
                     self.mouse_inventory_hit = Some(wsid);
                     trace!(?wsid, "Mouse hit window missing from inventory");
                     if let Some(info) = self
+                        .stores
                         .state
                         .windows
                         .get_window_server_info(wsid)
@@ -2578,7 +2604,7 @@ impl Reactor {
                 }
                 self.mouse_inventory_hit = None;
                 let active_space = window.and_then(|window| {
-                    self.state.windows.window(window).and_then(|state| {
+                    self.stores.state.windows.window(window).and_then(|state| {
                         self.best_space_for_window(&state.frame_monotonic(), state.info.sys_id)
                             .filter(|space| self.is_space_active(*space))
                             .or_else(|| {
@@ -2592,7 +2618,7 @@ impl Reactor {
                     })
                 });
                 let needs_layout_sync = window.is_some_and(|window| {
-                    self.layout_manager.layout_engine.focused_window() != Some(window)
+                    self.stores.layout.layout_engine.focused_window() != Some(window)
                 });
                 if self.mouse_raise_token.is_cancelled() {
                     self.mouse_raise_token = Default::default();
@@ -2621,7 +2647,7 @@ impl Reactor {
             Event::MissionControlNativeEntered => {
                 return topology_workflow::handle_mission_control_native_entered(
                     &mut self.mission_control_manager,
-                    &mut self.state,
+                    &mut self.stores.state,
                 );
             }
             Event::MissionControlNativeExited => {
@@ -2681,19 +2707,19 @@ impl Reactor {
                     let pins = engine.workspaces().rule_displays();
                     pins.map(|(id, display)| (id, display.to_owned())).collect()
                 };
-                let before = pins(&self.layout_manager.layout_engine);
+                let before = pins(&self.stores.layout.layout_engine);
                 let mut outcome = command_workflow::handle_config_updated(
                     &mut self.config,
-                    &mut self.layout_manager,
-                    &mut self.state,
+                    &mut self.stores.layout,
+                    &mut self.stores.state,
                     &mut self.drag_manager,
                     new_cfg,
                 )?;
-                let after = pins(&self.layout_manager.layout_engine);
+                let after = pins(&self.stores.layout.layout_engine);
                 // A pin that appeared or went away on a visible workspace rebalances the rest
                 // (#702).
                 let visible_pin_changed = {
-                    let workspaces = self.layout_manager.layout_engine.workspaces();
+                    let workspaces = self.stores.layout.layout_engine.workspaces();
                     before.iter().chain(&after).any(|pin| {
                         before.contains(pin) != after.contains(pin)
                             && workspaces
@@ -2707,7 +2733,7 @@ impl Reactor {
                     .map(|(id, _)| id)
                     .collect();
                 if !activated.is_empty() {
-                    let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+                    let workspaces = self.stores.layout.layout_engine.workspaces_mut();
                     for &id in &activated {
                         workspaces[id].rule_standing = RuleStanding::Followed;
                         // The pin, not an earlier explicit move, decides now.
@@ -2737,23 +2763,23 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
                 return command_workflow::handle_command_reactor_debug(
-                    &self.layout_manager,
+                    &self.stores.layout,
                     &self.space_state,
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
                 let active_space = self.active_display_space();
                 return command_workflow::handle_command_reactor_save_and_exit(
-                    &self.state,
-                    &mut self.layout_manager,
+                    &self.stores.state,
+                    &mut self.stores.layout,
                     active_space,
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveLayout { path })) => {
                 let active_space = self.active_display_space();
                 return command_workflow::handle_command_reactor_save_layout(
-                    &self.state,
-                    &mut self.layout_manager,
+                    &self.stores.state,
+                    &mut self.stores.layout,
                     path,
                     active_space,
                 );
@@ -2771,11 +2797,11 @@ impl Reactor {
                 let request = layout::RestoreRequest { scope, active_space, source };
                 let mut outcome = EventOutcome::window_membership_changed(false, true);
                 let visible: Vec<_> = self.iter_active_spaces().collect();
-                let report = self.layout_manager.layout_engine.restore_layout(
+                let report = self.stores.layout.layout_engine.restore_layout(
                     path,
                     request,
                     &visible,
-                    &mut self.state.windows,
+                    &mut self.stores.state.windows,
                     &self.config.settings.layout,
                 );
                 return Ok(match report {
@@ -2783,10 +2809,10 @@ impl Reactor {
                         for &(window, from, to) in &report.moved {
                             // A restored floating frame is already on the display it returns to.
                             let floating =
-                                self.layout_manager.layout_engine.is_window_floating(window);
+                                self.stores.layout.layout_engine.is_window_floating(window);
                             let source = if floating { to } else { from };
                             if floating {
-                                self.state.windows.clear_floating_display_geometry(window);
+                                self.stores.state.windows.clear_floating_display_geometry(window);
                             }
                             let source = self.space_state.screen_by_space(source).map(|s| s.frame);
                             outcome.absorb(self.request_window_transfer(window, to, source));
@@ -2851,12 +2877,12 @@ impl Reactor {
                 let window_id = WindowId::new(window_id.pid, window_id.idx);
                 let window_server_id = window_server_id.map(WindowServerId::new);
                 let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
-                    self.state.windows.window(window_id).and_then(|window| {
+                    self.stores.state.windows.window(window_id).and_then(|window| {
                         self.best_space_for_window(&window.frame_monotonic(), window.info.sys_id)
                     })
                 });
                 return command_workflow::handle_command_reactor_focus_window(
-                    &self.state,
+                    &self.stores.state,
                     &self.app_manager,
                     command_workflow::FocusWindowPayload {
                         window_id,
@@ -2939,24 +2965,24 @@ impl Reactor {
                 let rule_override = self.rule_override(source_space, &target_screen);
                 if source_space == target_space {
                     if let Some((id, overridden)) = rule_override {
-                        self.layout_manager.layout_engine.workspaces_mut()[id].rule_standing =
+                        self.stores.layout.layout_engine.workspaces_mut()[id].rule_standing =
                             overridden;
                     }
-                    let response =
-                        self.layout_manager.layout_engine.move_active_workspace_to_space(
-                            &mut self.state.windows,
-                            source_space,
-                            target_space,
-                            target_screen.frame.size,
-                        );
+                    let response = self.stores.layout.layout_engine.move_active_workspace_to_space(
+                        &mut self.stores.state.windows,
+                        source_space,
+                        target_space,
+                        target_screen.frame.size,
+                    );
                     return Ok(EventOutcome::no_change().with_layout_response(response, None));
                 }
 
                 let windows = self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .workspaces()
-                    .windows_in_active_workspace(&self.state.windows, source_space);
+                    .windows_in_active_workspace(&self.stores.state.windows, source_space);
                 if !windows.is_empty() {
                     self.store_current_floating_positions(source_space);
                 }
@@ -2964,7 +2990,7 @@ impl Reactor {
                 let moves = windows
                     .into_iter()
                     .filter_map(|window| {
-                        let frame = self.state.windows.window(window)?.frame_monotonic();
+                        let frame = self.stores.state.windows.window(window)?.frame_monotonic();
                         let source = self
                             .space_state
                             .screen_by_space(source_space)
@@ -2975,8 +3001,8 @@ impl Reactor {
                     })
                     .collect::<Vec<_>>();
                 let outcome = command_workflow::handle_command_reactor_move_workspace_to_display(
-                    &mut self.state,
-                    &mut self.layout_manager,
+                    &mut self.stores.state,
+                    &mut self.stores.layout,
                     &mut self.workspace_switch_manager,
                     command_workflow::MoveWorkspaceToDisplayPayload {
                         windows: moves,
@@ -2986,7 +3012,7 @@ impl Reactor {
                     },
                 );
                 if let Some((id, overridden)) = rule_override {
-                    let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+                    let workspaces = self.stores.layout.layout_engine.workspaces_mut();
                     if workspaces[id].space == target_space {
                         workspaces[id].rule_standing = overridden;
                     }
@@ -3071,7 +3097,7 @@ impl Reactor {
         }
         for window in outcome.finalize_created_windows {
             self.sync_native_admission(window);
-            if self.state.windows.native_fullscreen_record_for_window(window).is_some() {
+            if self.stores.state.windows.native_fullscreen_record_for_window(window).is_some() {
                 let restored = self.restore_native_fullscreen(None, window, None);
                 self.apply_event_outcome(restored);
                 continue;
@@ -3080,7 +3106,7 @@ impl Reactor {
             // them on the current display or their last frame is parked offscreen.
             let assigned_space = self.assigned_space_for_window_id(window);
             let active_space = assigned_space.or_else(|| {
-                self.state.windows.window(window).and_then(|state| {
+                self.stores.state.windows.window(window).and_then(|state| {
                     self.best_space_for_window(&state.frame_monotonic(), state.info.sys_id)
                         .filter(|space| self.is_space_active(*space))
                         .or_else(|| {
@@ -3094,7 +3120,7 @@ impl Reactor {
                 })
             });
             if let Some(space) = active_space {
-                if let Some(state) = self.state.windows.window(window)
+                if let Some(state) = self.stores.state.windows.window(window)
                     && let Some(id) = state.info.sys_id
                 {
                     self.transient_focus.ax(id, window.pid, &state.info, space);
@@ -3105,7 +3131,7 @@ impl Reactor {
                 {
                     self.process_windows_for_app_rules(vec![window], app_info, false);
                 }
-                if self.state.windows.is_admitted(window) {
+                if self.stores.state.windows.is_admitted(window) {
                     let space = self.assigned_space_for_window_id(window).unwrap_or(space);
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
                     if assigned_space.is_none() {
@@ -3133,7 +3159,7 @@ impl Reactor {
                 .map(|(&pid, app)| (pid, app.info.clone()))
                 .collect();
             for (pid, info) in apps {
-                let windows: Vec<_> = self.state.windows.window_ids_for_pid(pid).collect();
+                let windows: Vec<_> = self.stores.state.windows.window_ids_for_pid(pid).collect();
                 self.process_windows_for_app_rules(windows, info, false);
             }
         }
@@ -3260,7 +3286,7 @@ impl Reactor {
         if let Some(request) = outcome.close_window {
             let (target, window_server_id) = match request {
                 CloseWindowRequest::Window(wsid) => {
-                    (self.state.windows.tracked_window_id(wsid), Some(wsid))
+                    (self.stores.state.windows.tracked_window_id(wsid), Some(wsid))
                 }
                 CloseWindowRequest::Focused => (self.main_window(), None),
             };
@@ -3292,13 +3318,14 @@ impl Reactor {
         }
         if let Some((workspace, window, stamp)) = outcome.overview_activation {
             let frames = self
+                .stores
                 .state
                 .windows
                 .workspace_windows(workspace)
                 .into_iter()
                 .filter_map(|id| {
-                    let state = self.state.windows.window(id)?;
-                    (self.state.windows.is_admitted_state(id)
+                    let state = self.stores.state.windows.window(id)?;
+                    (self.stores.state.windows.is_admitted_state(id)
                         && !state.info.is_minimized
                         && state.info.is_standard)
                         .then_some((id, state.frame_monotonic()))
@@ -3332,14 +3359,15 @@ impl Reactor {
                 // Land at the same spot within the newly focused window that the cursor
                 // held in the old one, or the display itself when the workspace is empty.
                 let to = self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .selected_window(space)
                     .and_then(|wid| self.window_frame_on_known_screen(wid))
                     .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
                 let from = self
                     .main_window()
-                    .and_then(|wid| self.state.windows.window(wid))
+                    .and_then(|wid| self.stores.state.windows.window(wid))
                     .map(|window| window.frame_monotonic());
                 if let Some(to) = to
                     && let Some(input_tx) = &self.communication_manager.input_tx
@@ -3349,7 +3377,8 @@ impl Reactor {
             }
             Some(OwedWarp::Focus) => {
                 if let Some(center) = self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .focused_window()
                     .and_then(|wid| self.window_center_on_known_screen(wid))
@@ -3364,6 +3393,7 @@ impl Reactor {
         self.event_outcome_phase_trace.push("ui");
         if outcome.refresh_window_notifications {
             let mut ids: Vec<u32> = self
+                .stores
                 .state
                 .windows
                 .iter_tracked_window_server_ids()
@@ -3421,10 +3451,10 @@ impl Reactor {
     }
 
     fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
-        let window_state = self.state.windows.window(window_id)?;
-        let externally_managed = self.state.windows.is_claimed(window_id);
-        if (!self.state.windows.is_admitted_state(window_id)
-            || self.state.windows.is_temporarily_unavailable(window_id))
+        let window_state = self.stores.state.windows.window(window_id)?;
+        let externally_managed = self.stores.state.windows.is_claimed(window_id);
+        if (!self.stores.state.windows.is_admitted_state(window_id)
+            || self.stores.state.windows.is_temporarily_unavailable(window_id))
             && !externally_managed
         {
             return None;
@@ -3437,7 +3467,7 @@ impl Reactor {
         Some(RuntimeWindowData {
             layout_frame: None,
             id: window_id,
-            is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
+            is_floating: self.stores.layout.layout_engine.is_window_floating(window_id),
             externally_managed,
             is_focused: self.main_window() == Some(window_id),
             layout_position: None,
@@ -3452,17 +3482,17 @@ impl Reactor {
     }
 
     fn update_complete_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
-        self.state.windows.clear_visible_windows();
+        self.stores.state.windows.clear_visible_windows();
         self.update_partial_window_server_info(ws_info);
     }
 
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
         for info in ws_info {
-            if let Some(wid) = self.state.observe_native_window(info)
+            if let Some(wid) = self.stores.state.observe_native_window(info)
                 && let Some(Transition::Suspended(..)) =
-                    utils::refresh_heuristic(&mut self.state, wid)
+                    utils::refresh_heuristic(&mut self.stores.state, wid)
             {
-                self.send_layout_event(utils::layout_departure(&self.state, wid));
+                self.send_layout_event(utils::layout_departure(&self.stores.state, wid));
             }
         }
     }
@@ -3492,6 +3522,7 @@ impl Reactor {
     /// Recover confirmed exits once, retaining the record while AX is unavailable.
     fn reconcile_native_fullscreen_exits(&mut self, query_membership: bool) -> EventOutcome {
         let exits: Vec<_> = self
+            .stores
             .state
             .windows
             .iter_native_fullscreen_records()
@@ -3527,7 +3558,7 @@ impl Reactor {
                         // macOS can replace a fullscreen Space during display churn without
                         // the window ever returning to normal management.
                         FullscreenExit::Reentered(space) => {
-                            self.state.windows.observe_native_fullscreen(
+                            self.stores.state.windows.observe_native_fullscreen(
                                 wsid,
                                 space,
                                 record.last_known_user_space,
@@ -3537,7 +3568,8 @@ impl Reactor {
                         }
                         FullscreenExit::NotYet => continue,
                         FullscreenExit::Over { landed: Some(space) } => {
-                            self.state
+                            self.stores
+                                .state
                                 .windows
                                 .note_fullscreen_exit(record.current_window_id, space);
                         }
@@ -3587,9 +3619,10 @@ impl Reactor {
             .or_else(|| spaces.iter().copied().flatten().find(|space| self.is_space_active(*space)))
         {
             if let Some((workspace_id, workspace_name)) = self
-                .layout_manager
+                .stores
+                .layout
                 .layout_engine
-                .ensure_active_workspace_info(&mut self.state.windows, space)
+                .ensure_active_workspace_info(&mut self.stores.state.windows, space)
             {
                 let display_uuid = self.display_uuid_for_space(space);
                 let broadcast_event = BroadcastEvent::WorkspaceChanged {
@@ -3606,14 +3639,15 @@ impl Reactor {
     /// What every per-workspace broadcast names: the active workspace of `space`, if that
     /// space is active.
     pub(crate) fn workspace_header(&self, space: SpaceId) -> Option<WorkspaceHeader> {
-        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let workspaces = self.stores.layout.layout_engine.workspaces();
         let workspace_id =
             workspaces.active_workspace(space).filter(|_| self.is_space_active(space))?;
         Some(WorkspaceHeader {
             workspace_id: protocol_workspace_id(workspace_id),
             workspace_index: workspaces.active_workspace_idx(space),
             workspace_name: self
-                .layout_manager
+                .stores
+                .layout
                 .layout_engine
                 .workspace_name(space, workspace_id)
                 .unwrap_or_else(|| format!("Workspace {:?}", workspace_id)),
@@ -3728,7 +3762,8 @@ impl Reactor {
             |space| active.ask(space, |space| self.is_space_active(space)),
             || {
                 reconcilable.ask(|| {
-                    self.state
+                    self.stores
+                        .state
                         .windows
                         .window(window_id)
                         .is_some_and(WindowState::can_reconcile_admission)
@@ -3827,7 +3862,7 @@ impl Reactor {
             &space_state,
         );
         self.space_state.revision = space_state.revision;
-        self.state.windows.accept_topology_revision(space_state.revision);
+        self.stores.state.windows.accept_topology_revision(space_state.revision);
         self.space_state.authoritative = true;
         if self.spaces_tx.is_some() {
             for app in self.app_manager.apps.values_mut() {
@@ -3868,15 +3903,15 @@ impl Reactor {
                     .map(|space| (space, screen.display_uuid.clone(), screen.frame.size))
             })
             .collect::<Vec<_>>();
-        self.layout_manager.layout_engine.resolve_saved_spaces(
-            &mut self.state.windows,
+        self.stores.layout.layout_engine.resolve_saved_spaces(
+            &mut self.stores.state.windows,
             &current_display_spaces,
             screens.len(),
             &display_space_ids,
         );
 
         let empty = HashMap::default();
-        self.state.windows.note_fullscreen_exits(
+        self.stores.state.windows.note_fullscreen_exits(
             &fullscreen_spaces,
             &destroyed_spaces,
             if membership_complete {
@@ -3954,7 +3989,8 @@ impl Reactor {
         // Preserve the shared catalog through remaps on either side of a display change.
         // A remap can replace a destination catalog only if both topologies are local.
         if display_count > 1 {
-            self.layout_manager
+            self.stores
+                .layout
                 .layout_engine
                 .workspaces_mut()
                 .update_display_count(display_count);
@@ -3964,14 +4000,15 @@ impl Reactor {
                 self.last_screen_frames.insert(space, frame);
             }
             self.space_activation_policy.on_space_remapped(previous_space, space);
-            self.layout_manager.layout_engine.remap_space(
-                &mut self.state.windows,
+            self.stores.layout.layout_engine.remap_space(
+                &mut self.stores.state.windows,
                 previous_space,
                 space,
             );
         }
         if display_count == 1 {
-            self.layout_manager
+            self.stores
+                .layout
                 .layout_engine
                 .workspaces_mut()
                 .update_display_count(display_count);
@@ -3981,14 +4018,15 @@ impl Reactor {
             else {
                 continue;
             };
-            self.layout_manager
+            self.stores
+                .layout
                 .layout_engine
                 .update_space_display(space, Some(display_uuid.as_ref()));
         }
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
-        let engine = &self.layout_manager.layout_engine;
+        let engine = &self.stores.layout.layout_engine;
         let mut refits = Vec::new();
         for screen in &self.space_state.screens {
             let Some(space) = screen.space.filter(|space| self.active_spaces.contains(space))
@@ -4029,24 +4067,30 @@ impl Reactor {
         // Transfers already fitted their frames; refit only workspaces whose native
         // desktop stayed put while its display geometry changed.
         for (workspace, space, source, target) in refits {
-            let engine = &mut self.layout_manager.layout_engine;
+            let engine = &mut self.stores.layout.layout_engine;
             if engine.workspaces().workspace_space(workspace) != Some(space) {
                 continue;
             }
-            for window in self.state.windows.workspace_windows(workspace) {
+            for window in self.stores.state.windows.workspace_windows(workspace) {
                 if !engine.is_window_floating(window)
-                    || self.state.windows.native_fullscreen_record_for_window(window).is_some()
+                    || self
+                        .stores
+                        .state
+                        .windows
+                        .native_fullscreen_record_for_window(window)
+                        .is_some()
                 {
                     continue;
                 }
                 if let Some(frame) = engine.get_floating_position(workspace, window).or_else(|| {
-                    self.state
+                    self.stores
+                        .state
                         .windows
                         .can_place_window(window)
-                        .then(|| self.state.windows.record(window)?.frame())
+                        .then(|| self.stores.state.windows.record(window)?.frame())
                         .flatten()
                 }) {
-                    let projected = self.state.windows.project_floating_frame(
+                    let projected = self.stores.state.windows.project_floating_frame(
                         window,
                         frame,
                         Some(source),
@@ -4104,7 +4148,8 @@ impl Reactor {
             .filter_map(|screen| screen.space.filter(|space| self.active_spaces.contains(space)))
             .collect();
         let plan = self
-            .layout_manager
+            .stores
+            .layout
             .layout_engine
             .workspaces()
             .plan_display_balance(&displays, restored);
@@ -4135,19 +4180,19 @@ impl Reactor {
         };
         // The window under the user's hand stays where it is: it leaves the workspace's
         // layout and the workspace, placed by nothing until the drop.
-        if let Some(held) = self.state.windows.held_member(id) {
+        if let Some(held) = self.stores.state.windows.held_member(id) {
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(held.window()));
-            self.state.windows.leave_workspace_held(held);
+            self.stores.state.windows.leave_workspace_held(held);
         }
-        let source = self.layout_manager.layout_engine.workspaces()[id].space;
+        let source = self.stores.layout.layout_engine.workspaces()[id].space;
         let source_frame = previous_screens
             .iter()
             .chain(&self.space_state.screens)
             .find(|screen| screen.space == Some(source))
             .map(|screen| screen.frame)
             .or_else(|| self.last_screen_frames.get(&source).copied());
-        let response = self.layout_manager.layout_engine.transfer_workspace(
-            &mut self.state.windows,
+        let response = self.stores.layout.layout_engine.transfer_workspace(
+            &mut self.stores.state.windows,
             id,
             target,
             screen.frame.size,
@@ -4176,13 +4221,13 @@ impl Reactor {
         if self.refreshes_blocked() {
             return outcome;
         }
-        if self.layout_manager.layout_engine.workspaces().settings.mode
+        if self.stores.layout.layout_engine.workspaces().settings.mode
             != crate::common::config::WorkspaceMode::Global
         {
             return outcome;
         }
         let placements = plan_workspace_placements(
-            &self.layout_manager.layout_engine,
+            &self.stores.layout.layout_engine,
             &self.space_state,
             &self.active_spaces,
             previous_screens,
@@ -4197,14 +4242,14 @@ impl Reactor {
         let mut restored = HashSet::default();
         for (id, rehome, placement) in placements {
             if let Some(target) = rehome {
-                let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+                let workspaces = self.stores.layout.layout_engine.workspaces_mut();
                 let old = workspaces[id].home.space().unwrap();
                 let target = self.space_state.screens[target].space.unwrap();
                 workspaces[id].home = workspaces[id].home.with_space(target);
                 if workspaces.active_workspace_per_space().get(&old).is_some_and(|activation| {
                     activation.remembered().or(activation.current()) == Some(id)
                 }) {
-                    let windows = &mut self.state.windows;
+                    let windows = &mut self.stores.state.windows;
                     workspaces.update_activation(windows, old, SpaceActivation::forget_memory);
                     if workspaces[id].space == target {
                         workspaces.set_active_workspace(windows, target, id);
@@ -4242,13 +4287,15 @@ impl Reactor {
         }
         if preserve_membership {
             let owed: Vec<_> = self
+                .stores
                 .state
                 .windows
                 .iter_workspace_assignments()
                 .filter(|&(window, assignment)| {
                     // Native membership will reassign windows from a lost local desktop.
                     let lost = self
-                        .layout_manager
+                        .stores
+                        .layout
                         .layout_engine
                         .workspaces()
                         .workspaces
@@ -4256,13 +4303,18 @@ impl Reactor {
                         .is_some_and(|workspace| lost_local_desktops.contains(&workspace.space));
                     !lost
                         && !matches!(self.placement(window), None | Some(Placement::Home))
-                        && self.state.windows.record(window).is_some_and(|r| r.transfer().is_none())
+                        && self
+                            .stores
+                            .state
+                            .windows
+                            .record(window)
+                            .is_some_and(|r| r.transfer().is_none())
                 })
                 .map(|(window, _)| window)
                 .collect();
             for window in owed {
                 // Unknown membership keeps the assignment without a speculative write.
-                if let Some(unheld) = self.state.windows.unheld(window) {
+                if let Some(unheld) = self.stores.state.windows.unheld(window) {
                     unheld.begin_transfer(false);
                 }
             }
@@ -4275,6 +4327,7 @@ impl Reactor {
     /// where its workspace is now.
     fn rederive_refused_transfers(&mut self) -> EventOutcome {
         let owed: Vec<_> = self
+            .stores
             .state
             .windows
             .transfers()
@@ -4291,25 +4344,26 @@ impl Reactor {
     /// Whether the window behind `wsid` keeps its assignment though seen on `observed`,
     /// because of a transfer: see [`Transfer::keeps_assignment`].
     fn transfer_keeps_assignment(&self, wsid: WindowServerId, observed: Option<SpaceId>) -> bool {
-        self.state
+        self.stores
+            .state
             .windows
             .tracked_window_id(wsid)
-            .and_then(|wid| self.state.windows.record(wid)?.transfer())
+            .and_then(|wid| self.stores.state.windows.record(wid)?.transfer())
             .is_some_and(|transfer| transfer.keeps_assignment(observed))
     }
 
     /// The Space the accepted snapshot shows `window` on.
     fn observed_space(&self, window: WindowId) -> Option<SpaceId> {
-        let id = self.state.windows.record(window)?.window_server_id()?;
+        let id = self.stores.state.windows.record(window)?.window_server_id()?;
         self.space_state.active_window_spaces.get(&id).copied()
     }
 
     /// Where `window` is against where it belongs: the one place that compares the two.
     /// `None` for a window with no workspace.
     fn placement(&self, window: WindowId) -> Option<Placement> {
-        let assignment = self.state.windows.workspace_for_window(window)?;
+        let assignment = self.stores.state.windows.workspace_for_window(window)?;
         let target =
-            self.layout_manager.layout_engine.workspaces().workspaces.get(assignment)?.space;
+            self.stores.layout.layout_engine.workspaces().workspaces.get(assignment)?.space;
         let observed = self.observed_space(window).filter(|_| self.space_state.membership_complete);
         Some(match observed {
             Some(observed) if observed == target => Placement::Home,
@@ -4344,8 +4398,8 @@ impl Reactor {
             None
         };
         command_workflow::request_window_transfer(
-            &mut self.state,
-            &mut self.layout_manager,
+            &mut self.stores.state,
+            &mut self.stores.layout,
             window,
             frame,
             available,
@@ -4362,14 +4416,13 @@ impl Reactor {
         source: Option<CGRect>,
     ) -> Option<CGRect> {
         let screen = self.space_state.screen_by_space(target)?.frame;
-        let engine = &self.layout_manager.layout_engine;
-        let tiled_there =
-            engine
-                .workspaces()
-                .is_window_in_active_workspace(&self.state.windows, target, window)
-                && !engine.is_window_floating(window)
-                && engine.active_layout_mode_at(target)
-                    != crate::common::config::LayoutMode::Floating;
+        let engine = &self.stores.layout.layout_engine;
+        let tiled_there = engine.workspaces().is_window_in_active_workspace(
+            &self.stores.state.windows,
+            target,
+            window,
+        ) && !engine.is_window_floating(window)
+            && engine.active_layout_mode_at(target) != crate::common::config::LayoutMode::Floating;
         if tiled_there
             // Move directly into the destination tile. A source-sized placement
             // followed immediately by a resize can lose one AX size component.
@@ -4380,14 +4433,15 @@ impl Reactor {
         {
             return Some(tile);
         }
-        let engine = &self.layout_manager.layout_engine;
+        let engine = &self.stores.layout.layout_engine;
         let frame = self
+            .stores
             .state
             .windows
             .workspace_for_window(window)
             .filter(|_| engine.is_window_floating(window))
             .and_then(|workspace| engine.get_floating_position(workspace, window))
-            .or_else(|| self.state.windows.record(window)?.frame())?;
+            .or_else(|| self.stores.state.windows.record(window)?.frame())?;
         let source = source.or_else(|| self.screen_for_point(frame.mid()).map(|s| s.frame));
         Some(self.frame_on_display(window, frame, source, screen))
     }
@@ -4396,7 +4450,7 @@ impl Reactor {
     fn mission_control_moved_it(&mut self) -> bool {
         let active = self.is_native_mission_control_active();
         if active {
-            self.state.let_go();
+            self.stores.state.let_go();
         }
         active
     }
@@ -4404,11 +4458,11 @@ impl Reactor {
     /// What a report settled: `seen`, if the model now takes the window to be there. (The
     /// pending frame the app actor and the space bookkeeping read is the core's projection.)
     fn record_report(&mut self, wid: WindowId, seen: Option<CGRect>) {
-        if self.state.windows.window(wid).is_none() {
+        if self.stores.state.windows.window(wid).is_none() {
             return;
         }
         if let Some(seen) = seen {
-            self.state.step(CoreEvent::Seen { window: wid, frame: seen });
+            self.stores.state.step(CoreEvent::Seen { window: wid, frame: seen });
         }
     }
 
@@ -4421,15 +4475,15 @@ impl Reactor {
         new_frame: CGRect,
         as_of: Option<TransactionId>,
     ) -> anyhow::Result<EventOutcome> {
-        let Some(window) = self.state.windows.window(wid) else {
+        let Some(window) = self.stores.state.windows.window(wid) else {
             return Ok(EventOutcome::no_change());
         };
         let (server_id, old_frame) = (window.info.sys_id, window.frame_monotonic());
         // Whose change this is, if not Rift's own, is read off the user's hand: on this
         // window, it is theirs; anywhere else, the app's.
-        let gripped = self.state.windows.is_gripped(wid);
-        let request = self.state.tx.next_id();
-        let (reply, released) = self.state.observe(request, wid, new_frame, as_of);
+        let gripped = self.stores.state.windows.is_gripped(wid);
+        let request = self.stores.state.tx.next_id();
+        let (reply, released) = self.stores.state.observe(request, wid, new_frame, as_of);
         // The desire that waited behind an answered write goes out now.
         if let Some(write) = released {
             self.send_arranged(write);
@@ -4480,14 +4534,15 @@ impl Reactor {
         let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
         let new_space_active = new_space.is_some_and(|space| self.is_space_active(space));
         let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
-            self.layout_manager.layout_engine.active_layout_mode_at(space)
+            self.stores.layout.layout_engine.active_layout_mode_at(space)
                 == crate::common::config::LayoutMode::Scrolling
-                && !self.layout_manager.layout_engine.is_window_floating(wid)
+                && !self.stores.layout.layout_engine.is_window_floating(wid)
                 && self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .workspaces()
-                    .workspace_for_window(&self.state.windows, space, wid)
+                    .workspace_for_window(&self.stores.state.windows, space, wid)
                     .is_some()
         });
         let screens = if resized {
@@ -4502,8 +4557,8 @@ impl Reactor {
             Vec::new()
         };
         let outcome = window_workflow::handle_window_frame_changed(
-            &mut self.state,
-            &mut self.layout_manager,
+            &mut self.stores.state,
+            &mut self.stores.layout,
             window_workflow::WindowFrameChangedPayload {
                 window: wid,
                 new_frame,
@@ -4524,7 +4579,7 @@ impl Reactor {
     /// The pointer let go: a press ends, a drag drops.
     fn pointer_released(&mut self, released: rift_core::Release) -> anyhow::Result<EventOutcome> {
         // Where the pointer let go, as macOS sees it.
-        let final_space = self.state.windows.drag().and_then(|(window, session)| {
+        let final_space = self.stores.state.windows.drag().and_then(|(window, session)| {
             let source = session.source;
             source
                 .current_space
@@ -4535,7 +4590,7 @@ impl Reactor {
             .window_id_under_cursor()
             .and_then(|window| self.best_space_for_window_id(window).map(|space| (space, window)));
         // The core decides whether the release ends the grip (only its own button does).
-        let ended = self.state.release(released);
+        let ended = self.stores.state.release(released);
         let changed = ended.as_ref().is_some_and(|ended| !ended.changed.is_empty());
         let (pressed, dropped) = match ended {
             None => (None, None),
@@ -4550,8 +4605,8 @@ impl Reactor {
         let drag_ended = dropped.is_some();
         let mut outcome = match dropped {
             Some((window, commit, placed)) => interaction_workflow::handle_mouse_up(
-                &mut self.state,
-                &mut self.layout_manager,
+                &mut self.stores.state,
+                &mut self.stores.layout,
                 &mut self.drag_manager,
                 window,
                 commit,
@@ -4590,10 +4645,16 @@ impl Reactor {
     /// window), is handled, a fresh read finding the button up lets go first. A modifier
     /// drag's button is captured by the tap, which always reports its real release.
     fn release_if_missed(&mut self) {
-        let (Pointer::Pressing(wid) | Pointer::Dragging(wid)) = self.state.windows.pointer() else {
+        let (Pointer::Pressing(wid) | Pointer::Dragging(wid)) = self.stores.state.windows.pointer()
+        else {
             return;
         };
-        if self.state.windows.drag().is_some_and(|(_, session)| session.is_modifier())
+        if self
+            .stores
+            .state
+            .windows
+            .drag()
+            .is_some_and(|(_, session)| session.is_modifier())
             || (self.read_button)() != Some(MouseState::Up)
         {
             return;
@@ -4609,18 +4670,19 @@ impl Reactor {
     /// Anything else (empty space, a window Rift doesn't manage) presses nothing, and whatever
     /// the pointer held before is let go.
     fn pointer_pressed(&mut self, point: CGPoint, button: MouseButton) {
-        let window =
-            self.tracked_window_at(point).filter(|wid| self.state.windows.is_admitted(*wid));
+        let window = self
+            .tracked_window_at(point)
+            .filter(|wid| self.stores.state.windows.is_admitted(*wid));
         debug!(?window, ?point, "drag-evidence: press");
         if let Some(window) = window {
             // The user places this window now: a transition Rift was presenting stops.
             self.cancel_window_presentations(vec![window]);
         }
-        self.state.step(CoreEvent::Press { window, button: button.into() });
+        self.stores.state.step(CoreEvent::Press { window, button: button.into() });
     }
 
     fn tracked_window_at(&self, point: CGPoint) -> Option<WindowId> {
-        self.native.tracked_window_at(point, &self.state.windows)
+        self.native.tracked_window_at(point, &self.stores.state.windows)
     }
 
     /// On every accepted, complete snapshot, what each transfer still owes is derived again
@@ -4631,11 +4693,12 @@ impl Reactor {
         if self.refreshes_blocked() || !self.space_state.membership_complete {
             return outcome;
         }
-        let windows: Vec<_> = self.state.windows.transfers().map(|(window, _)| window).collect();
+        let windows: Vec<_> =
+            self.stores.state.windows.transfers().map(|(window, _)| window).collect();
         for window in windows {
             let target = match self.placement(window) {
                 None | Some(Placement::Home) => {
-                    self.state.windows.end_transfer(window);
+                    self.stores.state.windows.end_transfer(window);
                     continue;
                 }
                 Some(Placement::Away(target) | Placement::Unseen(target)) => target,
@@ -4644,17 +4707,18 @@ impl Reactor {
             let observed = self.observed_space(window);
             let revision = self.space_state.revision;
             if self
+                .stores
                 .state
                 .windows
                 .unheld(window)
                 .is_some_and(|unheld| unheld.retry_transfer(revision, available, observed))
                 && let Some(frame) = self.transfer_frame(window, target, None)
             {
-                if self.state.windows.window(window).is_some() {
-                    self.state.step(CoreEvent::Seen { window, frame });
+                if self.stores.state.windows.window(window).is_some() {
+                    self.stores.state.step(CoreEvent::Seen { window, frame });
                 }
-                self.layout_manager.layout_engine.prepare_window_placement(
-                    &mut self.state.windows,
+                self.stores.layout.layout_engine.prepare_window_placement(
+                    &mut self.stores.state.windows,
                     window,
                     frame,
                 );
@@ -4701,26 +4765,29 @@ impl Reactor {
         let mut native_spaces = HashMap::default();
         let mut fullscreen_observations = HashMap::default();
         for wsid in self
+            .stores
             .state
             .windows
             .window_ids_for_pid(pid)
-            .filter_map(|wid| self.state.windows.record(wid)?.window_server_id())
+            .filter_map(|wid| self.stores.state.windows.record(wid)?.window_server_id())
             .chain(new.iter().filter_map(|(_, info)| info.sys_id))
         {
             native_spaces.entry(wsid).or_insert_with(|| {
                 let standing = if self
+                    .stores
                     .state
                     .windows
                     .native_fullscreen_record_for_window_server_id(wsid)
                     .is_some()
                     || self
+                        .stores
                         .state
                         .windows
                         .pending_native_fullscreen_record_for_window_server_id(wsid)
                         .is_some()
                 {
                     Standing::RecoveringFullscreen
-                } else if self.state.windows.tracked_window_id(wsid).is_none() {
+                } else if self.stores.state.windows.tracked_window_id(wsid).is_none() {
                     Standing::Untracked
                 } else {
                     Standing::Tracked
@@ -4740,7 +4807,7 @@ impl Reactor {
                                     .any(|spaces| spaces.contains(&space))
                         })
                     },
-                    || recorded.ask(|| self.state.windows.window_server_space(wsid)),
+                    || recorded.ask(|| self.stores.state.windows.window_server_space(wsid)),
                     || resolved.ask(|| self.resolve_native_space(wsid, None)),
                 );
                 #[cfg(feature = "roc-core")]
@@ -4776,9 +4843,10 @@ impl Reactor {
                 discovered.native()
             });
         }
-        if self.state.windows.window_ids_for_pid(pid).any(|wid| {
+        if self.stores.state.windows.window_ids_for_pid(pid).any(|wid| {
             let assigned = self.assigned_space_for_window_id(wid);
             let native = self
+                .stores
                 .state
                 .windows
                 .record(wid)
@@ -4800,11 +4868,13 @@ impl Reactor {
             self.request_space_snapshot();
         }
         let inactive_windows = self
+            .stores
             .state
             .windows
             .window_ids_for_pid(pid)
             .filter(|wid| {
                 let native = self
+                    .stores
                     .state
                     .windows
                     .record(*wid)
@@ -4841,12 +4911,12 @@ impl Reactor {
         // A returned native identity protects its previous AX key until rekeying.
         let mut observed = known_visible.clone();
         observed.extend(new.iter().filter_map(|(_, info)| {
-            info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
+            info.sys_id.and_then(|wsid| self.stores.state.windows.tracked_window_id(wsid))
         }));
         let retired = if !self.may(Initiative::RetireWindows) {
             Vec::new()
         } else {
-            self.state.reconcile_app_inventory(
+            self.stores.state.reconcile_app_inventory(
                 pid,
                 &observed,
                 &inactive_windows,
@@ -4859,7 +4929,10 @@ impl Reactor {
         };
         let mut outcome = EventOutcome::default();
         for window in retired {
-            outcome.absorb(window_workflow::apply_window_retirement(&self.state.tx, window));
+            outcome.absorb(window_workflow::apply_window_retirement(
+                &self.stores.state.tx,
+                window,
+            ));
         }
         for (wid, info) in &new {
             if let Some(id) = info.sys_id
@@ -4878,49 +4951,58 @@ impl Reactor {
             })
             .collect();
         let (new_windows, resumed, process_outcome) = window_discovery::process_window_list(
-            &mut self.state,
-            &mut self.layout_manager,
+            &mut self.stores.state,
+            &mut self.stores.layout,
             observed_windows,
         );
         outcome.absorb(process_outcome);
         let new_window_ids: Vec<_> = new_windows.iter().map(|(wid, _)| *wid).collect();
-        window_discovery::update_window_states(&mut self.state, new_windows);
+        window_discovery::update_window_states(&mut self.stores.state, new_windows);
         for id in native_spaces.keys() {
-            if let Some(wid) = self.state.windows.tracked_window_id(*id) {
+            if let Some(wid) = self.stores.state.windows.tracked_window_id(*id) {
                 self.sync_native_admission(wid);
             }
         }
         for (wsid, space) in fullscreen_observations {
             if self.is_fullscreen_space(space) {
                 let user = self
+                    .stores
                     .state
                     .windows
                     .tracked_window_id(wsid)
                     .and_then(|window| self.assigned_space_for_window_id(window));
-                if let Some(window) =
-                    self.state.windows.observe_native_fullscreen(wsid, space, user, Some(pid))
-                {
+                if let Some(window) = self.stores.state.windows.observe_native_fullscreen(
+                    wsid,
+                    space,
+                    user,
+                    Some(pid),
+                ) {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(window));
                 }
-            } else if let Some(window) = self.state.windows.tracked_window_id(wsid) {
-                self.state
-                    .windows
-                    .observe_native_space(wsid, space, self.is_space_active(space));
+            } else if let Some(window) = self.stores.state.windows.tracked_window_id(wsid) {
+                self.stores.state.windows.observe_native_space(
+                    wsid,
+                    space,
+                    self.is_space_active(space),
+                );
                 outcome.absorb(self.restore_native_fullscreen(Some(wsid), window, Some(space)));
             }
         }
         outcome.absorb(self.reconcile_native_fullscreen_exits(false));
-        let has_admitted_windows =
-            new_window_ids.iter().any(|wid| self.state.windows.is_admitted_state(*wid));
+        let has_admitted_windows = new_window_ids
+            .iter()
+            .any(|wid| self.stores.state.windows.is_admitted_state(*wid));
 
         let window_spaces = self
+            .stores
             .state
             .windows
             .window_ids_for_pid(pid)
-            .filter(|wid| self.state.windows.contains_window(*wid))
+            .filter(|wid| self.stores.state.windows.contains_window(*wid))
             .chain(known_visible.iter().copied().filter(|wid| wid.pid == pid))
             .map(|wid| {
                 let native = self
+                    .stores
                     .state
                     .windows
                     .record(wid)
@@ -4930,7 +5012,7 @@ impl Reactor {
             })
             .collect();
         self.transient_focus.windows.retain(|id, t| {
-            t.native || t.pid != pid || self.state.windows.tracked_window_id(*id).is_some()
+            t.native || t.pid != pid || self.stores.state.windows.tracked_window_id(*id).is_some()
         });
         let active_spaces = self
             .space_state
@@ -4943,8 +5025,8 @@ impl Reactor {
             .focused_window_for_discovery(pid, &window_spaces)
             .filter(|(_, wid)| !has_admitted_windows || new_window_ids.contains(wid));
         outcome.absorb(window_discovery::emit_layout_events(
-            &mut self.state,
-            &mut self.layout_manager,
+            &mut self.stores.state,
+            &mut self.stores.layout,
             window_discovery::EmitLayoutPayload {
                 pid,
                 known_visible: &known_visible,
@@ -4987,16 +5069,21 @@ impl Reactor {
     }
 
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> DragScene {
-        interaction_workflow::build_drag_scene(&self.state, &self.layout_manager, source, space)
+        interaction_workflow::build_drag_scene(
+            &self.stores.state,
+            &self.stores.layout,
+            source,
+            space,
+        )
     }
 
     fn refresh_active_drag_scene(&mut self) {
-        let Some((window, session)) = self.state.windows.drag() else {
+        let Some((window, session)) = self.stores.state.windows.drag() else {
             return;
         };
         let Some(space) = session.scene_space() else { return };
         let scene = self.drag_scene(window, space);
-        let Some(session) = self.state.windows.drag_on_mut(window) else {
+        let Some(session) = self.stores.state.windows.drag_on_mut(window) else {
             return;
         };
         let settings = &self.config.settings.drag_drop;
@@ -5004,7 +5091,7 @@ impl Reactor {
         session.resolve_preview(
             window,
             settings,
-            drop_previews(window, &self.space_state, &self.layout_manager, &self.config),
+            drop_previews(window, &self.space_state, &self.stores.layout, &self.config),
         );
     }
 
@@ -5012,13 +5099,13 @@ impl Reactor {
     fn start_modifier_drag(&mut self, window: WindowId, source: DragSource, point: CGPoint) {
         let action = crate::common::config::MouseAction::Move;
         let session = Session::modifier(source, point, action, DragScene::default());
-        self.state.press_and_drag(window, MouseButton::Left, session.unwrap());
+        self.stores.state.press_and_drag(window, MouseButton::Left, session.unwrap());
     }
 
     /// Moves the pointer of the current drag `dx` to the right.
     #[cfg(test)]
     fn nudge_drag(&mut self, dx: f64) {
-        let (window, session) = self.state.windows.drag_mut().unwrap();
+        let (window, session) = self.stores.state.windows.drag_mut().unwrap();
         let point = CGPoint::new(session.pointer.x + dx, session.pointer.y);
         session.motion(
             window,
@@ -5029,10 +5116,10 @@ impl Reactor {
 
     #[cfg(test)]
     fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
-        if self.state.windows.drag_on(wid).is_none() {
-            let server_id = self.state.windows.server_id(wid);
+        if self.stores.state.windows.drag_on(wid).is_none() {
+            let server_id = self.stores.state.windows.server_id(wid);
             let origin_space = self.best_space_for_window(frame, server_id);
-            self.state.press_and_drag(
+            self.stores.state.press_and_drag(
                 wid,
                 MouseButton::Left,
                 Session::native(
@@ -5059,7 +5146,7 @@ impl Reactor {
         _frame: &CGRect,
     ) -> Option<SpaceId> {
         let wsid = window_server_id?;
-        let wid = self.state.windows.tracked_window_id(wsid)?;
+        let wid = self.stores.state.windows.tracked_window_id(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         if !self.is_space_active(assigned_space)
             || !self.window_in_non_active_workspace(assigned_space, wid)
@@ -5071,28 +5158,29 @@ impl Reactor {
     }
 
     fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let window = self.state.windows.window(wid)?;
+        let window = self.stores.state.windows.window(wid)?;
         self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic())
     }
 
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.layout_manager
+        self.stores
+            .layout
             .layout_engine
             .workspaces()
-            .workspace_space(self.state.windows.workspace_for_window(wid)?)
+            .workspace_space(self.stores.state.windows.workspace_for_window(wid)?)
     }
 
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
-        let wid = self.state.windows.tracked_window_id(wsid)?;
+        let wid = self.stores.state.windows.tracked_window_id(wsid)?;
         // A transfer decides: a refused one the user has since moved owes nothing, even
         // though its last frame write is still pending below.
-        if let Some(transfer) = self.state.windows.record(wid)?.transfer() {
+        if let Some(transfer) = self.stores.state.windows.record(wid)?.transfer() {
             return transfer
                 .keeps_assignment(self.observed_space(wid))
                 .then(|| self.assigned_space_for_window_id(wid))
                 .flatten();
         }
-        let target_frame = self.state.tx.target(wsid)?;
+        let target_frame = self.stores.state.tx.target(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         let target_space = self
             .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
@@ -5113,10 +5201,10 @@ impl Reactor {
         let windows: Vec<_> = active_windows
             .iter()
             .filter_map(|&(wsid, observed_space)| {
-                let wid = self.state.windows.tracked_window_id(wsid)?;
+                let wid = self.stores.state.windows.tracked_window_id(wsid)?;
                 let authoritative_space =
-                    self.state.windows.window_server_space(wsid).or(observed_space)?;
-                if self.state.windows.native_fullscreen_record_for_window(wid).is_some()
+                    self.stores.state.windows.window_server_space(wsid).or(observed_space)?;
+                if self.stores.state.windows.native_fullscreen_record_for_window(wid).is_some()
                     || self.transfer_keeps_assignment(wsid, Some(authoritative_space))
                 {
                     return None;
@@ -5124,21 +5212,26 @@ impl Reactor {
                 Some((wid, authoritative_space))
             })
             .collect();
-        self.layout_manager
+        self.stores
+            .layout
             .layout_engine
-            .begin_native_reconcile(&self.state.windows, &windows);
+            .begin_native_reconcile(&self.stores.state.windows, &windows);
         for (wid, authoritative_space) in windows {
             let preserve_ordinal = self
                 .assigned_space_for_window_id(wid)
                 .is_some_and(|space| invalidated_spaces.contains(&space));
             self.reassign_window_to_authoritative_space(wid, authoritative_space, preserve_ordinal);
         }
-        self.layout_manager.layout_engine.finish_native_reconcile(&self.state.windows);
+        self.stores
+            .layout
+            .layout_engine
+            .finish_native_reconcile(&self.stores.state.windows);
     }
 
     #[cfg(test)]
     fn reconcile_windows_with_authoritative_spaces(&mut self) {
         let active_windows: Vec<_> = self
+            .stores
             .state
             .windows
             .iter_windows()
@@ -5151,7 +5244,8 @@ impl Reactor {
     }
 
     fn current_reported_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.state
+        self.stores
+            .state
             .windows
             .server_id(wid)
             .and_then(|wsid| self.resolve_native_space(wsid, None))
@@ -5168,7 +5262,7 @@ impl Reactor {
         observation: Option<SpaceId>,
     ) -> Option<SpaceId> {
         if self.transfer_keeps_assignment(wsid, observation) {
-            return observation.or_else(|| self.state.windows.window_server_space(wsid));
+            return observation.or_else(|| self.stores.state.windows.window_server_space(wsid));
         }
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live =
@@ -5177,7 +5271,8 @@ impl Reactor {
             } else {
                 None
             };
-        let resolved = self.state.windows.resolve_native_space(wsid, observation, pending, live);
+        let resolved =
+            self.stores.state.windows.resolve_native_space(wsid, observation, pending, live);
         trace!(
             ?wsid,
             ?observation,
@@ -5191,7 +5286,8 @@ impl Reactor {
 
     fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.authoritative_space_for_window_id(wid).or_else(|| {
-            self.state
+            self.stores
+                .state
                 .windows
                 .window(wid)
                 .and_then(|window| self.best_space_for_window_state(window))
@@ -5203,18 +5299,19 @@ impl Reactor {
         wid: WindowId,
         native: Option<SpaceId>,
     ) -> (Option<SpaceId>, Option<SpaceId>) {
-        let standing = if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
-            DiscoveryStanding::FullscreenRecorded
-        } else if !self.state.windows.contains_window(wid) {
-            DiscoveryStanding::Placeholder
-        } else {
-            DiscoveryStanding::Admissible
-        };
+        let standing =
+            if self.stores.state.windows.native_fullscreen_record_for_window(wid).is_some() {
+                DiscoveryStanding::FullscreenRecorded
+            } else if !self.stores.state.windows.contains_window(wid) {
+                DiscoveryStanding::Placeholder
+            } else {
+                DiscoveryStanding::Admissible
+            };
         let assigned = self.assigned_space_for_window_id(wid);
         let by_frame = Asked::new();
         let spaces = discovery_spaces(standing, native, assigned, || {
             by_frame.ask(|| {
-                let window = self.state.windows.window(wid)?;
+                let window = self.stores.state.windows.window(wid)?;
                 self.best_space_for_frame(&window.frame_monotonic()).filter(|space| {
                     self.is_space_active(*space)
                         || !window
@@ -5264,11 +5361,11 @@ impl Reactor {
     }
 
     fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
-        self.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
+        self.stores.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
     }
 
     fn window_frame_on_known_screen(&self, wid: WindowId) -> Option<CGRect> {
-        let frame = self.state.windows.window(wid)?.frame_monotonic();
+        let frame = self.stores.state.windows.window(wid)?.frame_monotonic();
         self.screen_for_point(frame.mid()).map(|_| frame)
     }
 
@@ -5329,8 +5426,8 @@ impl Reactor {
             })
             .and_then(|screen| screen.space)
         };
-        self.layout_manager.layout_engine.workspaces_mut().ensure_visible_spaces(
-            &mut self.state.windows,
+        self.stores.layout.layout_engine.workspaces_mut().ensure_visible_spaces(
+            &mut self.stores.state.windows,
             &spaces,
             screens.len(),
             rule_space,
@@ -5340,7 +5437,7 @@ impl Reactor {
         }
     }
 
-    fn window_is_standard(&self, id: WindowId) -> bool { self.state.windows.is_admitted(id) }
+    fn window_is_standard(&self, id: WindowId) -> bool { self.stores.state.windows.is_admitted(id) }
 
     pub(crate) fn visible_spaces_for_layout(
         &self,
@@ -5379,12 +5476,13 @@ impl Reactor {
         if let LayoutEvent::WindowObserved(source, resolved) = &event {
             let window = resolved.info.window_id;
             let target =
-                self.layout_manager.layout_engine.workspaces()[resolved.effects.workspace_id].space;
-            let record = self.state.windows.record(window);
+                self.stores.layout.layout_engine.workspaces()[resolved.effects.workspace_id].space;
+            let record = self.stores.state.windows.record(window);
             // A transfer already under way is retried by the next snapshot.
             let needs_transfer = record.is_some_and(|record| {
                 record.transfer().is_none()
                     && self
+                        .stores
                         .state
                         .windows
                         .native_space(window)
@@ -5399,7 +5497,7 @@ impl Reactor {
         let focus_changed = matches!(
             &event,
             LayoutEvent::WindowFocused(_, window)
-                if self.layout_manager.layout_engine.focused_window() != Some(*window)
+                if self.stores.layout.layout_engine.focused_window() != Some(*window)
         );
         let event_space = match &event {
             LayoutEvent::WindowFocused(space, _) | LayoutEvent::WindowAdded(space, _) => {
@@ -5413,12 +5511,15 @@ impl Reactor {
         let focus_desktop = matches!(
             event,
             LayoutEvent::WindowRemoved(wid)
-                if self.layout_manager.layout_engine.focused_window() == Some(wid)
+                if self.stores.layout.layout_engine.focused_window() == Some(wid)
         );
         self.prepare_refocus_before_removal(&event);
         let event_clone = event.clone();
-        let layout_outcome =
-            self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
+        let layout_outcome = self
+            .stores
+            .layout
+            .layout_engine
+            .handle_event(&mut self.stores.state.windows, event);
         let mut response = layout_outcome.response;
         let crate::model::app_rules::AppRuleOutcome { frame, workspace_focus } =
             layout_outcome.app_rules;
@@ -5436,8 +5537,8 @@ impl Reactor {
             self.store_current_floating_positions(request.space);
             self.workspace_switch_manager
                 .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
-            response = self.layout_manager.layout_engine.activate_workspace(
-                &mut self.state.windows,
+            response = self.stores.layout.layout_engine.activate_workspace(
+                &mut self.stores.state.windows,
                 request.space,
                 request.workspace,
                 Some(request.window),
@@ -5479,7 +5580,7 @@ impl Reactor {
             self.focus_desktop_if_active_workspace_empty(space);
         }
         for space in self.space_state.iter_known_spaces() {
-            self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
+            self.stores.layout.layout_engine.debug_tree_desc(space, "after event", false);
         }
     }
 
@@ -5488,7 +5589,7 @@ impl Reactor {
         placements: Vec<crate::model::app_rules::AppRulePlacement>,
     ) {
         for placement in placements {
-            let Some(window) = self.state.windows.window(placement.window) else {
+            let Some(window) = self.stores.state.windows.window(placement.window) else {
                 continue;
             };
             let frame = if placement.position.is_some() {
@@ -5505,17 +5606,17 @@ impl Reactor {
                 placement.resolve_frame(window.frame_monotonic(), CGRect::default())
             };
 
-            self.state.windows.clear_floating_display_geometry(placement.window);
+            self.stores.state.windows.clear_floating_display_geometry(placement.window);
             if let Some(workspace) = self
-                .layout_manager
+                .stores
+                .layout
                 .layout_engine
                 .workspaces()
-                .workspace_for_window(&self.state.windows, placement.space, placement.window)
-                && self.layout_manager.layout_engine.workspaces().workspaces[workspace]
-                    .layout_mode()
+                .workspace_for_window(&self.stores.state.windows, placement.space, placement.window)
+                && self.stores.layout.layout_engine.workspaces().workspaces[workspace].layout_mode()
                     == crate::common::config::LayoutMode::Floating
             {
-                self.layout_manager.layout_engine.store_floating_position(
+                self.stores.layout.layout_engine.store_floating_position(
                     workspace,
                     placement.window,
                     frame,
@@ -5527,7 +5628,7 @@ impl Reactor {
 
     fn apply_app_rule_resizes(&mut self, resizes: Vec<crate::model::app_rules::AppRuleResize>) {
         for resize in resizes {
-            let Some(window) = self.state.windows.window(resize.window) else {
+            let Some(window) = self.stores.state.windows.window(resize.window) else {
                 continue;
             };
             let Some(screen) = self.space_state.screen_by_space(resize.space) else {
@@ -5546,7 +5647,7 @@ impl Reactor {
             if let Some(height) = resize.size.h {
                 new_frame.size.height = height;
             }
-            self.layout_manager.layout_engine.apply_app_rule_resize(
+            self.stores.layout.layout_engine.apply_app_rule_resize(
                 resize,
                 old_frame,
                 new_frame,
@@ -5557,7 +5658,7 @@ impl Reactor {
     }
 
     fn sync_native_admission(&mut self, wid: WindowId) {
-        let Some(window) = self.state.windows.window(wid) else {
+        let Some(window) = self.stores.state.windows.window(wid) else {
             return;
         };
         let entry = window
@@ -5587,7 +5688,7 @@ impl Reactor {
             );
         }
         if let Some(Transition::Suspended(..)) =
-            self.state.windows.set_native_transient(wid, transient)
+            self.stores.state.windows.set_native_transient(wid, transient)
         {
             self.send_layout_event(LayoutEvent::WindowSuspended(wid));
         }
@@ -5596,7 +5697,7 @@ impl Reactor {
     fn observe_transient_lifecycle(&mut self, event: &Event) {
         let departure = match *event {
             Event::WindowDestroyed(wid) => Departure::Destroyed(
-                self.state.windows.record(wid).and_then(|w| w.window_server_id()),
+                self.stores.state.windows.record(wid).and_then(|w| w.window_server_id()),
             ),
             Event::WindowClosed(id) => Departure::Closed(id),
             Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
@@ -5648,10 +5749,10 @@ impl Reactor {
                 // not disable focus-follows-mouse. Native transients always block.
                 && (t.native
                     || self
-                        .state
+                        .stores.state
                         .windows
                         .tracked_window_id(*id)
-                        .is_none_or(|wid| !self.state.windows.is_admitted(wid)))
+                        .is_none_or(|wid| !self.stores.state.windows.is_admitted(wid)))
         })
     }
 
@@ -5659,7 +5760,7 @@ impl Reactor {
     // active workspace membership and potential occlusion of floating windows above it.
     pub(crate) fn should_raise_on_mouse_over(&self, wid: WindowId, space: Option<SpaceId>) -> bool {
         use rift_core::focus::{Hovered, MouseRaise, Unraised};
-        let window = self.state.windows.window(wid).map(|window| Hovered {
+        let window = self.stores.state.windows.window(wid).map(|window| Hovered {
             frame: plain_rect(window.frame_monotonic()),
             server: window.info.sys_id.map(|wsid| wsid.as_u32()),
         });
@@ -5716,7 +5817,9 @@ impl Reactor {
         let targets = rift_core::lifecycle::rule_targets(
             &window_ids,
             run,
-            |wid| reconcilable.ask(wid, |wid| self.state.windows.can_reconcile_admission(wid)),
+            |wid| {
+                reconcilable.ask(wid, |wid| self.stores.state.windows.can_reconcile_admission(wid))
+            },
             |wid| {
                 spaces.ask(wid, |wid| {
                     self.assigned_space_for_window_id(wid)
@@ -5749,20 +5852,20 @@ impl Reactor {
 
             for wid in &wids {
                 let (previous_workspace, was_floating, was_ignored) = {
-                    let engine = &self.layout_manager.layout_engine;
+                    let engine = &self.stores.layout.layout_engine;
                     (
-                        self.layout_manager.layout_engine.workspaces().workspace_for_window(
-                            &self.state.windows,
+                        self.stores.layout.layout_engine.workspaces().workspace_for_window(
+                            &self.stores.state.windows,
                             space,
                             *wid,
                         ),
                         engine.is_window_floating(*wid),
-                        self.state.windows.manage_override(*wid) == Some(false),
+                        self.stores.state.windows.manage_override(*wid) == Some(false),
                     )
                 };
                 let (effects, removal) = window_discovery::assign_window(
-                    &mut self.state,
-                    &mut self.layout_manager,
+                    &mut self.stores.state,
+                    &mut self.stores.layout,
                     *wid,
                     crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
                     Some(&app_info),
@@ -5778,7 +5881,7 @@ impl Reactor {
                         floating_before: was_floating,
                         floating: assignment.should_float(was_floating),
                         was_ignored,
-                        unavailable: self.state.windows.is_temporarily_unavailable(*wid),
+                        unavailable: self.stores.state.windows.is_temporarily_unavailable(*wid),
                     };
                     let refreshes = rift_core::lifecycle::rule_refreshes_layout(run, &outcome);
                     #[cfg(feature = "roc-core")]
@@ -5816,7 +5919,7 @@ impl Reactor {
             }
 
             for (wid, effects) in windows_needing_layout_refresh {
-                let Some(window) = self.state.windows.window(wid) else {
+                let Some(window) = self.stores.state.windows.window(wid) else {
                     continue;
                 };
                 self.send_layout_event(LayoutEvent::WindowObserved(space, ResolvedWindow {
@@ -5829,10 +5932,11 @@ impl Reactor {
 
     fn sole_admitted_window(&self, pid: pid_t) -> Option<WindowId> {
         let mut windows = self
+            .stores
             .state
             .windows
             .window_ids_for_pid(pid)
-            .filter(|wid| self.state.windows.is_admitted(*wid));
+            .filter(|wid| self.stores.state.windows.is_admitted(*wid));
         let window = windows.next()?;
         windows.next().is_none().then_some(window)
     }
@@ -5849,8 +5953,8 @@ impl Reactor {
         self.store_current_floating_positions(space);
         self.workspace_switch_manager
             .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
-        let response = self.layout_manager.layout_engine.activate_workspace(
-            &mut self.state.windows,
+        let response = self.stores.layout.layout_engine.activate_workspace(
+            &mut self.stores.state.windows,
             space,
             workspace,
             Some(window),
@@ -6013,10 +6117,11 @@ impl Reactor {
                 if let Some(wid) = self.window_id_under_cursor().filter(|wid| {
                     self.assigned_space_for_window_id(*wid) == Some(space)
                         && self
-                            .layout_manager
+                            .stores
+                            .layout
                             .layout_engine
                             .workspaces()
-                            .is_window_in_active_workspace(&self.state.windows, space, *wid)
+                            .is_window_in_active_workspace(&self.stores.state.windows, space, *wid)
                 }) {
                     // Avoid duplicate focus events for the already focused window.
                     if self.main_window() != Some(wid) {
@@ -6024,10 +6129,11 @@ impl Reactor {
                     }
                     false
                 } else if self
-                    .layout_manager
+                    .stores
+                    .layout
                     .layout_engine
                     .workspaces()
-                    .windows_in_active_workspace(&self.state.windows, space)
+                    .windows_in_active_workspace(&self.stores.state.windows, space)
                     .is_empty()
                 {
                     self.focus_desktop_if_active_workspace_empty(space)
@@ -6038,7 +6144,7 @@ impl Reactor {
                 // Automatic fallback focus must not become a user workspace activation
                 // if its raise completes after another workspace has been selected.
                 focus_quiet = Quiet::Yes;
-                let selected = self.layout_manager.layout_engine.selected_window(space);
+                let selected = self.stores.layout.layout_engine.selected_window(space);
                 if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, selected)
                 {
                     focus_window = Some(wid);
@@ -6056,11 +6162,11 @@ impl Reactor {
         };
 
         if let Some(wid) = focus_window
-            && let Some(state) = self.state.windows.window(wid)
+            && let Some(state) = self.stores.state.windows.window(wid)
             && state.info.sys_id.is_some()
         {
             let best_space = self.best_space_for_window_state(state);
-            if self.state.windows.is_temporarily_unavailable(wid) {
+            if self.stores.state.windows.is_temporarily_unavailable(wid) {
                 focus_window = None;
                 if let Some(space) = workspace_switch_space
                     && self.may(Initiative::WarpFocus)
@@ -6111,8 +6217,8 @@ impl Reactor {
             .collect();
         let focus_window = focus_window.filter(|wid| self.is_window_on_active_space(*wid));
         if let Some(space) = workspace_switch_space {
-            self.layout_manager.layout_engine.commit_workspace_focus(
-                &mut self.state.windows,
+            self.stores.layout.layout_engine.commit_workspace_focus(
+                &mut self.stores.state.windows,
                 space,
                 focus_window,
             );
@@ -6133,7 +6239,7 @@ impl Reactor {
                     self.workspace_switch_manager.workspace_switch_state,
                     WorkspaceSwitchState::Active(_)
                 ) || self.assigned_space_for_window_id(wid).is_some_and(|space| {
-                    self.layout_manager.layout_engine.active_layout_mode_at(space)
+                    self.stores.layout.layout_engine.active_layout_mode_at(space)
                         == crate::common::config::LayoutMode::Scrolling
                 }))) {
                 // Scrolling resolves against the destination; workspace switches stay deferred.
@@ -6169,14 +6275,14 @@ impl Reactor {
 
     fn tracked_window_under_cursor(&self) -> Option<(WindowServerId, WindowId)> {
         let wsid = self.window_server_id_under_cursor()?;
-        let wid = self.state.windows.tracked_window_id(wsid)?;
+        let wid = self.stores.state.windows.tracked_window_id(wsid)?;
         Some((wsid, wid))
     }
 
     fn activation_from_unmanageable_window(&self, pid: pid_t) -> Option<WindowServerId> {
         let (wsid, wid) = self.tracked_window_under_cursor()?;
-        self.state.windows.window(wid)?;
-        (wid.pid == pid && !self.state.windows.is_admitted(wid)).then_some(wsid)
+        self.stores.state.windows.window(wid)?;
+        (wid.pid == pid && !self.stores.state.windows.is_admitted(wid)).then_some(wsid)
     }
 
     fn focus_untracked_window_under_cursor(&mut self) -> bool {
@@ -6186,10 +6292,11 @@ impl Reactor {
         let (tracked, known) = (Asked::new(), Asked::new());
         let decision = rift_core::focus::untracked_focus(
             under_cursor,
-            |wsid| tracked.ask(|| self.state.windows.tracked_window_id(wsid).is_some()),
+            |wsid| tracked.ask(|| self.stores.state.windows.tracked_window_id(wsid).is_some()),
             |wsid| {
                 known.ask(|| {
-                    self.state
+                    self.stores
+                        .state
                         .windows
                         .get_window_server_info(wsid)
                         .or_else(|| window_server::get_window(wsid))
@@ -6232,10 +6339,11 @@ impl Reactor {
         let workspace_empty = Asked::new();
         let focuses = rift_core::focus::focuses_desktop(active, || {
             workspace_empty.ask(|| {
-                self.layout_manager
+                self.stores
+                    .layout
                     .layout_engine
                     .workspaces()
-                    .windows_in_active_workspace(&self.state.windows, space)
+                    .windows_in_active_workspace(&self.stores.state.windows, space)
                     .is_empty()
             })
         });
@@ -6259,8 +6367,8 @@ impl Reactor {
             return false;
         }
 
-        self.layout_manager.layout_engine.commit_workspace_focus(
-            &mut self.state.windows,
+        self.stores.layout.layout_engine.commit_workspace_focus(
+            &mut self.stores.state.windows,
             space,
             None,
         );
@@ -6269,13 +6377,14 @@ impl Reactor {
 
     fn last_focused_window_in_space(&self, space: SpaceId) -> Option<WindowId> {
         let active_workspace =
-            self.layout_manager.layout_engine.workspaces().active_workspace(space)?;
+            self.stores.layout.layout_engine.workspaces().active_workspace(space)?;
         let wid = self
-            .layout_manager
+            .stores
+            .layout
             .layout_engine
             .workspaces()
             .last_focused_window(space, active_workspace)?;
-        let window = self.state.windows.window(wid)?;
+        let window = self.stores.state.windows.window(wid)?;
 
         if self.best_space_for_window_id(wid)? != space {
             return None;
@@ -6283,7 +6392,7 @@ impl Reactor {
         if window
             .info
             .sys_id
-            .is_some_and(|wsid| !self.state.windows.is_window_visible(wsid))
+            .is_some_and(|wsid| !self.stores.state.windows.is_window_visible(wsid))
         {
             return None;
         }
@@ -6296,14 +6405,14 @@ impl Reactor {
         preferred: Option<WindowId>,
     ) -> Option<WindowId> {
         let is_visible_in_space = |wid: WindowId| {
-            let Some(window) = self.state.windows.window(wid) else {
+            let Some(window) = self.stores.state.windows.window(wid) else {
                 return false;
             };
             window.info.sys_id.is_some()
-                && !self.state.windows.is_temporarily_unavailable(wid)
+                && !self.stores.state.windows.is_temporarily_unavailable(wid)
                 && self.best_space_for_window_id(wid) == Some(space)
-                && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-                    &self.state.windows,
+                && self.stores.layout.layout_engine.workspaces().is_window_in_active_workspace(
+                    &self.stores.state.windows,
                     space,
                     wid,
                 )
@@ -6315,10 +6424,11 @@ impl Reactor {
             || last_focused.ask(|| self.last_focused_window_in_space(space)),
             || {
                 in_workspace.ask(|| {
-                    self.layout_manager
+                    self.stores
+                        .layout
                         .layout_engine
                         .workspaces()
-                        .windows_in_active_workspace(&self.state.windows, space)
+                        .windows_in_active_workspace(&self.stores.state.windows, space)
                 })
             },
             |wid| visible.ask(wid, is_visible_in_space),
@@ -6351,7 +6461,7 @@ impl Reactor {
         // would activate that display's selection and warp the cursor back.
         let (main, focused) = (
             self.main_window(),
-            self.layout_manager.layout_engine.focused_window(),
+            self.stores.layout.layout_engine.focused_window(),
         );
         let in_inactive_workspace = Asked::new();
         let hides = rift_core::focus::hides_focus(window_id, main, focused, || {
@@ -6376,14 +6486,15 @@ impl Reactor {
 
     fn window_in_non_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
         let Some(active_workspace) =
-            self.layout_manager.layout_engine.workspaces().active_workspace(space)
+            self.stores.layout.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
-        self.layout_manager
+        self.stores
+            .layout
             .layout_engine
             .workspaces()
-            .workspace_for_window(&self.state.windows, space, window_id)
+            .workspace_for_window(&self.stores.state.windows, space, window_id)
             .is_some_and(|window_workspace| window_workspace != active_workspace)
     }
 
@@ -6393,12 +6504,12 @@ impl Reactor {
             LayoutEvent::WindowRemoved(wid) => Removal::WindowRemoved(wid),
             _ => return,
         };
-        let focused = self.layout_manager.layout_engine.focused_window().or_else(|| {
+        let focused = self.stores.layout.layout_engine.focused_window().or_else(|| {
             // AX suspension clears current focus before authoritative removal arrives.
             // Use workspace history without visibility filtering: the departing window
             // may already be ordered out or absent from the window store.
             let space = self.workspace_command_space()?;
-            let workspaces = self.layout_manager.layout_engine.workspaces();
+            let workspaces = self.stores.layout.layout_engine.workspaces();
             workspaces.last_focused_window(space, workspaces.active_workspace(space)?)
         });
         // A native tab departure can arrive before either AX or the debounced WindowServer
@@ -6411,7 +6522,8 @@ impl Reactor {
             |window| window.pid,
             |window| {
                 removed_space.ask(|| {
-                    self.layout_manager
+                    self.stores
+                        .layout
                         .layout_engine
                         .space_with_window(window)
                         .filter(|space| self.is_space_active(*space))
@@ -6421,7 +6533,8 @@ impl Reactor {
             |space| native_focus.ask(|| self.native.key_focused_window(space)),
             |native| {
                 successors.ask(native, |native| {
-                    self.state
+                    self.stores
+                        .state
                         .windows
                         .tracked_window_id(WindowServerId::new(native.idx.get()))
                         .unwrap_or(native)
@@ -6466,7 +6579,7 @@ impl Reactor {
         match decision {
             RemovalFocus::Unaffected => {}
             RemovalFocus::KeepNative(successor) => {
-                if !self.state.windows.contains_window(successor) {
+                if !self.stores.state.windows.contains_window(successor) {
                     self.request_window_inventory(successor.pid);
                 }
                 debug!(?successor, "Preserving native focus during window removal");
@@ -6530,7 +6643,7 @@ impl Reactor {
                 continue;
             }
 
-            let engine = &self.layout_manager.layout_engine;
+            let engine = &self.stores.layout.layout_engine;
             let mut mode = engine.active_layout_mode_at(space);
             // This cache routes gesture candidates, not public layout mode. An
             // empty/fullscreen strip must still permit workspace navigation.
@@ -6628,7 +6741,7 @@ impl Reactor {
         let window = self.main_window().filter(|window| window.pid == pid)?;
         let &(authoritative, discovery) = spaces.get(&window)?;
         let space = authoritative.or_else(|| {
-            let wsid = self.state.windows.record(window)?.window_server_id();
+            let wsid = self.stores.state.windows.record(window)?.window_server_id();
             (!wsid.is_some_and(|wsid| self.is_known_fullscreen_window(wsid)))
                 .then_some(discovery)
                 .flatten()
@@ -6659,7 +6772,8 @@ impl Reactor {
 
     fn command_context_space(&self) -> Option<SpaceId> {
         self.workspace_command_space().or_else(|| {
-            self.layout_manager
+            self.stores
+                .layout
                 .layout_engine
                 .focused_window()
                 .and_then(|wid| {
@@ -6828,8 +6942,8 @@ impl Reactor {
         source: Option<CGRect>,
         target: CGRect,
     ) -> CGRect {
-        if self.layout_manager.layout_engine.is_window_floating(window) {
-            self.state.windows.project_floating_frame(window, frame, source, target)
+        if self.stores.layout.layout_engine.is_window_floating(window) {
+            self.stores.state.windows.project_floating_frame(window, frame, source, target)
         } else {
             crate::sys::geometry::frame_on_display(frame, source, target, Default::default())
         }
@@ -6838,8 +6952,8 @@ impl Reactor {
     /// In global mode, open a new window on the pointer's display unless an app rule
     /// names its workspace: launchers can activate an app on another display.
     fn place_new_window_on_pointer_display(&mut self, window: WindowId, space: SpaceId) {
-        let engine = &self.layout_manager.layout_engine;
-        let new_window = match self.state.windows.window(window) {
+        let engine = &self.stores.layout.layout_engine;
+        let new_window = match self.stores.state.windows.window(window) {
             None => NewWindow::Untracked,
             Some(state) if !state.info.is_standard => NewWindow::NotStandard,
             Some(state) => NewWindow::Standard(state),
@@ -6920,14 +7034,14 @@ impl Reactor {
         &mut self,
         space: SpaceId,
     ) -> Option<crate::model::VirtualWorkspaceId> {
-        let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+        let workspaces = self.stores.layout.layout_engine.workspaces_mut();
         if let Some(id) = workspaces.active_workspace(space) {
             return Some(id);
         }
         if workspaces.effective_mode() != crate::common::config::WorkspaceMode::Global {
             return None;
         }
-        match workspaces.create_workspace(&mut self.state.windows, space, None) {
+        match workspaces.create_workspace(&mut self.stores.state.windows, space, None) {
             Ok(id) => {
                 self.expose_space_if_known(space);
                 Some(id)
@@ -6948,8 +7062,8 @@ impl Reactor {
         let Some(screen) = self.space_state.screen_by_space(target) else {
             return EventOutcome::no_change();
         };
-        let response = self.layout_manager.layout_engine.move_window_to_space(
-            &mut self.state.windows,
+        let response = self.stores.layout.layout_engine.move_window_to_space(
+            &mut self.stores.state.windows,
             source,
             target,
             screen.frame.size,
@@ -6979,7 +7093,8 @@ impl Reactor {
     /// next command would act on the display move-node just carried the window off.
     fn follow_focused_window_to_its_display(&mut self, previous_space: Option<SpaceId>) {
         let focused_space = self
-            .layout_manager
+            .stores
+            .layout
             .layout_engine
             .focused_window()
             .and_then(|window| self.assigned_space_for_window_id(window));
@@ -7024,8 +7139,8 @@ impl Reactor {
         which: WindowToMove,
     ) -> Result<(WindowId, SpaceId, SpaceId), Refusal> {
         let command_space = self.workspace_command_space();
-        let workspaces = self.layout_manager.layout_engine.workspaces();
-        let windows = &self.state.windows;
+        let workspaces = self.stores.layout.layout_engine.workspaces();
+        let windows = &self.stores.state.windows;
         let window = match which {
             WindowToMove::Index(index) => workspaces.resolve_window_index(
                 windows,
@@ -7042,7 +7157,12 @@ impl Reactor {
         // Only a window rift may move keeps its assignment through the move (#702).
         .filter(|&window| windows.can_move_assigned_window(window))
         .ok_or(Refusal::Warn("no target window was resolved"))?;
-        let state = self.state.windows.window(window).ok_or(Refusal::Warn("unknown window"))?;
+        let state = self
+            .stores
+            .state
+            .windows
+            .window(window)
+            .ok_or(Refusal::Warn("unknown window"))?;
         let source = self
             .assigned_space_for_window_id(window)
             .or_else(|| self.best_space_for_window_id(window))
@@ -7064,7 +7184,7 @@ impl Reactor {
         source: SpaceId,
         target: &ScreenInfo,
     ) -> Option<(crate::model::VirtualWorkspaceId, RuleStanding)> {
-        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let workspaces = self.stores.layout.layout_engine.workspaces();
         let active = workspaces.active_workspace(source)?;
         let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
         let preferred = crate::sys::screen::resolve_display_preference(
@@ -7155,10 +7275,10 @@ impl Reactor {
         let space = screen.as_ref().and_then(|screen| screen.space);
         let focus_window = space.and_then(|space| {
             self.last_focused_window_in_space(space).or_else(|| {
-                let engine = &self.layout_manager.layout_engine;
+                let engine = &self.stores.layout.layout_engine;
                 engine
                     .workspaces()
-                    .windows_in_active_workspace(&self.state.windows, space)
+                    .windows_in_active_workspace(&self.stores.state.windows, space)
                     .first()
                     .copied()
             })
@@ -7166,7 +7286,7 @@ impl Reactor {
         command_workflow::DisplayFocusPayload {
             target_is_active: space.is_none_or(|space| self.is_space_active(space)),
             focus_window_center: focus_window
-                .and_then(|wid| self.state.windows.window(wid))
+                .and_then(|wid| self.stores.state.windows.window(wid))
                 .map(|window| window.frame_monotonic().mid()),
             screen,
             focus_window,
@@ -7195,14 +7315,16 @@ impl Reactor {
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {
         let floating_windows_in_workspace = self
-            .layout_manager
+            .stores
+            .layout
             .layout_engine
             .workspaces()
-            .windows_in_active_workspace(&self.state.windows, space)
+            .windows_in_active_workspace(&self.stores.state.windows, space)
             .into_iter()
-            .filter(|&wid| self.layout_manager.layout_engine.is_window_floating(wid))
+            .filter(|&wid| self.stores.layout.layout_engine.is_window_floating(wid))
             .filter_map(|wid| {
-                self.state
+                self.stores
+                    .state
                     .windows
                     .window(wid)
                     .map(|window_state| (wid, window_state.frame_monotonic()))
@@ -7210,7 +7332,8 @@ impl Reactor {
             .collect::<Vec<_>>();
 
         if !floating_windows_in_workspace.is_empty() {
-            self.layout_manager
+            self.stores
+                .layout
                 .layout_engine
                 .store_floating_window_positions(space, &floating_windows_in_workspace);
         }
@@ -7436,26 +7559,26 @@ impl ActivationFacts for ActivationQuery<'_> {
     fn standard(&self) -> bool { self.reactor.window_is_standard(self.window) }
 
     fn unavailable(&self) -> bool {
-        self.reactor.state.windows.is_temporarily_unavailable(self.window)
+        self.reactor.stores.state.windows.is_temporarily_unavailable(self.window)
     }
 
     fn space(&self) -> Option<SpaceId> { self.reactor.best_space_for_window_id(self.window) }
 
     fn workspace(&self, space: SpaceId) -> Option<Self::Workspace> {
         let reactor = self.reactor;
-        reactor.layout_manager.layout_engine.workspaces().workspace_for_window(
-            &reactor.state.windows,
+        reactor.stores.layout.layout_engine.workspaces().workspace_for_window(
+            &reactor.stores.state.windows,
             space,
             self.window,
         )
     }
 
     fn active_workspace(&self, space: SpaceId) -> Option<Self::Workspace> {
-        self.reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+        self.reactor.stores.layout.layout_engine.workspaces().active_workspace(space)
     }
 
     fn pending_window(&self) -> bool {
-        self.reactor.state.windows.has_pending_window_for_pid(self.window.pid)
+        self.reactor.stores.state.windows.has_pending_window_for_pid(self.window.pid)
     }
 
     fn mode_refusal(&self) -> Option<String> {
@@ -7595,20 +7718,20 @@ impl rift_core::focus::RaiseFacts for RaiseQuery<'_> {
     type Server = u32;
     type Space = SpaceId;
 
-    fn claimed(&self) -> bool { self.reactor.state.windows.is_claimed(self.window) }
+    fn claimed(&self) -> bool { self.reactor.stores.state.windows.is_claimed(self.window) }
 
-    fn admitted(&self) -> bool { self.reactor.state.windows.is_admitted_state(self.window) }
+    fn admitted(&self) -> bool { self.reactor.stores.state.windows.is_admitted_state(self.window) }
 
     fn floating(&self) -> bool {
-        self.reactor.layout_manager.layout_engine.is_window_floating(self.window)
+        self.reactor.stores.layout.layout_engine.is_window_floating(self.window)
     }
 
     fn active(&self, space: SpaceId) -> bool { self.reactor.is_space_active(space) }
 
     fn in_active_workspace(&self, space: SpaceId) -> bool {
         let reactor = self.reactor;
-        reactor.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
-            &reactor.state.windows,
+        reactor.stores.layout.layout_engine.workspaces().is_window_in_active_workspace(
+            &reactor.stores.state.windows,
             space,
             self.window,
         )
@@ -7616,14 +7739,14 @@ impl rift_core::focus::RaiseFacts for RaiseQuery<'_> {
 
     fn could_occlude(&self) -> bool {
         let reactor = self.reactor;
-        let Some(window) = reactor.state.windows.window(self.window) else {
+        let Some(window) = reactor.stores.state.windows.window(self.window) else {
             return false;
         };
         let frame = window.frame_monotonic();
-        reactor.state.windows.iter_windows().any(|(other, state)| {
+        reactor.stores.state.windows.iter_windows().any(|(other, state)| {
             other != self.window
                 && state.info.sys_id.is_some()
-                && reactor.layout_manager.layout_engine.is_window_floating(other)
+                && reactor.stores.layout.layout_engine.is_window_floating(other)
                 && frame.contains_rect(state.frame_monotonic())
         })
     }
@@ -7634,10 +7757,10 @@ impl rift_core::focus::RaiseFacts for RaiseQuery<'_> {
 
     fn floater(&self, above: u32) -> Option<rift_core::plain::Rect> {
         let reactor = self.reactor;
-        let above = reactor.state.windows.tracked_window_id(WindowServerId::new(above))?;
-        reactor.layout_manager.layout_engine.is_window_floating(above).then_some(())?;
+        let above = reactor.stores.state.windows.tracked_window_id(WindowServerId::new(above))?;
+        reactor.stores.layout.layout_engine.is_window_floating(above).then_some(())?;
         Some(plain_rect(
-            reactor.state.windows.window(above)?.frame_monotonic(),
+            reactor.stores.state.windows.window(above)?.frame_monotonic(),
         ))
     }
 

@@ -38,7 +38,7 @@ const SCREEN_H: f64 = 800.;
 // Adapter: the only place that knows how this branch exposes the drag.
 
 fn dragged(reactor: &Reactor) -> Option<WindowId> {
-    reactor.state.windows.drag().map(|(window, _)| window)
+    reactor.stores.state.windows.drag().map(|(window, _)| window)
 }
 
 fn user_dragging(reactor: &Reactor) -> bool { reactor.user_is_dragging() }
@@ -46,7 +46,7 @@ fn user_dragging(reactor: &Reactor) -> bool { reactor.user_is_dragging() }
 /// The pointer goes down on `wid`. (The simulated windows can overlap, so the press names the
 /// window instead of a point for the reactor's test double to resolve.)
 fn press(reactor: &mut Reactor, wid: WindowId) {
-    reactor.state.step(CoreEvent::Press {
+    reactor.stores.state.step(CoreEvent::Press {
         window: Some(wid),
         button: crate::actor::drag::MouseButton::Left.into(),
     });
@@ -477,7 +477,7 @@ impl Setup {
 
 impl Sim {
     /// Every step the reactor takes through the core is recorded from the start
-    /// (`reactor.state.core.trace`): the invariants read why rift wrote what it wrote, and the
+    /// (`reactor.stores.state.core.trace`): the invariants read why rift wrote what it wrote, and the
     /// differential test replays it.
     fn new(setup: Setup) -> Self {
         let displays = setup.displays;
@@ -503,7 +503,7 @@ impl Sim {
                 (Apps::new(), reactor)
             }
         };
-        reactor.state.core.trace = Some(Vec::new());
+        reactor.stores.state.core.trace = Some(Vec::new());
         let screens: Vec<CGRect> = (0..displays)
             .map(|i| {
                 CGRect::new(
@@ -636,7 +636,7 @@ impl Sim {
     /// What an inventory reports of window `wid`: rift's record of it, at the frame the window
     /// really has. None when rift has no record (it retired or never admitted the window).
     fn reported_info(&self, wid: WindowId) -> Option<WindowInfo> {
-        let mut info = self.reactor.state.windows.window(wid)?.info.clone();
+        let mut info = self.reactor.stores.state.windows.window(wid)?.info.clone();
         info.frame = self.os_frame(wid);
         Some(info)
     }
@@ -828,7 +828,7 @@ impl Sim {
         self.in_flight_before = self
             .live
             .iter()
-            .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
+            .filter_map(|&wid| match self.reactor.stores.state.core.sync(wid)? {
                 Sync::Animating { target, .. } => Some((wid, vec![target])),
                 Sync::InFlight { target, queued, .. } => {
                     Some((wid, std::iter::once(target).chain(queued).collect()))
@@ -843,7 +843,7 @@ impl Sim {
         self.settled_before = self
             .live
             .iter()
-            .filter_map(|&wid| match self.reactor.state.core.sync(wid)? {
+            .filter_map(|&wid| match self.reactor.stores.state.core.sync(wid)? {
                 Sync::Settled { acked, .. } => Some((wid, (acked, self.os_frame(wid)))),
                 Sync::Unknown { .. }
                 | Sync::InFlight { .. }
@@ -899,7 +899,7 @@ impl Sim {
                     });
                     // The windows overlap: the user holds whichever one is on top at the point,
                     // which is the one rift took (if it manages one there).
-                    if let Some(gripped) = self.reactor.state.windows.gripped() {
+                    if let Some(gripped) = self.reactor.stores.state.windows.gripped() {
                         let assigned_at_start = self.reactor.assigned_space_for_window_id(gripped);
                         let rift_saw_it = dragged(&self.reactor) == Some(gripped);
                         let point = CGPoint::new(point.x + f64::from(dx), point.y + f64::from(dy));
@@ -1009,7 +1009,7 @@ impl Sim {
                 let new = mine
                     .iter()
                     .filter_map(|&wid| {
-                        let mut info = self.reactor.state.windows.window(wid)?.info.clone();
+                        let mut info = self.reactor.stores.state.windows.window(wid)?.info.clone();
                         let (frame, applied) = match self.stale_reads.get(&wid) {
                             Some(&read) if stale => read,
                             Some(_) | None => self.read(wid),
@@ -1133,10 +1133,11 @@ impl Sim {
                     let live: Vec<WindowId> = self.live.iter().copied().collect();
                     for wid in live {
                         // A window without a server identity yet (a fresh one) has no Space.
-                        let Some(wsid) = self.reactor.state.windows.server_id(wid) else {
+                        let Some(wsid) = self.reactor.stores.state.windows.server_id(wid) else {
                             continue;
                         };
-                        if self.reactor.state.windows.window_server_space(wsid) == Some(lost) {
+                        if self.reactor.stores.state.windows.window_server_space(wsid) == Some(lost)
+                        {
                             self.reactor.mark_test_window_visible_in_space(wsid, space);
                         }
                     }
@@ -1182,7 +1183,7 @@ impl Sim {
                         space,
                         SpaceEventKind::Fullscreen,
                     );
-                    self.reactor.state.windows.set_window_server_space(wsid, Some(space));
+                    self.reactor.stores.state.windows.set_window_server_space(wsid, Some(space));
                     self.fullscreen.insert(wid, Fullscreen { wsid, home, dead: None });
                 }
             }
@@ -1281,14 +1282,16 @@ impl Sim {
         self.apps.requests()
     }
 
-    fn core_steps(&self) -> usize { self.reactor.state.core.trace.as_ref().map_or(0, Vec::len) }
+    fn core_steps(&self) -> usize {
+        self.reactor.stores.state.core.trace.as_ref().map_or(0, Vec::len)
+    }
 
     /// What the core decided since step `from` that the invariants need: a modifier drag's
     /// interactive frame, or the core forgetting a window, ends rift's wait for it; and a
     /// window whose acknowledged frame rift stopped trusting (a display change, a drag's end) is
     /// written whatever it was.
     fn read_core_steps(&mut self, from: usize) {
-        let trace = &self.reactor.state.core.trace;
+        let trace = &self.reactor.stores.state.core.trace;
         for (event, effects) in &trace.as_ref().expect("recording")[from..] {
             match event {
                 // A modifier drag took the window, or something outside the core (a topology
@@ -1358,7 +1361,7 @@ impl Sim {
         ) && let Some(held) = &self.held
             && self.live.contains(&held.window)
             // A claimed window is its owner's: rift does not drag it.
-            && self.reactor.state.windows.claim(held.window).is_none()
+            && self.reactor.stores.state.windows.claim(held.window).is_none()
             && self.moved == Some(held.window)
             && !frames_written(&self.pending).iter().any(|(wid, frame)| {
                 *wid == held.window && frame.same_as(self.os_frame(held.window))
@@ -1392,7 +1395,8 @@ impl Sim {
             // 3. The dragged window keeps its assignment until the drop, unless a workspace
             // transfer would have carried it off: then it is placed by no workspace instead.
             let now = self.reactor.assigned_space_for_window_id(wid);
-            let left_unplaced = now.is_none() && self.reactor.state.windows.is_held_unplaced(wid);
+            let left_unplaced =
+                now.is_none() && self.reactor.stores.state.windows.is_held_unplaced(wid);
             if now != held.assigned_at_start && !left_unplaced {
                 let invariant = if held.command_during_drag {
                     "held-window-keeps-assignment (after a command)"
@@ -1411,7 +1415,7 @@ impl Sim {
         // 3b. A drag drops onto the display under the pointer: whatever it would drop onto is
         // there, and off every display there is nothing to drop onto.
         if let Some(held) = self.held.as_ref().filter(|held| held.rift_saw_it)
-            && let Some(session) = self.reactor.state.windows.drag_on(held.window)
+            && let Some(session) = self.reactor.stores.state.windows.drag_on(held.window)
             && let Some(intent) = session.intent()
         {
             let under = self.pointer().and_then(|pointer| {
@@ -1438,7 +1442,7 @@ impl Sim {
         // interactive frames (the viewport's; the fuzzer's drags are native, so they have none
         // of their own). The drop is what writes.
         if let Some(held) = &self.held
-            && self.reactor.state.windows.is_gripped(held.window)
+            && self.reactor.stores.state.windows.is_gripped(held.window)
             && let Some((_, frame)) = writes.iter().find(|(w, _)| *w == held.window)
         {
             return fail(
@@ -1500,7 +1504,7 @@ impl Sim {
             }
             // 6. Only the reconciler writes: what rift sent is what the reconciler has in
             // flight. (A write it stopped waiting for within the same step is the exception.)
-            match self.reactor.state.core.sync(wid) {
+            match self.reactor.stores.state.core.sync(wid) {
                 Some(Sync::InFlight { target, .. }) => {
                     if !frame.same_as(target) && !self.gave_up.contains(&wid) {
                         return fail(
@@ -1564,8 +1568,9 @@ impl Sim {
         // 10. The window store's frames are the core's projection: every window the store has
         // a frame for is seen there by the core.
         for &wid in &self.live {
-            let projected = self.reactor.state.windows.window(wid).map(|w| w.frame_monotonic());
-            let seen = self.reactor.state.core.seen(wid);
+            let projected =
+                self.reactor.stores.state.windows.window(wid).map(|w| w.frame_monotonic());
+            let seen = self.reactor.stores.state.core.seen(wid);
             if projected != seen {
                 return fail(
                     "frames-are-the-cores",
@@ -1575,11 +1580,11 @@ impl Sim {
         }
         // 11. The pending store the app actors read is the core's projection too.
         for &wid in &self.live {
-            let Some(wsid) = self.reactor.state.windows.server_id(wid) else {
+            let Some(wsid) = self.reactor.stores.state.windows.server_id(wid) else {
                 continue;
             };
-            let stored = self.reactor.state.tx.target(wsid);
-            let pending = self.reactor.state.core.pending(wid);
+            let stored = self.reactor.stores.state.tx.target(wsid);
+            let pending = self.reactor.stores.state.core.pending(wid);
             if stored != pending {
                 return fail(
                     "pending-is-the-cores",
@@ -1591,9 +1596,9 @@ impl Sim {
         // native fullscreen one is in its fullscreen space, a held one a transfer left is the
         // drop's to place).
         for &wid in &self.live {
-            if self.reactor.state.windows.claim(wid).is_none()
+            if self.reactor.stores.state.windows.claim(wid).is_none()
                 && !self.fullscreen.contains_key(&wid)
-                && !self.reactor.state.windows.is_held_unplaced(wid)
+                && !self.reactor.stores.state.windows.is_held_unplaced(wid)
                 && self.reactor.assigned_space_for_window_id(wid).is_none()
             {
                 return fail(
@@ -1658,7 +1663,7 @@ impl Sim {
                 if claims(&layouts, wid) != 1 {
                     return Err(fail(format!("{wid:?} is in more than one layout")));
                 }
-                let sync = self.reactor.state.core.sync(wid);
+                let sync = self.reactor.stores.state.core.sync(wid);
                 let observed = self.os_frame(wid);
                 // A refused window stays where its app put it; one whose write failed waits for
                 // the next arrange to write it again.
@@ -1869,14 +1874,14 @@ type PlainStep = (
 /// The steps the reactor took through the core on one case, on plain data.
 fn trace(setup: Setup, steps: &[Step]) -> Vec<PlainStep> {
     let mut sim = Sim::new(setup);
-    let epoch = sim.reactor.state.core.clock.now();
+    let epoch = sim.reactor.stores.state.core.clock.now();
     for &step in steps {
         let emitted = sim.run(step);
         sim.pending.extend(emitted);
     }
     _ = sim.settle(steps.len());
     let to = Plainly { epoch };
-    let recorded = sim.reactor.state.core.trace.take().unwrap_or_default();
+    let recorded = sim.reactor.stores.state.core.trace.take().unwrap_or_default();
     recorded
         .into_iter()
         .map(|(event, effects)| {
@@ -2305,7 +2310,7 @@ fn a_display_returning_mid_drag_leaves_the_held_window_where_it_is() {
             sim.pending.extend(emitted);
         }
         let held = sim.held_window().unwrap();
-        assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
+        assert_eq!(sim.reactor.stores.state.windows.workspace_for_window(held), None);
     }
     let setup = Setup {
         displays: 3,
@@ -2344,12 +2349,12 @@ fn a_held_window_left_by_its_workspace_is_placed_by_the_drop_or_its_space() {
         }
         _ = sim.settle(steps.len());
         let held = held.unwrap();
-        let wsid = sim.reactor.state.windows.server_id(held).unwrap();
-        let on = sim.reactor.state.windows.window_server_space(wsid).unwrap();
-        let shown = sim.reactor.layout_manager.layout_engine.workspaces().active_workspace(on);
+        let wsid = sim.reactor.stores.state.windows.server_id(held).unwrap();
+        let on = sim.reactor.stores.state.windows.window_server_space(wsid).unwrap();
+        let shown = sim.reactor.stores.layout.layout_engine.workspaces().active_workspace(on);
         assert!(shown.is_some(), "{end:?}");
         assert_eq!(
-            sim.reactor.state.windows.workspace_for_window(held),
+            sim.reactor.stores.state.windows.workspace_for_window(held),
             shown,
             "{end:?}"
         );
@@ -2367,10 +2372,10 @@ fn app_rules_mid_drag_leave_a_held_window_alone() {
         sim.pending.extend(emitted);
     }
     let held = sim.held_window().unwrap();
-    assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
+    assert_eq!(sim.reactor.stores.state.windows.workspace_for_window(held), None);
     let info = sim.reactor.app_manager.apps[&held.pid].info.clone();
     sim.reactor.process_windows_for_app_rules(vec![held], info, true);
-    assert_eq!(sim.reactor.state.windows.workspace_for_window(held), None);
+    assert_eq!(sim.reactor.stores.state.windows.workspace_for_window(held), None);
 }
 
 /// A workspace switch, then a departure that takes every workspace off the Space: the Space
@@ -2431,7 +2436,7 @@ fn activation_shapes_across_the_fuzzer() {
             let mut sim = Sim::new(setup);
             for step in generate(seed, len) {
                 let placed = |sim: &Sim| -> Vec<_> {
-                    let workspaces = sim.reactor.layout_manager.layout_engine.workspaces();
+                    let workspaces = sim.reactor.stores.layout.layout_engine.workspaces();
                     workspaces.catalog().map(|id| (id, workspaces[id].space)).collect()
                 };
                 let before = placed(&sim);
@@ -2448,7 +2453,7 @@ fn activation_shapes_across_the_fuzzer() {
                     entry.0 += 1;
                     entry.1 += u64::from(moved);
                 }
-                let workspaces = sim.reactor.layout_manager.layout_engine.workspaces();
+                let workspaces = sim.reactor.stores.layout.layout_engine.workspaces();
                 for activation in workspaces.active_workspace_per_space().values() {
                     let shape = match activation {
                         SpaceActivation::Showing {
