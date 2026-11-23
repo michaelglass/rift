@@ -2662,6 +2662,8 @@ impl WorkspaceStore {
         }
     }
 
+    /// Tests only: nothing in rift renames a workspace by id (names come from settings).
+    #[cfg(test)]
     pub(crate) fn rename_workspace(
         &mut self,
         core: &CoreWorkspaces,

@@ -431,6 +431,31 @@ impl<W: Copy + Ord, K: Copy + Ord, S: Copy + PartialEq, O: Copy> Workspaces<W, K
         self.assigned.get(&workspace).into_iter().flatten().copied()
     }
 
+    /// Workspaces holding exactly `catalog`, `activations` and `owners` (another core's view, in
+    /// its orders), built by stepping, so the step's refusals hold them: the first event refused
+    /// is the answer.
+    pub fn from_view(
+        catalog: impl IntoIterator<Item = (K, S)>,
+        activations: impl IntoIterator<Item = (S, Activation<K>)>,
+        owners: impl IntoIterator<Item = (W, Ownership<K, O>)>,
+    ) -> Result<Self, Refused<K, S>> {
+        let mut workspaces = Workspaces::default();
+        let created = catalog
+            .into_iter()
+            .map(|(workspace, space)| WorkspacesEvent::Created { workspace, space });
+        let activated = activations
+            .into_iter()
+            .map(|(space, activation)| WorkspacesEvent::Activated { space, activation });
+        let owned = owners.into_iter().map(|(window, ownership)| WorkspacesEvent::Owned {
+            window,
+            owned: Owned::Owner(ownership),
+        });
+        for event in created.chain(activated).chain(owned) {
+            workspaces.step(event)?;
+        }
+        Ok(workspaces)
+    }
+
     /// The Space `workspace` is on.
     pub fn space_of(&self, workspace: K) -> Option<S> {
         self.catalog
@@ -701,6 +726,58 @@ mod tests {
         assert!(emits_window(Some(1), || Some(1)));
         assert!(!emits_window(Some(1), || Some(2)));
         assert!(emits_window(Some(1), || None));
+    }
+
+    #[test]
+    fn workspaces_from_a_view_hold_that_view_and_refuse_one_naming_what_it_lacks() {
+        use WorkspacesEvent::{Activated, Created, Owned as Own};
+        let mut workspaces = Workspaces::<u32, u32, u32, u32>::default();
+        for event in [
+            Created { workspace: 2, space: 20 },
+            Created { workspace: 1, space: 10 },
+            Activated {
+                space: 20,
+                activation: Activation::Showing {
+                    current: 2,
+                    previous: None,
+                    remembered: Some(1),
+                },
+            },
+            Activated {
+                space: 10,
+                activation: Activation::Vacant { remembered: None },
+            },
+            Own {
+                window: 5,
+                owned: Owned::Owner(Ownership::Assigned(1)),
+            },
+            Own {
+                window: 3,
+                owned: Owned::Owner(Ownership::Claimed {
+                    owner: 7,
+                    destination: Destination::Returns(2),
+                }),
+            },
+            Own {
+                window: 4,
+                owned: Owned::Owner(Ownership::Held),
+            },
+        ] {
+            assert_eq!(workspaces.step(event), Ok(()), "{event:?}");
+        }
+        let rebuilt = Workspaces::from_view(
+            workspaces.catalog().to_vec(),
+            workspaces.activations().to_vec(),
+            workspaces.owners(),
+        );
+        assert_eq!(rebuilt.as_ref(), Ok(&workspaces));
+        assert_eq!(
+            Workspaces::<u32, u32, u32, u32>::from_view([(1, 10)], [], [(
+                5,
+                Ownership::Assigned(9)
+            )]),
+            Err(Refused::Unknown(9))
+        );
     }
 
     #[test]

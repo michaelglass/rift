@@ -75,6 +75,9 @@ fn show_roc_core() {
         let reseeds = crate::roc_twin::main_window_reseeds();
         println!("roc-core: main-window re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: main-window re-seeds");
+        let reseeds = crate::roc_twin::workspaces_reseeds();
+        println!("roc-core: workspaces re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: workspaces re-seeds");
     }
 }
 

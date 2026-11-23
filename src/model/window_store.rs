@@ -492,6 +492,20 @@ impl Claimant {
             original: self.original.word(),
         }
     }
+
+    /// The claimant a Roc core's plain one names (the inverse of [`Claimant::plain`]); `None`
+    /// for an owner or an original id no claimant has.
+    pub(crate) fn from_plain(plain: rift_core::workspaces::plain::Claimant) -> Option<Claimant> {
+        use rift_core::workspaces::plain::FocusFollowsMouse;
+        Some(Claimant {
+            owner: ClaimOwner(u32::try_from(plain.owner).ok()?),
+            flags: match plain.flags.focus_follows_mouse {
+                FocusFollowsMouse::Suppressed => WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
+                FocusFollowsMouse::Followed => WindowClaimFlags::empty(),
+            },
+            original: crate::roc_path::window_of_word(plain.original)?,
+        })
+    }
 }
 
 /// The Mach client port (session) holding external claims.

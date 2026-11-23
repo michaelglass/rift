@@ -8,8 +8,8 @@
 //! Which machine stands differs by machine. The lifecycle is flipped (the lead's policy (a)): the
 //! Roc core decides, its answers are rift's, and on a difference the Rust machine, now its shadow,
 //! is re-seeded from the Roc core's state (counted: [`lifecycle_reseeds`]). The main window is
-//! flipped the same way ([`main_window_reseeds`]). The joined workspaces are not flipped yet:
-//! their Rust machine stands.
+//! flipped the same way ([`main_window_reseeds`]), and the joined workspaces
+//! ([`workspaces_reseeds`]).
 //!
 //! A twinned machine reads as its Rust machine (`Deref`), and only its own methods change it:
 //! the Rust machine's changing methods take `&mut`, which `Deref` does not give, so no change
@@ -44,6 +44,17 @@ static LIFECYCLE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 /// How many times the main window's Rust shadow was re-seeded from the Roc core, process-wide.
 #[cfg(feature = "roc-core")]
 static MAIN_WINDOW_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the joined workspaces' Rust shadow was re-seeded from the Roc core.
+#[cfg(feature = "roc-core")]
+static WORKSPACES_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the joined workspaces' Rust shadow has been re-seeded from the Roc core (each
+/// one a `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn workspaces_reseeds() -> u64 {
+    WORKSPACES_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// How many times the main window's Rust shadow has been re-seeded from the Roc core (each one a
 /// `roc-divergence:` warned).
@@ -216,12 +227,14 @@ impl TwinnedLifecycle {
 
 /// The workspaces joined: the catalog (each workspace with its Space), what each Space shows and
 /// who places each window (a workspace, a claim, or the user's hand), with its Roc twin under
-/// `roc-core`. Not flipped: the Rust machine stands. A refused event is a bug in the caller
-/// (`workspace-refused:`, a panic in tests, a warning in a running Rift) and changes nothing.
-/// Under `roc-core` both must meet every event the same way, and keep the same workspaces:
+/// `roc-core`. A refused event is a bug in the caller (`workspace-refused:`, a panic in tests, a
+/// warning in a running Rift) and changes nothing. Flipped (policy (a)): under `roc-core` the Roc
+/// core decides (its outcome is the one reported) and the Rust machine is its shadow, read
+/// through `Deref`: both must meet every event the same way and keep the same workspaces,
 /// compared after every topology change (they are rare, and the view is small without many
-/// windows), and after every [`VIEW_EVERY`]th ownership change in a running Rift (every one in
-/// tests).
+/// windows), after every [`VIEW_EVERY`]th ownership change in a running Rift (every one in
+/// tests), and after any outcome that differs; on a difference the shadow is re-seeded from the
+/// Roc core's view.
 #[derive(Default)]
 pub(crate) struct TwinnedWorkspaces {
     rust: Workspaces<WindowId, VirtualWorkspaceId, SpaceId, Claimant>,
@@ -253,6 +266,8 @@ impl TwinnedWorkspaces {
     /// As [`Workspaces::step`]; a refusal is reported here.
     pub(crate) fn step(&mut self, event: JoinedEvent) {
         let met = self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        let met = self.stepped(event, met);
         if let Err(refused) = met {
             #[cfg(test)]
             panic!("workspace-refused: {refused:?} by {event:?}");
@@ -263,32 +278,122 @@ impl TwinnedWorkspaces {
                 "workspace-refused: the workspaces refused a change (a bug in its caller)"
             );
         }
-        #[cfg(feature = "roc-core")]
-        {
-            use crate::roc_path::{Word, diverged};
-            let plain = plain_joined_event(event);
-            let roc = self.twin.roc.step(plain);
-            let rust = met.map_err(|refused| match refused {
-                Refused::Exists(workspace) => Refused::Exists(workspace.word()),
-                Refused::Unknown(workspace) => Refused::Unknown(workspace.word()),
-                Refused::OwnSuccessor(workspace) => Refused::OwnSuccessor(workspace.word()),
-                Refused::Shown { workspace, space } => Refused::Shown {
-                    workspace: workspace.word(),
-                    space: space.word(),
-                },
-            });
-            if rust != roc {
-                diverged("workspaces step", &plain, &rust, &roc);
+    }
+
+    /// The Roc core takes the event the Rust shadow took: its outcome stands, and on any
+    /// difference (the outcome, or the workspaces when due) the shadow is re-seeded from it.
+    #[cfg(feature = "roc-core")]
+    fn stepped(
+        &mut self,
+        event: JoinedEvent,
+        met: Result<(), Refused<VirtualWorkspaceId, SpaceId>>,
+    ) -> Result<(), Refused<VirtualWorkspaceId, SpaceId>> {
+        use crate::roc_path::{Word, diverged};
+        let plain = plain_joined_event(event);
+        let roc = self.twin.roc.step(plain);
+        let rust = met.map_err(|refused| match refused {
+            Refused::Exists(workspace) => Refused::Exists(workspace.word()),
+            Refused::Unknown(workspace) => Refused::Unknown(workspace.word()),
+            Refused::OwnSuccessor(workspace) => Refused::OwnSuccessor(workspace.word()),
+            Refused::Shown { workspace, space } => Refused::Shown {
+                workspace: workspace.word(),
+                space: space.word(),
+            },
+        });
+        let outcome_differs = rust != roc;
+        if outcome_differs {
+            diverged("workspaces step", &plain, &rust, &roc);
+        }
+        self.twin.steps += 1;
+        let topology = !matches!(event, WorkspacesEvent::Owned { .. });
+        if outcome_differs || topology || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+            let roc_view = self.twin.roc.view();
+            let rust_view = self.rust_view();
+            if rust_view != roc_view {
+                diverged("workspaces view", &plain, &rust_view, &roc_view);
             }
-            self.twin.steps += 1;
-            let topology = !matches!(event, WorkspacesEvent::Owned { .. });
-            if topology || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
-                let rust = self.rust_view();
-                let roc = self.twin.roc.view();
-                if rust != roc {
-                    diverged("workspaces view", &plain, &rust, &roc);
-                }
+            if outcome_differs || rust_view != roc_view {
+                self.reseed(roc_view);
             }
+        }
+        // The Roc core decides.
+        roc.map_err(|refused| match refused {
+            Refused::Exists(workspace) => Refused::Exists(workspace_of_word(workspace)),
+            Refused::Unknown(workspace) => Refused::Unknown(workspace_of_word(workspace)),
+            Refused::OwnSuccessor(workspace) => Refused::OwnSuccessor(workspace_of_word(workspace)),
+            Refused::Shown { workspace, space } => Refused::Shown {
+                workspace: workspace_of_word(workspace),
+                space: SpaceId::new(space),
+            },
+        })
+    }
+
+    /// Replace the Rust shadow with the Roc core's workspaces, and count it. A view the shadow
+    /// cannot hold (a word naming no window or claimant, or an event the step refuses) leaves
+    /// the shadow as it was, said so beside the divergence already warned.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, roc: rift_core_roc::workspaces::WorkspacesView) {
+        use rift_core::workspaces::{Activation, Destination, Ownership};
+
+        use crate::roc_path::window_of_word;
+        let activation = |activation: Activation<u64>| match activation {
+            Activation::Showing { current, previous, remembered } => Activation::Showing {
+                current: workspace_of_word(current),
+                previous: previous.map(workspace_of_word),
+                remembered: remembered.map(workspace_of_word),
+            },
+            Activation::Vacant { remembered } => Activation::Vacant {
+                remembered: remembered.map(workspace_of_word),
+            },
+        };
+        let owners: Option<Vec<_>> = roc
+            .owners
+            .into_iter()
+            .map(|(window, ownership)| {
+                let ownership = match ownership {
+                    Ownership::Assigned(workspace) => {
+                        Ownership::Assigned(workspace_of_word(workspace))
+                    }
+                    Ownership::Held => Ownership::Held,
+                    Ownership::Claimed { owner, destination } => Ownership::Claimed {
+                        owner: Claimant::from_plain(owner)?,
+                        destination: match destination {
+                            Destination::Returns(workspace) => {
+                                Destination::Returns(workspace_of_word(workspace))
+                            }
+                            Destination::Nowhere => Destination::Nowhere,
+                        },
+                    },
+                };
+                Some((window_of_word(window)?, ownership))
+            })
+            .collect();
+        let rebuilt = owners.ok_or(None).and_then(|owners| {
+            Workspaces::from_view(
+                roc.catalog
+                    .into_iter()
+                    .map(|(workspace, space)| (workspace_of_word(workspace), SpaceId::new(space))),
+                roc.activations
+                    .into_iter()
+                    .map(|(space, shown)| (SpaceId::new(space), activation(shown))),
+                owners,
+            )
+            .map_err(Some)
+        });
+        match rebuilt {
+            Ok(rebuilt) => {
+                self.rust = rebuilt;
+                let reseeds =
+                    WORKSPACES_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                tracing::warn!(
+                    reseeds,
+                    "roc-divergence: the joined workspaces' Rust shadow was re-seeded from the Roc core"
+                );
+            }
+            Err(refused) => tracing::warn!(
+                ?refused,
+                "roc-divergence: the Roc core's workspaces could not be held by the Rust shadow; it stays as it was"
+            ),
         }
     }
 
@@ -331,6 +436,10 @@ impl TwinnedWorkspaces {
         }
     }
 }
+
+/// The workspace a word names (the inverse of its `Word`).
+#[cfg(feature = "roc-core")]
+fn workspace_of_word(word: u64) -> VirtualWorkspaceId { slotmap::KeyData::from_ffi(word).into() }
 
 /// A joined event with its windows, workspaces, Spaces and owners as words.
 #[cfg(feature = "roc-core")]
@@ -573,6 +682,8 @@ mod tests {
 
     use super::{LIFECYCLE_RESEEDS, TwinnedLifecycle};
     use crate::actor::app::WindowId;
+    use crate::model::window_store::Claimant;
+    use crate::sys::screen::SpaceId;
 
     const FACTS: AdmissionFacts = AdmissionFacts {
         manageability: Manageability::Manageable,
@@ -643,6 +754,73 @@ mod tests {
     fn a_main_window_shadow_out_of_step_panics_in_tests() {
         let mut mains = main_windows_knocked_out_of_step();
         mains.step(rift_core::main_window::MainWindowEvent::Deactivated(5));
+    }
+
+    /// Joined workspaces whose Rust shadow lost a claim (suppressing focus follows mouse) the Roc
+    /// core still holds.
+    fn workspaces_knocked_out_of_step() -> (super::TwinnedWorkspaces, WindowId) {
+        use rift_core::workspaces::plain::{ClaimFlags, Claimant as Plain, FocusFollowsMouse};
+        use rift_core::workspaces::{Destination, Owned, Ownership, WorkspacesEvent};
+        let mut workspaces = super::TwinnedWorkspaces::default();
+        let workspace = super::workspace_of_word((1 << 32) | 1);
+        let window = WindowId::new(6, 2);
+        let owner = Claimant::from_plain(Plain {
+            owner: 40,
+            flags: ClaimFlags {
+                focus_follows_mouse: FocusFollowsMouse::Suppressed,
+            },
+            original: crate::roc_path::Word::word(WindowId::new(6, 1)),
+        })
+        .unwrap();
+        workspaces.step(WorkspacesEvent::Created {
+            workspace,
+            space: SpaceId::new(9),
+        });
+        workspaces.step(WorkspacesEvent::Owned {
+            window,
+            owned: Owned::Owner(Ownership::Claimed {
+                owner,
+                destination: Destination::Returns(workspace),
+            }),
+        });
+        workspaces
+            .rust
+            .step(WorkspacesEvent::Owned { window, owned: Owned::Unowned })
+            .unwrap();
+        (workspaces, window)
+    }
+
+    /// Re-seeding gives the joined workspaces' Rust shadow exactly the Roc core's, the claim
+    /// whole (flags and original id), and is counted.
+    #[test]
+    fn a_workspaces_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        use rift_core::workspaces::{Owned, Ownership};
+        let (mut workspaces, window) = workspaces_knocked_out_of_step();
+        assert_eq!(workspaces.owned(window), Owned::Unowned, "the shadow lost it");
+        let before = super::WORKSPACES_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = workspaces.twin.roc.view();
+        workspaces.reseed(view.clone());
+        assert_eq!(workspaces.rust_view(), view);
+        let Owned::Owner(Ownership::Claimed { owner, .. }) = workspaces.owned(window) else {
+            panic!("reads follow the Roc core");
+        };
+        let Ownership::Claimed { owner: held, .. } = view.owners[0].1 else {
+            panic!("the Roc core holds the claim");
+        };
+        assert_eq!(owner.plain(), held, "the claim whole: owner, flags, original id");
+        assert!(super::WORKSPACES_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// Tests still panic on a workspaces difference.
+    #[test]
+    #[should_panic(expected = "roc-divergence")]
+    fn a_workspaces_shadow_out_of_step_panics_in_tests() {
+        use rift_core::workspaces::{Owned, Ownership, WorkspacesEvent};
+        let (mut workspaces, _) = workspaces_knocked_out_of_step();
+        workspaces.step(WorkspacesEvent::Owned {
+            window: WindowId::new(6, 3),
+            owned: Owned::Owner(Ownership::Held),
+        });
     }
 
     /// Tests still panic on a difference (a running Rift warns and re-seeds).
