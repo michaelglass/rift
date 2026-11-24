@@ -89,7 +89,32 @@ impl Default for MasterStackLayoutSystem {
 impl MasterStackLayoutSystem {
     /// A master-stack layout as the core's geometry takes it (none when nothing takes space).
     /// Arguments as `calculate_layout` takes them.
-    #[cfg(any(test, feature = "roc-core"))]
+    /// The frames the master-stack system computes itself: since the core decides (policy (a)),
+    /// the shadow `calculate_layout` holds the core's to.
+    pub(crate) fn shadow_frames(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Vec<(WindowId, CGRect)> {
+        let (root, master, stack) = self.region_roots(layout);
+        super::tiles::project(
+            &self.tiles,
+            root,
+            |active| super::tiles::project_root(root, Some((master, stack)), active),
+            screen,
+            stack_offset,
+            constraints,
+            gaps,
+            stack_line,
+            true,
+            None,
+        )
+    }
+
     pub(crate) fn shape(
         &self,
         layout: LayoutId,
@@ -485,6 +510,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId { self.tiles.clone_layout(layout) }
 
+    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
+    /// shadow.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -494,26 +521,11 @@ impl LayoutSystem for MasterStackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let (root, master, stack) = self.region_roots(layout);
-        let frames = super::tiles::project(
-            &self.tiles,
-            root,
-            |active| super::tiles::project_root(root, Some((master, stack)), active),
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-            true,
-            None,
-        );
-        #[cfg(any(test, feature = "roc-core"))]
-        crate::layout_engine::core_geometry::check_traditional(
+        crate::layout_engine::core_geometry::decide_traditional(
             "master-stack",
             self.shape(layout, screen, stack_offset, constraints, gaps, stack_line),
-            &frames,
-        );
-        frames
+            &self.shadow_frames(layout, screen, stack_offset, constraints, gaps, stack_line),
+        )
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -730,6 +742,38 @@ mod tests {
     use crate::layout_engine::systems::drawn::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    /// A master and two stacked windows: the master on the left, the stack's windows sharing
+    /// the right, the inner gaps between them (what rift does with a master-stack layout,
+    /// whichever core decides it).
+    #[test]
+    fn a_master_stack_layout_keeps_its_inner_gaps() {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        let mut gaps = crate::common::config::GapSettings::default();
+        gaps.inner.horizontal = 10.0;
+        gaps.inner.vertical = 6.0;
+        let frames = system.calculate_layout(
+            layout,
+            CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0)),
+            0.0,
+            &Default::default(),
+            &gaps,
+            Default::default(),
+        );
+        let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+        // The newest window is the master: 60% of the width less the gap, then the 10-point
+        // gap, then the stack, its two windows 6 points apart.
+        assert_eq!(frames, vec![
+            (w(3), rect(0.0, 0.0, 594.0, 800.0)),
+            (w(2), rect(604.0, 0.0, 396.0, 397.0)),
+            (w(1), rect(604.0, 403.0, 396.0, 397.0)),
+        ]);
+    }
 
     #[test]
     fn region_identity_and_grouping_survive_removal_and_settings_reload() {
@@ -1086,7 +1130,7 @@ mod tests {
         (system, layout, windows)
     }
 
-    /// The core's frames for a master-stack layout are upstream's `calculate_layout`'s, bit for
+    /// The core's frames for a master-stack layout are the system's own (`shadow_frames`), bit for
     /// bit, over drawn systems, screens, gaps, offsets, bars and window constraints.
     #[test]
     fn the_core_tiles_master_stack_layouts_as_the_master_stack_system_does() {
@@ -1099,8 +1143,7 @@ mod tests {
             let gaps = drawn_gaps(&mut rng);
             let offset = drawn_offset(&mut rng);
             let line = drawn_line(&mut rng);
-            let upstream =
-                system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
+            let upstream = system.shadow_frames(layout, screen, offset, &constraints, &gaps, line);
             let core = core_frames(system.shape(layout, screen, offset, &constraints, &gaps, line));
             assert_eq!(bits(&core), bits(&upstream));
             cases += 1;

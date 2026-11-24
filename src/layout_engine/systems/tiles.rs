@@ -655,7 +655,6 @@ fn region_root(
 /// A tiled layout as the core's geometry takes it: the subtree `project` lays out from `node`
 /// (the master region when `regions` names one and the stack region takes no space), pruned to
 /// the nodes that participate (none: nothing takes space). Arguments as `project` takes them.
-#[cfg(any(test, feature = "roc-core"))]
 pub(super) fn shape(
     tiles: &GroupLayouts,
     node: NodeId,
@@ -696,7 +695,6 @@ pub(super) fn shape(
 }
 
 /// A participating node of a tiled layout as the core's geometry takes it.
-#[cfg(any(test, feature = "roc-core"))]
 fn shape_node(
     tiles: &GroupLayouts,
     node: NodeId,

@@ -1079,7 +1079,7 @@ mod tests {
         (system, layout, windows)
     }
 
-    /// The core's frames for a stack layout are upstream's `calculate_layout`'s, bit for bit,
+    /// The core's frames for a stack layout are the system's own (`shadow_frames`), bit for bit,
     /// over drawn stacks, screens, gaps, offsets, bars and window constraints.
     #[test]
     fn the_core_tiles_stack_layouts_as_the_stack_system_does() {
