@@ -4,9 +4,10 @@
 //! and stale keys meet the slot versions. Every operation must answer alike and leave the same
 //! whole system: each table's slots, versions and free list, the windows left out, the settings.
 
-use rift_core::layout::bsp_tree::{InsertionPoint, Participation};
+use rift_core::layout::bsp_tree::{InsertionPoint, Participation, Resize};
+use rift_core::plain::Rect;
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
-use rift_core_roc::{AllocationCount, RocBspTree};
+use rift_core_roc::{AllocationCount, RocBspTree, narrow};
 
 /// xorshift64*: deterministic, no dependency.
 struct Rng(u64);
@@ -28,15 +29,24 @@ impl Rng {
     }
 
     /// One of a few windows, as words (a pid in the high half, an index in the low one).
-    fn window(&mut self) -> u64 {
-        [
-            (1 << 32) | 1,
-            (1 << 32) | 2,
-            (2 << 32) | 1,
-            (2 << 32) | 2,
-            7,
-            9,
-        ][self.below(6) as usize]
+    fn window(&mut self) -> u64 { WINDOWS[self.below(WINDOWS.len() as u64) as usize] }
+
+    /// A frame a native resize starts or ends at: the screen, the tiling area, or a window's
+    /// frame nudged under and over half a point and changed along either axis or both.
+    fn frame(&mut self) -> Rect {
+        let at = |x, y, w, h| Rect { x, y, w, h };
+        match self.below(10) {
+            0 => SCREEN,
+            1 => TILING,
+            2 => at(100.0, 100.0, 400.0, 300.0),
+            3 => at(100.0, 100.0, 400.4, 300.0),
+            4 => at(100.0, 100.0, 400.6, 300.0),
+            5 => at(100.0, 100.0, 400.0, 300.6),
+            6 => at(100.0, 100.0, 550.0, 300.0),
+            7 => at(100.0, 100.0, 400.0, 180.0),
+            8 => at(50.0, 60.0, 620.0, 410.0),
+            _ => at(100.0, 100.0, 0.0, 300.0),
+        }
     }
 
     fn insertion(&mut self) -> InsertionPoint {
@@ -60,6 +70,32 @@ impl Rng {
     }
 }
 
+/// The windows runs draw from: two apps of three windows each, and two of one.
+const WINDOWS: [u64; 8] = [
+    (1 << 32) | 1,
+    (1 << 32) | 2,
+    (1 << 32) | 3,
+    (2 << 32) | 1,
+    (2 << 32) | 2,
+    (2 << 32) | 3,
+    7,
+    9,
+];
+
+const SCREEN: Rect = Rect {
+    x: 0.0,
+    y: 0.0,
+    w: 1000.0,
+    h: 800.0,
+};
+
+const TILING: Rect = Rect {
+    x: 10.0,
+    y: 10.0,
+    w: 980.0,
+    h: 780.0,
+};
+
 /// What a run has made: every layout key answered (removed ones stay, as stale keys).
 #[derive(Default)]
 struct Made {
@@ -76,20 +112,37 @@ impl Made {
     }
 
     fn event(&self, rng: &mut Rng) -> Event {
-        match rng.below(20) {
-            0..=3 => Event::CreateLayout,
-            4..=7 => Event::CloneLayout(self.layout(rng)),
-            8..=11 => Event::RemoveLayout(self.layout(rng)),
-            12..=15 => Event::Participation(
+        match rng.below(30) {
+            0..=2 => Event::CreateLayout,
+            3 | 4 => Event::CloneLayout(self.layout(rng)),
+            5 => Event::RemoveLayout(self.layout(rng)),
+            6..=8 => Event::Participation(
                 rng.window(),
-                if rng.chance(50) {
+                if rng.chance(60) {
                     Participation::TakesPart
                 } else {
                     Participation::LeftOut
                 },
             ),
-            16 | 17 => Event::Insertion(rng.insertion()),
-            _ => Event::AspectRatio(rng.aspect()),
+            9 => Event::Insertion(rng.insertion()),
+            10 => Event::AspectRatio(rng.aspect()),
+            11..=19 => Event::AddWindow(self.layout(rng), rng.window()),
+            20 | 21 => Event::RemoveWindow(rng.window()),
+            22 => Event::ReplaceWindow {
+                from: rng.window(),
+                to: rng.window(),
+            },
+            23 => {
+                // The app's windows, as `close_app`'s predicate tells them.
+                let pid = rng.window() >> 32;
+                Event::CloseApp(WINDOWS.into_iter().filter(|window| window >> 32 == pid).collect())
+            }
+            _ => Event::ResizeWindow(self.layout(rng), rng.window(), Resize {
+                old: rng.frame(),
+                new: rng.frame(),
+                screen: SCREEN,
+                tiling: TILING,
+            }),
         }
     }
 
@@ -105,7 +158,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
     let runs: u64 = std::env::var("RIFT_BSP_TREE_RUNS").map_or(1_000, |n| n.parse().unwrap());
     let mut rng = Rng(0xB5B7_7EE0_0000_0001);
     let before = AllocationCount::now();
-    let (mut steps, mut reused) = (0, 0);
+    let (mut steps, mut reused, mut deepest, mut resized) = (0, 0, 0, 0);
     for run in 0..runs {
         let insertion = rng.insertion();
         let mut rust = Tree::new(insertion);
@@ -114,8 +167,12 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         let mut history = Vec::new();
         for step in 0..60 {
             let event = made.event(&mut rng);
-            history.push(event);
-            let expected = bsp_tree::step(&mut rust, event);
+            history.push(event.clone());
+            let before_step = TreeView::from(&rust);
+            let expected = bsp_tree::step(&mut rust, event.clone());
+            if matches!(event, Event::ResizeWindow(..)) && TreeView::from(&rust) != before_step {
+                resized += 1;
+            }
             assert_eq!(
                 roc.step(event),
                 expected,
@@ -133,6 +190,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
             }
             made.answered(&expected);
             steps += 1;
+            deepest = deepest.max(rust.nodes().len());
         }
     }
     assert_eq!(
@@ -144,7 +202,71 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         reused > 0,
         "no layout reused a slot: the free list went unexercised"
     );
-    eprintln!(
-        "bsp_tree: {steps} operations identical ({reused} reused a slot), the system compared after each"
+    assert!(resized > 0, "no native resize changed a system");
+    assert!(
+        deepest > 8,
+        "no system grew past {deepest} nodes: the trees went unexercised"
     );
+    eprintln!(
+        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes), the system compared after each"
+    );
+}
+
+/// Roc has no `F64 -> F32`, so the core writes Rust's `as f32` out (`Geometry.narrow`): held to
+/// it bit for bit on drawn bit patterns of every class, the midpoints between neighbouring
+/// `f32`s (ties, which round to even), and the edges: just under each power of two (a carry
+/// into the next exponent), the largest `f32` and past it, the smallest normal and subnormal,
+/// and `f64` subnormals.
+#[test]
+fn the_roc_core_narrows_an_f64_as_rust_does() {
+    let mut rng = Rng(0x0F32_0F64_0000_0001);
+    let mut values = vec![
+        0.0,
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::from(f32::MAX),
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::from(f32::MIN_POSITIVE),
+        f64::from(f32::from_bits(1)),
+        f64::from(f32::from_bits(1)) / 2.0,
+    ];
+    // Just under each power of two: rounding up carries into the next exponent.
+    for exponent in 1..255u32 {
+        let below = f32::from_bits((exponent << 23) | 0x7F_FFFF);
+        let midpoint = (f64::from(below) + f64::from(f32::from_bits(below.to_bits() + 1))) / 2.0;
+        values.extend([midpoint, midpoint.next_up(), midpoint.next_down()]);
+    }
+    let (mut ties, mut odd_ties) = (0, 0);
+    for _ in 0..200_000 {
+        let bits = rng.next();
+        values.push(f64::from_bits(bits));
+        // Every f32 class, and the midpoint to its neighbour (exact in an f64).
+        let low = f32::from_bits(bits as u32 & 0x7F7F_FFFF);
+        let high = f32::from_bits(low.to_bits() + 1);
+        let midpoint = (f64::from(low) + f64::from(high)) / 2.0;
+        ties += 1;
+        odd_ties += usize::from(low.to_bits() % 2 == 1);
+        values.push(if bits >> 63 == 1 { -midpoint } else { midpoint });
+        values.push(f64::from(low) * (1.0 + f64::EPSILON * (rng.below(5) as f64 - 2.0)));
+    }
+    for value in values {
+        let (expected, got) = (value as f32, narrow(value));
+        if expected.is_nan() {
+            assert!(
+                got.is_nan(),
+                "{value:e} ({:#x}) narrowed to {got:e}",
+                value.to_bits()
+            );
+        } else {
+            assert_eq!(
+                got.to_bits(),
+                expected.to_bits(),
+                "{value:e} ({:#x}) narrowed to {got:e}, Rust gives {expected:e}",
+                value.to_bits()
+            );
+        }
+    }
+    assert!(odd_ties > 0 && odd_ties < ties, "ties all of one parity");
 }

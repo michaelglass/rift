@@ -858,7 +858,17 @@ Boundary := [].{
 
 	BspNodeSlot := [Occupied(BspNodeHeld), Vacant(U32)]
 
-	## One operation of the system (`Tree`'s methods, one for one).
+	## A window added to a layout.
+	BspWindowIn := { layout : U64, window : U64 }
+
+	## A window that took another's place.
+	BspReplacement := { from : U64, to : U64 }
+
+	## A native resize of a layout's window, with the screen and its tiling area it happened on.
+	BspNativeResize := { layout : U64, window : U64, old : Rect, new : Rect, screen : Rect, tiling : Rect }
+
+	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
+	## app's windows, since Roc has no pid).
 	BspTreeEvent := [
 		CreateLayout,
 		CloneLayout(U64),
@@ -866,6 +876,11 @@ Boundary := [].{
 		Participation(BspParticipation),
 		Insertion(BspInsertion),
 		AspectRatio(Aspect),
+		AddWindow(BspWindowIn),
+		RemoveWindow(U64),
+		ReplaceWindow(BspReplacement),
+		CloseApp(List(U64)),
+		ResizeWindow(BspNativeResize),
 	]
 
 	## What an operation answers: a layout it made, whether a window's participation changed,

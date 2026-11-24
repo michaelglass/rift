@@ -20,6 +20,51 @@ Geometry := [].{
 	epsilon : F64
 	epsilon = F64.from_bits(4372995238176751616)
 
+	## Rust's `value as f32`: the nearest `F32`, ties to even (an infinity past its range, zero
+	## or a subnormal below it, the sign kept; a NaN stays a NaN).
+	narrow : F64 -> F32
+	narrow = |value| {
+		bits = value.to_bits()
+		sign = bits.shr_zf_wrap(63).shl_wrap(31)
+		biased = bits.shr_zf_wrap(52).bitwise_and(0x7FF)
+		mantissa = bits.bitwise_and(0xF_FFFF_FFFF_FFFF)
+		magnitude =
+			if biased == 0x7FF {
+				if mantissa == 0 0x7F80_0000 else U64.bitwise_or(0x7FC0_0000, mantissa.shr_zf_wrap(29))
+			} else if biased == 0 {
+				# An f64 subnormal is far below the smallest f32 subnormal.
+				0
+			} else {
+				significand = mantissa.bitwise_or(0x10_0000_0000_0000)
+				exponent = biased.to_i64_wrap() - 1023 + 127
+				if exponent >= 255 {
+					0x7F80_0000
+				} else if exponent >= 1 {
+					rounded = rounded_shift(significand, 29)
+					# Rounding up can carry into the next binade.
+					if rounded == 0x100_0000 {
+						if exponent + 1 >= 255 0x7F80_0000 else (exponent + 1).to_u64_wrap().shl_wrap(23)
+					} else {
+						exponent.to_u64_wrap().shl_wrap(23).bitwise_or(rounded.bitwise_and(0x7F_FFFF))
+					}
+				} else {
+					# A subnormal f32: the significand in units of 2^-149.
+					shift = 1 - exponent + 29
+					if shift > 54 0 else rounded_shift(significand, shift.to_u8_wrap())
+				}
+			}
+		F32.from_bits(sign.bitwise_or(magnitude).to_u32_wrap())
+	}
+
+	## `value` shifted right by `by` bits, rounded to nearest, ties to even.
+	rounded_shift : U64, U8 -> U64
+	rounded_shift = |value, by| {
+		kept = value.shr_zf_wrap(by)
+		rest = value.bitwise_and(U64.shl_wrap(1, by) - 1)
+		half = U64.shl_wrap(1, by - 1)
+		if rest > half or (rest == half and kept.is_odd()) kept + 1 else kept
+	}
+
 	## `f64::max` on arm64 (`fmaxnm`): a NaN loses, and +0 beats -0.
 	max : F64, F64 -> F64
 	max = |a, b|

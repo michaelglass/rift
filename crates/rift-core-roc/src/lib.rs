@@ -371,7 +371,7 @@ impl RocBspTree {
 
 /// The BSP tree's operations and view, on plain keys, and the Rust tree they are held to.
 pub mod bsp_tree {
-    use rift_core::layout::bsp_tree::{InsertionPoint, Layout, Node, Participation};
+    use rift_core::layout::bsp_tree::{InsertionPoint, Layout, Node, Participation, Resize};
     use rift_core::slot_table::{SlotKey, SlotTable};
 
     /// A layout's key: slotmap's ffi form, `version << 32 | index`.
@@ -399,8 +399,9 @@ pub mod bsp_tree {
     /// The Rust tree, on plain keys and windows as words.
     pub type Tree = rift_core::layout::bsp_tree::Tree<LayoutKey, NodeKey, u64>;
 
-    /// One operation of the system (`Tree`'s methods, one for one).
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    /// One operation of the system (`Tree`'s methods, one for one; an app closing lists its
+    /// windows, which `close_app`'s predicate tells).
+    #[derive(Debug, Clone, PartialEq)]
     pub enum Event {
         CreateLayout,
         CloneLayout(LayoutKey),
@@ -408,6 +409,11 @@ pub mod bsp_tree {
         Participation(u64, Participation),
         Insertion(InsertionPoint),
         AspectRatio(Option<f64>),
+        AddWindow(LayoutKey, u64),
+        RemoveWindow(u64),
+        ReplaceWindow { from: u64, to: u64 },
+        CloseApp(Vec<u64>),
+        ResizeWindow(LayoutKey, u64, Resize),
     }
 
     /// What an operation answers.
@@ -436,6 +442,26 @@ pub mod bsp_tree {
             }
             Event::AspectRatio(ratio) => {
                 tree.set_single_window_aspect_ratio(ratio);
+                Answer::Done
+            }
+            Event::AddWindow(layout, window) => {
+                tree.add_window(layout, window);
+                Answer::Done
+            }
+            Event::RemoveWindow(window) => {
+                tree.remove_window(window);
+                Answer::Done
+            }
+            Event::ReplaceWindow { from, to } => {
+                tree.replace_window(from, to);
+                Answer::Done
+            }
+            Event::CloseApp(windows) => {
+                tree.close_app(|window| windows.contains(&window));
+                Answer::Done
+            }
+            Event::ResizeWindow(layout, window, resize) => {
+                tree.resize_window(layout, window, resize);
                 Answer::Done
             }
         }
@@ -607,6 +633,10 @@ pub fn solve_axis_lengths(
     let question = boundary::axis_question(items, usable, &host);
     Ok(boundary::lengths(unsafe { abi::roc_axis(question) }, &host))
 }
+
+/// `value as f32`, as the Roc core narrows it (the BSP tree's shares are `f32`s; Roc has no
+/// conversion of its own).
+pub fn narrow(value: f64) -> f32 { unsafe { abi::roc_narrow(value) } }
 
 /// A floating layout's first frames, as `Floating::first_frames` places them, placed by the Roc
 /// core.

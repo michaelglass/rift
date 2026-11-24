@@ -61,6 +61,7 @@ platform ""
 			main_window_init : {} -> mains,
 			main_window_step : mains, MainWindowEvent -> { model : mains, focus : MaybeWord },
 			main_window_view : mains -> { model : mains, main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord },
+			narrow : F64 -> F32,
 			bsp_tree_init : BspInsertion -> trees,
 			bsp_tree_step : trees, BspTreeEvent -> { model : trees, answer : BspTreeAnswer },
 			bsp_tree_view : trees -> { model : trees, layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect },
@@ -84,6 +85,7 @@ platform ""
 		"roc_main_window_step": main_window_step_for_host,
 		"roc_main_window_view": main_window_view_for_host,
 		"roc_main_window_release": main_window_release_for_host,
+		"roc_narrow": narrow_for_host,
 		"roc_bsp_tree_init": bsp_tree_init_for_host,
 		"roc_bsp_tree_step": bsp_tree_step_for_host,
 		"roc_bsp_tree_view": bsp_tree_view_for_host,
@@ -471,3 +473,7 @@ bsp_tree_view_for_host = |boxed| {
 ## The host cannot release a `Box(Trees)`: only Roc knows its layout.
 bsp_tree_release_for_host : Box(Trees) -> {}
 bsp_tree_release_for_host = |_| {}
+
+## Rust's `value as f32`.
+narrow_for_host : F64 -> F32
+narrow_for_host = |value| (core.narrow)(value)

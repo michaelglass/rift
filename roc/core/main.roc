@@ -104,7 +104,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_step, bsp_tree_view }
+core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_step, bsp_tree_view, narrow }
 
 # The layout questions, typed (`Boundary`). The core modules take and answer the platform's own
 # types: a plain record or union never passes for a named one, nor a named one for a plain one.
@@ -141,6 +141,10 @@ translate = |q|
 		{ screen: q.screen, tiling: q.tiling, offset: q.offset, parking: q.parking },
 		q.fullscreen.map(|f| (f.window, f.mode)),
 	).map(|(window, frame)| { window, frame })
+
+## Rust's `value as f32` (the BSP tree's shares are `f32`s).
+narrow : F64 -> F32
+narrow = |value| Geometry.narrow(value)
 
 ## The lengths of the segments along one axis.
 axis : AxisQuestion -> List(F64)

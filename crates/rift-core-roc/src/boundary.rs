@@ -12,7 +12,7 @@ use rift_core::focus::{
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::bsp_tree::{
     Content, Direction as TreeDirection, InsertionPoint, Kind, Layout, Leaf, Members, Memory,
-    Node as TreeNode, Orientation, Parent, Participation, Preselect, Side, Split, Tabs,
+    Node as TreeNode, Orientation, Parent, Participation, Preselect, Resize, Side, Split, Tabs,
 };
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -3455,7 +3455,7 @@ fn from_aspect(aspect: abi::BoundaryAspect) -> Option<f64> {
     }
 }
 
-fn tree_event(event: TreeEvent) -> abi::BoundaryBspTreeEvent {
+fn tree_event(event: TreeEvent, host: &abi::RocHost) -> abi::BoundaryBspTreeEvent {
     use abi::BoundaryBspTreeEventTag as Tag;
     match event {
         TreeEvent::CreateLayout => union!(
@@ -3493,6 +3493,39 @@ fn tree_event(event: TreeEvent) -> abi::BoundaryBspTreeEvent {
             BoundaryBspTreeEvent,
             BoundaryBspTreeEventPayload.aspect_ratio(aspect(ratio)),
             Tag::AspectRatio
+        ),
+        TreeEvent::AddWindow(layout, window) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload
+                .add_window(abi::BoundaryBspWindowIn { layout: layout.0, window }),
+            Tag::AddWindow
+        ),
+        TreeEvent::RemoveWindow(window) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.remove_window(window),
+            Tag::RemoveWindow
+        ),
+        TreeEvent::ReplaceWindow { from, to } => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.replace_window(abi::BoundaryBspReplacement { from, to }),
+            Tag::ReplaceWindow
+        ),
+        TreeEvent::CloseApp(windows) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.close_app(list(&windows, host)),
+            Tag::CloseApp
+        ),
+        TreeEvent::ResizeWindow(layout, window, Resize { old, new, screen, tiling }) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.resize_window(abi::BoundaryBspNativeResize {
+                layout: layout.0,
+                window,
+                old: rect(old),
+                new: rect(new),
+                screen: rect(screen),
+                tiling: rect(tiling),
+            }),
+            Tag::ResizeWindow
         ),
     }
 }
@@ -3637,7 +3670,7 @@ impl BspTreeBox {
     pub(crate) fn step(self, event: TreeEvent, host: &abi::RocHost) -> (BspTreeBox, TreeAnswer) {
         // SAFETY: the box is these trees', given to the step; its successor comes back. The
         // answer is read, then released.
-        let stepped = unsafe { abi::roc_bsp_tree_step(self.into_raw(), tree_event(event)) };
+        let stepped = unsafe { abi::roc_bsp_tree_step(self.into_raw(), tree_event(event, host)) };
         let answer = from_tree_answer(stepped.answer);
         unsafe { stepped.answer.decref(host) };
         (BspTreeBox(stepped.model), answer)
