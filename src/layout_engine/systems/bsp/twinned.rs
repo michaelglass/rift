@@ -21,9 +21,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
+use super::Upstream;
 #[cfg(feature = "roc-core")]
 use super::roc_tree::{self as roc, RocTree};
-use super::{LayoutState, LeafMembers, Node, NodeKind, Upstream};
+use super::stored::{LayoutState, LeafMembers, Loaded, Node, NodeKind, StoredBspSystem};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
@@ -53,7 +54,7 @@ pub(crate) fn bsp_tree_divergences() -> u64 { BSP_TREE_DIVERGENCES.load(Ordering
 /// Loaded through upstream's load (which parses old forms and normalizes what only a file
 /// holds), saved from the core in the same form.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(from = "Upstream")]
+#[serde(try_from = "StoredBspSystem")]
 pub struct BspLayoutSystem {
     /// Under `roc-core` the Roc tree's shadow, else the deciding tree; saved either way (under
     /// `roc-core` it is re-seeded from the Roc tree on any difference, compared on every
@@ -89,6 +90,32 @@ impl Serialize for BspLayoutSystem {
             nodes: saved(self.core.nodes(), |_, node| upstream_node(node)).collect(),
         }
         .serialize(serializer)
+    }
+}
+
+impl TryFrom<StoredBspSystem> for BspLayoutSystem {
+    type Error = String;
+
+    /// A saved system loaded into the core's tree (the settings are not saved: rift sets them
+    /// again); upstream's system, the shadow, holds the same tables.
+    fn try_from(stored: StoredBspSystem) -> Result<Self, String> {
+        let loaded = Loaded::try_from(stored)?;
+        let core = core_of_tables(
+            &loaded.layouts,
+            &loaded.nodes,
+            BTreeSet::new(),
+            insertion_point(WindowInsertionPoint::default()),
+            None,
+        );
+        Ok(Self {
+            #[cfg(feature = "roc-core")]
+            roc: RocTree::seeded(&core),
+            shadow: Box::new(Shadow {
+                upstream: Upstream::from(loaded),
+                steps: 0,
+            }),
+            core,
+        })
     }
 }
 
@@ -789,6 +816,23 @@ fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
 
 /// Upstream's system as the core holds it.
 fn seed(upstream: &Upstream) -> CoreTree {
+    core_of_tables(
+        &upstream.layouts,
+        &upstream.nodes,
+        upstream.inactive.iter().copied().collect(),
+        insertion_point(upstream.window_insertion_point),
+        upstream.single_window_aspect_ratio,
+    )
+}
+
+/// Saved-form tables as the core's tree: each slotmap's slots, versions and free list.
+fn core_of_tables(
+    layouts: &SlotMap<LayoutId, LayoutState>,
+    nodes: &SlotMap<NodeId, Node>,
+    left_out: BTreeSet<WindowId>,
+    insertion: InsertionPoint,
+    aspect: Option<f64>,
+) -> CoreTree {
     let dummy_node = Node {
         parent: None,
         kind: NodeKind::Leaf {
@@ -800,13 +844,11 @@ fn seed(upstream: &Upstream) -> CoreTree {
     };
     let dummy_layout = LayoutState { root: NodeId::default() };
     CoreTree::from_parts(
-        table(&upstream.layouts, dummy_layout, |state| Layout {
-            root: state.root,
-        }),
-        table(&upstream.nodes, dummy_node, core_node),
-        upstream.inactive.iter().copied().collect::<BTreeSet<_>>(),
-        insertion_point(upstream.window_insertion_point),
-        upstream.single_window_aspect_ratio,
+        table(layouts, dummy_layout, |state| Layout { root: state.root }),
+        table(nodes, dummy_node, core_node),
+        left_out,
+        insertion,
+        aspect,
     )
 }
 
@@ -1211,53 +1253,52 @@ mod tests {
         assert_eq!(system.window_slot(layout, w(3)), Some(vec![1, 1]));
     }
 
-    /// A file holding `corrupt` loads as `normalized` holds it, upstream's copy and the core
-    /// alike, and is saved as `normalized` is: the bytes rift writes.
-    fn loads_normalized(corrupt: &Upstream, normalized: &Upstream) {
-        let file = ron::to_string(corrupt).unwrap();
-        let loaded: BspLayoutSystem = ron::from_str(&file).unwrap();
-        assert_eq!(view_difference(&loaded.core, &loaded.shadow.upstream), None);
-        assert_eq!(view_difference(&seed(normalized), &loaded.shadow.upstream), None);
-        let expected = ron::to_string(normalized).unwrap();
-        assert_ne!(file, expected);
-        assert_eq!(ron::to_string(&loaded).unwrap(), expected);
+    /// A file holding `corrupt` (a state only a saved file holds) loads as `normalized` holds
+    /// it, and is saved as `normalized`: the bytes rift writes.
+    fn loads_normalized(corrupt: &str, normalized: &str) {
+        assert_ne!(corrupt, normalized);
+        let loaded: BspLayoutSystem = ron::from_str(corrupt).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), normalized);
     }
 
-    fn leaf_flags(system: &mut Upstream, node: NodeId) -> (&mut bool, &mut bool) {
-        let NodeKind::Leaf {
-            fullscreen,
-            fullscreen_within_gaps,
-            ..
-        } = &mut system.nodes[node].kind
-        else {
-            unreachable!("the node is a leaf");
-        };
-        (fullscreen, fullscreen_within_gaps)
+    /// `file` with `from` (which it holds once) written as `to`.
+    fn written_as(file: &str, from: &str, to: &str) -> String {
+        assert_eq!(file.matches(from).count(), 1, "{from} in {file}");
+        file.replace(from, to)
     }
 
     /// A saved leaf with both fullscreen flags loads fullscreen (as the projection reads it).
     #[test]
     fn a_saved_leaf_with_both_fullscreen_flags_loads_fullscreen() {
-        let mut normalized = Upstream::default();
-        let layout = normalized.create_layout();
-        normalized.update(WindowChange::Add(layout, w(1), None));
-        let root = normalized.layouts[layout].root;
-        *leaf_flags(&mut normalized, root).0 = true;
-        let mut corrupt = normalized.clone();
-        *leaf_flags(&mut corrupt, root).1 = true;
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, w(1), None));
+        system.edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: false });
+        let normalized = ron::to_string(&system).unwrap();
+        let corrupt = written_as(
+            &normalized,
+            "fullscreen:true,fullscreen_within_gaps:false",
+            "fullscreen:true,fullscreen_within_gaps:true",
+        );
         loads_normalized(&corrupt, &normalized);
     }
 
     /// A saved empty leaf with a fullscreen flag loads without it.
     #[test]
     fn a_saved_empty_leaf_loads_without_fullscreen_flags() {
-        let mut normalized = Upstream::default();
-        let layout = normalized.create_layout();
-        let root = normalized.layouts[layout].root;
-        for flags in [(true, false), (false, true), (true, true)] {
-            let mut corrupt = normalized.clone();
-            let (fullscreen, within_gaps) = leaf_flags(&mut corrupt, root);
-            (*fullscreen, *within_gaps) = flags;
+        let mut system = BspLayoutSystem::default();
+        system.create_layout();
+        let normalized = ron::to_string(&system).unwrap();
+        for flags in [
+            "true,fullscreen_within_gaps:false",
+            "false,fullscreen_within_gaps:true",
+            "true,fullscreen_within_gaps:true",
+        ] {
+            let corrupt = written_as(
+                &normalized,
+                "members:Empty,fullscreen:false,fullscreen_within_gaps:false",
+                &format!("members:Empty,fullscreen:{flags}"),
+            );
             loads_normalized(&corrupt, &normalized);
         }
     }
@@ -1266,24 +1307,105 @@ mod tests {
     /// finite share stands as saved, even outside the bounds edits keep.
     #[test]
     fn a_saved_split_with_a_share_not_a_number_loads_even() {
-        let mut normalized = Upstream::default();
-        let layout = normalized.create_layout();
-        normalized.update(WindowChange::Add(layout, w(1), None));
-        normalized.update(WindowChange::Add(layout, w(2), None));
-        let root = normalized.layouts[layout].root;
-        let set_share = |system: &mut Upstream, share: f32| match &mut system.nodes[root].kind {
-            NodeKind::Split { ratio, .. } => *ratio = share,
-            NodeKind::Leaf { .. } => unreachable!("two windows split the root"),
-        };
-        for saved in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut corrupt = normalized.clone();
-            set_share(&mut corrupt, saved);
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, w(1), None));
+        system.update(WindowChange::Add(layout, w(2), None));
+        let normalized = ron::to_string(&system).unwrap();
+        for saved in ["NaN", "inf", "-inf"] {
+            let corrupt = written_as(&normalized, "ratio:0.5", &format!("ratio:{saved}"));
             loads_normalized(&corrupt, &normalized);
         }
-        let mut wide = normalized.clone();
-        set_share(&mut wide, 0.99);
-        let loaded: Upstream = ron::from_str(&ron::to_string(&wide).unwrap()).unwrap();
-        assert_eq!(ron::to_string(&loaded).unwrap(), ron::to_string(&wide).unwrap());
+        let wide = written_as(&normalized, "ratio:0.5", "ratio:0.99");
+        let loaded: BspLayoutSystem = ron::from_str(&wide).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), wide);
+    }
+
+    /// The older topology-and-components form (`bsp_legacy.ron`: a split of a stack of two and
+    /// a window) with `from` (which it holds once) written as `to`.
+    fn legacy_as(from: &str, to: &str) -> String {
+        written_as(include_str!("../bsp_legacy.ron"), from, to)
+    }
+
+    /// A legacy stack whose saved window is not one of its windows shows its last window.
+    #[test]
+    fn a_legacy_stack_without_its_window_shows_its_last() {
+        let file = legacy_as(
+            "stacks: {(idx: 2, version: 1): [(pid: 1, idx: 1), (pid: 1, idx: 2)]}",
+            "stacks: {(idx: 2, version: 1): [(pid: 1, idx: 2), (pid: 1, idx: 1)]}",
+        );
+        let file = written_as(
+            &file,
+            "window: Some((pid: 1, idx: 2))",
+            "window: Some((pid: 1, idx: 7))",
+        );
+        let system: BspLayoutSystem = ron::from_str(&file).unwrap();
+        let layout = system.core.layouts().keys().next().unwrap();
+        assert_eq!(system.windows(layout, WindowQuery::Visible), vec![w(1), w(3)]);
+    }
+
+    /// A legacy node no layout reaches is dropped at the load: its slot is vacated (its version
+    /// bumped, as upstream's retain did) and nothing of it is saved.
+    #[test]
+    fn a_legacy_node_no_layout_reaches_is_dropped() {
+        let file = legacy_as(
+            "            (value: None, version: 2),\n            (value: None, version: 2),\n        ]),",
+            "            (value: Some((\n                parent: None, prev_sibling: None, next_sibling: None,\n                first_child: None, last_child: None,\n            )), version: 1),\n            (value: None, version: 2),\n        ]),",
+        );
+        let file = written_as(
+            &file,
+            "            preselected: None,\n        )), version: 1),\n    ],\n    stacks",
+            "            preselected: None,\n        )), version: 1),\n        (value: Some(Leaf(\n            window: Some((pid: 1, idx: 8)), fullscreen: false, fullscreen_within_gaps: false,\n            preselected: None,\n        )), version: 1),\n    ],\n    stacks",
+        );
+        let system: BspLayoutSystem = ron::from_str(&file).unwrap();
+        let saved = ron::to_string(&system).unwrap();
+        assert!(!saved.contains("idx:8"), "{saved}");
+        assert!(
+            saved.contains("(value:None,version:2),(value:None,version:2)]"),
+            "{saved}"
+        );
+    }
+
+    /// The system the saved-system fixture holds, made by operations: stacks, a fill, a split's
+    /// memory, a share off the middle, vacant slots and a cloned layout.
+    fn saved_fixture_system() -> BspLayoutSystem {
+        use crate::layout_engine::{ResizeOrientation, WindowDropAction};
+        let mut system = BspLayoutSystem::default();
+        let main = system.create_layout();
+        let spare = system.create_layout();
+        let other = system.create_layout();
+        for idx in 1..=5 {
+            system.update(WindowChange::Add(main, w(idx), None));
+        }
+        system.update(WindowChange::Add(spare, w(9), None));
+        system.edit_layout(main, LayoutEdit::Drop {
+            source: w(5),
+            target: w(4),
+            action: WindowDropAction::Stack,
+        });
+        system.focus(main, Focus::Select(w(1)));
+        system.edit_layout(main, LayoutEdit::Resize {
+            amount: 0.15,
+            orientation: ResizeOrientation::Horizontal,
+        });
+        system.edit_layout(main, LayoutEdit::Fullscreen { within_gaps: true });
+        system.remove_layout(spare);
+        let cloned = system.clone_layout(main);
+        system.update(WindowChange::Remove(w(2)));
+        system.update(WindowChange::Add(other, w(6), None));
+        system.focus(cloned, Focus::Select(w(4)));
+        system
+    }
+
+    /// A system as rift saves it today (`bsp_saved.ron`, written while upstream's system still
+    /// stood beside the core and the core's bytes were held to upstream's): the operations save
+    /// to exactly those bytes, and the file loads and saves back byte for byte.
+    #[test]
+    fn a_saved_system_loads_and_saves_byte_for_byte() {
+        let file = include_str!("bsp_saved.ron").trim_end();
+        assert_eq!(ron::to_string(&saved_fixture_system()).unwrap(), file);
+        let loaded: BspLayoutSystem = ron::from_str(file).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), file);
     }
 
     /// Upstream's system differing from the core is counted and fails a test (a running Rift
