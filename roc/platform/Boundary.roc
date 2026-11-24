@@ -927,6 +927,10 @@ Boundary := [].{
 	## What an edit did (upstream's `EditResult`).
 	BspEdited := [Unsupported, Unchanged, Changed, Raise(List(U64))]
 
+	## A system as the platform holds it (`Tree::from_parts`): each table's slots and free list
+	## (in taking order: the last first), the windows left out, the settings.
+	BspTreeSeed := { layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect }
+
 	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
 	## app's windows, since Roc has no pid).
 	BspTreeEvent := [

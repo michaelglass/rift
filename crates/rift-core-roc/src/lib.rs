@@ -356,6 +356,15 @@ impl RocBspTree {
         }
     }
 
+    /// The system `view` holds, as `Tree::from_parts` takes it: `view` must be one
+    /// [`bsp_tree::TreeView::tree`] parses (a Rust tree's view, or a load's).
+    pub fn seeded(view: &bsp_tree::TreeView) -> Self {
+        let host = host();
+        RocBspTree {
+            trees: boundary::BspTreeBox::seeded(view, &host),
+        }
+    }
+
     /// One operation, as [`bsp_tree::step`] applies it to a `Tree`.
     pub fn step(&mut self, event: bsp_tree::Event) -> bsp_tree::Answer {
         let host = host();
@@ -375,7 +384,7 @@ pub mod bsp_tree {
         Direction, Edit, Edited, Focus, Focused, InsertionPoint, Layout, Node, Participation,
         Query, Resize,
     };
-    use rift_core::slot_table::{SlotKey, SlotTable};
+    use rift_core::slot_table::{SlotKey, SlotTable, SlotsError};
 
     /// A layout's key: slotmap's ffi form, `version << 32 | index`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -537,6 +546,21 @@ pub mod bsp_tree {
             .saved()
             .map(|(held, version)| (held.map(|(_, value)| value.clone()), version))
             .collect()
+    }
+
+    impl TreeView {
+        /// The Rust tree this view holds, its tables parsed as slotmap reads them (refused as
+        /// slotmap refuses them, or when a free list is not the table's vacant slots).
+        pub fn tree(&self) -> Result<Tree, SlotsError> {
+            let taking = |free: &[u32]| free.iter().rev().copied().collect::<Vec<u32>>();
+            Ok(Tree::from_parts(
+                SlotTable::parse(self.layouts.clone())?.resumed(&taking(&self.layout_free))?,
+                SlotTable::parse(self.nodes.clone())?.resumed(&taking(&self.node_free))?,
+                self.left_out.iter().copied().collect(),
+                self.insertion,
+                self.aspect,
+            ))
+        }
     }
 
     impl From<&Tree> for TreeView {

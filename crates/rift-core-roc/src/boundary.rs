@@ -3954,6 +3954,169 @@ fn from_tree_node(node: &abi::BoundaryBspTreeNode) -> TreeNode<NodeKey, u64> {
     TreeNode { parent, kind }
 }
 
+fn tree_side(side: Side) -> abi::BoundaryBspSide {
+    match side {
+        Side::First => abi::BoundaryBspSide::First,
+        Side::Second => abi::BoundaryBspSide::Second,
+    }
+}
+
+fn tree_members(members: &Members<u64>, host: &abi::RocHost) -> abi::BoundaryBspMembers {
+    use abi::BoundaryBspMembersTag as Tag;
+    match members {
+        Members::Window(window) => {
+            union!(
+                BoundaryBspMembers,
+                BoundaryBspMembersPayload.window(*window),
+                Tag::Window
+            )
+        }
+        Members::Stack(Tabs { before, top, after }) => union!(
+            BoundaryBspMembers,
+            BoundaryBspMembersPayload.stack(abi::BoundaryBspTabs {
+                before: list(before, host),
+                top: *top,
+                after: list(after, host),
+            }),
+            Tag::Stack
+        ),
+    }
+}
+
+fn tree_leaf(leaf: &Leaf<u64>, host: &abi::RocHost) -> abi::BoundaryBspTreeLeaf {
+    abi::BoundaryBspTreeLeaf {
+        content: match &leaf.content {
+            Content::Empty => union!(
+                BoundaryBspContent,
+                BoundaryBspContentPayload.empty,
+                abi::BoundaryBspContentTag::Empty
+            ),
+            Content::Held { members, fill } => union!(
+                BoundaryBspContent,
+                BoundaryBspContentPayload.held(abi::BoundaryBspHeld {
+                    members: tree_members(members, host),
+                    fill: bsp_fill(*fill),
+                }),
+                abi::BoundaryBspContentTag::Held
+            ),
+        },
+        preselect: match leaf.preselect {
+            Preselect::Unset => union!(
+                BoundaryBspPreselect,
+                BoundaryBspPreselectPayload.unset,
+                abi::BoundaryBspPreselectTag::Unset
+            ),
+            Preselect::Toward(direction) => union!(
+                BoundaryBspPreselect,
+                BoundaryBspPreselectPayload.toward(tree_direction(direction)),
+                abi::BoundaryBspPreselectTag::Toward
+            ),
+        },
+    }
+}
+
+fn tree_node(node: &TreeNode<NodeKey, u64>, host: &abi::RocHost) -> abi::BoundaryBspTreeNode {
+    abi::BoundaryBspTreeNode {
+        parent: match node.parent {
+            Parent::Root => union!(
+                BoundaryBspParent,
+                BoundaryBspParentPayload.root,
+                abi::BoundaryBspParentTag::Root
+            ),
+            Parent::Split(above) => union!(
+                BoundaryBspParent,
+                BoundaryBspParentPayload.split(above.0),
+                abi::BoundaryBspParentTag::Split
+            ),
+        },
+        kind: match &node.kind {
+            Kind::Split(Split {
+                orientation,
+                ratio,
+                children: [first, second],
+                memory,
+            }) => union!(
+                BoundaryBspKind,
+                BoundaryBspKindPayload.split(abi::BoundaryBspTreeSplit {
+                    orientation: tree_orientation(*orientation),
+                    ratio: *ratio,
+                    first: first.0,
+                    second: second.0,
+                    memory: match memory {
+                        Memory::Stops => union!(
+                            BoundaryBspMemory,
+                            BoundaryBspMemoryPayload.stops,
+                            abi::BoundaryBspMemoryTag::Stops
+                        ),
+                        Memory::Toward(side) => union!(
+                            BoundaryBspMemory,
+                            BoundaryBspMemoryPayload.toward(tree_side(*side)),
+                            abi::BoundaryBspMemoryTag::Toward
+                        ),
+                    },
+                }),
+                abi::BoundaryBspKindTag::Split
+            ),
+            Kind::Leaf(leaf) => union!(
+                BoundaryBspKind,
+                BoundaryBspKindPayload.leaf(tree_leaf(leaf, host)),
+                abi::BoundaryBspKindTag::Leaf
+            ),
+        },
+    }
+}
+
+/// A system as the platform holds it, for `roc_bsp_tree_seed`.
+fn tree_seed(view: &TreeView, host: &abi::RocHost) -> abi::BoundaryBspTreeSeed {
+    let layouts: Vec<abi::BoundaryBspLayoutSlot> = view
+        .layouts
+        .iter()
+        .map(|(held, version)| match held {
+            Some(layout) => union!(
+                BoundaryBspLayoutSlot,
+                BoundaryBspLayoutSlotPayload.occupied(abi::BoundaryBspLayoutHeld {
+                    version: *version,
+                    root: layout.root.0,
+                }),
+                abi::BoundaryBspLayoutSlotTag::Occupied
+            ),
+            None => union!(
+                BoundaryBspLayoutSlot,
+                BoundaryBspLayoutSlotPayload.vacant(*version),
+                abi::BoundaryBspLayoutSlotTag::Vacant
+            ),
+        })
+        .collect();
+    let nodes: Vec<abi::BoundaryBspNodeSlot> = view
+        .nodes
+        .iter()
+        .map(|(held, version)| match held {
+            Some(node) => union!(
+                BoundaryBspNodeSlot,
+                BoundaryBspNodeSlotPayload.occupied(abi::BoundaryBspNodeHeld {
+                    version: *version,
+                    node: tree_node(node, host),
+                }),
+                abi::BoundaryBspNodeSlotTag::Occupied
+            ),
+            None => union!(
+                BoundaryBspNodeSlot,
+                BoundaryBspNodeSlotPayload.vacant(*version),
+                abi::BoundaryBspNodeSlotTag::Vacant
+            ),
+        })
+        .collect();
+    abi::BoundaryBspTreeSeed {
+        layouts: list(&layouts, host),
+        layout_free: list(&view.layout_free, host),
+        nodes: list(&nodes, host),
+        node_free: list(&view.node_free, host),
+        left_out: list(&view.left_out, host),
+        insertion: insertion(view.insertion),
+        aspect: aspect(view.aspect),
+    }
+}
+
 /// The BSP trees' box, which only Roc can read or free; only the `roc_bsp_tree_*` entries make
 /// and take one. Dropping it releases the trees.
 pub(crate) struct BspTreeBox(abi::RocBox);
@@ -3961,6 +4124,12 @@ pub(crate) struct BspTreeBox(abi::RocBox);
 impl BspTreeBox {
     pub(crate) fn new(point: InsertionPoint) -> BspTreeBox {
         BspTreeBox(unsafe { abi::roc_bsp_tree_init(insertion(point)) })
+    }
+
+    /// The system `view` holds, which the caller has parsed (`TreeView::tree`).
+    pub(crate) fn seeded(view: &TreeView, host: &abi::RocHost) -> BspTreeBox {
+        // SAFETY: the seed's lists are allocated through the host and consumed by Roc.
+        BspTreeBox(unsafe { abi::roc_bsp_tree_seed(tree_seed(view, host)) })
     }
 
     /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).

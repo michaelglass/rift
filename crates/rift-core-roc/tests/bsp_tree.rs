@@ -5,8 +5,8 @@
 //! whole system: each table's slots, versions and free list, the windows left out, the settings.
 
 use rift_core::layout::bsp_tree::{
-    Content, Direction, DropAction, Edit, Focus, Focused, InsertionPoint, Kind, Members,
-    Orientation, Participation, Query, Resize, ResizeAlong, SplitKind,
+    Content, Direction, DropAction, Edit, Focus, Focused, InsertionPoint, Kind, Members, Memory,
+    Orientation, Participation, Preselect, Query, Resize, ResizeAlong, SplitKind,
 };
 use rift_core::plain::Rect;
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
@@ -287,17 +287,20 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
     let before = AllocationCount::now();
     let (mut steps, mut reused, mut deepest, mut resized) = (0, 0, 0, 0);
     let (mut queries, mut told, mut reached, mut stacked) = (0, 0, 0, 0);
+    let mut descended = 0;
     for run in 0..runs {
         let insertion = rng.insertion();
         let mut rust = Tree::new(insertion);
         let mut roc = RocBspTree::new(insertion);
         let mut made = Made::default();
         let mut history = Vec::new();
+        let mut reloads = Vec::new();
         for step in 0..60 {
             let event = made.event(&mut rng, &rust);
             history.push(event.clone());
             let before_step = TreeView::from(&rust);
             let expected = bsp_tree::step(&mut rust, event.clone());
+            let event_was = event.clone();
             if matches!(event, Event::ResizeWindow(..)) && TreeView::from(&rust) != before_step {
                 resized += 1;
             }
@@ -320,6 +323,35 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
             steps += 1;
             if let Answer::Focused(Focused::Movement { window: Some(_), .. }) = expected {
                 reached += 1;
+            }
+            if let (
+                Event::Focus(_, Focus::Descend),
+                Answer::Focused(Focused::Selection { handled: true }),
+            ) = (&event_was, &expected)
+            {
+                descended += 1;
+            }
+            if rng.chance(3) {
+                // A reload: both trees seeded from the same system, with states only a saved
+                // file holds (preselected leaves, splits whose memory stops).
+                let mut view = TreeView::from(&rust);
+                for node in view.nodes.iter_mut().filter_map(|(held, _)| held.as_mut()) {
+                    match &mut node.kind {
+                        Kind::Leaf(leaf) if rng.chance(30) => {
+                            leaf.preselect = Preselect::Toward(rng.direction())
+                        }
+                        Kind::Split(split) if rng.chance(30) => split.memory = Memory::Stops,
+                        Kind::Leaf(_) | Kind::Split(_) => {}
+                    }
+                }
+                rust = view.tree().expect("a Rust tree's view parses");
+                roc = RocBspTree::seeded(&view);
+                reloads.push(step);
+                assert_eq!(
+                    roc.view(),
+                    view,
+                    "run {run} step {step}: the seed (reloads at {reloads:?}) after {history:#?}"
+                );
             }
             if rng.chance(50) {
                 let query = made.query(&mut rng, &rust);
@@ -367,7 +399,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         "no system grew past {deepest} nodes: the trees went unexercised"
     );
     eprintln!(
-        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something; {reached} focus moves reaching a window; {stacked} operations leaving a stack), the system compared after each"
+        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something; {reached} focus moves reaching a window; {stacked} operations leaving a stack; {descended} descents moving the selection), the system compared after each"
     );
 }
 

@@ -8,7 +8,7 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
-import pf.Boundary exposing [Aspect, BspDrop, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
+import pf.Boundary exposing [Aspect, BspTreeSeed, BspDrop, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
 
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
@@ -48,6 +48,36 @@ BspTree := [].{
 		left_out: Set.empty(),
 		insertion,
 		aspect: Free,
+	}
+
+	## A system as the platform holds it (each table's slots, vacant ones included, and its free
+	## list in taking order; the windows left out; the settings), as `Tree::from_parts` takes it.
+	## The host parses it first (slotmap's refusals, the free list naming the vacant slots).
+	seeded : BspTreeSeed -> Trees
+	seeded = |seed| {
+		layouts: {
+			slots: seed.layouts.map(
+				|slot|
+					match slot {
+						Occupied({ version, root }) => Occupied({ version, value: root })
+						Vacant(version) => Vacant(version)
+					},
+			),
+			free: seed.layout_free,
+		},
+		nodes: {
+			slots: seed.nodes.map(
+				|slot|
+					match slot {
+						Occupied({ version, node: held }) => Occupied({ version, value: held })
+						Vacant(version) => Vacant(version)
+					},
+			),
+			free: seed.node_free,
+		},
+		left_out: Set.from_list(seed.left_out),
+		insertion: seed.insertion,
+		aspect: seed.aspect,
 	}
 
 	## One operation, and what it answers.
