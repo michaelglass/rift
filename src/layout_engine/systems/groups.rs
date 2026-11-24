@@ -172,12 +172,31 @@ impl Seat {
     }
 }
 
-/// What a node is: a window, a stack, or a split along an axis.
+/// What a node that may be a window is: a window, a stack, or a split along an axis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Shape {
     Window,
     Stack,
     Split { orientation: Orientation },
+}
+
+/// What a container is: a stack, or a split along an axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ContainerShape {
+    Stack,
+    Split { orientation: Orientation },
+}
+
+impl From<LayoutKind> for ContainerShape {
+    fn from(kind: LayoutKind) -> Self {
+        if kind.is_stacked() {
+            Self::Stack
+        } else {
+            Self::Split {
+                orientation: kind.orientation(),
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -324,10 +343,9 @@ impl GroupLayouts {
             Seat::Tab { .. } => return EditResult::Unchanged,
             Seat::Root => {
                 let root = self.root(layout);
-                match self.shape(root) {
-                    Shape::Split { orientation } => (root, orientation),
-                    // A layout root is a container; a stack has no split to rotate.
-                    Shape::Stack | Shape::Window => return EditResult::Unchanged,
+                match self.container_shape(root) {
+                    ContainerShape::Split { orientation } => (root, orientation),
+                    ContainerShape::Stack => return EditResult::Unchanged,
                 }
             }
         };
@@ -532,7 +550,7 @@ impl GroupLayouts {
             node,
             &|window| self.window_participates(window),
             &|node| {
-                if map.container_kind(node).is_stacked() {
+                if self.container_shape(node) == ContainerShape::Stack {
                     (map.local_selection(node), false, group_limit)
                 } else {
                     (None, false, BranchLimit::All)
@@ -733,13 +751,18 @@ impl GroupLayouts {
 
     /// What `node` is: a window, a stack, or a split along an axis.
     pub(super) fn shape(&self, node: NodeId) -> Shape {
-        match self.kind(node) {
+        match self.kind(node).map(ContainerShape::from) {
             None => Shape::Window,
-            Some(kind) if kind.is_stacked() => Shape::Stack,
-            Some(kind) => Shape::Split {
-                orientation: kind.orientation(),
-            },
+            Some(ContainerShape::Stack) => Shape::Stack,
+            Some(ContainerShape::Split { orientation }) => Shape::Split { orientation },
         }
+    }
+
+    /// What a node that is a container by construction is: a layout root, a parent, or a
+    /// `Seat`'s container. Panics on a window.
+    #[track_caller]
+    pub(super) fn container_shape(&self, node: NodeId) -> ContainerShape {
+        ContainerShape::from(self.container_kind(node))
     }
 
     pub(super) fn is_stack(&self, node: NodeId) -> bool { self.shape(node) == Shape::Stack }
@@ -945,13 +968,16 @@ impl GroupLayouts {
             self.root(layout),
             &|window| self.window_participates(window),
             &|node| {
-                let kind = map.container_kind(node);
-                let preferred =
-                    if kind.is_stacked() || kind.orientation() != direction.orientation() {
-                        map.local_selection(node)
-                    } else {
+                let preferred = match self.container_shape(node) {
+                    ContainerShape::Split { orientation }
+                        if orientation == direction.orientation() =>
+                    {
                         None
-                    };
+                    }
+                    ContainerShape::Stack | ContainerShape::Split { .. } => {
+                        map.local_selection(node)
+                    }
+                };
                 (preferred, reverse)
             },
         )

@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
-use super::groups::{GroupLayouts, Seat, Shape};
+use super::groups::{ContainerShape, GroupLayouts, Seat, Shape};
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -194,7 +194,7 @@ impl TraditionalLayoutSystem {
             _ => {}
         }
         let parent = self.find_or_create_smart_common_parent(selection, target, direction);
-        if !self.tiles.container_kind(parent).is_stacked() {
+        if let ContainerShape::Split { .. } = self.tiles.container_shape(parent) {
             self.tiles.set_layout(parent, kind);
         }
         self.tiles.select(parent);
@@ -290,10 +290,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 };
                 let mut root = self.tiles.root(layout);
                 let kind = LayoutKind::from(direction.orientation());
-                let current = self.tiles.container_kind(root);
-                if !root.is_empty(self.tiles.map())
-                    && (current.is_stacked() || current.orientation() != kind.orientation())
-                {
+                let along = ContainerShape::Split {
+                    orientation: direction.orientation(),
+                };
+                if !root.is_empty(self.tiles.map()) && self.tiles.container_shape(root) != along {
                     root = self.tiles.nest_in_container_internal(layout, root, kind);
                 }
                 self.tiles.set_layout(root, kind);
@@ -661,10 +661,12 @@ impl TraditionalLayoutSystem {
                 (target, false)
             } else {
                 let old_root = moving_node.ancestors(map).last().unwrap();
-                let root_kind = self.tiles.tree.map.container_kind(old_root);
                 // Leaving the edge of a root group splits the window out of it; at the edge
                 // of a same-oriented split there is nowhere further to go.
-                if root_kind.orientation() == direction.orientation() && !root_kind.is_stacked() {
+                let along = ContainerShape::Split {
+                    orientation: direction.orientation(),
+                };
+                if self.tiles.container_shape(old_root) == along {
                     return None;
                 }
                 wrap_root = Some(old_root);

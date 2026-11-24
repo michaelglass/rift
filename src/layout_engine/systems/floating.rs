@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 
-use super::groups::{GroupLayouts, Seat};
+use super::groups::{ContainerShape, GroupLayouts, Seat};
 use super::{
     EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
     WindowLayoutConstraints, WindowQuery,
@@ -556,7 +556,7 @@ impl LayoutSystem for FloatingLayoutSystem {
                         return EditResult::Raise(Vec::new());
                     };
                     let members = self.members(container);
-                    let save = !self.groups.container_kind(container).is_stacked();
+                    let save = self.groups.container_shape(container) != ContainerShape::Stack;
                     self.align_members(&members, focused, save);
                     self.groups.apply_stacking_to_parent_of_selection(layout, orientation);
                     self.groups.focus(layout, Focus::Select(focused)).handled;
@@ -636,7 +636,7 @@ impl FloatingLayoutSystem {
             parent
         };
         let remaining = self.remaining_leaf(target_node);
-        if self.groups.container_kind(container).is_stacked() {
+        if self.groups.container_shape(container) == ContainerShape::Stack {
             self.align_members(&[target], focused, true);
         } else if let Some(geometry) = self.geometry.get_mut(&target) {
             geometry.restore = None;
