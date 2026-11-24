@@ -896,6 +896,27 @@ Boundary := [].{
 	## movement.
 	BspFocused := [Selection(Bool), Movement(BspMovement)]
 
+	## What splitting the selection makes (upstream's `LayoutKind`): a tiled split, or a stacked
+	## one (which BSP does not do).
+	BspSplitKind := [Tiled(BspOrientation), Stacked]
+
+	## Which fullscreen a toggle asks for: the whole screen, or the screen within its gaps.
+	BspFullscreen := [Screen, WithinGaps]
+
+	## Which split a resize changes (upstream's `ResizeOrientation`): the nearest along an axis,
+	## or the nearest whatever its orientation.
+	BspResizeAlong := [Horizontal, Vertical, Smart]
+
+	BspResize := { amount : F64, along : BspResizeAlong }
+
+	## An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads).
+	BspEdit := [Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
+
+	BspEditIn := { layout : U64, edit : BspEdit }
+
+	## What an edit did (upstream's `EditResult`).
+	BspEdited := [Unsupported, Unchanged, Changed, Raise(List(U64))]
+
 	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
 	## app's windows, since Roc has no pid).
 	BspTreeEvent := [
@@ -921,11 +942,12 @@ Boundary := [].{
 		CanMoveWindow(BspMoveQuery),
 		WindowSlot(BspWindowIn),
 		Focus(BspFocusIn),
+		Edit(BspEditIn),
 	]
 
 	## What an operation answers: a layout it made, whether a window's participation changed, a
 	## query's answer, or nothing.
-	BspTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(BspSlot), Focused(BspFocused)]
+	BspTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(BspSlot), Focused(BspFocused), Edited(BspEdited)]
 
 
 

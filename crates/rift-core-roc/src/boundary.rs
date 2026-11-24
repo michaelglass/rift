@@ -11,9 +11,9 @@ use rift_core::focus::{
 };
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::bsp_tree::{
-    Content, Direction as TreeDirection, Focus as TreeFocus, Focused, InsertionPoint, Kind, Layout,
-    Leaf, Members, Memory, Node as TreeNode, Orientation, Parent, Participation, Preselect, Query,
-    Resize, Side, Split, Tabs,
+    Content, Direction as TreeDirection, Edit, Edited, Focus as TreeFocus, Focused, InsertionPoint,
+    Kind, Layout, Leaf, Members, Memory, Node as TreeNode, Orientation, Parent, Participation,
+    Preselect, Query, Resize, ResizeAlong, Side, Split, SplitKind, Tabs,
 };
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -3516,6 +3516,14 @@ fn tree_event(event: TreeEvent, host: &abi::RocHost) -> abi::BoundaryBspTreeEven
             BoundaryBspTreeEventPayload.close_app(list(&windows, host)),
             Tag::CloseApp
         ),
+        TreeEvent::Edit(layout, edit) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.edit(abi::BoundaryBspEditIn {
+                layout: layout.0,
+                edit: tree_edit(edit),
+            }),
+            Tag::Edit
+        ),
         TreeEvent::Focus(layout, focus) => union!(
             BoundaryBspTreeEvent,
             BoundaryBspTreeEventPayload.focus(abi::BoundaryBspFocusIn {
@@ -3615,6 +3623,17 @@ fn from_tree_answer(answer: abi::BoundaryBspTreeAnswer) -> TreeAnswer {
             TreeAnswer::Participated(unsafe { *answer.borrow_payload_participated_unchecked() })
         }
         Tag::Done => TreeAnswer::Done,
+        Tag::Edited => {
+            let edited = unsafe { answer.borrow_payload_edited_unchecked() };
+            TreeAnswer::Edited(match edited.tag {
+                abi::BoundaryBspEditedTag::Unsupported => Edited::Unsupported,
+                abi::BoundaryBspEditedTag::Unchanged => Edited::Unchanged,
+                abi::BoundaryBspEditedTag::Changed => Edited::Changed,
+                abi::BoundaryBspEditedTag::Raise => Edited::Raise(
+                    unsafe { edited.borrow_payload_raise_unchecked() }.as_slice().to_vec(),
+                ),
+            })
+        }
         Tag::Focused => {
             let focused = unsafe { answer.borrow_payload_focused_unchecked() };
             TreeAnswer::Focused(match focused.tag {
@@ -3659,6 +3678,70 @@ fn tree_direction(direction: TreeDirection) -> abi::BoundaryBspDirection {
         TreeDirection::Right => abi::BoundaryBspDirection::Right,
         TreeDirection::Up => abi::BoundaryBspDirection::Up,
         TreeDirection::Down => abi::BoundaryBspDirection::Down,
+    }
+}
+
+fn tree_orientation(orientation: Orientation) -> abi::BoundaryBspOrientation {
+    match orientation {
+        Orientation::Horizontal => abi::BoundaryBspOrientation::Horizontal,
+        Orientation::Vertical => abi::BoundaryBspOrientation::Vertical,
+    }
+}
+
+fn tree_edit(edit: Edit<u64>) -> abi::BoundaryBspEdit {
+    use abi::BoundaryBspEditTag as Tag;
+    match edit {
+        Edit::Split(kind) => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.split(match kind {
+                SplitKind::Tiled(orientation) => union!(
+                    BoundaryBspSplitKind,
+                    BoundaryBspSplitKindPayload.tiled(tree_orientation(orientation)),
+                    abi::BoundaryBspSplitKindTag::Tiled
+                ),
+                SplitKind::Stacked => union!(
+                    BoundaryBspSplitKind,
+                    BoundaryBspSplitKindPayload.stacked,
+                    abi::BoundaryBspSplitKindTag::Stacked
+                ),
+            }),
+            Tag::Split
+        ),
+        Edit::Fullscreen { within_gaps } => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.fullscreen(if within_gaps {
+                abi::BoundaryBspFullscreen::WithinGaps
+            } else {
+                abi::BoundaryBspFullscreen::Screen
+            }),
+            Tag::Fullscreen
+        ),
+        Edit::Resize { amount, along } => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.resize(abi::BoundaryBspResize {
+                amount,
+                along: match along {
+                    ResizeAlong::Horizontal => abi::BoundaryBspResizeAlong::Horizontal,
+                    ResizeAlong::Vertical => abi::BoundaryBspResizeAlong::Vertical,
+                    ResizeAlong::Smart => abi::BoundaryBspResizeAlong::Smart,
+                },
+            }),
+            Tag::Resize
+        ),
+        Edit::Rebalance => {
+            union!(BoundaryBspEdit, BoundaryBspEditPayload.rebalance, Tag::Rebalance)
+        }
+        Edit::ToggleOrientation => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.toggle_orientation,
+            Tag::ToggleOrientation
+        ),
+        Edit::Move(_)
+        | Edit::Swap(..)
+        | Edit::Drop { .. }
+        | Edit::Join(_)
+        | Edit::ConsumeOrExpel(_)
+        | Edit::Unjoin => todo!("the moves, swaps, drops and joins port in the next commits"),
     }
 }
 

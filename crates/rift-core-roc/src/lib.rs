@@ -372,7 +372,8 @@ impl RocBspTree {
 /// The BSP tree's operations and view, on plain keys, and the Rust tree they are held to.
 pub mod bsp_tree {
     use rift_core::layout::bsp_tree::{
-        Direction, Focus, Focused, InsertionPoint, Layout, Node, Participation, Query, Resize,
+        Direction, Edit, Edited, Focus, Focused, InsertionPoint, Layout, Node, Participation,
+        Query, Resize,
     };
     use rift_core::slot_table::{SlotKey, SlotTable};
 
@@ -431,6 +432,7 @@ pub mod bsp_tree {
         CanMoveWindow(LayoutKey, u64, Direction),
         WindowSlot(LayoutKey, u64),
         Focus(LayoutKey, Focus<u64>),
+        Edit(LayoutKey, Edit<u64>),
     }
 
     /// What an operation answers.
@@ -444,6 +446,7 @@ pub mod bsp_tree {
         Windows(Vec<u64>),
         WindowSlot(Option<Vec<usize>>),
         Focused(Focused<u64>),
+        Edited(Edited<u64>),
     }
 
     /// `event` applied to the Rust tree, and what it answers.
@@ -509,6 +512,7 @@ pub mod bsp_tree {
                 Answer::WindowSlot(tree.window_slot(layout, window))
             }
             Event::Focus(layout, focus) => Answer::Focused(tree.focus(layout, focus)),
+            Event::Edit(layout, edit) => Answer::Edited(tree.edit(layout, edit)),
         }
     }
 

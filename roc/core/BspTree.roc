@@ -8,7 +8,7 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
-import pf.Boundary exposing [Aspect, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
+import pf.Boundary exposing [Aspect, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
 
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
@@ -88,6 +88,10 @@ BspTree := [].{
 			Windows(asked) => (trees, Windows(listed_windows(trees, asked)))
 			CanMoveWindow(asked) => (trees, Verdict(can_move_window(trees, asked)))
 			WindowSlot(asked) => (trees, WindowSlot(window_slot(trees, asked)))
+			Edit(asked) => {
+				(after, edited) = edit(trees, asked)
+				(after, Edited(edited))
+			}
 			Focus(asked) => {
 				(after, focused) = focus(trees, asked)
 				(after, Focused(focused))
@@ -635,6 +639,139 @@ BspTree := [].{
 			Window(_) => members
 			Stack(tabs) => Stack({ before: tabs_windows(tabs).keep_if(|member| member != window), top: window, after: [] })
 		}
+
+	# Edits (upstream's `edit_layout`).
+
+	## An edit of a layout, and what it did.
+	edit : Trees, BspEditIn -> (Trees, BspEdited)
+	edit = |trees, { layout, edit: asked }|
+		match asked {
+			Split(Stacked) => (trees, Unsupported)
+			Split(Tiled(orientation)) =>
+				match selection_of_layout(trees, layout) {
+					NoSelection => (trees, Unchanged)
+					Selection(selected) => (split_leaf(trees, descend_to_leaf(trees, selected), orientation, Empty, Second), Changed)
+				}
+			Fullscreen(mode) => {
+				(after, raised) = toggle_fullscreen(trees, layout, mode)
+				(after, Raise(raised))
+			}
+			Resize(resize) => resize_selection(trees, layout, resize)
+			Rebalance =>
+				match get(trees.layouts, layout) {
+					Held(root) => {
+						(after, _) = rebalance_node(trees, root, Horizontal)
+						(after, Changed)
+					}
+					NotHeld => (trees, Changed)
+				}
+			ToggleOrientation =>
+				match selection_of_layout(trees, layout) {
+					NoSelection => (trees, Unchanged)
+					Selection(start) =>
+						match ancestors(trees, start).find_first(|at| is_split(trees, at)) {
+							Ok(found) => {
+								split = split_of(trees, found, "toggle_orientation")
+								turned =
+									match split.orientation {
+										Horizontal => Vertical
+										Vertical => Horizontal
+									}
+								(set_kind(trees, found, Split({ ..split, orientation: turned }), "toggle_orientation"), Changed)
+							}
+							Err(_) => (trees, Unchanged)
+						}
+				}
+		}
+
+	## The nearest split above the selection along `along` (any, smart) moves its share by half
+	## the amount toward the selection's side, kept within 0.05..0.95 (in `f32`s, as upstream).
+	resize_selection : Trees, U64, BspResize -> (Trees, BspEdited)
+	resize_selection = |trees, layout, { amount, along }|
+		match selection_of_layout(trees, layout) {
+			NoSelection => (trees, Unchanged)
+			Selection(selected) => resize_from(trees, selected, Geometry.narrow(amount), along)
+		}
+
+	resize_from : Trees, U64, F32, BspResizeAlong -> (Trees, BspEdited)
+	resize_from = |trees, current, amount, along|
+		match parent(trees, current) {
+			NoParent => (trees, Unchanged)
+			Parent(above) => {
+				split = split_of(trees, above, "resize_selection")
+				matches =
+					match (along, split.orientation) {
+						(Smart, _) | (Horizontal, Horizontal) | (Vertical, Vertical) => True
+						(Horizontal, Vertical) | (Vertical, Horizontal) => False
+					}
+				if matches {
+					half : F32
+					half = if current == split.first 0.5 else -0.5
+					next = clamp_f32(split.ratio + amount * half, 0.05, 0.95)
+					(set_kind(trees, above, Split({ ..split, ratio: next }), "resize_selection"), if split.ratio != next Changed else Unchanged)
+				} else {
+					resize_from(trees, above, amount, along)
+				}
+			}
+		}
+
+	## Each split's share made its first side's tiles over all its tiles, where a tile is a leaf
+	## or a split across its parent's axis; the subtree's tiles along `parent_axis`.
+	rebalance_node : Trees, U64, BspOrientation -> (Trees, U64)
+	rebalance_node = |trees, key, parent_axis|
+		match kind(trees, key) {
+			Leaf(_) => (trees, 1)
+			Split(split) => {
+				(with_first, first_span) = rebalance_node(trees, split.first, split.orientation)
+				(with_second, second_span) = rebalance_node(with_first, split.second, split.orientation)
+				span = first_span + second_span
+				ratio = clamp_f32(first_span.to_f32() / span.to_f32(), 0.05, 0.95)
+				balanced = set_kind(with_second, key, Split({ ..split_of(with_second, key, "rebalance_node"), ratio }), "rebalance_node")
+				(balanced, if same_orientation(split.orientation, parent_axis) span else 1)
+			}
+		}
+
+	## The selected leaf's fill toggled; its window taking part is raised.
+	toggle_fullscreen : Trees, U64, BspFullscreen -> (Trees, List(U64))
+	toggle_fullscreen = |trees, layout, mode|
+		match selection_of_layout(trees, layout) {
+			NoSelection => (trees, [])
+			Selection(selected) => {
+				leaf = descend_to_leaf(trees, selected)
+				match content_of(trees, leaf, "toggle_fullscreen") {
+					Empty => (trees, [])
+					Held(held) => {
+						raised =
+							match participating_window(trees, leaf) {
+								Some(window) => [window]
+								Nothing => []
+							}
+						(set_content(trees, leaf, Held({ ..held, fill: toggled(held.fill, mode) }), "toggle_fullscreen"), raised)
+					}
+				}
+			}
+		}
+
+	## A fill toggled (upstream's `toggle_fullscreen_mode`): the mode asked for is turned off if
+	## it is on, else on (replacing the other).
+	toggled : Fill, BspFullscreen -> Fill
+	toggled = |fill, mode|
+		match (fill, mode) {
+			(WithinGaps, WithinGaps) | (Screen, Screen) => Tiled
+			(_, WithinGaps) => WithinGaps
+			(_, Screen) => Screen
+		}
+
+	is_split : Trees, U64 -> Bool
+	is_split = |trees, key|
+		match kind(trees, key) {
+			Split(_) => True
+			Leaf(_) => False
+		}
+
+	## Rust's `f32::clamp`.
+	clamp_f32 : F32, F32, F32 -> F32
+	clamp_f32 = |value, low, high| if value < low low else if value > high high else value
 
 	# Selection and insertion.
 

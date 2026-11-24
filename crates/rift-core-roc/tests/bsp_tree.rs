@@ -5,7 +5,8 @@
 //! whole system: each table's slots, versions and free list, the windows left out, the settings.
 
 use rift_core::layout::bsp_tree::{
-    Direction, Focus, Focused, InsertionPoint, Participation, Query, Resize,
+    Direction, Edit, Focus, Focused, InsertionPoint, Orientation, Participation, Query, Resize,
+    ResizeAlong, SplitKind,
 };
 use rift_core::plain::Rect;
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
@@ -58,6 +59,47 @@ impl Rng {
             Direction::Up,
             Direction::Down,
         ][self.below(4) as usize]
+    }
+
+    fn orientation(&mut self) -> Orientation {
+        if self.chance(50) {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        }
+    }
+
+    /// A resize amount: small steps either way, large ones, and magnitudes an `f32` rounds,
+    /// overflows or loses.
+    fn amount(&mut self) -> f64 {
+        match self.below(4) {
+            0 => [
+                0.05, -0.05, 0.1, -0.3, 1.0, -1.0, 10.0, 1e-9, 1e30, -7.25, 1e-40,
+            ][self.below(11) as usize],
+            _ => (self.next() >> 11) as f64 / (1u64 << 53) as f64 * 4.0 - 2.0,
+        }
+    }
+
+    /// A shape edit (upstream's `LayoutEdit`, the ones that reshape a layout).
+    fn shape_edit(&mut self) -> Edit<u64> {
+        match self.below(6) {
+            0 => Edit::Split(if self.chance(85) {
+                SplitKind::Tiled(self.orientation())
+            } else {
+                SplitKind::Stacked
+            }),
+            1 => Edit::Fullscreen { within_gaps: self.chance(50) },
+            2 | 3 => Edit::Resize {
+                amount: self.amount(),
+                along: [
+                    ResizeAlong::Horizontal,
+                    ResizeAlong::Vertical,
+                    ResizeAlong::Smart,
+                ][self.below(3) as usize],
+            },
+            4 => Edit::Rebalance,
+            _ => Edit::ToggleOrientation,
+        }
     }
 
     fn insertion(&mut self) -> InsertionPoint {
@@ -123,7 +165,8 @@ impl Made {
     }
 
     fn event(&self, rng: &mut Rng) -> Event {
-        match rng.below(36) {
+        match rng.below(44) {
+            36..=43 => Event::Edit(self.layout(rng), rng.shape_edit()),
             30..=35 => Event::Focus(self.layout(rng), match rng.below(5) {
                 0 => Focus::Select(rng.window()),
                 1 => Focus::Ascend,
