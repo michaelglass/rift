@@ -315,7 +315,17 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
         let upstream = self.upstream.focus(layout, focus);
-        self.unported();
+        let core_focus = match focus {
+            Focus::Select(window) => core::Focus::Select(window),
+            Focus::Ascend => core::Focus::Ascend,
+            Focus::Descend => core::Focus::Descend,
+            Focus::Direction(direction) => core::Focus::Direction(core_direction(direction)),
+        };
+        let core = match self.twin.core.focus(layout, core_focus) {
+            core::Focused::Selection { handled } => FocusResult::selection(handled),
+            core::Focused::Movement { window, raise } => FocusResult::movement((window, raise)),
+        };
+        self.stepped("focus", &focus_words(&upstream), &focus_words(&core));
         upstream
     }
 
@@ -352,6 +362,11 @@ impl LayoutSystem for BspLayoutSystem {
         self.unported();
         upstream
     }
+}
+
+/// A focus's answer, comparable.
+fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
+    (result.handled, result.window, result.raise.clone())
 }
 
 /// Upstream's system as the core holds it.

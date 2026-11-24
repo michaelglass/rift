@@ -492,6 +492,77 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
         }
     }
 
+    /// The selection moved (upstream's `focus`).
+    pub fn focus(&mut self, layout: L, focus: Focus<W>) -> Focused<W> {
+        match focus {
+            Focus::Select(window) => Focused::Selection {
+                handled: self.select_window(layout, window),
+            },
+            Focus::Ascend => Focused::Selection { handled: self.ascend(layout) },
+            Focus::Descend => Focused::Selection { handled: self.descend(layout) },
+            Focus::Direction(direction) => self.move_focus(layout, direction),
+        }
+    }
+
+    fn select_window(&mut self, layout: L, window: W) -> bool {
+        if self.left_out.contains(&window) {
+            return false;
+        }
+        let Some(node) = self.node_for_window_in_layout(layout, window) else {
+            return false;
+        };
+        if let Content::Held { members, .. } = self.content_mut(node) {
+            members.focus(window);
+        }
+        self.select(node);
+        true
+    }
+
+    fn ascend(&mut self, layout: L) -> bool {
+        if let Some(selection) = self.selection_of_layout(layout)
+            && let Some(parent) = self.parent(selection)
+        {
+            let leaf = self.descend_to_leaf(parent);
+            self.select(leaf);
+            return true;
+        }
+        false
+    }
+
+    fn descend(&mut self, layout: L) -> bool {
+        if let Some(selection) = self.selection_of_layout(layout) {
+            let leaf = self.descend_to_leaf(selection);
+            if leaf != selection {
+                self.select(leaf);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn move_focus(&mut self, layout: L, direction: Direction) -> Focused<W> {
+        let Some(selection) = self.selection_of_layout(layout) else {
+            return Focused::Movement {
+                window: None,
+                raise: Vec::new(),
+            };
+        };
+        let leaf = self.descend_to_leaf(selection);
+        let Some(next) = self.find_neighbor_leaf(leaf, direction) else {
+            return Focused::Movement {
+                window: None,
+                raise: Vec::new(),
+            };
+        };
+        self.select(next);
+        let window = self.participating_window(next);
+        // Tiled BSP windows never overlap, so only the focus target is raised.
+        Focused::Movement {
+            window,
+            raise: window.into_iter().collect(),
+        }
+    }
+
     /// A layout as the core's geometry takes it, pruned as upstream's `prepare_geometry` prunes
     /// it (none: nothing takes space): a leaf shows its participating member; a leaf with none
     /// is left out, except an empty leaf while no window is left out of the system; a split
@@ -1084,4 +1155,35 @@ fn track_fullscreen_resize(
         return false;
     }
     true
+}
+
+/// How the selection moves (upstream's `Focus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus<W> {
+    Select(W),
+    Ascend,
+    Descend,
+    Direction(Direction),
+}
+
+/// What a focus did (upstream's `FocusResult`, by how it was made): a selection change says
+/// whether it was handled; a movement names the window it reached, if any, and those to raise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Focused<W> {
+    Selection { handled: bool },
+    Movement { window: Option<W>, raise: Vec<W> },
+}
+
+impl<W: Copy + PartialEq> Members<W> {
+    /// `window` on top: a stack moves it to the end, the others keeping their order.
+    fn focus(&mut self, window: W) {
+        if let Members::Stack(tabs) = self {
+            let rest: Vec<W> = tabs.windows().filter(|&member| member != window).collect();
+            *tabs = Tabs {
+                before: rest,
+                top: window,
+                after: Vec::new(),
+            };
+        }
+    }
 }
