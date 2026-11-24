@@ -16,7 +16,11 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeO
 use crate::model::selection::*;
 use crate::model::tree::NodeId;
 
+#[cfg(feature = "roc-core")]
+mod roc_shadow;
 mod twinned;
+#[cfg(feature = "roc-core")]
+pub(crate) use roc_shadow::bsp_tree_reseeds;
 pub use twinned::BspLayoutSystem;
 pub(crate) use twinned::bsp_tree_divergences;
 

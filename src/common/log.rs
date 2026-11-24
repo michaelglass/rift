@@ -81,8 +81,9 @@ fn show_layout_core() {
     tracing::info!(bsp_tree, "core: bsp tree divergences");
 }
 
-/// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow had to be
-/// re-seeded (each one a `roc-divergence:`). Only with `roc-core`.
+/// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow, or a Roc
+/// shadow (the BSP tree), had to be re-seeded (each one a `roc-divergence:`). Only with
+/// `roc-core`.
 fn show_roc_core() {
     #[cfg(feature = "roc-core")]
     {
@@ -95,6 +96,10 @@ fn show_roc_core() {
         let reseeds = crate::roc_twin::workspaces_reseeds();
         println!("roc-core: workspaces re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: workspaces re-seeds");
+        // The Roc BSP tree, a shadow of the core's deciding tree (re-seeded from it).
+        let reseeds = crate::layout_engine::systems::bsp_tree_reseeds();
+        println!("roc-core: bsp tree re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: bsp tree re-seeds");
     }
 }
 
