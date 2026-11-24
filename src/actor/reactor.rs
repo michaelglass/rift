@@ -84,8 +84,8 @@ pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{AppState, WindowState};
 pub use crate::model::reactor::{
-    Command, DisplaySelector, MenuState, MissionControlState, ReactorCommand, RefocusState,
-    Requested, StaleCleanupState, WorkspaceSwitchOrigin,
+    Command, DisplaySelector, MenuState, ReactorCommand, RefocusState, Requested,
+    StaleCleanupState, WorkspaceSwitchOrigin,
 };
 
 #[doc(hidden)]
@@ -413,7 +413,8 @@ pub struct Reactor {
     notification_manager: managers::NotificationManager,
     transaction_manager: transaction_manager::TransactionManager,
     menu_manager: managers::MenuManager,
-    mission_control_manager: managers::MissionControlManager,
+    /// macOS's Mission Control is open.
+    mission_control_open: bool,
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
@@ -535,9 +536,7 @@ impl Reactor {
                 menu_tx: None,
                 last_projection_signature: None,
             },
-            mission_control_manager: managers::MissionControlManager {
-                mission_control_state: MissionControlState::Inactive,
-            },
+            mission_control_open: false,
             window_inventory_manager: managers::WindowInventoryManager {
                 next_request_id: 0,
                 in_flight: HashMap::default(),
@@ -1058,12 +1057,7 @@ impl Reactor {
         self.drag_manager.actor.begin_native(source, scene);
     }
 
-    fn is_mission_control_active(&self) -> bool {
-        matches!(
-            self.mission_control_manager.mission_control_state,
-            MissionControlState::Active
-        )
-    }
+    fn is_mission_control_active(&self) -> bool { self.mission_control_open }
 
     async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
@@ -5880,15 +5874,10 @@ impl Reactor {
     }
 
     fn set_mission_control_active(&mut self, active: bool) {
-        let new_state = if active {
-            MissionControlState::Active
-        } else {
-            MissionControlState::Inactive
-        };
-        if self.is_mission_control_active() == active {
+        if self.mission_control_open == active {
             return;
         }
-        self.mission_control_manager.mission_control_state = new_state;
+        self.mission_control_open = active;
         self.update_focus_follows_mouse_state();
     }
 

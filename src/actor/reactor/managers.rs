@@ -147,11 +147,6 @@ pub struct MenuManager {
     pub last_projection_signature: Option<u64>,
 }
 
-/// Manages Mission Control state
-pub struct MissionControlManager {
-    pub mission_control_state: super::MissionControlState,
-}
-
 /// Owns ordering and coalescing for asynchronous AX window inventories.
 pub struct WindowInventoryManager {
     pub next_request_id: u64,

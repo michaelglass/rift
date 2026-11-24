@@ -30,13 +30,6 @@ pub enum Command {
     Reactor(ReactorCommand),
 }
 
-#[derive(Debug, Clone)]
-pub enum MissionControlState {
-    Inactive,
-    Active,
-    Transitioning,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuState {
     Closed,
