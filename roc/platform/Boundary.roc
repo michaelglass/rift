@@ -2,9 +2,6 @@
 ## a name of its own here, so the generated glue names it (never by hash or number; the build
 ## fails on either). Each mirrors the Rust core's type of the same meaning.
 Boundary := [].{
-	## One step's result: the model's box and the effects. Generic in the model, so the
-	## platform's model variable stays out of a nominal type.
-	Stepped(model) := { model : Box(model), effects : List(Effect) }
 
 	# Shared geometry (`rift_core::plain`, `rift_core::layout`).
 
@@ -651,7 +648,12 @@ Boundary := [].{
 	## A window with AX state and its presence.
 	PresentWindow := { window : U64, presence : Present }
 
-	## The lifecycle after a reading, and the change in the window's admission.
+
+	## The lifecycle after a reading, and the change in the window's admission. Generic in the
+	## model, here and not in the platform module beside the other machines' results:
+	## roc-lang/roc#13363 (nightly-2026-11-23-b5c77fc) makes any provided function answering a bare
+	## type (`lifecycle_net`'s `Change`) "polymorphic" when a type declared in the platform module
+	## wraps it. Fixed upstream (3ef41a6); it moves beside the others on the next nightly.
 	LifecycleStepped(model) := { model : Box(model), change : Change }
 
 	## Whether an invalidation found AX state to invalidate.
@@ -661,14 +663,8 @@ Boundary := [].{
 	## without AX state, was not invalidated).
 	Revalidation := [Revalidated, NotInvalidated]
 
-	## The lifecycle after an invalidation, and what it found.
-	LifecycleInvalidated(model) := { model : Box(model), invalidation : Invalidation }
 
-	## The lifecycle after a revalidation, and what it found.
-	LifecycleRevalidated(model) := { model : Box(model), revalidation : Revalidation }
 
-	## The lifecycle, unchanged, and every window with AX state.
-	LifecycleViewed(model) := { model : Box(model), windows : List(PresentWindow) }
 
 	Report := [Reported, Omitted]
 
@@ -803,12 +799,7 @@ Boundary := [].{
 	## One app as the machine knows it.
 	MainApp := { pid : U64, standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }
 
-	## The main windows after an event, and the window to focus, if the event makes one known.
-	MainWindowsStepped(model) := { model : Box(model), focus : MaybeWord }
 
-	## The main windows, unchanged, and what they hold: the main window, the native focus, every
-	## app in pid order and the globally frontmost app.
-	MainWindowsViewed(model) := { model : Box(model), main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord }
 
 	## Where a claimed window returns to when its claim ends.
 	Destination := [Returns(U64), Nowhere].{
@@ -860,12 +851,7 @@ Boundary := [].{
 	## each catalogued workspace's assigned windows, in catalog order.
 	JoinedView := { outcomes : List(Outcome), catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
 
-	## The joined workspaces after an event, and what the event met.
-	WorkspacesStepped(model) := { model : Box(model), outcome : Outcome }
 
-	## The joined workspaces, unchanged: the catalog, every Space's activation, every owned window
-	## and each catalogued workspace's assigned windows, in catalog order.
-	WorkspacesViewed(model) := { model : Box(model), catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : List(WindowOwnership), windows : List(WorkspaceWindows) }
 
 	# The core's events and effects (`rift_core::Event`, `rift_core::Effect`).
 
