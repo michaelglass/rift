@@ -1080,4 +1080,116 @@ mod tests {
         t.assert_children_are([t.gc1, t.child3], t.root);
         assert!(!t.tree.map.contains(t.child2));
     }
+
+    /// The saved node shape of builds before a layout kind lived only on containers: every
+    /// node, windows included, carried a required kind.
+    mod old {
+        use serde::{Deserialize, Serialize};
+        use slotmap::SlotMap;
+
+        use super::super::NodeId;
+        use crate::actor::app::WindowId;
+        use crate::layout_engine::LayoutKind;
+        use crate::model::selection::SelectionInfo;
+
+        #[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub(super) struct LayoutInfo {
+            pub(super) size: f32,
+            pub(super) kind: LayoutKind,
+            #[serde(default)]
+            pub(super) is_fullscreen: bool,
+            #[serde(default)]
+            pub(super) is_fullscreen_within_gaps: bool,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub(super) struct StoredNode {
+            pub(super) parent: Option<NodeId>,
+            pub(super) prev_sibling: Option<NodeId>,
+            pub(super) next_sibling: Option<NodeId>,
+            pub(super) first_child: Option<NodeId>,
+            pub(super) last_child: Option<NodeId>,
+            #[serde(default)]
+            pub(super) layout: LayoutInfo,
+            #[serde(default)]
+            pub(super) selection: Option<SelectionInfo>,
+            #[serde(default)]
+            pub(super) window: Option<WindowId>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub(super) master_first: Option<bool>,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub(super) struct NodeMap {
+            pub(super) map: SlotMap<NodeId, StoredNode>,
+        }
+    }
+
+    /// A stacked root holding a fullscreen window and a split, and a region-pair root.
+    fn saved_shapes() -> (NodeMap, [NodeId; 6]) {
+        let mut tree = Tree::default();
+        let root = tree.create_root();
+        tree.map.set_kind(root, LayoutKind::VerticalStack);
+        let window = tree.insert(Placement::Back(root));
+        tree.window
+            .set_window(&mut tree.map, LayoutId::default(), window, WindowId::new(1, 1));
+        tree.map[window].layout.size = 0.5;
+        tree.map[window].layout.is_fullscreen_within_gaps = true;
+        let split = tree.insert(Placement::Back(root));
+        tree.map.set_kind(split, LayoutKind::Vertical);
+
+        let pair = tree.create_root();
+        tree.map.set_kind(pair, LayoutKind::Horizontal);
+        let primary = tree.insert(Placement::Back(pair));
+        let secondary = tree.insert(Placement::Back(pair));
+        tree.map.set_kind(secondary, LayoutKind::HorizontalStack);
+        tree.map.set_region_pair(pair, primary, secondary);
+        (tree.map, [root, window, split, pair, primary, secondary])
+    }
+
+    #[test]
+    fn a_saved_tree_still_loads_in_builds_that_stored_a_kind_on_every_node() {
+        let (map, [root, window, split, pair, primary, secondary]) = saved_shapes();
+        let saved = ron::to_string(&map).unwrap();
+        let old: old::NodeMap = ron::from_str(&saved).unwrap();
+
+        let kind = |node: NodeId| old.map[node].layout.kind;
+        assert_eq!(kind(root), LayoutKind::VerticalStack);
+        assert_eq!(kind(split), LayoutKind::Vertical);
+        assert_eq!(kind(pair), LayoutKind::Horizontal);
+        assert_eq!(kind(primary), LayoutKind::default());
+        assert_eq!(kind(secondary), LayoutKind::HorizontalStack);
+        // A window is saved with the default kind old builds gave every new node.
+        assert_eq!(old.map[window].layout, old::LayoutInfo {
+            size: 0.5,
+            kind: LayoutKind::default(),
+            is_fullscreen: false,
+            is_fullscreen_within_gaps: true,
+        });
+        assert_eq!(old.map[window].window, Some(WindowId::new(1, 1)));
+        assert_eq!(old.map[pair].master_first, Some(true));
+    }
+
+    #[test]
+    fn a_tree_saved_with_a_kind_on_every_node_loads_with_kinds_only_on_containers() {
+        let (map, [root, window, split, pair, primary, secondary]) = saved_shapes();
+        let mut old: old::NodeMap = ron::from_str(&ron::to_string(&map).unwrap()).unwrap();
+        // Old builds could save any kind on a window; it never meant anything.
+        old.map[window].layout.kind = LayoutKind::HorizontalStack;
+        let loaded: NodeMap = ron::from_str(&ron::to_string(&old).unwrap()).unwrap();
+
+        assert_eq!(loaded.kind(root), Some(LayoutKind::VerticalStack));
+        assert_eq!(loaded.kind(split), Some(LayoutKind::Vertical));
+        assert_eq!(loaded.kind(pair), Some(LayoutKind::Horizontal));
+        assert_eq!(loaded.kind(primary), Some(LayoutKind::default()));
+        assert_eq!(loaded.kind(secondary), Some(LayoutKind::HorizontalStack));
+        assert_eq!(loaded.region_pair(pair), Some((primary, secondary)));
+        assert_eq!(loaded.kind(window), None);
+        assert_eq!(loaded.window(window), Some(WindowId::new(1, 1)));
+        assert_eq!(loaded[window].layout, map[window].layout);
+
+        // Saved again, the window's meaningless kind is gone and the rest is unchanged.
+        assert_eq!(ron::to_string(&loaded).unwrap(), ron::to_string(&map).unwrap());
+    }
 }
