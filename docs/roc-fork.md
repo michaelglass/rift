@@ -9,22 +9,90 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, the Roc nightly bumped; the layout flip six of seven): read this first
+## Handoff (2026-11-24, the layout flip done; the shadow sampled; the core's layout linear): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
 shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
 through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 868 lib tests (2
-ignored), 877 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+Public-clean; the published tip's id is in the slice report). All checks green: 883 lib tests (3
+ignored, one of them `measure_layout_shadow`), 892 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
---all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
-either way.
+--all-targets --features roc-core` compiles (331 warnings, no errors); no build warnings either
+way.
 
-**Next: the scrolling placement's flip, the last of the layout flip.** Then the window store's
-single writer, the Roadmap.
+**Next: the window store's single writer** (the Roadmap), on the lead's go.
 
-**The layout flip (the lead's ruling, 2026-11-24, policy (a)): six of seven sites done.** The core
+**The core's layout path made linear (the lead's approved design, after roc-fork-7's diagnosis).**
+Since the flip the core's frames are rift's cost, and the core's `place` recomputed each child's
+subtree summary at every level: O(n x depth), quadratic for the deep chains BSP and traditional
+trees grow (traditional is 333 deep at 1000 windows). Now `frames()` folds the shape once,
+bottom-up, into a transient annotated tree of the same form (`Summarized { along: Along, node:
+Annotated }`; `axis::Along` holds a subtree's summary along both axes, since a parent asks along
+its own), and `place` (with `axis`, `stack` and the stack offset's cap) reads the children's
+summaries from it. Nothing is kept across passes; the shape stays the only source; the recompute
+path is gone. Same in Roc: `Summarized := { along : Along, node : Annotated }` inside `Bsp` and
+`Traditional`, with the children inside `Split`/`Axis`/`Stack`. Summaries are bit-identical (the
+upstream and Rust/Roc differentials pass unchanged). Plants (the annotated summary read along the
+wrong axis): Rust BSP 2 lib failures (the BSP differential), Rust traditional 7 (the master-stack
+differential and behaviour tests), Roc BSP 1 lib failure and the Roc crate's BSP differential, Roc
+traditional 4. A pass at 1000 windows (release, `measure_layout_shadow`, the shadow skipped):
+
+| | before | after | the system (the shadow) |
+|---|---|---|---|
+| BSP, Rust core | 13.3 ms | 175 us | 117 us |
+| traditional, Rust core | 1.13 ms | 132 us | 84 us |
+| BSP, `roc-core` (Rust and Roc cores) | 43.9 ms | 829 us | 115 us |
+| traditional, `roc-core` | 6.91 ms | 554 us | 87 us |
+
+At 100 windows BSP went from 114 us to 17 us (Rust core), 444 us to 88 us (`roc-core`). The rest
+of a core pass over the system is mostly the shape builder (about 50 us at 1000 windows).
+
+**The scrolling placement flipped (the last site, 37dafa4f).** `Geometry::build` takes its columns,
+frames, resting points and bounds from `core_geometry::decide_strip(strip, shadow, ||
+shadow_placement(..))`: the core's `Placed` (Roc under `roc-core`), with the system's own
+placement (`shadow_placement`, upstream's `build`) the shadow, held word for word
+(`StripPlacement::words`). Snaps name their column by id at the boundary and in `Geometry`
+(`SnapPoint.column: ColumnId`); `settle` ties and walks by id, as the core's `past`, held by a
+session-local differential against the old index-based settle (32,000 drawn releases, alike).
+`check_strip` and the old `diverged` are gone; `decided` is generic (frames or a placement) and
+`report_all` reports for both. Anchors are still computed by rift at reveal time
+(`Geometry::anchor_offset`, upstream's) from the core's columns; the core's `Spot.anchor` is not
+used. Plants in the commit message; four literal tests added (gaps between columns and rows, a
+centred snap, the gesture tie-break, the niri walk both ways).
+
+**The shadow, sampled (the lead's ruling, 2026-11-24; see the commit after 37dafa4f).** The core
+decides in every build. `core_geometry::Shadow { Run, Skip }` is handed to every decision
+(`decide_*(shape, shadow, || shadow_frames(..))`; the shadow is a closure, asked only on `Run`,
+`Shadowed::{Ran, Skipped}`). The layout engine counts each Space's passes
+(`LayoutEngine::shadow_passes: ShadowPasses`, in `calculate_layout_with_groups`, the reactor's
+pass) and `SAMPLING` decides: tests and `roc-core` builds every pass, a plain release build every
+32nd pass per Space (the first, then each 32nd, after the twins' `VIEW_EVERY`). Layout work outside
+a Space's pass (IPC queries, drag previews, an edit's rebuild of a scrolling strip) runs the shadow
+where every pass does and skips it in release (`Shadow::outside_a_pass`); so in release the
+scrolling placement's shadow runs only when a sampled pass rebuilds the strip (a screen, gaps or
+constraints change). Option if wanted: hold the cached placement to the shadow on each sampled
+pass. `LayoutSystem::calculate_layout` and `prepare_layout` take the `Shadow`. `show-timing`
+prints `core: layout divergences: N (shadows run: M)`. Cost per pass (release,
+`measure_layout_shadow`, `#[ignore]`d in `systems.rs`: gaps, no constraints; pass with the shadow
+skipped, the shadow's extra, its share):
+
+| system | 10 windows | 100 windows | 1000 windows |
+|---|---|---|---|
+| stack | 1.08 us, +0.20 us (18%) | 1.76 us, +1.23 us (70%) | 13.1 us, +9.5 us (73%) |
+| master-stack | 2.12 us, +0.67 us (31%) | 5.52 us, +5.86 us (106%) | 47.0 us, +54.7 us (116%) |
+| traditional | 1.11 us, +1.06 us (95%) | 18.5 us, +9.4 us (51%) | 1.13 ms, +72 us (6%) |
+| BSP | 1.72 us, +1.27 us (74%) | 114 us, +10.6 us (9%) | 13.3 ms, +131 us (1%) |
+| floating | 0.40 us, +0.36 us (90%) | 2.16 us, +2.05 us (95%) | 19.2 us, +18.5 us (97%) |
+| scrolling translation | 72 ns, +90 ns (125%) | 239 ns, +334 ns (140%) | 2.35 us, +4.39 us (187%) |
+| scrolling placement (a rebuild) | 1.69 us, +1.41 us (83%) | 11.9 us, +8.9 us (75%) | 109 us, +77 us (70%) |
+
+(Measured before the core's layout path was made linear, below; after it, the shadow is 63-67% of
+a traditional or BSP pass at 100 and 1000 windows.) Far above the 5% that would make every pass
+affordable. Sampled every 32nd pass, the
+shadow adds at most about 6% of a pass (187% / 32).
+
+**The layout flip (the lead's ruling, 2026-11-24, policy (a)): all seven sites done.** The core
 decides the frames of stack (e19d50a8), master-stack (b0af4547), traditional (fc76dc2f), floating
 (a0a85f58), BSP (b53a4f20) and scrolling's translation (1a3fb330): the Roc core's under `roc-core`,
 else the Rust core's, in every build. Each system's `calculate_layout` (scrolling:
@@ -37,15 +105,8 @@ as `core: layout divergences: N` in every build), then panics in tests or warns
 `layout-divergence:` (a system) / `roc-divergence:` (the Rust core, or the Roc core's failure) in a
 running Rift; the core's frames are used. The shape builders (`shape`, `tiles::shape`, `shown`)
 and the conversions are built in every build. Each differential now holds the core to the
-system's `shadow_frames`, not to `calculate_layout` (which is the core). **The lead's ruling
-(2026-11-24), not yet built:** in a plain release build the shadow runs on every 32nd layout pass
-per Space (divergences counted); tests and `roc-core` builds compare every pass; measure the
-shadow's cost per pass at 10, 100 and 1000 windows into this doc. A first measurement (release, no
-constraints or gaps; shadow as a share of the pass without it): stack 38-44%, master-stack
-61-174%, traditional 58% / 53% / 7%, BSP 74% / 9% / 1%, floating 59-64%; and the core's own path is
-far slower than the systems' at scale (BSP 1000 windows: about 14 ms a pass against 0.12 ms for
-the system; traditional 1000: 1.17 ms against 0.09 ms; BSP 100: 124 us against 11 us), cause not
-yet found (the shape builder or the core's summaries).
+system's `shadow_frames`, not to `calculate_layout` (which is the core). The shadow is sampled
+in a plain release build (above).
 - Plants per system, run with the divergence panics on and then off (`report_divergence` and the
   old `diverged` both warn instead): a Rust-core bug fails behaviour tests with the panic off (rift
   follows the core); the same bug in the system's shadow path fails none (only the differential and
@@ -59,11 +120,6 @@ yet found (the shape builder or the core's summaries).
   `columns_out_of_view_are_parked_with_a_point_showing`; traditional's existing
   `toggling_stack_tabs_reserves_and_publishes_only_while_enabled` and
   `native_tabs_reserve_the_configured_edge_without_changing_stack_direction` caught its plant.
-- **Left: the scrolling placement** (`Geometry::build`, `check_strip`, still a check: the system's
-  placement stands). Its flip rebuilds the `Geometry` from the core's `Placed`: the columns (id,
-  world x, width), the frames, the snaps (the core names a snap's column by id, `Geometry` by its
-  index among the columns) and the bounds; a placement the core cannot place (no participating
-  window) is the system's empty geometry. Plants as above, through `check_strip`'s words.
 - Tooling (session-local, the pattern): a plant runner applies one replacement, runs `cargo test
   --lib` (with `--features roc-core` for Roc plants) with the panics on, then with both
   `#[cfg(test)] panic!` lines in `core_geometry` turned to warnings, lists the failures and
@@ -1100,6 +1156,10 @@ counts only under the `respect_min_size` app rule).
   reactor tests under `roc-core` (shadowed). The fuzzer should drive them.
 
 ### Measured
+
+**The layout systems' shadows (2026-11-24, release):** see the Handoff, "The shadow, sampled":
+6-187% of a pass. **The core's layout path:** BSP at 1000 windows 13.3 ms a pass before the
+annotated tree, 175 us after (Handoff, "made linear").
 
 **Twins (2026-11-20, release), per step / whole view:** lifecycle 75 ns at 10 to 1000
 windows / 0.15, 0.36, 3 us at 10, 100, 1000; ownerships 160-200 ns at 10 to 1000 windows (on a
