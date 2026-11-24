@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, the store's admission writer done; the layout flip done; the shadow sampled): read this first
+## Handoff (2026-11-24, layout trees: slice 1 done, slice 2 next; the store's admission writer done): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
@@ -23,17 +23,62 @@ ignored, one of them `measure_layout_shadow`), 894 with `roc-core`, the fuzzer a
 (the bound: at most 336); no build warnings outside test code (`cargo test` prints three old
 unused-variable / unused-mut warnings in fuzz.rs, tests.rs and systems.rs).
 
-**Next: layout trees into the core, re-planned (2026-11-24).** After #688 each system owns its
-tree and every edit; the core decides only geometry, from a shape rebuilt each pass. The
-pre-#688 core trees (`bsp_tree`, `traditional_tree`) had no caller since merge (b) and are
-deleted (the lead's ruling). Proposed, BSP first: a core BSP tree with #688's state ported from
-`systems/bsp.rs` operation by operation, held in test builds against `shape()` every pass and by
-an operation shadow (a core tree per layout stepped on every operation, answers and trees
-compared, node ids renumbered) with a drawn fuzzer; then a Roc mirror; then the flip (the core's
-tree is the state, the system's the shadow; saved from the core, old files byte-compatible); then
-the old tree goes. Then stack, traditional and master-stack, scrolling's columns, floating.
-Waiting on the lead: where the core tree lives (proposed: inside `BspLayoutSystem`, keyed by
-`LayoutId`) and node ids over IPC after the flip (proposed: the core's tags, same format).
+**Next: layout trees, slice 2, the core BSP tree (the lead's rulings, 2026-11-24).** Slice 1
+(the dead pre-#688 core trees deleted) is done, and `SlotTable` now lives in the core
+(`rift_core::slot_table`, generic over `SlotKey`; see below). The plan, accepted: BSP, then
+traditional (covering stack, master-stack and traditional), then scrolling's columns, then
+floating. Per system: (1) delete (done for both trees), (2) port with a two-way shadow, (3) the Roc
+mirror, (4) the flip, (5) the old tree code goes once nothing reads it. Report to the lead at the
+end of each slice and on any behaviour difference.
+
+Rulings for slice 2:
+- **Where it lives:** a `TwinnedBsp` inside `BspLayoutSystem`; every `LayoutSystem` operation
+  steps both. The engine glue stays untouched. Note what the code shows: `BspLayoutSystem` keeps
+  ONE node table for all its layouts (`layouts: SlotMap<LayoutId, LayoutState { root }>`, `nodes:
+  SlotMap<NodeId, Node>`, `model::tree::NodeId`), so the core value is per system, not per layout:
+  `SlotTable<LayoutId, Root>` and `SlotTable<NodeId, Node>`, so that ids are allocated in one
+  sequence as upstream's are.
+- **Port, not adapt:** each operation is ported from #688's `systems/bsp.rs` (`impl LayoutSystem
+  for BspLayoutSystem`, line 1211 on, and its helpers: `smart_insert_window`, `split_leaf`,
+  `remove_window_internal`, `rebalance_node`, `detach_child`, `LeafMembers::{focus, remove,
+  append, prepare_slot_swap, take_stack, swap_tabs}`, join/unjoin, swap, target drop, fullscreen,
+  preselection, the insertion point and the single window's aspect ratio). Upstream's rules are
+  the spec; the old `bsp_tree`'s type shapes (in history, deleted in 89748de1: `Content::Empty |
+  Window | Stack(Tabs)`, `Fill`, `Preselect`, `Memory`) are reused where they fit, and no rule
+  upstream lacks is kept. A difference the shadow shows: upstream wins, unless it is an upstream
+  bug: then stop, report, and it joins the upstream candidates.
+- **Node ids:** minted by the core's `SlotTable` with upstream's keys (`NodeId`, `LayoutId` get
+  `SlotKey` through `crate::model::slot_table`'s `slot_keys!` macro), so the ids equal upstream's
+  for the same sequence of operations: no change over IPC (`container_tree`, `rift-cli query
+  layout`), saved files byte-compatible without a mapping, and the shadow compares ids directly
+  (no renumbering). If minted tags turn out to be needed anywhere, stop and report.
+- **The shadow:** on all lib traffic, plus a drawn tree fuzzer (`systems::drawn`), as phase A did.
+  The stateful shadow steps on every operation in every build (tree operations are per command
+  and cheap); only the view comparison is sampled, every 32nd operation in a plain release build.
+  Measure the per-operation cost at 1000 windows and put it here.
+- **The NoAxState arm** stays doing nothing, with its one-line reason (done).
+
+**Queued, between slices (the lead, 2026-11-24): the next Roc nightly bump.** roc#13363 (PR 13389,
+`LifecycleStepped`'s `S(m)`), roc#13348 (PR 13386, a one-tag union with several payloads described
+by its first payload only) and roc#13349 (PR 13393, RustGlue output not `include!`-able, edition
+2024 / clippy lints) are fixed on roc main; roc#13350 (a tag named `Release` colliding with the
+union's helper) is still open. The pinned nightly-2026-11-23-b5c77fc predates all three. At the
+first nightly containing those PRs, bump, then remove the workarounds, one commit each:
+`LifecycleStepped`'s `S(m)` (into the platform module beside the other entries' results); the
+build script's `//!`/`#![...]` comment rewrite and the glue module's lint allows, if the new output
+needs neither; any workaround for the one-tag union description, if there is one. Do it between
+slices, not inside one.
+
+**`SlotTable` moved into the core (the lead's ruling (c), before slice 2).** `rift_core::slot_table`
+holds the table and slotmap 1.1's rules (versions, free list, the sentinel, refusals) over a
+`SlotKey` trait (`from_parts(index, version)`, `parts()`); the core has no slotmap or serde
+dependency. `SlotTable::saved()` yields each slot's key and value (or none) and version, and
+`SlotTable::parse` takes `(value, version)` pairs (`len` gained `is_empty`, held by the differential). `crate::model::slot_table` keeps the platform
+side: `SavedSlot<T>` (slotmap's `SerdeSlot`), `saved` / `parse` over it, the `slot_keys!` macro
+(slotmap keys as `SlotKey`, by their ffi form `version << 32 | index`;
+`VirtualWorkspaceId` today), and the differential against a real `SlotMap`. Plants: the removal's
+version bump (1 lib failure), the free list first-in-first-out (2), the sentinel kept as saved (1);
+`vacant | 1` as `vacant + 1` is equivalent (a vacant version is even).
 
 **The window store's single writer, done (the lead's ruling, 2026-11-24: the upstream PR plan's
 C1 step 2, narrow).** C1 step 2 is about the admission facts only (manageability, rule, AX kind,
