@@ -9,26 +9,36 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, after layout slice 5a, scrolling's placement): read this first
+## Handoff (2026-11-24, the layout series complete): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
-upstream's layout systems (Next item 2) has six slices, stack, master-stack, traditional, floating, BSP and scrolling's placement, and the core's
+upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
 shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
 through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 867 lib tests (2
-ignored), 876 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+Public-clean; the published tip's id is in the slice report). All checks green: 868 lib tests (2
+ignored), 877 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
 --all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
 either way.
 
-**Next: slice 5b, the last layout slice (the lead's ruling, 2026-11-24).** A pure core
-`translate` over a placed strip's world frames, the camera's offset (an input fact) and the
-fullscreen set: each window's frame is its fullscreen frame (the screen, or the tiling area),
-else its world frame moved by `tiling.x - offset`, parked at the screen's edge (1 point showing)
-when parking and wholly outside the tiling area, then rounded. Checked at `translate_frames`, with
-a Roc mirror and a differential that includes offsets at and past the parking edges and
-non-integer offsets. The camera spring and its sampling stay rift's. Then the layout series is
-complete; report it to the lead.
+**Next: the lead's call.** Every layout system's frames on rift's path are now held to the core's,
+Rust and Roc, bit for bit (rift's systems still decide: nothing is flipped). What is left in "Next
+steps": item 3 (the Roc nightly bump: boundary conversions first; no bump before a nightly with
+roc-lang/roc#13347's fix, then the `S(m)` workaround goes), the window store's single writer, and
+the Roadmap. A flip of the layouts (the core deciding, the systems' frames the shadow) would be
+policy (a) as for the twins, and the lead's to rule.
+
+**Scrolling's translation (slice 5b, d37970b1; the lead's ruling, 2026-11-24).**
+`scrolling::translate(frames, Camera { screen, tiling, offset, parking: Park | InPlace },
+fullscreen)`: a fullscreen window's frame (the screen, or the tiling area), else its world frame
+moved by `tiling.x - offset`, parked at the screen's nearer edge (`REVEAL` = 1 point showing) when
+parking and wholly outside the tiling area, then rounded; upstream's `translate_frames` operation
+for operation. `Scrolling.roc`'s `translate`, through `TranslateQuestion -> List(Frame)`.
+`translate_frames` holds the core's frames to its own (`check_translation`; `shown` reads the
+geometry, the camera's offset, parking and the fullscreen windows). The camera spring and its
+sampling stay rift's. Differentials: against upstream (12,000 cameras at and 1e-9 past the parking
+edges, fractional and half-point offsets; 38,896 frames, 18,869 parked) and Rust/Roc (20,000).
+Plants: 7 Rust + 3 Roc, all caught. No difference.
 
 **Scrolling's placement (slice 5a, 02ea31d2; the column order, 5f5c33bb).** The lead ruled
 (2026-11-24) that the placement is checked where it is decided, `Geometry::build`, since
@@ -793,8 +803,8 @@ A slice that needs a behaviour change stops and is reported.
    against upstream's `calculate_layout`; a difference is a behaviour question, stopped and
    reported.
    Done: stack (aec5f920), the core's solver and weights brought up to #688 (a02886b5, 6cebd282),
-   master-stack, traditional, floating, BSP, scrolling's placement (Handoff). Next: scrolling's
-   translation (5b).
+   master-stack, traditional, floating, BSP, scrolling's placement and translation (Handoff). The
+   series is complete.
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
