@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use objc2_core_foundation::CGRect;
 use rift_core::layout::bsp_tree::{
     self as core, Content, InsertionPoint, Kind, Layout, Leaf, Members, Memory, Parent,
-    Participation, Preselect, Query, Side, Split, Tabs, Tree,
+    Participation, Preselect, Query, Resize, Side, Split, Tabs, Tree,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -320,8 +320,31 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
+        use crate::layout_engine::core_rect;
+        let core = &mut self.twin.core;
+        match change {
+            WindowChange::Add(layout, window, _) => core.add_window(layout, window),
+            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
+                core.remove_window(window)
+            }
+            WindowChange::Replace(from, to) => core.replace_window(from, to),
+            WindowChange::CloseApp(pid) => core.close_app(|window| window.pid == pid),
+            WindowChange::Resize {
+                layout,
+                window,
+                old,
+                new,
+                screen,
+                gaps,
+            } => core.resize_window(layout, window, Resize {
+                old: core_rect(old),
+                new: core_rect(new),
+                screen: core_rect(screen),
+                tiling: core_rect(crate::layout_engine::utils::compute_tiling_area(screen, gaps)),
+            }),
+        }
         self.upstream.update(change);
-        self.unported();
+        self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
@@ -547,6 +570,26 @@ mod tests {
         }));
         assert!(failed.is_err());
         assert!(bsp_tree_divergences() > before);
+    }
+
+    /// A leaf with a preselected direction (only a saved file holds one) is split that way by
+    /// the next window, which goes on that side and is selected; a window after it goes next to
+    /// the selection as usual.
+    #[test]
+    fn a_preselected_direction_puts_the_next_window_on_that_side() {
+        let mut upstream = Upstream::new(WindowInsertionPoint::NextToSelection);
+        let layout = upstream.create_layout();
+        upstream.update(WindowChange::Add(layout, w(1), None));
+        let root = upstream.layouts[layout].root;
+        let NodeKind::Leaf { preselected, .. } = &mut upstream.nodes[root].kind else {
+            unreachable!("a layout of one window is a leaf");
+        };
+        *preselected = Some(Direction::Left);
+        let mut system = BspLayoutSystem::from(upstream);
+        system.update(WindowChange::Add(layout, w(2), None));
+        assert_eq!(system.window_slot(layout, w(2)), Some(vec![0]));
+        assert_eq!(system.window_slot(layout, w(1)), Some(vec![1]));
+        assert_eq!(system.selected_window(layout), Some(w(2)));
     }
 
     /// A core that differs from upstream's system is counted and fails a test (a running Rift

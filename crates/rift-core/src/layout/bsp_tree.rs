@@ -42,6 +42,15 @@ impl Direction {
 
     /// Whether the direction goes toward a split's first child.
     fn backwards(self) -> bool { matches!(self, Direction::Left | Direction::Up) }
+
+    /// The side a window moved or put this way takes.
+    fn side(self) -> Side {
+        if self.backwards() {
+            Side::First
+        } else {
+            Side::Second
+        }
+    }
 }
 
 /// One of a split's two children.
@@ -348,6 +357,139 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
             slot.push(tabs.windows().position(|member| member == window)?);
         }
         Some(slot)
+    }
+
+    /// A window added to a layout: after the selection, split toward a preselected direction,
+    /// or at the end of the tree (upstream's `add_window_after_selection`).
+    pub fn add_window(&mut self, layout: L, window: W) {
+        if self.contains_window(layout, window) {
+            return;
+        }
+        let Some(state) = self.layouts.get(layout).copied() else {
+            return;
+        };
+        if self.insertion == InsertionPoint::EndOfTree {
+            let mut leaf = state.root;
+            while let Some([_, right]) = self.children(leaf) {
+                leaf = right;
+            }
+            self.select(leaf);
+            self.insert_window_at_selection(layout, window);
+            return;
+        }
+        if !self.smart_insert_window(layout, window) {
+            self.insert_window_at_selection(layout, window);
+        }
+    }
+
+    /// A window gone from every layout.
+    pub fn remove_window(&mut self, window: W) {
+        self.left_out.remove(&window);
+        let layouts: Vec<L> = self.layouts.keys().collect();
+        for layout in layouts {
+            while self.remove_window_internal(layout, window) {}
+        }
+    }
+
+    /// A window that took another's place (a native tab, a restore's match), in every layout.
+    pub fn replace_window(&mut self, from: W, to: W) {
+        if self.left_out.remove(&from) {
+            self.left_out.insert(to);
+        }
+        if from == to {
+            return;
+        }
+        let layouts: Vec<L> = self.layouts.keys().collect();
+        for layout in layouts {
+            if !self.contains_window(layout, from) {
+                continue;
+            }
+            // A replacement may already be present after restore matching.
+            while self.remove_window_internal(layout, to) {}
+        }
+        for node in self.nodes.values_mut() {
+            if let Kind::Leaf(Leaf {
+                content: Content::Held { members, .. },
+                ..
+            }) = &mut node.kind
+            {
+                members.replace(from, to);
+            }
+        }
+    }
+
+    /// An app gone: its windows (those `of_app` tells) leave every layout.
+    pub fn close_app(&mut self, of_app: impl Fn(W) -> bool) {
+        self.left_out.retain(|&window| !of_app(window));
+        let mut windows: Vec<W> = self
+            .layouts
+            .values()
+            .flat_map(|state| self.windows_under(state.root))
+            .filter(|&window| of_app(window))
+            .collect();
+        windows.sort_unstable();
+        windows.dedup();
+        for window in windows {
+            self.remove_window(window);
+        }
+    }
+
+    /// A window the user (or its app) resized from `old` to `new`: a frame that enters or leaves
+    /// the screen or the tiling area sets or clears its fill; otherwise the nearest split along
+    /// a changed axis takes the new share.
+    pub fn resize_window(&mut self, layout: L, window: W, resize: Resize) {
+        let Resize { old, new, screen, tiling } = resize;
+        if !self.window_participates(window) {
+            return;
+        }
+        let Some(node) = self.node_for_window_in_layout(layout, window) else {
+            return;
+        };
+        if let Content::Held { fill, .. } = self.content_mut(node)
+            && track_fullscreen_resize(fill, old, new, screen, tiling)
+        {
+            return;
+        }
+        let width_changed = (new.w - old.w).abs() > 0.5;
+        let height_changed = (new.h - old.h).abs() > 0.5;
+        if !width_changed && !height_changed {
+            return;
+        }
+        let mut current = node;
+        while let Some(parent) = self.parent(current) {
+            let Kind::Split(split) = self.kind_mut(parent) else {
+                unreachable!("parent of a BSP node is a split");
+            };
+            let (old_len, new_len) = match split.orientation {
+                Orientation::Horizontal if width_changed => (old.w, new.w),
+                Orientation::Vertical if height_changed => (old.h, new.h),
+                _ => {
+                    current = parent;
+                    continue;
+                }
+            };
+            let current_ratio = f64::from(split.ratio);
+            let is_first = current == split.children[0];
+            let denom = if is_first {
+                current_ratio
+            } else {
+                1.0 - current_ratio
+            };
+            if old_len <= 0.0 || denom <= f64::EPSILON {
+                break;
+            }
+            let parent_len = old_len / denom;
+            if parent_len <= 0.0 {
+                break;
+            }
+            let raw_ratio = (new_len / parent_len).clamp(0.05, 0.95);
+            split.ratio = if is_first {
+                raw_ratio as f32
+            } else {
+                (1.0 - raw_ratio) as f32
+            };
+            break;
+        }
     }
 
     /// A layout as the core's geometry takes it, pruned as upstream's `prepare_geometry` prunes
@@ -692,4 +834,254 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
             .filter_map(|node| self.participating_window(node))
             .collect()
     }
+
+    fn kind_mut(&mut self, node: N) -> &mut Kind<N, W> { &mut self.nodes[node].kind }
+
+    fn content_mut(&mut self, leaf: N) -> &mut Content<W> {
+        let Kind::Leaf(leaf) = self.kind_mut(leaf) else {
+            unreachable!("expected a BSP leaf");
+        };
+        &mut leaf.content
+    }
+
+    fn select(&mut self, mut node: N) {
+        if let Kind::Split(split) = self.kind_mut(node) {
+            split.memory = Memory::Stops;
+        }
+        while let Some(parent) = self.parent(node) {
+            let Kind::Split(split) = self.kind_mut(parent) else {
+                unreachable!("parent of a BSP node is a split");
+            };
+            split.memory = Memory::Toward(if split.children[1] == node {
+                Side::Second
+            } else {
+                Side::First
+            });
+            node = parent;
+        }
+    }
+
+    fn set_split(&mut self, node: N, orientation: Orientation, children: [N; 2]) {
+        self.nodes[node].kind = Kind::Split(Split {
+            orientation,
+            ratio: 0.5,
+            children,
+            memory: Memory::Stops,
+        });
+        for child in children {
+            self.nodes[child].parent = Parent::Split(node);
+        }
+    }
+
+    fn smart_insert_window(&mut self, layout: L, window: W) -> bool {
+        let Some(selection) = self.selection_of_layout(layout) else {
+            return false;
+        };
+        let leaf = self.descend_to_leaf(selection);
+        let Kind::Leaf(Leaf {
+            preselect: Preselect::Toward(direction),
+            ..
+        }) = *self.kind(leaf)
+        else {
+            return false;
+        };
+        self.split_leaf(
+            leaf,
+            direction.orientation(),
+            Content::window(window),
+            direction.side(),
+        );
+        true
+    }
+
+    /// The leaf becomes a split of its windows (tiled, no preselection) and `new`, on `side`;
+    /// the new leaf is selected.
+    fn split_leaf(&mut self, leaf: N, orientation: Orientation, new: Content<W>, side: Side) {
+        let content = std::mem::replace(self.content_mut(leaf), Content::Empty);
+        let existing = self.make_leaf(content.tiled());
+        let new = self.make_leaf(new);
+        let children = match side {
+            Side::First => [new, existing],
+            Side::Second => [existing, new],
+        };
+        self.set_split(leaf, orientation, children);
+        self.select(new);
+    }
+
+    fn orientation_for_leaf(&self, node: N) -> Orientation {
+        if self.ancestors(node).count() % 2 == 1 {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        }
+    }
+
+    // Remove one child and promote the other into the parent's stable slot.
+    fn detach_child(&mut self, node: N) {
+        let parent = self.parent(node).expect("cannot detach BSP root");
+        let children = self.children(parent).expect("a BSP parent is a split");
+        let sibling = children[usize::from(children[0] == node)];
+        let sibling = self.nodes.remove(sibling).expect("a split's children are live");
+        self.nodes[node].parent = Parent::Root;
+        let parent_node = &mut self.nodes[parent];
+        parent_node.kind = sibling.kind;
+        // The former parent's selection pointed to one of the two removed child slots.
+        if let Kind::Split(split) = &mut parent_node.kind {
+            split.memory = Memory::Stops;
+        }
+        if let Some(children) = self.children(parent) {
+            for child in children {
+                self.nodes[child].parent = Parent::Split(parent);
+            }
+        }
+    }
+
+    fn insert_window_at_selection(&mut self, layout: L, window: W) {
+        let Some(state) = self.layouts.get(layout).copied() else {
+            return;
+        };
+        let selection = self
+            .selection_of_layout(layout)
+            .unwrap_or_else(|| self.current_selection(state.root));
+        let leaf = self.descend_to_leaf(selection);
+        if leaf != selection {
+            self.select(leaf);
+        }
+        match self.content_mut(leaf) {
+            content @ Content::Empty => *content = Content::window(window),
+            Content::Held { .. } => {
+                let orientation = self.orientation_for_leaf(leaf);
+                self.split_leaf(leaf, orientation, Content::window(window), Side::Second);
+            }
+        }
+    }
+
+    /// Remove an occurrence and report progress so callers can clear legacy duplicates.
+    fn remove_window_internal(&mut self, layout: L, window: W) -> bool {
+        let Some(node) = self.node_for_window_in_layout(layout, window) else {
+            return false;
+        };
+        self.remove_member(layout, node, window);
+        true
+    }
+
+    fn remove_member(&mut self, layout: L, node: N, window: W) {
+        let content = self.content_mut(node);
+        content.remove(window);
+        if let Content::Held { .. } = content {
+            self.select(node);
+            return;
+        }
+        if self.parent(node).is_some() {
+            self.detach_child(node);
+            self.nodes.remove(node);
+        }
+        let selection = self.current_selection(self.layouts[layout].root);
+        let leaf = self.descend_to_leaf(selection);
+        self.select(leaf);
+    }
+}
+
+impl<W: Copy + PartialEq> Content<W> {
+    /// A leaf's content for one window, tiled.
+    pub fn window(window: W) -> Self {
+        Content::Held {
+            members: Members::Window(window),
+            fill: Fill::Tiled,
+        }
+    }
+
+    /// The same windows, tiled (a split's new leaf keeps its windows, not its fill).
+    fn tiled(self) -> Self {
+        match self {
+            Content::Empty => Content::Empty,
+            Content::Held { members, .. } => Content::Held { members, fill: Fill::Tiled },
+        }
+    }
+
+    /// Without `window`: a stack keeps its other windows, the last on top, and its fill; a
+    /// leaf left with none is empty.
+    fn remove(&mut self, window: W) {
+        if let Content::Held {
+            members: Members::Stack(tabs),
+            fill,
+        } = self
+        {
+            let rest: Vec<W> = tabs.windows().filter(|&member| member != window).collect();
+            if let Some(tabs) = Tabs::last_on_top(rest) {
+                *self = Content::Held {
+                    members: Members::Stack(tabs),
+                    fill: *fill,
+                };
+                return;
+            }
+        }
+        *self = Content::Empty;
+    }
+}
+
+impl<W: Copy + PartialEq> Members<W> {
+    fn replace(&mut self, from: W, to: W) {
+        let swap = |member: &mut W| {
+            if *member == from {
+                *member = to;
+            }
+        };
+        match self {
+            Members::Window(window) => swap(window),
+            Members::Stack(tabs) => {
+                tabs.before.iter_mut().for_each(swap);
+                swap(&mut tabs.top);
+                tabs.after.iter_mut().for_each(swap);
+            }
+        }
+    }
+}
+
+impl<W> Tabs<W> {
+    /// `windows` as a stack with the last on top (none: no windows).
+    fn last_on_top(mut windows: Vec<W>) -> Option<Self> {
+        let top = windows.pop()?;
+        Some(Tabs {
+            before: windows,
+            top,
+            after: Vec::new(),
+        })
+    }
+}
+
+/// A native resize, with the screen and its tiling area it happened on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resize {
+    pub old: Rect,
+    pub new: Rect,
+    pub screen: Rect,
+    pub tiling: Rect,
+}
+
+/// Whether a native resize entered or left a fullscreen frame (upstream's
+/// `track_fullscreen_resize`, on the leaf's one fill).
+fn track_fullscreen_resize(
+    fill: &mut Fill,
+    old: Rect,
+    new: Rect,
+    screen: Rect,
+    tiling: Rect,
+) -> bool {
+    if new == screen {
+        *fill = Fill::Screen;
+    } else if old == screen {
+        if *fill == Fill::Screen {
+            *fill = Fill::Tiled;
+        }
+    } else if new == tiling {
+        *fill = Fill::WithinGaps;
+    } else if old == tiling {
+        if *fill == Fill::WithinGaps {
+            *fill = Fill::Tiled;
+        }
+    } else {
+        return false;
+    }
+    true
 }

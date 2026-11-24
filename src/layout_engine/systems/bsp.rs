@@ -2176,10 +2176,12 @@ mod core_geometry_tests {
     /// replaced, native resizes into and out of fullscreen, the settings changed, and every
     /// query asked.
     pub(super) fn drawn_system(rng: &mut Rng) -> (BspLayoutSystem, LayoutId, Vec<WindowId>) {
-        let insertion = drawn_insertion(rng);
+        let mut insertion = drawn_insertion(rng);
         let mut system = BspLayoutSystem::new(insertion);
+        let mut aspect = None;
         if rng.chance(30) {
-            system.set_single_window_aspect_ratio(Some(rng.length(0.3, 3.0)));
+            aspect = Some(rng.length(0.3, 3.0));
+            system.set_single_window_aspect_ratio(aspect);
         }
         let layout = system.create_layout();
         let mut others: Vec<LayoutId> = Vec::new();
@@ -2207,12 +2209,38 @@ mod core_geometry_tests {
                         system.remove_layout(removed);
                     }
                     3 => system.remove_layout(LayoutId::default()),
-                    4 => system.set_window_insertion_point(drawn_insertion(rng)),
-                    _ => system.set_single_window_aspect_ratio(
-                        [None, Some(rng.length(0.3, 3.0)), Some(0.0), Some(f64::NAN)]
-                            [rng.below(4) as usize],
-                    ),
+                    4 => {
+                        insertion = drawn_insertion(rng);
+                        system.set_window_insertion_point(insertion);
+                    }
+                    _ => {
+                        aspect = [None, Some(rng.length(0.3, 3.0)), Some(0.0), Some(f64::NAN)]
+                            [rng.below(4) as usize];
+                        system.set_single_window_aspect_ratio(aspect);
+                    }
                 }
+                continue;
+            }
+            if rng.chance(4) {
+                // Saved and loaded (the settings are not saved: rift sets them again), some
+                // leaf maybe given a preselected direction, which only a saved file holds.
+                let mut upstream = system.upstream.clone();
+                let leaves: Vec<NodeId> = upstream
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| matches!(node.kind, NodeKind::Leaf { .. }))
+                    .map(|(id, _)| id)
+                    .collect();
+                if rng.chance(70) {
+                    let leaf = leaves[rng.below(leaves.len() as u64) as usize];
+                    if let NodeKind::Leaf { preselected, .. } = &mut upstream.nodes[leaf].kind {
+                        *preselected = Some(drawn_direction(rng));
+                    }
+                }
+                let saved = ron::to_string(&BspLayoutSystem::from(upstream)).unwrap();
+                system = ron::from_str(&saved).unwrap();
+                system.set_window_insertion_point(insertion);
+                system.set_single_window_aspect_ratio(aspect);
                 continue;
             }
             if !windows.is_empty() && rng.chance(8) {
@@ -2233,12 +2261,21 @@ mod core_geometry_tests {
                 let screen = drawn_screen(rng);
                 let gaps = drawn_gaps(rng);
                 let tiling = crate::layout_engine::utils::compute_tiling_area(screen, &gaps);
-                let mut frame = || match rng.below(4) {
+                let frame = |rng: &mut Rng| match rng.below(4) {
                     0 => screen,
                     1 => tiling,
                     _ => drawn_screen(rng),
                 };
-                let (old, new) = (frame(), frame());
+                let old = frame(rng);
+                let new = if rng.chance(25) {
+                    // A nudge either side of the half-point a resize must exceed.
+                    let mut new = old;
+                    new.size.width += [0.3, 0.5, 0.7, -0.4][rng.below(4) as usize];
+                    new.size.height += [0.0, 0.5, 0.6][rng.below(3) as usize];
+                    new
+                } else {
+                    frame(rng)
+                };
                 system.update(WindowChange::Resize {
                     layout,
                     window,
@@ -2279,7 +2316,13 @@ mod core_geometry_tests {
                     system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
                 }
                 7 => {
-                    let window = pick(rng, &windows);
+                    let window = if rng.chance(15) {
+                        // A window in no layout (participation is the system's, not a layout's).
+                        next += 1;
+                        WindowId::new(1 + rng.below(3) as i32, next)
+                    } else {
+                        pick(rng, &windows)
+                    };
                     system.set_window_participation(window, rng.chance(40));
                 }
                 8 => {
