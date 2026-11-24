@@ -271,6 +271,44 @@ enum LegacyKind {
     },
 }
 
+/// A saved split's share that no operation makes (not a finite number) as a fresh split's.
+/// Upstream's load keeps it (an upstream candidate); finite shares stand as saved.
+fn normalize_ratio(layout: LayoutId, node: NodeId, ratio: &mut f32) {
+    if !ratio.is_finite() {
+        tracing::warn!(?layout, ?node, saved = %ratio, "bsp-load: normalized a split's share to 0.5");
+        *ratio = 0.5;
+    }
+}
+
+/// A saved leaf's fullscreen flags as an operation leaves them: never both set (fullscreen
+/// wins, as the projection reads them), none on an empty leaf (cleared as a leaf empties).
+/// Upstream's load keeps both states (an upstream candidate).
+fn normalize_fullscreen(
+    layout: LayoutId,
+    node: NodeId,
+    members: &LeafMembers,
+    fullscreen: &mut bool,
+    within_gaps: &mut bool,
+) {
+    if matches!(members, LeafMembers::Empty) && (*fullscreen || *within_gaps) {
+        tracing::warn!(
+            ?layout,
+            ?node,
+            fullscreen = *fullscreen,
+            within_gaps = *within_gaps,
+            "bsp-load: normalized an empty leaf's fullscreen flags away"
+        );
+        (*fullscreen, *within_gaps) = (false, false);
+    } else if *fullscreen && *within_gaps {
+        tracing::warn!(
+            ?layout,
+            ?node,
+            "bsp-load: normalized a leaf with both fullscreen flags to fullscreen"
+        );
+        *within_gaps = false;
+    }
+}
+
 impl TryFrom<StoredBspSystem> for Upstream {
     type Error = String;
 
@@ -347,18 +385,28 @@ impl TryFrom<StoredBspSystem> for Upstream {
         } else {
             stored.nodes
         };
-        let mut pending: Vec<_> = stored.layouts.values().map(|state| (state.root, None)).collect();
+        let mut pending: Vec<_> = stored
+            .layouts
+            .iter()
+            .map(|(layout, state)| (layout, state.root, None))
+            .collect();
         let mut visited = HashSet::default();
-        while let Some((id, parent)) = pending.pop() {
+        while let Some((layout, id, parent)) = pending.pop() {
             let node = nodes.get_mut(id).ok_or("missing saved BSP node")?;
             if node.parent != parent || !visited.insert(id) {
                 return Err("saved BSP nodes must belong to exactly one branch".into());
             }
             match &mut node.kind {
-                NodeKind::Split { children, .. } => {
-                    pending.extend(children.iter().map(|&child| (child, Some(id))));
+                NodeKind::Split { children, ratio, .. } => {
+                    pending.extend(children.iter().map(|&child| (layout, child, Some(id))));
+                    normalize_ratio(layout, id, ratio);
                 }
-                NodeKind::Leaf { members, .. } => {
+                NodeKind::Leaf {
+                    members,
+                    fullscreen,
+                    fullscreen_within_gaps,
+                    ..
+                } => {
                     if let LeafMembers::Stack { windows, active } = members {
                         if windows.is_empty() {
                             *members = LeafMembers::Empty;
@@ -366,6 +414,7 @@ impl TryFrom<StoredBspSystem> for Upstream {
                             *active = 0;
                         }
                     }
+                    normalize_fullscreen(layout, id, members, fullscreen, fullscreen_within_gaps);
                 }
             }
         }

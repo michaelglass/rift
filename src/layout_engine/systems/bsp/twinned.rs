@@ -701,6 +701,81 @@ mod tests {
         assert_eq!(system.window_slot(layout, w(3)), Some(vec![1, 1]));
     }
 
+    /// A file holding `corrupt` loads as `normalized` holds it, upstream's copy and the core
+    /// alike, and is saved as `normalized` is: the bytes rift writes.
+    fn loads_normalized(corrupt: &Upstream, normalized: &Upstream) {
+        let file = ron::to_string(corrupt).unwrap();
+        let loaded: BspLayoutSystem = ron::from_str(&file).unwrap();
+        assert_eq!(view_difference(&loaded.twin.core, &loaded.upstream), None);
+        assert_eq!(view_difference(&seed(normalized), &loaded.upstream), None);
+        let expected = ron::to_string(normalized).unwrap();
+        assert_ne!(file, expected);
+        assert_eq!(ron::to_string(&loaded).unwrap(), expected);
+    }
+
+    fn leaf_flags(system: &mut Upstream, node: NodeId) -> (&mut bool, &mut bool) {
+        let NodeKind::Leaf {
+            fullscreen,
+            fullscreen_within_gaps,
+            ..
+        } = &mut system.nodes[node].kind
+        else {
+            unreachable!("the node is a leaf");
+        };
+        (fullscreen, fullscreen_within_gaps)
+    }
+
+    /// A saved leaf with both fullscreen flags loads fullscreen (as the projection reads it).
+    #[test]
+    fn a_saved_leaf_with_both_fullscreen_flags_loads_fullscreen() {
+        let mut normalized = Upstream::default();
+        let layout = normalized.create_layout();
+        normalized.update(WindowChange::Add(layout, w(1), None));
+        let root = normalized.layouts[layout].root;
+        *leaf_flags(&mut normalized, root).0 = true;
+        let mut corrupt = normalized.clone();
+        *leaf_flags(&mut corrupt, root).1 = true;
+        loads_normalized(&corrupt, &normalized);
+    }
+
+    /// A saved empty leaf with a fullscreen flag loads without it.
+    #[test]
+    fn a_saved_empty_leaf_loads_without_fullscreen_flags() {
+        let mut normalized = Upstream::default();
+        let layout = normalized.create_layout();
+        let root = normalized.layouts[layout].root;
+        for flags in [(true, false), (false, true), (true, true)] {
+            let mut corrupt = normalized.clone();
+            let (fullscreen, within_gaps) = leaf_flags(&mut corrupt, root);
+            (*fullscreen, *within_gaps) = flags;
+            loads_normalized(&corrupt, &normalized);
+        }
+    }
+
+    /// A saved split whose share is not a finite number loads with a fresh split's share; a
+    /// finite share stands as saved, even outside the bounds edits keep.
+    #[test]
+    fn a_saved_split_with_a_share_not_a_number_loads_even() {
+        let mut normalized = Upstream::default();
+        let layout = normalized.create_layout();
+        normalized.update(WindowChange::Add(layout, w(1), None));
+        normalized.update(WindowChange::Add(layout, w(2), None));
+        let root = normalized.layouts[layout].root;
+        let set_share = |system: &mut Upstream, share: f32| match &mut system.nodes[root].kind {
+            NodeKind::Split { ratio, .. } => *ratio = share,
+            NodeKind::Leaf { .. } => unreachable!("two windows split the root"),
+        };
+        for saved in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut corrupt = normalized.clone();
+            set_share(&mut corrupt, saved);
+            loads_normalized(&corrupt, &normalized);
+        }
+        let mut wide = normalized.clone();
+        set_share(&mut wide, 0.99);
+        let loaded: Upstream = ron::from_str(&ron::to_string(&wide).unwrap()).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), ron::to_string(&wide).unwrap());
+    }
+
     /// A core that differs from upstream's system is counted and fails a test (a running Rift
     /// warns and re-seeds it).
     #[test]
