@@ -9,19 +9,86 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, layout trees: slices 1 and 2 done, the BSP load normalized, slice 3 next): read this first
+## Handoff (2026-11-24, layout trees: slice 3 done, the Roc BSP tree held to the Rust one; slice 4 next): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
-upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
-shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
-through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 885 lib tests (3
-ignored, one of them `measure_layout_shadow`), 894 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
---features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
---all-targets --features roc-core` compiles with no errors and 331 warnings (332 before the dead trees went), counted as `cargo clippy
---all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated | wc -l`
-(the bound: at most 336); no build warnings outside test code (`cargo test` prints three old
-unused-variable / unused-mut warnings in fuzz.rs, tests.rs and systems.rs).
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-3 are done for
+BSP. `rearch/roc-next@fork` carries everything through this docs commit once it is published
+(publish procedure: "Rulings that bind", Public-clean; the published tip's id is in the slice
+report). All checks green at the tip: workspace tests 1026 (4 ignored), the lib with `roc-core`
+903 (4 ignored), `cargo test -p rift-core-roc --features roc` 51 (9 ignored), `cargo test -p
+rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and
+`cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
+counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
+grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, slice 3, done: the Roc mirror of the BSP tree.** Commits (after b6ef8a80's task
+0): the slot tables, layouts, participation and settings; the window changes; the queries; the
+focus; the shape edits; the moves, swaps and drops; the joins (every edit ported); the seed. Each
+message has its plants and checks.
+- **The core:** `roc/core/BspTree.roc` holds `Trees` as the Rust core holds `Tree`: `layouts :
+  Slots(U64)` (each layout's root), `nodes : Slots(BspTreeNode)`, `left_out : Set(U64)`, the
+  insertion point, the aspect ratio. `Slots(v) : { slots : List([Occupied({ version, value }),
+  Vacant(U32)]), free : List(U32) }` with slotmap's rules (slot 0 the sentinel, the free list
+  taken last-first, a new slot at version 1, a vacant one at `version | 1`, a removal bumping by
+  one); keys are words, `version << 32 | index` (slotmap's ffi form). Nodes are the platform's
+  types (`BspTreeNode { parent : [Root, Split(U64)], kind : [Split(BspTreeSplit),
+  Leaf(BspTreeLeaf)] }`, a split's children `first`/`second`). Every `Tree` operation is ported
+  one for one, in the same order of allocations, so keys match.
+- **A missing node is `crash` (the lead's ruling (b), Rust parity).** A node is looked up only
+  by a key the tree holds; `BspTree.node` (and `set_node`, `split_of`, `content_of`,
+  `set_content`, the root and detach checks) crash naming what looked and the key, as Rust's
+  `Index` panics and its `unreachable!`s stop. `roc_crashed` aborts, as it always did ("a core
+  crash is fatal: Roc cannot unwind, and the platform restores window state on restart"), so
+  under `roc-core` a Roc core bug on an impossible state aborts rift exactly as the Rust core's
+  panic does. Checked once by hand: a plant (node lookups off by one) aborts the differential's
+  binary with `[roc crashed] BspTree.kind: no node 4294967297`. The message names the helper
+  that looked (`kind`, `parent`, ...) and the key word; not the public operation, which would
+  mean threading a name through every helper.
+- **The boundary:** a stateful machine beside the workspaces and main windows: the platform
+  requires `Trees : trees`, with `bsp_tree_init : BspInsertion -> trees`, `bsp_tree_seed :
+  BspTreeSeed -> trees` (a system as the platform holds it: each table's slots and free list in
+  taking order, the windows left out, the settings; the host parses it first), `bsp_tree_step :
+  trees, BspTreeEvent -> { model, answer : BspTreeAnswer }` (one event per operation and query;
+  an app closing or a has-windows-for-app question lists the app's windows, as Roc has no pid)
+  and `bsp_tree_view`, plus a release. Rust: `RocBspTree` (`new`, `seeded`, `step`, `view`) and
+  `rift_core_roc::bsp_tree`: `LayoutKey`/`NodeKey` (`SlotKey` newtypes), `Event`/`Answer`,
+  `step` (an event applied to a `Tree`), `TreeView` (comparable; `From<&Tree>`, and `tree()`
+  parsing it back through `SlotTable::parse`/`resumed`). `SlotTable` gained `free()`.
+- **`Geometry.narrow`:** Roc has no `F64 -> F32`, and a share is an `f32` (`as f32` in Rust), so
+  the core writes Rust's conversion out bit for bit, answered through a typed question (`narrow :
+  F64 -> F32`, `rift_core_roc::narrow`) and held by `the_roc_core_narrows_an_f64_as_rust_does`
+  (600,000 values: every class, the ties between neighbouring `f32`s, just under each power of
+  two, the range's edges).
+- **The differential** (`crates/rift-core-roc/tests/bsp_tree.rs`, 8000 runs of 60 operations,
+  2.9 s): every operation drawn (layouts made, cloned and removed with stale keys, participation,
+  the settings, windows added, removed, replaced and closed by app, native resizes between the
+  screen, the tiling area and frames nudged around half a point, every focus and edit, resize
+  amounts of every magnitude), a query after half of them, and a reload on 3%: both trees seeded
+  from the same system with preselected leaves and splits whose memory stops (states only a saved
+  file holds). The windows a move, swap, drop or query decides on are mostly the layout's own.
+  Answers and the whole view (slots, versions, free lists, left out, settings) compared after
+  each: 480,000 operations identical, 240,000 queries (83,000 telling something), 14,000
+  operations leaving a stack, 200 descents moving the selection, no Roc allocation left live.
+  Plants: 71 in Roc across the families (each commit lists its own), 70 caught, one
+  equivalent in the drawn space: rebalance's 0.05 clamp (a share under 0.05 needs more than 19
+  tiles along one axis; runs draw 8 windows).
+- **Not ported to Roc: `Tree::shape`** (the geometry's input, with its constraints closure). The
+  Roc geometry takes a `BspShape` of `WindowId`s; the tree's windows are words. Slice 4 decides
+  whether the Roc tree builds its own shape or the Rust side keeps building it (a design
+  question in the slice report).
+- **Glue:** a tag named after a Rust keyword (`Move`) becomes a field named `move`, which does
+  not compile; upstream's `Move` is `Moved` at the boundary (`BspEdit`, `BspDropAction`), as the
+  floating slot's `Placed` was for `in`.
+
+**Next: layout trees, slice 4, the flip (policy (a)).** The core's tree decides and is saved
+(old files byte-compatible; the load's normalization already parses what only a file holds);
+under `roc-core` the Roc tree (`RocBspTree`, seeded from the Rust tree at load and on a re-seed)
+steps beside it and is held to it (`roc-divergence:`). Then slice 5 deletes `Upstream`. The
+queued Roc nightly bump still waits: the newest nightly is still nightly-2026-11-23-b5c77fc
+(checked 2026-11-24).
+
+**Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
+-0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
 
 **Layout trees, slice 2, done: the core's BSP tree, stepped beside upstream's system.** Commits
 (after 4d365f91): 09b58190 (the tree, layouts, participation, settings, the shape; the twin),
@@ -98,8 +165,8 @@ tests (3 ignored), 899 with `roc-core`, rift-core 106, the rest as above, clippy
   49 us more at 1000 windows). Not optimized (premature bug-fixing first); a re-seed happens
   only after a divergence.
 
-**Next: layout trees, slice 3, the Roc mirror of the BSP tree** (the lead's go, 2026-11-24;
-not started). The plan, from the patterns already in the crate:
+**Slice 3's plan, as handed off (the lead's go, 2026-11-24; done, above; the missing-node
+question ruled `crash`, the lead's (b)).** The plan, from the patterns already in the crate:
 - *Roc:* a `roc/core/BspTree.roc` type module holding the tree as the Rust core does: a slot
   table with slotmap's rules (`slots : List([Occupied({ version : U32, value : v }), Vacant(U32)])`,
   slot 0 the sentinel, the free list taken last-first, a new slot at version 1, a vacant one
@@ -1547,6 +1614,16 @@ notes called several of these friction; they are Roc's design, and the core foll
   helper cannot build a nominal answer, so each model-free entry matches its decision into its
   own answer type.
 
+- **`crash` is for impossible states, and it is fatal** (langref `errors.md`, "When to Crash";
+  `statements.md`: what follows a crash "is determined by the platform"). Rift's host aborts in
+  `roc_crashed` ("a core crash is fatal: Roc cannot unwind, and the platform restores window
+  state on restart"). The core uses it in one place, `BspTree.roc`: a node looked up by a key the
+  tree holds that is not there, a parent that is not a split, a leaf that is not a leaf (the
+  lead's ruling (b), 2026-11-24). That is Rust parity: the Rust tree's `Index` panics and its
+  `unreachable!`s stop on the same states, and under `roc-core` either aborts rift. No `Try`
+  answer stands for them (it would be a defensive branch for a state that cannot occur). Each
+  message names the helper that looked and the key (checked by hand with a plant:
+  `[roc crashed] BspTree.kind: no node 4294967297`).
 - **No `Option`, no null.** Failures are `Try`, absence is a descriptive tag union (mini
   tutorial, "`Try`": "Roc does not have `null`, `nil`, `undefined`, or anything similar").
   The core says what absence means: `Last : [Sent(U32), NeverSent]`, `Waiting : [Waiting(Rect),
@@ -1623,6 +1700,9 @@ notes called several of these friction; they are Roc's design, and the core foll
 - **`roc build` hung** (`roc check` passing) on an entry rebuilding tuples out of a nominal
   record's fields (the settle question's placement); giving the core's own type the record
   shape removed the hang. Not reduced further.
+- **A tag named after a Rust keyword** becomes a payload field of that name (`move`, `in`), which
+  does not compile; such tags are renamed at the boundary (`Moved` for upstream's `Move` in
+  `BspEdit` and `BspDropAction`, `Placed` for the floating slot).
 - **A tag named `Release`** gives a per-variant alias (`BoundaryEventRelease`) that collides
   with the glue's own `<Type>Release` helper struct; the event's tag is `Released` at the
   boundary.
@@ -1899,3 +1979,30 @@ Apache-2.0, keeping rift's and glide-wm's attribution.
 
 Out of the core for good: AX calls, event taps, CG/SkyLight, run loops and timers, IPC, the
 animation presenter itself.
+
+### Lessons from manual QA (2026-11-24)
+
+Items to schedule, not started (the lead's, from the day's manual QA):
+
+1. **One `Appeared` fact at the boundary.** Upstream admits a new window by three paths: AX
+   `WindowCreated`, `WindowsDiscovered` (the inventory refresh after `WindowServerAppeared` /
+   `FocusChanged`) and main-window-changed registration. A gate on one path missed Chrome's
+   tear-off, which arrives through the inventory refresh (#689, PR #713). The platform should
+   parse all three into one `Appeared` fact. A window appearing under a held left button should
+   be an admission fact (`Vetoed(UnderPress)`) and the hand's held window. The fork matches
+   upstream, so it has #689 today.
+2. **The actual frame from more than one witness.** With TextEdit frozen (SIGSTOP), a window
+   dragged and then thawed reports a stale AX frame (its tile) while the window server knows it
+   moved; rift trusts AX and never retiles. Consider letting the window server's bounds feed the
+   actual-frame fact.
+3. **A fuzzer invariant: every window id in a layout exists in the window store.** On upstream
+   main a Safari tab-drag preview window stayed in a master slot (a 0 × 0 frame) after the store
+   had forgotten it.
+4. **Scrolling's parking on several displays.** Upstream parks hidden columns left of the
+   display (x = -1439, inside the neighbouring display's area), and macOS keeps them at x = 0
+   behind the visible column. Check what `translate`'s `Park | InPlace` does with neighbours on
+   both sides.
+5. **Record and replay real sessions.** Differentials prove "same as upstream" and inherit
+   upstream's blind spots. rift has `--record`: plan a replay harness in which recorded QA
+   sessions (the Chrome tear-off, the scrolling close) become fixtures, so each manual find is a
+   permanent test through the real event sequence.
