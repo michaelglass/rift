@@ -9,26 +9,39 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, after layout slice 5, BSP): read this first
+## Handoff (2026-11-24, after layout slice 5a, scrolling's placement): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
-upstream's layout systems (Next item 2) has five slices, stack, master-stack, traditional, floating and BSP, and the core's
+upstream's layout systems (Next item 2) has six slices, stack, master-stack, traditional, floating, BSP and scrolling's placement, and the core's
 shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
 through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 866 lib tests (2
-ignored), 875 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+Public-clean; the published tip's id is in the slice report). All checks green: 867 lib tests (2
+ignored), 876 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
 --all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
 either way.
 
-**Next: scrolling, the last layout slice.** Its `calculate_layout` is not its tree alone: it
-takes the cached `Geometry` (or builds it on a cloned state, where `prepare_geometry` may rebase
-the camera or reveal a column), shifts every frame by the camera's offset (`translate_frame`, with
-parking, then `round`), and gives fullscreen windows their frame; the offset may come from a
-spring sampled at `Instant::now()`. Asked of the lead (2026-11-24): check at `Geometry::build`
-(the core's `Strip::place` against upstream's columns, world frames, snaps and bounds; the
-camera stays rift's), or also make the translation a core function. Read side by side, the core's
-placement matches upstream's (widths, rows, anchors, the snap order); the differential decides.
+**Next: slice 5b, the last layout slice (the lead's ruling, 2026-11-24).** A pure core
+`translate` over a placed strip's world frames, the camera's offset (an input fact) and the
+fullscreen set: each window's frame is its fullscreen frame (the screen, or the tiling area),
+else its world frame moved by `tiling.x - offset`, parked at the screen's edge (1 point showing)
+when parking and wholly outside the tiling area, then rounded. Checked at `translate_frames`, with
+a Roc mirror and a differential that includes offsets at and past the parking edges and
+non-integer offsets. The camera spring and its sampling stay rift's. Then the layout series is
+complete; report it to the lead.
+
+**Scrolling's placement (slice 5a, 02ea31d2; the column order, 5f5c33bb).** The lead ruled
+(2026-11-24) that the placement is checked where it is decided, `Geometry::build`, since
+`calculate_layout` reads rift's camera; the translation follows as slice 5b. The differential
+found one difference: upstream moves to the next column by `x += width + gap`, the core by
+`(x + width) + gap` (one ulp, then every later column, frame, snap and bound); not a pre-#688 rule
+(upstream's order predates #688), the core's own. Brought to upstream's order in Rust and Roc
+with a comment at both sites (the lead's go), named regression
+`a_columns_x_adds_its_width_and_gap_in_upstreams_order`. `strip` builds the core's `Strip` from
+the arrangement as `build` reads it; `check_strip` holds `Strip::place` to `Geometry::build` word
+for word (columns, world frames, resting points, bounds). Differential: 3000 systems through
+every edit and drawn settings, 9,477 frames identical. Plants: 8 Rust + 1 Roc caught, one
+equivalent.
 
 **Layout slice 5, BSP (see the slice's commit).** `BspLayoutSystem::shape` builds the core's
 `Bsp` pruned as `prepare_geometry` prunes: a leaf shows its participating member; a leaf with none
@@ -780,7 +793,8 @@ A slice that needs a behaviour change stops and is reported.
    against upstream's `calculate_layout`; a difference is a behaviour question, stopped and
    reported.
    Done: stack (aec5f920), the core's solver and weights brought up to #688 (a02886b5, 6cebd282),
-   master-stack, traditional, floating, BSP (Handoff). Next: scrolling.
+   master-stack, traditional, floating, BSP, scrolling's placement (Handoff). Next: scrolling's
+   translation (5b).
 3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
    or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
    Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
