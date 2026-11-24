@@ -321,15 +321,15 @@ pub(crate) fn check_strip(
     }
 }
 
-/// Holds the core's frames for a placed strip shown by a camera (`translate`) to the scrolling
-/// system's (`translate_frames`), as [`check_strip`] does.
-#[cfg(any(test, feature = "roc-core"))]
-pub(crate) fn check_translation(
+/// The frames rift gives a placed strip shown by a camera: the core's (`translate`; the Roc
+/// core's under `roc-core`, else the Rust core's), with the scrolling system's
+/// (`translate_frames`'s own, `upstream`) the shadow, as [`decide_traditional`].
+pub(crate) fn decide_translation(
     world: &[(WindowId, Rect)],
     camera: rift_core::layout::scrolling::Camera,
     fullscreen: &[(WindowId, rift_core::layout::scrolling::Fullscreen)],
     upstream: &[(WindowId, CGRect)],
-) {
+) -> Vec<(WindowId, CGRect)> {
     let rust = rift_core::layout::scrolling::translate(world, camera, fullscreen);
     let question = (world, camera, fullscreen);
     #[cfg(feature = "roc-core")]
@@ -340,7 +340,7 @@ pub(crate) fn check_translation(
     };
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    check("scrolling translation", &question, upstream, rust, roc);
+    decide("scrolling translation", &question, upstream, rust, roc)
 }
 
 /// The frames rift gives a floating layout: the core's (the Roc core's under `roc-core`, else the
@@ -361,36 +361,6 @@ pub(crate) fn decide_floating(
 #[cfg(not(feature = "roc-core"))]
 fn no_roc() -> Result<Vec<(rift_core::plain::WindowId, Rect)>, std::convert::Infallible> {
     Ok(Vec::new())
-}
-
-/// The core's frames (`rust`, and under `roc-core` what `roc` answers) against rift's.
-#[cfg(any(test, feature = "roc-core"))]
-fn check<E: std::fmt::Debug>(
-    what: &str,
-    shape: &impl std::fmt::Debug,
-    upstream: &[(WindowId, CGRect)],
-    rust: Vec<(WindowId, Rect)>,
-    #[cfg_attr(not(feature = "roc-core"), allow(unused_variables))] roc: impl FnOnce() -> Result<
-        Vec<(rift_core::plain::WindowId, Rect)>,
-        E,
-    >,
-) {
-    let upstream: Vec<(WindowId, Rect)> =
-        upstream.iter().map(|&(window, frame)| (window, core_rect(frame))).collect();
-    if bits(&rust) != bits(&upstream) {
-        diverged("layout-divergence", what, shape, &upstream, &rust);
-    }
-    #[cfg(feature = "roc-core")]
-    match roc() {
-        Ok(frames) => {
-            let roc: Vec<(WindowId, Rect)> =
-                frames.into_iter().map(|(window, frame)| (of_plain(window), frame)).collect();
-            if bits(&roc) != bits(&upstream) {
-                diverged("roc-divergence", what, shape, &upstream, &roc);
-            }
-        }
-        Err(error) => diverged("roc-divergence", what, shape, &upstream, &error),
-    }
 }
 
 /// A window as one word (its pid's bits above its index).

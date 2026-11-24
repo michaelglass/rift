@@ -411,7 +411,6 @@ fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
 /// What the core's `translate` takes to show a placed strip: its world frames, the camera (the
 /// geometry's screen and tiling area, the camera's `offset`, parking or not) and the fullscreen
 /// windows, as `translate_frames` reads them.
-#[cfg(any(test, feature = "roc-core"))]
 fn shown(
     state: &LayoutState,
     g: &Geometry,
@@ -1542,7 +1541,25 @@ impl ScrollingLayoutSystem {
         Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park)
     }
 
+    /// The strip's frames on screen: the core's (policy (a)), with the system's own
+    /// ([`Self::shadow_translation`]) their shadow.
     fn translate_frames(state: &LayoutState, g: &Geometry, park: bool) -> Vec<(WindowId, CGRect)> {
+        let (world, camera, fullscreen) = shown(state, g, state.camera.viewport.offset(), park);
+        crate::layout_engine::core_geometry::decide_translation(
+            &world,
+            camera,
+            &fullscreen,
+            &Self::shadow_translation(state, g, park),
+        )
+    }
+
+    /// The strip's frames on screen as the scrolling system computes them itself: since the core
+    /// decides (policy (a)), the shadow `translate_frames` holds the core's to.
+    fn shadow_translation(
+        state: &LayoutState,
+        g: &Geometry,
+        park: bool,
+    ) -> Vec<(WindowId, CGRect)> {
         let offset = state.camera.viewport.offset();
         let frames: Vec<(WindowId, CGRect)> = g
             .frames
@@ -1554,16 +1571,6 @@ impl ScrollingLayoutSystem {
                 (wid, frame)
             })
             .collect();
-        #[cfg(any(test, feature = "roc-core"))]
-        {
-            let (world, camera, fullscreen) = shown(state, g, offset, park);
-            crate::layout_engine::core_geometry::check_translation(
-                &world,
-                camera,
-                &fullscreen,
-                &frames,
-            );
-        }
         frames
     }
 
@@ -2720,6 +2727,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// Columns wholly out of view are parked at the screen's edge with one point showing (what
+    /// rift does with a scrolling layout, whichever core decides it).
+    #[test]
+    fn columns_out_of_view_are_parked_with_a_point_showing() {
+        let mut f = Fixture::new(4);
+        f.prepare();
+        let frames = f.system.calculate_layout(
+            f.layout,
+            f.screen,
+            0.0,
+            &f.constraints,
+            &f.gaps,
+            Default::default(),
+        );
+        let xs: Vec<(WindowId, f64)> = frames.iter().map(|&(w, r)| (w, r.origin.x)).collect();
+        // Two 500-point columns fill the 1000-point screen; the other two park at its right edge,
+        // one point showing.
+        assert_eq!(xs, vec![
+            (wid(1), 0.0),
+            (wid(2), 500.0),
+            (wid(3), 999.0),
+            (wid(4), 999.0)
+        ]);
+    }
+
     #[test]
     fn consume_expel_and_horizontal_extraction_preserve_identity_sizing_and_focus() {
         for direction in [Direction::Left, Direction::Right] {
@@ -3120,7 +3152,7 @@ mod core_geometry_tests {
                 let park = rng.chance(70);
                 let mut shown_state = state.clone();
                 shown_state.camera.viewport = Viewport::Static(offset);
-                let upstream = ScrollingLayoutSystem::translate_frames(&shown_state, g, park);
+                let upstream = ScrollingLayoutSystem::shadow_translation(&shown_state, g, park);
                 let (world, camera, fullscreen) = shown(&shown_state, g, offset, park);
                 let core: Vec<(WindowId, CGRect)> = translate(&world, camera, &fullscreen)
                     .into_iter()
