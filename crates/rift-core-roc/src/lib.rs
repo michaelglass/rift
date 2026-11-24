@@ -445,6 +445,18 @@ pub fn floating_frames(
     ))
 }
 
+/// A placed strip's frames on screen, as `rift_core::layout::scrolling::translate` shows them,
+/// shown by the Roc core.
+pub fn translate(
+    frames: &[(WindowId, Rect)],
+    camera: rift_core::layout::scrolling::Camera,
+    fullscreen: &[(WindowId, rift_core::layout::scrolling::Fullscreen)],
+) -> Result<Vec<(WindowId, Rect)>, RocError> {
+    let host = host();
+    let question = boundary::translate_question(frames, camera, fullscreen, &host);
+    Ok(boundary::frames(unsafe { abi::roc_translate(question) }, &host))
+}
+
 /// The lengths of segments along one axis, as `rift_core::layout::axis::solve_axis_lengths`
 /// solves them, solved by the Roc core.
 pub fn solve_axis_lengths(

@@ -129,6 +129,75 @@ pub struct Settled<C> {
     pub offset: f64,
 }
 
+/// How the camera shows a placed strip: the screen and tiling area it shows them on, its offset
+/// in world space (the platform's camera decides it), and whether windows wholly out of view are
+/// parked at the screen's edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    pub screen: Rect,
+    pub tiling: Rect,
+    pub offset: f64,
+    pub parking: Parking,
+}
+
+/// What happens to a window wholly outside the tiling area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parking {
+    /// Parked at the screen's nearer edge, `REVEAL` points still showing.
+    Park,
+    /// Left where the offset puts it.
+    InPlace,
+}
+
+/// A fullscreen window's frame: the screen, or the tiling area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fullscreen {
+    Screen,
+    WithinGaps,
+}
+
+/// How much of a parked window stays on screen, in points.
+pub const REVEAL: f64 = 1.0;
+
+/// Each window's frame on screen, in the strip's order: a fullscreen window's fullscreen frame;
+/// any other its world frame moved by the camera (`tiling.x - offset`), parked when the camera
+/// parks and it is wholly outside the tiling area, then rounded to whole points. As upstream's
+/// `translate_frames`, operation for operation.
+pub fn translate<W: Copy + PartialEq>(
+    frames: &[(W, Rect)],
+    camera: Camera,
+    fullscreen: &[(W, Fullscreen)],
+) -> Vec<(W, Rect)> {
+    frames
+        .iter()
+        .map(|&(window, frame)| {
+            let shown = match fullscreen.iter().find(|(w, _)| *w == window) {
+                Some((_, Fullscreen::Screen)) => camera.screen,
+                Some((_, Fullscreen::WithinGaps)) => camera.tiling,
+                None => super::round(moved(frame, camera)),
+            };
+            (window, shown)
+        })
+        .collect()
+}
+
+/// A world frame moved by the camera, and parked if it must be.
+fn moved(mut frame: Rect, camera: Camera) -> Rect {
+    let (tiling, screen) = (camera.tiling, camera.screen);
+    frame.x += tiling.x - camera.offset;
+    match camera.parking {
+        Parking::InPlace => {}
+        Parking::Park => {
+            if frame.x + frame.w <= tiling.x {
+                frame.x = screen.x - frame.w + REVEAL;
+            } else if frame.x >= tiling.x + tiling.w {
+                frame.x = screen.x + screen.w - REVEAL;
+            }
+        }
+    }
+    frame
+}
+
 /// A column's place among the strip's columns, which decides its anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Position {

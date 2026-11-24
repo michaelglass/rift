@@ -53,6 +53,18 @@ Boundary := [].{
 
 	BspShape := { screen : Rect, gaps : Gaps, aspect : Aspect, root : BspNode }
 
+	# A scrolling strip on screen (`rift_core::layout::scrolling::translate`).
+
+	FullscreenMode := [Screen, WithinGaps]
+
+	FullscreenWindow := { window : WindowId, mode : FullscreenMode }
+
+	Parking := [Park, InPlace]
+
+	## A placed strip's world frames shown by a camera: its screen and tiling area, its offset, and
+	## whether windows wholly out of view are parked; the fullscreen windows.
+	TranslateQuestion := { frames : List(Frame), screen : Rect, tiling : Rect, offset : F64, parking : Parking, fullscreen : List(FullscreenWindow) }
+
 	# One axis (`rift_core::layout::axis`).
 
 	## A segment's fixed length, if it has one.

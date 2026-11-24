@@ -408,6 +408,48 @@ fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
     column.world_x - (view - column.width).max(0.0) / 2.0
 }
 
+/// What the core's `translate` takes to show a placed strip: its world frames, the camera (the
+/// geometry's screen and tiling area, the camera's `offset`, parking or not) and the fullscreen
+/// windows, as `translate_frames` reads them.
+#[cfg(any(test, feature = "roc-core"))]
+fn shown(
+    state: &LayoutState,
+    g: &Geometry,
+    offset: f64,
+    park: bool,
+) -> (
+    Vec<(WindowId, rift_core::plain::Rect)>,
+    rift_core::layout::scrolling::Camera,
+    Vec<(WindowId, rift_core::layout::scrolling::Fullscreen)>,
+) {
+    use rift_core::layout::scrolling::{Camera, Fullscreen, Parking};
+
+    use crate::layout_engine::core_rect;
+    let world = g.frames.iter().map(|&(window, frame)| (window, core_rect(frame))).collect();
+    let camera = Camera {
+        screen: core_rect(g.screen),
+        tiling: core_rect(g.tiling),
+        offset,
+        parking: if park {
+            Parking::Park
+        } else {
+            Parking::InPlace
+        },
+    };
+    let fullscreen = state
+        .arrangement
+        .fullscreen
+        .iter()
+        .map(|(&window, mode)| {
+            (window, match mode {
+                FullscreenMode::Screen => Fullscreen::Screen,
+                FullscreenMode::WithinGaps => Fullscreen::WithinGaps,
+            })
+        })
+        .collect();
+    (world, camera, fullscreen)
+}
+
 /// A scrolling layout's strip as the core's geometry takes it: the columns with a window that
 /// takes part, each with those windows (a window with no constraints is resizable), as
 /// `Geometry::build` reads them (none: no window takes part). Arguments as `build` takes them.
@@ -1480,7 +1522,7 @@ impl ScrollingLayoutSystem {
                 || (!self.settings.preserve_window_sizes
                     && g.same_projected_constraints(constraints)))
         {
-            return Self::translate_frames(state, g, park).collect();
+            return Self::translate_frames(state, g, park);
         }
         let mut camera = state.camera.clone();
         camera.restored_view = camera.restored_view.or_else(|| state.bookmark());
@@ -1497,21 +1539,32 @@ impl ScrollingLayoutSystem {
             revision,
             gaps,
         );
-        Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park).collect()
+        Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park)
     }
 
-    fn translate_frames<'a>(
-        state: &'a LayoutState,
-        g: &'a Geometry,
-        park: bool,
-    ) -> impl Iterator<Item = (WindowId, CGRect)> + 'a {
+    fn translate_frames(state: &LayoutState, g: &Geometry, park: bool) -> Vec<(WindowId, CGRect)> {
         let offset = state.camera.viewport.offset();
-        g.frames.iter().map(move |&(wid, frame)| {
-            let frame = state.fullscreen_frame(g, wid).unwrap_or_else(|| {
-                translate_frame(frame, offset, g.tiling, g.screen, park).round()
-            });
-            (wid, frame)
-        })
+        let frames: Vec<(WindowId, CGRect)> = g
+            .frames
+            .iter()
+            .map(move |&(wid, frame)| {
+                let frame = state.fullscreen_frame(g, wid).unwrap_or_else(|| {
+                    translate_frame(frame, offset, g.tiling, g.screen, park).round()
+                });
+                (wid, frame)
+            })
+            .collect();
+        #[cfg(any(test, feature = "roc-core"))]
+        {
+            let (world, camera, fullscreen) = shown(state, g, offset, park);
+            crate::layout_engine::core_geometry::check_translation(
+                &world,
+                camera,
+                &fullscreen,
+                &frames,
+            );
+        }
+        frames
     }
 
     pub(crate) fn finish_viewport(&mut self, layout: LayoutId) {
@@ -3022,5 +3075,74 @@ mod core_geometry_tests {
         }
         eprintln!("scrolling: {cases} strips, {frames_seen} frames identical");
         assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
+    }
+
+    /// An offset that puts a world frame at a parking edge, just past it, or anywhere
+    /// (fractional, so rounding is exercised).
+    fn edge_offset(rng: &mut Rng, frame: CGRect, tiling: CGRect) -> f64 {
+        let left_edge = frame.origin.x + frame.size.width;
+        let right_edge = frame.origin.x - tiling.size.width;
+        let nudge = |rng: &mut Rng| match rng.below(4) {
+            0 => 0.0,
+            1 => 1e-9,
+            2 => -1e-9,
+            _ => rng.length(-1.0, 1.0),
+        };
+        match rng.below(4) {
+            0 => left_edge + nudge(rng),
+            1 => right_edge + nudge(rng),
+            2 => rng.length(-3000.0, 6000.0),
+            _ => rng.length(-3000.0, 6000.0).round() + 0.5,
+        }
+    }
+
+    /// The core shows a placed strip as upstream's `translate_frames` does, bit for bit: drawn
+    /// systems (fullscreen windows among them), each placed, then shown by cameras at and past
+    /// the parking edges and at fractional offsets, parking or not.
+    #[test]
+    fn the_core_shows_scrolling_strips_as_the_scrolling_system_does() {
+        use rift_core::layout::scrolling::translate;
+        let mut rng = Rng(0x5eed_7a45);
+        let (mut cases, mut frames_seen, mut parked) = (0, 0, 0);
+        for _ in 0..3000 {
+            let (mut system, layout, windows) = drawn_system(&mut rng);
+            let screen = drawn_screen(&mut rng);
+            let constraints = drawn_constraints_for(&mut rng, &windows);
+            let gaps = drawn_gaps(&mut rng);
+            system.prepare(layout, screen, &constraints, None, &gaps);
+            let state = &system.layouts[layout];
+            let Some(g) = state.geometry.as_ref() else { continue };
+            for _ in 0..4 {
+                let offset = match g.frames.first() {
+                    Some(&(_, frame)) => edge_offset(&mut rng, frame, g.tiling),
+                    None => rng.length(-3000.0, 6000.0),
+                };
+                let park = rng.chance(70);
+                let mut shown_state = state.clone();
+                shown_state.camera.viewport = Viewport::Static(offset);
+                let upstream = ScrollingLayoutSystem::translate_frames(&shown_state, g, park);
+                let (world, camera, fullscreen) = shown(&shown_state, g, offset, park);
+                let core: Vec<(WindowId, CGRect)> = translate(&world, camera, &fullscreen)
+                    .into_iter()
+                    .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
+                    .collect();
+                assert_eq!(bits(&core), bits(&upstream), "offset {offset}, park {park}");
+                cases += 1;
+                frames_seen += upstream.len();
+                parked += upstream
+                    .iter()
+                    .filter(|(_, f)| {
+                        f.max().x <= g.screen.origin.x + 1.0 || f.origin.x >= g.screen.max().x - 1.0
+                    })
+                    .count();
+            }
+        }
+        eprintln!(
+            "scrolling shown: {cases} cameras, {frames_seen} frames identical, {parked} parked"
+        );
+        assert!(
+            frames_seen > 3000 && parked > 300,
+            "the draws reach frames and parking"
+        );
     }
 }

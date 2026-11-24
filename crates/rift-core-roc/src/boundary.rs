@@ -649,6 +649,43 @@ pub(crate) fn floating_layout(
     }
 }
 
+pub(crate) fn translate_question(
+    frames: &[(WindowId, Rect)],
+    camera: rift_core::layout::scrolling::Camera,
+    fullscreen: &[(WindowId, rift_core::layout::scrolling::Fullscreen)],
+    host: &abi::RocHost,
+) -> abi::BoundaryTranslateQuestion {
+    use rift_core::layout::scrolling::{Fullscreen, Parking};
+    let frames: Vec<abi::BoundaryFrame> = frames
+        .iter()
+        .map(|&(id, frame)| abi::BoundaryFrame {
+            window: window(id),
+            frame: rect(frame),
+        })
+        .collect();
+    let fullscreen: Vec<abi::BoundaryFullscreenWindow> = fullscreen
+        .iter()
+        .map(|&(id, mode)| abi::BoundaryFullscreenWindow {
+            window: window(id),
+            mode: match mode {
+                Fullscreen::Screen => abi::BoundaryFullscreenMode::Screen,
+                Fullscreen::WithinGaps => abi::BoundaryFullscreenMode::WithinGaps,
+            },
+        })
+        .collect();
+    abi::BoundaryTranslateQuestion {
+        frames: list(&frames, host),
+        screen: rect(camera.screen),
+        tiling: rect(camera.tiling),
+        offset: camera.offset,
+        parking: match camera.parking {
+            Parking::Park => abi::BoundaryParking::Park,
+            Parking::InPlace => abi::BoundaryParking::InPlace,
+        },
+        fullscreen: list(&fullscreen, host),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // One axis.
 

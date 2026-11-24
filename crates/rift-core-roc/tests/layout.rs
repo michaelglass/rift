@@ -635,3 +635,91 @@ fn the_roc_core_places_whole_floating_layouts_as_the_rust_core_does() {
     assert_eq!(after.live(), before.live(), "Roc allocations left live");
     eprintln!("layout: {cases} whole floating layouts, {placed} frames identical");
 }
+
+/// An offset that puts `frame` at a parking edge, just past it, or anywhere (fractional).
+fn edge_offset(rng: &mut Rng, frame: Rect, tiling: Rect) -> f64 {
+    let left_edge = frame.x + frame.w;
+    let right_edge = frame.x - tiling.w;
+    let nudge = |rng: &mut Rng| match rng.below(4) {
+        0 => 0.,
+        1 => 1e-9,
+        2 => -1e-9,
+        _ => rng.float(-1., 1.),
+    };
+    match rng.below(4) {
+        0 => left_edge + nudge(rng),
+        1 => right_edge + nudge(rng),
+        2 => rng.float(-3000., 6000.),
+        _ => rng.length(-3000., 6000.) + 0.5,
+    }
+}
+
+#[test]
+fn the_roc_core_shows_a_strip_as_the_rust_core_does() {
+    use rift_core::layout::scrolling::{Camera, Fullscreen, Parking, translate};
+    let cases: u64 = std::env::var("RIFT_LAYOUT_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut rng = Rng(0x7A45_1A7E_0FF5_E7ED);
+    let before = AllocationCount::now();
+    let mut shown = 0;
+    for case in 0..cases {
+        let screen = Rect {
+            x: rng.length(-2000., 2000.),
+            y: rng.length(-100., 1000.),
+            w: rng.length(0., 3000.),
+            h: rng.length(0., 2000.),
+        };
+        let inset = rng.length(0., 40.);
+        let tiling = Rect {
+            x: screen.x + inset,
+            y: screen.y + inset,
+            w: (screen.w - 2. * inset).max(0.),
+            h: (screen.h - 2. * inset).max(0.),
+        };
+        let frames: Vec<(WindowId, Rect)> = (0..rng.below(7) as u32)
+            .map(|idx| {
+                (WindowId { pid: 5, idx: idx + 1 }, Rect {
+                    x: rng.float(-500., 8000.),
+                    y: tiling.y + rng.float(0., 500.),
+                    w: rng.float(1., 2500.),
+                    h: rng.float(1., 1500.),
+                })
+            })
+            .collect();
+        let offset = match frames.first() {
+            Some(&(_, frame)) => edge_offset(&mut rng, frame, tiling),
+            None => rng.float(-3000., 6000.),
+        };
+        let mut fullscreen: Vec<(WindowId, Fullscreen)> = Vec::new();
+        for &(window, _) in &frames {
+            if rng.chance(15) {
+                let mode = if rng.chance(50) {
+                    Fullscreen::Screen
+                } else {
+                    Fullscreen::WithinGaps
+                };
+                fullscreen.push((window, mode));
+            }
+        }
+        let camera = Camera {
+            screen,
+            tiling,
+            offset,
+            parking: if rng.chance(70) {
+                Parking::Park
+            } else {
+                Parking::InPlace
+            },
+        };
+        let rust = translate(&frames, camera, &fullscreen);
+        shown += rust.len();
+        let roc = rift_core_roc::translate(&frames, camera, &fullscreen).expect("frames");
+        if wire::encode_frames(roc.clone()) != wire::encode_frames(rust.clone()) {
+            panic!(
+                "case {case}: {camera:?} {frames:?} {fullscreen:?}\n  roc:  {roc:?}\n  rust: {rust:?}"
+            );
+        }
+    }
+    let after = AllocationCount::now();
+    assert_eq!(after.live(), before.live(), "Roc allocations left live");
+    eprintln!("layout: {cases} strips shown, {shown} frames identical");
+}

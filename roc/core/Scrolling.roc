@@ -1,7 +1,7 @@
 ## A scrolling layout's strip (`rift_core::layout::scrolling`): columns side by side in world
 ## space, each column's windows in rows sharing its height, and the camera's resting points.
 
-import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, solve]
+import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, round_rect, solve]
 
 WindowId : { pid : I32, idx : U32 }
 
@@ -63,6 +63,9 @@ Settled : { column : U64, offset : F64 }
 
 ## A column's place among the strip's, which decides its anchor.
 Position : [Only, First, Middle, Last]
+
+## How the camera shows a placed strip (`rift_core::layout::scrolling::Camera`).
+Camera : { screen : Rect, tiling : Rect, offset : F64, parking : [Park, InPlace] }
 
 Scrolling := [].{
 
@@ -423,5 +426,56 @@ Scrolling := [].{
 					}
 			}
 		{ column, offset: snap.offset }
+	}
+
+	## How much of a parked window stays on screen, in points.
+	reveal : F64
+	reveal = 1.0
+
+	## Each window's frame on screen, in order: a fullscreen window's fullscreen frame; any other
+	## its world frame moved by the camera, parked when the camera parks and it is wholly outside
+	## the tiling area, then rounded (upstream's `translate_frames`, operation for operation).
+	translate : List((WindowId, Rect)), Camera, List((WindowId, [Screen, WithinGaps])) -> List((WindowId, Rect))
+	translate = |frames, camera, fullscreen|
+		frames.map(
+			|(window, frame)| {
+				mode =
+					fullscreen.fold(
+						NotFullscreen,
+						|found, (w, m)|
+							match found {
+								NotFullscreen => if (w == window) Found(m) else NotFullscreen
+								Found(_) => found
+							},
+					)
+				shown =
+					match mode {
+						Found(Screen) => camera.screen
+						Found(WithinGaps) => camera.tiling
+						NotFullscreen => round_rect(moved(frame, camera))
+					}
+				(window, shown)
+			},
+		)
+
+	## A world frame moved by the camera (`x += tiling.x - offset`), and parked if it must be.
+	moved : Rect, Camera -> Rect
+	moved = |frame, camera| {
+		tiling = camera.tiling
+		screen = camera.screen
+		x = frame.x + (tiling.x - camera.offset)
+		parked =
+			match camera.parking {
+				InPlace => x
+				Park =>
+					if x + frame.w <= tiling.x {
+						screen.x - frame.w + reveal
+					} else if x >= tiling.x + tiling.w {
+						screen.x + screen.w - reveal
+					} else {
+						x
+					}
+			}
+		{ ..frame, x: parked }
 	}
 }

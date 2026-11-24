@@ -212,6 +212,28 @@ pub(crate) fn check_strip(
     }
 }
 
+/// Holds the core's frames for a placed strip shown by a camera (`translate`) to the scrolling
+/// system's (`translate_frames`), as [`check_traditional`] does.
+#[cfg(any(test, feature = "roc-core"))]
+pub(crate) fn check_translation(
+    world: &[(WindowId, Rect)],
+    camera: rift_core::layout::scrolling::Camera,
+    fullscreen: &[(WindowId, rift_core::layout::scrolling::Fullscreen)],
+    upstream: &[(WindowId, CGRect)],
+) {
+    let rust = rift_core::layout::scrolling::translate(world, camera, fullscreen);
+    let question = (world, camera, fullscreen);
+    #[cfg(feature = "roc-core")]
+    let roc = || {
+        let world: Vec<_> = world.iter().map(|&(w, r)| (to_plain(w), r)).collect();
+        let fullscreen: Vec<_> = fullscreen.iter().map(|&(w, m)| (to_plain(w), m)).collect();
+        rift_core_roc::translate(&world, camera, &fullscreen)
+    };
+    #[cfg(not(feature = "roc-core"))]
+    let roc = no_roc;
+    check("scrolling translation", &question, upstream, rust, roc);
+}
+
 /// Holds the core's frames for a floating layout to the floating system's, as
 /// [`check_traditional`] does.
 #[cfg(any(test, feature = "roc-core"))]
