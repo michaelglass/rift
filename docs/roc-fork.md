@@ -59,7 +59,11 @@ session-local differential against the old index-based settle (32,000 drawn rele
 `report_all` reports for both. Anchors are still computed by rift at reveal time
 (`Geometry::anchor_offset`, upstream's) from the core's columns; the core's `Spot.anchor` is not
 used. Plants in the commit message; four literal tests added (gaps between columns and rows, a
-centred snap, the gesture tie-break, the niri walk both ways).
+centred snap, the gesture tie-break, the niri walk both ways). The niri tie-break by offset (the
+lead's ruling: settle it, delete or test): a layout tells it apart (free navigation lists the right
+end second, before the interior edges, so a release midway between an interior edge and the right
+end goes to the edge only by the tie-break); a literal case in
+`a_niri_release_shows_the_furthest_column_in_view_its_way` now fails when it is dropped.
 
 **The shadow, sampled (the lead's ruling, 2026-11-24; see the commit after 37dafa4f).** The core
 decides in every build. `core_geometry::Shadow { Run, Skip }` is handed to every decision
