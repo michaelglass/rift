@@ -12,7 +12,8 @@ use rift_core::focus::{
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::bsp_tree::{
     Content, Direction as TreeDirection, InsertionPoint, Kind, Layout, Leaf, Members, Memory,
-    Node as TreeNode, Orientation, Parent, Participation, Preselect, Resize, Side, Split, Tabs,
+    Node as TreeNode, Orientation, Parent, Participation, Preselect, Query, Resize, Side, Split,
+    Tabs,
 };
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -3515,6 +3516,71 @@ fn tree_event(event: TreeEvent, host: &abi::RocHost) -> abi::BoundaryBspTreeEven
             BoundaryBspTreeEventPayload.close_app(list(&windows, host)),
             Tag::CloseApp
         ),
+        TreeEvent::ContainsLayout(layout) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.contains_layout(layout.0),
+            Tag::ContainsLayout
+        ),
+        TreeEvent::WindowParticipates(window) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.window_participates(window),
+            Tag::WindowParticipates
+        ),
+        TreeEvent::SelectedWindow(layout) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.selected_window(layout.0),
+            Tag::SelectedWindow
+        ),
+        TreeEvent::WindowInDirection(layout, direction) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.window_in_direction(abi::BoundaryBspLayoutDirection {
+                layout: layout.0,
+                direction: tree_direction(direction),
+            }),
+            Tag::WindowInDirection
+        ),
+        TreeEvent::ContainsWindow(layout, window) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload
+                .contains_window(abi::BoundaryBspWindowIn { layout: layout.0, window }),
+            Tag::ContainsWindow
+        ),
+        TreeEvent::HasAnyFullscreenNode(layout) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.has_any_fullscreen_node(layout.0),
+            Tag::HasAnyFullscreenNode
+        ),
+        TreeEvent::HasWindowsForApp(layout, windows) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.has_windows_for_app(abi::BoundaryBspAppIn {
+                layout: layout.0,
+                windows: list(&windows, host),
+            }),
+            Tag::HasWindowsForApp
+        ),
+        TreeEvent::Windows(layout, query) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.windows(abi::BoundaryBspWindowsQuery {
+                layout: layout.0,
+                query: tree_query(query),
+            }),
+            Tag::Windows
+        ),
+        TreeEvent::CanMoveWindow(layout, window, direction) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.can_move_window(abi::BoundaryBspMoveQuery {
+                layout: layout.0,
+                window,
+                direction: tree_direction(direction),
+            }),
+            Tag::CanMoveWindow
+        ),
+        TreeEvent::WindowSlot(layout, window) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload
+                .window_slot(abi::BoundaryBspWindowIn { layout: layout.0, window }),
+            Tag::WindowSlot
+        ),
         TreeEvent::ResizeWindow(layout, window, Resize { old, new, screen, tiling }) => union!(
             BoundaryBspTreeEvent,
             BoundaryBspTreeEventPayload.resize_window(abi::BoundaryBspNativeResize {
@@ -3541,6 +3607,57 @@ fn from_tree_answer(answer: abi::BoundaryBspTreeAnswer) -> TreeAnswer {
             TreeAnswer::Participated(unsafe { *answer.borrow_payload_participated_unchecked() })
         }
         Tag::Done => TreeAnswer::Done,
+        Tag::Verdict => TreeAnswer::Verdict(unsafe { *answer.borrow_payload_verdict_unchecked() }),
+        Tag::Window => TreeAnswer::Window(from_maybe_word(unsafe {
+            *answer.borrow_payload_window_unchecked()
+        })),
+        Tag::Windows => TreeAnswer::Windows(unsafe {
+            answer.borrow_payload_windows_unchecked().as_slice().to_vec()
+        }),
+        Tag::WindowSlot => {
+            let slot = unsafe { answer.borrow_payload_window_slot_unchecked() };
+            TreeAnswer::WindowSlot(match slot.tag {
+                abi::BoundaryBspSlotTag::NoSlot => None,
+                abi::BoundaryBspSlotTag::Slot => Some(
+                    unsafe { slot.borrow_payload_slot_unchecked() }
+                        .as_slice()
+                        .iter()
+                        .map(|&side| side as usize)
+                        .collect(),
+                ),
+            })
+        }
+    }
+}
+
+fn tree_direction(direction: TreeDirection) -> abi::BoundaryBspDirection {
+    match direction {
+        TreeDirection::Left => abi::BoundaryBspDirection::Left,
+        TreeDirection::Right => abi::BoundaryBspDirection::Right,
+        TreeDirection::Up => abi::BoundaryBspDirection::Up,
+        TreeDirection::Down => abi::BoundaryBspDirection::Down,
+    }
+}
+
+fn tree_query(query: Query<u64>) -> abi::BoundaryBspQuery {
+    use abi::BoundaryBspQueryTag as Tag;
+    match query {
+        Query::All => union!(BoundaryBspQuery, BoundaryBspQueryPayload.all, Tag::All),
+        Query::Visible => union!(BoundaryBspQuery, BoundaryBspQueryPayload.visible, Tag::Visible),
+        Query::Selection => {
+            union!(
+                BoundaryBspQuery,
+                BoundaryBspQueryPayload.selection,
+                Tag::Selection
+            )
+        }
+        Query::Stack(window) => {
+            union!(
+                BoundaryBspQuery,
+                BoundaryBspQueryPayload.stack(window),
+                Tag::Stack
+            )
+        }
     }
 }
 

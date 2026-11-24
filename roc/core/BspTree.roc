@@ -8,7 +8,7 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
-import pf.Boundary exposing [Aspect, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
+import pf.Boundary exposing [Aspect, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
 
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
@@ -74,6 +74,20 @@ BspTree := [].{
 			ReplaceWindow(replacement) => (replace_window(trees, replacement), Done)
 			CloseApp(windows) => (close_app(trees, windows), Done)
 			ResizeWindow(resize) => (resize_window(trees, resize), Done)
+			ContainsLayout(layout) =>
+				match get(trees.layouts, layout) {
+					Held(_) => (trees, Verdict(True))
+					NotHeld => (trees, Verdict(False))
+				}
+			WindowParticipates(window) => (trees, Verdict(!trees.left_out.contains(window)))
+			SelectedWindow(layout) => (trees, Window(selected_window(trees, layout)))
+			WindowInDirection(asked) => (trees, Window(window_in_direction(trees, asked)))
+			ContainsWindow({ layout, window }) => (trees, Verdict(contains_window(trees, layout, window)))
+			HasAnyFullscreenNode(layout) => (trees, Verdict(has_any_fullscreen_node(trees, layout)))
+			HasWindowsForApp(asked) => (trees, Verdict(has_windows_for_app(trees, asked)))
+			Windows(asked) => (trees, Windows(listed_windows(trees, asked)))
+			CanMoveWindow(asked) => (trees, Verdict(can_move_window(trees, asked)))
+			WindowSlot(asked) => (trees, WindowSlot(window_slot(trees, asked)))
 		}
 
 	view : Trees -> View
@@ -298,6 +312,228 @@ BspTree := [].{
 					}
 				}
 			}
+		}
+
+	# Queries.
+
+	## The window the layout's selection shows, if one takes part.
+	selected_window : Trees, U64 -> MaybeWord
+	selected_window = |trees, layout|
+		match get(trees.layouts, layout) {
+			Held(root) => participating_window(trees, current_selection(trees, root))
+			NotHeld => Nothing
+		}
+
+	## The first window taking part met going `direction` from the root: at each split, the
+	## side that way first.
+	window_in_direction : Trees, BspLayoutDirection -> MaybeWord
+	window_in_direction = |trees, { layout, direction }|
+		match get(trees.layouts, layout) {
+			Held(root) => window_in_direction_from(trees, root, direction)
+			NotHeld => Nothing
+		}
+
+	window_in_direction_from : Trees, U64, BspDirection -> MaybeWord
+	window_in_direction_from = |trees, key, direction|
+		match children(trees, key) {
+			Childless => participating_window(trees, key)
+			Children(first, second) => {
+				(nearer, farther) =
+					match side_of(direction) {
+						First => (second, first)
+						Second => (first, second)
+					}
+				match window_in_direction_from(trees, nearer, direction) {
+					Some(window) => Some(window)
+					Nothing => window_in_direction_from(trees, farther, direction)
+				}
+			}
+		}
+
+	## Whether a leaf of the layout holding a window that takes part fills the screen or the
+	## screen within its gaps.
+	has_any_fullscreen_node : Trees, U64 -> Bool
+	has_any_fullscreen_node = |trees, layout|
+		match get(trees.layouts, layout) {
+			Held(root) => has_fullscreen_in_subtree(trees, root)
+			NotHeld => False
+		}
+
+	has_fullscreen_in_subtree : Trees, U64 -> Bool
+	has_fullscreen_in_subtree = |trees, key|
+		match kind(trees, key) {
+			Leaf({ content: Held({ fill: Screen, .. }), .. }) | Leaf({ content: Held({ fill: WithinGaps, .. }), .. }) => takes_part(trees, key)
+			Leaf(_) => False
+			Split({ first, second, .. }) => has_fullscreen_in_subtree(trees, first) or has_fullscreen_in_subtree(trees, second)
+		}
+
+	## Whether the layout holds one of the app's windows (those listed).
+	has_windows_for_app : Trees, BspAppIn -> Bool
+	has_windows_for_app = |trees, { layout, windows }|
+		match get(trees.layouts, layout) {
+			Held(root) => windows_under(trees, root).any(|window| windows.contains(window))
+			NotHeld => False
+		}
+
+	## The layout's windows a query lists (upstream's `WindowQuery`).
+	listed_windows : Trees, BspWindowsQuery -> List(U64)
+	listed_windows = |trees, { layout, query }|
+		match get(trees.layouts, layout) {
+			NotHeld => []
+			Held(root) =>
+				match query {
+					All => windows_under(trees, root)
+					Visible =>
+						preorder(trees, root).join_map(
+							|at|
+								match participating_window(trees, at) {
+									Some(window) => [window]
+									Nothing => []
+								},
+						)
+					Selection =>
+						match selection_of_layout(trees, layout) {
+							Selection(selected) =>
+								match participating_window(trees, descend_to_leaf(trees, selected)) {
+									Some(window) => [window]
+									Nothing => []
+								}
+							NoSelection => []
+						}
+					Stack(window) =>
+						match node_for_window_in_layout(trees, layout, window) {
+							Found(leaf) =>
+								match content(trees, leaf) {
+									Content(Held({ members: Stack(tabs), .. })) => tabs_windows(tabs)
+									_ => []
+								}
+							NotFound => []
+						}
+				}
+		}
+
+	## Whether the window takes part and has a neighbour leaf that way.
+	can_move_window : Trees, BspMoveQuery -> Bool
+	can_move_window = |trees, { layout, window, direction }|
+		if trees.left_out.contains(window) {
+			False
+		} else {
+			match node_for_window_in_layout(trees, layout, window) {
+				Found(leaf) =>
+					match find_neighbor_leaf(trees, leaf, direction) {
+						Neighbor(_) => True
+						NoNeighbor => False
+					}
+				NotFound => False
+			}
+		}
+
+	## The window's place: the side taken at each split from the root (0 first, 1 second),
+	## then its position in its leaf's stack, if it is stacked.
+	window_slot : Trees, BspWindowIn -> BspSlot
+	window_slot = |trees, { layout, window }|
+		match node_for_window_in_layout(trees, layout, window) {
+			NotFound => NoSlot
+			Found(leaf) => {
+				sides = ancestors(trees, leaf).drop_last(1).map(
+					|at|
+						match parent(trees, at) {
+							Parent(above) => if split_of(trees, above, "window_slot").second == at 1 else 0
+							NoParent => {
+								crash "BspTree.window_slot: node ${at.to_str()} below its root has no parent"
+							}
+						},
+				)
+				path = sides.rev()
+				match content(trees, leaf) {
+					Content(Held({ members: Stack(tabs), .. })) =>
+						match tabs_windows(tabs).find_first_index(|member| member == window) {
+							Ok(position) => Slot(path.append(position))
+							Err(_) => {
+								crash "BspTree.window_slot: leaf ${leaf.to_str()} holds no ${window.to_str()}"
+							}
+						}
+					_ => Slot(path)
+				}
+			}
+		}
+
+	## The nearest leaf `direction` of `from` holding a window that takes part (any leaf while
+	## none is left out).
+	find_neighbor_leaf : Trees, U64, BspDirection -> [Neighbor(U64), NoNeighbor]
+	find_neighbor_leaf = |trees, from, direction|
+		match find_structural_neighbor_leaf(trees, from, direction) {
+			Neighbor(next) =>
+				if trees.left_out.is_empty() or takes_part(trees, next) {
+					Neighbor(next)
+				} else {
+					find_neighbor_leaf(trees, next, direction)
+				}
+			NoNeighbor => NoNeighbor
+		}
+
+	## The leaf across the nearest split along `direction`'s axis, entered at the point level
+	## with `from`'s middle (the anchor, a share of the span across the axis).
+	find_structural_neighbor_leaf : Trees, U64, BspDirection -> [Neighbor(U64), NoNeighbor]
+	find_structural_neighbor_leaf = |trees, from, direction| {
+		backwards = is_backwards(direction)
+		axis = orientation_of(direction)
+		climb(trees, from, 0.5, backwards, axis)
+	}
+
+	climb : Trees, U64, F64, Bool, BspOrientation -> [Neighbor(U64), NoNeighbor]
+	climb = |trees, current, anchor, backwards, axis|
+		match parent(trees, current) {
+			NoParent => NoNeighbor
+			Parent(above) => {
+				split = split_of(trees, above, "find_structural_neighbor_leaf")
+				second = split.second == current
+				if same_orientation(split.orientation, axis) {
+					if second == backwards {
+						Neighbor(enter(trees, if second split.first else split.second, anchor, backwards, axis))
+					} else {
+						climb(trees, above, anchor, backwards, axis)
+					}
+				} else {
+					ratio = split.ratio.to_f64()
+					across = if second ratio + anchor * (1.0 - ratio) else anchor * ratio
+					climb(trees, above, across, backwards, axis)
+				}
+			}
+		}
+
+	## Down from `key` to a leaf: along the axis, the side nearest where the move came from;
+	## across it, the side holding the anchor.
+	enter : Trees, U64, F64, Bool, BspOrientation -> U64
+	enter = |trees, key, anchor, backwards, axis|
+		match kind(trees, key) {
+			Leaf(_) => key
+			Split(split) =>
+				if same_orientation(split.orientation, axis) {
+					enter(trees, if backwards split.second else split.first, anchor, backwards, axis)
+				} else {
+					ratio = split.ratio.to_f64()
+					if anchor <= ratio {
+						enter(trees, split.first, anchor / ratio, backwards, axis)
+					} else {
+						enter(trees, split.second, (anchor - ratio) / (1.0 - ratio), backwards, axis)
+					}
+				}
+		}
+
+	## Whether the direction goes toward a split's first child.
+	is_backwards : BspDirection -> Bool
+	is_backwards = |direction|
+		match direction {
+			Left | Up => True
+			Right | Down => False
+		}
+
+	same_orientation : BspOrientation, BspOrientation -> Bool
+	same_orientation = |a, b|
+		match (a, b) {
+			(Horizontal, Horizontal) | (Vertical, Vertical) => True
+			(Horizontal, Vertical) | (Vertical, Horizontal) => False
 		}
 
 	# Selection and insertion.

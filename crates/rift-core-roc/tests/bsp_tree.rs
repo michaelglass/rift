@@ -4,7 +4,7 @@
 //! and stale keys meet the slot versions. Every operation must answer alike and leave the same
 //! whole system: each table's slots, versions and free list, the windows left out, the settings.
 
-use rift_core::layout::bsp_tree::{InsertionPoint, Participation, Resize};
+use rift_core::layout::bsp_tree::{Direction, InsertionPoint, Participation, Query, Resize};
 use rift_core::plain::Rect;
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
 use rift_core_roc::{AllocationCount, RocBspTree, narrow};
@@ -47,6 +47,15 @@ impl Rng {
             8 => at(50.0, 60.0, 620.0, 410.0),
             _ => at(100.0, 100.0, 0.0, 300.0),
         }
+    }
+
+    fn direction(&mut self) -> Direction {
+        [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ][self.below(4) as usize]
     }
 
     fn insertion(&mut self) -> InsertionPoint {
@@ -146,6 +155,38 @@ impl Made {
         }
     }
 
+    /// A query, of a layout the run made and a window it may hold.
+    fn query(&self, rng: &mut Rng) -> Event {
+        let layout = self.layout(rng);
+        let window = rng.window();
+        match rng.below(10) {
+            0 => Event::ContainsLayout(layout),
+            1 => Event::WindowParticipates(window),
+            2 => Event::SelectedWindow(layout),
+            3 => Event::WindowInDirection(layout, rng.direction()),
+            4 => Event::ContainsWindow(layout, window),
+            5 => Event::HasAnyFullscreenNode(layout),
+            6 => {
+                let pid = window >> 32;
+                Event::HasWindowsForApp(
+                    layout,
+                    WINDOWS.into_iter().filter(|window| window >> 32 == pid).collect(),
+                )
+            }
+            7 => Event::Windows(
+                layout,
+                [
+                    Query::All,
+                    Query::Visible,
+                    Query::Selection,
+                    Query::Stack(window),
+                ][rng.below(4) as usize],
+            ),
+            8 => Event::CanMoveWindow(layout, window, rng.direction()),
+            _ => Event::WindowSlot(layout, window),
+        }
+    }
+
     fn answered(&mut self, answer: &Answer) {
         if let Answer::Layout(layout) = answer {
             self.layouts.push(*layout);
@@ -159,6 +200,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
     let mut rng = Rng(0xB5B7_7EE0_0000_0001);
     let before = AllocationCount::now();
     let (mut steps, mut reused, mut deepest, mut resized) = (0, 0, 0, 0);
+    let (mut queries, mut told) = (0, 0);
     for run in 0..runs {
         let insertion = rng.insertion();
         let mut rust = Tree::new(insertion);
@@ -190,6 +232,24 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
             }
             made.answered(&expected);
             steps += 1;
+            if rng.chance(50) {
+                let query = made.query(&mut rng);
+                let expected = bsp_tree::step(&mut rust, query.clone());
+                assert_eq!(
+                    roc.step(query.clone()),
+                    expected,
+                    "run {run} step {step}: {query:?} after {history:#?}"
+                );
+                queries += 1;
+                // An answer that tells something: a window, a yes, a list, a place below a root.
+                told += usize::from(match &expected {
+                    Answer::Verdict(yes) => *yes,
+                    Answer::Window(window) => window.is_some(),
+                    Answer::Windows(windows) => !windows.is_empty(),
+                    Answer::WindowSlot(slot) => slot.as_ref().is_some_and(|slot| !slot.is_empty()),
+                    _ => false,
+                });
+            }
             deepest = deepest.max(rust.nodes().len());
         }
     }
@@ -204,11 +264,15 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
     );
     assert!(resized > 0, "no native resize changed a system");
     assert!(
+        told * 4 > queries,
+        "only {told} of {queries} queries told anything"
+    );
+    assert!(
         deepest > 8,
         "no system grew past {deepest} nodes: the trees went unexercised"
     );
     eprintln!(
-        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes), the system compared after each"
+        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something), the system compared after each"
     );
 }
 

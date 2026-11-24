@@ -371,7 +371,9 @@ impl RocBspTree {
 
 /// The BSP tree's operations and view, on plain keys, and the Rust tree they are held to.
 pub mod bsp_tree {
-    use rift_core::layout::bsp_tree::{InsertionPoint, Layout, Node, Participation, Resize};
+    use rift_core::layout::bsp_tree::{
+        Direction, InsertionPoint, Layout, Node, Participation, Query, Resize,
+    };
     use rift_core::slot_table::{SlotKey, SlotTable};
 
     /// A layout's key: slotmap's ffi form, `version << 32 | index`.
@@ -411,9 +413,23 @@ pub mod bsp_tree {
         AspectRatio(Option<f64>),
         AddWindow(LayoutKey, u64),
         RemoveWindow(u64),
-        ReplaceWindow { from: u64, to: u64 },
+        ReplaceWindow {
+            from: u64,
+            to: u64,
+        },
         CloseApp(Vec<u64>),
         ResizeWindow(LayoutKey, u64, Resize),
+        ContainsLayout(LayoutKey),
+        WindowParticipates(u64),
+        SelectedWindow(LayoutKey),
+        WindowInDirection(LayoutKey, Direction),
+        ContainsWindow(LayoutKey, u64),
+        HasAnyFullscreenNode(LayoutKey),
+        /// The app's windows, which `has_windows_for_app`'s predicate tells.
+        HasWindowsForApp(LayoutKey, Vec<u64>),
+        Windows(LayoutKey, Query<u64>),
+        CanMoveWindow(LayoutKey, u64, Direction),
+        WindowSlot(LayoutKey, u64),
     }
 
     /// What an operation answers.
@@ -422,6 +438,10 @@ pub mod bsp_tree {
         Layout(LayoutKey),
         Participated(bool),
         Done,
+        Verdict(bool),
+        Window(Option<u64>),
+        Windows(Vec<u64>),
+        WindowSlot(Option<Vec<usize>>),
     }
 
     /// `event` applied to the Rust tree, and what it answers.
@@ -463,6 +483,28 @@ pub mod bsp_tree {
             Event::ResizeWindow(layout, window, resize) => {
                 tree.resize_window(layout, window, resize);
                 Answer::Done
+            }
+            Event::ContainsLayout(layout) => Answer::Verdict(tree.contains_layout(layout)),
+            Event::WindowParticipates(window) => Answer::Verdict(tree.window_participates(window)),
+            Event::SelectedWindow(layout) => Answer::Window(tree.selected_window(layout)),
+            Event::WindowInDirection(layout, direction) => {
+                Answer::Window(tree.window_in_direction(layout, direction))
+            }
+            Event::ContainsWindow(layout, window) => {
+                Answer::Verdict(tree.contains_window(layout, window))
+            }
+            Event::HasAnyFullscreenNode(layout) => {
+                Answer::Verdict(tree.has_any_fullscreen_node(layout))
+            }
+            Event::HasWindowsForApp(layout, windows) => Answer::Verdict(
+                tree.has_windows_for_app(layout, |window| windows.contains(&window)),
+            ),
+            Event::Windows(layout, query) => Answer::Windows(tree.windows(layout, query)),
+            Event::CanMoveWindow(layout, window, direction) => {
+                Answer::Verdict(tree.can_move_window(layout, window, direction))
+            }
+            Event::WindowSlot(layout, window) => {
+                Answer::WindowSlot(tree.window_slot(layout, window))
             }
         }
     }

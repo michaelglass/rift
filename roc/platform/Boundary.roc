@@ -867,6 +867,23 @@ Boundary := [].{
 	## A native resize of a layout's window, with the screen and its tiling area it happened on.
 	BspNativeResize := { layout : U64, window : U64, old : Rect, new : Rect, screen : Rect, tiling : Rect }
 
+	## A layout and a direction.
+	BspLayoutDirection := { layout : U64, direction : BspDirection }
+
+	## A layout and an app's windows.
+	BspAppIn := { layout : U64, windows : List(U64) }
+
+	## Which of a layout's windows to list (upstream's `WindowQuery`).
+	BspQuery := [All, Visible, Selection, Stack(U64)]
+
+	BspWindowsQuery := { layout : U64, query : BspQuery }
+
+	BspMoveQuery := { layout : U64, window : U64, direction : BspDirection }
+
+	## A window's place: the side taken at each split from the root (0 first, 1 second), then
+	## its position in its stack, if stacked; none when the layout does not hold it.
+	BspSlot := [Slot(List(U64)), NoSlot]
+
 	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
 	## app's windows, since Roc has no pid).
 	BspTreeEvent := [
@@ -881,11 +898,21 @@ Boundary := [].{
 		ReplaceWindow(BspReplacement),
 		CloseApp(List(U64)),
 		ResizeWindow(BspNativeResize),
+		ContainsLayout(U64),
+		WindowParticipates(U64),
+		SelectedWindow(U64),
+		WindowInDirection(BspLayoutDirection),
+		ContainsWindow(BspWindowIn),
+		HasAnyFullscreenNode(U64),
+		HasWindowsForApp(BspAppIn),
+		Windows(BspWindowsQuery),
+		CanMoveWindow(BspMoveQuery),
+		WindowSlot(BspWindowIn),
 	]
 
-	## What an operation answers: a layout it made, whether a window's participation changed,
-	## or nothing.
-	BspTreeAnswer := [Layout(U64), Participated(Bool), Done]
+	## What an operation answers: a layout it made, whether a window's participation changed, a
+	## query's answer, or nothing.
+	BspTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(BspSlot)]
 
 
 
