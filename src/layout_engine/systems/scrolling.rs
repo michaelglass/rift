@@ -411,7 +411,7 @@ fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
 /// A scrolling layout's strip as the core's geometry takes it: the columns with a window that
 /// takes part, each with those windows (a window with no constraints is resizable), as
 /// `Geometry::build` reads them (none: no window takes part). Arguments as `build` takes them.
-#[cfg(test)]
+#[cfg(any(test, feature = "roc-core"))]
 fn strip(
     state: &LayoutState,
     settings: &ScrollingLayoutSettings,
@@ -601,6 +601,27 @@ impl Geometry {
                     (min.min(snap.offset), max.max(snap.offset))
                 });
         }
+        #[cfg(any(test, feature = "roc-core"))]
+        crate::layout_engine::core_geometry::check_strip(
+            strip(
+                state,
+                settings,
+                inactive,
+                screen,
+                &geometry.constraints,
+                &geometry.gaps,
+            ),
+            &crate::layout_engine::core_geometry::StripPlacement {
+                columns: geometry.columns.iter().map(|c| (c.id.0, c.world_x, c.width)).collect(),
+                frames: geometry.frames.clone(),
+                snaps: geometry
+                    .snaps
+                    .iter()
+                    .map(|snap| (snap.offset, geometry.columns[snap.column].id.0))
+                    .collect(),
+                bounds: geometry.bounds,
+            },
+        );
         geometry
     }
 

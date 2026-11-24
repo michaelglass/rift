@@ -111,7 +111,7 @@ pub(crate) fn check_bsp(
 /// Where a scrolling layout's system placed its strip in world space: each column (id, x,
 /// width), each window's frame, the camera's resting points (offset, the column's id) and its
 /// bounds.
-#[cfg(test)]
+#[cfg(any(test, feature = "roc-core"))]
 #[derive(Debug)]
 pub(crate) struct StripPlacement {
     pub columns: Vec<(u64, f64, f64)>,
@@ -121,7 +121,7 @@ pub(crate) struct StripPlacement {
 }
 
 /// The placement as words: ids as they are, floats as their bits.
-#[cfg(test)]
+#[cfg(any(test, feature = "roc-core"))]
 fn placement_words<W: Copy>(
     columns: impl Iterator<Item = (u64, f64, f64)>,
     frames: &[(W, Rect)],
@@ -148,7 +148,7 @@ fn placement_words<W: Copy>(
 
 /// The core's placement of a scrolling `strip` (none: no window takes part, so no column, frame
 /// or resting point, and bounds at 0) as words.
-#[cfg(test)]
+#[cfg(any(test, feature = "roc-core"))]
 fn placed_words<W: Copy>(
     placed: Option<rift_core::layout::scrolling::Placed<W, u64>>,
     window: impl Fn(W) -> u64,
@@ -166,6 +166,49 @@ fn placed_words<W: Copy>(
             placed.bounds,
             window,
         ),
+    }
+}
+
+/// Holds the core's placement of a scrolling strip (none: no window takes part) to the
+/// scrolling system's (`Geometry::build`), word for word; under `roc-core` the Roc core's too.
+/// The system's placement stands either way, as [`check_traditional`]'s frames do.
+#[cfg(any(test, feature = "roc-core"))]
+pub(crate) fn check_strip(
+    strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
+    upstream: &StripPlacement,
+) {
+    let frames: Vec<(WindowId, Rect)> = upstream
+        .frames
+        .iter()
+        .map(|&(window, frame)| (window, core_rect(frame)))
+        .collect();
+    let theirs = placement_words(
+        upstream.columns.iter().copied(),
+        &frames,
+        upstream.snaps.iter().copied(),
+        upstream.bounds,
+        window_word,
+    );
+    let rust = placed_words(
+        strip.as_ref().map(rift_core::layout::scrolling::Strip::place),
+        window_word,
+    );
+    if rust != theirs {
+        diverged("layout-divergence", "scrolling", &strip, upstream, &rust);
+    }
+    #[cfg(feature = "roc-core")]
+    {
+        let plain = |w: rift_core::plain::WindowId| window_word(of_plain(w));
+        let roc = match &strip {
+            None => Ok(placed_words(None, plain)),
+            Some(strip) => rift_core_roc::place_strip(strip.clone().map(&to_plain, &|id| id))
+                .map(|placed| placed_words(Some(placed), plain)),
+        };
+        match roc {
+            Ok(roc) if roc == theirs => {}
+            Ok(roc) => diverged("roc-divergence", "scrolling", &strip, upstream, &roc),
+            Err(error) => diverged("roc-divergence", "scrolling", &strip, upstream, &error),
+        }
     }
 }
 
@@ -221,7 +264,7 @@ fn check<E: std::fmt::Debug>(
 }
 
 /// A window as one word (its pid's bits above its index).
-#[cfg(test)]
+#[cfg(any(test, feature = "roc-core"))]
 fn window_word(window: WindowId) -> u64 {
     (u64::from(window.pid as u32) << 32) | u64::from(window.idx.get())
 }
