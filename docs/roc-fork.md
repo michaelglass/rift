@@ -56,14 +56,23 @@ tests (3 ignored), 899 with `roc-core`, rift-core 106, the rest as above, clippy
   half point), participation (windows in no layout too), the settings, the edits upstream has no
   case for, drops straight to `edit_layout`, every query on a third of its steps, and reloads
   through serde, most with a preselected leaf (only a saved file holds one).
-- **Upstream states the core does not hold (no operation reaches them; only a saved file can):**
-  both fullscreen flags set (read as `Fill::Screen`, as upstream's projection reads them; a
-  later toggle would then differ from upstream), and an empty leaf with a fullscreen flag
-  (dropped: upstream clears the flags as a leaf empties; only IPC's `container_tree` showed
-  it). Upstream's load normalizes neither. For slice 4 (saving from the core, old files
-  byte-compatible): normalize them at the load boundary with one warn line, or keep two flags;
-  the lead's call. A NaN ratio from a file compares unequal to itself (`f32`), so would report a
-  divergence; none is drawn.
+- **States only a saved file holds, parsed at the load boundary (the lead's ruling,
+  2026-11-24):** `Upstream`'s load (`TryFrom<StoredBspSystem>`)
+  normalizes, on each node a layout reaches, with one `bsp-load:` warn naming the layout and
+  the node: both fullscreen flags set -> fullscreen (as the projection reads them); an empty
+  leaf's fullscreen flags -> none; a split's share that is not a finite number -> 0.5 (a fresh
+  split's). Finite shares stand as saved, even outside the 0.05..0.95 edits keep (upstream's
+  load does not clamp them, and no other bound applies). Upstream's copy and the core are both
+  seeded from the parsed form, so the twin never diverges on a file; files rift writes save
+  byte for byte as before. Tests: `a_saved_leaf_with_both_fullscreen_flags_loads_fullscreen`,
+  `a_saved_empty_leaf_loads_without_fullscreen_flags`,
+  `a_saved_split_with_a_share_not_a_number_loads_even` (each: the parsed form, the save, the
+  normalized bytes); a plant skipping each normalization fails its test. One reach left: a
+  resize edit with a NaN amount (`rift-cli` parses `NaN` as an `f64`) makes a NaN share, which
+  rift would save and then normalize on the next load.
+- **Upstream candidate:** upstream's saved BSP layout can hold states no operation reaches
+  (both fullscreen flags, an empty leaf's fullscreen flag, a share that is not a finite
+  number), and its load does not normalize them.
 - **Cost (release, `measure_bsp_twin`, everyday operations: focus moves, swaps, resizes, a
   window added and removed):**
 
