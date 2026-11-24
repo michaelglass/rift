@@ -920,7 +920,7 @@ Boundary := [].{
 
 	## An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads; its `Move` is
 	## `Moved`, since the glue does not escape Rust's `move`).
-	BspEdit := [Moved(BspDirection), Swap(BspPair), Drop(BspDrop), Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
+	BspEdit := [Moved(BspDirection), Swap(BspPair), Drop(BspDrop), Join(BspDirection), ConsumeOrExpel(BspDirection), Unjoin, Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
 
 	BspEditIn := { layout : U64, edit : BspEdit }
 

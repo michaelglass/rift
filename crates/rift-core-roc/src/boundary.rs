@@ -3755,9 +3755,17 @@ fn tree_edit(edit: Edit<u64>) -> abi::BoundaryBspEdit {
             }),
             Tag::Drop
         ),
-        Edit::Join(_) | Edit::ConsumeOrExpel(_) | Edit::Unjoin => {
-            todo!("the joins port in the next commit")
-        }
+        Edit::Join(direction) => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.join(tree_direction(direction)),
+            Tag::Join
+        ),
+        Edit::ConsumeOrExpel(direction) => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.consume_or_expel(tree_direction(direction)),
+            Tag::ConsumeOrExpel
+        ),
+        Edit::Unjoin => union!(BoundaryBspEdit, BoundaryBspEditPayload.unjoin, Tag::Unjoin),
     }
 }
 

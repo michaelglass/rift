@@ -649,6 +649,9 @@ BspTree := [].{
 			Moved(direction) => edited_by(move_selection(trees, layout, direction))
 			Swap({ a, b }) => edited_by(swap_windows(trees, layout, a, b))
 			Drop(dropped) => edited_by(apply_target_drop(trees, layout, dropped))
+			Join(direction) => edited_by(join_selection_with_direction(trees, layout, direction))
+			ConsumeOrExpel(direction) => edited_by(consume_or_expel(trees, layout, direction))
+			Unjoin => edited_by(unjoin_selection(trees, layout))
 			Split(Stacked) => (trees, Unsupported)
 			Split(Tiled(orientation)) =>
 				match selection_of_layout(trees, layout) {
@@ -943,6 +946,116 @@ BspTree := [].{
 					}
 				if tabs.before.is_empty() Window(tabs.top) else Stack(tabs)
 			}
+		}
+
+	# Joins.
+
+	## The selection joined with its neighbour `direction`: onto the neighbour's stack, or, when
+	## the two share a split below the root, that split's windows as one stack (the selected one
+	## on top).
+	join_selection_with_direction : Trees, U64, BspDirection -> (Trees, Bool)
+	join_selection_with_direction = |trees, layout, direction|
+		match selection_of_layout(trees, layout) {
+			NoSelection => (trees, False)
+			Selection(selected) => {
+				leaf = descend_to_leaf(trees, selected)
+				match find_neighbor_leaf(trees, leaf, direction) {
+					NoNeighbor => (trees, False)
+					Neighbor(neighbor) =>
+						match (is_stack(trees, neighbor), is_stack(trees, leaf), participating_window(trees, leaf), participating_window(trees, neighbor)) {
+							(True, False, Some(source), Some(target)) => apply_target_drop(trees, layout, { source, target, action: Stack })
+							_ => join_under(trees, layout, leaf, neighbor)
+						}
+				}
+			}
+		}
+
+	## Up from `current` to the split the neighbour is a child of: unless it is the root, its
+	## windows become one stack in its place.
+	join_under : Trees, U64, U64, U64 -> (Trees, Bool)
+	join_under = |trees, layout, current, neighbor|
+		match parent(trees, current) {
+			NoParent => (trees, False)
+			Parent(above) =>
+				match parent(trees, neighbor) {
+					Parent(shared) if shared == above =>
+						match parent(trees, above) {
+							NoParent => (trees, False)
+							Parent(_) => {
+								under = windows_under(trees, above)
+								# The last member is the visible one, so keep the selected window there.
+								ordered =
+									match selected_window(trees, layout) {
+										Some(chosen) =>
+											match under.find_first_index(|window| window == chosen) {
+												Ok(index) => under.take_first(index).concat(under.drop_first(index + 1)).append(chosen)
+												Err(_) => under
+											}
+										Nothing => under
+									}
+								match last_on_top(ordered) {
+									NoTabs => (trees, False)
+									Tabs(tabs) => {
+										(with_leaf, joined) = make_leaf(trees, Held({ members: Stack(tabs), fill: Tiled }))
+										in_place = replace_child(with_leaf, above, joined)
+										(select(remove_subtree(in_place, above), joined), True)
+									}
+								}
+							}
+						}
+					_ => join_under(trees, layout, above, neighbor)
+				}
+		}
+
+	## The selected stack's windows put back one by one at the selection, the stack's fill
+	## handed to the visible member.
+	unjoin_selection : Trees, U64 -> (Trees, Bool)
+	unjoin_selection = |trees, layout|
+		match selection_of_layout(trees, layout) {
+			NoSelection => (trees, False)
+			Selection(selected) => {
+				leaf = descend_to_leaf(trees, selected)
+				match content_of(trees, leaf, "unjoin_selection") {
+					Held({ members: Stack(tabs), fill }) => {
+						emptied = select(set_content(trees, leaf, Empty, "unjoin_selection"), leaf)
+						inserted = tabs_windows(tabs).fold(emptied, |acc, member| insert_window_at_selection(acc, layout, member))
+						# Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
+						refilled =
+							match selection_of_layout(inserted, layout) {
+								Selection(visible) =>
+									match kind(inserted, visible) {
+										Leaf({ content: Held(held), .. }) => set_content(inserted, visible, Held({ ..held, fill }), "unjoin_selection")
+										_ => inserted
+									}
+								NoSelection => inserted
+							}
+						(refilled, True)
+					}
+					_ => (trees, False)
+				}
+			}
+		}
+
+	## Whether the selected leaf holds a stack of two or more: unjoin it, else join.
+	consume_or_expel : Trees, U64, BspDirection -> (Trees, Bool)
+	consume_or_expel = |trees, layout, direction| {
+		joined =
+			match selection_of_layout(trees, layout) {
+				Selection(selected) =>
+					match content(trees, descend_to_leaf(trees, selected)) {
+						Content(Held({ members: Stack(tabs), .. })) => tabs_windows(tabs).len() >= 2
+						_ => False
+					}
+				NoSelection => False
+			}
+		if joined unjoin_selection(trees, layout) else join_selection_with_direction(trees, layout, direction)
+	}
+
+	is_stack : Trees, U64 -> Bool
+	is_stack = |trees, key|
+		match content(trees, key) {
+			Content(Held({ members: Stack(_), .. })) => True
+			_ => False
 		}
 
 	# Selection and insertion.

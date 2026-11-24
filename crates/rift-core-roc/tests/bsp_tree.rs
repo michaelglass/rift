@@ -111,9 +111,12 @@ impl Rng {
         }
     }
 
-    /// A move, swap or drop (the edits that move windows between leaves).
+    /// A move, swap, drop or join (the edits that move windows between leaves).
     fn moving_edit(&mut self, held: &[u64]) -> Edit<u64> {
-        match self.below(5) {
+        match self.below(8) {
+            5 => Edit::Join(self.direction()),
+            6 => Edit::ConsumeOrExpel(self.direction()),
+            7 => Edit::Unjoin,
             0 | 1 => Edit::Move(self.direction()),
             2 => Edit::Swap(self.held(held), self.held(held)),
             _ => Edit::Drop {
