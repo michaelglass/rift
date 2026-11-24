@@ -967,9 +967,10 @@ impl Serialize for SavedRecords<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // One holder: the catalog holds every workspace the core does (its writers tell the core
         // in the same step), so each record has a Space.
-        serializer.collect_seq(
-            self.catalog.workspaces.saved(|id, workspace| workspace.saved(self.spaces[&id])),
-        )
+        serializer.collect_seq(crate::model::slot_table::saved(
+            &self.catalog.workspaces,
+            |id, workspace| workspace.saved(self.spaces[&id]),
+        ))
     }
 }
 
@@ -1126,7 +1127,8 @@ pub(crate) struct LoadedWorkspaces {
 impl<'de> Deserialize<'de> for LoadedWorkspaces {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let saved = SavedStore::deserialize(deserializer)?;
-        let records = SlotTable::parse(saved.workspaces).map_err(serde::de::Error::custom)?;
+        let records =
+            crate::model::slot_table::parse(saved.workspaces).map_err(serde::de::Error::custom)?;
         let (workspaces, catalog) =
             Catalog::parse(records, saved.order).map_err(serde::de::Error::custom)?;
         let topology = SavedTopology {

@@ -128,6 +128,7 @@ impl Reactor {
                 outcome.memberships.push((wid, None));
                 outcome.refresh_window_notifications = true;
             }
+            // No AX state: the window is in no layout and has no notifications to refresh.
             rift_core::lifecycle::Invalidation::NoAxState => {}
         }
         outcome

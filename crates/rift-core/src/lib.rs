@@ -15,6 +15,7 @@ pub mod modes;
 pub mod plain;
 pub mod pointer;
 pub mod reconciler;
+pub mod slot_table;
 pub mod topology;
 pub mod workspaces;
 
