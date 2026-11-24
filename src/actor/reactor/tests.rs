@@ -9701,7 +9701,7 @@ fn duplicate_minimize_suspends_geometry_and_preserves_inactive_assignment() {
             let workspace = reactor.test_workspace(inactive, 0);
             assert!(reactor.assign_test_window_to_workspace(inactive, wid, workspace));
         }
-        reactor.stores.state.windows.window_mut(wid).unwrap().info.is_minimized = true;
+        reactor.stores.state.windows.set_minimized(wid, true);
 
         assert_eq!(has_window_in_layout(&mut reactor, space, screen, wid), tiled);
 
@@ -9894,7 +9894,7 @@ fn inventory_observes_only_eligible_omitted_windows() {
     let space = SpaceId::new(1);
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(5));
     let windows: Vec<_> = (1..=5).map(|index| WindowId::new(1, index)).collect();
-    reactor.stores.state.windows.window_mut(windows[2]).unwrap().info.is_minimized = true;
+    reactor.stores.state.windows.set_minimized(windows[2], true);
     reactor.stores.state.windows_mut().suspend_window_to_native_fullscreen(
         windows[4],
         None,
