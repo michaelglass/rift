@@ -17,7 +17,8 @@ fn sync_existing_window_state(
     mut info: WindowInfo,
     as_of: Option<crate::actor::reactor::transaction_manager::TransactionId>,
 ) -> anyhow::Result<(crate::actor::reactor::events::EventOutcome, bool)> {
-    let ax_returned = state.windows.validate_ax_identity(wid);
+    let revalidation = state.windows.validate_ax_identity(wid);
+    let ax_returned = revalidation == rift_core::lifecycle::Revalidation::Revalidated;
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
 
     let is_minimized = info.is_minimized;

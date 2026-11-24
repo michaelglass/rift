@@ -123,9 +123,12 @@ impl Reactor {
     /// evidence or confirmed retirement, and sits out of layout meanwhile.
     pub(super) fn invalidate_window_identity(&mut self, wid: WindowId) -> EventOutcome {
         let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-        if self.stores.state.windows.invalidate_ax_identity(wid) {
-            outcome.memberships.push((wid, None));
-            outcome.refresh_window_notifications = true;
+        match self.stores.state.windows.invalidate_ax_identity(wid) {
+            rift_core::lifecycle::Invalidation::Invalidated => {
+                outcome.memberships.push((wid, None));
+                outcome.refresh_window_notifications = true;
+            }
+            rift_core::lifecycle::Invalidation::NoAxState => {}
         }
         outcome
     }

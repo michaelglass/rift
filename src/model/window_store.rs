@@ -908,14 +908,22 @@ impl WindowStore {
 
     /// The window's AX element was invalidated: it keeps its ownership, facts and place until
     /// fresh AX evidence or confirmed retirement. A window with no AX state has none to lose.
-    /// Whether this invalidated it (false if it already was, or has no AX state).
-    pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) -> bool {
-        self.lifecycle.invalidate(wid) == rift_core::lifecycle::Invalidation::Invalidated
+    /// What it found: `Invalidated` for a window with AX state (one already invalidated too),
+    /// `NoAxState` for one without.
+    pub(crate) fn invalidate_ax_identity(
+        &mut self,
+        wid: WindowId,
+    ) -> rift_core::lifecycle::Invalidation {
+        self.lifecycle.invalidate(wid)
     }
 
-    /// Only a fresh AX observation validates an invalidated identity.
-    pub(crate) fn validate_ax_identity(&mut self, wid: WindowId) -> bool {
-        self.lifecycle.revalidate(wid) == rift_core::lifecycle::Revalidation::Revalidated
+    /// Only a fresh AX observation validates an invalidated identity: `Revalidated`, or
+    /// `NotInvalidated` when it was not.
+    pub(crate) fn validate_ax_identity(
+        &mut self,
+        wid: WindowId,
+    ) -> rift_core::lifecycle::Revalidation {
+        self.lifecycle.revalidate(wid)
     }
 
     /// Live windows can lose heuristic admission as their AX/native metadata
@@ -3767,19 +3775,20 @@ mod tests {
 
     #[test]
     fn an_invalidated_window_is_unmanaged_until_fresh_ax_and_its_invalidation_moves_with_it() {
+        use rift_core::lifecycle::{Invalidation, Revalidation};
         let (wid, tab) = (WindowId::new(5, 1), WindowId::new(5, 2));
         let mut store = OwnedWindows::default();
         // No AX state: nothing to invalidate.
-        store.invalidate_ax_identity(wid);
+        assert_eq!(store.invalidate_ax_identity(wid), Invalidation::NoAxState);
         assert!(!store.is_temporarily_unavailable(wid));
         store.view_mut().insert_test_ax_state(wid);
         assert!(store.view().is_admitted(wid) && store.view().can_reconcile_admission(wid));
-        store.invalidate_ax_identity(wid);
+        assert_eq!(store.invalidate_ax_identity(wid), Invalidation::Invalidated);
         assert!(!store.view().is_admitted(wid) && !store.view().can_reconcile_admission(wid));
         assert!(store.is_temporarily_unavailable(wid));
         assert!(store.is_admitted_state(wid), "its facts still admit it");
-        assert!(store.validate_ax_identity(wid));
-        assert!(!store.validate_ax_identity(wid));
+        assert_eq!(store.validate_ax_identity(wid), Revalidation::Revalidated);
+        assert_eq!(store.validate_ax_identity(wid), Revalidation::NotInvalidated);
         assert!(store.view().is_admitted(wid));
         // A native tab taking over an invalidated window inherits the invalidation.
         store.invalidate_ax_identity(wid);
@@ -3787,7 +3796,7 @@ mod tests {
         store.view_mut().transfer_persistent_window_metadata(wid, tab);
         assert!(store.window(wid).is_some() && !store.is_temporarily_unavailable(wid));
         assert!(store.is_temporarily_unavailable(tab) && !store.view().is_admitted(tab));
-        assert!(store.validate_ax_identity(tab));
+        assert_eq!(store.validate_ax_identity(tab), Revalidation::Revalidated);
         assert!(store.view().is_admitted(tab));
         assert_eq!(store.lifecycle_divergences(), vec![]);
     }

@@ -109,17 +109,24 @@ pub fn handle_window_visibility_changed(
     visible: bool,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let minimized = !visible;
-    // Application hiding can report minimization for a cached AX key.
-    let ax_returned = !minimized && state.windows.validate_ax_identity(wid);
-    let Some(window) = state.windows.window(wid) else {
+    let Some(was_minimized) = state.windows.window(wid).map(|window| window.info.is_minimized)
+    else {
         debug!(
             ?wid,
             minimized, "Minimization change for unknown window - ignoring"
         );
         return Ok(EventOutcome::no_change());
     };
-    if !minimized && !window.info.is_minimized && !ax_returned {
-        return Ok(EventOutcome::no_change());
+    // Application hiding can report minimization for a cached AX key: a shown window is a
+    // positive AX observation.
+    if !minimized {
+        match state.windows.validate_ax_identity(wid) {
+            rift_core::lifecycle::Revalidation::Revalidated => {}
+            rift_core::lifecycle::Revalidation::NotInvalidated if was_minimized => {}
+            rift_core::lifecycle::Revalidation::NotInvalidated => {
+                return Ok(EventOutcome::no_change());
+            }
+        }
     }
     state.windows.set_minimized(wid, minimized);
     // Minimizing orders the window out and restoring orders it back in: without native

@@ -7738,6 +7738,56 @@ fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
 }
 
 #[test]
+fn a_shown_event_for_an_invalidated_window_is_a_positive_ax_return() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    let window = WindowId::new(1, 2);
+    let original = test_layout(&mut reactor, space, screen);
+    reactor.handle_event(Event::WindowInvalidated(
+        window,
+        super::WindowInvalidationSource::AxDestroyedNotification,
+    ));
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+
+    // Its AX snapshot was never minimized: only the revalidation makes this news.
+    reactor.handle_event(Event::WindowDeminiaturized(window));
+    assert!(!reactor.stores.state.windows.is_temporarily_unavailable(window));
+    assert_eq!(test_layout(&mut reactor, space, screen), original);
+}
+
+#[test]
+fn rediscovering_an_invalidated_window_resumes_it_though_natively_hidden() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    let window = WindowId::new(1, 2);
+    let wsid = reactor.test_window_server_id(window);
+    let original = test_layout(&mut reactor, space, screen);
+    let windows: Vec<_> = (1..=3)
+        .map(|idx| {
+            let wid = WindowId::new(1, idx);
+            (
+                wid,
+                reactor.stores.state.windows.window(wid).unwrap().info.clone(),
+            )
+        })
+        .collect();
+    reactor.handle_event(Event::WindowInvalidated(
+        window,
+        super::WindowInvalidationSource::AxDestroyedNotification,
+    ));
+    reactor.handle_event(Event::WindowServerHidden(wsid));
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+
+    // Not natively visible and not among the visible: the AX return alone resumes it.
+    reactor.discover_test_windows(window.pid, windows, vec![]);
+    assert_eq!(test_layout(&mut reactor, space, screen), original);
+}
+
+#[test]
 fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
