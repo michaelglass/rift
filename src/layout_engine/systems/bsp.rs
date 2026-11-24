@@ -802,17 +802,21 @@ mod tests {
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
-    fn tiled(windows: &[u32]) -> (Upstream, LayoutId) {
-        let mut system = Upstream::default();
+    fn tiled(windows: &[u32]) -> (BspLayoutSystem, LayoutId) {
+        let mut system = BspLayoutSystem::default();
         let layout = system.create_layout();
         for &window in windows {
-            system.add_window_after_selection(layout, w(window));
+            system.update(WindowChange::Add(layout, w(window), None));
         }
         (system, layout)
     }
 
+    fn fullscreen(system: &mut BspLayoutSystem, layout: LayoutId, within_gaps: bool) {
+        system.edit(layout, LayoutEdit::Fullscreen { within_gaps }).discard();
+    }
+
     fn calculate_frames(
-        system: &Upstream,
+        system: &BspLayoutSystem,
         layout: LayoutId,
         size: CGSize,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
@@ -881,7 +885,7 @@ mod tests {
             calculate_frames(&system, cloned, size, &Default::default()),
             frames
         );
-        system.toggle_fullscreen(original, true);
+        fullscreen(&mut system, original, true);
         let fullscreen_clone = system.clone_layout(original);
         assert_eq!(
             calculate_frames(&system, fullscreen_clone, size, &Default::default()),
@@ -954,21 +958,21 @@ mod tests {
                 w(4),
                 w(5)
             ]);
-            assert_eq!(system.visible_windows_in_layout(layout), vec![w(5), w(3)]);
+            assert_eq!(system.windows(layout, WindowQuery::Visible), vec![w(5), w(3)]);
         }
-        system.remove_window(w(5));
+        system.update(WindowChange::Remove(w(5)));
         for layout in [original, cloned] {
             assert_eq!(system.windows(layout, WindowQuery::Stack(w(4))), vec![w(4)]);
-            assert_eq!(system.visible_windows_in_layout(layout), vec![w(4), w(3)]);
+            assert_eq!(system.windows(layout, WindowQuery::Visible), vec![w(4), w(3)]);
         }
         system.update(WindowChange::Replace(w(4), w(3)));
         for layout in [original, cloned] {
-            assert_eq!(system.all_windows_in_layout(layout), vec![w(3)]);
+            assert_eq!(system.windows(layout, WindowQuery::All), vec![w(3)]);
         }
         system.update(WindowChange::CloseApp(1));
         for layout in [original, cloned] {
-            assert!(system.all_windows_in_layout(layout).is_empty());
-            assert!(system.visible_windows_in_layout(layout).is_empty());
+            assert!(system.windows(layout, WindowQuery::All).is_empty());
+            assert!(system.windows(layout, WindowQuery::Visible).is_empty());
             assert_eq!(system.selected_window(layout), None);
         }
     }
@@ -976,27 +980,32 @@ mod tests {
     #[test]
     fn closing_the_last_fullscreen_window_clears_the_tile() {
         let (mut system, layout) = tiled(&[1]);
-        system.toggle_fullscreen(layout, false);
+        fullscreen(&mut system, layout, false);
         assert!(system.container_tree(layout).is_fullscreen);
-        system.remove_window(w(1));
+        system.update(WindowChange::Remove(w(1)));
         assert!(!system.container_tree(layout).is_fullscreen);
-        system.add_window_after_selection(layout, w(2));
+        system.update(WindowChange::Add(layout, w(2), None));
         assert!(!system.container_tree(layout).is_fullscreen);
     }
 
     #[test]
     fn join_adds_the_selected_window_to_the_neighboring_stack() {
         let (mut system, layout) = tiled(&[1, 2, 3]);
-        assert!(system.apply_target_drop(
-            layout,
-            w(2),
-            w(1),
-            crate::layout_engine::WindowDropAction::Stack
-        ));
+        assert!(
+            system
+                .edit(layout, LayoutEdit::Drop {
+                    source: w(2),
+                    target: w(1),
+                    action: crate::layout_engine::WindowDropAction::Stack,
+                })
+                .changed()
+        );
         assert!(system.focus(layout, Focus::Select(w(3))).handled);
-        system.join_selection_with_direction(layout, Direction::Left);
-        assert_eq!(system.all_windows_in_layout(layout), vec![w(1), w(2), w(3)]);
-        assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
+        system
+            .edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Left)))
+            .discard();
+        assert_eq!(system.windows(layout, WindowQuery::All), vec![w(1), w(2), w(3)]);
+        assert_eq!(system.windows(layout, WindowQuery::Visible), vec![w(3)]);
     }
 }
 
