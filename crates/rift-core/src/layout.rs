@@ -4,11 +4,9 @@
 
 pub mod axis;
 pub mod bsp;
-pub mod bsp_tree;
 pub mod floating;
 pub mod scrolling;
 pub mod traditional;
-pub mod traditional_tree;
 
 use crate::plain::Rect;
 
