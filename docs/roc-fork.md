@@ -80,12 +80,20 @@ message has its plants and checks.
   not compile; upstream's `Move` is `Moved` at the boundary (`BspEdit`, `BspDropAction`), as the
   floating slot's `Placed` was for `in`.
 
-**Next: layout trees, slice 4, the flip (policy (a)).** The core's tree decides and is saved
-(old files byte-compatible; the load's normalization already parses what only a file holds);
-under `roc-core` the Roc tree (`RocBspTree`, seeded from the Rust tree at load and on a re-seed)
-steps beside it and is held to it (`roc-divergence:`). Then slice 5 deletes `Upstream`. The
-queued Roc nightly bump still waits: the newest nightly is still nightly-2026-11-23-b5c77fc
-(checked 2026-11-24).
+**Next: layout trees, slice 4, the flip (policy (a)), then 4b (the lead's ruling, 2026-11-24).**
+- **4, the flip:** the core's tree decides and is saved (old files byte-compatible; the load's
+  normalization already parses what only a file holds). Under `roc-core` the Roc tree
+  (`RocBspTree`, seeded through `bsp_tree_seed` at load and on a re-seed) steps beside it and is
+  held to it operation by operation (`roc-divergence:`, a re-seed on divergence). The shape stays
+  built from `rift_core`'s `Tree` (option (a)): under the Rust core that is the deciding state;
+  under `roc-core` the geometry then reads the shadow, which is sound only while the operation
+  differential holds the two trees identical.
+- **4b, not optional, right after 4 and before 5:** port `Tree::shape` to Roc, converting the
+  tree's window words to `WindowId` at the boundary, so under `roc-core` a Roc-decided tree feeds
+  the Roc geometry with no Rust tree in between (option (b)).
+- **5:** delete `Upstream` once nothing reads it.
+- The queued Roc nightly bump still waits: the newest nightly is still
+  nightly-2026-11-23-b5c77fc (checked 2026-11-24).
 
 **Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
 -0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
