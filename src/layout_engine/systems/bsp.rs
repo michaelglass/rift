@@ -2195,7 +2195,7 @@ mod core_geometry_tests {
             } else {
                 layout
             };
-            if rng.chance(20) {
+            if rng.chance(35) {
                 asked(rng, &system, layout, &windows);
             }
             if rng.chance(12) {
@@ -2377,9 +2377,7 @@ mod core_geometry_tests {
             [] => WindowId::new(1, 9999),
             _ => windows[rng.below(windows.len() as u64) as usize],
         };
-        let direction = drawn_direction(rng);
         let _ = system.selected_window(layout);
-        let _ = system.window_in_direction(layout, direction);
         let _ = system.contains_window(layout, window);
         let _ = system.has_any_fullscreen_node(layout);
         let _ = system.has_windows_for_app(layout, window.pid);
@@ -2393,7 +2391,17 @@ mod core_geometry_tests {
         ] {
             let _ = system.windows(layout, query);
         }
-        let _ = system.can_move_window(layout, window, direction);
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            let _ = system.window_in_direction(layout, direction);
+            for &window in windows {
+                let _ = system.can_move_window(layout, window, direction);
+            }
+        }
         let _ = system.window_slot(layout, window);
     }
 

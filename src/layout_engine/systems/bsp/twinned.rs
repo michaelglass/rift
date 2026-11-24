@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use objc2_core_foundation::CGRect;
 use rift_core::layout::bsp_tree::{
     self as core, Content, InsertionPoint, Kind, Layout, Leaf, Members, Memory, Parent,
-    Participation, Preselect, Side, Split, Tabs, Tree,
+    Participation, Preselect, Query, Side, Split, Tabs, Tree,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -104,7 +104,11 @@ impl BspLayoutSystem {
         window: WindowId,
         direction: Direction,
     ) -> bool {
-        self.upstream.can_move_window(layout, window, direction)
+        self.answered(
+            "can_move_window",
+            self.upstream.can_move_window(layout, window, direction),
+            self.twin.core.can_move_window(layout, window, core_direction(direction)),
+        )
     }
 
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String { self.upstream.draw_tree(layout) }
@@ -114,7 +118,11 @@ impl BspLayoutSystem {
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        self.upstream.window_slot(layout, window)
+        self.answered(
+            "window_slot",
+            self.upstream.window_slot(layout, window),
+            self.twin.core.window_slot(layout, window),
+        )
     }
 
     /// After an operation upstream's system and the core both took: their answers compared,
@@ -134,6 +142,15 @@ impl BspLayoutSystem {
         if answers_differ || matches!(view, Some(Some(_))) {
             self.twin.core = seed(&self.upstream);
         }
+    }
+
+    /// A query both answered: a difference is reported (the next step's view re-seeds the
+    /// core).
+    fn answered<A: PartialEq + Debug>(&self, what: &str, upstream: A, core: A) -> A {
+        if upstream != core {
+            report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
+        }
+        upstream
     }
 
     /// After an operation the core has no port of yet: the core takes upstream's tree.
@@ -156,11 +173,19 @@ fn report(what: &str, difference: &str) {
 
 impl LayoutSystem for BspLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.upstream.has_windows_for_app(layout, pid)
+        self.answered(
+            "has_windows_for_app",
+            self.upstream.has_windows_for_app(layout, pid),
+            self.twin.core.has_windows_for_app(layout, |window| window.pid == pid),
+        )
     }
 
     fn window_participates(&self, window: WindowId) -> bool {
-        self.upstream.window_participates(window)
+        self.answered(
+            "window_participates",
+            self.upstream.window_participates(window),
+            self.twin.core.window_participates(window),
+        )
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
@@ -182,7 +207,13 @@ impl LayoutSystem for BspLayoutSystem {
         upstream
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.upstream.contains_layout(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        self.answered(
+            "contains_layout",
+            self.upstream.contains_layout(layout),
+            self.twin.core.contains_layout(layout),
+        )
+    }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let upstream = self.upstream.clone_layout(layout);
@@ -237,23 +268,49 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.upstream.selected_window(layout)
+        self.answered(
+            "selected_window",
+            self.upstream.selected_window(layout),
+            self.twin.core.selected_window(layout),
+        )
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.upstream.window_in_direction(layout, direction)
+        self.answered(
+            "window_in_direction",
+            self.upstream.window_in_direction(layout, direction),
+            self.twin.core.window_in_direction(layout, core_direction(direction)),
+        )
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.upstream.contains_window(layout, wid)
+        self.answered(
+            "contains_window",
+            self.upstream.contains_window(layout, wid),
+            self.twin.core.contains_window(layout, wid),
+        )
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        self.upstream.has_any_fullscreen_node(layout)
+        self.answered(
+            "has_any_fullscreen_node",
+            self.upstream.has_any_fullscreen_node(layout),
+            self.twin.core.has_any_fullscreen_node(layout),
+        )
     }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
-        self.upstream.windows(layout, query)
+        let core_query = match query {
+            WindowQuery::All => Query::All,
+            WindowQuery::Visible => Query::Visible,
+            WindowQuery::Selection => Query::Selection,
+            WindowQuery::Stack(window) => Query::Stack(window),
+        };
+        self.answered(
+            "windows",
+            self.upstream.windows(layout, query),
+            self.twin.core.windows(layout, core_query),
+        )
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
@@ -476,6 +533,20 @@ mod tests {
             system.twin.core.layouts()[core].root,
             system.upstream.layouts[upstream].root
         );
+    }
+
+    /// A query the core answers otherwise than upstream's system is counted and fails a test.
+    #[test]
+    fn a_query_answered_otherwise_is_counted_and_fails_tests() {
+        let mut system = BspLayoutSystem::default();
+        system.create_layout();
+        system.twin.core.set_window_participation(w(1), Participation::LeftOut);
+        let before = bsp_tree_divergences();
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            system.window_participates(w(1));
+        }));
+        assert!(failed.is_err());
+        assert!(bsp_tree_divergences() > before);
     }
 
     /// A core that differs from upstream's system is counted and fails a test (a running Rift

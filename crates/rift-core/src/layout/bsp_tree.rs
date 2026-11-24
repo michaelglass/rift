@@ -39,6 +39,9 @@ impl Direction {
             Direction::Up | Direction::Down => Orientation::Vertical,
         }
     }
+
+    /// Whether the direction goes toward a split's first child.
+    fn backwards(self) -> bool { matches!(self, Direction::Left | Direction::Up) }
 }
 
 /// One of a split's two children.
@@ -46,6 +49,15 @@ impl Direction {
 pub enum Side {
     First,
     Second,
+}
+
+impl Side {
+    fn index(self) -> usize {
+        match self {
+            Side::First => 0,
+            Side::Second => 1,
+        }
+    }
 }
 
 /// Where the selection goes when it reaches a split: it stops there, or goes on into a side
@@ -163,6 +175,16 @@ pub enum InsertionPoint {
     EndOfTree,
 }
 
+/// Which of a layout's windows to list (upstream's `WindowQuery`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Query<W> {
+    All,
+    Visible,
+    Selection,
+    /// The stack a window is in.
+    Stack(W),
+}
+
 /// Whether a window takes part in layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Participation {
@@ -257,6 +279,75 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
         if let Some(state) = self.layouts.remove(layout) {
             self.remove_subtree(state.root);
         }
+    }
+
+    pub fn selected_window(&self, layout: L) -> Option<W> {
+        let state = self.layouts.get(layout)?;
+        self.participating_window(self.current_selection(state.root))
+    }
+
+    pub fn window_in_direction(&self, layout: L, direction: Direction) -> Option<W> {
+        self.window_in_direction_from(self.layouts.get(layout)?.root, direction)
+    }
+
+    pub fn contains_window(&self, layout: L, window: W) -> bool {
+        self.node_for_window_in_layout(layout, window).is_some()
+    }
+
+    pub fn has_any_fullscreen_node(&self, layout: L) -> bool {
+        self.layouts
+            .get(layout)
+            .is_some_and(|state| self.has_fullscreen_in_subtree(state.root))
+    }
+
+    /// Whether the layout holds a window of the app `of_app` tells.
+    pub fn has_windows_for_app(&self, layout: L, of_app: impl Fn(W) -> bool) -> bool {
+        self.layouts
+            .get(layout)
+            .is_some_and(|state| self.windows_under(state.root).any(of_app))
+    }
+
+    pub fn windows(&self, layout: L, query: Query<W>) -> Vec<W> {
+        match query {
+            Query::All => self.all_windows_in_layout(layout),
+            Query::Visible => self.visible_windows_in_layout(layout),
+            Query::Selection => self
+                .selection_of_layout(layout)
+                .and_then(|node| self.participating_window(self.descend_to_leaf(node)))
+                .into_iter()
+                .collect(),
+            Query::Stack(window) => self
+                .node_for_window_in_layout(layout, window)
+                .and_then(|node| self.stack(node))
+                .map(|tabs| tabs.windows().collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn can_move_window(&self, layout: L, window: W, direction: Direction) -> bool {
+        self.window_participates(window)
+            && self
+                .node_for_window_in_layout(layout, window)
+                .is_some_and(|node| self.find_neighbor_leaf(node, direction).is_some())
+    }
+
+    /// The window's place: the side taken at each split from the root (0 first, 1 second), then
+    /// its position in its leaf's stack, if it is stacked.
+    pub fn window_slot(&self, layout: L, window: W) -> Option<Vec<usize>> {
+        let root = self.layouts.get(layout)?.root;
+        let node = self.node_for_window_in_layout(layout, window)?;
+        let mut current = node;
+        let mut slot = Vec::new();
+        while current != root {
+            let parent = self.parent(current)?;
+            slot.push(usize::from(self.children(parent)?[1] == current));
+            current = parent;
+        }
+        slot.reverse();
+        if let Some(tabs) = self.stack(node) {
+            slot.push(tabs.windows().position(|member| member == window)?);
+        }
+        Some(slot)
     }
 
     /// A layout as the core's geometry takes it, pruned as upstream's `prepare_geometry` prunes
@@ -380,5 +471,225 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
         } else {
             members.windows().find(|&window| self.window_participates(window))
         }
+    }
+
+    fn parent(&self, node: N) -> Option<N> {
+        match self.nodes[node].parent {
+            Parent::Root => None,
+            Parent::Split(parent) => Some(parent),
+        }
+    }
+
+    fn first_child(&self, node: N) -> Option<N> { Some(self.children(node)?[0]) }
+
+    fn child_iter(&self, node: N) -> impl DoubleEndedIterator<Item = N> {
+        self.children(node).into_iter().flatten()
+    }
+
+    fn ancestors(&self, node: N) -> impl Iterator<Item = N> + '_ {
+        std::iter::successors(Some(node), |&node| self.parent(node))
+    }
+
+    fn preorder(&self, root: N) -> impl Iterator<Item = N> + '_ {
+        std::iter::successors(Some(root), move |&node| {
+            self.first_child(node).or_else(|| {
+                self.ancestors(node)
+                    .take_while(|&ancestor| ancestor != root)
+                    .find_map(|ancestor| {
+                        let children = self.children(self.parent(ancestor)?)?;
+                        (children[0] == ancestor).then_some(children[1])
+                    })
+            })
+        })
+    }
+
+    fn current_selection(&self, mut node: N) -> N {
+        while let Kind::Split(Split {
+            children,
+            memory: Memory::Toward(side),
+            ..
+        }) = self.kind(node)
+        {
+            node = children[side.index()];
+        }
+        node
+    }
+
+    fn content(&self, node: N) -> Option<&Content<W>> {
+        match self.kind(node) {
+            Kind::Leaf(leaf) => Some(&leaf.content),
+            Kind::Split(_) => None,
+        }
+    }
+
+    fn stack(&self, node: N) -> Option<&Tabs<W>> {
+        match self.content(node)? {
+            Content::Held {
+                members: Members::Stack(tabs), ..
+            } => Some(tabs),
+            Content::Held { .. } | Content::Empty => None,
+        }
+    }
+
+    fn participating_window(&self, node: N) -> Option<W> {
+        self.participating_member(self.content(node)?)
+    }
+
+    fn find_neighbor_leaf(&self, from_leaf: N, direction: Direction) -> Option<N> {
+        let mut current = from_leaf;
+        while let Some(next) = self.find_structural_neighbor_leaf(current, direction) {
+            if self.left_out.is_empty() || self.participating_window(next).is_some() {
+                return Some(next);
+            }
+            current = next;
+        }
+        None
+    }
+
+    fn find_structural_neighbor_leaf(&self, from_leaf: N, direction: Direction) -> Option<N> {
+        let backwards = direction.backwards();
+        let axis = direction.orientation();
+        let mut anchor = 0.5;
+        let mut current = from_leaf;
+        while let Some(parent) = self.parent(current) {
+            let Kind::Split(Split {
+                orientation, ratio, children, ..
+            }) = *self.kind(parent)
+            else {
+                unreachable!("a BSP parent is a split")
+            };
+            let second = children[1] == current;
+            if orientation == axis {
+                if second == backwards {
+                    let mut target = children[usize::from(!second)];
+                    while let Kind::Split(Split {
+                        orientation, ratio, children, ..
+                    }) = *self.kind(target)
+                    {
+                        let ratio = f64::from(ratio);
+                        let second = if orientation == axis {
+                            backwards
+                        } else if anchor <= ratio {
+                            anchor /= ratio;
+                            false
+                        } else {
+                            anchor = (anchor - ratio) / (1.0 - ratio);
+                            true
+                        };
+                        target = children[usize::from(second)];
+                    }
+                    return Some(target);
+                }
+            } else {
+                let ratio = f64::from(ratio);
+                anchor = if second {
+                    ratio + anchor * (1.0 - ratio)
+                } else {
+                    anchor * ratio
+                };
+            }
+            current = parent;
+        }
+        None
+    }
+
+    fn window_in_direction_from(&self, node: N, direction: Direction) -> Option<W> {
+        let Some(mut children) = self.children(node) else {
+            return self.participating_window(node);
+        };
+        if direction.backwards() {
+            children.swap(0, 1);
+        }
+        children
+            .into_iter()
+            .find_map(|child| self.window_in_direction_from(child, direction))
+    }
+
+    fn node_for_window_in_layout(&self, layout: L, window: W) -> Option<N> {
+        self.find_window(self.layouts.get(layout)?.root, window)
+    }
+
+    fn find_window(&self, node: N, window: W) -> Option<N> {
+        match self.kind(node) {
+            Kind::Split(Split { children: [first, second], .. }) => {
+                self.find_window(*first, window).or_else(|| self.find_window(*second, window))
+            }
+            Kind::Leaf(leaf) => match &leaf.content {
+                Content::Held { members, .. } => {
+                    members.windows().any(|member| member == window).then_some(node)
+                }
+                Content::Empty => None,
+            },
+        }
+    }
+
+    fn descend_to_leaf(&self, mut node: N) -> N {
+        if !self.left_out.is_empty()
+            && let Some(active) = self
+                .preorder(node)
+                .find(|&candidate| self.participating_window(candidate).is_some())
+        {
+            return active;
+        }
+        while let Some(child) = self.first_child(node) {
+            node = child;
+        }
+        node
+    }
+
+    fn windows_under(&self, root: N) -> impl Iterator<Item = W> + '_ {
+        self.preorder(root)
+            .filter_map(|node| match self.content(node)? {
+                Content::Held { members, .. } => Some(members.windows()),
+                Content::Empty => None,
+            })
+            .flatten()
+    }
+
+    fn has_fullscreen_in_subtree(&self, node: N) -> bool {
+        match self.kind(node) {
+            Kind::Leaf(leaf) => {
+                self.participating_window(node).is_some()
+                    && matches!(leaf.content, Content::Held {
+                        fill: Fill::Screen | Fill::WithinGaps,
+                        ..
+                    })
+            }
+            Kind::Split(_) => {
+                self.child_iter(node).any(|child| self.has_fullscreen_in_subtree(child))
+            }
+        }
+    }
+
+    fn selection_of_layout(&self, layout: L) -> Option<N> {
+        let root = self.layouts.get(layout)?.root;
+        let selected = self.current_selection(root);
+        if self.left_out.is_empty() || self.participating_window(selected).is_some() {
+            return Some(selected);
+        }
+        let first_active =
+            self.preorder(root).find(|&node| self.participating_window(node).is_some())?;
+        if matches!(self.content(selected), Some(Content::Held { .. })) {
+            Some(first_active)
+        } else {
+            Some(selected)
+        }
+    }
+
+    fn all_windows_in_layout(&self, layout: L) -> Vec<W> {
+        self.layouts
+            .get(layout)
+            .into_iter()
+            .flat_map(|state| self.windows_under(state.root))
+            .collect()
+    }
+
+    fn visible_windows_in_layout(&self, layout: L) -> Vec<W> {
+        self.layouts
+            .get(layout)
+            .into_iter()
+            .flat_map(|state| self.preorder(state.root))
+            .filter_map(|node| self.participating_window(node))
+            .collect()
     }
 }
