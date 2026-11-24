@@ -4,6 +4,32 @@
 /// grow.
 pub type AxisSummary = (f64, Option<f64>, Option<f64>, bool);
 
+/// A subtree's constraints along both axes: its parent asks along its own axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Along {
+    pub horizontal: AxisSummary,
+    pub vertical: AxisSummary,
+}
+
+impl Along {
+    /// The constraints along each axis, as `summary` gives them.
+    pub fn both(summary: impl Fn(bool) -> AxisSummary) -> Self {
+        Self {
+            horizontal: summary(true),
+            vertical: summary(false),
+        }
+    }
+
+    /// The constraints along one axis.
+    pub fn on(self, horizontal: bool) -> AxisSummary {
+        if horizontal {
+            self.horizontal
+        } else {
+            self.vertical
+        }
+    }
+}
+
 // Shared by Traditional containers and BSP splits. A sole child contributes
 // exactly its own constraints; gaps and stack decorations belong to projections.
 //

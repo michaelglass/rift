@@ -2,11 +2,14 @@
 ## their children out along an axis by weight, or stack them with an offset (one shown on top),
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
-import pf.Boundary exposing [TraditionalNode, TraditionalShape, StackLine, Child, Fill, WindowId, Rect, WindowConstraints, AxisItem, AxisFixed, AxisMax]
+import pf.Boundary exposing [TraditionalNode, TraditionalShape, TraditionalWindow, StackLine, Child, Fill, WindowId, Rect, WindowConstraints, AxisItem, AxisFixed, AxisMax]
 import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, tiled_min, tiling_area]
 
 ## One subtree's constraints along an axis.
 Summary : { min : F64, fixed : AxisFixed, max : AxisMax, can_grow : Bool }
+
+## A subtree's constraints along both axes: its parent asks along its own axis.
+Along : { horizontal : Summary, vertical : Summary }
 
 ## Along an axis by weight, or a stack with the child at `focused` on top.
 ## A stack's frames: its container (without the bar), each window's size, and the offset.
@@ -18,6 +21,18 @@ Node : TraditionalNode
 Shape : TraditionalShape
 
 Traditional := [].{
+
+	## A node with its subtree's constraints along both axes, made for one `frames` and dropped
+	## with it (as the Rust core's `Summarized`).
+	Summarized := { along : Along, node : Annotated }
+
+	Annotated := [Window(TraditionalWindow), Axis(SummarizedAxis), Stack(SummarizedStack)]
+
+	SummarizedAxis := { horizontal : Bool, fill : Fill, first : SummarizedChild, rest : List(SummarizedChild) }
+
+	SummarizedStack := { horizontal : Bool, fill : Fill, before : List(SummarizedChild), focused : SummarizedChild, after : List(SummarizedChild) }
+
+	SummarizedChild := { size : F32, node : Summarized }
 
 	## `f64::clamp`.
 	clamp : F64, F64, F64 -> F64
@@ -82,25 +97,62 @@ Traditional := [].{
 		}
 	}
 
-	summary : Shape, Node, Bool -> Summary
-	summary = |shape, node, horizontal|
+	## The constraints along one axis.
+	on : Along, Bool -> Summary
+	on = |along, horizontal| if (horizontal) along.horizontal else along.vertical
+
+	## The constraints along each axis, as `summary_of` gives them.
+	both : (Bool -> Summary) -> Along
+	both = |summary_of| { horizontal: summary_of(True), vertical: summary_of(False) }
+
+	## The tree with each subtree's constraints along both axes, folded once bottom-up (a
+	## container asks each child's along its own axis; recomputing them at every level made a
+	## deep tree's frames quadratic).
+	summarized : Shape, Node -> Summarized
+	summarized = |shape, node| {
+		child = |c| SummarizedChild.{ size: c.size, node: summarized(shape, c.node) }
 		match node {
-			TraditionalNode.Window({ constraints: Constrained(c), .. }) => leaf_summary(c, horizontal)
-			TraditionalNode.Window({ constraints: Unconstrained, .. }) => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
-			TraditionalNode.Axis({ horizontal: along, first, rest, .. }) => {
-				aligned = along == horizontal
-				add = |acc, child| gather(acc, summary(shape, child.node, horizontal), aligned, False)
-				acc = rest.fold(add(gather_start, first), add)
-				gathered(acc, aligned, False, gap_along(shape, horizontal), shape.stack_offset, 0.0)
+			TraditionalNode.Window(window) => {
+				leaf = |horizontal|
+					match window.constraints {
+						Constrained(c) => leaf_summary(c, horizontal)
+						Unconstrained => { min: 0.0, fixed: Free, max: NoMax, can_grow: True }
+					}
+				Summarized.{ along: both(leaf), node: Annotated.Window(window) }
 			}
 
-			TraditionalNode.Stack({ horizontal: along, before, focused, after, .. }) => {
-				aligned = along == horizontal
-				add = |acc, child| gather(acc, summary(shape, child.node, horizontal), aligned, True)
-				acc = after.fold(add(before.fold(gather_start, add), focused), add)
-				gathered(acc, aligned, True, gap_along(shape, horizontal), shape.stack_offset, on_axis(shape.stack_line, along, horizontal))
+			TraditionalNode.Axis({ horizontal: along, fill, first, rest }) => {
+				first_s = child(first)
+				rest_s = rest.map(child)
+				container = |horizontal| {
+					aligned = along == horizontal
+					add = |acc, c| gather(acc, on(c.node.along, horizontal), aligned, False)
+					acc = rest_s.fold(add(gather_start, first_s), add)
+					gathered(acc, aligned, False, gap_along(shape, horizontal), shape.stack_offset, 0.0)
+				}
+				Summarized.{
+					along: both(container),
+					node: Annotated.Axis(SummarizedAxis.{ horizontal: along, fill, first: first_s, rest: rest_s }),
+				}
+			}
+
+			TraditionalNode.Stack({ horizontal: along, fill, before, focused, after }) => {
+				before_s = before.map(child)
+				focused_s = child(focused)
+				after_s = after.map(child)
+				container = |horizontal| {
+					aligned = along == horizontal
+					add = |acc, c| gather(acc, on(c.node.along, horizontal), aligned, True)
+					acc = after_s.fold(add(before_s.fold(gather_start, add), focused_s), add)
+					gathered(acc, aligned, True, gap_along(shape, horizontal), shape.stack_offset, on_axis(shape.stack_line, along, horizontal))
+				}
+				Summarized.{
+					along: both(container),
+					node: Annotated.Stack(SummarizedStack.{ horizontal: along, fill, before: before_s, focused: focused_s, after: after_s }),
+				}
 			}
 		}
+	}
 
 	gap_along : Shape, Bool -> F64
 	gap_along = |shape, horizontal| if (horizontal) shape.gaps.horizontal else shape.gaps.vertical
@@ -144,10 +196,10 @@ Traditional := [].{
 		})
 	}
 
-	place : Shape, Node, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	place : Shape, Summarized, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
 	place = |shape, node, rect0, out|
-		match node {
-			TraditionalNode.Window({ window, constraints, fill }) => {
+		match node.node {
+			Annotated.Window({ window, constraints, fill }) => {
 				rect = filled(shape, fill, rect0)
 				frame =
 					match constraints {
@@ -174,21 +226,21 @@ Traditional := [].{
 				out.append((window, frame))
 			}
 
-			TraditionalNode.Stack({ horizontal, fill, before, focused, after }) =>
+			Annotated.Stack({ horizontal, fill, before, focused, after }) =>
 				stack(shape, before, focused, after, horizontal, filled(shape, fill, rect0), out)
 
-			TraditionalNode.Axis({ horizontal, fill, first, rest }) =>
+			Annotated.Axis({ horizontal, fill, first, rest }) =>
 				axis(shape, first, rest, horizontal, filled(shape, fill, rect0), out)
 		}
 
-	stack : Shape, List(Child), Child, List(Child), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	stack : Shape, List(SummarizedChild), SummarizedChild, List(SummarizedChild), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
 	stack = |shape, before, focused, after, horizontal, rect, out0| {
 		count = before.len() + 1 + after.len()
 		axis_len = if (horizontal) rect.w else rect.h
 		# The offset is capped so the window on top keeps its required length.
 		offset =
 			if count > 1 {
-				s = summary(shape, focused.node, horizontal)
+				s = on(focused.node.along, horizontal)
 				low =
 					match s.fixed {
 						Fixed(v) => v
@@ -207,7 +259,7 @@ Traditional := [].{
 		placed
 	}
 
-	axis : Shape, Child, List(Child), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	axis : Shape, SummarizedChild, List(SummarizedChild), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
 	axis = |shape, first, rest, horizontal, rect, out0| {
 		children = [first].concat(rest)
 		# Weights as upstream's `layout_axis` reads them (since #688): each as an F64, and equal
@@ -228,7 +280,7 @@ Traditional := [].{
 		items =
 			children.map(
 				|child| {
-					s = summary(shape, child.node, horizontal)
+					s = on(child.node.along, horizontal)
 					weight = if (equal) 1.0 else F32.to_f64(child.size)
 					AxisItem.{ min: s.min, fixed: s.fixed, max: s.max, weight, can_grow: s.can_grow }
 				},
@@ -253,5 +305,5 @@ Traditional := [].{
 
 	frames : Shape -> List((WindowId, Rect))
 	frames = |shape|
-		place(shape, shape.root, shape.area, [])
+		place(shape, summarized(shape, shape.root), shape.area, [])
 }

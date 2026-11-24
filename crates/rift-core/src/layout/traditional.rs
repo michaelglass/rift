@@ -2,7 +2,9 @@
 //! by weight, or stack them with an offset (one shown on top), as far as the windows'
 //! constraints allow. The stack and master-stack systems are traditional trees too.
 
-use super::axis::{AxisConstraints, AxisSummary, container_axis_constraints, solve_axis_lengths};
+use super::axis::{
+    Along, AxisConstraints, AxisSummary, container_axis_constraints, solve_axis_lengths,
+};
 use super::{Gaps, Sizing, WindowConstraints, round, tiling_area};
 use crate::plain::Rect;
 
@@ -189,42 +191,91 @@ impl<W: Copy> Traditional<W> {
     /// Each window's frame, in tree order.
     pub fn frames(&self) -> Vec<(W, Rect)> {
         let mut out = Vec::new();
-        self.place(&self.root, self.area, &mut out);
+        self.place(&self.summarized(&self.root), self.area, &mut out);
         out
     }
 
-    fn summary(&self, node: &Node<W>, horizontal: bool) -> AxisSummary {
+    /// The tree with each subtree's constraints along both axes, folded once bottom-up (a
+    /// container asks each child's along its own axis; recomputing them at every level made a
+    /// deep tree's frames quadratic).
+    fn summarized(&self, node: &Node<W>) -> Summarized<W> {
+        let child = |child: &Child<W>| SummarizedChild {
+            size: child.size,
+            node: self.summarized(&child.node),
+        };
         match node {
-            Node::Window { constraints: Some(c), .. } => leaf_summary(*c, horizontal),
-            Node::Window { constraints: None, .. } => (0.0, None, None, true),
+            Node::Window { window, constraints, fill } => Summarized {
+                along: Along::both(|horizontal| match constraints {
+                    Some(c) => leaf_summary(*c, horizontal),
+                    None => (0.0, None, None, true),
+                }),
+                node: Annotated::Window {
+                    window: *window,
+                    constraints: *constraints,
+                    fill: *fill,
+                },
+            },
             Node::Axis {
-                horizontal: along, first, rest, ..
-            } => self.container(
-                std::iter::once(&**first).chain(rest),
-                *along == horizontal,
-                false,
-                horizontal,
-                0.0,
-            ),
+                horizontal: along,
+                fill,
+                first,
+                rest,
+            } => {
+                let first = Box::new(child(first));
+                let rest: Vec<SummarizedChild<W>> = rest.iter().map(child).collect();
+                Summarized {
+                    along: Along::both(|horizontal| {
+                        self.container(
+                            std::iter::once(&*first).chain(&rest),
+                            *along == horizontal,
+                            false,
+                            horizontal,
+                            0.0,
+                        )
+                    }),
+                    node: Annotated::Axis {
+                        horizontal: *along,
+                        fill: *fill,
+                        first,
+                        rest,
+                    },
+                }
+            }
             Node::Stack {
                 horizontal: along,
+                fill,
                 before,
                 focused,
                 after,
-                ..
-            } => self.container(
-                before.iter().chain(std::iter::once(&**focused)).chain(after),
-                *along == horizontal,
-                true,
-                horizontal,
-                self.stack_line.on_axis(*along, horizontal),
-            ),
+            } => {
+                let before: Vec<SummarizedChild<W>> = before.iter().map(child).collect();
+                let focused = Box::new(child(focused));
+                let after: Vec<SummarizedChild<W>> = after.iter().map(child).collect();
+                Summarized {
+                    along: Along::both(|horizontal| {
+                        self.container(
+                            before.iter().chain(std::iter::once(&*focused)).chain(&after),
+                            *along == horizontal,
+                            true,
+                            horizontal,
+                            self.stack_line.on_axis(*along, horizontal),
+                        )
+                    }),
+                    node: Annotated::Stack {
+                        horizontal: *along,
+                        fill: *fill,
+                        before,
+                        focused,
+                        after,
+                    },
+                }
+            }
         }
     }
 
     fn container<'a>(
         &self,
-        children: impl Iterator<Item = &'a Child<W>>,
+        children: impl Iterator<Item = &'a SummarizedChild<W>>,
         aligned: bool,
         stacked: bool,
         horizontal: bool,
@@ -234,7 +285,7 @@ impl<W: Copy> Traditional<W> {
         W: 'a,
     {
         container_axis_constraints(
-            children.map(|child| self.summary(&child.node, horizontal)),
+            children.map(|child| child.node.along.on(horizontal)),
             aligned,
             stacked,
             if horizontal {
@@ -255,9 +306,9 @@ impl<W: Copy> Traditional<W> {
         }
     }
 
-    fn place(&self, node: &Node<W>, rect: Rect, out: &mut Vec<(W, Rect)>) {
-        match node {
-            Node::Window { window, constraints, fill } => {
+    fn place(&self, node: &Summarized<W>, rect: Rect, out: &mut Vec<(W, Rect)>) {
+        match &node.node {
+            Annotated::Window { window, constraints, fill } => {
                 let rect = self.filled(*fill, rect);
                 let frame = match constraints {
                     Some(c) => {
@@ -277,7 +328,7 @@ impl<W: Copy> Traditional<W> {
                 };
                 out.push((*window, frame));
             }
-            Node::Stack {
+            Annotated::Stack {
                 horizontal,
                 fill,
                 before,
@@ -291,7 +342,7 @@ impl<W: Copy> Traditional<W> {
                 self.filled(*fill, rect),
                 out,
             ),
-            Node::Axis { horizontal, fill, first, rest } => {
+            Annotated::Axis { horizontal, fill, first, rest } => {
                 self.axis(first, rest, *horizontal, self.filled(*fill, rect), out)
             }
         }
@@ -299,9 +350,9 @@ impl<W: Copy> Traditional<W> {
 
     fn stack(
         &self,
-        before: &[Child<W>],
-        focused: &Child<W>,
-        after: &[Child<W>],
+        before: &[SummarizedChild<W>],
+        focused: &SummarizedChild<W>,
+        after: &[SummarizedChild<W>],
         horizontal: bool,
         rect: Rect,
         out: &mut Vec<(W, Rect)>,
@@ -311,7 +362,7 @@ impl<W: Copy> Traditional<W> {
         // The offset is capped so the window on top keeps its required length (a maximum is no
         // requirement).
         let offset = if count > 1 {
-            let (min, fixed, _, _) = self.summary(&focused.node, horizontal);
+            let (min, fixed, _, _) = focused.node.along.on(horizontal);
             let desired = fixed.unwrap_or(min).clamp(0.0, axis_len.max(0.0));
             let max_offset = (axis_len - desired).max(0.0) / (count - 1) as f64;
             self.stack_offset.min(max_offset)
@@ -327,13 +378,13 @@ impl<W: Copy> Traditional<W> {
 
     fn axis(
         &self,
-        first: &Child<W>,
-        rest: &[Child<W>],
+        first: &SummarizedChild<W>,
+        rest: &[SummarizedChild<W>],
         horizontal: bool,
         rect: Rect,
         out: &mut Vec<(W, Rect)>,
     ) {
-        let children: Vec<&Child<W>> = std::iter::once(first).chain(rest).collect();
+        let children: Vec<&SummarizedChild<W>> = std::iter::once(first).chain(rest).collect();
         // Weights as upstream's `layout_axis` reads them (since #688): each as an f64, and
         // equal weights only when one is negative or not finite, or they add up to nothing (a
         // small positive weight, which splitting and promotion can leave, stands).
@@ -360,7 +411,7 @@ impl<W: Copy> Traditional<W> {
         let items: Vec<AxisConstraints> = children
             .iter()
             .map(|child| {
-                let (min, fixed, max, can_grow) = self.summary(&child.node, horizontal);
+                let (min, fixed, max, can_grow) = child.node.along.on(horizontal);
                 let weight = if equal { 1.0 } else { f64::from(child.size) };
                 AxisConstraints {
                     min,
@@ -386,6 +437,39 @@ impl<W: Copy> Traditional<W> {
             }
         }
     }
+}
+
+/// A node of a [`Traditional`] with its subtree's constraints along both axes, made for one
+/// `frames` and dropped with it.
+struct Summarized<W> {
+    along: Along,
+    node: Annotated<W>,
+}
+
+enum Annotated<W> {
+    Window {
+        window: W,
+        constraints: Option<WindowConstraints>,
+        fill: Fill,
+    },
+    Axis {
+        horizontal: bool,
+        fill: Fill,
+        first: Box<SummarizedChild<W>>,
+        rest: Vec<SummarizedChild<W>>,
+    },
+    Stack {
+        horizontal: bool,
+        fill: Fill,
+        before: Vec<SummarizedChild<W>>,
+        focused: Box<SummarizedChild<W>>,
+        after: Vec<SummarizedChild<W>>,
+    },
+}
+
+struct SummarizedChild<W> {
+    size: f32,
+    node: Summarized<W>,
 }
 
 /// The frames of a stack of `count` windows in `rect`, each `offset` further along than the one

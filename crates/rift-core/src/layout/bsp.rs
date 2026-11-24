@@ -1,7 +1,9 @@
 //! A BSP layout's frames: every split divides its area in two along one axis, by a ratio, as
 //! far as its windows' constraints allow.
 
-use super::axis::{AxisConstraints, AxisSummary, container_axis_constraints, solve_axis_lengths};
+use super::axis::{
+    Along, AxisConstraints, AxisSummary, container_axis_constraints, solve_axis_lengths,
+};
 use super::{Gaps, WindowConstraints, tiling_area};
 use crate::plain::Rect;
 
@@ -104,7 +106,7 @@ impl<W: Copy> Bsp<W> {
         let root = &self.root;
         let area = tiling_area(self.screen, self.gaps);
         let mut out = Vec::new();
-        self.place(root, area, &mut out);
+        self.place(&self.summarized(root), area, &mut out);
         if let (Some(ratio), [(_, frame)]) = (self.aspect, out.as_mut_slice())
             && let Node::Leaf {
                 fill: Fill::Tiled,
@@ -127,13 +129,49 @@ impl<W: Copy> Bsp<W> {
         out
     }
 
-    fn place(&self, node: &Node<W>, rect: Rect, out: &mut Vec<(W, Rect)>) {
+    /// The tree with each subtree's constraints along both axes, folded once bottom-up (a
+    /// split asks each child's along its own axis; recomputing them at every level made a deep
+    /// tree's frames quadratic).
+    fn summarized<'a>(&self, node: &'a Node<W>) -> Summarized<'a, W> {
         match node {
-            Node::Leaf { slot: Slot::Empty, .. } => {}
-            Node::Leaf {
+            Node::Leaf { slot, fill, .. } => Summarized {
+                along: Along::both(|horizontal| leaf_summary(slot, horizontal)),
+                node: Annotated::Leaf { slot, fill: *fill },
+            },
+            Node::Split {
+                horizontal: split,
+                ratio,
+                children,
+            } => {
+                let children = match children {
+                    Children::One(child) => {
+                        SummarizedChildren::One(Box::new(self.summarized(child)))
+                    }
+                    Children::Two(first, second) => SummarizedChildren::Two(
+                        Box::new(self.summarized(first)),
+                        Box::new(self.summarized(second)),
+                    ),
+                };
+                Summarized {
+                    along: Along::both(|horizontal| {
+                        self.split_summary(*split, children.alongs(), horizontal)
+                    }),
+                    node: Annotated::Split {
+                        horizontal: *split,
+                        ratio: *ratio,
+                        children,
+                    },
+                }
+            }
+        }
+    }
+
+    fn place(&self, node: &Summarized<'_, W>, rect: Rect, out: &mut Vec<(W, Rect)>) {
+        match &node.node {
+            Annotated::Leaf { slot: Slot::Empty, .. } => {}
+            Annotated::Leaf {
                 slot: Slot::Window { window, constraints },
                 fill,
-                ..
             } => {
                 let target = match fill {
                     Fill::Screen => self.screen,
@@ -145,13 +183,14 @@ impl<W: Copy> Bsp<W> {
                 };
                 out.push((*window, target));
             }
-            Node::Split {
-                children: Children::One(child), ..
+            Annotated::Split {
+                children: SummarizedChildren::One(child),
+                ..
             } => self.place(child, rect, out),
-            Node::Split {
+            Annotated::Split {
                 horizontal,
                 ratio,
-                children: Children::Two(first, second),
+                children: SummarizedChildren::Two(first, second),
             } => {
                 let horizontal = *horizontal;
                 let (total, gap) = if horizontal {
@@ -161,8 +200,8 @@ impl<W: Copy> Bsp<W> {
                 };
                 let available = (total - gap).max(0.0);
                 let ratio = f64::from(*ratio);
-                let axis = |node: &Node<W>, weight: f64| {
-                    let (min, fixed, max, can_grow) = self.summary(node, horizontal);
+                let axis = |node: &Summarized<'_, W>, weight: f64| {
+                    let (min, fixed, max, can_grow) = node.along.on(horizontal);
                     AxisConstraints {
                         min,
                         fixed,
@@ -190,60 +229,83 @@ impl<W: Copy> Bsp<W> {
         }
     }
 
-    /// The subtree's constraints along one axis.
-    fn summary(&self, node: &Node<W>, horizontal: bool) -> AxisSummary {
-        match node {
-            Node::Leaf {
-                slot:
-                    Slot::Window {
-                        constraints: Some(constraints), ..
-                    },
-                ..
-            } => {
-                let c = constraints.normalized();
-                (
-                    c.reported_min(horizontal),
-                    c.fixed_for_axis(horizontal),
-                    (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal)),
-                    c.resizable_for_axis(horizontal),
-                )
-            }
-            Node::Leaf {
-                slot: Slot::Window { constraints: None, .. } | Slot::Empty,
-                ..
-            } => (0.0, None, None, true),
-            Node::Split {
-                horizontal: split, children, ..
-            } => {
-                let summaries: Vec<AxisSummary> = match children {
-                    Children::One(child) => vec![self.summary(child, horizontal)],
-                    Children::Two(first, second) => {
-                        vec![
-                            self.summary(first, horizontal),
-                            self.summary(second, horizontal),
-                        ]
-                    }
-                };
-                let gap = if horizontal {
-                    self.gaps.horizontal
-                } else {
-                    self.gaps.vertical
-                };
-                let mut summary = container_axis_constraints(
-                    summaries.into_iter(),
-                    *split == horizontal,
-                    false,
-                    gap,
-                    0.0,
-                    0.0,
-                );
-                // BSP has always left the perpendicular maximum unconstrained.
-                if *split != horizontal {
-                    summary.2 = None;
-                }
-                summary
-            }
+    /// A split's constraints along one axis, from its children's.
+    fn split_summary(
+        &self,
+        split: bool,
+        children: impl Iterator<Item = Along>,
+        horizontal: bool,
+    ) -> AxisSummary {
+        let gap = if horizontal {
+            self.gaps.horizontal
+        } else {
+            self.gaps.vertical
+        };
+        let mut summary = container_axis_constraints(
+            children.map(|along| along.on(horizontal)),
+            split == horizontal,
+            false,
+            gap,
+            0.0,
+            0.0,
+        );
+        // BSP has always left the perpendicular maximum unconstrained.
+        if split != horizontal {
+            summary.2 = None;
         }
+        summary
+    }
+}
+
+/// A leaf's constraints along one axis.
+fn leaf_summary<W>(slot: &Slot<W>, horizontal: bool) -> AxisSummary {
+    match slot {
+        Slot::Window {
+            constraints: Some(constraints), ..
+        } => {
+            let c = constraints.normalized();
+            (
+                c.reported_min(horizontal),
+                c.fixed_for_axis(horizontal),
+                (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal)),
+                c.resizable_for_axis(horizontal),
+            )
+        }
+        Slot::Window { constraints: None, .. } | Slot::Empty => (0.0, None, None, true),
+    }
+}
+
+/// A node of a [`Bsp`] with its subtree's constraints along both axes, made for one `frames`
+/// and dropped with it.
+struct Summarized<'a, W> {
+    along: Along,
+    node: Annotated<'a, W>,
+}
+
+enum Annotated<'a, W> {
+    Leaf {
+        slot: &'a Slot<W>,
+        fill: Fill,
+    },
+    Split {
+        horizontal: bool,
+        ratio: f32,
+        children: SummarizedChildren<'a, W>,
+    },
+}
+
+enum SummarizedChildren<'a, W> {
+    One(Box<Summarized<'a, W>>),
+    Two(Box<Summarized<'a, W>>, Box<Summarized<'a, W>>),
+}
+
+impl<W> SummarizedChildren<'_, W> {
+    fn alongs(&self) -> impl Iterator<Item = Along> + '_ {
+        let (first, second) = match self {
+            Self::One(only) => (only, None),
+            Self::Two(first, second) => (first, Some(second)),
+        };
+        std::iter::once(first.along).chain(second.map(|s| s.along))
     }
 }
 
