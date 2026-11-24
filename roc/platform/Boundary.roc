@@ -909,8 +909,18 @@ Boundary := [].{
 
 	BspResize := { amount : F64, along : BspResizeAlong }
 
-	## An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads).
-	BspEdit := [Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
+	## Two windows.
+	BspPair := { a : U64, b : U64 }
+
+	## What a window dropped onto another does (upstream's `WindowDropAction`; its `Move` is
+	## `Moved`, since the glue does not escape Rust's `move`).
+	BspDropAction := [Swap, Stack, Insert(BspDirection), Moved(BspDirection), ConsumeOrExpel(BspDirection)]
+
+	BspDrop := { source : U64, target : U64, action : BspDropAction }
+
+	## An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads; its `Move` is
+	## `Moved`, since the glue does not escape Rust's `move`).
+	BspEdit := [Moved(BspDirection), Swap(BspPair), Drop(BspDrop), Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
 
 	BspEditIn := { layout : U64, edit : BspEdit }
 

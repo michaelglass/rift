@@ -8,7 +8,7 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
-import pf.Boundary exposing [Aspect, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
+import pf.Boundary exposing [Aspect, BspDrop, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
 
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
@@ -646,6 +646,9 @@ BspTree := [].{
 	edit : Trees, BspEditIn -> (Trees, BspEdited)
 	edit = |trees, { layout, edit: asked }|
 		match asked {
+			Moved(direction) => edited_by(move_selection(trees, layout, direction))
+			Swap({ a, b }) => edited_by(swap_windows(trees, layout, a, b))
+			Drop(dropped) => edited_by(apply_target_drop(trees, layout, dropped))
 			Split(Stacked) => (trees, Unsupported)
 			Split(Tiled(orientation)) =>
 				match selection_of_layout(trees, layout) {
@@ -762,6 +765,10 @@ BspTree := [].{
 			(_, Screen) => Screen
 		}
 
+	## An edit's answer by whether it changed the layout.
+	edited_by : (Trees, Bool) -> (Trees, BspEdited)
+	edited_by = |(after, did)| (after, if did Changed else Unchanged)
+
 	is_split : Trees, U64 -> Bool
 	is_split = |trees, key|
 		match kind(trees, key) {
@@ -772,6 +779,171 @@ BspTree := [].{
 	## Rust's `f32::clamp`.
 	clamp_f32 : F32, F32, F32 -> F32
 	clamp_f32 = |value, low, high| if value < low low else if value > high high else value
+
+	# Moves, swaps and drops.
+
+	## The selected leaf moved `direction`: beside its neighbour in their split, into an empty
+	## neighbour's place, or into a new split with a held one.
+	move_selection : Trees, U64, BspDirection -> (Trees, Bool)
+	move_selection = |trees, layout, direction|
+		match selection_of_layout(trees, layout) {
+			NoSelection => (trees, False)
+			Selection(selected) => {
+				moving = descend_to_leaf(trees, selected)
+				match (content(trees, moving), find_neighbor_leaf(trees, moving, direction), parent(trees, moving)) {
+					(Content(Held(_)), Neighbor(target), Parent(old_parent)) => {
+						side = side_of(direction)
+						moved =
+							match parent(trees, target) {
+								Parent(target_parent) if target_parent == old_parent => {
+									split = split_of(trees, old_parent, "move_selection")
+									moving_first = split.first == moving
+									going_first =
+										match side {
+											First => True
+											Second => False
+										}
+									if moving_first != going_first {
+										set_kind(trees, old_parent, Split({ ..split, first: split.second, second: split.first }), "move_selection")
+									} else {
+										trees
+									}
+								}
+								_ => {
+									detached = detach_child(trees, moving)
+									match content(detached, target) {
+										Content(Empty) => {
+											placed = replace_child(detached, target, moving)
+											(nodes, _) = remove(placed.nodes, target)
+											{ ..placed, nodes }
+										}
+										_ => {
+											(with_split, made) = make_leaf(detached, Empty)
+											pair =
+												match side {
+													First => (moving, target)
+													Second => (target, moving)
+												}
+											set_split(replace_child(with_split, target, made), made, orientation_of(direction), pair)
+										}
+									}
+								}
+							}
+						(select(moved, moving), True)
+					}
+					_ => (trees, False)
+				}
+			}
+		}
+
+	## `new` in `old`'s place in its split; `old` is not a root.
+	replace_child : Trees, U64, U64 -> Trees
+	replace_child = |trees, old, new| {
+		above =
+			match parent(trees, old) {
+				Parent(found) => found
+				NoParent => {
+					crash "BspTree.replace_child: node ${old.to_str()} is a root"
+				}
+			}
+		split = split_of(trees, above, "replace_child")
+		swapped_in = if split.second == old { ..split, second: new } else { ..split, first: new }
+		set_parent(set_kind(trees, above, Split(swapped_in), "replace_child"), new, Split(above))
+	}
+
+	## Two windows taking part swapped: in one stack, both moved to its end (the first on top);
+	## across leaves, their windows trade places and each leaf keeps its fill.
+	swap_windows : Trees, U64, U64, U64 -> (Trees, Bool)
+	swap_windows = |trees, layout, a, b|
+		if a == b or trees.left_out.contains(a) or trees.left_out.contains(b) {
+			(trees, False)
+		} else {
+			match (node_for_window_in_layout(trees, layout, a), node_for_window_in_layout(trees, layout, b)) {
+				(Found(node_a), Found(node_b)) =>
+					if node_a == node_b {
+						match content_of(trees, node_a, "swap_windows") {
+							Held({ members: Stack(tabs), fill }) => {
+								before = tabs_windows(tabs).keep_if(|window| window != a and window != b).append(b)
+								swapped = set_content(trees, node_a, Held({ members: Stack({ before, top: a, after: [] }), fill }), "swap_windows")
+								(select(swapped, node_a), True)
+							}
+							_ => {
+								crash "BspTree.swap_windows: leaf ${node_a.to_str()} holds two windows and no stack"
+							}
+						}
+					} else {
+						match (content_of(trees, node_a, "swap_windows"), content_of(trees, node_b, "swap_windows")) {
+							(Held(first), Held(second)) => {
+								traded = set_content(trees, node_a, Held({ members: for_slot_swap(second.members), fill: first.fill }), "swap_windows")
+								(set_content(traded, node_b, Held({ members: for_slot_swap(first.members), fill: second.fill }), "swap_windows"), True)
+							}
+							_ => {
+								crash "BspTree.swap_windows: a window's leaf holds none"
+							}
+						}
+					}
+				_ => (trees, False)
+			}
+		}
+
+	## A window dropped onto another (upstream's `apply_target_drop`): swapped with it, stacked
+	## onto it, or inserted beside it; both must take part and be in the layout.
+	apply_target_drop : Trees, U64, BspDrop -> (Trees, Bool)
+	apply_target_drop = |trees, layout, { source, target, action }|
+		if trees.left_out.contains(source) or trees.left_out.contains(target) or source == target or !contains_window(trees, layout, source) or !contains_window(trees, layout, target) {
+			(trees, False)
+		} else {
+			match action {
+				Swap => swap_windows(trees, layout, source, target)
+				Moved(_) | ConsumeOrExpel(_) => (trees, False)
+				Stack => {
+					(taken, onto) = taken_from_beside(trees, layout, source, target)
+					stacked =
+						match content_of(taken, onto, "apply_target_drop") {
+							Held(held) => set_content(taken, onto, Held({ ..held, members: appended(held.members, source) }), "apply_target_drop")
+							Empty => taken
+						}
+					(select(stacked, onto), True)
+				}
+				Insert(direction) => {
+					(taken, beside) = taken_from_beside(trees, layout, source, target)
+					(split_leaf(taken, beside, orientation_of(direction), lone(source), side_of(direction)), True)
+				}
+			}
+		}
+
+	## `source` removed from the layout, and the leaf now holding `target` (removal can promote
+	## it into another slot).
+	taken_from_beside : Trees, U64, U64, U64 -> (Trees, U64)
+	taken_from_beside = |trees, layout, source, target| {
+		taken = remove_every(trees, layout, source)
+		match node_for_window_in_layout(taken, layout, target) {
+			Found(leaf) => (taken, leaf)
+			NotFound => {
+				crash "BspTree.taken_from_beside: removing ${source.to_str()} lost ${target.to_str()}"
+			}
+		}
+	}
+
+	## `window` added to the end of the stack, on top (a lone window becomes a stack of two).
+	appended : BspMembers, U64 -> BspMembers
+	appended = |members, window| Stack({ before: members_windows(members), top: window, after: [] })
+
+	## The windows as they move to another slot: a stack shows its last window, a stack of one is
+	## a lone window.
+	for_slot_swap : BspMembers -> BspMembers
+	for_slot_swap = |members|
+		match members {
+			Window(_) => members
+			Stack({ before, top, after }) => {
+				tabs =
+					match after.last() {
+						Ok(last) => { before: before.append(top).concat(after.drop_last(1)), top: last, after: [] }
+						Err(_) => { before, top, after }
+					}
+				if tabs.before.is_empty() Window(tabs.top) else Stack(tabs)
+			}
+		}
 
 	# Selection and insertion.
 

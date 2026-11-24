@@ -1,12 +1,12 @@
 //! A BSP layout system's trees, kept between operations: the Roc twin (`RocBspTree`) against the
-//! Rust tree (`rift_core::layout::bsp_tree::Tree`), on drawn runs of operations. Runs reuse a few
-//! windows and the keys the run has made (stale ones too: removed layouts), so ids are reused
+//! Rust tree (`rift_core::layout::bsp_tree::Tree`), on 8000 drawn runs of operations. Runs reuse a
+//! few windows and the keys the run has made (stale ones too: removed layouts), so ids are reused
 //! and stale keys meet the slot versions. Every operation must answer alike and leave the same
 //! whole system: each table's slots, versions and free list, the windows left out, the settings.
 
 use rift_core::layout::bsp_tree::{
-    Direction, Edit, Focus, Focused, InsertionPoint, Orientation, Participation, Query, Resize,
-    ResizeAlong, SplitKind,
+    Content, Direction, DropAction, Edit, Focus, Focused, InsertionPoint, Kind, Members,
+    Orientation, Participation, Query, Resize, ResizeAlong, SplitKind,
 };
 use rift_core::plain::Rect;
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
@@ -49,6 +49,15 @@ impl Rng {
             7 => at(100.0, 100.0, 400.0, 180.0),
             8 => at(50.0, 60.0, 620.0, 410.0),
             _ => at(100.0, 100.0, 0.0, 300.0),
+        }
+    }
+
+    /// A window the layout holds (most of the time), else any: biased toward the windows a
+    /// move, swap, drop or query decides on.
+    fn held(&mut self, held: &[u64]) -> u64 {
+        match self.pick(held) {
+            Some(window) if self.chance(80) => window,
+            _ => self.window(),
         }
     }
 
@@ -99,6 +108,25 @@ impl Rng {
             },
             4 => Edit::Rebalance,
             _ => Edit::ToggleOrientation,
+        }
+    }
+
+    /// A move, swap or drop (the edits that move windows between leaves).
+    fn moving_edit(&mut self, held: &[u64]) -> Edit<u64> {
+        match self.below(5) {
+            0 | 1 => Edit::Move(self.direction()),
+            2 => Edit::Swap(self.held(held), self.held(held)),
+            _ => Edit::Drop {
+                source: self.held(held),
+                target: self.held(held),
+                action: match self.below(6) {
+                    0 => DropAction::Swap,
+                    1 | 2 => DropAction::Stack,
+                    3 => DropAction::Insert(self.direction()),
+                    4 => DropAction::Move(self.direction()),
+                    _ => DropAction::ConsumeOrExpel(self.direction()),
+                },
+            },
         }
     }
 
@@ -164,8 +192,12 @@ impl Made {
         }
     }
 
-    fn event(&self, rng: &mut Rng) -> Event {
-        match rng.below(44) {
+    fn event(&self, rng: &mut Rng, tree: &Tree) -> Event {
+        match rng.below(52) {
+            44..=51 => {
+                let layout = self.layout(rng);
+                Event::Edit(layout, rng.moving_edit(&tree.windows(layout, Query::All)))
+            }
             36..=43 => Event::Edit(self.layout(rng), rng.shape_edit()),
             30..=35 => Event::Focus(self.layout(rng), match rng.below(5) {
                 0 => Focus::Select(rng.window()),
@@ -207,9 +239,9 @@ impl Made {
     }
 
     /// A query, of a layout the run made and a window it may hold.
-    fn query(&self, rng: &mut Rng) -> Event {
+    fn query(&self, rng: &mut Rng, tree: &Tree) -> Event {
         let layout = self.layout(rng);
-        let window = rng.window();
+        let window = rng.held(&tree.windows(layout, Query::All));
         match rng.below(10) {
             0 => Event::ContainsLayout(layout),
             1 => Event::WindowParticipates(window),
@@ -247,11 +279,11 @@ impl Made {
 
 #[test]
 fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
-    let runs: u64 = std::env::var("RIFT_BSP_TREE_RUNS").map_or(1_000, |n| n.parse().unwrap());
+    let runs: u64 = std::env::var("RIFT_BSP_TREE_RUNS").map_or(8_000, |n| n.parse().unwrap());
     let mut rng = Rng(0xB5B7_7EE0_0000_0001);
     let before = AllocationCount::now();
     let (mut steps, mut reused, mut deepest, mut resized) = (0, 0, 0, 0);
-    let (mut queries, mut told, mut reached) = (0, 0, 0);
+    let (mut queries, mut told, mut reached, mut stacked) = (0, 0, 0, 0);
     for run in 0..runs {
         let insertion = rng.insertion();
         let mut rust = Tree::new(insertion);
@@ -259,7 +291,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         let mut made = Made::default();
         let mut history = Vec::new();
         for step in 0..60 {
-            let event = made.event(&mut rng);
+            let event = made.event(&mut rng, &rust);
             history.push(event.clone());
             let before_step = TreeView::from(&rust);
             let expected = bsp_tree::step(&mut rust, event.clone());
@@ -287,7 +319,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
                 reached += 1;
             }
             if rng.chance(50) {
-                let query = made.query(&mut rng);
+                let query = made.query(&mut rng, &rust);
                 let expected = bsp_tree::step(&mut rust, query.clone());
                 assert_eq!(
                     roc.step(query.clone()),
@@ -305,6 +337,12 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
                 });
             }
             deepest = deepest.max(rust.nodes().len());
+            stacked += usize::from(rust.nodes().values().any(|node| {
+                matches!(&node.kind, Kind::Leaf(leaf) if matches!(&leaf.content, Content::Held {
+                    members: Members::Stack(_),
+                    ..
+                }))
+            }));
         }
     }
     assert_eq!(
@@ -326,7 +364,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         "no system grew past {deepest} nodes: the trees went unexercised"
     );
     eprintln!(
-        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something; {reached} focus moves reaching a window), the system compared after each"
+        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something; {reached} focus moves reaching a window; {stacked} operations leaving a stack), the system compared after each"
     );
 }
 

@@ -11,9 +11,9 @@ use rift_core::focus::{
 };
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::bsp_tree::{
-    Content, Direction as TreeDirection, Edit, Edited, Focus as TreeFocus, Focused, InsertionPoint,
-    Kind, Layout, Leaf, Members, Memory, Node as TreeNode, Orientation, Parent, Participation,
-    Preselect, Query, Resize, ResizeAlong, Side, Split, SplitKind, Tabs,
+    Content, Direction as TreeDirection, DropAction, Edit, Edited, Focus as TreeFocus, Focused,
+    InsertionPoint, Kind, Layout, Leaf, Members, Memory, Node as TreeNode, Orientation, Parent,
+    Participation, Preselect, Query, Resize, ResizeAlong, Side, Split, SplitKind, Tabs,
 };
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -3736,12 +3736,63 @@ fn tree_edit(edit: Edit<u64>) -> abi::BoundaryBspEdit {
             BoundaryBspEditPayload.toggle_orientation,
             Tag::ToggleOrientation
         ),
-        Edit::Move(_)
-        | Edit::Swap(..)
-        | Edit::Drop { .. }
-        | Edit::Join(_)
-        | Edit::ConsumeOrExpel(_)
-        | Edit::Unjoin => todo!("the moves, swaps, drops and joins port in the next commits"),
+        Edit::Move(direction) => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.moved(tree_direction(direction)),
+            Tag::Moved
+        ),
+        Edit::Swap(a, b) => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.swap(abi::BoundaryBspPair { a, b }),
+            Tag::Swap
+        ),
+        Edit::Drop { source, target, action } => union!(
+            BoundaryBspEdit,
+            BoundaryBspEditPayload.drop(abi::BoundaryBspDrop {
+                source,
+                target,
+                action: drop_action(action),
+            }),
+            Tag::Drop
+        ),
+        Edit::Join(_) | Edit::ConsumeOrExpel(_) | Edit::Unjoin => {
+            todo!("the joins port in the next commit")
+        }
+    }
+}
+
+fn drop_action(action: DropAction) -> abi::BoundaryBspDropAction {
+    use abi::BoundaryBspDropActionTag as Tag;
+    match action {
+        DropAction::Swap => {
+            union!(
+                BoundaryBspDropAction,
+                BoundaryBspDropActionPayload.swap,
+                Tag::Swap
+            )
+        }
+        DropAction::Stack => {
+            union!(
+                BoundaryBspDropAction,
+                BoundaryBspDropActionPayload.stack,
+                Tag::Stack
+            )
+        }
+        DropAction::Insert(direction) => union!(
+            BoundaryBspDropAction,
+            BoundaryBspDropActionPayload.insert(tree_direction(direction)),
+            Tag::Insert
+        ),
+        DropAction::Move(direction) => union!(
+            BoundaryBspDropAction,
+            BoundaryBspDropActionPayload.moved(tree_direction(direction)),
+            Tag::Moved
+        ),
+        DropAction::ConsumeOrExpel(direction) => union!(
+            BoundaryBspDropAction,
+            BoundaryBspDropActionPayload.consume_or_expel(tree_direction(direction)),
+            Tag::ConsumeOrExpel
+        ),
     }
 }
 
