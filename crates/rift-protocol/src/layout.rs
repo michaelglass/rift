@@ -121,8 +121,6 @@ impl LayoutKind {
             Self::Vertical | Self::VerticalStack => Orientation::Vertical,
         }
     }
-
-    pub const fn is_group(self) -> bool { self.is_stacked() }
 }
 
 #[derive(

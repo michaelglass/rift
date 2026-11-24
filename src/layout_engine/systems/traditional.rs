@@ -664,7 +664,7 @@ impl TraditionalLayoutSystem {
                 let root_kind = self.tiles.tree.map.container_kind(old_root);
                 // Leaving the edge of a root group splits the window out of it; at the edge
                 // of a same-oriented split there is nowhere further to go.
-                if root_kind.orientation() == direction.orientation() && !root_kind.is_group() {
+                if root_kind.orientation() == direction.orientation() && !root_kind.is_stacked() {
                     return None;
                 }
                 wrap_root = Some(old_root);

@@ -532,7 +532,7 @@ impl GroupLayouts {
             node,
             &|window| self.window_participates(window),
             &|node| {
-                if map.container_kind(node).is_group() {
+                if map.container_kind(node).is_stacked() {
                     (map.local_selection(node), false, group_limit)
                 } else {
                     (None, false, BranchLimit::All)
