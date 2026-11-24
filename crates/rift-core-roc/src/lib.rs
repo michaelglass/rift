@@ -339,6 +339,146 @@ impl RocMainWindows {
 }
 
 /// What the main-window machine holds, as both twins give it.
+/// A BSP layout system's trees (`rift_core::layout::bsp_tree::Tree`) kept in Roc between
+/// operations.
+pub struct RocBspTree {
+    trees: boundary::BspTreeBox,
+}
+
+// SAFETY: as `RocCore`: the box is owned, never shared, and only stepped through `&mut self`.
+unsafe impl Send for RocBspTree {}
+
+impl RocBspTree {
+    /// As `Tree::new`.
+    pub fn new(insertion: rift_core::layout::bsp_tree::InsertionPoint) -> Self {
+        RocBspTree {
+            trees: boundary::BspTreeBox::new(insertion),
+        }
+    }
+
+    /// One operation, as [`bsp_tree::step`] applies it to a `Tree`.
+    pub fn step(&mut self, event: bsp_tree::Event) -> bsp_tree::Answer {
+        let host = host();
+        boundary::in_place(&mut self.trees, |trees| trees.step(event, &host))
+    }
+
+    /// The whole system, as [`bsp_tree::TreeView::from`] reads a `Tree`.
+    pub fn view(&mut self) -> bsp_tree::TreeView {
+        let host = host();
+        boundary::in_place(&mut self.trees, |trees| trees.view(&host))
+    }
+}
+
+/// The BSP tree's operations and view, on plain keys, and the Rust tree they are held to.
+pub mod bsp_tree {
+    use rift_core::layout::bsp_tree::{InsertionPoint, Layout, Node, Participation};
+    use rift_core::slot_table::{SlotKey, SlotTable};
+
+    /// A layout's key: slotmap's ffi form, `version << 32 | index`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct LayoutKey(pub u64);
+
+    /// A node's key: slotmap's ffi form, `version << 32 | index`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct NodeKey(pub u64);
+
+    macro_rules! slot_key {
+        ($key:ident) => {
+            impl SlotKey for $key {
+                fn from_parts(index: u32, version: u32) -> Self {
+                    $key((u64::from(version) << 32) | u64::from(index))
+                }
+
+                fn parts(self) -> (u32, u32) { (self.0 as u32, (self.0 >> 32) as u32) }
+            }
+        };
+    }
+    slot_key!(LayoutKey);
+    slot_key!(NodeKey);
+
+    /// The Rust tree, on plain keys and windows as words.
+    pub type Tree = rift_core::layout::bsp_tree::Tree<LayoutKey, NodeKey, u64>;
+
+    /// One operation of the system (`Tree`'s methods, one for one).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum Event {
+        CreateLayout,
+        CloneLayout(LayoutKey),
+        RemoveLayout(LayoutKey),
+        Participation(u64, Participation),
+        Insertion(InsertionPoint),
+        AspectRatio(Option<f64>),
+    }
+
+    /// What an operation answers.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Answer {
+        Layout(LayoutKey),
+        Participated(bool),
+        Done,
+    }
+
+    /// `event` applied to the Rust tree, and what it answers.
+    pub fn step(tree: &mut Tree, event: Event) -> Answer {
+        match event {
+            Event::CreateLayout => Answer::Layout(tree.create_layout()),
+            Event::CloneLayout(layout) => Answer::Layout(tree.clone_layout(layout)),
+            Event::RemoveLayout(layout) => {
+                tree.remove_layout(layout);
+                Answer::Done
+            }
+            Event::Participation(window, participation) => {
+                Answer::Participated(tree.set_window_participation(window, participation))
+            }
+            Event::Insertion(insertion) => {
+                tree.set_window_insertion_point(insertion);
+                Answer::Done
+            }
+            Event::AspectRatio(ratio) => {
+                tree.set_single_window_aspect_ratio(ratio);
+                Answer::Done
+            }
+        }
+    }
+
+    /// A saved slot: its value (none when vacant) and its version.
+    pub type Saved<V> = (Option<V>, u32);
+
+    /// The whole system, comparable: each table's slots and free list, the windows left out in
+    /// order, the settings.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TreeView {
+        pub layouts: Vec<Saved<Layout<NodeKey>>>,
+        pub layout_free: Vec<u32>,
+        pub nodes: Vec<Saved<Node<NodeKey, u64>>>,
+        pub node_free: Vec<u32>,
+        pub left_out: Vec<u64>,
+        pub insertion: InsertionPoint,
+        pub aspect: Option<f64>,
+    }
+
+    fn saved<K: SlotKey, V: Clone>(table: &SlotTable<K, V>) -> Vec<Saved<V>> {
+        table
+            .saved()
+            .map(|(held, version)| (held.map(|(_, value)| value.clone()), version))
+            .collect()
+    }
+
+    impl From<&Tree> for TreeView {
+        fn from(tree: &Tree) -> Self {
+            TreeView {
+                layouts: saved(tree.layouts()),
+                layout_free: tree.layouts().free().to_vec(),
+                nodes: saved(tree.nodes()),
+                node_free: tree.nodes().free().to_vec(),
+                left_out: tree.left_out().iter().copied().collect(),
+                insertion: tree.insertion(),
+                aspect: tree.aspect(),
+            }
+        }
+    }
+}
+
 pub mod main_window {
     use rift_core::main_window::{App, MainWindows, NativeFocus};
 

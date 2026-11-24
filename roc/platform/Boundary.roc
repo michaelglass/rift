@@ -799,6 +799,79 @@ Boundary := [].{
 	## One app as the machine knows it.
 	MainApp := { pid : U64, standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }
 
+	# A BSP layout system's trees (`rift_core::layout::bsp_tree::Tree`), kept between operations.
+	# Layouts and nodes are slotmap keys, one word each (`version << 32 | index`, slotmap's ffi
+	# form); windows are one word each.
+
+	## Which way a split divides its area.
+	BspOrientation := [Horizontal, Vertical]
+
+	BspDirection := [Left, Right, Up, Down]
+
+	## One of a split's two children.
+	BspSide := [First, Second]
+
+	## Where the selection goes when it reaches a split: it stops there, or goes on into a side.
+	BspMemory := [Stops, Toward(BspSide)]
+
+	## A direction the next window put into a leaf splits it toward, if one was chosen.
+	BspPreselect := [Unset, Toward(BspDirection)]
+
+	## A stack's windows in order, with the one shown on top.
+	BspTabs := { before : List(U64), top : U64, after : List(U64) }
+
+	## What a leaf holding windows holds: one window, or a stack.
+	BspMembers := [Window(U64), Stack(BspTabs)]
+
+	BspHeld := { members : BspMembers, fill : Fill }
+
+	## What a leaf holds: nothing (a placeholder), or windows filling their place one way.
+	BspContent := [Empty, Held(BspHeld)]
+
+	BspTreeLeaf := { content : BspContent, preselect : BspPreselect }
+
+	## A split: the first child's share, its children's keys, and where the selection goes.
+	BspTreeSplit := { orientation : BspOrientation, ratio : F32, first : U64, second : U64, memory : BspMemory }
+
+	BspKind := [Split(BspTreeSplit), Leaf(BspTreeLeaf)]
+
+	## A node's place: a layout's root (or a node not placed yet), or a split's child.
+	BspParent := [Root, Split(U64)]
+
+	BspTreeNode := { parent : BspParent, kind : BspKind }
+
+	## Where a new window goes when no direction was preselected.
+	BspInsertion := [NextToSelection, EndOfTree]
+
+	## Whether a window takes part in layout.
+	BspTakesPart := [TakesPart, LeftOut]
+
+	BspParticipation := { window : U64, participation : BspTakesPart }
+
+	## One layout slot: a layout's root under an odd version, or vacant under an even one.
+	BspLayoutHeld := { version : U32, root : U64 }
+
+	BspLayoutSlot := [Occupied(BspLayoutHeld), Vacant(U32)]
+
+	## One node slot: a node under an odd version, or vacant under an even one.
+	BspNodeHeld := { version : U32, node : BspTreeNode }
+
+	BspNodeSlot := [Occupied(BspNodeHeld), Vacant(U32)]
+
+	## One operation of the system (`Tree`'s methods, one for one).
+	BspTreeEvent := [
+		CreateLayout,
+		CloneLayout(U64),
+		RemoveLayout(U64),
+		Participation(BspParticipation),
+		Insertion(BspInsertion),
+		AspectRatio(Aspect),
+	]
+
+	## What an operation answers: a layout it made, whether a window's participation changed,
+	## or nothing.
+	BspTreeAnswer := [Layout(U64), Participated(Bool), Done]
+
 
 
 	## Where a claimed window returns to when its claim ends.

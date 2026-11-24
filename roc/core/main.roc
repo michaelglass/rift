@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
+import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect]
 import Geometry
 import Bsp
 import Traditional
@@ -16,6 +16,7 @@ import Focus
 import Workspaces
 import Modes
 import MainWindow
+import BspTree
 
 ## The events, effects and their payloads are the platform's (`Boundary.Event`,
 ## `Boundary.Effect`): taking the platform's own types, not ones of the same shape, is what keeps
@@ -77,6 +78,17 @@ Joined : { catalog : List(WorkspaceSpace), activations : List(SpaceActivation), 
 ## app and the native focus (`MainWindow.Mains`, written out: the platform needs the name here).
 Mains : { apps : Dict(U64, { standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }), global_frontmost : MaybeWord, native_focus : NativeFocus }
 
+## A BSP layout system's trees, kept between operations: every layout's root and every node in
+## slot tables, the windows left out of layout, the settings (`BspTree.Trees`, written out: the
+## platform needs the name here).
+Trees : {
+	layouts : { slots : List([Occupied({ version : U32, value : U64 }), Vacant(U32)]), free : List(U32) },
+	nodes : { slots : List([Occupied({ version : U32, value : BspTreeNode }), Vacant(U32)]), free : List(U32) },
+	left_out : Set(U64),
+	insertion : BspInsertion,
+	aspect : Aspect,
+}
+
 Model : {
 	windows : Dict(WindowId, Record),
 
@@ -92,7 +104,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view }
+core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_step, bsp_tree_view }
 
 # The layout questions, typed (`Boundary`). The core modules take and answer the platform's own
 # types: a plain record or union never passes for a named one, nor a named one for a plain one.
@@ -390,6 +402,24 @@ main_window_step = |mains, event| {
 ## The main window, the native focus, every app in pid order and the globally frontmost app.
 main_window_view : Mains -> { model : Mains, main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord }
 main_window_view = |mains| { model: mains, main_window: MainWindow.main_window(mains), native_focus: mains.native_focus, apps: MainWindow.apps_in_order(mains), global_frontmost: mains.global_frontmost }
+
+## A BSP layout system's trees: no layouts, no windows left out, no aspect ratio.
+bsp_tree_init : BspInsertion -> Trees
+bsp_tree_init = |insertion| BspTree.empty(insertion)
+
+## One operation of the system, and what it answers.
+bsp_tree_step : Trees, BspTreeEvent -> { model : Trees, answer : BspTreeAnswer }
+bsp_tree_step = |trees, event| {
+	(model, answer) = BspTree.step(trees, event)
+	{ model, answer }
+}
+
+## Each table's slots and free list, the windows left out in order, and the settings.
+bsp_tree_view : Trees -> { model : Trees, layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect }
+bsp_tree_view = |trees| {
+	viewed = BspTree.view(trees)
+	{ model: trees, layouts: viewed.layouts, layout_free: viewed.layout_free, nodes: viewed.nodes, node_free: viewed.node_free, left_out: viewed.left_out, insertion: viewed.insertion, aspect: viewed.aspect }
+}
 
 ## The mode table's verdict on an initiative.
 mode_verdict : ModesQuestion -> ModeVerdict

@@ -56,6 +56,10 @@ required-features = ["roc"]
 name = "main_window"
 required-features = ["roc"]
 
+[[test]]
+name = "bsp_tree"
+required-features = ["roc"]
+
 [dependencies]
 rift-core = { path = "../rift-core" }
 libmimalloc-sys = { version = "0.1.39", optional = true }

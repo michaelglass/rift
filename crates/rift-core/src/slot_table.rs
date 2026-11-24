@@ -120,6 +120,9 @@ impl<K: SlotKey, V> SlotTable<K, V> {
         Some(value)
     }
 
+    /// The vacant slots in the order they are taken: the last one first.
+    pub fn free(&self) -> &[u32] { &self.free }
+
     pub fn get(&self, key: K) -> Option<&V> {
         let (index, version) = parts(key);
         match self.slots.get(index)? {

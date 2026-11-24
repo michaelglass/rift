@@ -10,6 +10,10 @@ use rift_core::focus::{
     self, Follow, MouseRaise, Removal, RemovalFocus, Stay, Unraised, UntrackedFocus,
 };
 use rift_core::layout::bsp::{self, Bsp};
+use rift_core::layout::bsp_tree::{
+    Content, Direction as TreeDirection, InsertionPoint, Kind, Layout, Leaf, Members, Memory,
+    Node as TreeNode, Orientation, Parent, Participation, Preselect, Side, Split, Tabs,
+};
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
     self, Alignment, Column, Navigation, Placed, Row, Settle, Settled, Snap, Spot, Strip, Width,
@@ -39,6 +43,7 @@ use rift_core::{
 };
 
 use crate::abi;
+use crate::bsp_tree::{Answer as TreeAnswer, Event as TreeEvent, LayoutKey, NodeKey, TreeView};
 
 /// A Roc box's header, which the payload's type decides: a type holding refcounted values
 /// (lists, boxes) gets a two-word header, any other one word. Each boxed boundary type's
@@ -3412,5 +3417,291 @@ pub(crate) fn from_mode_verdict(
                 AxisTag::Topology => Axis::Topology,
             })
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The BSP layout system's trees.
+
+fn insertion(insertion: InsertionPoint) -> abi::BoundaryBspInsertion {
+    match insertion {
+        InsertionPoint::NextToSelection => abi::BoundaryBspInsertion::NextToSelection,
+        InsertionPoint::EndOfTree => abi::BoundaryBspInsertion::EndOfTree,
+    }
+}
+
+fn from_insertion(insertion: abi::BoundaryBspInsertion) -> InsertionPoint {
+    match insertion {
+        abi::BoundaryBspInsertion::NextToSelection => InsertionPoint::NextToSelection,
+        abi::BoundaryBspInsertion::EndOfTree => InsertionPoint::EndOfTree,
+    }
+}
+
+fn aspect(ratio: Option<f64>) -> abi::BoundaryAspect {
+    use abi::BoundaryAspectTag as Tag;
+    match ratio {
+        Some(ratio) => union!(BoundaryAspect, BoundaryAspectPayload.aspect(ratio), Tag::Aspect),
+        None => union!(BoundaryAspect, BoundaryAspectPayload.free, Tag::Free),
+    }
+}
+
+fn from_aspect(aspect: abi::BoundaryAspect) -> Option<f64> {
+    match aspect.tag {
+        // SAFETY: the tag says the payload is the ratio.
+        abi::BoundaryAspectTag::Aspect => {
+            Some(unsafe { *aspect.borrow_payload_aspect_unchecked() })
+        }
+        abi::BoundaryAspectTag::Free => None,
+    }
+}
+
+fn tree_event(event: TreeEvent) -> abi::BoundaryBspTreeEvent {
+    use abi::BoundaryBspTreeEventTag as Tag;
+    match event {
+        TreeEvent::CreateLayout => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.create_layout,
+            Tag::CreateLayout
+        ),
+        TreeEvent::CloneLayout(layout) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.clone_layout(layout.0),
+            Tag::CloneLayout
+        ),
+        TreeEvent::RemoveLayout(layout) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.remove_layout(layout.0),
+            Tag::RemoveLayout
+        ),
+        TreeEvent::Participation(window, participation) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.participation(abi::BoundaryBspParticipation {
+                window,
+                participation: match participation {
+                    Participation::TakesPart => abi::BoundaryBspTakesPart::TakesPart,
+                    Participation::LeftOut => abi::BoundaryBspTakesPart::LeftOut,
+                },
+            }),
+            Tag::Participation
+        ),
+        TreeEvent::Insertion(point) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.insertion(insertion(point)),
+            Tag::Insertion
+        ),
+        TreeEvent::AspectRatio(ratio) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.aspect_ratio(aspect(ratio)),
+            Tag::AspectRatio
+        ),
+    }
+}
+
+fn from_tree_answer(answer: abi::BoundaryBspTreeAnswer) -> TreeAnswer {
+    use abi::BoundaryBspTreeAnswerTag as Tag;
+    match answer.tag {
+        // SAFETY (each arm): the tag says which payload it is.
+        Tag::Layout => {
+            TreeAnswer::Layout(LayoutKey(unsafe { *answer.borrow_payload_layout_unchecked() }))
+        }
+        Tag::Participated => {
+            TreeAnswer::Participated(unsafe { *answer.borrow_payload_participated_unchecked() })
+        }
+        Tag::Done => TreeAnswer::Done,
+    }
+}
+
+fn from_orientation(orientation: abi::BoundaryBspOrientation) -> Orientation {
+    match orientation {
+        abi::BoundaryBspOrientation::Horizontal => Orientation::Horizontal,
+        abi::BoundaryBspOrientation::Vertical => Orientation::Vertical,
+    }
+}
+
+fn from_side(side: abi::BoundaryBspSide) -> Side {
+    match side {
+        abi::BoundaryBspSide::First => Side::First,
+        abi::BoundaryBspSide::Second => Side::Second,
+    }
+}
+
+fn from_direction(direction: abi::BoundaryBspDirection) -> TreeDirection {
+    match direction {
+        abi::BoundaryBspDirection::Left => TreeDirection::Left,
+        abi::BoundaryBspDirection::Right => TreeDirection::Right,
+        abi::BoundaryBspDirection::Up => TreeDirection::Up,
+        abi::BoundaryBspDirection::Down => TreeDirection::Down,
+    }
+}
+
+fn from_fill(fill: abi::BoundaryFill) -> bsp::Fill {
+    match fill {
+        abi::BoundaryFill::Tiled => bsp::Fill::Tiled,
+        abi::BoundaryFill::Screen => bsp::Fill::Screen,
+        abi::BoundaryFill::WithinGaps => bsp::Fill::WithinGaps,
+    }
+}
+
+fn from_members(members: &abi::BoundaryBspMembers) -> Members<u64> {
+    use abi::BoundaryBspMembersTag as Tag;
+    match members.tag {
+        // SAFETY (each arm): the tag says which payload it is; the lists are only read.
+        Tag::Window => Members::Window(unsafe { *members.borrow_payload_window_unchecked() }),
+        Tag::Stack => {
+            let tabs = unsafe { members.borrow_payload_stack_unchecked() };
+            Members::Stack(Tabs {
+                before: tabs.before.as_slice().to_vec(),
+                top: tabs.top,
+                after: tabs.after.as_slice().to_vec(),
+            })
+        }
+    }
+}
+
+fn from_leaf(leaf: &abi::BoundaryBspTreeLeaf) -> Leaf<u64> {
+    let content = match leaf.content.tag {
+        abi::BoundaryBspContentTag::Empty => Content::Empty,
+        abi::BoundaryBspContentTag::Held => {
+            // SAFETY: the tag says the payload is the held windows.
+            let held = unsafe { leaf.content.borrow_payload_held_unchecked() };
+            Content::Held {
+                members: from_members(&held.members),
+                fill: from_fill(held.fill),
+            }
+        }
+    };
+    let preselect = match leaf.preselect.tag {
+        abi::BoundaryBspPreselectTag::Unset => Preselect::Unset,
+        abi::BoundaryBspPreselectTag::Toward => {
+            // SAFETY: the tag says the payload is the direction.
+            Preselect::Toward(from_direction(unsafe {
+                *leaf.preselect.borrow_payload_toward_unchecked()
+            }))
+        }
+    };
+    Leaf { content, preselect }
+}
+
+fn from_tree_node(node: &abi::BoundaryBspTreeNode) -> TreeNode<NodeKey, u64> {
+    let parent = match node.parent.tag {
+        abi::BoundaryBspParentTag::Root => Parent::Root,
+        // SAFETY: the tag says the payload is the parent's key.
+        abi::BoundaryBspParentTag::Split => {
+            Parent::Split(NodeKey(unsafe { *node.parent.borrow_payload_split_unchecked() }))
+        }
+    };
+    let kind = match node.kind.tag {
+        abi::BoundaryBspKindTag::Split => {
+            // SAFETY: the tag says the payload is the split.
+            let split = unsafe { node.kind.borrow_payload_split_unchecked() };
+            Kind::Split(Split {
+                orientation: from_orientation(split.orientation),
+                ratio: split.ratio,
+                children: [NodeKey(split.first), NodeKey(split.second)],
+                memory: match split.memory.tag {
+                    abi::BoundaryBspMemoryTag::Stops => Memory::Stops,
+                    abi::BoundaryBspMemoryTag::Toward => {
+                        // SAFETY: the tag says the payload is the side.
+                        Memory::Toward(from_side(unsafe {
+                            *split.memory.borrow_payload_toward_unchecked()
+                        }))
+                    }
+                },
+            })
+        }
+        // SAFETY: the tag says the payload is the leaf.
+        abi::BoundaryBspKindTag::Leaf => {
+            Kind::Leaf(from_leaf(unsafe { node.kind.borrow_payload_leaf_unchecked() }))
+        }
+    };
+    TreeNode { parent, kind }
+}
+
+/// The BSP trees' box, which only Roc can read or free; only the `roc_bsp_tree_*` entries make
+/// and take one. Dropping it releases the trees.
+pub(crate) struct BspTreeBox(abi::RocBox);
+
+impl BspTreeBox {
+    pub(crate) fn new(point: InsertionPoint) -> BspTreeBox {
+        BspTreeBox(unsafe { abi::roc_bsp_tree_init(insertion(point)) })
+    }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// One operation: the trees after it, and what it answered.
+    pub(crate) fn step(self, event: TreeEvent, host: &abi::RocHost) -> (BspTreeBox, TreeAnswer) {
+        // SAFETY: the box is these trees', given to the step; its successor comes back. The
+        // answer is read, then released.
+        let stepped = unsafe { abi::roc_bsp_tree_step(self.into_raw(), tree_event(event)) };
+        let answer = from_tree_answer(stepped.answer);
+        unsafe { stepped.answer.decref(host) };
+        (BspTreeBox(stepped.model), answer)
+    }
+
+    /// Each table's slots and free list, the windows left out in order, the settings.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (BspTreeBox, TreeView) {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_bsp_tree_view(self.into_raw()) };
+        let layouts = viewed
+            .layouts
+            .as_slice()
+            .iter()
+            .map(|slot| match slot.tag {
+                abi::BoundaryBspLayoutSlotTag::Occupied => {
+                    // SAFETY: the tag says the payload is the held layout.
+                    let held = unsafe { slot.borrow_payload_occupied_unchecked() };
+                    (Some(Layout { root: NodeKey(held.root) }), held.version)
+                }
+                // SAFETY: the tag says the payload is the vacant version.
+                abi::BoundaryBspLayoutSlotTag::Vacant => {
+                    (None, unsafe { *slot.borrow_payload_vacant_unchecked() })
+                }
+            })
+            .collect();
+        let nodes = viewed
+            .nodes
+            .as_slice()
+            .iter()
+            .map(|slot| match slot.tag {
+                abi::BoundaryBspNodeSlotTag::Occupied => {
+                    // SAFETY: the tag says the payload is the held node.
+                    let held = unsafe { slot.borrow_payload_occupied_unchecked() };
+                    (Some(from_tree_node(&held.node)), held.version)
+                }
+                // SAFETY: the tag says the payload is the vacant version.
+                abi::BoundaryBspNodeSlotTag::Vacant => {
+                    (None, unsafe { *slot.borrow_payload_vacant_unchecked() })
+                }
+            })
+            .collect();
+        let view = TreeView {
+            layouts,
+            layout_free: viewed.layout_free.as_slice().to_vec(),
+            nodes,
+            node_free: viewed.node_free.as_slice().to_vec(),
+            left_out: viewed.left_out.as_slice().to_vec(),
+            insertion: from_insertion(viewed.insertion),
+            aspect: from_aspect(viewed.aspect),
+        };
+        unsafe {
+            viewed.layouts.decref(host);
+            viewed.layout_free.decref(host);
+            abi::decref_list_of_boundary_bsp_node_slot(viewed.nodes, host);
+            viewed.node_free.decref(host);
+            viewed.left_out.decref(host);
+        }
+        (BspTreeBox(viewed.model), view)
+    }
+}
+
+impl Drop for BspTreeBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is these trees' and is never used again.
+        unsafe { abi::roc_bsp_tree_release(self.0) }
     }
 }
