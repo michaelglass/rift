@@ -194,6 +194,26 @@ pub enum Query<W> {
     Stack(W),
 }
 
+/// A node as rift's container view shows it: whether the selection's memory rests on it, its
+/// share of its parent split (none at the root), and what it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Container<N, W> {
+    pub node: N,
+    pub selected: bool,
+    pub share: Option<f64>,
+    pub kind: ContainerKind<N, W>,
+}
+
+/// A container's kind: a split with its two children, or a leaf as the tree holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContainerKind<N, W> {
+    Split {
+        orientation: Orientation,
+        children: [Box<Container<N, W>>; 2],
+    },
+    Leaf(Leaf<W>),
+}
+
 /// Whether a window takes part in layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Participation {
@@ -338,6 +358,71 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
             && self
                 .node_for_window_in_layout(layout, window)
                 .is_some_and(|node| self.find_neighbor_leaf(node, direction).is_some())
+    }
+
+    /// A layout's nodes as rift's container view shows them (upstream's `container_tree`):
+    /// each node, whether the selection's memory rests on it, its share of its parent, and
+    /// what it holds; none for a layout the tree lacks.
+    pub fn container(&self, layout: L) -> Option<Container<N, W>> {
+        let root = self.layouts.get(layout)?.root;
+        Some(self.container_of(root, self.current_selection(root)))
+    }
+
+    fn container_of(&self, node: N, selected: N) -> Container<N, W> {
+        let share = match self.nodes[node].parent {
+            Parent::Root => None,
+            Parent::Split(parent) => match self.kind(parent) {
+                Kind::Split(split) if split.children[0] == node => Some(f64::from(split.ratio)),
+                Kind::Split(split) => Some(1.0 - f64::from(split.ratio)),
+                Kind::Leaf(_) => unreachable!("a BSP parent is a split"),
+            },
+        };
+        let kind = match self.kind(node) {
+            Kind::Split(split) => ContainerKind::Split {
+                orientation: split.orientation,
+                children: split.children.map(|child| Box::new(self.container_of(child, selected))),
+            },
+            Kind::Leaf(leaf) => ContainerKind::Leaf(leaf.clone()),
+        };
+        Container {
+            node,
+            selected: node == selected,
+            share,
+            kind,
+        }
+    }
+
+    /// A layout drawn as text, one node a line, children indented below their split (upstream's
+    /// `draw_tree`, rift-cli's debug view): a leaf's window on top, a split's orientation and
+    /// share.
+    pub fn draw(&self, layout: L) -> String
+    where W: std::fmt::Debug {
+        let Some(state) = self.layouts.get(layout) else {
+            return "<empty bsp>".to_string();
+        };
+        let mut out = String::new();
+        self.draw_node(state.root, 0, &mut out);
+        out
+    }
+
+    fn draw_node(&self, node: N, indent: usize, out: &mut String)
+    where W: std::fmt::Debug {
+        out.push_str(&"  ".repeat(indent));
+        match self.kind(node) {
+            Kind::Leaf(leaf) => {
+                let top = match &leaf.content {
+                    Content::Empty => None,
+                    Content::Held { members, .. } => Some(members.top()),
+                };
+                out.push_str(&format!("Leaf {top:?}\n"));
+            }
+            Kind::Split(split) => {
+                out.push_str(&format!("Split {:?} {:.2}\n", split.orientation, split.ratio));
+                for child in split.children {
+                    self.draw_node(child, indent + 1, out);
+                }
+            }
+        }
     }
 
     /// The window's place: the side taken at each split from the root (0 first, 1 second), then

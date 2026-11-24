@@ -160,12 +160,26 @@ impl BspLayoutSystem {
         core
     }
 
+    /// The layout drawn as text (rift-cli's debug view), from the core's tree; upstream's
+    /// drawing is held to it.
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        self.shadow.upstream.draw_tree(layout)
+        self.answered(
+            "draw_tree",
+            self.shadow.upstream.draw_tree(layout),
+            self.core.draw(layout),
+        )
     }
 
+    /// The layout's nodes as rift-cli's container query shows them, from the core's tree;
+    /// upstream's view is held to it.
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.shadow.upstream.container_tree(layout)
+        self.answered(
+            "container_tree",
+            self.shadow.upstream.container_tree(layout),
+            self.core
+                .container(layout)
+                .map_or_else(Default::default, |root| container_node(&root)),
+        )
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
@@ -567,6 +581,66 @@ impl LayoutSystem for BspLayoutSystem {
         self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
         core
     }
+}
+
+/// A core container as rift-cli's container node: a split with its orientation and children; a
+/// leaf as its window, a horizontal stack of its windows (each selected when the leaf is and it
+/// is on top), or a placeholder, with its fill and preselection.
+fn container_node(
+    container: &core::Container<NodeId, WindowId>,
+) -> rift_protocol::ContainerTreeNode {
+    use rift_protocol::{ContainerNodeType, ContainerTreeNode, LayoutKind};
+    let mut node = ContainerTreeNode {
+        node_id: slotmap::Key::data(&container.node).as_ffi(),
+        is_selected: container.selected,
+        weight: container.share,
+        ..Default::default()
+    };
+    match &container.kind {
+        core::ContainerKind::Split { orientation, children } => {
+            node.layout_kind = Some(LayoutKind::from(upstream_orientation(*orientation)));
+            node.children = children.iter().map(|child| container_node(child)).collect();
+        }
+        core::ContainerKind::Leaf(leaf) => {
+            node.pending_split = match leaf.preselect {
+                Preselect::Unset => None,
+                Preselect::Toward(direction) => Some(upstream_direction(direction)),
+            };
+            match &leaf.content {
+                Content::Empty => node.node_type = ContainerNodeType::Placeholder,
+                Content::Held { members, fill } => {
+                    (node.is_fullscreen, node.is_fullscreen_within_gaps) = match fill {
+                        core::Fill::Tiled => (false, false),
+                        core::Fill::Screen => (true, false),
+                        core::Fill::WithinGaps => (false, true),
+                    };
+                    match members {
+                        Members::Window(window) => {
+                            node.node_type = ContainerNodeType::Window;
+                            node.window_id = Some((*window).into());
+                        }
+                        Members::Stack(tabs) => {
+                            node.layout_kind = Some(LayoutKind::HorizontalStack);
+                            node.children = tabs
+                                .windows()
+                                .map(|member| ContainerTreeNode {
+                                    node_id: (u64::from(member.pid as u32) << 32)
+                                        | u64::from(member.idx.get()),
+                                    node_type: ContainerNodeType::Window,
+                                    window_id: Some(member.into()),
+                                    is_selected: container.selected && member == tabs.top,
+                                    is_fullscreen: node.is_fullscreen,
+                                    is_fullscreen_within_gaps: node.is_fullscreen_within_gaps,
+                                    ..Default::default()
+                                })
+                                .collect();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    node
 }
 
 /// A focus's answer, comparable.

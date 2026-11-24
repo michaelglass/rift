@@ -2523,6 +2523,11 @@ mod core_geometry_tests {
             }
         }
         let _ = system.window_slot(layout, window);
+        // rift-cli's views of the layout (and of a layout removed or never made).
+        for layout in [layout, LayoutId::default()] {
+            let _ = system.draw_tree(layout);
+            let _ = system.container_tree(layout);
+        }
     }
 
     /// The core's frames for a BSP layout are the system's own (`shadow_frames`), bit for bit, over
