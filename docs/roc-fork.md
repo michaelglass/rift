@@ -37,9 +37,15 @@ as `core: layout divergences: N` in every build), then panics in tests or warns
 `layout-divergence:` (a system) / `roc-divergence:` (the Rust core, or the Roc core's failure) in a
 running Rift; the core's frames are used. The shape builders (`shape`, `tiles::shape`, `shown`)
 and the conversions are built in every build. Each differential now holds the core to the
-system's `shadow_frames`, not to `calculate_layout` (which is the core). Without `roc-core` the
-shadow is still compared on every layout (it is computed anyway; the bit comparison is cheap); the
-lead may rule it test/roc-core only.
+system's `shadow_frames`, not to `calculate_layout` (which is the core). **The lead's ruling
+(2026-11-24), not yet built:** in a plain release build the shadow runs on every 32nd layout pass
+per Space (divergences counted); tests and `roc-core` builds compare every pass; measure the
+shadow's cost per pass at 10, 100 and 1000 windows into this doc. A first measurement (release, no
+constraints or gaps; shadow as a share of the pass without it): stack 38-44%, master-stack
+61-174%, traditional 58% / 53% / 7%, BSP 74% / 9% / 1%, floating 59-64%; and the core's own path is
+far slower than the systems' at scale (BSP 1000 windows: about 14 ms a pass against 0.12 ms for
+the system; traditional 1000: 1.17 ms against 0.09 ms; BSP 100: 124 us against 11 us), cause not
+yet found (the shape builder or the core's summaries).
 - Plants per system, run with the divergence panics on and then off (`report_divergence` and the
   old `diverged` both warn instead): a Rust-core bug fails behaviour tests with the panic off (rift
   follows the core); the same bug in the system's shadow path fails none (only the differential and
