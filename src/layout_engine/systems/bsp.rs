@@ -1038,6 +1038,32 @@ mod tests {
             .collect()
     }
 
+    /// A split resized towards its first window gives that window the larger share (what rift
+    /// does with a BSP layout, whichever core decides it).
+    #[test]
+    fn a_resized_split_gives_its_first_window_the_larger_share() {
+        let (mut system, layout) = tiled(&[1, 2]);
+        let _ = system.focus(layout, Focus::Select(w(1)));
+        system
+            .edit(layout, LayoutEdit::Resize {
+                amount: 0.2,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        let frames =
+            calculate_frames(&system, layout, CGSize::new(1000.0, 800.0), &Default::default());
+        let rect = |x, w| CGRect::new(CGPoint::new(x, 0.0), CGSize::new(w, 800.0));
+        // The ratio is kept as an f32 (0.6), so the first window is 0.6f32 of the width.
+        let first = 1000.0 * f64::from(0.6_f32);
+        assert_eq!(
+            frames,
+            HashMap::from_iter([
+                (w(1), rect(0.0, first)),
+                (w(2), rect(first, 1000.0 - first))
+            ])
+        );
+    }
+
     #[test]
     fn clone_preserves_arrangement_and_selection() {
         let (mut system, original) = tiled(&[1, 2, 3, 4]);
@@ -1216,6 +1242,8 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
+    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
+    /// shadow.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -1225,43 +1253,14 @@ impl LayoutSystem for BspLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let mut out = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let rect = compute_tiling_area(screen, gaps);
-            let prepared = self.prepare_geometry(state.root, constraints, gaps);
-            BspProjection {
-                system: self,
-                prepared: &prepared,
-                screen,
-                tiling: rect,
-                constraints,
-                gaps,
-            }
-            .apply(state.root, rect, &mut out);
-            #[cfg(any(test, feature = "roc-core"))]
-            let shape = self.shape(state.root, screen, constraints, gaps);
-            if let (Some(ratio), [(_, frame)]) =
-                (self.single_window_aspect_ratio, out.as_mut_slice())
-                && matches!(self.kind(state.root), NodeKind::Leaf {
-                    fullscreen: false,
-                    fullscreen_within_gaps: false,
-                    ..
-                })
-                && self.stack(state.root).is_none()
-            {
-                let (width, height) = if frame.size.width > frame.size.height * ratio {
-                    (frame.size.height * ratio, frame.size.height)
-                } else {
-                    (frame.size.width, frame.size.width / ratio)
-                };
-                frame.origin.x = rect.origin.x + (rect.size.width - width) / 2.0;
-                frame.origin.y = rect.origin.y + (rect.size.height - height) / 2.0;
-                frame.size = CGSize::new(width, height);
-            }
-            #[cfg(any(test, feature = "roc-core"))]
-            crate::layout_engine::core_geometry::check_bsp(shape, &out);
-        }
-        out
+        let shape = self
+            .layouts
+            .get(layout)
+            .and_then(|state| self.shape(state.root, screen, constraints, gaps));
+        crate::layout_engine::core_geometry::decide_bsp(
+            shape,
+            &self.shadow_frames(layout, screen, constraints, gaps),
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -2031,7 +2030,50 @@ impl BspLayoutSystem {
 impl BspLayoutSystem {
     /// A BSP layout as the core's geometry takes it, from `root`, pruned as `prepare_geometry`
     /// prunes it (none: nothing takes space). Arguments as `calculate_layout` takes them.
-    #[cfg(any(test, feature = "roc-core"))]
+    /// The frames the BSP system computes itself: since the core decides (policy (a)), the
+    /// shadow `calculate_layout` holds the core's to.
+    pub(crate) fn shadow_frames(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+    ) -> Vec<(WindowId, CGRect)> {
+        let mut out = Vec::new();
+        if let Some(state) = self.layouts.get(layout).copied() {
+            let rect = compute_tiling_area(screen, gaps);
+            let prepared = self.prepare_geometry(state.root, constraints, gaps);
+            BspProjection {
+                system: self,
+                prepared: &prepared,
+                screen,
+                tiling: rect,
+                constraints,
+                gaps,
+            }
+            .apply(state.root, rect, &mut out);
+            if let (Some(ratio), [(_, frame)]) =
+                (self.single_window_aspect_ratio, out.as_mut_slice())
+                && matches!(self.kind(state.root), NodeKind::Leaf {
+                    fullscreen: false,
+                    fullscreen_within_gaps: false,
+                    ..
+                })
+                && self.stack(state.root).is_none()
+            {
+                let (width, height) = if frame.size.width > frame.size.height * ratio {
+                    (frame.size.height * ratio, frame.size.height)
+                } else {
+                    (frame.size.width, frame.size.width / ratio)
+                };
+                frame.origin.x = rect.origin.x + (rect.size.width - width) / 2.0;
+                frame.origin.y = rect.origin.y + (rect.size.height - height) / 2.0;
+                frame.size = CGSize::new(width, height);
+            }
+        }
+        out
+    }
+
     pub(crate) fn shape(
         &self,
         root: NodeId,
@@ -2051,7 +2093,6 @@ impl BspLayoutSystem {
     /// A node as the core's geometry takes it: a leaf shows its participating member; a leaf
     /// with none is left out, except an empty leaf while no window is left out of the system; a
     /// split keeps the children that remain.
-    #[cfg(any(test, feature = "roc-core"))]
     fn shape_node(
         &self,
         node: NodeId,
@@ -2255,7 +2296,7 @@ mod core_geometry_tests {
         (system, layout, windows)
     }
 
-    /// The core's frames for a BSP layout are upstream's `calculate_layout`'s, bit for bit, over
+    /// The core's frames for a BSP layout are the system's own (`shadow_frames`), bit for bit, over
     /// drawn systems, screens, gaps and window constraints.
     #[test]
     fn the_core_tiles_bsp_layouts_as_the_bsp_system_does() {
@@ -2266,8 +2307,9 @@ mod core_geometry_tests {
             let screen = drawn_screen(&mut rng);
             let constraints = drawn_constraints_for(&mut rng, &windows);
             let gaps = drawn_gaps(&mut rng);
-            let line = drawn_line(&mut rng);
-            let upstream = system.calculate_layout(layout, screen, 0.0, &constraints, &gaps, line);
+            // Drawn but unused (a BSP layout has no bar): the draws stay as they were.
+            let _ = drawn_line(&mut rng);
+            let upstream = system.shadow_frames(layout, screen, &constraints, &gaps);
             let root = system.layouts[layout].root;
             let core: Vec<(WindowId, CGRect)> = system
                 .shape(root, screen, &constraints, &gaps)

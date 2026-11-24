@@ -198,14 +198,13 @@ fn report_divergence(
     );
 }
 
-/// Holds the core's frames for a BSP `shape` (none: nothing takes space) to the BSP system's, bit
-/// for bit; under `roc-core` the Roc core's too. The system's frames stand: a difference fails
-/// tests and a running Rift warns `layout-divergence:` or `roc-divergence:`.
-#[cfg(any(test, feature = "roc-core"))]
-pub(crate) fn check_bsp(
+/// The frames rift gives a BSP layout: the core's for `shape` (none: nothing takes space), the
+/// Roc core's under `roc-core`, else the Rust core's, with the BSP system's (`upstream`) the
+/// shadow, as [`decide_traditional`].
+pub(crate) fn decide_bsp(
     shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
     upstream: &[(WindowId, CGRect)],
-) {
+) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, rift_core::layout::bsp::Bsp::frames);
     #[cfg(feature = "roc-core")]
     let roc = || match &shape {
@@ -214,7 +213,7 @@ pub(crate) fn check_bsp(
     };
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    check("bsp", &shape, upstream, rust, roc);
+    decide("bsp", &shape, upstream, rust, roc)
 }
 
 /// Where a scrolling layout's system placed its strip in world space: each column (id, x,
@@ -280,7 +279,8 @@ fn placed_words<W: Copy>(
 
 /// Holds the core's placement of a scrolling strip (none: no window takes part) to the
 /// scrolling system's (`Geometry::build`), word for word; under `roc-core` the Roc core's too.
-/// The system's placement stands either way, as [`check_bsp`]'s frames do.
+/// The system's placement stands either way: a difference fails tests and a running Rift warns
+/// `layout-divergence:` (the Rust core) or `roc-divergence:` (the Roc core).
 #[cfg(any(test, feature = "roc-core"))]
 pub(crate) fn check_strip(
     strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
@@ -322,7 +322,7 @@ pub(crate) fn check_strip(
 }
 
 /// Holds the core's frames for a placed strip shown by a camera (`translate`) to the scrolling
-/// system's (`translate_frames`), as [`check_bsp`] does.
+/// system's (`translate_frames`), as [`check_strip`] does.
 #[cfg(any(test, feature = "roc-core"))]
 pub(crate) fn check_translation(
     world: &[(WindowId, Rect)],
