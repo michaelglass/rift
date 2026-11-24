@@ -11,7 +11,7 @@ use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{
-    LayoutInfo, NodeId, NodeMap, Placement, Tree, WindowIndex, WindowNodeInfo, WindowNodeInfoVec,
+    NodeId, NodeMap, Placement, StoredLayout, Tree, WindowIndex, WindowNodeInfo, WindowNodeInfoVec,
 };
 
 fn perpendicular(orientation: Orientation) -> Orientation {
@@ -68,7 +68,7 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Tree, D::Error> {
     #[derive(Deserialize, Default)]
     struct LegacyLayout {
-        info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
+        info: slotmap::SecondaryMap<NodeId, StoredLayout>,
     }
     #[derive(Deserialize)]
     struct StoredIndex {
@@ -105,7 +105,7 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
                 "layout metadata references a missing node",
             ));
         }
-        map[node].layout = layout;
+        map.restore_layout(node, layout);
     }
     for (node, selection) in &data.selection.nodes {
         if !map.contains(node)

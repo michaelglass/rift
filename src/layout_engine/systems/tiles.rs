@@ -183,14 +183,15 @@ impl Projection<'_> {
             return;
         }
         use LayoutKind::*;
-        match info.kind {
+        let kind = map.container_kind(node);
+        match kind {
             HorizontalStack | VerticalStack => {
                 let children: Vec<_> =
                     node.children(map).filter(|child| prepared.contains_key(child)).collect();
                 if children.is_empty() {
                     return;
                 }
-                let is_horizontal = matches!(info.kind, HorizontalStack);
+                let is_horizontal = matches!(kind, HorizontalStack);
                 let focused_child = map
                     .participating_child(node, false, |child| prepared.contains_key(&child))
                     .expect("stack has a participating child");
@@ -198,7 +199,7 @@ impl Projection<'_> {
                 if collect && let Some(output) = &mut self.groups {
                     output.groups.push(self.tiles.stack_group_container_info(
                         node,
-                        info.kind,
+                        kind,
                         rect,
                         &children,
                         focused_idx,
@@ -231,7 +232,7 @@ impl Projection<'_> {
                 node,
                 rect,
                 sizes,
-                info.kind == Horizontal,
+                kind == Horizontal,
                 collect && selection_only,
                 collect,
             ),
