@@ -478,7 +478,7 @@ impl Input {
                         .iter()
                         .any(|(space, mode)| state.layout_mode_by_space.get(space) != Some(mode))
             }
-            Request::AppsSettled => !self.running(),
+            Request::AppsSettled => true,
             Request::SetMissionControlActive(active, _) => {
                 *active != self.mission_control_active.get()
             }
@@ -567,10 +567,11 @@ impl Input {
                 state.converter = converter;
             }
             Request::AppsSettled => {
-                // Nothing is captured yet: modifier presses are not subscribed before this.
-                self.startup.set(Startup::Running);
-                self.reset_mouse_move_sample_gate();
-                should_rebuild_mask = true;
+                if self.advance(Startup::Settling, Startup::Running) {
+                    // Nothing is captured yet: modifier presses are not subscribed before this.
+                    self.reset_mouse_move_sample_gate();
+                    should_rebuild_mask = true;
+                }
             }
             Request::SetFocusFollowsMouseEnabled(enabled) => {
                 debug!(
@@ -584,8 +585,7 @@ impl Input {
                 should_rebuild_mask = true;
             }
             Request::AppsRegistered => {
-                if self.startup.get() == Startup::Registering {
-                    self.startup.set(Startup::Settling);
+                if self.advance(Startup::Registering, Startup::Settling) {
                     self.rebuild_binding_maps();
                     should_rebuild_mask = true;
                 }
@@ -719,6 +719,18 @@ impl Input {
     fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
 
     fn running(&self) -> bool { self.startup.get() == Startup::Running }
+
+    /// Move startup one step forward. Each step's request is sent once, in order; one that
+    /// arrives at any other stage is refused, so startup never skips or repeats a stage.
+    fn advance(&self, from: Startup, to: Startup) -> bool {
+        let current = self.startup.get();
+        if current != from {
+            warn!(?current, ?to, "Ignoring an out-of-order startup step");
+            return false;
+        }
+        self.startup.set(to);
+        true
+    }
 
     fn hotkeys_on(&self) -> bool { self.startup.get() != Startup::Registering }
 
@@ -2158,6 +2170,28 @@ mod tests {
             assert!(!input.hotkeys.borrow().is_empty());
             let key_mask = (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::FlagsChanged.0);
             assert_eq!(input.desired_event_mask() & key_mask, key_mask);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn startup_moves_forward_one_step_at_a_time() {
+        std::thread::spawn(|| {
+            let (input, _, _) = input();
+            let (recovery, _) = tokio::sync::mpsc::unbounded_channel();
+            // Settling cannot be skipped: pointer features never run without hotkeys.
+            input.on_request(Request::AppsSettled, &recovery);
+            assert_eq!(input.startup.get(), Startup::Registering);
+
+            input.on_request(Request::AppsRegistered, &recovery);
+            assert_eq!(input.startup.get(), Startup::Settling);
+            input.on_request(Request::AppsSettled, &recovery);
+            assert_eq!(input.startup.get(), Startup::Running);
+
+            // Nothing moves it back.
+            input.on_request(Request::AppsRegistered, &recovery);
+            assert_eq!(input.startup.get(), Startup::Running);
         })
         .join()
         .unwrap();
