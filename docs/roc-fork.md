@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, the layout flip done; the shadow sampled; the core's layout linear): read this first
+## Handoff (2026-11-24, the store's admission writer done; the layout flip done; the shadow sampled): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
@@ -21,7 +21,29 @@ ignored, one of them `measure_layout_shadow`), 892 with `roc-core`, the fuzzer a
 --all-targets --features roc-core` compiles (331 warnings, no errors); no build warnings either
 way.
 
-**Next: the window store's single writer** (the Roadmap), on the lead's go.
+**Next: the Roadmap's next row, layout trees into the core** (planned with the lead first: the
+core's `layout::bsp_tree` and `traditional_tree` predate #688 and nothing in rift shadows them
+since merge (b)).
+
+**The window store's single writer, done (the lead's ruling, 2026-11-24: the upstream PR plan's
+C1 step 2, narrow).** C1 step 2 is about the admission facts only (manageability, rule, AX kind,
+native kind, minimize): one place, one writer, setters returning the transition. On this line
+that was already true since L3 (the core's lifecycle holds them; the store's setters are their
+only writers) except for two details, each its own commit: `invalidate_ax_identity` /
+`validate_ax_identity` answer the core's `Invalidation` / `Revalidation` and the callers match
+on them (2594b590; plants and two literal tests in the message: a shown event for an invalidated
+window is a positive AX return, a rediscovered invalidated window resumes though natively
+hidden), and two reactor tests that set a snapshot's minimized flag around the writer go through
+`set_minimized` (77dfd124). Checked: no admission fact is written around the writers in rift
+(`Effect::Seen` writes only the model frame, the title handler only the title); C1 step 3
+(8207d229) and C2.1 (c173c69f) were done. `window_mut` stays: it still writes the title and
+`Effect::Seen`'s model frame (the ruling: it goes only if left writing nothing but the title).
+Ruled out: a universal `apply(WindowChange)` over the store's other writers (window server,
+visibility, native fullscreen, rule floating, claims, the grip, topology); nothing upstream
+asks for it. Topology stays its own writer on the core. The old doc comment's "false if it
+already was" was wrong: invalidating an invalidated window answers `Invalidated` again.
+Clippy with `roc-core`, counted as `grep -E '^(warning|error)' | grep -v generated`, is 332 lines
+on both sides of these commits.
 
 **The core's layout path made linear (the lead's approved design, after roc-fork-7's diagnosis).**
 Since the flip the core's frames are rift's cost, and the core's `place` recomputed each child's
@@ -923,8 +945,9 @@ A slice that needs a behaviour change stops and is reported.
    on f25da45 and b5c77fc), then the pin moved to nightly-2026-11-23-b5c77fc, then the `S(m)`
    workaround went (all but `LifecycleStepped`: roc-lang/roc#13363).
 
-- When the window store gets its single writer (upstream C1 step 2), its `invalidate_ax_identity` /
-  `validate_ax_identity` answer the core's named tags (`Invalidation`, `Revalidation`) instead of bools.
+- The window store's single writer (the upstream PR plan's C1 step 2): done 2026-11-24, admission
+  facts only; `invalidate_ax_identity` / `validate_ax_identity` answer `Invalidation` /
+  `Revalidation` (Handoff).
 - `LifecycleStepped` moves into the platform module beside the other entries' results on the first
   nightly with roc-lang/roc#13363's fix (3ef41a6).
 
@@ -1696,7 +1719,7 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
 | Layout geometry: floating | S | Done, Rust and Roc: first frames and the cascade (`layout::floating`, `Floating.roc`). |
 | Layout trees into the core | L+ | **In progress, BSP first; traditional paused for upstream #688.** `layout::bsp_tree` holds a BSP layout (splits of two, leaves of nothing / a window / a stack, the selection as each split's memory, node tags the core mints) and every change rift makes to one; in test builds each of `BspLayoutSystem`'s operations is shadowed by the core on all traffic, and a tree fuzzer composes them. Next: the core answers (the flip), then the old system goes. Then traditional, scrolling's columns, floating. |
-| Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. |
+| Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. The admission facts' single writer (upstream plan C1 step 2) is done. A universal `apply(WindowChange)` over the store's other writers is not planned: raise it only when a Roc claim needs one step for the store, with that claim as the reason. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
 | The mode table | L | The other ~30 modes as one `Mode x InputClass` table in the core. |
