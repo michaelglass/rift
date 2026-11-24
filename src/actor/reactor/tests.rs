@@ -2951,6 +2951,102 @@ fn a_window_created_while_the_button_is_held_is_tiled_only_at_the_release() {
     );
 }
 
+/// A torn-out tab that reaches Rift through a window-list refresh rather than the
+/// created notification, as Chrome's often does (#689).
+fn discover_window_under_held_button() -> (Apps, Reactor, WindowId, SpaceId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    apps.requests();
+    let wid = WindowId::new(1, 2);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+    // The window server reports the new window first.
+    let wsid = WindowServerId::new(10_002);
+    reactor.state.windows.track_window_server_info(WindowServerInfo {
+        id: wsid,
+        pid: 1,
+        layer: 0,
+        frame,
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    });
+    reactor.mark_test_window_visible_in_space(wsid, space);
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
+    let info = make_window_info(frame, Some(wsid), "Detached tab", None);
+    reactor.discover_test_windows(1, vec![(wid, info)], vec![WindowId::new(1, 1), wid]);
+    (apps, reactor, wid, space)
+}
+
+fn release_left_button(reactor: &mut Reactor) {
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Up)));
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+}
+
+#[test]
+fn a_window_discovered_while_the_button_is_held_is_admitted_only_at_the_release() {
+    let (_apps, mut reactor, wid, space) = discover_window_under_held_button();
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        None,
+        "a window-list refresh admitted the window while the button was held"
+    );
+
+    release_left_button(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space));
+}
+
+#[test]
+fn a_window_discovered_while_the_button_is_held_gets_no_frame_writes_until_the_release() {
+    let (mut apps, mut reactor, wid, _) = discover_window_under_held_button();
+    // The app moves its new window under the cursor while the tab is dragged.
+    for step in 0..5 {
+        let origin = CGPoint::new(200. + 40. * f64::from(step), 200.);
+        let frame = CGRect::new(origin, CGSize::new(500., 500.));
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            frame,
+            None,
+            Requested(false),
+            Some(MouseState::Down),
+        ));
+    }
+    let held = frame_writes(&mut apps);
+    assert!(
+        held.iter().all(|(window, _)| *window != wid),
+        "Rift moved the window while the button was held: {held:?}"
+    );
+
+    release_left_button(&mut reactor);
+    let released = frame_writes(&mut apps);
+    assert!(
+        released.iter().any(|(window, _)| *window == wid),
+        "the release did not tile the window: {released:?}"
+    );
+}
+
+#[test]
+fn the_release_admits_each_held_window_once_and_ends_the_press() {
+    let (mut apps, mut reactor, wid, space) = discover_window_under_held_button();
+    // The same window seen again under the press is not recorded twice.
+    let info = reactor.state.windows.window(wid).unwrap().info.clone();
+    reactor.discover_test_windows(1, vec![(wid, info)], vec![WindowId::new(1, 1), wid]);
+
+    release_left_button(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space));
+    apps.requests();
+
+    // The press is over: a second release has nothing left to admit, and a window
+    // that appears with the button up is tiled at once.
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    assert!(frame_writes(&mut apps).iter().all(|(window, _)| *window != wid));
+    let later = WindowId::new(1, 3);
+    let frame = CGRect::new(CGPoint::new(300., 300.), CGSize::new(400., 400.));
+    let info = make_window_info(frame, None, "Later", None);
+    reactor.handle_event(Event::WindowCreated(later, info, None, Some(MouseState::Up)));
+    assert_eq!(reactor.assigned_space_for_window_id(later), Some(space));
+}
+
 #[test]
 fn opening_mission_control_ends_a_press_and_admits_its_windows() {
     let (mut apps, mut reactor) = test_context();
@@ -2959,6 +3055,8 @@ fn opening_mission_control_ends_a_press_and_admits_its_windows() {
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
     let wid = WindowId::new(1, 2);
     let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(500., 500.));
+    // The button stays down: dragging the new window to the top edge opens Mission Control.
+    crate::sys::event::TEST_MOUSE_STATE.with(|state| state.set(Some(MouseState::Down)));
     let info = make_window_info(frame, None, "Detached tab", None);
     reactor.handle_event(Event::WindowCreated(wid, info, None, Some(MouseState::Down)));
     assert_eq!(reactor.assigned_space_for_window_id(wid), None);
