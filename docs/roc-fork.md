@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, the layout series complete): read this first
+## Handoff (2026-11-24, the Roc nightly bumped): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
@@ -21,12 +21,24 @@ ignored), 877 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -
 --all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
 either way.
 
-**Next: the lead's call.** Every layout system's frames on rift's path are now held to the core's,
-Rust and Roc, bit for bit (rift's systems still decide: nothing is flipped). What is left in "Next
-steps": item 3 (the Roc nightly bump: boundary conversions first; no bump before a nightly with
-roc-lang/roc#13347's fix, then the `S(m)` workaround goes), the window store's single writer, and
-the Roadmap. A flip of the layouts (the core deciding, the systems' frames the shadow) would be
-policy (a) as for the twins, and the lead's to rule.
+**Next: the layout flip (the lead's ruling, 2026-11-24, policy (a)).** The core decides each
+layout system's frames (Roc under `roc-core`, else Rust); a difference warns `layout-divergence:` /
+`roc-divergence:` (tests panic), the core's frames are used, and divergences are counted in
+`rift-cli metrics show-timing`. One system per commit, with plants both ways. Then: the window
+store's single writer, the Roadmap.
+
+**The Roc nightly bump (2026-11-24).** Pinned `nightly-2026-11-23-b5c77fc` (`roc/NIGHTLY`; the local
+install's `current` and `safe` point at it, `src` is a roc-lang/roc checkout at b5c77fc for the glue
+spec). Three commits: (1) the core takes and answers the platform's own types, since nightlies after
+f25da45 never pass a plain value for a nominal one (93 `roc check` errors at b5c77fc); green on both
+nightlies; see "Design we follow" for the shape (Boundary's `answer`/`entry` methods keep
+`Asking` generic, `is_eq`/`to_hash` on a few types, each entry builds its own answer type);
+(2) the pin; (3) the `S(m)` workaround goes: the entries' results are declared in the platform
+module on `Model`, `Windows`, `Joined`, `Mains`, except `LifecycleStepped`, which roc-lang/roc#13363
+keeps in `Boundary` (generic) until the next nightly (see "Unknown"). No Rust change; the glue's
+names are unchanged. Checks: 1009 workspace tests (868 lib, 2 ignored), 877 lib with `roc-core`, the
+Roc crate's 49, rift-core's 116, the fuzzer 2000 × 40 both ways, `cargo check --locked` both ways,
+fmt, clippy with `roc-core` compiles (old warnings).
 
 **Scrolling's translation (slice 5b, d37970b1; the lead's ruling, 2026-11-24).**
 `scrolling::translate(frames, Camera { screen, tiling, offset, parking: Park | InPlace },
@@ -805,14 +817,14 @@ A slice that needs a behaviour change stops and is reported.
    Done: stack (aec5f920), the core's solver and weights brought up to #688 (a02886b5, 6cebd282),
    master-stack, traditional, floating, BSP, scrolling's placement and translation (Handoff). The
    series is complete.
-3. The Roc nightly bump: nightly 09f4dc3 rejects a nominal value where a plain record, tuple, tag
-   or List is expected (`roc check` here: 86 errors, 80 of them this rule, in core/main.roc,
-   Bsp.roc and Traditional.roc). Boundary conversions first; the pin stays on f25da45 until then.
+3. The Roc nightly bump: done 2026-11-24 (Handoff). The core speaks the platform's types (green
+   on f25da45 and b5c77fc), then the pin moved to nightly-2026-11-23-b5c77fc, then the `S(m)`
+   workaround went (all but `LifecycleStepped`: roc-lang/roc#13363).
 
 - When the window store gets its single writer (upstream C1 step 2), its `invalidate_ax_identity` /
   `validate_ax_identity` answer the core's named tags (`Invalidation`, `Revalidation`) instead of bools.
-- roc-lang/roc#13347 is fixed upstream (8712e637); the `S(m)` workaround goes after the next nightly that
-  includes it. No bump before then.
+- `LifecycleStepped` moves into the platform module beside the other entries' results on the first
+  nightly with roc-lang/roc#13363's fix (3ef41a6).
 
 No call site is in `layout_engine/`; keep it that way.
 
@@ -1220,19 +1232,30 @@ Build:
 | rift with `roc-core`, after touching `main.roc` (Roc build + relinking rift) | 32 s |
 | rift without it, after touching `rift-core` | 16 s |
 
-## Roc: the design we follow, and what is left (nightly-2026-11-15-f25da45)
+## Roc: the design we follow, and what is left (nightly-2026-11-23-b5c77fc)
 
-Sources are the Roc checkout at the pinned commit (`f25da45`): `docs/langref/`, `design.md`,
+Sources are the Roc checkout at the pinned commit (`b5c77fc`; written at `f25da45`, the bump's
+changes noted): `docs/langref/`, `design.md`,
 `docs/mini-tutorial-new-compiler.md`, `src/build/roc/Builtin.roc`, `src/cli/main.zig`. Earlier
 notes called several of these friction; they are Roc's design, and the core follows them.
 
 ### Design we follow
 
-- **Same-shaped nominal types do not unify** (langref `types.md`, "Nominal Types" and
-  "Structural-Nominal Compatibility"): a structural value passes where a nominal type is
-  expected, but two nominals of the same shape are different types. So the core modules use
-  the platform's recursive nominals (`Boundary.BspNode`, `Boundary.TraditionalNode`) directly,
-  and nothing is copied between nominal and structural records in Roc.
+- **A plain value never passes for a nominal type, nor a nominal for a plain one** (since the
+  nightlies after `f25da45`; at `f25da45` a structural value still passed where a nominal was
+  expected). Two nominals of the same shape are different types too. So the core modules take
+  and answer the platform's own types (`Boundary`'s), never structural copies of them, and
+  nothing is copied between the two. A record literal or a tag where the annotation names the
+  nominal type is that type; `Rect.{ x, y, w, h }` builds one where nothing names it, and `{
+  ..rect, w }` keeps it. Internal state that never crosses (the reconciler's `Sync`, a
+  container's `Summary`) stays structural, with nominal fields.
+- **Methods make a nominal type usable generically** (langref `static-dispatch.md`): each
+  `Fact…` type answers what the platform asked (`answer`), each keyed answer gives its key and
+  answer (`entry`), so `Asking.ask`, `ask_window` and `ask_word` stay generic over them
+  (`where [f.answer : ..]`). `==` is a method, `is_eq`: `WindowId`, `MaybeWord`, `Screen`,
+  `Destination` and `Armed` define it, and `WindowId` defines `to_hash` (a `Dict` key). A generic
+  helper cannot build a nominal answer, so each model-free entry matches its decision into its
+  own answer type.
 
 - **No `Option`, no null.** Failures are `Try`, absence is a descriptive tag union (mini
   tutorial, "`Try`": "Roc does not have `null`, `nil`, `undefined`, or anything similar").
@@ -1295,12 +1318,18 @@ notes called several of these friction; they are Roc's design, and the core foll
   `List.first(tag.payload)`, and `RustGlue.roc:159` emits that. Unfixed on main and unreported
   (2026-11-20). Workaround and guard: such values are a named record, and the build fails on a
   platform union with one tag carrying several values.
-- **`roc check` hangs** on a nominal type in a platform module that mentions the platform's
-  `Model` variable, when the platform has no `import` (minimal repro, the lead's); ours imports
-  `Boundary`, and `Stepped(model)` is generic in the model anyway. Closest upstream: open issue
-  #13263 (aliases built on `requires`' Model are not checked as Model), whose workaround is the
-  same type parameter. On a nightly bump, also check #13249 (an `--opt=dev` SIGTRAP when a
-  platform closure captures a Model-typed callback; closed).
+- **`roc check` hung** on a nominal type in a platform module that mentions the platform's
+  `Model` variable (roc-lang/roc#13347, fixed in 8712e637, in nightly-2026-11-23-b5c77fc). The
+  workaround, the entries' results declared in `Boundary` generic in the model (`Stepped(model)`
+  and its kin), went with the bump: they are declared in the platform module on `Model`,
+  `Windows`, `Joined` and `Mains`. All but one: **roc-lang/roc#13363** (in b5c77fc; fixed upstream
+  in 3ef41a6, PR #13389, merged 2026-11-24, in no nightly yet) rejects a provided function
+  answering a bare type as "polymorphic" when a type declared in the platform module wraps that
+  type (30-line repro: `S := { c : C }` with `C` from an imported module makes `net : U64 -> C`
+  polymorphic; a type parameter on `S` does not help). `LifecycleStepped` wraps `Change`, which
+  `lifecycle_net` answers bare, so it stays in `Boundary`, generic; it moves on the next nightly.
+  Also check #13249 on a bump (an `--opt=dev` SIGTRAP when a platform closure captures a
+  Model-typed callback; closed).
 - **`roc build` hung** (`roc check` passing) on an entry rebuilding tuples out of a nominal
   record's fields (the settle question's placement); giving the core's own type the record
   shape removed the hang. Not reduced further.
