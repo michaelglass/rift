@@ -2341,7 +2341,13 @@ mod core_geometry_tests {
                         3 => WindowDropAction::Insert(drawn_direction(rng)),
                         _ => WindowDropAction::Move(drawn_direction(rng)),
                     };
-                    system.edit(layout, LayoutEdit::Drop { source, target, action });
+                    let drop = LayoutEdit::Drop { source, target, action };
+                    if rng.chance(30) {
+                        // Past `edit`'s participation check, which the system makes again.
+                        system.edit_layout(layout, drop);
+                    } else {
+                        system.edit(layout, drop);
+                    }
                 }
                 10 => {
                     let amount = rng.length(-0.6, 0.6);

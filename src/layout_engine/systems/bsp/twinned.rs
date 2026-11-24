@@ -390,9 +390,28 @@ fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
 }
 
 /// An edit as the core takes it; none for those the core has no port of yet.
-fn core_edit(edit: LayoutEdit) -> Option<core::Edit> {
-    use crate::layout_engine::{LayoutKind, ResizeOrientation};
+fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
+    use crate::layout_engine::{LayoutKind, ResizeOrientation, WindowDropAction};
     Some(match edit {
+        LayoutEdit::Move { direction, .. } => core::Edit::Move(core_direction(direction)),
+        LayoutEdit::Swap(a, b) => core::Edit::Swap(a, b),
+        LayoutEdit::Drop { source, target, action } => core::Edit::Drop {
+            source,
+            target,
+            action: match action {
+                WindowDropAction::Swap => core::DropAction::Swap,
+                WindowDropAction::Stack => core::DropAction::Stack,
+                WindowDropAction::Insert(direction) => {
+                    core::DropAction::Insert(core_direction(direction))
+                }
+                WindowDropAction::Move(direction) => {
+                    core::DropAction::Move(core_direction(direction))
+                }
+                WindowDropAction::ConsumeOrExpel(direction) => {
+                    core::DropAction::ConsumeOrExpel(core_direction(direction))
+                }
+            },
+        },
         LayoutEdit::Split(kind) => core::Edit::Split(match kind {
             LayoutKind::Horizontal => core::SplitKind::Tiled(core::Orientation::Horizontal),
             LayoutKind::Vertical => core::SplitKind::Tiled(core::Orientation::Vertical),

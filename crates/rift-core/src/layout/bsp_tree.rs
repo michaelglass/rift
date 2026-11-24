@@ -564,8 +564,9 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
     }
 
     /// An edit of a layout (upstream's `edit_layout`).
-    pub fn edit(&mut self, layout: L, edit: Edit) -> Edited<W> {
+    pub fn edit(&mut self, layout: L, edit: Edit<W>) -> Edited<W> {
         match edit {
+            Edit::Move(direction) => Edited::of(self.move_selection(layout, direction)),
             Edit::Split(SplitKind::Stacked) => Edited::Unsupported,
             Edit::Split(SplitKind::Tiled(orientation)) => {
                 let Some(selection) = self.selection_of_layout(layout) else {
@@ -577,6 +578,10 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
             }
             Edit::Fullscreen { within_gaps } => {
                 Edited::Raise(self.toggle_fullscreen(layout, within_gaps))
+            }
+            Edit::Swap(a, b) => Edited::of(self.swap_windows(layout, a, b)),
+            Edit::Drop { source, target, action } => {
+                Edited::of(self.apply_target_drop(layout, source, target, action))
             }
             Edit::Resize { amount, along } => self.resize_selection(layout, amount, along),
             Edit::Rebalance => {
@@ -656,6 +661,146 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
         };
         *fill = toggled(*fill, within_gaps);
         active.into_iter().collect()
+    }
+
+    fn replace_child(&mut self, old: N, new: N) {
+        let parent = self.parent(old).expect("cannot replace BSP root");
+        let Kind::Split(split) = self.kind_mut(parent) else {
+            unreachable!("a BSP parent is a split")
+        };
+        let side = usize::from(split.children[1] == old);
+        split.children[side] = new;
+        self.nodes[new].parent = Parent::Split(parent);
+    }
+
+    fn move_selection(&mut self, layout: L, direction: Direction) -> bool {
+        let Some(selection) = self.selection_of_layout(layout) else {
+            return false;
+        };
+        let moving = self.descend_to_leaf(selection);
+        if !matches!(self.content(moving), Some(Content::Held { .. })) {
+            return false;
+        }
+        let Some(target) = self.find_neighbor_leaf(moving, direction) else {
+            return false;
+        };
+        let Some(old_parent) = self.parent(moving) else {
+            return false;
+        };
+        let side = direction.side();
+        if self.parent(target) == Some(old_parent) {
+            let Kind::Split(split) = self.kind_mut(old_parent) else {
+                unreachable!("a BSP parent is a split")
+            };
+            if (split.children[0] == moving) != (side == Side::First) {
+                split.children.swap(0, 1);
+            }
+        } else {
+            self.detach_child(moving);
+            if matches!(self.content(target), Some(Content::Empty)) {
+                self.replace_child(target, moving);
+                self.nodes.remove(target);
+            } else {
+                let split = self.make_leaf(Content::Empty);
+                self.replace_child(target, split);
+                self.set_split(split, direction.orientation(), match side {
+                    Side::First => [moving, target],
+                    Side::Second => [target, moving],
+                });
+            }
+        }
+        self.select(moving);
+        true
+    }
+
+    fn swap_windows(&mut self, layout: L, a: W, b: W) -> bool {
+        if a == b || !self.window_participates(a) || !self.window_participates(b) {
+            return false;
+        }
+        let Some(node_a) = self.node_for_window_in_layout(layout, a) else {
+            return false;
+        };
+        let Some(node_b) = self.node_for_window_in_layout(layout, b) else {
+            return false;
+        };
+        if node_a == node_b {
+            let Content::Held {
+                members: Members::Stack(tabs), ..
+            } = self.content_mut(node_a)
+            else {
+                unreachable!("distinct windows in one leaf require a stack");
+            };
+            tabs.swap(a, b);
+            self.select(node_a);
+            return true;
+        }
+        // Occupancy moves while fullscreen stays attached to the slot.
+        let first = std::mem::replace(self.content_mut(node_a), Content::Empty);
+        let second = std::mem::replace(self.content_mut(node_b), Content::Empty);
+        let (
+            Content::Held {
+                members: first,
+                fill: first_fill,
+            },
+            Content::Held {
+                members: second,
+                fill: second_fill,
+            },
+        ) = (first, second)
+        else {
+            unreachable!("window lookup returns leaves holding the windows");
+        };
+        *self.content_mut(node_a) = Content::Held {
+            members: second.for_slot_swap(),
+            fill: first_fill,
+        };
+        *self.content_mut(node_b) = Content::Held {
+            members: first.for_slot_swap(),
+            fill: second_fill,
+        };
+        true
+    }
+
+    fn apply_target_drop(&mut self, layout: L, source: W, target: W, action: DropAction) -> bool {
+        if !self.window_participates(source) || !self.window_participates(target) {
+            return false;
+        }
+        if source == target
+            || !self.contains_window(layout, source)
+            || !self.contains_window(layout, target)
+        {
+            return false;
+        }
+        match action {
+            DropAction::Swap => self.swap_windows(layout, source, target),
+            DropAction::Move(_) | DropAction::ConsumeOrExpel(_) => false,
+            DropAction::Stack => {
+                let target = self.taken_from_beside(layout, source, target);
+                if let Content::Held { members, .. } = self.content_mut(target) {
+                    members.append(source);
+                }
+                self.select(target);
+                true
+            }
+            DropAction::Insert(direction) => {
+                let target = self.taken_from_beside(layout, source, target);
+                self.split_leaf(
+                    target,
+                    direction.orientation(),
+                    Content::window(source),
+                    direction.side(),
+                );
+                true
+            }
+        }
+    }
+
+    /// `source` removed from the layout; the leaf now holding `target` (removal can promote it
+    /// into another slot).
+    fn taken_from_beside(&mut self, layout: L, source: W, target: W) -> N {
+        while self.remove_window_internal(layout, source) {}
+        self.node_for_window_in_layout(layout, target)
+            .expect("removing a different window preserves the drop target")
     }
 
     /// A layout as the core's geometry takes it, pruned as upstream's `prepare_geometry` prunes
@@ -1300,12 +1445,34 @@ pub enum SplitKind {
     Stacked,
 }
 
+/// What a window dropped onto another does (upstream's `WindowDropAction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropAction {
+    Swap,
+    Stack,
+    Insert(Direction),
+    Move(Direction),
+    ConsumeOrExpel(Direction),
+}
+
 /// An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Edit {
+pub enum Edit<W> {
+    Move(Direction),
     Split(SplitKind),
-    Fullscreen { within_gaps: bool },
-    Resize { amount: f64, along: ResizeAlong },
+    Fullscreen {
+        within_gaps: bool,
+    },
+    Swap(W, W),
+    Drop {
+        source: W,
+        target: W,
+        action: DropAction,
+    },
+    Resize {
+        amount: f64,
+        along: ResizeAlong,
+    },
     Rebalance,
     ToggleOrientation,
 }
@@ -1336,5 +1503,52 @@ fn toggled(fill: Fill, within_gaps: bool) -> Fill {
         (Fill::WithinGaps, true) | (Fill::Screen, false) => Fill::Tiled,
         (_, true) => Fill::WithinGaps,
         (_, false) => Fill::Screen,
+    }
+}
+
+impl<W: Copy + PartialEq> Members<W> {
+    /// `window` added to the end of the stack, on top (a lone window becomes a stack of two).
+    fn append(&mut self, window: W) {
+        *self = Members::Stack(Tabs {
+            before: self.windows().collect(),
+            top: window,
+            after: Vec::new(),
+        });
+    }
+
+    /// The windows as they move to another slot: a stack shows its last window, a stack of one
+    /// is a lone window.
+    fn for_slot_swap(self) -> Self {
+        let (mut before, top, mut after) = match self {
+            Members::Window(window) => return Members::Window(window),
+            Members::Stack(Tabs { before, top, after }) => (before, top, after),
+        };
+        let tabs = match after.pop() {
+            Some(last) => {
+                before.push(top);
+                before.append(&mut after);
+                Tabs { before, top: last, after }
+            }
+            None => Tabs { before, top, after },
+        };
+        if tabs.before.is_empty() {
+            Members::Window(tabs.top)
+        } else {
+            Members::Stack(tabs)
+        }
+    }
+}
+
+impl<W: Copy + PartialEq> Tabs<W> {
+    /// `first` and `second` moved to the end, `second` then `first`, `first` on top.
+    fn swap(&mut self, first: W, second: W) {
+        let mut before: Vec<W> =
+            self.windows().filter(|&window| window != first && window != second).collect();
+        before.push(second);
+        *self = Tabs {
+            before,
+            top: first,
+            after: Vec::new(),
+        };
     }
 }
