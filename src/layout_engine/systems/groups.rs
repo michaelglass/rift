@@ -271,28 +271,16 @@ impl NodeMap {
         self[new].layout.size = core::mem::replace(&mut self[old].layout.size, 0.0);
     }
 
-    pub(super) fn set_kind(&mut self, node: NodeId, kind: LayoutKind) {
-        self[node].layout.kind = kind;
-    }
-
-    pub(super) fn kind(&self, node: NodeId) -> LayoutKind { self[node].layout.kind }
-
     pub(super) fn is_effectively_fullscreen(&self, node: NodeId) -> bool {
         let info = &self[node].layout;
         info.is_fullscreen || info.is_fullscreen_within_gaps
     }
 
-    fn debug(&self, node: NodeId, is_container: bool) -> String {
-        let info = &self[node].layout;
-        if is_container {
-            format!(
-                "{:?} [size {} total={}]",
-                info.kind,
-                info.size,
-                self.children_total(node)
-            )
-        } else {
-            format!("[size {}]", info.size)
+    fn debug(&self, node: NodeId) -> String {
+        let size = self[node].layout.size;
+        match self.kind(node) {
+            Some(kind) => format!("{kind:?} [size {size} total={}]", self.children_total(node)),
+            None => format!("[size {size}]"),
         }
     }
 }
@@ -328,7 +316,7 @@ impl GroupLayouts {
             Seat::Tab { .. } => return EditResult::Unchanged,
             Seat::Root => {
                 let root = self.root(layout);
-                let kind = self.layout(root);
+                let kind = self.container_kind(root);
                 if kind.is_stacked() {
                     return EditResult::Unchanged;
                 }
@@ -397,8 +385,8 @@ impl GroupLayouts {
         };
         let desc = format!("{status}{node:?}");
         let desc = match self.window_at(node) {
-            Some(wid) => format!("{desc} {:?} {}", wid, self.tree.map.debug(node, false)),
-            None => format!("{desc} {}", self.tree.map.debug(node, true)),
+            Some(wid) => format!("{desc} {:?} {}", wid, self.tree.map.debug(node)),
+            None => format!("{desc} {}", self.tree.map.debug(node)),
         };
         let desc = if let Some(label) =
             labels.iter().find_map(|&(id, label)| (id == node).then_some(label))
@@ -452,7 +440,7 @@ impl GroupLayouts {
                     rift_protocol::ContainerNodeType::Container
                 },
                 frame: Default::default(),
-                layout_kind: window.is_none().then_some(info.kind),
+                layout_kind: system.tree.map.kind(node),
                 weight: node.parent(system.map()).map(|_| f64::from(info.size)),
                 window_id: window.map(Into::into),
                 is_selected: node == selected,
@@ -493,12 +481,14 @@ impl GroupLayouts {
     fn descend_into_target(&self, target: NodeId, direction: Direction, map: &NodeMap) -> NodeId {
         let active = self.participating_nodes(target);
         let mut current = target;
-        while let Some(child) = map.participating_child(
-            current,
-            !map.kind(current).is_stacked()
-                && matches!(direction, Direction::Right | Direction::Down),
-            |child| self.inactive.is_empty() || active.contains(&child),
-        ) {
+        // Descend until a window, which has no kind and no children.
+        while let Some(kind) = map.kind(current)
+            && let Some(child) = map.participating_child(
+                current,
+                !kind.is_stacked() && matches!(direction, Direction::Right | Direction::Down),
+                |child| self.inactive.is_empty() || active.contains(&child),
+            )
+        {
             current = child;
         }
         current
@@ -534,7 +524,7 @@ impl GroupLayouts {
             node,
             &|window| self.window_participates(window),
             &|node| {
-                if map.kind(node).is_group() {
+                if map.container_kind(node).is_group() {
                     (map.local_selection(node), false, group_limit)
                 } else {
                     (None, false, BranchLimit::All)
@@ -693,7 +683,7 @@ impl GroupLayouts {
             Some(selection)
         };
         let Some(container) = container else { return Vec::new() };
-        let kind = self.layout(container);
+        let kind = self.container_kind(container);
         let orientation = if kind.is_stacked() {
             perpendicular(kind.orientation())
         } else {
@@ -717,7 +707,7 @@ impl GroupLayouts {
         let Some(parent) = parent else {
             return Seat::Root;
         };
-        let kind = self.layout(parent);
+        let kind = self.container_kind(parent);
         let orientation = kind.orientation();
         if kind.is_stacked() {
             Seat::Tab { stack: parent, orientation }
@@ -733,10 +723,9 @@ impl GroupLayouts {
             .filter_map(|(_, parent)| self.seat_under(parent).stack())
     }
 
-    /// Whether `node` is a stack. Every node stores a layout kind, but only a container's means
-    /// anything.
+    /// Whether `node` is a stack.
     pub(super) fn is_stack(&self, node: NodeId) -> bool {
-        self.window_at(node).is_none() && self.layout(node).is_stacked()
+        self.kind(node).is_some_and(LayoutKind::is_stacked)
     }
 
     /// `node` itself if it is a stack, else the nearest stack around it.
@@ -769,7 +758,7 @@ impl GroupLayouts {
             return Vec::new();
         };
         let orientation =
-            group_orientation(self.layout(container).orientation(), default_orientation);
+            group_orientation(self.container_kind(container).orientation(), default_orientation);
         self.set_layout(container, match orientation {
             Orientation::Horizontal => LayoutKind::Horizontal,
             Orientation::Vertical => LayoutKind::Vertical,
@@ -797,7 +786,8 @@ impl GroupLayouts {
         let Some(stack) = source.common_ancestor(target, map) else {
             return false;
         };
-        if !self.layout(stack).is_stacked() {
+        // The same window twice has itself, not a stack, as the common ancestor.
+        if !self.is_stack(stack) {
             return false;
         }
         let tab = |node: NodeId| node.ancestors(map).find(|node| node.parent(map) == Some(stack));
@@ -937,7 +927,7 @@ impl GroupLayouts {
             self.root(layout),
             &|window| self.window_participates(window),
             &|node| {
-                let kind = map.kind(node);
+                let kind = map.container_kind(node);
                 let preferred =
                     if kind.is_stacked() || kind.orientation() != direction.orientation() {
                         map.local_selection(node)
@@ -1066,7 +1056,14 @@ impl GroupLayouts {
             .or_else(|| self.tree.map.last_selection(node))
     }
 
-    pub(super) fn layout(&self, node: NodeId) -> LayoutKind { self.tree.map.kind(node) }
+    /// A container's layout kind, or `None` for a window, which has none.
+    pub(super) fn kind(&self, node: NodeId) -> Option<LayoutKind> { self.tree.map.kind(node) }
+
+    /// The layout kind of a node that is a container by construction. Panics on a window.
+    #[track_caller]
+    pub(super) fn container_kind(&self, node: NodeId) -> LayoutKind {
+        self.tree.map.container_kind(node)
+    }
 
     pub(super) fn window_node(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
         self.tree.window.node_for(layout, wid)

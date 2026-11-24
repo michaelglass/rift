@@ -115,7 +115,7 @@ impl TraditionalLayoutSystem {
         direction: Direction,
     ) -> Option<NodeId> {
         let first = container.first_child(self.tiles.map())?;
-        if self.tiles.layout(container).orientation() != direction.orientation() {
+        if self.tiles.container_kind(container).orientation() != direction.orientation() {
             return self.tiles.local_selection(container).or(Some(first));
         }
         match direction {
@@ -194,7 +194,7 @@ impl TraditionalLayoutSystem {
             _ => {}
         }
         let parent = self.find_or_create_smart_common_parent(selection, target, direction);
-        if !self.tiles.layout(parent).is_stacked() {
+        if !self.tiles.container_kind(parent).is_stacked() {
             self.tiles.set_layout(parent, kind);
         }
         self.tiles.select(parent);
@@ -290,7 +290,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 };
                 let mut root = self.tiles.root(layout);
                 let kind = LayoutKind::from(direction.orientation());
-                let current = self.tiles.layout(root);
+                let current = self.tiles.container_kind(root);
                 if !root.is_empty(self.tiles.map())
                     && (current.is_stacked() || current.orientation() != kind.orientation())
                 {
@@ -476,10 +476,9 @@ impl TraditionalLayoutSystem {
 
         // If the selection is now a container that matches the join orientation,
         // absorb the target into it to avoid creating an extra nesting layer.
-        let selection_layout = self.tiles.layout(selection);
         let target_is_ancestor = target.ancestors(map).any(|a| a == selection);
         let selection_is_ancestor = selection.ancestors(map).any(|a| a == target);
-        if self.tiles.window_at(selection).is_none()
+        if let Some(selection_layout) = self.tiles.kind(selection)
             && selection_layout.orientation() == direction.orientation()
             && !selection_layout.is_group()
             && !target_is_ancestor
@@ -644,7 +643,8 @@ impl TraditionalLayoutSystem {
                 else {
                     break node;
                 };
-                if self.tiles.tree.map.kind(node).orientation() == direction.orientation() {
+                if self.tiles.tree.map.container_kind(node).orientation() == direction.orientation()
+                {
                     break next;
                 }
                 node = next;
@@ -662,7 +662,7 @@ impl TraditionalLayoutSystem {
                 (target, false)
             } else {
                 let old_root = moving_node.ancestors(map).last().unwrap();
-                let root_kind = self.tiles.tree.map.kind(old_root);
+                let root_kind = self.tiles.tree.map.container_kind(old_root);
                 // Leaving the edge of a root group splits the window out of it; at the edge
                 // of a same-oriented split there is nowhere further to go.
                 if root_kind.orientation() == direction.orientation() && !root_kind.is_group() {
@@ -971,7 +971,7 @@ mod tests {
                 (_, _, VerticalPlacement::Right) => rect(472.0, 200.0, 28.0, 300.0),
             };
             assert_eq!(bar, expected_bar);
-            assert_eq!(system.tiles.tree.map.kind(root), kind);
+            assert_eq!(system.tiles.tree.map.container_kind(root), kind);
         }
     }
 
@@ -1076,16 +1076,16 @@ mod tests {
         let root = system.tiles.root(layout);
 
         assert!(system.edit(layout, LayoutEdit::ToggleOrientation).changed());
-        assert_eq!(system.tiles.layout(root), LayoutKind::Vertical);
+        assert_eq!(system.tiles.container_kind(root), LayoutKind::Vertical);
 
         let _ = system.edit(
             layout,
             LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Same)),
         );
-        let stacked = system.tiles.layout(root);
+        let stacked = system.tiles.container_kind(root);
         assert!(stacked.is_stacked());
         assert!(!system.edit(layout, LayoutEdit::ToggleOrientation).changed());
-        assert_eq!(system.tiles.layout(root), stacked);
+        assert_eq!(system.tiles.container_kind(root), stacked);
     }
 
     #[test]
@@ -1133,7 +1133,10 @@ mod tests {
         drop(&mut system, layout, w(4), w(3), Stack);
         assert_eq!(system.windows(layout, WindowQuery::Stack(w(3))), [w(3), w(4)]);
         let new_stack = parent_of(&system, layout, w(3)).unwrap();
-        assert_eq!(system.tiles.layout(new_stack), LayoutKind::HorizontalStack);
+        assert_eq!(
+            system.tiles.container_kind(new_stack),
+            LayoutKind::HorizontalStack
+        );
 
         // Inserting beside a tab, along the split's axis, inserts beside its whole stack.
         let (mut system, layout) = build();

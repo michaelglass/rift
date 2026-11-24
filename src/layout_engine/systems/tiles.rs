@@ -90,7 +90,7 @@ impl NodeMap {
             return (0.0, None, None, true);
         }
 
-        let kind = self[node].layout.kind;
+        let kind = self.container_kind(node);
         container_axis_constraints(
             node.children(self)
                 .filter_map(|child| prepared.get(&child))

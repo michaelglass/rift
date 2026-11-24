@@ -285,6 +285,25 @@ impl NodeMap {
 
     pub(crate) fn window(&self, node: NodeId) -> Option<WindowId> { self.map.get(node)?.window() }
 
+    /// A container's layout kind, or `None` for a window, which has none.
+    pub(crate) fn kind(&self, node: NodeId) -> Option<LayoutKind> {
+        self.window(node).is_none().then(|| self[node].layout.kind)
+    }
+
+    /// The layout kind of a node that is a container by construction: a parent, a layout root,
+    /// or a node with children. Panics on a window, which has no kind.
+    #[track_caller]
+    pub(crate) fn container_kind(&self, node: NodeId) -> LayoutKind {
+        self.kind(node).expect("a window has no layout kind")
+    }
+
+    /// Sets a container's layout kind. Panics on a window, which has no kind.
+    #[track_caller]
+    pub(crate) fn set_kind(&mut self, node: NodeId, kind: LayoutKind) {
+        assert!(self.window(node).is_none(), "a window has no layout kind");
+        self[node].layout.kind = kind;
+    }
+
     pub(crate) fn selection_info(&self, node: NodeId) -> Option<SelectionInfo> {
         self.map.get(node)?.children()?.selection
     }

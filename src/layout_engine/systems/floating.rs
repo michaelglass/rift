@@ -97,7 +97,7 @@ impl FloatingLayoutSystem {
         let selection = self.groups.selection(layout);
         let root = self.groups.root(layout);
         root.traverse_preorder(self.groups.map())
-            .filter(|node| self.groups.layout(*node).is_stacked())
+            .filter(|&node| self.groups.is_stack(node))
             .filter(|node| {
                 !selection_path_only
                     || selection.ancestors(self.groups.map()).any(|ancestor| ancestor == *node)
@@ -115,7 +115,7 @@ impl FloatingLayoutSystem {
                 });
                 Some(self.groups.stack_group_container_info(
                     node,
-                    self.groups.layout(node),
+                    self.groups.container_kind(node),
                     frame,
                     &children,
                     index,
@@ -556,7 +556,7 @@ impl LayoutSystem for FloatingLayoutSystem {
                         return EditResult::Raise(Vec::new());
                     };
                     let members = self.members(container);
-                    let save = !self.groups.layout(container).is_stacked();
+                    let save = !self.groups.container_kind(container).is_stacked();
                     self.align_members(&members, focused, save);
                     self.groups.apply_stacking_to_parent_of_selection(layout, orientation);
                     self.groups.focus(layout, Focus::Select(focused)).handled;
@@ -636,7 +636,7 @@ impl FloatingLayoutSystem {
             parent
         };
         let remaining = self.remaining_leaf(target_node);
-        if self.groups.layout(container).is_stacked() {
+        if self.groups.container_kind(container).is_stacked() {
             self.align_members(&[target], focused, true);
         } else if let Some(geometry) = self.geometry.get_mut(&target) {
             geometry.restore = None;
