@@ -219,9 +219,10 @@ impl LayoutConstraints {
         layout: LayoutId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
+        shadow: crate::layout_engine::Shadow,
     ) {
         if let LayoutSystemKind::Scrolling(scrolling) = system {
-            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps);
+            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps, shadow);
         }
     }
 }
@@ -255,6 +256,8 @@ pub struct LayoutEngine {
     native_reconcile_batch: Option<HashSet<VirtualWorkspaceId>>,
     // Windows a display departure moved to another display, by where they came from.
     evicted: HashMap<WindowId, EvictedWindow>,
+    /// Each Space's layout passes, deciding which run the layout systems' shadows.
+    shadow_passes: super::core_geometry::ShadowPasses,
 }
 
 /// A layout engine and the topology its workspaces start with, joined into the stores by
@@ -519,9 +522,12 @@ impl LayoutEngine {
             .edit(layout, LayoutEdit::Drop { source, target, action })
             .changed()
             .then_some(())?;
-        self.window_layout_constraints.prepare(&mut system, layout, screen, &gaps);
+        // A drag preview is not a Space's layout pass.
+        let shadow = crate::layout_engine::Shadow::outside_a_pass();
+        self.window_layout_constraints
+            .prepare(&mut system, layout, screen, &gaps, shadow);
         let frame = self
-            .project_arrangement(&system, layout, screen, &gaps, stack_line.reserve())
+            .project_arrangement(&system, layout, screen, &gaps, stack_line.reserve(), shadow)
             .into_iter()
             .find_map(|(window, frame)| (window == source).then_some(frame))?;
         Some(DropPreview {
@@ -604,7 +610,15 @@ impl LayoutEngine {
         else {
             return Vec::new();
         };
-        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
+        // A query is not a Space's layout pass.
+        self.calculate_arrangement(
+            workspace_id,
+            layout,
+            screen,
+            gaps,
+            stack_line,
+            crate::layout_engine::Shadow::outside_a_pass(),
+        )
     }
 
     fn calculate_arrangement(
@@ -614,6 +628,7 @@ impl LayoutEngine {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         self.project_arrangement(
             &self.workspaces[workspace_id].layout_system,
@@ -621,6 +636,7 @@ impl LayoutEngine {
             screen,
             gaps,
             stack_line,
+            shadow,
         )
     }
 
@@ -631,6 +647,7 @@ impl LayoutEngine {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         if let LayoutSystemKind::Scrolling(scrolling) = system {
             return scrolling.calculate_frames(
@@ -640,6 +657,7 @@ impl LayoutEngine {
                 Some(self.window_layout_constraints.revision),
                 gaps,
                 true,
+                shadow,
             );
         }
         system.calculate_layout(
@@ -649,6 +667,7 @@ impl LayoutEngine {
             &self.window_layout_constraints.windows,
             gaps,
             stack_line,
+            shadow,
         )
     }
 
@@ -1942,6 +1961,7 @@ impl LayoutEngine {
             native_layouts: HashMap::default(),
             native_reconcile_batch: None,
             evicted: HashMap::default(),
+            shadow_passes: Default::default(),
         }
     }
 
@@ -3016,13 +3036,15 @@ impl LayoutEngine {
         else {
             return Vec::new();
         };
+        let shadow = self.shadow_passes.pass(space);
         self.window_layout_constraints.prepare(
             &mut self.workspaces[workspace_id].layout_system,
             layout,
             screen,
             gaps,
+            shadow,
         );
-        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
+        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line, shadow)
     }
 
     pub(crate) fn calculate_layout_with_virtual_workspaces<F>(
@@ -3126,8 +3148,9 @@ impl LayoutEngine {
                     None
                 });
                 positions.extend(frames.unwrap_or_else(|| {
+                    let shadow = self.shadow_passes.pass(space);
                     let system = &mut self.workspaces[active_workspace_id].layout_system;
-                    self.window_layout_constraints.prepare(system, layout, screen, gaps);
+                    self.window_layout_constraints.prepare(system, layout, screen, gaps, shadow);
                     if finish_scrolling && let LayoutSystemKind::Scrolling(scrolling) = system {
                         scrolling.finish_viewport(layout);
                     }
@@ -3137,6 +3160,7 @@ impl LayoutEngine {
                         screen,
                         gaps,
                         stack_line,
+                        shadow,
                     )
                 }));
             }
@@ -3283,6 +3307,8 @@ impl LayoutEngine {
                     Some(self.window_layout_constraints.revision),
                     gaps,
                     false,
+                    // A query is not a Space's layout pass.
+                    crate::layout_engine::Shadow::outside_a_pass(),
                 )
                 .into_iter()
                 .collect(),
@@ -4432,6 +4458,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Each layout pass of a Space is counted for that Space (which passes run the layout
+    /// system's shadow is decided by its count: every one in tests).
+    #[test]
+    fn each_spaces_layout_passes_are_counted_for_the_shadow() {
+        let mut window_store = OwnedWindows::default();
+        let mut engine = test_engine();
+        let (a, b) = (SpaceId::new(95), SpaceId::new(96));
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let size = CGSize::new(500.0, 500.0);
+        for (space, pid) in [(a, 61), (b, 62)] {
+            let window = WindowId::new(pid, 1);
+            window_store.view_mut().insert_manageable_window(window, live_window(size));
+            let _ = engine.handle_event(
+                &mut window_store.view_mut(),
+                LayoutEvent::SpaceExposed(space, screen.size),
+            );
+            let _ = engine.handle_event(
+                &mut window_store.view_mut(),
+                LayoutEvent::windows_observed(
+                    space,
+                    pid,
+                    vec![window_layout_info(window, size)],
+                    None,
+                ),
+            );
+        }
+        let gaps = engine.layout_settings.gaps.clone();
+        let shadows = crate::layout_engine::layout_shadows();
+        for space in [a, a, b] {
+            let frames = engine.calculate_layout_with_virtual_workspaces(
+                window_store.view(),
+                space,
+                screen,
+                &gaps,
+                Default::default(),
+                |_| None,
+                &[screen],
+            );
+            assert_eq!(frames.len(), 1);
+        }
+        let mut passes = super::super::core_geometry::ShadowPasses::default();
+        passes.pass(a);
+        passes.pass(a);
+        passes.pass(b);
+        assert_eq!(engine.shadow_passes, passes);
+        assert!(crate::layout_engine::layout_shadows() >= shadows + 3);
     }
 
     #[test]

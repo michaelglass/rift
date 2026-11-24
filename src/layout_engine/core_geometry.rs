@@ -77,6 +77,76 @@ pub(crate) fn layout_divergences() -> u64 {
     LAYOUT_DIVERGENCES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// How many times a layout system's shadow ran beside the deciding core, process-wide.
+static LAYOUT_SHADOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times a layout system's shadow has run (see [`LAYOUT_SHADOWS`]).
+pub(crate) fn layout_shadows() -> u64 { LAYOUT_SHADOWS.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Whether a layout pass runs the shadow beside the deciding core (the core decides either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shadow {
+    Run,
+    Skip,
+}
+
+/// How often a Space's layout passes run the shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sampling {
+    EveryPass,
+    /// Every this many passes (the first pass among them).
+    Every(std::num::NonZeroU64),
+}
+
+/// Tests and `roc-core` builds run the shadow on every pass; a plain release build on every 32nd
+/// pass per Space (the lead's ruling, 2026-11-24, after the twins' `VIEW_EVERY`): the shadow
+/// costs a large share of a pass (see roc-fork.md, "Measured"), and a divergence is still
+/// counted within 32 passes of a Space.
+const SAMPLING: Sampling = if cfg!(any(test, feature = "roc-core")) {
+    Sampling::EveryPass
+} else {
+    Sampling::Every(std::num::NonZeroU64::new(32).unwrap())
+};
+
+impl Sampling {
+    /// Whether the pass numbered `pass` (from 0) runs the shadow.
+    fn shadow(self, pass: u64) -> Shadow {
+        match self {
+            Self::EveryPass => Shadow::Run,
+            Self::Every(every) if pass % every.get() == 0 => Shadow::Run,
+            Self::Every(_) => Shadow::Skip,
+        }
+    }
+
+    /// Whether layout work outside a Space's pass (a query, a drag preview, an edit's rebuild of a
+    /// scrolling strip) runs the shadow: only where every pass does.
+    fn outside_a_pass(self) -> Shadow {
+        match self {
+            Self::EveryPass => Shadow::Run,
+            Self::Every(_) => Shadow::Skip,
+        }
+    }
+}
+
+impl Shadow {
+    /// For layout work outside a Space's pass (see [`Sampling::outside_a_pass`]).
+    pub(crate) fn outside_a_pass() -> Self { SAMPLING.outside_a_pass() }
+}
+
+/// Each Space's layout passes, counted, deciding which run the shadow.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ShadowPasses(std::collections::HashMap<crate::sys::screen::SpaceId, u64>);
+
+impl ShadowPasses {
+    /// Counts a layout pass of `space`, answering whether it runs the shadow.
+    pub(crate) fn pass(&mut self, space: crate::sys::screen::SpaceId) -> Shadow {
+        let passes = self.0.entry(space).or_default();
+        let shadow = SAMPLING.shadow(*passes);
+        *passes += 1;
+        shadow
+    }
+}
+
 /// The frames rift gives a traditional layout (stack, master-stack, traditional): the core's for
 /// `shape` (none: nothing takes space), the Roc core's under `roc-core`, else the Rust core's. The
 /// layout system's frames (`upstream`) are the shadow: a difference fails tests, and a running
@@ -84,7 +154,8 @@ pub(crate) fn layout_divergences() -> u64 {
 pub(crate) fn decide_traditional(
     what: &str,
     shape: Option<Traditional<WindowId>>,
-    upstream: &[(WindowId, CGRect)],
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
     #[cfg(feature = "roc-core")]
@@ -94,7 +165,7 @@ pub(crate) fn decide_traditional(
     };
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    decide(what, &shape, upstream, rust, roc)
+    decide(what, &shape, shadow, upstream, rust, roc)
 }
 
 /// A shadow (frames, or a placement) that differed from the deciding core, or the Roc core
@@ -114,9 +185,9 @@ enum Divergence<T, E> {
 /// The deciding core's answer and every shadow that differs from it (compared by `key`): the
 /// Roc core's (`roc`, `Some` only under `roc-core`) when it answers, else the Rust core's
 /// (`rust`); the Rust core's is a shadow when the Roc core decides, the system's (`upstream`)
-/// always.
+/// when the pass runs it.
 fn decided<T, E, K: PartialEq>(
-    upstream: T,
+    upstream: Shadowed<T>,
     rust: T,
     roc: Option<Result<T, E>>,
     key: impl Fn(&T) -> K,
@@ -135,10 +206,33 @@ fn decided<T, E, K: PartialEq>(
             rust
         }
     };
-    if key(&upstream) != key(&core) {
-        divergences.push(Divergence::System(upstream));
+    match upstream {
+        Shadowed::Ran(upstream) if key(&upstream) != key(&core) => {
+            divergences.push(Divergence::System(upstream))
+        }
+        Shadowed::Ran(_) | Shadowed::Skipped => {}
     }
     (core, divergences)
+}
+
+/// The layout system's own answer, if the pass ran it.
+#[derive(Debug)]
+enum Shadowed<T> {
+    Ran(T),
+    Skipped,
+}
+
+impl<T> Shadowed<T> {
+    /// The system's answer (`upstream`), asked only when the pass runs the shadow.
+    fn of(shadow: Shadow, upstream: impl FnOnce() -> T) -> Self {
+        match shadow {
+            Shadow::Run => {
+                LAYOUT_SHADOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Self::Ran(upstream())
+            }
+            Shadow::Skip => Self::Skipped,
+        }
+    }
 }
 
 /// The core's frames (`rust`, and under `roc-core` what `roc` answers) decided over rift's
@@ -146,15 +240,20 @@ fn decided<T, E, K: PartialEq>(
 fn decide<E: std::fmt::Debug>(
     what: &str,
     shape: &impl std::fmt::Debug,
-    upstream: &[(WindowId, CGRect)],
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
     rust: Vec<(WindowId, Rect)>,
     #[cfg_attr(not(feature = "roc-core"), allow(unused_variables))] roc: impl FnOnce() -> Result<
         Vec<(rift_core::plain::WindowId, Rect)>,
         E,
     >,
 ) -> Vec<(WindowId, CGRect)> {
-    let upstream: Vec<(WindowId, Rect)> =
-        upstream.iter().map(|&(window, frame)| (window, core_rect(frame))).collect();
+    let upstream = Shadowed::of(shadow, || {
+        upstream()
+            .into_iter()
+            .map(|(window, frame)| (window, core_rect(frame)))
+            .collect()
+    });
     #[cfg(feature = "roc-core")]
     let roc = Some(roc().map(|frames| {
         frames.into_iter().map(|(window, frame)| (of_plain(window), frame)).collect()
@@ -216,7 +315,8 @@ fn report_divergence(
 /// shadow, as [`decide_traditional`].
 pub(crate) fn decide_bsp(
     shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
-    upstream: &[(WindowId, CGRect)],
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, rift_core::layout::bsp::Bsp::frames);
     #[cfg(feature = "roc-core")]
@@ -226,7 +326,7 @@ pub(crate) fn decide_bsp(
     };
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    decide("bsp", &shape, upstream, rust, roc)
+    decide("bsp", &shape, shadow, upstream, rust, roc)
 }
 
 /// A scrolling strip placed in world space: each column (id, x, width), each window's frame,
@@ -291,7 +391,8 @@ impl StripPlacement {
 /// (`upstream`) the shadow, held word for word, as [`decide_traditional`].
 pub(crate) fn decide_strip(
     strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
-    upstream: StripPlacement,
+    shadow: Shadow,
+    upstream: impl FnOnce() -> StripPlacement,
 ) -> StripPlacement {
     let rust = StripPlacement::of_placed(
         strip.as_ref().map(rift_core::layout::scrolling::Strip::place),
@@ -305,7 +406,8 @@ pub(crate) fn decide_strip(
     });
     #[cfg(not(feature = "roc-core"))]
     let roc: Option<Result<StripPlacement, std::convert::Infallible>> = None;
-    let (core, divergences) = decided(upstream, rust, roc, StripPlacement::words);
+    let (core, divergences) =
+        decided(Shadowed::of(shadow, upstream), rust, roc, StripPlacement::words);
     report_all("scrolling", &strip, divergences, &core);
     core
 }
@@ -317,7 +419,8 @@ pub(crate) fn decide_translation(
     world: &[(WindowId, Rect)],
     camera: rift_core::layout::scrolling::Camera,
     fullscreen: &[(WindowId, rift_core::layout::scrolling::Fullscreen)],
-    upstream: &[(WindowId, CGRect)],
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = rift_core::layout::scrolling::translate(world, camera, fullscreen);
     let question = (world, camera, fullscreen);
@@ -329,21 +432,22 @@ pub(crate) fn decide_translation(
     };
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    decide("scrolling translation", &question, upstream, rust, roc)
+    decide("scrolling translation", &question, shadow, upstream, rust, roc)
 }
 
 /// The frames rift gives a floating layout: the core's (the Roc core's under `roc-core`, else the
 /// Rust core's), with the floating system's (`upstream`) the shadow, as [`decide_traditional`].
 pub(crate) fn decide_floating(
     layout: rift_core::layout::floating::Layout<WindowId>,
-    upstream: &[(WindowId, CGRect)],
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = layout.frames();
     #[cfg(feature = "roc-core")]
     let roc = || rift_core_roc::floating_frames(layout.clone().map(&to_plain));
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    decide("floating", &layout, upstream, rust, roc)
+    decide("floating", &layout, shadow, upstream, rust, roc)
 }
 
 /// Without `roc-core` there is no Roc core to ask.
@@ -411,11 +515,11 @@ pub(crate) mod tests {
         let core = vec![frame(1, 0.0), frame(2, 100.0)];
         let system = vec![frame(1, 0.0), frame(2, 101.0)];
         let (frames, divergences) =
-            decided::<_, (), _>(system.clone(), core.clone(), None, |f| bits(f));
+            decided::<_, (), _>(Shadowed::Ran(system.clone()), core.clone(), None, |f| bits(f));
         assert_eq!(frames, core);
         assert_eq!(divergences, vec![Divergence::System(system)]);
         let (frames, divergences) =
-            decided::<_, (), _>(core.clone(), core.clone(), None, |f| bits(f));
+            decided::<_, (), _>(Shadowed::Ran(core.clone()), core.clone(), None, |f| bits(f));
         assert_eq!(frames, core);
         assert_eq!(divergences, vec![]);
     }
@@ -426,20 +530,69 @@ pub(crate) mod tests {
     fn the_roc_core_decides_when_it_answers() {
         let roc = vec![frame(1, 0.0)];
         let rust = vec![frame(1, 1.0)];
-        let (frames, divergences) =
-            decided::<_, (), _>(rust.clone(), rust.clone(), Some(Ok(roc.clone())), |f| bits(f));
+        let (frames, divergences) = decided::<_, (), _>(
+            Shadowed::Ran(rust.clone()),
+            rust.clone(),
+            Some(Ok(roc.clone())),
+            |f| bits(f),
+        );
         assert_eq!(frames, roc);
         assert_eq!(divergences, vec![
             Divergence::RustCore(rust.clone()),
             Divergence::System(rust.clone())
         ]);
-        let (frames, divergences) =
-            decided(roc.clone(), rust.clone(), Some(Err("no answer")), |f| bits(f));
+        let (frames, divergences) = decided(
+            Shadowed::Ran(roc.clone()),
+            rust.clone(),
+            Some(Err("no answer")),
+            |f| bits(f),
+        );
         assert_eq!(frames, rust);
         assert_eq!(divergences, vec![
             Divergence::RocFailed("no answer"),
             Divergence::System(roc)
         ]);
+    }
+
+    /// A pass that skips the shadow never asks the system, and the core decides alone.
+    #[test]
+    fn a_skipped_shadow_is_not_asked_and_the_core_decides() {
+        let core = vec![frame(1, 0.0)];
+        let (frames, divergences) =
+            decided::<_, (), _>(Shadowed::Skipped, core.clone(), None, |f| bits(f));
+        assert_eq!(frames, core);
+        assert_eq!(divergences, vec![]);
+        let asked = std::cell::Cell::new(false);
+        let skipped = Shadowed::of(Shadow::Skip, || asked.set(true));
+        assert!(matches!(skipped, Shadowed::Skipped) && !asked.get());
+    }
+
+    /// Sampled every 32nd pass, a Space's first pass and each 32nd after it run the shadow, and
+    /// layout work outside a pass does not; sampling every pass runs it everywhere. Each Space
+    /// counts its own passes.
+    #[test]
+    fn a_sampled_shadow_runs_on_every_32nd_pass_of_each_space() {
+        let every = Sampling::Every(std::num::NonZeroU64::new(32).unwrap());
+        let ran: Vec<u64> = (0..100).filter(|&p| every.shadow(p) == Shadow::Run).collect();
+        assert_eq!(ran, vec![0, 32, 64, 96]);
+        assert_eq!(every.outside_a_pass(), Shadow::Skip);
+        assert!((0..100).all(|p| Sampling::EveryPass.shadow(p) == Shadow::Run));
+        assert_eq!(Sampling::EveryPass.outside_a_pass(), Shadow::Run);
+        assert_eq!(
+            SAMPLING,
+            Sampling::EveryPass,
+            "tests run the shadow on every pass"
+        );
+        let mut passes = ShadowPasses::default();
+        let (a, b) = (
+            crate::sys::screen::SpaceId::new(1),
+            crate::sys::screen::SpaceId::new(2),
+        );
+        passes.pass(a);
+        passes.pass(a);
+        passes.pass(b);
+        assert_eq!(passes.0.get(&a), Some(&2));
+        assert_eq!(passes.0.get(&b), Some(&1));
     }
 
     /// A system's frames that differ from the core's are counted, then fail the test.
@@ -474,8 +627,10 @@ pub(crate) mod tests {
             CGRect::new(CGPoint::new(1.0, 0.0), CGSize::new(800.0, 600.0)),
         )];
         let before = layout_divergences();
-        let failed = std::panic::catch_unwind(|| decide_traditional("test", Some(shape), &system))
-            .expect_err("a divergence fails tests");
+        let failed = std::panic::catch_unwind(|| {
+            decide_traditional("test", Some(shape), Shadow::Run, || system.to_vec())
+        })
+        .expect_err("a divergence fails tests");
         let message = failed.downcast_ref::<String>().cloned().unwrap_or_default();
         assert!(message.starts_with("layout-divergence"), "{message}");
         assert!(layout_divergences() > before);

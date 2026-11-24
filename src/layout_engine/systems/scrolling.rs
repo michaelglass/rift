@@ -526,12 +526,14 @@ impl Geometry {
         constraints: HashMap<WindowId, WindowLayoutConstraints>,
         constraint_revision: Option<u64>,
         gaps: GapSettings,
+        shadow: crate::layout_engine::Shadow,
     ) -> Self {
         use crate::layout_engine::cg_rect;
         let tiling = compute_tiling_area(screen, &gaps);
         let placed = crate::layout_engine::core_geometry::decide_strip(
             strip(state, settings, inactive, screen, &constraints, &gaps),
-            shadow_placement(state, settings, inactive, tiling, &constraints, &gaps),
+            shadow,
+            || shadow_placement(state, settings, inactive, tiling, &constraints, &gaps),
         );
         Self {
             screen,
@@ -1208,6 +1210,7 @@ impl LayoutState {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         revision: Option<u64>,
         gaps: &GapSettings,
+        shadow: crate::layout_engine::Shadow,
     ) {
         let same_constraints =
             self.geometry.as_ref().is_some_and(|g| g.has_constraints(constraints, revision));
@@ -1259,6 +1262,7 @@ impl LayoutState {
             snapshot,
             revision,
             gaps.clone(),
+            shadow,
         ));
         if let Some(bookmark) = bookmark
             && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
@@ -1375,6 +1379,8 @@ impl LayoutState {
                 old.constraints,
                 old.constraint_revision,
                 old.gaps,
+                // An edit's rebuild is not a Space's layout pass.
+                crate::layout_engine::Shadow::outside_a_pass(),
             ));
             let anchor = window
                 .and_then(|wid| self.arrangement.locate(wid))
@@ -1519,6 +1525,7 @@ impl ScrollingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         revision: Option<u64>,
         gaps: &GapSettings,
+        shadow: crate::layout_engine::Shadow,
     ) {
         if let Some(state) = self.layouts.get_mut(layout) {
             state.prepare_geometry(
@@ -1528,6 +1535,7 @@ impl ScrollingLayoutSystem {
                 constraints,
                 revision,
                 gaps,
+                shadow,
             );
         }
     }
@@ -1540,6 +1548,7 @@ impl ScrollingLayoutSystem {
         revision: Option<u64>,
         gaps: &GapSettings,
         park: bool,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         let Some(state) = self.layouts.get(layout) else {
             return Vec::new();
@@ -1551,7 +1560,7 @@ impl ScrollingLayoutSystem {
                 || (!self.settings.preserve_window_sizes
                     && g.same_projected_constraints(constraints)))
         {
-            return Self::translate_frames(state, g, park);
+            return Self::translate_frames(state, g, park, shadow);
         }
         let mut camera = state.camera.clone();
         camera.restored_view = camera.restored_view.or_else(|| state.bookmark());
@@ -1567,19 +1576,26 @@ impl ScrollingLayoutSystem {
             constraints,
             revision,
             gaps,
+            shadow,
         );
-        Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park)
+        Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park, shadow)
     }
 
     /// The strip's frames on screen: the core's (policy (a)), with the system's own
     /// ([`Self::shadow_translation`]) their shadow.
-    fn translate_frames(state: &LayoutState, g: &Geometry, park: bool) -> Vec<(WindowId, CGRect)> {
+    fn translate_frames(
+        state: &LayoutState,
+        g: &Geometry,
+        park: bool,
+        shadow: crate::layout_engine::Shadow,
+    ) -> Vec<(WindowId, CGRect)> {
         let (world, camera, fullscreen) = shown(state, g, state.camera.viewport.offset(), park);
         crate::layout_engine::core_geometry::decide_translation(
             &world,
             camera,
             &fullscreen,
-            &Self::shadow_translation(state, g, park),
+            shadow,
+            || Self::shadow_translation(state, g, park),
         )
     }
 
@@ -2055,8 +2071,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         screen: CGRect,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
+        shadow: crate::layout_engine::Shadow,
     ) {
-        self.prepare(layout, screen, constraints, None, gaps);
+        self.prepare(layout, screen, constraints, None, gaps, shadow);
     }
 
     fn calculate_layout(
@@ -2067,8 +2084,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
-        self.calculate_frames(layout, screen, constraints, None, gaps, true)
+        self.calculate_frames(layout, screen, constraints, None, gaps, true, shadow)
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -2718,8 +2736,13 @@ pub(crate) mod tests {
         }
 
         fn prepare(&mut self) {
-            self.system
-                .prepare_layout(self.layout, self.screen, &self.constraints, &self.gaps);
+            self.system.prepare_layout(
+                self.layout,
+                self.screen,
+                &self.constraints,
+                &self.gaps,
+                crate::layout_engine::Shadow::Run,
+            );
         }
 
         fn frames(&mut self) -> Vec<(WindowId, CGRect)> {
@@ -2731,6 +2754,7 @@ pub(crate) mod tests {
                 None,
                 &self.gaps,
                 false,
+                crate::layout_engine::Shadow::Run,
             )
         }
 
@@ -2770,6 +2794,7 @@ pub(crate) mod tests {
             &f.constraints,
             &f.gaps,
             Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         let xs: Vec<(WindowId, f64)> = frames.iter().map(|&(w, r)| (w, r.origin.x)).collect();
         // Two 500-point columns fill the 1000-point screen; the other two park at its right edge,
@@ -2805,6 +2830,7 @@ pub(crate) mod tests {
             &f.constraints,
             &f.gaps,
             Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
         // Half of the 1000-point screen and one gap, less the gap: 490 points a column; the
@@ -2988,14 +3014,28 @@ pub(crate) mod tests {
         let text = ron::to_string(&f.system).unwrap();
         let mut restored: ScrollingLayoutSystem = ron::from_str(&text).unwrap();
         restored.update_settings(&f.system.settings);
-        restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps);
+        restored.prepare_layout(
+            f.layout,
+            f.screen,
+            &f.constraints,
+            &f.gaps,
+            crate::layout_engine::Shadow::Run,
+        );
         assert_eq!(restored.container_tree(f.layout), tree);
         assert_eq!(presented_frames(&restored, f.layout).collect::<Vec<_>>(), frames);
         f.system.select_window(clone, wid(3));
         f.system.center_selected_column(clone);
         let old_x = f
             .system
-            .calculate_frames(clone, f.screen, &f.constraints, None, &f.gaps, false)
+            .calculate_frames(
+                clone,
+                f.screen,
+                &f.constraints,
+                None,
+                &f.gaps,
+                false,
+                crate::layout_engine::Shadow::Run,
+            )
             .into_iter()
             .find(|(w, _)| *w == wid(3))
             .unwrap()
@@ -3006,9 +3046,23 @@ pub(crate) mod tests {
             ron::from_str(&ron::to_string(&f.system).unwrap()).unwrap();
         resized_restore.update_settings(&f.system.settings);
         let wider = CGRect::new(CGPoint::ZERO, CGSize::new(1600.0, 800.0));
-        resized_restore.prepare_layout(clone, wider, &f.constraints, &f.gaps);
+        resized_restore.prepare_layout(
+            clone,
+            wider,
+            &f.constraints,
+            &f.gaps,
+            crate::layout_engine::Shadow::Run,
+        );
         let new_x = resized_restore
-            .calculate_frames(clone, wider, &f.constraints, None, &f.gaps, false)
+            .calculate_frames(
+                clone,
+                wider,
+                &f.constraints,
+                None,
+                &f.gaps,
+                false,
+                crate::layout_engine::Shadow::Run,
+            )
             .into_iter()
             .find(|(w, _)| *w == wid(3))
             .unwrap()
@@ -3034,7 +3088,13 @@ pub(crate) mod tests {
         let mut system = ScrollingLayoutSystem::default();
         let layout = system.layouts.insert(state);
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
-        system.prepare_layout(layout, screen, &HashMap::default(), &GapSettings::default());
+        system.prepare_layout(
+            layout,
+            screen,
+            &HashMap::default(),
+            &GapSettings::default(),
+            crate::layout_engine::Shadow::Run,
+        );
         assert_eq!(system.selected_window(layout), Some(wid(2)));
         assert_eq!(system.container_tree(layout).children[0].node_id, 42);
         assert_eq!(
@@ -3177,7 +3237,14 @@ mod core_geometry_tests {
                     let screen = drawn_screen(rng);
                     let constraints = drawn_constraints_for(rng, &windows);
                     let gaps = drawn_gaps(rng);
-                    system.prepare(layout, screen, &constraints, None, &gaps);
+                    system.prepare(
+                        layout,
+                        screen,
+                        &constraints,
+                        None,
+                        &gaps,
+                        crate::layout_engine::Shadow::Run,
+                    );
                 }
                 _ => {
                     system.update_settings(&drawn_settings(rng));
@@ -3259,7 +3326,14 @@ mod core_geometry_tests {
             let screen = drawn_screen(&mut rng);
             let constraints = drawn_constraints_for(&mut rng, &windows);
             let gaps = drawn_gaps(&mut rng);
-            system.prepare(layout, screen, &constraints, None, &gaps);
+            system.prepare(
+                layout,
+                screen,
+                &constraints,
+                None,
+                &gaps,
+                crate::layout_engine::Shadow::Run,
+            );
             let state = &system.layouts[layout];
             let Some(g) = state.geometry.as_ref() else { continue };
             for _ in 0..4 {

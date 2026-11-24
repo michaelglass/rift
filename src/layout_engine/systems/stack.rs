@@ -380,11 +380,13 @@ impl LayoutSystem for StackLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         line: StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         crate::layout_engine::core_geometry::decide_traditional(
             "stack",
             self.shape(layout, screen, offset, constraints, gaps, line),
-            &self.shadow_frames(layout, screen, offset, constraints, gaps, line),
+            shadow,
+            || self.shadow_frames(layout, screen, offset, constraints, gaps, line),
         )
     }
 
@@ -971,6 +973,7 @@ mod tests {
             &constraints,
             &GapSettings::default(),
             StackLineReserve::default(),
+            crate::layout_engine::Shadow::Run,
         );
         assert_eq!(frames[0].1.size.width, 200.0);
     }
@@ -997,6 +1000,7 @@ mod tests {
             &HashMap::default(),
             &GapSettings::default(),
             line,
+            crate::layout_engine::Shadow::Run,
         );
         let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
         // A vertical stack: the bar (20 + 4) on the left, each window 12 points below the one

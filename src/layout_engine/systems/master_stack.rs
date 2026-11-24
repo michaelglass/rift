@@ -520,11 +520,13 @@ impl LayoutSystem for MasterStackLayoutSystem {
         constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         crate::layout_engine::core_geometry::decide_traditional(
             "master-stack",
             self.shape(layout, screen, stack_offset, constraints, gaps, stack_line),
-            &self.shadow_frames(layout, screen, stack_offset, constraints, gaps, stack_line),
+            shadow,
+            || self.shadow_frames(layout, screen, stack_offset, constraints, gaps, stack_line),
         )
     }
 
@@ -764,6 +766,7 @@ mod tests {
             &Default::default(),
             &gaps,
             Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
         // The newest window is the master: 60% of the width less the gap, then the 10-point

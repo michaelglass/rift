@@ -1033,6 +1033,7 @@ mod tests {
                 constraints,
                 &Default::default(),
                 Default::default(),
+                crate::layout_engine::Shadow::Run,
             )
             .into_iter()
             .collect()
@@ -1252,15 +1253,15 @@ impl LayoutSystem for BspLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         let shape = self
             .layouts
             .get(layout)
             .and_then(|state| self.shape(state.root, screen, constraints, gaps));
-        crate::layout_engine::core_geometry::decide_bsp(
-            shape,
-            &self.shadow_frames(layout, screen, constraints, gaps),
-        )
+        crate::layout_engine::core_geometry::decide_bsp(shape, shadow, || {
+            self.shadow_frames(layout, screen, constraints, gaps)
+        })
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {

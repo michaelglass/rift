@@ -545,10 +545,12 @@ impl LayoutSystem for FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         crate::layout_engine::core_geometry::decide_floating(
             self.shape(layout, screen, constraints, gaps),
-            &self.shadow_frames(layout, screen, constraints, gaps),
+            shadow,
+            || self.shadow_frames(layout, screen, constraints, gaps),
         )
     }
 
@@ -816,6 +818,7 @@ mod tests {
             &HashMap::default(),
             &crate::common::config::GapSettings::default(),
             Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         assert_eq!(frames, vec![
             (

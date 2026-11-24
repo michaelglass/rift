@@ -441,6 +441,7 @@ mod tests {
             CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),
             &Default::default(),
             &Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         let mut cfg = Config::default();
         cfg.settings.layout.scrolling.gestures.enabled = true;

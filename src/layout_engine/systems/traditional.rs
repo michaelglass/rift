@@ -265,6 +265,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         crate::layout_engine::core_geometry::decide_traditional(
             "traditional",
@@ -278,7 +279,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 gaps,
                 stack_line,
             ),
-            &self.shadow_frames(layout, screen, stack_offset, constraints, gaps, stack_line),
+            shadow,
+            || self.shadow_frames(layout, screen, stack_offset, constraints, gaps, stack_line),
         )
     }
 
@@ -788,6 +790,7 @@ mod tests {
                     &Default::default(),
                     &Default::default(),
                     Default::default(),
+                    crate::layout_engine::Shadow::Run,
                 )
                 .into_iter()
                 .map(|(window, frame)| (window, frame.size.width))
@@ -826,6 +829,7 @@ mod tests {
                     &Default::default(),
                     &Default::default(),
                     Default::default(),
+                    crate::layout_engine::Shadow::Run,
                 )
                 .into_iter()
                 .find(|(window, _)| *window == w(3))
@@ -959,6 +963,7 @@ mod tests {
                 &HashMap::default(),
                 &Default::default(),
                 reserve,
+                crate::layout_engine::Shadow::Run,
             );
             for (_, frame) in frames {
                 assert_eq!(frame, expected, "{kind:?} {horiz:?} {vert:?}");

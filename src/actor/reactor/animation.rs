@@ -1919,6 +1919,7 @@ mod tests {
             rect(0.0, 0.0, 1000.0, 800.0),
             &Default::default(),
             &Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         let make_camera = |system: &ScrollingLayoutSystem,
                            native: &[(WindowId, CGRect)],
@@ -2194,6 +2195,7 @@ mod tests {
             rect(0.0, 0.0, 1000.0, 800.0),
             &Default::default(),
             &Default::default(),
+            crate::layout_engine::Shadow::Run,
         );
         system.begin_viewport_gesture(layout, now);
         let wsid = WindowServerId::new(1);

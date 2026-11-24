@@ -332,9 +332,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         _screen: CGRect,
         _constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         _gaps: &crate::common::config::GapSettings,
+        _shadow: crate::layout_engine::Shadow,
     ) {
     }
 
+    /// The layout's frames, decided by the core; `shadow` says whether this pass runs the
+    /// system's own frames beside it.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -343,6 +346,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)>;
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;
@@ -602,7 +606,13 @@ mod participation_tests {
         ]) {
             let layout = system.create_layout();
             let frames = |system: &mut LayoutSystemKind| {
-                system.prepare_layout(layout, screen, &constraints, &gaps);
+                system.prepare_layout(
+                    layout,
+                    screen,
+                    &constraints,
+                    &gaps,
+                    crate::layout_engine::Shadow::Run,
+                );
                 system.calculate_layout(
                     layout,
                     screen,
@@ -610,6 +620,7 @@ mod participation_tests {
                     &constraints,
                     &gaps,
                     Default::default(),
+                    crate::layout_engine::Shadow::Run,
                 )
             };
             let windows = [1, 2, 3, 4].map(|i| WindowId::new(1, i));
@@ -826,6 +837,117 @@ impl LayoutSystemKind {
                 s.collect_group_containers(layout_id, screen, gaps, selection_path_only)
             }
             _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod shadow_cost {
+    use std::time::{Duration, Instant};
+
+    use objc2_core_foundation::{CGPoint, CGSize};
+
+    use super::*;
+    use crate::layout_engine::Shadow;
+
+    /// The median of five timings of `pass`, each over `rounds` calls, per call.
+    fn time(rounds: u32, mut pass: impl FnMut()) -> Duration {
+        let mut runs: Vec<Duration> = (0..5)
+            .map(|_| {
+                let start = Instant::now();
+                for _ in 0..rounds {
+                    pass();
+                }
+                start.elapsed() / rounds
+            })
+            .collect();
+        runs.sort();
+        runs[2]
+    }
+
+    /// What the layout systems' shadows cost a layout pass, at 10, 100 and 1000 windows: each
+    /// system's pass with its shadow skipped, then run (gaps, no constraints, windows added as
+    /// the system adds them). The scrolling placement is timed as a rebuild (`prepare_layout`
+    /// on a screen that changes each time), the rest as `calculate_layout`. Run with
+    /// `cargo test --release --lib measure_layout_shadow -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_layout_shadow() {
+        let screens = [
+            CGRect::new(CGPoint::ZERO, CGSize::new(1600.0, 1000.0)),
+            CGRect::new(CGPoint::ZERO, CGSize::new(1601.0, 1000.0)),
+        ];
+        let constraints = HashMap::default();
+        let mut gaps = crate::common::config::GapSettings::default();
+        gaps.inner.horizontal = 16.0;
+        gaps.inner.vertical = 12.0;
+        gaps.outer.top = 8.0;
+        let line = crate::common::config::StackLineReserve::default();
+        for count in [10_u32, 100, 1000] {
+            let rounds = (20_000 / count).max(20);
+            let systems = [
+                ("stack", LayoutSystemKind::Stack(Default::default())),
+                ("master-stack", LayoutSystemKind::MasterStack(Default::default())),
+                ("traditional", LayoutSystemKind::Traditional(Default::default())),
+                ("bsp", LayoutSystemKind::Bsp(Default::default())),
+                ("floating", LayoutSystemKind::Floating(Default::default())),
+                ("scrolling", LayoutSystemKind::Scrolling(Default::default())),
+            ];
+            for (name, mut system) in systems {
+                let layout = system.create_layout();
+                for index in 1..=count {
+                    system.update(WindowChange::Add(layout, WindowId::new(1, index), None));
+                }
+                system.prepare_layout(layout, screens[0], &constraints, &gaps, Shadow::Run);
+                let mut report = |what: &str, skip: Duration, run: Duration| {
+                    let extra = run.saturating_sub(skip);
+                    eprintln!(
+                        "shadow-cost {what:>22} {count:>5} windows: pass {skip:>10.2?}, with \
+                         shadow {run:>10.2?}, shadow {extra:>10.2?} ({:.0}%)",
+                        100.0 * extra.as_secs_f64() / skip.as_secs_f64()
+                    );
+                };
+                let pass = |shadow| {
+                    time(rounds, || {
+                        std::hint::black_box(system.calculate_layout(
+                            layout,
+                            screens[0],
+                            20.0,
+                            &constraints,
+                            &gaps,
+                            line,
+                            shadow,
+                        ));
+                    })
+                };
+                let (skip, run) = (pass(Shadow::Skip), pass(Shadow::Run));
+                report(
+                    if name == "scrolling" {
+                        "scrolling translation"
+                    } else {
+                        name
+                    },
+                    skip,
+                    run,
+                );
+                if let LayoutSystemKind::Scrolling(_) = system {
+                    let mut flip = 0;
+                    let mut rebuild = |shadow| {
+                        time(rounds, || {
+                            flip ^= 1;
+                            system.prepare_layout(
+                                layout,
+                                screens[flip],
+                                &constraints,
+                                &gaps,
+                                shadow,
+                            );
+                        })
+                    };
+                    let (skip, run) = (rebuild(Shadow::Skip), rebuild(Shadow::Run));
+                    report("scrolling placement", skip, run);
+                }
+            }
         }
     }
 }
