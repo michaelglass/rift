@@ -9,17 +9,56 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, layout trees: slice 3 done, the Roc BSP tree held to the Rust one; slice 4 next): read this first
+## Handoff (2026-11-24, layout trees: slice 4 done, the core's BSP tree decides; 4b next): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-3 are done for
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-4 are done for
 BSP. `rearch/roc-next@fork` carries everything through this docs commit once it is published
 (publish procedure: "Rulings that bind", Public-clean; the published tip's id is in the slice
-report). All checks green at the tip: workspace tests 1026 (4 ignored), the lib with `roc-core`
-903 (4 ignored), `cargo test -p rift-core-roc --features roc` 51 (9 ignored), `cargo test -p
+report). All checks green at the tip: workspace tests 1027 (4 ignored), the lib with `roc-core`
+905 (5 ignored), `cargo test -p rift-core-roc --features roc` 51 (9 ignored), `cargo test -p
 rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and
 `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, slice 4, done: the flip (policy (a)).** Two commits after d911eb9b: the flip, and
+the Roc tree as a shadow under `roc-core`. Each message has its plants, checks and costs.
+- **The core's `Tree` decides in every build** (`systems/bsp/twinned.rs`): `BspLayoutSystem {
+  core, shadow: Box<Shadow { upstream, steps, roc (roc-core only) }> }`. Every operation steps
+  the core and gives its answer; upstream's system (the shadow) steps in every build, its answers
+  compared on every operation, the whole tree on every operation in tests and `roc-core` builds
+  and every 32nd in a plain release build, the shape on every pass. A difference: counted
+  (`core: bsp tree divergences`), a test panics, a running Rift warns `bsp-tree-divergence:` and
+  **re-seeds the shadow from the core** (`upstream_of`; the lead's ruling: the deciding side
+  stands, as in every policy (a) flip). `calculate_layout` gives the core geometry's frames for
+  the core tree's shape (option (a)), upstream's geometry the shadow.
+- **Saving is written from the core** in upstream's form (`Saved`, renamed `Upstream`: the
+  `SerdeSlot` sequences, a split's `selected`), byte-compatible by construction; the drawn fuzzer
+  holds the core's save to upstream's bytes at every reload. Loads still go through upstream's
+  load (old forms, the slice 2 normalizations) and `seed()` the core.
+- **The re-seed keeps ids in step:** a slotmap is only built through its saved form, whose load
+  rebuilds the free list highest first, so `slot_map` writes each vacant slot two versions back,
+  then takes (`| 1`) and frees (`+ 1`) it again in the core's order. Held by
+  `a_shadow_reseeded_from_the_core_allocates_the_ids_the_core_would` and by the drawn fuzzer,
+  which re-seeds the shadow on 4% of its steps.
+- **Under `roc-core` the Roc tree is a shadow of the core's** (`systems/bsp/roc_shadow.rs`, the
+  lead's ruling for slice 4): seeded through `bsp_tree_seed` at load, stepped with every operation
+  (queries too, through a cell: the layout system's queries take `&self`), answer and whole view
+  compared on every operation after upstream's; a difference is counted (`roc-core: bsp tree
+  re-seeds`), panics in tests, or warns `roc-divergence:` and re-seeds the Roc tree from the core.
+  An app closing lists the app's windows the core holds (in layouts or left out). Windows are
+  `Word`s, ordered as `WindowId` (pid, then index), so the trees' orderings agree.
+- **Still read from the shadow:** `draw_tree` and `container_tree` (IPC), identical while the views
+  hold; slice 5 must port them to the core before `Upstream` goes.
+- **Plants:** 10/10 for the flip (core, shadow, conversion, save only, re-seed), 8/8 for the Roc
+  shadow (Roc and conversion). A trap found on the way: a plant runner that restores the file with
+  an older mtime than the planted build leaves cargo's planted object in place (the next plants
+  then run on it); restore, then touch the file.
+- **Cost (release):** a plain build steps both trees (upstream 64 ns / 0.42 us / 7.4 us, core
+  76 ns / 0.76 us / 13.5 us at 10 / 100 / 1000 windows), the view every 32nd (5 / 43 / 410 ns per
+  operation), a shadow re-seed 63 us / 0.52 ms / 5.0 ms; a `roc-core` build adds the Roc tree's
+  step (0.85 / 3.7 / 29 us) and a view comparison (1.1 / 5.5 / 34 us) on every operation, a Roc
+  re-seed 1.4 / 7.4 / 38 us.
 
 **Layout trees, slice 3, done: the Roc mirror of the BSP tree.** Commits (after b6ef8a80's task
 0): the slot tables, layouts, participation and settings; the window changes; the queries; the
@@ -80,18 +119,18 @@ message has its plants and checks.
   not compile; upstream's `Move` is `Moved` at the boundary (`BspEdit`, `BspDropAction`), as the
   floating slot's `Placed` was for `in`.
 
-**Next: layout trees, slice 4, the flip (policy (a)), then 4b (the lead's ruling, 2026-11-24).**
-- **4, the flip:** the core's tree decides and is saved (old files byte-compatible; the load's
-  normalization already parses what only a file holds). Under `roc-core` the Roc tree
-  (`RocBspTree`, seeded through `bsp_tree_seed` at load and on a re-seed) steps beside it and is
-  held to it operation by operation (`roc-divergence:`, a re-seed on divergence). The shape stays
-  built from `rift_core`'s `Tree` (option (a)): under the Rust core that is the deciding state;
-  under `roc-core` the geometry then reads the shadow, which is sound only while the operation
-  differential holds the two trees identical.
-- **4b, not optional, right after 4 and before 5:** port `Tree::shape` to Roc, converting the
-  tree's window words to `WindowId` at the boundary, so under `roc-core` a Roc-decided tree feeds
-  the Roc geometry with no Rust tree in between (option (b)).
-- **5:** delete `Upstream` once nothing reads it.
+**Next: layout trees, 4b, then 5 (the lead's rulings, 2026-11-24).**
+- **4 (done, above):** the Rust core's tree decides and is saved in every build; upstream's
+  system is its shadow, re-seeded from the core; under `roc-core` the Roc tree is a second shadow,
+  re-seeded from the core through `bsp_tree_seed`. The shape is built from the Rust core's tree
+  (option (a)).
+- **4b, not optional, before 5:** port `Tree::shape` to Roc, converting the tree's window words to
+  `WindowId` at the boundary, so under `roc-core` a Roc-decided tree feeds the Roc geometry with no
+  Rust tree in between (option (b)). Then under `roc-core` the Roc tree and its shape decide, and
+  the Rust tree becomes the shadow, re-seeded from the Roc tree's view (policy (a)). Held by a
+  differential, with plants.
+- **5 (waits for the lead's go):** delete `Upstream` once nothing reads it (`draw_tree` and
+  `container_tree` first).
 - The queued Roc nightly bump still waits: the newest nightly is still
   nightly-2026-11-23-b5c77fc (checked 2026-11-24).
 
@@ -122,7 +161,8 @@ tests (3 ignored), 899 with `roc-core`, rift-core 106, the rest as above, clippy
   left out, settings) on every operation in tests and `roc-core` builds and every 32nd in a plain
   release build, each pass's shape on every pass. A difference: counted (`rift-cli metrics
   show-timing`: `core: bsp tree divergences: N`), a test fails, a running Rift warns
-  `bsp-tree-divergence:` and re-seeds the core from upstream. Seeding reads each slotmap's slots
+  `bsp-tree-divergence:` and re-seeds the core from upstream (slice 2; since the flip the core
+  decides and the shadow is re-seeded from it, slice 4 above). Seeding reads each slotmap's slots
   (vacant versions from its saved form) and its free list (the order a copy hands vacant slots
   out), taken by `SlotTable::resumed` (a load would take the highest vacant slot first).
 - **The drawn fuzzer** (`bsp.rs`'s `drawn_system`, under the BSP differential, 3000 systems)
@@ -1967,7 +2007,7 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Sizing (respect_min_size in the core) | S | Done, Rust (the play line) and Roc, with its own wire encoding. |
 | Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
 | Layout geometry: floating | S | Done, Rust and Roc: first frames and the cascade (`layout::floating`, `Floating.roc`). |
-| Layout trees into the core | L+ | **Re-planned 2026-11-24 (Handoff).** The pre-#688 core trees are deleted (no caller since merge (b)). Next: a core BSP tree ported from #688's `systems/bsp.rs` under an operation shadow, a Roc mirror, the flip (saved from the core), the old tree gone. Then stack, traditional and master-stack, scrolling's columns, floating. |
+| Layout trees into the core | L+ | **Re-planned 2026-11-24 (Handoff).** The pre-#688 core trees are deleted (no caller since merge (b)). BSP: the core tree (ported from #688's `systems/bsp.rs`), its Roc mirror and the flip (saved from the core) are done; next the shape in Roc (4b), then the old tree gone. Then stack, traditional and master-stack, scrolling's columns, floating. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. The admission facts' single writer (upstream plan C1 step 2) is done. A universal `apply(WindowChange)` over the store's other writers is not planned: raise it only when a Roc claim needs one step for the store, with that claim as the reason. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
