@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, layout trees: slices 1 and 2 done, slice 3 next): read this first
+## Handoff (2026-11-24, layout trees: slices 1 and 2 done, the BSP load normalized, slice 3 next): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
@@ -87,12 +87,37 @@ tests (3 ignored), 899 with `roc-core`, rift-core 106, the rest as above, clippy
   49 us more at 1000 windows). Not optimized (premature bug-fixing first); a re-seed happens
   only after a divergence.
 
-**Next: layout trees, slice 3, the Roc mirror of the BSP tree** (the lead's plan): a Roc
-`BspTree` with the same operations, held to the Rust core by a Rust/Roc differential over drawn
-operation sequences (answers and trees), plants in Roc. Then 4, the flip (policy (a)): the
-core's tree decides and is saved (old files byte-compatible); 5 deletes `Upstream`. The queued
-Roc nightly bump (below) is still waiting: the newest nightly is still nightly-2026-11-23-b5c77fc
-(checked 2026-11-24).
+**Next: layout trees, slice 3, the Roc mirror of the BSP tree** (the lead's go, 2026-11-24;
+not started). The plan, from the patterns already in the crate:
+- *Roc:* a `roc/core/BspTree.roc` type module holding the tree as the Rust core does: a slot
+  table with slotmap's rules (`slots : List([Occupied({ version : U32, value : v }), Vacant(U32)])`,
+  slot 0 the sentinel, the free list taken last-first, a new slot at version 1, a vacant one
+  taken at `version | 1`, a removal bumping by one), keys as words (`version << 32 | index`,
+  slotmap's ffi form, so the Rust side's `SlotKey` maps one to one), nodes `Split { orientation,
+  ratio : F32, children, memory }` / `Leaf { content : [Empty, Held({ members, fill })],
+  preselect }`, members `[Window(U64), Stack({ before, top, after })]`. Each Rust operation
+  ported one for one, by family as in slice 2. A node lookup by a key the tree holds cannot
+  fail in Rust (`Index` panics); in Roc, `List.get` answers `Try`: give operations one lookup
+  helper and decide with the lead whether a missing node is `crash` (none exists in the core
+  yet) or an `Err(Corrupt)` the step answers (the differential would catch it).
+- *The boundary:* a stateful model like `Joined`/`Windows`: `[.., BspTree : bsp_tree]` in the
+  platform's `requires`, entries `bsp_tree_init : InsertionPoint -> bsp_tree`, `bsp_tree_step :
+  bsp_tree, BspTreeEvent -> { model, answer : BspTreeAnswer }` (one event per operation:
+  create/clone/remove layout, participation, settings, add/remove/replace/close-app (the app's
+  windows listed by the host: Roc has no pid), resize, focus, edit, and each query) and
+  `bsp_tree_view : bsp_tree -> { model, layouts, nodes, left_out, settings }`, plus a release;
+  `RocBspTree` in `rift-core-roc/src/lib.rs` beside `RocWorkspaces`, the conversions in
+  `boundary.rs`. Avoid a one-tag union with several payloads (roc#13348) and a tag named
+  `Release` (roc#13350) until the nightly bump.
+- *The differential:* `rift-core-roc/tests/`, drawn operation sequences (the platform fuzzer's
+  mix: every edit, focus, layouts cloned and removed, replaces, resizes, participation,
+  settings, queries) stepped on `rift_core::layout::bsp_tree::Tree` (keys as a plain `SlotKey`
+  newtype) and on `RocBspTree`, every answer and the whole view compared; plants in Roc, each
+  caught. Then slice 4 can put the Roc tree beside rift's under `roc-core`.
+- *Then* 4, the flip (policy (a)): the core's tree decides and is saved (old files
+  byte-compatible; the load's normalization above already parses what only a file holds); 5
+  deletes `Upstream`. The queued Roc nightly bump (below) still waits: the newest nightly is
+  still nightly-2026-11-23-b5c77fc (checked 2026-11-24).
 
 **Slice 2's plan and rulings, as given (the lead's, 2026-11-24; done, above).** Slice 1
 (the dead pre-#688 core trees deleted) is done, and `SlotTable` now lives in the core
