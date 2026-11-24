@@ -280,7 +280,45 @@ impl FloatingLayoutSystem {
     /// window left out holds its position), each on the screen or in the tiling area when it or
     /// an ancestor is fullscreen, else at the frame the layout keeps for it, else at a first
     /// frame. Arguments as `calculate_layout` takes them.
-    #[cfg(any(test, feature = "roc-core"))]
+    /// The frames the floating system computes itself: since the core decides (policy (a)), the
+    /// shadow `calculate_layout` holds the core's to.
+    pub(crate) fn shadow_frames(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+    ) -> Vec<(WindowId, CGRect)> {
+        let count = if self.spread_on_initialization {
+            self.groups.windows_with_nodes(layout).count()
+        } else {
+            0
+        };
+        let frames: Vec<(WindowId, CGRect)> = self
+            .groups
+            .windows_with_nodes(layout)
+            .enumerate()
+            .filter(|(_, (_, wid))| self.groups.window_participates(*wid))
+            .map(|(index, (node, wid))| {
+                let frame = self
+                    .groups
+                    .fullscreen_frame(node, screen, gaps)
+                    .or_else(|| self.frame(wid))
+                    .unwrap_or_else(|| {
+                        self.initial_frame(
+                            screen,
+                            constraints.get(&wid).copied().unwrap_or_default(),
+                            None,
+                            index,
+                            count,
+                        )
+                    });
+                (wid, frame)
+            })
+            .collect();
+        frames
+    }
+
     pub(crate) fn shape(
         &self,
         layout: LayoutId,
@@ -497,6 +535,8 @@ impl LayoutSystem for FloatingLayoutSystem {
         }
     }
 
+    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
+    /// shadow.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -506,39 +546,10 @@ impl LayoutSystem for FloatingLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let count = if self.spread_on_initialization {
-            self.groups.windows_with_nodes(layout).count()
-        } else {
-            0
-        };
-        let frames: Vec<(WindowId, CGRect)> = self
-            .groups
-            .windows_with_nodes(layout)
-            .enumerate()
-            .filter(|(_, (_, wid))| self.groups.window_participates(*wid))
-            .map(|(index, (node, wid))| {
-                let frame = self
-                    .groups
-                    .fullscreen_frame(node, screen, gaps)
-                    .or_else(|| self.frame(wid))
-                    .unwrap_or_else(|| {
-                        self.initial_frame(
-                            screen,
-                            constraints.get(&wid).copied().unwrap_or_default(),
-                            None,
-                            index,
-                            count,
-                        )
-                    });
-                (wid, frame)
-            })
-            .collect();
-        #[cfg(any(test, feature = "roc-core"))]
-        crate::layout_engine::core_geometry::check_floating(
+        crate::layout_engine::core_geometry::decide_floating(
             self.shape(layout, screen, constraints, gaps),
-            &frames,
-        );
-        frames
+            &self.shadow_frames(layout, screen, constraints, gaps),
+        )
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -789,6 +800,32 @@ mod tests {
             .into_windows();
     }
 
+    /// A floating window rift has no frame for yet takes 70% of the screen, centred, and one
+    /// with a frame keeps it (what rift does with a floating layout, whichever core decides it).
+    #[test]
+    fn a_new_floating_window_takes_most_of_the_screen_centred() {
+        let mut system = FloatingLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.store_frame(w(2), rect(20., 40.));
+        let frames = system.calculate_layout(
+            layout,
+            CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.)),
+            0.0,
+            &HashMap::default(),
+            &crate::common::config::GapSettings::default(),
+            Default::default(),
+        );
+        assert_eq!(frames, vec![
+            (
+                w(1),
+                CGRect::new(CGPoint::new(150., 120.), CGSize::new(700., 560.))
+            ),
+            (w(2), rect(20., 40.)),
+        ]);
+    }
+
     #[test]
     fn suspended_stack_selection_leaves_the_visible_tab_interactive() {
         let (mut system, layout) = fixture();
@@ -993,7 +1030,7 @@ mod tests {
         (system, layout, windows)
     }
 
-    /// The core's frames for a floating layout are upstream's `calculate_layout`'s, bit for bit,
+    /// The core's frames for a floating layout are the system's own (`shadow_frames`), bit for bit,
     /// over drawn systems, screens, gaps and window constraints.
     #[test]
     fn the_core_places_floating_layouts_as_the_floating_system_does() {
@@ -1005,8 +1042,9 @@ mod tests {
             let screen = drawn_screen(&mut rng);
             let constraints = drawn_constraints_for(&mut rng, &windows);
             let gaps = drawn_gaps(&mut rng);
-            let line = drawn_line(&mut rng);
-            let upstream = system.calculate_layout(layout, screen, 0.0, &constraints, &gaps, line);
+            // Drawn but unused (a floating layout has no bar): the draws stay as they were.
+            let _ = drawn_line(&mut rng);
+            let upstream = system.shadow_frames(layout, screen, &constraints, &gaps);
             let core: Vec<(WindowId, CGRect)> = system
                 .shape(layout, screen, &constraints, &gaps)
                 .frames()

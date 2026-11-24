@@ -343,19 +343,18 @@ pub(crate) fn check_translation(
     check("scrolling translation", &question, upstream, rust, roc);
 }
 
-/// Holds the core's frames for a floating layout to the floating system's, as
-/// [`check_bsp`] does.
-#[cfg(any(test, feature = "roc-core"))]
-pub(crate) fn check_floating(
+/// The frames rift gives a floating layout: the core's (the Roc core's under `roc-core`, else the
+/// Rust core's), with the floating system's (`upstream`) the shadow, as [`decide_traditional`].
+pub(crate) fn decide_floating(
     layout: rift_core::layout::floating::Layout<WindowId>,
     upstream: &[(WindowId, CGRect)],
-) {
+) -> Vec<(WindowId, CGRect)> {
     let rust = layout.frames();
     #[cfg(feature = "roc-core")]
     let roc = || rift_core_roc::floating_frames(layout.clone().map(&to_plain));
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    check("floating", &layout, upstream, rust, roc);
+    decide("floating", &layout, upstream, rust, roc)
 }
 
 /// Without `roc-core` there is no Roc core to ask.
