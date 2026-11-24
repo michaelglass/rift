@@ -329,6 +329,22 @@ pub(crate) fn decide_bsp(
     decide("bsp", &shape, shadow, upstream, rust, roc)
 }
 
+/// The frames rift gives a BSP layout whose tree the Roc core decides (`roc-core`): the Roc
+/// tree's own (`roc`: its shape through the Roc geometry), with the Rust core's frames for the
+/// Rust tree's `shape` and the BSP system's (`upstream`) the shadows.
+#[cfg(feature = "roc-core")]
+pub(crate) fn decide_bsp_tree(
+    shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
+    roc: impl FnOnce() -> Vec<(rift_core::plain::WindowId, Rect)>,
+) -> Vec<(WindowId, CGRect)> {
+    let rust = shape.as_ref().map_or_else(Vec::new, rift_core::layout::bsp::Bsp::frames);
+    decide("bsp", &shape, shadow, upstream, rust, || {
+        Ok::<_, std::convert::Infallible>(roc())
+    })
+}
+
 /// A scrolling strip placed in world space: each column (id, x, width), each window's frame,
 /// the camera's resting points (offset, the column's id) and its bounds. Nothing placed (no
 /// window takes part) is no column, frame or resting point, and bounds at 0.

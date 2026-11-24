@@ -17,10 +17,10 @@ use crate::model::selection::*;
 use crate::model::tree::NodeId;
 
 #[cfg(feature = "roc-core")]
-mod roc_shadow;
+mod roc_tree;
 mod twinned;
 #[cfg(feature = "roc-core")]
-pub(crate) use roc_shadow::bsp_tree_reseeds;
+pub(crate) use roc_tree::bsp_tree_reseeds;
 pub use twinned::BspLayoutSystem;
 pub(crate) use twinned::bsp_tree_divergences;
 
@@ -2278,6 +2278,12 @@ mod core_geometry_tests {
                 // The shadow re-seeded from the core (as after a divergence): both go on
                 // allocating the same ids.
                 system.shadow.upstream = twinned::upstream_of(&system.core);
+            }
+            #[cfg(feature = "roc-core")]
+            if rng.chance(4) {
+                // The Rust tree re-seeded from the deciding Roc tree (as after a divergence):
+                // the trees go on alike.
+                system.core = roc_tree::core_of(&system.roc.view());
             }
             if rng.chance(4) {
                 // Saved from the core, byte for byte as upstream's system saves; then loaded
