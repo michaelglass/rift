@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
-use super::groups::{GroupLayouts, Seat};
+use super::groups::{GroupLayouts, Seat, Shape};
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -478,9 +478,8 @@ impl TraditionalLayoutSystem {
         // absorb the target into it to avoid creating an extra nesting layer.
         let target_is_ancestor = target.ancestors(map).any(|a| a == selection);
         let selection_is_ancestor = selection.ancestors(map).any(|a| a == target);
-        if let Some(selection_layout) = self.tiles.kind(selection)
-            && selection_layout.orientation() == direction.orientation()
-            && !selection_layout.is_group()
+        if let Shape::Split { orientation } = self.tiles.shape(selection)
+            && orientation == direction.orientation()
             && !target_is_ancestor
             && !selection_is_ancestor
             && target.parent(map) != Some(selection)

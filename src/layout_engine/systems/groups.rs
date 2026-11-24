@@ -172,6 +172,14 @@ impl Seat {
     }
 }
 
+/// What a node is: a window, a stack, or a split along an axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Shape {
+    Window,
+    Stack,
+    Split { orientation: Orientation },
+}
+
 #[derive(Clone, Copy)]
 enum BranchLimit {
     All,
@@ -316,11 +324,11 @@ impl GroupLayouts {
             Seat::Tab { .. } => return EditResult::Unchanged,
             Seat::Root => {
                 let root = self.root(layout);
-                let kind = self.container_kind(root);
-                if kind.is_stacked() {
-                    return EditResult::Unchanged;
+                match self.shape(root) {
+                    Shape::Split { orientation } => (root, orientation),
+                    // A layout root is a container; a stack has no split to rotate.
+                    Shape::Stack | Shape::Window => return EditResult::Unchanged,
                 }
-                (root, kind.orientation())
             }
         };
         let new_kind = LayoutKind::from(perpendicular(orientation));
@@ -723,10 +731,18 @@ impl GroupLayouts {
             .filter_map(|(_, parent)| self.seat_under(parent).stack())
     }
 
-    /// Whether `node` is a stack.
-    pub(super) fn is_stack(&self, node: NodeId) -> bool {
-        self.kind(node).is_some_and(LayoutKind::is_stacked)
+    /// What `node` is: a window, a stack, or a split along an axis.
+    pub(super) fn shape(&self, node: NodeId) -> Shape {
+        match self.kind(node) {
+            None => Shape::Window,
+            Some(kind) if kind.is_stacked() => Shape::Stack,
+            Some(kind) => Shape::Split {
+                orientation: kind.orientation(),
+            },
+        }
     }
+
+    pub(super) fn is_stack(&self, node: NodeId) -> bool { self.shape(node) == Shape::Stack }
 
     /// `node` itself if it is a stack, else the nearest stack around it.
     pub(super) fn own_or_enclosing_stack(&self, node: NodeId) -> Option<NodeId> {
@@ -739,11 +755,13 @@ impl GroupLayouts {
 
     fn stacked_selection_container(&self, layout: LayoutId) -> Option<NodeId> {
         let selection = self.selection(layout);
-        if self.window_at(selection).is_none() && !self.is_stack(selection) {
+        match self.shape(selection) {
+            Shape::Window | Shape::Stack => self.own_or_enclosing_stack(selection),
             // A selected split stands for its stacked child.
-            return selection.children(self.map()).find(|&child| self.is_stack(child));
+            Shape::Split { .. } => {
+                selection.children(self.map()).find(|&child| self.is_stack(child))
+            }
         }
-        self.own_or_enclosing_stack(selection)
     }
 
     pub(super) fn unstack_parent_of_selection(
