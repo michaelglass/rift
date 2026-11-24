@@ -563,6 +563,101 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
         }
     }
 
+    /// An edit of a layout (upstream's `edit_layout`).
+    pub fn edit(&mut self, layout: L, edit: Edit) -> Edited<W> {
+        match edit {
+            Edit::Split(SplitKind::Stacked) => Edited::Unsupported,
+            Edit::Split(SplitKind::Tiled(orientation)) => {
+                let Some(selection) = self.selection_of_layout(layout) else {
+                    return Edited::Unchanged;
+                };
+                let leaf = self.descend_to_leaf(selection);
+                self.split_leaf(leaf, orientation, Content::Empty, Side::Second);
+                Edited::Changed
+            }
+            Edit::Fullscreen { within_gaps } => {
+                Edited::Raise(self.toggle_fullscreen(layout, within_gaps))
+            }
+            Edit::Resize { amount, along } => self.resize_selection(layout, amount, along),
+            Edit::Rebalance => {
+                if let Some(state) = self.layouts.get(layout).copied() {
+                    self.rebalance_node(state.root, Orientation::Horizontal);
+                }
+                Edited::Changed
+            }
+            Edit::ToggleOrientation => {
+                let Some(start) = self.selection_of_layout(layout) else {
+                    return Edited::Unchanged;
+                };
+                let split = self.ancestors(start).find(|&node| self.children(node).is_some());
+                if let Some(node) = split
+                    && let Kind::Split(split) = self.kind_mut(node)
+                {
+                    split.orientation = match split.orientation {
+                        Orientation::Horizontal => Orientation::Vertical,
+                        Orientation::Vertical => Orientation::Horizontal,
+                    };
+                    return Edited::Changed;
+                }
+                Edited::Unchanged
+            }
+        }
+    }
+
+    fn resize_selection(&mut self, layout: L, amount: f64, along: ResizeAlong) -> Edited<W> {
+        let Some(mut node) = self.selection_of_layout(layout) else {
+            return Edited::Unchanged;
+        };
+        while let Some(parent) = self.parent(node) {
+            if let Kind::Split(split) = self.kind_mut(parent)
+                && match along {
+                    ResizeAlong::Horizontal => split.orientation == Orientation::Horizontal,
+                    ResizeAlong::Vertical => split.orientation == Orientation::Vertical,
+                    ResizeAlong::Smart => true,
+                }
+            {
+                let delta = (amount as f32) * if node == split.children[0] { 0.5 } else { -0.5 };
+                let next = (split.ratio + delta).clamp(0.05, 0.95);
+                return Edited::of(std::mem::replace(&mut split.ratio, next) != next);
+            }
+            node = parent;
+        }
+        Edited::Unchanged
+    }
+
+    // Return the number of tiles sharing the parent's axis; perpendicular splits count as one.
+    fn rebalance_node(&mut self, node: N, parent_axis: Orientation) -> usize {
+        let Kind::Split(Split {
+            orientation,
+            children: [first, second],
+            ..
+        }) = *self.kind(node)
+        else {
+            return 1;
+        };
+        let first_span = self.rebalance_node(first, orientation);
+        let second_span = self.rebalance_node(second, orientation);
+        let span = first_span + second_span;
+        let Kind::Split(split) = self.kind_mut(node) else {
+            unreachable!("rebalancing children does not replace their parent");
+        };
+        split.ratio = (first_span as f32 / span as f32).clamp(0.05, 0.95);
+        if orientation == parent_axis { span } else { 1 }
+    }
+
+    fn toggle_fullscreen(&mut self, layout: L, within_gaps: bool) -> Vec<W> {
+        let Some(selection) = self.selection_of_layout(layout) else {
+            return Vec::new();
+        };
+        let leaf = self.descend_to_leaf(selection);
+        let active = self.participating_window(leaf);
+        let Content::Held { fill, .. } = self.content_mut(leaf) else {
+            return Vec::new();
+        };
+        *fill = toggled(*fill, within_gaps);
+        active.into_iter().collect()
+    }
+
     /// A layout as the core's geometry takes it, pruned as upstream's `prepare_geometry` prunes
     /// it (none: nothing takes space): a leaf shows its participating member; a leaf with none
     /// is left out, except an empty leaf while no window is left out of the system; a split
@@ -1185,5 +1280,61 @@ impl<W: Copy + PartialEq> Members<W> {
                 after: Vec::new(),
             };
         }
+    }
+}
+
+/// Which split a resize changes (upstream's `ResizeOrientation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeAlong {
+    Horizontal,
+    Vertical,
+    /// The nearest split, whichever its orientation.
+    Smart,
+}
+
+/// What splitting the selection makes (upstream's `LayoutKind`): a tiled split, or a stacked
+/// one (which BSP does not do).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitKind {
+    Tiled(Orientation),
+    Stacked,
+}
+
+/// An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Edit {
+    Split(SplitKind),
+    Fullscreen { within_gaps: bool },
+    Resize { amount: f64, along: ResizeAlong },
+    Rebalance,
+    ToggleOrientation,
+}
+
+/// What an edit did (upstream's `EditResult`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Edited<W> {
+    Unsupported,
+    Unchanged,
+    Changed,
+    Raise(Vec<W>),
+}
+
+impl<W> Edited<W> {
+    fn of(changed: bool) -> Self {
+        if changed {
+            Edited::Changed
+        } else {
+            Edited::Unchanged
+        }
+    }
+}
+
+/// A fill toggled (upstream's `toggle_fullscreen_mode`): the mode asked for is turned off if it
+/// is on, else on (replacing the other).
+fn toggled(fill: Fill, within_gaps: bool) -> Fill {
+    match (fill, within_gaps) {
+        (Fill::WithinGaps, true) | (Fill::Screen, false) => Fill::Tiled,
+        (_, true) => Fill::WithinGaps,
+        (_, false) => Fill::Screen,
     }
 }

@@ -359,7 +359,17 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         let upstream = self.upstream.edit_layout(layout, edit);
-        self.unported();
+        let Some(edit) = core_edit(edit) else {
+            self.unported();
+            return upstream;
+        };
+        let core = match self.twin.core.edit(layout, edit) {
+            core::Edited::Unsupported => EditResult::Unsupported,
+            core::Edited::Unchanged => EditResult::Unchanged,
+            core::Edited::Changed => EditResult::Changed,
+            core::Edited::Raise(windows) => EditResult::Raise(windows),
+        };
+        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
         upstream
     }
 }
@@ -367,6 +377,40 @@ impl LayoutSystem for BspLayoutSystem {
 /// A focus's answer, comparable.
 fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
     (result.handled, result.window, result.raise.clone())
+}
+
+/// An edit's answer, comparable.
+fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
+    match result {
+        EditResult::Unsupported => ("unsupported", Vec::new()),
+        EditResult::Unchanged => ("unchanged", Vec::new()),
+        EditResult::Changed => ("changed", Vec::new()),
+        EditResult::Raise(windows) => ("raise", windows.clone()),
+    }
+}
+
+/// An edit as the core takes it; none for those the core has no port of yet.
+fn core_edit(edit: LayoutEdit) -> Option<core::Edit> {
+    use crate::layout_engine::{LayoutKind, ResizeOrientation};
+    Some(match edit {
+        LayoutEdit::Split(kind) => core::Edit::Split(match kind {
+            LayoutKind::Horizontal => core::SplitKind::Tiled(core::Orientation::Horizontal),
+            LayoutKind::Vertical => core::SplitKind::Tiled(core::Orientation::Vertical),
+            LayoutKind::HorizontalStack | LayoutKind::VerticalStack => core::SplitKind::Stacked,
+        }),
+        LayoutEdit::Fullscreen { within_gaps } => core::Edit::Fullscreen { within_gaps },
+        LayoutEdit::Resize { amount, orientation } => core::Edit::Resize {
+            amount,
+            along: match orientation {
+                ResizeOrientation::Horizontal => core::ResizeAlong::Horizontal,
+                ResizeOrientation::Vertical => core::ResizeAlong::Vertical,
+                ResizeOrientation::Smart => core::ResizeAlong::Smart,
+            },
+        },
+        LayoutEdit::Rebalance => core::Edit::Rebalance,
+        LayoutEdit::ToggleOrientation => core::Edit::ToggleOrientation,
+        _ => return None,
+    })
 }
 
 /// Upstream's system as the core holds it.
