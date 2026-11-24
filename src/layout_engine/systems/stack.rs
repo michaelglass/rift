@@ -1,6 +1,5 @@
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
-#[cfg(any(test, feature = "roc-core"))]
 use rift_core::layout::traditional::{self, Fill, Traditional};
 use serde::{Deserialize, Deserializer, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
@@ -14,13 +13,10 @@ use crate::common::config::{
     GapSettings, StackDefaultOrientation, StackLineReserve, WindowInsertionPoint,
     default_stack_orientation,
 };
-#[cfg(any(test, feature = "roc-core"))]
 use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind};
-#[cfg(any(test, feature = "roc-core"))]
-use crate::layout_engine::{core_gaps, core_rect};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, core_gaps, core_rect};
 use crate::model::tree::{NodeId, Tree};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -374,6 +370,8 @@ impl LayoutSystem for StackLayoutSystem {
 
     fn remove_layout(&mut self, layout: LayoutId) { self.layouts.remove(layout); }
 
+    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
+    /// shadow.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -383,56 +381,11 @@ impl LayoutSystem for StackLayoutSystem {
         gaps: &GapSettings,
         line: StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        #[cfg(any(test, feature = "roc-core"))]
-        let offset_setting = offset;
-        let stack = &self.layouts[layout];
-        let count = stack.members.iter().filter(|m| self.window_participates(m.window)).count();
-        let Some(active) = stack.visible_index(&self.inactive) else {
-            return Vec::new();
-        };
-        let horizontal = stack.kind == LayoutKind::HorizontalStack;
-        let tiling = compute_tiling_area(screen, gaps);
-        let rect = if stack.fullscreen { screen } else { tiling };
-        let required = constraints
-            .get(&stack.members[active].window)
-            .copied()
-            .map(|c| {
-                let (min, fixed, _, _) = traditional_leaf_axis_constraints(c, horizontal);
-                fixed.unwrap_or(min)
-            })
-            .unwrap_or(0.0);
-        let offset = super::tiles::stack_offset_with_required_size(
-            rect, horizontal, count, offset, required,
-        );
-        let geometry = super::tiles::stack_layout_result(rect, count, offset, horizontal, line);
-        let frames: Vec<(WindowId, CGRect)> = stack
-            .members
-            .iter()
-            .filter(|m| self.window_participates(m.window))
-            .enumerate()
-            .map(|(i, m)| {
-                let frame = if m.fullscreen {
-                    screen
-                } else if m.within_gaps {
-                    tiling
-                } else {
-                    geometry.get_frame_for_index(i)
-                };
-                let frame = constraints.get(&m.window).copied().map_or(frame, |c| {
-                    constrain_frame(frame, |horizontal| {
-                        traditional_leaf_axis_constraints(c, horizontal)
-                    })
-                });
-                (m.window, frame)
-            })
-            .collect();
-        #[cfg(any(test, feature = "roc-core"))]
-        crate::layout_engine::core_geometry::check_traditional(
+        crate::layout_engine::core_geometry::decide_traditional(
             "stack",
-            self.shape(layout, screen, offset_setting, constraints, gaps, line),
-            &frames,
-        );
-        frames
+            self.shape(layout, screen, offset, constraints, gaps, line),
+            &self.shadow_frames(layout, screen, offset, constraints, gaps, line),
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -609,7 +562,61 @@ impl LayoutSystem for StackLayoutSystem {
 }
 
 impl StackLayoutSystem {
-    #[cfg(any(test, feature = "roc-core"))]
+    /// The frames the stack system computes itself: since the core decides (policy (a)), the
+    /// shadow `calculate_layout` holds the core's to.
+    pub(crate) fn shadow_frames(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+        line: StackLineReserve,
+    ) -> Vec<(WindowId, CGRect)> {
+        let stack = &self.layouts[layout];
+        let count = stack.members.iter().filter(|m| self.window_participates(m.window)).count();
+        let Some(active) = stack.visible_index(&self.inactive) else {
+            return Vec::new();
+        };
+        let horizontal = stack.kind == LayoutKind::HorizontalStack;
+        let tiling = compute_tiling_area(screen, gaps);
+        let rect = if stack.fullscreen { screen } else { tiling };
+        let required = constraints
+            .get(&stack.members[active].window)
+            .copied()
+            .map(|c| {
+                let (min, fixed, _, _) = traditional_leaf_axis_constraints(c, horizontal);
+                fixed.unwrap_or(min)
+            })
+            .unwrap_or(0.0);
+        let offset = super::tiles::stack_offset_with_required_size(
+            rect, horizontal, count, offset, required,
+        );
+        let geometry = super::tiles::stack_layout_result(rect, count, offset, horizontal, line);
+        let frames: Vec<(WindowId, CGRect)> = stack
+            .members
+            .iter()
+            .filter(|m| self.window_participates(m.window))
+            .enumerate()
+            .map(|(i, m)| {
+                let frame = if m.fullscreen {
+                    screen
+                } else if m.within_gaps {
+                    tiling
+                } else {
+                    geometry.get_frame_for_index(i)
+                };
+                let frame = constraints.get(&m.window).copied().map_or(frame, |c| {
+                    constrain_frame(frame, |horizontal| {
+                        traditional_leaf_axis_constraints(c, horizontal)
+                    })
+                });
+                (m.window, frame)
+            })
+            .collect();
+        frames
+    }
+
     /// A stack layout as the core's geometry takes it: one stack of the participating members,
     /// the visible one on top (none when no member participates). `offset` is the configured
     /// stack offset, as `calculate_layout` takes it.
@@ -968,6 +975,38 @@ mod tests {
         assert_eq!(frames[0].1.size.width, 200.0);
     }
 
+    /// A stack of two windows leaves room for its bar and offsets each window behind the first
+    /// (what rift does with a stack layout, whichever core decides it).
+    #[test]
+    fn a_stack_reserves_its_bar_and_offsets_each_window() {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let mut system = StackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        let line = StackLineReserve {
+            thickness: 20.0,
+            spacing: 4.0,
+            horiz: crate::common::config::HorizontalPlacement::Top,
+            vert: crate::common::config::VerticalPlacement::Left,
+        };
+        let frames = system.calculate_layout(
+            layout,
+            CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0)),
+            12.0,
+            &HashMap::default(),
+            &GapSettings::default(),
+            line,
+        );
+        let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+        // A vertical stack: the bar (20 + 4) on the left, each window 12 points below the one
+        // before and 12 shorter than the screen.
+        assert_eq!(frames, vec![
+            (w(1), rect(24.0, 0.0, 976.0, 788.0)),
+            (w(2), rect(24.0, 12.0, 976.0, 788.0))
+        ]);
+    }
+
     /// A stack system after random edits: windows added, removed, selected, made fullscreen,
     /// left out of the layout, the stack's orientation turned, the root selected.
     fn drawn_system(rng: &mut Rng) -> (StackLayoutSystem, LayoutId, Vec<WindowId>) {
@@ -1053,8 +1092,7 @@ mod tests {
             let gaps = drawn_gaps(&mut rng);
             let offset = drawn_offset(&mut rng);
             let line = drawn_line(&mut rng);
-            let upstream =
-                system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
+            let upstream = system.shadow_frames(layout, screen, offset, &constraints, &gaps, line);
             let core = core_frames(system.shape(layout, screen, offset, &constraints, &gaps, line));
             assert_eq!(bits(&core), bits(&upstream), "{}", system.draw_tree(layout));
             cases += 1;

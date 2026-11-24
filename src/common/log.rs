@@ -49,6 +49,7 @@ pub fn handle_command(command: MetricsCommand) {
 }
 
 pub fn show_timing() {
+    show_layout_core();
     show_roc_core();
     #[cfg(feature = "timing")]
     tracing::dispatcher::get_default(|d| {
@@ -62,6 +63,15 @@ pub fn show_timing() {
     println!(
         "Timing collection is disabled. Build rift with --features timing to collect metrics."
     );
+}
+
+/// The core deciding layouts (policy (a)): how often a shadow's frames (a layout system's, or
+/// under `roc-core` the Rust core's) differed from the deciding core's, each one a
+/// `layout-divergence:` or `roc-divergence:`.
+fn show_layout_core() {
+    let divergences = crate::layout_engine::layout_divergences();
+    println!("core: layout divergences: {divergences}");
+    tracing::info!(divergences, "core: layout divergences");
 }
 
 /// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow had to be

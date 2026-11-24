@@ -6,7 +6,7 @@ pub mod systems;
 pub mod utils;
 pub(crate) mod workspaces;
 
-pub(crate) use core_geometry::{cg_rect, core_gaps, core_rect};
+pub(crate) use core_geometry::{cg_rect, core_gaps, core_rect, layout_divergences};
 pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
     EventResponse, LayoutCommand, LayoutEngine, LayoutEvent, LayoutEventOutcome, ResolvedWindow,
