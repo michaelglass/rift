@@ -2372,10 +2372,17 @@ mod core_geometry_tests {
                     system.edit(layout, LayoutEdit::Split(kind));
                 }
                 13 => {
-                    let edit = match rng.below(3) {
-                        0 => GroupEdit::Join(drawn_direction(rng)),
-                        1 => GroupEdit::ConsumeOrExpel(drawn_direction(rng)),
-                        _ => GroupEdit::Unjoin,
+                    let edit = match rng.below(8) {
+                        0 | 1 => GroupEdit::Join(drawn_direction(rng)),
+                        2 | 3 => GroupEdit::ConsumeOrExpel(drawn_direction(rng)),
+                        4 | 5 => GroupEdit::Unjoin,
+                        // Edits upstream's BSP system has no case for.
+                        6 => GroupEdit::Stack(crate::common::config::StackDefaultOrientation::Same),
+                        _ => {
+                            let (window, target) = (pick(rng, &windows), pick(rng, &windows));
+                            system.edit(layout, LayoutEdit::ReorderTab { window, target });
+                            continue;
+                        }
                     };
                     system.edit(layout, LayoutEdit::Group(edit));
                 }

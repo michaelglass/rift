@@ -152,9 +152,6 @@ impl BspLayoutSystem {
         }
         upstream
     }
-
-    /// After an operation the core has no port of yet: the core takes upstream's tree.
-    fn unported(&mut self) { self.twin.core = seed(&self.upstream); }
 }
 
 /// Counts a difference, then fails the test, or in a running Rift warns it.
@@ -359,15 +356,15 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         let upstream = self.upstream.edit_layout(layout, edit);
-        let Some(edit) = core_edit(edit) else {
-            self.unported();
-            return upstream;
-        };
-        let core = match self.twin.core.edit(layout, edit) {
-            core::Edited::Unsupported => EditResult::Unsupported,
-            core::Edited::Unchanged => EditResult::Unchanged,
-            core::Edited::Changed => EditResult::Changed,
-            core::Edited::Raise(windows) => EditResult::Raise(windows),
+        let core = match core_edit(edit) {
+            Some(edit) => match self.twin.core.edit(layout, edit) {
+                core::Edited::Unsupported => EditResult::Unsupported,
+                core::Edited::Unchanged => EditResult::Unchanged,
+                core::Edited::Changed => EditResult::Changed,
+                core::Edited::Raise(windows) => EditResult::Raise(windows),
+            },
+            // An edit upstream's BSP system has no case for.
+            None => EditResult::Unsupported,
         };
         self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
         upstream
@@ -389,8 +386,9 @@ fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
     }
 }
 
-/// An edit as the core takes it; none for those the core has no port of yet.
+/// An edit as the core takes it; none for those upstream's BSP system has no case for.
 fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
+    use crate::layout_engine::systems::GroupEdit;
     use crate::layout_engine::{LayoutKind, ResizeOrientation, WindowDropAction};
     Some(match edit {
         LayoutEdit::Move { direction, .. } => core::Edit::Move(core_direction(direction)),
@@ -428,7 +426,15 @@ fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
         },
         LayoutEdit::Rebalance => core::Edit::Rebalance,
         LayoutEdit::ToggleOrientation => core::Edit::ToggleOrientation,
-        _ => return None,
+        LayoutEdit::Group(GroupEdit::Join(direction)) => {
+            core::Edit::Join(core_direction(direction))
+        }
+        LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
+            core::Edit::ConsumeOrExpel(core_direction(direction))
+        }
+        LayoutEdit::Group(GroupEdit::Unjoin) => core::Edit::Unjoin,
+        LayoutEdit::ReorderTab { .. }
+        | LayoutEdit::Group(GroupEdit::Stack(_) | GroupEdit::Unstack(_)) => return None,
     })
 }
 
@@ -668,6 +674,31 @@ mod tests {
         assert_eq!(system.window_slot(layout, w(2)), Some(vec![0]));
         assert_eq!(system.window_slot(layout, w(1)), Some(vec![1]));
         assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    /// Unjoining a stack the selection reached past a left-out window puts the stack's windows
+    /// back where the stack was, not beside the left-out window.
+    #[test]
+    fn an_unjoin_reached_past_a_left_out_window_stays_in_the_stacks_place() {
+        use crate::layout_engine::WindowDropAction;
+        use crate::layout_engine::systems::GroupEdit;
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=3 {
+            system.update(WindowChange::Add(layout, w(idx), None));
+        }
+        system.edit(layout, LayoutEdit::Drop {
+            source: w(3),
+            target: w(2),
+            action: WindowDropAction::Stack,
+        });
+        assert_eq!(system.window_slot(layout, w(2)), Some(vec![1, 0]));
+        assert!(system.focus(layout, Focus::Select(w(1))).handled);
+        system.set_window_participation(w(1), false);
+        assert!(system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin)).changed());
+        assert_eq!(system.window_slot(layout, w(1)), Some(vec![0]));
+        assert_eq!(system.window_slot(layout, w(2)), Some(vec![1, 0]));
+        assert_eq!(system.window_slot(layout, w(3)), Some(vec![1, 1]));
     }
 
     /// A core that differs from upstream's system is counted and fails a test (a running Rift

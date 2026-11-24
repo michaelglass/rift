@@ -583,6 +583,22 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
             Edit::Drop { source, target, action } => {
                 Edited::of(self.apply_target_drop(layout, source, target, action))
             }
+            Edit::Join(direction) => {
+                Edited::of(self.join_selection_with_direction(layout, direction))
+            }
+            Edit::ConsumeOrExpel(direction) => {
+                let joined = self
+                    .selection_of_layout(layout)
+                    .map(|selection| self.descend_to_leaf(selection))
+                    .and_then(|leaf| self.stack(leaf))
+                    .is_some_and(|tabs| tabs.windows().nth(1).is_some());
+                if joined {
+                    Edited::of(self.unjoin_selection(layout))
+                } else {
+                    Edited::of(self.join_selection_with_direction(layout, direction))
+                }
+            }
+            Edit::Unjoin => Edited::of(self.unjoin_selection(layout)),
             Edit::Resize { amount, along } => self.resize_selection(layout, amount, along),
             Edit::Rebalance => {
                 if let Some(state) = self.layouts.get(layout).copied() {
@@ -801,6 +817,81 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Tree<L, N, W> {
         while self.remove_window_internal(layout, source) {}
         self.node_for_window_in_layout(layout, target)
             .expect("removing a different window preserves the drop target")
+    }
+
+    fn join_selection_with_direction(&mut self, layout: L, direction: Direction) -> bool {
+        let Some(selection) = self.selection_of_layout(layout) else {
+            return false;
+        };
+        let leaf = self.descend_to_leaf(selection);
+        let Some(neighbor) = self.find_neighbor_leaf(leaf, direction) else {
+            return false;
+        };
+        if self.stack(neighbor).is_some()
+            && self.stack(leaf).is_none()
+            && let Some(source) = self.participating_window(leaf)
+            && let Some(target) = self.participating_window(neighbor)
+        {
+            return self.apply_target_drop(layout, source, target, DropAction::Stack);
+        }
+        let mut current = leaf;
+        while let Some(parent) = self.parent(current) {
+            if self.parent(neighbor) == Some(parent) {
+                if self.parent(parent).is_some() {
+                    let mut windows: Vec<W> = self.windows_under(parent).collect();
+                    // The last member is the visible one, so keep the selected window there.
+                    let selected = self.selected_window(layout);
+                    if let Some(index) = windows.iter().position(|&window| Some(window) == selected)
+                    {
+                        windows[index..].rotate_left(1);
+                    }
+                    if let Some(tabs) = Tabs::last_on_top(windows) {
+                        let new_leaf = self.make_leaf(Content::Held {
+                            members: Members::Stack(tabs),
+                            fill: Fill::Tiled,
+                        });
+                        self.replace_child(parent, new_leaf);
+                        self.remove_subtree(parent);
+                        self.select(new_leaf);
+                        return true;
+                    }
+                }
+                break;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    fn unjoin_selection(&mut self, layout: L) -> bool {
+        let Some(selection) = self.selection_of_layout(layout) else {
+            return false;
+        };
+        let leaf = self.descend_to_leaf(selection);
+        let content = self.content_mut(leaf);
+        let Content::Held {
+            members: Members::Stack(tabs),
+            fill,
+        } = content
+        else {
+            return false;
+        };
+        let (windows, fill): (Vec<W>, Fill) = (tabs.windows().collect(), *fill);
+        *content = Content::Empty;
+        self.select(leaf);
+        for member in windows {
+            self.insert_window_at_selection(layout, member);
+        }
+        // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
+        if let Some(visible) = self.selection_of_layout(layout)
+            && let Kind::Leaf(Leaf {
+                content: Content::Held { fill: visible_fill, .. },
+                ..
+            }) = self.kind_mut(visible)
+        {
+            *visible_fill = fill;
+        }
+        true
     }
 
     /// A layout as the core's geometry takes it, pruned as upstream's `prepare_geometry` prunes
@@ -1469,6 +1560,9 @@ pub enum Edit<W> {
         target: W,
         action: DropAction,
     },
+    Join(Direction),
+    ConsumeOrExpel(Direction),
+    Unjoin,
     Resize {
         amount: f64,
         along: ResizeAlong,
