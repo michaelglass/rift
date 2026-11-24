@@ -265,6 +265,28 @@ fn decide<E: std::fmt::Debug>(
     core.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
 }
 
+/// As [`decide`], for a layout system with no geometry of its own to shadow: the Rust core's
+/// frames, or under `roc-core` the Roc core's with the Rust core's the shadow.
+fn decide_unshadowed<E: std::fmt::Debug>(
+    what: &str,
+    shape: &impl std::fmt::Debug,
+    rust: Vec<(WindowId, Rect)>,
+    #[cfg_attr(not(feature = "roc-core"), allow(unused_variables))] roc: impl FnOnce() -> Result<
+        Vec<(rift_core::plain::WindowId, Rect)>,
+        E,
+    >,
+) -> Vec<(WindowId, CGRect)> {
+    #[cfg(feature = "roc-core")]
+    let roc = Some(roc().map(|frames| {
+        frames.into_iter().map(|(window, frame)| (of_plain(window), frame)).collect()
+    }));
+    #[cfg(not(feature = "roc-core"))]
+    let roc: Option<Result<Vec<(WindowId, Rect)>, E>> = None;
+    let (core, divergences) = decided(Shadowed::Skipped, rust, roc, |frames| bits(frames));
+    report_all(what, shape, divergences, &core);
+    core.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
+}
+
 /// Reports each divergence from the deciding core's answer (`core`).
 fn report_all<T: std::fmt::Debug, E: std::fmt::Debug>(
     what: &str,
@@ -310,39 +332,25 @@ fn report_divergence(
     );
 }
 
-/// The frames rift gives a BSP layout: the core's for `shape` (none: nothing takes space), the
-/// Roc core's under `roc-core`, else the Rust core's, with the BSP system's (`upstream`) the
-/// shadow, as [`decide_traditional`].
+/// The frames rift gives a BSP layout without `roc-core`: the core's for its tree's `shape`
+/// (none: nothing takes space). The BSP system has no geometry of its own to shadow.
+#[cfg(not(feature = "roc-core"))]
 pub(crate) fn decide_bsp(
     shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
-    shadow: Shadow,
-    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, rift_core::layout::bsp::Bsp::frames);
-    #[cfg(feature = "roc-core")]
-    let roc = || match &shape {
-        None => Ok(Vec::new()),
-        Some(shape) => rift_core_roc::tile_bsp(shape.clone().map(&to_plain)),
-    };
-    #[cfg(not(feature = "roc-core"))]
-    let roc = no_roc;
-    decide("bsp", &shape, shadow, upstream, rust, roc)
+    decide_unshadowed("bsp", &shape, rust, no_roc)
 }
 
-/// The frames rift gives a BSP layout whose tree the Roc core decides (`roc-core`): the Roc
-/// tree's own (`roc`: its shape through the Roc geometry), with the Rust core's frames for the
-/// Rust tree's `shape` and the BSP system's (`upstream`) the shadows.
+/// The frames rift gives a BSP layout under `roc-core`: the Roc tree's own (`roc`: its shape
+/// through the Roc geometry), with the Rust core's frames for the Rust tree's `shape` the shadow.
 #[cfg(feature = "roc-core")]
 pub(crate) fn decide_bsp_tree(
     shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
-    shadow: Shadow,
-    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
     roc: impl FnOnce() -> Vec<(rift_core::plain::WindowId, Rect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, rift_core::layout::bsp::Bsp::frames);
-    decide("bsp", &shape, shadow, upstream, rust, || {
-        Ok::<_, std::convert::Infallible>(roc())
-    })
+    decide_unshadowed("bsp", &shape, rust, || Ok::<_, std::convert::Infallible>(roc()))
 }
 
 /// A scrolling strip placed in world space: each column (id, x, width), each window's frame,

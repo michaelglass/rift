@@ -1,804 +1,27 @@
-use objc2_core_foundation::{CGRect, CGSize};
-use serde::{Deserialize, Serialize};
-use slotmap::{Key, SlotMap};
-use stored::{LayoutState, LeafMembers, Loaded, Node, NodeKind};
-
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
-use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::WindowInsertionPoint;
-use crate::layout_engine::systems::constraints::{
-    AxisConstraints, ConstraintCache, axis_slot, constrain_frame, container_axis_constraints,
-    solve_axis_lengths,
-};
-use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
-use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
-use crate::model::tree::NodeId;
+//! rift's BSP layout system: the core's tree (`rift_core::layout::bsp_tree`) and, under
+//! `roc-core`, the Roc tree that decides with the Rust tree its shadow (`system`, `roc_tree`); the
+//! saved form and its load (`stored`).
 
 #[cfg(feature = "roc-core")]
 mod roc_tree;
 mod stored;
-mod twinned;
+mod system;
 #[cfg(feature = "roc-core")]
 pub(crate) use roc_tree::bsp_tree_reseeds;
-pub use twinned::BspLayoutSystem;
-pub(crate) use twinned::bsp_tree_divergences;
-
-fn bsp_leaf_constraints(
-    c: WindowLayoutConstraints,
-    horizontal: bool,
-) -> (f64, Option<f64>, Option<f64>, bool) {
-    let max = c.max_for_axis(horizontal);
-    (
-        c.min_for_axis(horizontal),
-        c.fixed_for_axis(horizontal),
-        (max > 0.0).then_some(max),
-        c.resizable_for_axis(horizontal),
-    )
-}
-
-impl LeafMembers {
-    fn active(&self) -> Option<WindowId> {
-        match self {
-            Self::Empty => None,
-            Self::Single(window) => Some(*window),
-            Self::Stack { windows, active } => Some(windows[*active]),
-        }
-    }
-
-    fn windows(&self) -> &[WindowId] {
-        match self {
-            Self::Empty => &[],
-            Self::Single(window) => std::slice::from_ref(window),
-            Self::Stack { windows, .. } => windows,
-        }
-    }
-
-    fn windows_mut(&mut self) -> &mut [WindowId] {
-        match self {
-            Self::Empty => &mut [],
-            Self::Single(window) => std::slice::from_mut(window),
-            Self::Stack { windows, .. } => windows,
-        }
-    }
-
-    fn focus(&mut self, window: WindowId) {
-        if let Self::Stack { windows, active } = self {
-            let index = windows
-                .iter()
-                .position(|&member| member == window)
-                .expect("focused window belongs to its leaf");
-            windows[index..].rotate_left(1);
-            *active = windows.len() - 1;
-        }
-    }
-
-    fn remove(&mut self, window: WindowId) {
-        if let Self::Stack { windows, active } = self {
-            windows.retain(|&member| member != window);
-            if let Some(last) = windows.len().checked_sub(1) {
-                *active = last;
-                return;
-            }
-        }
-        *self = Self::Empty;
-    }
-
-    fn append(&mut self, window: WindowId) {
-        let mut windows = match std::mem::take(self) {
-            Self::Empty => Vec::new(),
-            Self::Single(member) => vec![member],
-            Self::Stack { windows, .. } => windows,
-        };
-        windows.push(window);
-        *self = Self::from_stack(windows);
-    }
-
-    fn prepare_slot_swap(&mut self) {
-        if let Self::Stack { windows, active } = self {
-            *active = windows.len() - 1;
-            if windows.len() == 1 {
-                *self = Self::Single(windows[0]);
-            }
-        }
-    }
-
-    fn take_stack(&mut self) -> Option<Vec<WindowId>> {
-        match self {
-            Self::Stack { windows, .. } => {
-                let windows = std::mem::take(windows);
-                *self = Self::Empty;
-                Some(windows)
-            }
-            _ => None,
-        }
-    }
-
-    fn swap_tabs(&mut self, first: WindowId, second: WindowId) {
-        let Self::Stack { windows, active } = self else {
-            unreachable!("distinct windows in one leaf require a stack");
-        };
-        windows.retain(|&window| window != first && window != second);
-        windows.extend([second, first]);
-        *active = windows.len() - 1;
-    }
-
-    fn from_stack(windows: Vec<WindowId>) -> Self {
-        match windows.len().checked_sub(1) {
-            Some(active) => Self::Stack { windows, active },
-            None => Self::Empty,
-        }
-    }
-}
-
-/// Upstream's (#688) BSP system, which decides; [`BspLayoutSystem`] steps the core's tree
-/// beside it.
-#[derive(Clone, Default, Serialize, Deserialize, Debug)]
-#[serde(try_from = "stored::StoredBspSystem")]
-pub(crate) struct Upstream {
-    #[serde(skip)]
-    inactive: HashSet<WindowId>,
-    layouts: SlotMap<LayoutId, LayoutState>,
-    nodes: SlotMap<NodeId, Node>,
-    #[serde(skip)]
-    window_insertion_point: WindowInsertionPoint,
-    #[serde(skip)]
-    single_window_aspect_ratio: Option<f64>,
-}
-
-impl TryFrom<stored::StoredBspSystem> for Upstream {
-    type Error = String;
-
-    fn try_from(stored: stored::StoredBspSystem) -> Result<Self, String> {
-        Loaded::try_from(stored).map(Self::from)
-    }
-}
-
-impl From<Loaded> for Upstream {
-    fn from(loaded: Loaded) -> Self {
-        Self {
-            layouts: loaded.layouts,
-            nodes: loaded.nodes,
-            ..Self::default()
-        }
-    }
-}
-
-impl Upstream {
-    fn kind(&self, node: NodeId) -> &NodeKind { &self.nodes[node].kind }
-
-    fn kind_mut(&mut self, node: NodeId) -> &mut NodeKind { &mut self.nodes[node].kind }
-
-    fn make_node(&mut self, kind: NodeKind) -> NodeId {
-        self.nodes.insert(Node { parent: None, kind })
-    }
-
-    fn parent(&self, node: NodeId) -> Option<NodeId> { self.nodes[node].parent }
-
-    fn children(&self, node: NodeId) -> Option<[NodeId; 2]> {
-        match self.kind(node) {
-            NodeKind::Split { children, .. } => Some(*children),
-            NodeKind::Leaf { .. } => None,
-        }
-    }
-
-    fn first_child(&self, node: NodeId) -> Option<NodeId> { Some(self.children(node)?[0]) }
-
-    fn child_iter(&self, node: NodeId) -> impl DoubleEndedIterator<Item = NodeId> {
-        self.children(node).into_iter().flatten()
-    }
-
-    fn ancestors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        std::iter::successors(Some(node), |&node| self.parent(node))
-    }
-
-    fn preorder(&self, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        std::iter::successors(Some(root), move |&node| {
-            self.first_child(node).or_else(|| {
-                self.ancestors(node)
-                    .take_while(|&ancestor| ancestor != root)
-                    .find_map(|ancestor| {
-                        let children = self.children(self.parent(ancestor)?)?;
-                        (children[0] == ancestor).then_some(children[1])
-                    })
-            })
-        })
-    }
-
-    fn postorder(&self, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        let leftmost = |node| {
-            std::iter::successors(Some(node), |&node| self.first_child(node))
-                .last()
-                .unwrap()
-        };
-        std::iter::successors(Some(leftmost(root)), move |&node| {
-            if node == root {
-                return None;
-            }
-            let parent = self.parent(node)?;
-            let children = self.children(parent)?;
-            Some(if children[0] == node {
-                leftmost(children[1])
-            } else {
-                parent
-            })
-        })
-    }
-
-    fn current_selection(&self, mut node: NodeId) -> NodeId {
-        while let NodeKind::Split {
-            children,
-            selected: Some(second),
-            ..
-        } = self.kind(node)
-        {
-            node = children[usize::from(*second)];
-        }
-        node
-    }
-
-    fn select(&mut self, mut node: NodeId) {
-        if let NodeKind::Split { selected, .. } = self.kind_mut(node) {
-            *selected = None;
-        }
-        while let Some(parent) = self.parent(node) {
-            let NodeKind::Split { children, selected, .. } = self.kind_mut(parent) else {
-                unreachable!("parent of a BSP node is a split");
-            };
-            *selected = Some(children[1] == node);
-            node = parent;
-        }
-    }
-
-    fn set_split(&mut self, node: NodeId, orientation: Orientation, children: [NodeId; 2]) {
-        self.nodes[node].kind = NodeKind::Split {
-            orientation,
-            ratio: 0.5,
-            children,
-            selected: None,
-        };
-        for child in children {
-            self.nodes[child].parent = Some(node);
-        }
-    }
-
-    fn replace_child(&mut self, old: NodeId, new: NodeId) {
-        let parent = self.nodes[old].parent.expect("cannot replace BSP root");
-        let entry = &mut self.nodes[parent];
-        let NodeKind::Split { children, .. } = &mut entry.kind else {
-            unreachable!()
-        };
-        debug_assert!(children.contains(&old));
-        children[usize::from(children[1] == old)] = new;
-        self.nodes[new].parent = Some(parent);
-    }
-
-    fn clone_node(&mut self, source: NodeId, parent: Option<NodeId>) -> NodeId {
-        let clone = self.nodes.insert(self.nodes[source].clone());
-        self.nodes[clone].parent = parent;
-        if let Some([first, second]) = self.children(source) {
-            let new = [
-                self.clone_node(first, Some(clone)),
-                self.clone_node(second, Some(clone)),
-            ];
-            let node = &mut self.nodes[clone];
-            if let NodeKind::Split { children, .. } = &mut node.kind {
-                *children = new;
-            }
-        }
-        clone
-    }
-
-    fn remove_subtree(&mut self, root: NodeId) {
-        if let Some(children) = self.children(root) {
-            for child in children {
-                self.remove_subtree(child);
-            }
-        }
-        self.nodes.remove(root);
-    }
-
-    fn members(&self, node: NodeId) -> Option<&LeafMembers> {
-        let NodeKind::Leaf { members, .. } = self.kind(node) else {
-            return None;
-        };
-        Some(members)
-    }
-
-    fn leaf_members_mut(&mut self, leaf: NodeId) -> &mut LeafMembers {
-        let NodeKind::Leaf { members, .. } = self.kind_mut(leaf) else {
-            unreachable!("expected a BSP leaf");
-        };
-        members
-    }
-
-    fn stack(&self, node: NodeId) -> Option<&[WindowId]> {
-        match self.members(node)? {
-            LeafMembers::Stack { windows, .. } => Some(windows),
-            _ => None,
-        }
-    }
-
-    fn participating_window(&self, node: NodeId) -> Option<WindowId> {
-        self.participating_member(self.members(node)?)
-    }
-
-    fn participating_member(&self, members: &LeafMembers) -> Option<WindowId> {
-        members
-            .active()
-            .filter(|w| self.window_participates(*w))
-            .or_else(|| members.windows().iter().copied().find(|w| self.window_participates(*w)))
-    }
-
-    fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
-        let mut current = from_leaf;
-        while let Some(next) = self.find_structural_neighbor_leaf(current, direction) {
-            if self.inactive.is_empty() || self.participating_window(next).is_some() {
-                return Some(next);
-            }
-            current = next;
-        }
-        None
-    }
-
-    fn find_structural_neighbor_leaf(
-        &self,
-        from_leaf: NodeId,
-        direction: Direction,
-    ) -> Option<NodeId> {
-        let backwards = matches!(direction, Direction::Left | Direction::Up);
-        let axis = direction.orientation();
-        let mut anchor = 0.5;
-        let mut current = from_leaf;
-        while let Some(parent) = self.parent(current) {
-            let NodeKind::Split {
-                orientation, ratio, children, ..
-            } = self.nodes[parent].kind
-            else {
-                unreachable!("a BSP parent is a split")
-            };
-            let second = children[1] == current;
-            if orientation == axis {
-                if second == backwards {
-                    let mut target = children[usize::from(!second)];
-                    while let NodeKind::Split {
-                        orientation, ratio, children, ..
-                    } = self.nodes[target].kind
-                    {
-                        let ratio = f64::from(ratio);
-                        let second = if orientation == axis {
-                            backwards
-                        } else if anchor <= ratio {
-                            anchor /= ratio;
-                            false
-                        } else {
-                            anchor = (anchor - ratio) / (1.0 - ratio);
-                            true
-                        };
-                        target = children[usize::from(second)];
-                    }
-                    return Some(target);
-                }
-            } else {
-                let ratio = f64::from(ratio);
-                anchor = if second {
-                    ratio + anchor * (1.0 - ratio)
-                } else {
-                    anchor * ratio
-                };
-            }
-            current = parent;
-        }
-        None
-    }
-
-    fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
-        let Some(mut children) = self.children(node) else {
-            return self.participating_window(node);
-        };
-        if matches!(direction, Direction::Left | Direction::Up) {
-            children.swap(0, 1);
-        }
-        children
-            .into_iter()
-            .find_map(|child| self.window_in_direction_from(child, direction))
-    }
-
-    fn smart_insert_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
-        let Some(selection) = self.selection_of_layout(layout) else {
-            return false;
-        };
-        let leaf = self.descend_to_leaf(selection);
-        let &NodeKind::Leaf {
-            preselected: Some(direction), ..
-        } = self.kind(leaf)
-        else {
-            return false;
-        };
-        self.split_leaf(
-            leaf,
-            direction.orientation(),
-            Some(window),
-            matches!(direction, Direction::Left | Direction::Up),
-        );
-        true
-    }
-
-    fn split_leaf(
-        &mut self,
-        leaf: NodeId,
-        orientation: Orientation,
-        new_window: Option<WindowId>,
-        new_first: bool,
-    ) {
-        let members = std::mem::take(self.leaf_members_mut(leaf));
-        let existing = self.make_leaf_with_members(members);
-        let new = self.make_leaf(new_window);
-        let children = if new_first {
-            [new, existing]
-        } else {
-            [existing, new]
-        };
-        self.set_split(leaf, orientation, children);
-        self.select(new);
-    }
-}
-
-impl Upstream {
-    pub fn new(window_insertion_point: WindowInsertionPoint) -> Self {
-        Self {
-            window_insertion_point,
-            ..Self::default()
-        }
-    }
-
-    pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
-        self.window_insertion_point = value;
-    }
-
-    pub fn set_single_window_aspect_ratio(&mut self, ratio: Option<f64>) {
-        self.single_window_aspect_ratio = ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0);
-    }
-
-    fn node_for_window_in_layout(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
-        fn find(arena: &SlotMap<NodeId, Node>, node: NodeId, window: WindowId) -> Option<NodeId> {
-            match &arena[node].kind {
-                NodeKind::Split { children: [first, second], .. } => {
-                    find(arena, *first, window).or_else(|| find(arena, *second, window))
-                }
-                NodeKind::Leaf { members, .. } => {
-                    members.windows().contains(&window).then_some(node)
-                }
-            }
-        }
-        find(&self.nodes, self.layouts.get(layout)?.root, wid)
-    }
-
-    fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
-        self.make_leaf_with_members(window.map_or(LeafMembers::Empty, LeafMembers::Single))
-    }
-
-    fn make_leaf_with_members(&mut self, members: LeafMembers) -> NodeId {
-        self.make_node(NodeKind::Leaf {
-            members,
-            fullscreen: false,
-            fullscreen_within_gaps: false,
-            preselected: None,
-        })
-    }
-
-    fn descend_to_leaf(&self, mut node: NodeId) -> NodeId {
-        if !self.inactive.is_empty()
-            && let Some(active) = self
-                .preorder(node)
-                .find(|&candidate| self.participating_window(candidate).is_some())
-        {
-            return active;
-        }
-        while let Some(child) = self.first_child(node) {
-            node = child;
-        }
-        node
-    }
-
-    fn orientation_for_leaf(&self, node: NodeId) -> Orientation {
-        if self.ancestors(node).count() % 2 == 1 {
-            Orientation::Horizontal
-        } else {
-            Orientation::Vertical
-        }
-    }
-
-    fn windows_under(&self, root: NodeId) -> impl Iterator<Item = WindowId> + '_ {
-        self.preorder(root)
-            .filter_map(|node| self.members(node))
-            .flat_map(|members| members.windows().iter().copied())
-    }
-
-    fn has_fullscreen_in_subtree(&self, node: NodeId) -> bool {
-        match self.kind(node) {
-            NodeKind::Leaf {
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            } => {
-                self.participating_window(node).is_some()
-                    && (*fullscreen || *fullscreen_within_gaps)
-            }
-            NodeKind::Split { .. } => {
-                self.child_iter(node).any(|child| self.has_fullscreen_in_subtree(child))
-            }
-        }
-    }
-
-    // Return the number of tiles sharing the parent's axis; perpendicular splits count as one.
-    fn rebalance_node(&mut self, node: NodeId, parent_axis: Orientation) -> usize {
-        let NodeKind::Split {
-            orientation,
-            children: [first, second],
-            ..
-        } = self.nodes[node].kind
-        else {
-            return 1;
-        };
-        let first_span = self.rebalance_node(first, orientation);
-        let second_span = self.rebalance_node(second, orientation);
-        let span = first_span + second_span;
-        let NodeKind::Split { ratio, .. } = self.kind_mut(node) else {
-            unreachable!("rebalancing children does not replace their parent");
-        };
-        *ratio = (first_span as f32 / span as f32).clamp(0.05, 0.95);
-        if orientation == parent_axis { span } else { 1 }
-    }
-
-    // Remove one child and promote the other into the parent's stable slot.
-    fn detach_child(&mut self, node: NodeId) {
-        let parent = self.nodes[node].parent.expect("cannot detach BSP root");
-        let children = self.children(parent).unwrap();
-        debug_assert!(children.contains(&node));
-        let sibling = children[usize::from(children[0] == node)];
-        let sibling = self.nodes.remove(sibling).unwrap();
-        self.nodes[node].parent = None;
-        let parent_node = &mut self.nodes[parent];
-        parent_node.kind = sibling.kind;
-        // The former parent's selection pointed to one of the two removed child slots.
-        if let NodeKind::Split { selected, .. } = &mut parent_node.kind {
-            *selected = None;
-        }
-        if let Some(children) = self.children(parent) {
-            for child in children {
-                self.nodes[child].parent = Some(parent);
-            }
-        }
-    }
-
-    fn selection_of_layout(&self, layout: LayoutId) -> Option<NodeId> {
-        let root = self.layouts.get(layout)?.root;
-        let selected = self.current_selection(root);
-        if self.inactive.is_empty() || self.participating_window(selected).is_some() {
-            return Some(selected);
-        }
-        let first_active =
-            self.preorder(root).find(|&node| self.participating_window(node).is_some())?;
-        if self.members(selected).and_then(LeafMembers::active).is_some() {
-            Some(first_active)
-        } else {
-            Some(selected)
-        }
-    }
-
-    fn insert_window_at_selection(
-        &mut self,
-        layout: crate::layout_engine::LayoutId,
-        wid: WindowId,
-    ) {
-        let Some(state) = self.layouts.get(layout).copied() else {
-            return;
-        };
-        let sel = self
-            .selection_of_layout(layout)
-            .unwrap_or_else(|| self.current_selection(state.root));
-        let leaf = self.descend_to_leaf(sel);
-        if leaf != sel {
-            self.select(leaf);
-        }
-        match self.kind_mut(leaf) {
-            NodeKind::Leaf {
-                members,
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            } if matches!(members, LeafMembers::Empty) => {
-                (*members, *fullscreen, *fullscreen_within_gaps) =
-                    (LeafMembers::Single(wid), false, false);
-            }
-            NodeKind::Leaf { .. } => {
-                let orientation = self.orientation_for_leaf(leaf);
-                self.split_leaf(leaf, orientation, Some(wid), false);
-            }
-            NodeKind::Split { .. } => unreachable!("descent ends at a leaf"),
-        }
-    }
-
-    /// Remove an occurrence and report progress so callers can clear legacy duplicates.
-    fn remove_window_internal(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        let Some(node) = self.node_for_window_in_layout(layout, wid) else {
-            return false;
-        };
-        self.remove_member(layout, node, wid);
-        true
-    }
-
-    fn remove_member(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
-        let members = self.leaf_members_mut(node);
-        members.remove(wid);
-        if members.active().is_some() {
-            self.select(node);
-            return;
-        }
-        if let NodeKind::Leaf {
-            fullscreen,
-            fullscreen_within_gaps,
-            ..
-        } = self.kind_mut(node)
-        {
-            *fullscreen = false;
-            *fullscreen_within_gaps = false;
-        }
-        if self.nodes[node].parent.is_some() {
-            self.detach_child(node);
-            self.nodes.remove(node);
-        }
-        let selection = self.current_selection(self.layouts[layout].root);
-        let leaf = self.descend_to_leaf(selection);
-        self.select(leaf);
-    }
-
-    fn prepare_geometry(
-        &self,
-        root: NodeId,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-    ) -> ConstraintCache {
-        let mut prepared = ConstraintCache::default();
-        for node in self.postorder(root) {
-            let axes = match self.kind(node) {
-                NodeKind::Leaf { members, .. } => {
-                    let active = self.participating_member(members);
-                    if active.is_none()
-                        && !(self.inactive.is_empty() && matches!(members, LeafMembers::Empty))
-                    {
-                        continue;
-                    }
-                    let limits = active
-                        .and_then(|window| constraints.get(&window).copied())
-                        .map(WindowLayoutConstraints::normalized);
-                    [false, true].map(|horizontal| {
-                        limits.map_or((0.0, None, None, true), |limits| {
-                            bsp_leaf_constraints(limits, horizontal)
-                        })
-                    })
-                }
-                NodeKind::Split { orientation, children, .. } => {
-                    let children = children.map(|child| prepared.get(&child));
-                    if children == [None; 2] {
-                        continue;
-                    }
-                    let kind = LayoutKind::from(*orientation);
-                    [false, true].map(|horizontal| {
-                        let mut summary = container_axis_constraints(
-                            children.into_iter().flatten().map(|axes| axes[horizontal as usize]),
-                            kind,
-                            horizontal,
-                            if horizontal {
-                                gaps.inner.horizontal
-                            } else {
-                                gaps.inner.vertical
-                            },
-                            0.0,
-                            0.0,
-                        );
-                        // BSP leaves the perpendicular maximum unconstrained.
-                        if (*orientation == Orientation::Horizontal) != horizontal {
-                            summary.2 = None;
-                        }
-                        summary
-                    })
-                }
-            };
-            prepared.insert(node, axes);
-        }
-        prepared
-    }
-
-    fn selection_window(&self, state: &LayoutState) -> Option<WindowId> {
-        let sel = self.current_selection(state.root);
-        self.participating_window(sel)
-    }
-}
-
-struct BspProjection<'a> {
-    system: &'a Upstream,
-    prepared: &'a ConstraintCache,
-    screen: CGRect,
-    tiling: CGRect,
-    constraints: &'a HashMap<WindowId, WindowLayoutConstraints>,
-    gaps: &'a crate::common::config::GapSettings,
-}
-
-impl BspProjection<'_> {
-    fn apply(&self, node: NodeId, slot: CGRect, out: &mut Vec<(WindowId, CGRect)>) {
-        let Some(axes) = self.prepared.get(&node) else { return };
-        match &self.system.nodes[node].kind {
-            NodeKind::Leaf {
-                members,
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            } => {
-                let Some(window) = self.system.participating_member(members) else {
-                    return;
-                };
-                let frame = if *fullscreen {
-                    self.screen
-                } else if *fullscreen_within_gaps {
-                    self.tiling
-                } else if self.constraints.contains_key(&window) {
-                    constrain_frame(slot, |horizontal| axes[horizontal as usize])
-                } else {
-                    slot
-                };
-                out.push((window, frame));
-            }
-            NodeKind::Split {
-                orientation,
-                ratio,
-                children: [first, second],
-                ..
-            } => {
-                let (Some(first_axes), Some(second_axes)) =
-                    (self.prepared.get(first), self.prepared.get(second))
-                else {
-                    self.apply(*first, slot, out);
-                    self.apply(*second, slot, out);
-                    return;
-                };
-                let horizontal = *orientation == Orientation::Horizontal;
-                let (origin, total, gap) = if horizontal {
-                    (slot.origin.x, slot.size.width, self.gaps.inner.horizontal)
-                } else {
-                    (slot.origin.y, slot.size.height, self.gaps.inner.vertical)
-                };
-                let ratio = f64::from(*ratio);
-                let items =
-                    [(first_axes, ratio), (second_axes, 1.0 - ratio)].map(|(axes, weight)| {
-                        let (min, fixed, max, can_grow) = axes[horizontal as usize];
-                        AxisConstraints {
-                            min,
-                            fixed,
-                            max,
-                            weight,
-                            can_grow,
-                        }
-                    });
-                let lengths = solve_axis_lengths(items, (total - gap).max(0.0));
-                self.apply(*first, axis_slot(slot, horizontal, origin, lengths[0]), out);
-                self.apply(
-                    *second,
-                    axis_slot(slot, horizontal, origin + (lengths[0] + gap), lengths[1]),
-                    out,
-                );
-            }
-        }
-    }
-}
+pub use system::BspLayoutSystem;
 
 #[cfg(test)]
 mod tests {
-    use objc2_core_foundation::CGPoint;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
+    use crate::actor::app::WindowId;
+    use crate::common::collections::HashMap;
+    use crate::layout_engine::systems::{
+        Focus, GroupEdit, LayoutEdit, LayoutSystem, WindowChange, WindowLayoutConstraints,
+        WindowQuery,
+    };
+    use crate::layout_engine::{Direction, LayoutId, LayoutKind, ResizeOrientation};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -988,6 +211,111 @@ mod tests {
         assert!(!system.container_tree(layout).is_fullscreen);
     }
 
+    /// Rebalancing counts the windows along each split's own axis: across alternating splits
+    /// every share is even again after a resize.
+    #[test]
+    fn a_rebalance_evens_the_shares_after_a_resize() {
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        let _ = system.focus(layout, Focus::Select(w(1)));
+        system
+            .edit(layout, LayoutEdit::Resize {
+                amount: 0.2,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        system.edit(layout, LayoutEdit::Rebalance).discard();
+        let frames =
+            calculate_frames(&system, layout, CGSize::new(1200.0, 900.0), &Default::default());
+        for (window, x, y, width, height) in [
+            (w(1), 0.0, 0.0, 600.0, 900.0),
+            (w(2), 600.0, 0.0, 600.0, 450.0),
+            (w(3), 600.0, 450.0, 600.0, 450.0),
+        ] {
+            assert_eq!(
+                frames[&window],
+                CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+            );
+        }
+    }
+
+    /// rift-cli's container view of a BSP layout: a split with each child's share, a window leaf
+    /// with its fill, selection and preselection, a stack as a horizontal stack of its windows.
+    #[test]
+    fn the_container_view_shows_the_trees_nodes() {
+        use rift_protocol::{ContainerNodeType, ContainerTreeNode, LayoutKind as Kind};
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: crate::layout_engine::WindowDropAction::Stack,
+            })
+            .discard();
+        let _ = system.focus(layout, Focus::Select(w(1)));
+        fullscreen(&mut system, layout, true);
+        // A preselection only a saved file holds, on the first leaf.
+        let file = ron::to_string(&system).unwrap().replacen(
+            "preselected:None",
+            "preselected:Some(left)",
+            1,
+        );
+        let system: BspLayoutSystem = ron::from_str(&file).unwrap();
+        let window = |idx: u32, selected: bool| ContainerTreeNode {
+            node_id: (1 << 32) | u64::from(idx),
+            node_type: ContainerNodeType::Window,
+            window_id: Some(w(idx).into()),
+            is_selected: selected,
+            ..Default::default()
+        };
+        let expected = ContainerTreeNode {
+            node_id: (1 << 32) | 1,
+            layout_kind: Some(Kind::Horizontal),
+            children: vec![
+                ContainerTreeNode {
+                    node_id: (1 << 32) | 2,
+                    weight: Some(0.5),
+                    is_fullscreen_within_gaps: true,
+                    pending_split: Some(rift_protocol::Direction::Left),
+                    ..window(1, true)
+                },
+                ContainerTreeNode {
+                    node_id: (1 << 32) | 3,
+                    weight: Some(0.5),
+                    layout_kind: Some(Kind::HorizontalStack),
+                    children: vec![window(2, false), window(3, false)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(system.container_tree(layout), expected);
+        // rift-cli's text drawing: each node a line, a leaf's window on top, a split's share.
+        assert_eq!(
+            system.draw_tree(layout),
+            "Split Horizontal 0.50\n  Leaf Some(WindowId { pid: 1, idx: 1 })\n  Leaf \
+             Some(WindowId { pid: 1, idx: 3 })\n"
+        );
+        assert_eq!(system.draw_tree(LayoutId::default()), "<empty bsp>");
+        // A share off the middle: each child's weight is its own side's.
+        let mut system = system;
+        system
+            .edit(layout, LayoutEdit::Resize {
+                amount: 0.2,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        // The stack selected: its window on top is shown selected, the other not.
+        assert!(system.focus(layout, Focus::Select(w(3))).handled);
+        let tree = system.container_tree(layout);
+        let weights: Vec<f64> = tree.children.iter().map(|child| child.weight.unwrap()).collect();
+        assert!(weights[0] > weights[1], "{weights:?}");
+        assert_eq!(weights[0] + weights[1], 1.0);
+        let stack = &tree.children[1];
+        assert!(stack.is_selected);
+        let selected: Vec<bool> = stack.children.iter().map(|tab| tab.is_selected).collect();
+        assert_eq!(selected, vec![false, true]);
+    }
+
     #[test]
     fn join_adds_the_selected_window_to_the_neighboring_stack() {
         let (mut system, layout) = tiled(&[1, 2, 3]);
@@ -1009,967 +337,28 @@ mod tests {
     }
 }
 
-impl LayoutSystem for Upstream {
-    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.layouts
-            .get(layout)
-            .is_some_and(|state| self.windows_under(state.root).any(|window| window.pid == pid))
-    }
-
-    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
-
-    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        super::update_participation(&mut self.inactive, window, participates)
-    }
-
-    fn create_layout(&mut self) -> LayoutId {
-        let leaf = self.make_leaf(None);
-        let state = LayoutState { root: leaf };
-        self.layouts.insert(state)
-    }
-
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
-
-    fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let Some(state) = self.layouts.get(layout).copied() else {
-            return self.create_layout();
-        };
-        let root = self.clone_node(state.root, None);
-        self.layouts.insert(LayoutState { root })
-    }
-
-    fn remove_layout(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.remove(layout) {
-            self.remove_subtree(state.root);
-        }
-    }
-
-    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
-    /// shadow.
-    fn calculate_layout(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        _stack_offset: f64,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-        _stack_line: crate::common::config::StackLineReserve,
-        shadow: crate::layout_engine::Shadow,
-    ) -> Vec<(WindowId, CGRect)> {
-        let shape = self
-            .layouts
-            .get(layout)
-            .and_then(|state| self.shape(state.root, screen, constraints, gaps));
-        crate::layout_engine::core_geometry::decide_bsp(shape, shadow, || {
-            self.shadow_frames(layout, screen, constraints, gaps)
-        })
-    }
-
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.layouts.get(layout).and_then(|s| self.selection_window(s))
-    }
-
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.layouts
-            .get(layout)
-            .and_then(|state| self.window_in_direction_from(state.root, direction))
-    }
-
-    fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.node_for_window_in_layout(layout, wid).is_some()
-    }
-
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        if let Some(state) = self.layouts.get(layout).copied() {
-            self.has_fullscreen_in_subtree(state.root)
-        } else {
-            false
-        }
-    }
-
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
-        match query {
-            WindowQuery::All => self.all_windows_in_layout(layout),
-            WindowQuery::Visible => self.visible_windows_in_layout(layout),
-            WindowQuery::Selection => self
-                .selection_of_layout(layout)
-                .and_then(|node| self.participating_window(self.descend_to_leaf(node)))
-                .into_iter()
-                .collect(),
-            WindowQuery::Stack(window) => self
-                .node_for_window_in_layout(layout, window)
-                .and_then(|node| self.stack(node))
-                .unwrap_or_default()
-                .to_vec(),
-        }
-    }
-
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        match focus {
-            Focus::Select(window) => FocusResult::selection({
-                let wid = window;
-
-                if self.inactive.contains(&wid) {
-                    return FocusResult::selection(false);
-                }
-                let Some(node) = self.node_for_window_in_layout(layout, wid) else {
-                    return FocusResult::selection(false);
-                };
-                self.leaf_members_mut(node).focus(wid);
-                self.select(node);
-                true
-            }),
-            Focus::Ascend => FocusResult::selection({
-                if let Some(sel) = self.selection_of_layout(layout) {
-                    let parent_opt = self.parent(sel);
-                    if let Some(parent) = parent_opt {
-                        let new_sel = self.descend_to_leaf(parent);
-                        self.select(new_sel);
-                        return FocusResult::selection(true);
-                    }
-                }
-                false
-            }),
-            Focus::Descend => FocusResult::selection({
-                if let Some(sel) = self.selection_of_layout(layout) {
-                    let new_sel = self.descend_to_leaf(sel);
-                    if new_sel != sel {
-                        self.select(new_sel);
-                        return FocusResult::selection(true);
-                    }
-                }
-                false
-            }),
-            Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
-            }
-        }
-    }
-
-    fn update(&mut self, change: WindowChange<'_>) {
-        match change {
-            WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
-            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                self.remove_window(window)
-            }
-            WindowChange::Replace(from, to) => {
-                super::replace_participation(&mut self.inactive, from, to);
-                if from == to {
-                    return;
-                }
-                let layouts: Vec<_> = self.layouts.keys().collect();
-                for layout in layouts {
-                    if !self.contains_window(layout, from) {
-                        continue;
-                    }
-                    // A replacement may already be present after restore matching.
-                    while self.remove_window_internal(layout, to) {}
-                }
-                for node in self.nodes.values_mut() {
-                    if let NodeKind::Leaf { members, .. } = &mut node.kind {
-                        for member in
-                            members.windows_mut().iter_mut().filter(|member| **member == from)
-                        {
-                            *member = to;
-                        }
-                    }
-                }
-            }
-            WindowChange::CloseApp(pid) => {
-                self.inactive.retain(|window| window.pid != pid);
-                let mut windows: Vec<_> = self
-                    .layouts
-                    .values()
-                    .flat_map(|state| self.windows_under(state.root))
-                    .filter(|window| window.pid == pid)
-                    .collect();
-                windows.sort_unstable();
-                windows.dedup();
-                for window in windows {
-                    self.remove_window(window);
-                }
-            }
-            WindowChange::Resize {
-                layout,
-                window,
-                old,
-                new,
-                screen,
-                gaps,
-            } => {
-                let wid = window;
-                let old_frame = old;
-                let new_frame = new;
-
-                if !self.window_participates(wid) {
-                    return;
-                }
-                if let Some(node) = self.node_for_window_in_layout(layout, wid) {
-                    if let NodeKind::Leaf {
-                        fullscreen,
-                        fullscreen_within_gaps,
-                        ..
-                    } = self.kind_mut(node)
-                        && super::track_fullscreen_resize(
-                            fullscreen,
-                            fullscreen_within_gaps,
-                            old_frame,
-                            new_frame,
-                            screen,
-                            gaps,
-                        )
-                    {
-                        return;
-                    }
-
-                    let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
-                    let height_changed =
-                        (new_frame.size.height - old_frame.size.height).abs() > 0.5;
-                    if !width_changed && !height_changed {
-                        return;
-                    }
-
-                    let mut current = node;
-                    while let Some(parent) = self.parent(current) {
-                        let NodeKind::Split {
-                            orientation, ratio, children, ..
-                        } = self.kind_mut(parent)
-                        else {
-                            unreachable!("parent of a BSP node is a split");
-                        };
-
-                        let (old_len, new_len) = match orientation {
-                            Orientation::Horizontal if width_changed => {
-                                (old_frame.size.width, new_frame.size.width)
-                            }
-                            Orientation::Vertical if height_changed => {
-                                (old_frame.size.height, new_frame.size.height)
-                            }
-                            _ => {
-                                current = parent;
-                                continue;
-                            }
-                        };
-
-                        let current_ratio = f64::from(*ratio);
-                        let is_first = current == children[0];
-                        let denom = if is_first {
-                            current_ratio
-                        } else {
-                            1.0 - current_ratio
-                        };
-                        if old_len <= 0.0 || denom <= f64::EPSILON {
-                            break;
-                        }
-
-                        let parent_len = old_len / denom;
-                        if parent_len <= 0.0 {
-                            break;
-                        }
-
-                        let raw_ratio = (new_len / parent_len).clamp(0.05, 0.95);
-                        *ratio = if is_first {
-                            raw_ratio as f32
-                        } else {
-                            (1.0 - raw_ratio) as f32
-                        };
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        match edit {
-            LayoutEdit::Move {
-                direction,
-                has_display_neighbor: _,
-            } => EditResult::from(self.move_selection(layout, direction)),
-            LayoutEdit::Split(kind) => {
-                if kind.is_stacked() {
-                    return EditResult::Unsupported;
-                }
-                let Some(selection) = self.selection_of_layout(layout) else {
-                    return EditResult::Unchanged;
-                };
-                let leaf = self.descend_to_leaf(selection);
-                self.split_leaf(leaf, kind.orientation(), None, false);
-                EditResult::Changed
-            }
-            LayoutEdit::Fullscreen { within_gaps } => {
-                EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
-            }
-            LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
-            LayoutEdit::Drop { source, target, action } => {
-                EditResult::from(self.apply_target_drop(layout, source, target, action))
-            }
-            LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                EditResult::from(self.join_selection_with_direction(layout, direction))
-            }
-            LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
-                let is_joined = self
-                    .selection_of_layout(layout)
-                    .map(|selection| self.descend_to_leaf(selection))
-                    .and_then(|leaf| self.stack(leaf))
-                    .is_some_and(|members| members.len() > 1);
-
-                if is_joined {
-                    EditResult::from(self.unjoin_selection(layout))
-                } else {
-                    EditResult::from(self.join_selection_with_direction(layout, direction))
-                }
-            }
-            LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(self.unjoin_selection(layout)),
-            LayoutEdit::Resize { amount, orientation } => {
-                let sel_snapshot = self.selection_of_layout(layout);
-                let Some(mut node) = sel_snapshot else {
-                    return EditResult::Unchanged;
-                };
-
-                while let Some(parent) = self.parent(node) {
-                    if let NodeKind::Split {
-                        orientation: split_orientation,
-                        ratio,
-                        children,
-                        ..
-                    } = self.kind_mut(parent)
-                        && match orientation {
-                            ResizeOrientation::Horizontal => {
-                                *split_orientation == Orientation::Horizontal
-                            }
-                            ResizeOrientation::Vertical => {
-                                *split_orientation == Orientation::Vertical
-                            }
-                            ResizeOrientation::Smart => true,
-                        }
-                    {
-                        let delta = (amount as f32) * if node == children[0] { 0.5 } else { -0.5 };
-                        let next = (*ratio + delta).clamp(0.05, 0.95);
-                        return EditResult::from(std::mem::replace(ratio, next) != next);
-                    }
-                    node = parent;
-                }
-                EditResult::Unchanged
-            }
-            LayoutEdit::Rebalance => {
-                if let Some(state) = self.layouts.get(layout).copied() {
-                    self.rebalance_node(state.root, Orientation::Horizontal);
-                };
-                EditResult::Changed
-            }
-            LayoutEdit::ToggleOrientation => {
-                let Some(start) = self.selection_of_layout(layout) else {
-                    return EditResult::Unchanged;
-                };
-                let split = self.ancestors(start).find(|&node| self.children(node).is_some());
-                if let Some(node) = split
-                    && let NodeKind::Split { orientation, .. } = self.kind_mut(node)
-                {
-                    *orientation = match *orientation {
-                        Orientation::Horizontal => Orientation::Vertical,
-                        Orientation::Vertical => Orientation::Horizontal,
-                    };
-                    return EditResult::Changed;
-                }
-                EditResult::Unchanged
-            }
-            _ => EditResult::Unsupported,
-        }
-    }
-}
-
-impl Upstream {
-    pub(in crate::layout_engine) fn can_move_window(
-        &self,
-        layout: LayoutId,
-        window: WindowId,
-        direction: Direction,
-    ) -> bool {
-        self.window_participates(window)
-            && self
-                .node_for_window_in_layout(layout, window)
-                .is_some_and(|node| self.find_neighbor_leaf(node, direction).is_some())
-    }
-
-    fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return false;
-        };
-        let moving = self.descend_to_leaf(sel);
-        if self.members(moving).and_then(LeafMembers::active).is_none() {
-            return false;
-        }
-        let Some(target) = self.find_neighbor_leaf(moving, direction) else {
-            return false;
-        };
-        let Some(old_parent) = self.parent(moving) else {
-            return false;
-        };
-
-        let moving_first = matches!(direction, Direction::Left | Direction::Up);
-        if self.nodes[target].parent == Some(old_parent) {
-            let NodeKind::Split { children, .. } = &mut self.nodes[old_parent].kind else {
-                unreachable!()
-            };
-            if (children[0] == moving) != moving_first {
-                children.swap(0, 1);
-            }
-        } else {
-            self.detach_child(moving);
-            if matches!(self.members(target), Some(LeafMembers::Empty)) {
-                self.replace_child(target, moving);
-                self.nodes.remove(target);
-            } else {
-                let split = self.make_leaf(None);
-                self.replace_child(target, split);
-                self.set_split(
-                    split,
-                    direction.orientation(),
-                    if moving_first {
-                        [moving, target]
-                    } else {
-                        [target, moving]
-                    },
-                );
-            }
-        }
-        self.select(moving);
-        true
-    }
-
-    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.layouts
-            .get(layout)
-            .into_iter()
-            .flat_map(|state| self.windows_under(state.root))
-            .collect()
-    }
-
-    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.layouts
-            .get(layout)
-            .into_iter()
-            .flat_map(|state| self.preorder(state.root))
-            .filter_map(|node| self.participating_window(node))
-            .collect()
-    }
-
-    fn move_focus(
-        &mut self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> (Option<WindowId>, Vec<WindowId>) {
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(current_sel) = sel_snapshot else {
-            return (None, vec![]);
-        };
-        let current_leaf = self.descend_to_leaf(current_sel);
-        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
-            return (None, vec![]);
-        };
-        self.select(next_leaf);
-        let focus = self.participating_window(next_leaf);
-        // Tiled BSP windows never overlap, so only the focus target needs to be
-        // raised. Raising every visible window makes the raise manager front
-        // each app in turn (via make_key_window) before the target, which
-        // flickers the menu bar and any focus border on every focus move. The
-        // traditional engine already raises only the revealed group.
-        (focus, focus.into_iter().collect())
-    }
-
-    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        if self.contains_window(layout, wid) {
-            return;
-        }
-        if self.layouts.get(layout).is_some() {
-            if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
-                let mut leaf = self.layouts[layout].root;
-                while let Some([_, right]) = self.children(leaf) {
-                    leaf = right;
-                }
-                self.select(leaf);
-                self.insert_window_at_selection(layout, wid);
-                return;
-            }
-            // Try smart insertion first (with preselection support)
-            if !self.smart_insert_window(layout, wid) {
-                // Fall back to default insertion
-                self.insert_window_at_selection(layout, wid);
-            }
-        }
-    }
-
-    fn remove_window(&mut self, wid: WindowId) {
-        self.inactive.remove(&wid);
-        let layouts: Vec<_> = self.layouts.keys().collect();
-        for layout in layouts {
-            while self.remove_window_internal(layout, wid) {}
-        }
-    }
-
-    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        if a == b || !self.window_participates(a) || !self.window_participates(b) {
-            return false;
-        }
-        let Some(node_a) = self.node_for_window_in_layout(layout, a) else {
-            return false;
-        };
-        let Some(node_b) = self.node_for_window_in_layout(layout, b) else {
-            return false;
-        };
-        if node_a == node_b {
-            self.leaf_members_mut(node_a).swap_tabs(a, b);
-            self.select(node_a);
-            return true;
-        }
-
-        let [first, second] =
-            self.nodes.get_disjoint_mut([node_a, node_b]).expect("distinct live BSP nodes");
-        let (NodeKind::Leaf { members: first, .. }, NodeKind::Leaf { members: second, .. }) =
-            (&mut first.kind, &mut second.kind)
-        else {
-            unreachable!("window lookup returns leaves");
-        };
-        // Occupancy moves while fullscreen stays attached to the slot.
-        first.prepare_slot_swap();
-        second.prepare_slot_swap();
-        std::mem::swap(first, second);
-
-        true
-    }
-
-    fn apply_target_drop(
-        &mut self,
-        layout: LayoutId,
-        source: WindowId,
-        target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
-    ) -> bool {
-        if !self.window_participates(source) || !self.window_participates(target) {
-            return false;
-        }
-        if source == target
-            || !self.contains_window(layout, source)
-            || !self.contains_window(layout, target)
-        {
-            return false;
-        }
-        use crate::layout_engine::WindowDropAction::*;
-        match action {
-            Swap => return self.swap_windows(layout, source, target),
-            Move(_) | ConsumeOrExpel(_) => return false,
-            Stack | Insert(_) => {}
-        }
-
-        while self.remove_window_internal(layout, source) {}
-        // Removal can promote the target into a different arena slot.
-        let target_node = self
-            .node_for_window_in_layout(layout, target)
-            .expect("removing a different window preserves the drop target");
-        match action {
-            crate::layout_engine::WindowDropAction::Stack => {
-                self.leaf_members_mut(target_node).append(source);
-                self.select(target_node);
-                true
-            }
-            crate::layout_engine::WindowDropAction::Insert(direction) => {
-                self.split_leaf(
-                    target_node,
-                    direction.orientation(),
-                    Some(source),
-                    matches!(direction, Direction::Left | Direction::Up),
-                );
-                true
-            }
-            crate::layout_engine::WindowDropAction::Swap
-            | crate::layout_engine::WindowDropAction::Move(_)
-            | crate::layout_engine::WindowDropAction::ConsumeOrExpel(_) => {
-                unreachable!()
-            }
-        }
-    }
-
-    fn toggle_fullscreen(&mut self, layout: LayoutId, within_gaps: bool) -> Vec<WindowId> {
-        let Some(selection) = self.selection_of_layout(layout) else {
-            return Vec::new();
-        };
-        let leaf = self.descend_to_leaf(selection);
-        let active = self.participating_window(leaf);
-        let NodeKind::Leaf {
-            members,
-            fullscreen,
-            fullscreen_within_gaps,
-            ..
-        } = self.kind_mut(leaf)
-        else {
-            return Vec::new();
-        };
-        if members.active().is_none() {
-            return Vec::new();
-        }
-        super::toggle_fullscreen_mode(fullscreen, fullscreen_within_gaps, within_gaps);
-        active.into_iter().collect()
-    }
-
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return false;
-        };
-        let sel_leaf = self.descend_to_leaf(sel);
-
-        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
-            return false;
-        };
-
-        if self.stack(neighbor).is_some()
-            && self.stack(sel_leaf).is_none()
-            && let Some(source) = self.participating_window(sel_leaf)
-            && let Some(target) = self.participating_window(neighbor)
-        {
-            return self.apply_target_drop(
-                layout,
-                source,
-                target,
-                crate::layout_engine::WindowDropAction::Stack,
-            );
-        }
-
-        let mut current = sel_leaf;
-        while let Some(parent) = self.parent(current) {
-            if self.parent(neighbor) == Some(parent) {
-                if self.parent(parent).is_some() {
-                    let mut windows: Vec<_> = self.windows_under(parent).collect();
-
-                    // The last member is the visible one, so keep the selected window there.
-                    let selected = self.selected_window(layout);
-
-                    if let Some(index) = windows.iter().position(|window| Some(*window) == selected)
-                    {
-                        windows[index..].rotate_left(1);
-                    }
-
-                    if !windows.is_empty() {
-                        let new_leaf =
-                            self.make_leaf_with_members(LeafMembers::from_stack(windows));
-                        self.replace_child(parent, new_leaf);
-                        self.remove_subtree(parent);
-
-                        self.select(new_leaf);
-                        return true;
-                    }
-                }
-                break;
-            }
-            current = parent;
-        }
-        false
-    }
-
-    fn unjoin_selection(&mut self, layout: LayoutId) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return false;
-        };
-
-        let leaf = self.descend_to_leaf(sel);
-        let NodeKind::Leaf {
-            members,
-            fullscreen,
-            fullscreen_within_gaps,
-            ..
-        } = self.kind_mut(leaf)
-        else {
-            unreachable!("descent ends at a BSP leaf");
-        };
-        let Some(windows) = members.take_stack() else {
-            return false;
-        };
-        let flags = (*fullscreen, *fullscreen_within_gaps);
-
-        self.select(leaf);
-
-        for member in windows {
-            self.insert_window_at_selection(layout, member);
-        }
-
-        // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
-        if let Some(visible) = self.selection_of_layout(layout)
-            && let NodeKind::Leaf {
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            } = self.kind_mut(visible)
-        {
-            (*fullscreen, *fullscreen_within_gaps) = flags;
-        }
-        true
-    }
-}
-
-impl Upstream {
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        fn write_node(this: &Upstream, node: NodeId, out: &mut String, indent: usize) {
-            for _ in 0..indent {
-                out.push_str("  ");
-            }
-            match this.kind(node) {
-                NodeKind::Leaf { members, .. } => {
-                    out.push_str(&format!("Leaf {:?}\n", members.active()));
-                }
-                NodeKind::Split { orientation, ratio, .. } => {
-                    out.push_str(&format!("Split {:?} {:.2}\n", orientation, ratio));
-                    let mut it = this.child_iter(node);
-                    if let Some(first) = it.next() {
-                        write_node(this, first, out, indent + 1);
-                    }
-                    if let Some(second) = it.next() {
-                        write_node(this, second, out, indent + 1);
-                    }
-                }
-            }
-        }
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let mut s = String::new();
-            write_node(self, state.root, &mut s, 0);
-            s
-        } else {
-            "<empty bsp>".to_string()
-        }
-    }
-
-    pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        fn snapshot(
-            system: &Upstream,
-            node: NodeId,
-            selected: NodeId,
-        ) -> rift_protocol::ContainerTreeNode {
-            let weight = system.parent(node).and_then(|parent| {
-                let NodeKind::Split { ratio, .. } = system.kind(parent) else {
-                    return None;
-                };
-                let first = system.first_child(parent);
-                Some(if first == Some(node) {
-                    f64::from(*ratio)
-                } else {
-                    1.0 - f64::from(*ratio)
-                })
-            });
-
-            use rift_protocol::{ContainerNodeType, ContainerTreeNode, LayoutKind};
-            let mut result = ContainerTreeNode {
-                node_id: node.data().as_ffi(),
-                is_selected: node == selected,
-                weight,
-                ..Default::default()
-            };
-            match system.kind(node) {
-                NodeKind::Split { orientation, children, .. } => {
-                    result.layout_kind = Some(LayoutKind::from(*orientation));
-                    result.children =
-                        children.iter().map(|&child| snapshot(system, child, selected)).collect();
-                }
-                NodeKind::Leaf {
-                    members,
-                    fullscreen,
-                    fullscreen_within_gaps,
-                    preselected,
-                } => {
-                    let window = members.active();
-                    result.is_fullscreen = *fullscreen;
-                    result.is_fullscreen_within_gaps = *fullscreen_within_gaps;
-                    result.pending_split = preselected.map(Into::into);
-                    if let LeafMembers::Stack { windows, .. } = members {
-                        result.layout_kind = Some(LayoutKind::HorizontalStack);
-                        result.children = windows
-                            .iter()
-                            .map(|&member| ContainerTreeNode {
-                                node_id: (u64::from(member.pid as u32) << 32)
-                                    | u64::from(member.idx.get()),
-                                node_type: ContainerNodeType::Window,
-                                window_id: Some(member.into()),
-                                is_selected: result.is_selected && window == Some(member),
-                                is_fullscreen: *fullscreen,
-                                is_fullscreen_within_gaps: *fullscreen_within_gaps,
-                                ..Default::default()
-                            })
-                            .collect();
-                    } else if let Some(window) = window {
-                        result.node_type = ContainerNodeType::Window;
-                        result.window_id = Some(window.into());
-                    } else {
-                        result.node_type = ContainerNodeType::Placeholder;
-                    }
-                }
-            }
-            result
-        }
-
-        let Some(state) = self.layouts.get(layout) else {
-            return Default::default();
-        };
-        let selected = self.current_selection(state.root);
-        snapshot(self, state.root, selected)
-    }
-
-    pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        let root = self.layouts.get(layout)?.root;
-        let node = self.node_for_window_in_layout(layout, window)?;
-        let mut current = node;
-        let mut slot = Vec::new();
-        while current != root {
-            let parent = self.nodes[current].parent?;
-            slot.push(usize::from(self.children(parent)?[1] == current));
-            current = parent;
-        }
-        slot.reverse();
-        if let Some(members) = self.stack(node) {
-            slot.push(members.iter().position(|&member| member == window)?);
-        }
-        Some(slot)
-    }
-}
-
-impl Upstream {
-    /// A BSP layout as the core's geometry takes it, from `root`, pruned as `prepare_geometry`
-    /// prunes it (none: nothing takes space). Arguments as `calculate_layout` takes them.
-    /// The frames the BSP system computes itself: since the core decides (policy (a)), the
-    /// shadow `calculate_layout` holds the core's to.
-    pub(crate) fn shadow_frames(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-    ) -> Vec<(WindowId, CGRect)> {
-        let mut out = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let rect = compute_tiling_area(screen, gaps);
-            let prepared = self.prepare_geometry(state.root, constraints, gaps);
-            BspProjection {
-                system: self,
-                prepared: &prepared,
-                screen,
-                tiling: rect,
-                constraints,
-                gaps,
-            }
-            .apply(state.root, rect, &mut out);
-            if let (Some(ratio), [(_, frame)]) =
-                (self.single_window_aspect_ratio, out.as_mut_slice())
-                && matches!(self.kind(state.root), NodeKind::Leaf {
-                    fullscreen: false,
-                    fullscreen_within_gaps: false,
-                    ..
-                })
-                && self.stack(state.root).is_none()
-            {
-                let (width, height) = if frame.size.width > frame.size.height * ratio {
-                    (frame.size.height * ratio, frame.size.height)
-                } else {
-                    (frame.size.width, frame.size.width / ratio)
-                };
-                frame.origin.x = rect.origin.x + (rect.size.width - width) / 2.0;
-                frame.origin.y = rect.origin.y + (rect.size.height - height) / 2.0;
-                frame.size = CGSize::new(width, height);
-            }
-        }
-        out
-    }
-
-    pub(crate) fn shape(
-        &self,
-        root: NodeId,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-    ) -> Option<rift_core::layout::bsp::Bsp<WindowId>> {
-        use crate::layout_engine::{core_gaps, core_rect};
-        Some(rift_core::layout::bsp::Bsp {
-            screen: core_rect(screen),
-            gaps: core_gaps(gaps),
-            root: self.shape_node(root, constraints)?,
-            aspect: self.single_window_aspect_ratio,
-        })
-    }
-
-    /// A node as the core's geometry takes it: a leaf shows its participating member; a leaf
-    /// with none is left out, except an empty leaf while no window is left out of the system; a
-    /// split keeps the children that remain.
-    fn shape_node(
-        &self,
-        node: NodeId,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-    ) -> Option<rift_core::layout::bsp::Node<WindowId>> {
-        use rift_core::layout::bsp::{Children, Fill, Node, Slot};
-
-        use crate::layout_engine::core_geometry::core_constraints;
-        match self.kind(node) {
-            NodeKind::Leaf {
-                members,
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            } => {
-                let slot = match self.participating_member(members) {
-                    Some(window) => Slot::Window {
-                        window,
-                        constraints: constraints.get(&window).copied().map(core_constraints),
-                    },
-                    None if self.inactive.is_empty() && matches!(members, LeafMembers::Empty) => {
-                        Slot::Empty
-                    }
-                    None => return None,
-                };
-                let fill = if *fullscreen {
-                    Fill::Screen
-                } else if *fullscreen_within_gaps {
-                    Fill::WithinGaps
-                } else {
-                    Fill::Tiled
-                };
-                Some(Node::Leaf {
-                    slot,
-                    fill,
-                    stacked: matches!(members, LeafMembers::Stack { .. }),
-                })
-            }
-            NodeKind::Split {
-                orientation,
-                ratio,
-                children: [first, second],
-                ..
-            } => {
-                let children = match (
-                    self.shape_node(*first, constraints),
-                    self.shape_node(*second, constraints),
-                ) {
-                    (None, None) => return None,
-                    (Some(only), None) | (None, Some(only)) => Children::One(Box::new(only)),
-                    (Some(first), Some(second)) => Children::Two(Box::new(first), Box::new(second)),
-                };
-                Some(Node::Split {
-                    horizontal: *orientation == Orientation::Horizontal,
-                    ratio: *ratio,
-                    children,
-                })
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod core_geometry_tests {
+    use objc2_core_foundation::CGRect;
+
     use super::*;
+    use crate::actor::app::WindowId;
+    use crate::common::config::WindowInsertionPoint;
     use crate::layout_engine::systems::drawn::*;
-    use crate::layout_engine::{ResizeOrientation, WindowDropAction};
+    use crate::layout_engine::systems::{
+        Focus, GroupEdit, LayoutEdit, LayoutSystem, WindowChange, WindowQuery,
+    };
+    use crate::layout_engine::{
+        Direction, LayoutId, LayoutKind, ResizeOrientation, WindowDropAction,
+    };
 
     /// A BSP system after random edits: windows added and removed, closed apps, every focus,
     /// splits of every kind, joins, unjoins, consume-or-expel, moves, drops of every kind (stacks
     /// among them), resizes, swaps, rebalances, orientation toggles, fullscreen of a leaf or a
-    /// split, participation, a single window's aspect ratio; and, for the core's tree stepped
-    /// beside it (every operation compared), layouts created, cloned and removed, windows
-    /// replaced, native resizes into and out of fullscreen, the settings changed, and every
-    /// query asked.
+    /// split, participation, a single window's aspect ratio; layouts created, cloned and removed,
+    /// windows replaced, native resizes into and out of fullscreen, the settings changed, every
+    /// query asked, and saves and loads (under `roc-core` every operation also held to the Roc
+    /// tree, and the Rust tree re-seeded from it now and then).
     pub(super) fn drawn_system(rng: &mut Rng) -> (BspLayoutSystem, LayoutId, Vec<WindowId>) {
         let mut insertion = drawn_insertion(rng);
         let mut system = BspLayoutSystem::new(insertion);
@@ -2016,11 +405,6 @@ mod core_geometry_tests {
                 }
                 continue;
             }
-            if rng.chance(4) {
-                // The shadow re-seeded from the core (as after a divergence): both go on
-                // allocating the same ids.
-                system.shadow.upstream = twinned::upstream_of(&system.core);
-            }
             #[cfg(feature = "roc-core")]
             if rng.chance(4) {
                 // The Rust tree re-seeded from the deciding Roc tree (as after a divergence):
@@ -2028,28 +412,25 @@ mod core_geometry_tests {
                 system.core = roc_tree::core_of(&system.roc.view());
             }
             if rng.chance(4) {
-                // Saved from the core, byte for byte as upstream's system saves; then loaded
-                // (the settings are not saved: rift sets them again), some leaf maybe given a
-                // preselected direction, which only a saved file holds.
-                assert_eq!(
-                    ron::to_string(&system).unwrap(),
-                    ron::to_string(&system.shadow.upstream).unwrap()
-                );
-                let mut upstream = system.shadow.upstream.clone();
-                let leaves: Vec<NodeId> = upstream
-                    .nodes
-                    .iter()
-                    .filter(|(_, node)| matches!(node.kind, NodeKind::Leaf { .. }))
-                    .map(|(id, _)| id)
-                    .collect();
-                if rng.chance(70) {
-                    let leaf = leaves[rng.below(leaves.len() as u64) as usize];
-                    if let NodeKind::Leaf { preselected, .. } = &mut upstream.nodes[leaf].kind {
-                        *preselected = Some(drawn_direction(rng));
-                    }
+                // Saved and loaded (the settings are not saved: rift sets them again), some
+                // leaf maybe given a preselected direction in the file, which only a saved file
+                // holds.
+                let mut saved = ron::to_string(&system).unwrap();
+                let leaves = saved.matches("preselected:None").count();
+                if leaves > 0 && rng.chance(70) {
+                    let leaf = rng.below(leaves as u64) as usize;
+                    let at = saved.match_indices("preselected:None").nth(leaf).unwrap().0;
+                    let direction = match drawn_direction(rng) {
+                        Direction::Left => "left",
+                        Direction::Right => "right",
+                        Direction::Up => "up",
+                        Direction::Down => "down",
+                    };
+                    saved.replace_range(
+                        at..at + "preselected:None".len(),
+                        &format!("preselected:Some({direction})"),
+                    );
                 }
-                let saved = ron::to_string(&BspLayoutSystem::from(upstream.clone())).unwrap();
-                assert_eq!(saved, ron::to_string(&upstream).unwrap());
                 system = ron::from_str(&saved).unwrap();
                 system.set_window_insertion_point(insertion);
                 system.set_single_window_aspect_ratio(aspect);
@@ -2278,10 +659,13 @@ mod core_geometry_tests {
         }
     }
 
-    /// The core's frames for a BSP layout are the system's own (`shadow_frames`), bit for bit, over
-    /// drawn systems, screens, gaps and window constraints.
+    /// rift's frames for a BSP layout are the core tree's shape through the core's geometry, bit
+    /// for bit, over drawn systems, screens, gaps and window constraints (under `roc-core` the
+    /// Roc tree's frames decide, held to the Rust tree's by the pass itself).
     #[test]
-    fn the_core_tiles_bsp_layouts_as_the_bsp_system_does() {
+    fn the_bsp_system_tiles_its_trees_shape() {
+        use crate::layout_engine::core_geometry::core_constraints;
+        use crate::layout_engine::{cg_rect, core_gaps, core_rect};
         let mut rng = Rng(0x5eed_b5b5);
         let (mut cases, mut frames_seen) = (0, 0);
         for _ in 0..3000 {
@@ -2291,8 +675,7 @@ mod core_geometry_tests {
             let gaps = drawn_gaps(&mut rng);
             // A BSP layout has no bar: the line is drawn only for the pass's arguments.
             let line = drawn_line(&mut rng);
-            // The pass rift makes: the core's tree's shape held to upstream's system's.
-            let _ = system.calculate_layout(
+            let given = system.calculate_layout(
                 layout,
                 screen,
                 0.0,
@@ -2301,18 +684,18 @@ mod core_geometry_tests {
                 line,
                 crate::layout_engine::Shadow::Run,
             );
-            let system = &system.shadow.upstream;
-            let upstream = system.shadow_frames(layout, screen, &constraints, &gaps);
-            let root = system.layouts[layout].root;
-            let core: Vec<(WindowId, CGRect)> = system
-                .shape(root, screen, &constraints, &gaps)
+            let shaped: Vec<(WindowId, CGRect)> = system
+                .core
+                .shape(layout, core_rect(screen), core_gaps(&gaps), |window| {
+                    constraints.get(&window).copied().map(core_constraints)
+                })
                 .map_or_else(Vec::new, |shape| shape.frames())
                 .into_iter()
-                .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
+                .map(|(window, frame)| (window, cg_rect(frame)))
                 .collect();
-            assert_eq!(bits(&core), bits(&upstream));
+            assert_eq!(bits(&given), bits(&shaped));
             cases += 1;
-            frames_seen += upstream.len();
+            frames_seen += given.len();
         }
         eprintln!("bsp: {cases} layouts, {frames_seen} frames identical");
         assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");

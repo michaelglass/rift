@@ -74,11 +74,6 @@ fn show_layout_core() {
     let shadows = crate::layout_engine::layout_shadows();
     println!("core: layout divergences: {divergences} (shadows run: {shadows})");
     tracing::info!(divergences, shadows, "core: layout divergences");
-    // Upstream's BSP system, stepped beside the core's deciding BSP tree (each one a
-    // `bsp-tree-divergence:`, after which upstream's system is re-seeded from the core).
-    let bsp_tree = crate::layout_engine::systems::bsp_tree_divergences();
-    println!("core: bsp tree divergences: {bsp_tree}");
-    tracing::info!(bsp_tree, "core: bsp tree divergences");
 }
 
 /// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow, or a Roc

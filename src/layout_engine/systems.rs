@@ -416,7 +416,6 @@ pub use traditional::TraditionalLayoutSystem;
 mod bsp;
 pub(crate) mod constraints;
 pub use bsp::BspLayoutSystem;
-pub(crate) use bsp::bsp_tree_divergences;
 #[cfg(feature = "roc-core")]
 pub(crate) use bsp::bsp_tree_reseeds;
 mod master_stack;

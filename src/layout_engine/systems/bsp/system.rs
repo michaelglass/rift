@@ -1,14 +1,9 @@
-//! The BSP layout system: the core's [`Tree`] decides and is saved (layout trees, slice 4, the
-//! flip), with upstream's system ([`Upstream`]) the shadow. The shadow is stepped on every
-//! operation, in every build, and held to the core: each answer is compared on every operation,
-//! the whole tree (the view) on every operation in tests and `roc-core` builds and every
-//! [`VIEW_EVERY`]th in a plain release build, and each pass's shape (what the core's geometry is
-//! handed) on every pass. A difference is counted, fails a test, or in a running Rift is warned
-//! and the shadow re-seeded from the core.
+//! rift's BSP layout system: the core's [`Tree`] decides and is saved (layout trees: the core's
+//! tree since slice 4, upstream's system deleted in slice 5). Under `roc-core` the Roc tree
+//! decides instead, with the Rust tree its shadow (`roc_tree`). Loaded through the saved form's
+//! load (`stored`), saved in the same form, byte for byte.
 
 use std::collections::BTreeSet;
-use std::fmt::Debug;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::CGRect;
 use rift_core::layout::bsp_tree::{
@@ -21,7 +16,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
-use super::Upstream;
 #[cfg(feature = "roc-core")]
 use super::roc_tree::{self as roc, RocTree};
 use super::stored::{LayoutState, LeafMembers, Loaded, Node, NodeKind, StoredBspSystem};
@@ -39,43 +33,20 @@ use crate::model::tree::NodeId;
 /// The core's tree over rift's ids.
 pub(super) type CoreTree = Tree<LayoutId, NodeId, WindowId>;
 
-/// How often a plain release build compares the whole tree (the twins' sampling).
-const VIEW_EVERY: u64 = 32;
-
-/// Whether every operation compares the whole tree.
-const VIEW_ALWAYS: bool = cfg!(any(test, feature = "roc-core"));
-
-static BSP_TREE_DIVERGENCES: AtomicU64 = AtomicU64::new(0);
-
-/// Differences between the core's BSP tree and upstream's system, counted process-wide.
-pub(crate) fn bsp_tree_divergences() -> u64 { BSP_TREE_DIVERGENCES.load(Ordering::Relaxed) }
-
-/// The BSP layout system: the core's tree decides, and upstream's system is stepped beside it.
-/// Loaded through upstream's load (which parses old forms and normalizes what only a file
-/// holds), saved from the core in the same form.
+/// The BSP layout system: the core's tree, and under `roc-core` the deciding Roc tree.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "StoredBspSystem")]
 pub struct BspLayoutSystem {
-    /// Under `roc-core` the Roc tree's shadow, else the deciding tree; saved either way (under
-    /// `roc-core` it is re-seeded from the Roc tree on any difference, compared on every
-    /// operation).
+    /// The deciding tree, or under `roc-core` the Roc tree's shadow (re-seeded from it on any
+    /// difference, compared on every operation); saved either way.
     pub(super) core: CoreTree,
     /// Under `roc-core`, the deciding tree.
     #[cfg(feature = "roc-core")]
     pub(super) roc: RocTree,
-    /// Boxed: the system is one variant of `LayoutSystemKind`.
-    pub(super) shadow: Box<Shadow>,
 }
 
-/// Upstream's system and how many operations stepped it.
-#[derive(Clone, Debug)]
-pub(super) struct Shadow {
-    pub(super) upstream: Upstream,
-    steps: u64,
-}
-
-/// The core's tree as upstream saves its system (the field names and order of upstream's
-/// derived form), byte for byte.
+/// The core's tree in the saved form (the field names and order upstream's system wrote), byte
+/// for byte.
 #[derive(Serialize)]
 #[serde(rename = "Upstream")]
 struct Saved {
@@ -86,8 +57,8 @@ struct Saved {
 impl Serialize for BspLayoutSystem {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         Saved {
-            layouts: saved(self.core.layouts(), |_, layout| upstream_layout(layout)).collect(),
-            nodes: saved(self.core.nodes(), |_, node| upstream_node(node)).collect(),
+            layouts: saved(self.core.layouts(), |_, layout| stored_layout(layout)).collect(),
+            nodes: saved(self.core.nodes(), |_, node| stored_node(node)).collect(),
         }
         .serialize(serializer)
     }
@@ -97,51 +68,36 @@ impl TryFrom<StoredBspSystem> for BspLayoutSystem {
     type Error = String;
 
     /// A saved system loaded into the core's tree (the settings are not saved: rift sets them
-    /// again); upstream's system, the shadow, holds the same tables.
+    /// again).
     fn try_from(stored: StoredBspSystem) -> Result<Self, String> {
         let loaded = Loaded::try_from(stored)?;
-        let core = core_of_tables(
+        Ok(Self::holding(core_of_tables(
             &loaded.layouts,
             &loaded.nodes,
-            BTreeSet::new(),
             insertion_point(WindowInsertionPoint::default()),
-            None,
-        );
-        Ok(Self {
-            #[cfg(feature = "roc-core")]
-            roc: RocTree::seeded(&core),
-            shadow: Box::new(Shadow {
-                upstream: Upstream::from(loaded),
-                steps: 0,
-            }),
-            core,
-        })
-    }
-}
-
-impl From<Upstream> for BspLayoutSystem {
-    fn from(upstream: Upstream) -> Self {
-        let core = seed(&upstream);
-        Self {
-            #[cfg(feature = "roc-core")]
-            roc: RocTree::seeded(&core),
-            shadow: Box::new(Shadow { upstream, steps: 0 }),
-            core,
-        }
+        )))
     }
 }
 
 impl Default for BspLayoutSystem {
-    fn default() -> Self { Upstream::default().into() }
+    fn default() -> Self { Self::new(WindowInsertionPoint::default()) }
 }
 
 impl BspLayoutSystem {
     pub fn new(window_insertion_point: WindowInsertionPoint) -> Self {
-        Upstream::new(window_insertion_point).into()
+        Self::holding(CoreTree::new(insertion_point(window_insertion_point)))
+    }
+
+    /// The system holding `core` (under `roc-core`, the Roc tree seeded from it).
+    fn holding(core: CoreTree) -> Self {
+        Self {
+            #[cfg(feature = "roc-core")]
+            roc: RocTree::seeded(&core),
+            core,
+        }
     }
 
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
-        self.shadow.upstream.set_window_insertion_point(value);
         self.core.set_window_insertion_point(insertion_point(value));
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
@@ -149,11 +105,9 @@ impl BspLayoutSystem {
             RocEvent::Insertion(insertion_point(value)),
             RocAnswer::Done,
         );
-        self.stepped("set_window_insertion_point", &(), &());
     }
 
     pub fn set_single_window_aspect_ratio(&mut self, ratio: Option<f64>) {
-        self.shadow.upstream.set_single_window_aspect_ratio(ratio);
         self.core.set_single_window_aspect_ratio(ratio);
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
@@ -161,7 +115,6 @@ impl BspLayoutSystem {
             RocEvent::AspectRatio(ratio),
             RocAnswer::Done,
         );
-        self.stepped("set_single_window_aspect_ratio", &(), &());
     }
 
     pub(in crate::layout_engine) fn can_move_window(
@@ -170,11 +123,7 @@ impl BspLayoutSystem {
         window: WindowId,
         direction: Direction,
     ) -> bool {
-        let core = self.answered(
-            "can_move_window",
-            self.shadow.upstream.can_move_window(layout, window, direction),
-            self.core.can_move_window(layout, window, core_direction(direction)),
-        );
+        let core = self.core.can_move_window(layout, window, core_direction(direction));
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -192,34 +141,18 @@ impl BspLayoutSystem {
         core
     }
 
-    /// The layout drawn as text (rift-cli's debug view), from the core's tree; upstream's
-    /// drawing is held to it.
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        self.answered(
-            "draw_tree",
-            self.shadow.upstream.draw_tree(layout),
-            self.core.draw(layout),
-        )
-    }
+    /// The layout drawn as text (rift-cli's debug view), from the core's tree.
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String { self.core.draw(layout) }
 
-    /// The layout's nodes as rift-cli's container query shows them, from the core's tree;
-    /// upstream's view is held to it.
+    /// The layout's nodes as rift-cli's container query shows them, from the core's tree.
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.answered(
-            "container_tree",
-            self.shadow.upstream.container_tree(layout),
-            self.core
-                .container(layout)
-                .map_or_else(Default::default, |root| container_node(&root)),
-        )
+        self.core
+            .container(layout)
+            .map_or_else(Default::default, |root| container_node(&root))
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        let core = self.answered(
-            "window_slot",
-            self.shadow.upstream.window_slot(layout, window),
-            self.core.window_slot(layout, window),
-        );
+        let core = self.core.window_slot(layout, window);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -230,34 +163,6 @@ impl BspLayoutSystem {
             roc::as_slot,
             core,
         );
-        core
-    }
-
-    /// After an operation the core and upstream's system both took: their answers compared,
-    /// and the trees when due; a difference is reported and the shadow re-seeded from the core.
-    fn stepped<A: PartialEq + Debug>(&mut self, what: &str, upstream: &A, core: &A) {
-        self.shadow.steps += 1;
-        let answers_differ = upstream != core;
-        if answers_differ {
-            report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
-        }
-        let view_due = VIEW_ALWAYS || self.shadow.steps.is_multiple_of(VIEW_EVERY);
-        let view = (answers_differ || view_due)
-            .then(|| view_difference(&self.core, &self.shadow.upstream));
-        if let Some(Some(difference)) = &view {
-            report(what, difference);
-        }
-        if answers_differ || matches!(view, Some(Some(_))) {
-            self.shadow.upstream = upstream_of(&self.core);
-        }
-    }
-
-    /// A query both answered, the core's answer given: a difference is reported (the next
-    /// step's view re-seeds the shadow).
-    fn answered<A: PartialEq + Debug>(&self, what: &str, upstream: A, core: A) -> A {
-        if upstream != core {
-            report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
-        }
         core
     }
 
@@ -276,27 +181,9 @@ impl BspLayoutSystem {
     }
 }
 
-/// Counts a difference, then fails the test, or in a running Rift warns it.
-fn report(what: &str, difference: &str) {
-    let divergences = BSP_TREE_DIVERGENCES.fetch_add(1, Ordering::Relaxed) + 1;
-    #[cfg(test)]
-    panic!("bsp-tree-divergence ({divergences} so far) after {what}: {difference}");
-    #[cfg(not(test))]
-    tracing::warn!(
-        what,
-        divergences,
-        difference,
-        "bsp-tree-divergence: upstream's BSP system differs from the core's tree; re-seeded from the core"
-    );
-}
-
 impl LayoutSystem for BspLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        let core = self.answered(
-            "has_windows_for_app",
-            self.shadow.upstream.has_windows_for_app(layout, pid),
-            self.core.has_windows_for_app(layout, |window| window.pid == pid),
-        );
+        let core = self.core.has_windows_for_app(layout, |window| window.pid == pid);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -314,11 +201,7 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn window_participates(&self, window: WindowId) -> bool {
-        let core = self.answered(
-            "window_participates",
-            self.shadow.upstream.window_participates(window),
-            self.core.window_participates(window),
-        );
+        let core = self.core.window_participates(window);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -333,7 +216,6 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        let upstream = self.shadow.upstream.set_window_participation(window, participates);
         let participation = if participates {
             Participation::TakesPart
         } else {
@@ -350,12 +232,10 @@ impl LayoutSystem for BspLayoutSystem {
             roc::as_participated,
             core,
         );
-        self.stepped("set_window_participation", &upstream, &core);
         core
     }
 
     fn create_layout(&mut self) -> LayoutId {
-        let upstream = self.shadow.upstream.create_layout();
         let core = self.core.create_layout();
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
@@ -367,16 +247,11 @@ impl LayoutSystem for BspLayoutSystem {
             roc::as_layout,
             core,
         );
-        self.stepped("create_layout", &upstream, &core);
         core
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool {
-        let core = self.answered(
-            "contains_layout",
-            self.shadow.upstream.contains_layout(layout),
-            self.core.contains_layout(layout),
-        );
+        let core = self.core.contains_layout(layout);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -391,7 +266,6 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let upstream = self.shadow.upstream.clone_layout(layout);
         let core = self.core.clone_layout(layout);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
@@ -403,12 +277,10 @@ impl LayoutSystem for BspLayoutSystem {
             roc::as_layout,
             core,
         );
-        self.stepped("clone_layout", &upstream, &core);
         core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        self.shadow.upstream.remove_layout(layout);
         self.core.remove_layout(layout);
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
@@ -416,13 +288,12 @@ impl LayoutSystem for BspLayoutSystem {
             RocEvent::RemoveLayout(roc::layout_key(layout)),
             RocAnswer::Done,
         );
-        self.stepped("remove_layout", &(), &());
     }
 
-    /// The core's frames (policy (a)): under `roc-core` the Roc tree's own shape through the Roc
-    /// geometry, else the Rust tree's shape through the Rust geometry, with the Rust geometry's
-    /// frames for the Rust tree's shape and upstream's geometry the shadows; upstream's system's
-    /// shape is held to the Rust tree's on every pass.
+    /// The core's frames: under `roc-core` the Roc tree's own shape through the Roc geometry,
+    /// with the Rust geometry's frames for the Rust tree's shape the shadow; else the Rust tree's
+    /// shape through the Rust geometry. A BSP layout has no system geometry of its own to
+    /// shadow, so `shadow` is not read.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -431,50 +302,29 @@ impl LayoutSystem for BspLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
-        shadow: crate::layout_engine::Shadow,
+        _shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         use crate::layout_engine::core_geometry::core_constraints;
         use crate::layout_engine::{core_gaps, core_rect};
-        let upstream = &self.shadow.upstream;
         let core = self.core.shape(layout, core_rect(screen), core_gaps(gaps), |window| {
             constraints.get(&window).copied().map(core_constraints)
         });
-        let upstream_shape = upstream
-            .layouts
-            .get(layout)
-            .and_then(|state| upstream.shape(state.root, screen, constraints, gaps));
-        if upstream_shape != core {
-            report(
-                "calculate_layout",
-                &format!("shapes: upstream {upstream_shape:?}, core {core:?}"),
-            );
-        }
-        let upstream_frames = || upstream.shadow_frames(layout, screen, constraints, gaps);
         // Under `roc-core` the Roc tree's own shape through the Roc geometry decides.
         #[cfg(feature = "roc-core")]
-        return crate::layout_engine::core_geometry::decide_bsp_tree(
-            core,
-            shadow,
-            upstream_frames,
-            || {
-                use crate::roc_path::Word;
-                let known: Vec<_> = constraints
-                    .iter()
-                    .map(|(&window, &held)| (window.word(), core_constraints(held)))
-                    .collect();
-                self.roc.frames(layout, core_rect(screen), core_gaps(gaps), &known)
-            },
-        );
+        return crate::layout_engine::core_geometry::decide_bsp_tree(core, || {
+            use crate::roc_path::Word;
+            let known: Vec<_> = constraints
+                .iter()
+                .map(|(&window, &held)| (window.word(), core_constraints(held)))
+                .collect();
+            self.roc.frames(layout, core_rect(screen), core_gaps(gaps), &known)
+        });
         #[cfg(not(feature = "roc-core"))]
-        crate::layout_engine::core_geometry::decide_bsp(core, shadow, upstream_frames)
+        crate::layout_engine::core_geometry::decide_bsp(core)
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        let core = self.answered(
-            "selected_window",
-            self.shadow.upstream.selected_window(layout),
-            self.core.selected_window(layout),
-        );
+        let core = self.core.selected_window(layout);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -489,11 +339,7 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        let core = self.answered(
-            "window_in_direction",
-            self.shadow.upstream.window_in_direction(layout, direction),
-            self.core.window_in_direction(layout, core_direction(direction)),
-        );
+        let core = self.core.window_in_direction(layout, core_direction(direction));
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -508,11 +354,7 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        let core = self.answered(
-            "contains_window",
-            self.shadow.upstream.contains_window(layout, wid),
-            self.core.contains_window(layout, wid),
-        );
+        let core = self.core.contains_window(layout, wid);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -527,11 +369,7 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        let core = self.answered(
-            "has_any_fullscreen_node",
-            self.shadow.upstream.has_any_fullscreen_node(layout),
-            self.core.has_any_fullscreen_node(layout),
-        );
+        let core = self.core.has_any_fullscreen_node(layout);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -552,11 +390,7 @@ impl LayoutSystem for BspLayoutSystem {
             WindowQuery::Selection => Query::Selection,
             WindowQuery::Stack(window) => Query::Stack(window),
         };
-        let core = self.answered(
-            "windows",
-            self.shadow.upstream.windows(layout, query),
-            self.core.windows(layout, core_query),
-        );
+        let core = self.core.windows(layout, core_query);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
             self.roc_asked(
@@ -571,7 +405,6 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        let upstream = self.shadow.upstream.focus(layout, focus);
         let core_focus = match focus {
             Focus::Select(window) => core::Focus::Select(window),
             Focus::Ascend => core::Focus::Ascend,
@@ -589,12 +422,10 @@ impl LayoutSystem for BspLayoutSystem {
             roc::as_focused,
             focused,
         );
-        let core = match focused {
+        match focused {
             core::Focused::Selection { handled } => FocusResult::selection(handled),
             core::Focused::Movement { window, raise } => FocusResult::movement((window, raise)),
-        };
-        self.stepped("focus", &focus_words(&upstream), &focus_words(&core));
-        core
+        }
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
@@ -651,15 +482,12 @@ impl LayoutSystem for BspLayoutSystem {
                 gaps,
             } => core.resize_window(layout, window, resize(old, new, screen, gaps)),
         }
-        self.shadow.upstream.update(change);
         #[cfg(feature = "roc-core")]
         self.roc_stepped("update", roc_event, RocAnswer::Done);
-        self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        let upstream = self.shadow.upstream.edit_layout(layout, edit);
-        let core = match core_edit(edit) {
+        match core_edit(edit) {
             Some(edit) => {
                 let edited = self.core.edit(layout, edit);
                 #[cfg(feature = "roc-core")]
@@ -679,11 +507,9 @@ impl LayoutSystem for BspLayoutSystem {
                     core::Edited::Raise(windows) => EditResult::Raise(windows),
                 }
             }
-            // An edit upstream's BSP system has no case for (nor the trees).
+            // An edit the BSP trees have no case for (upstream's system had none).
             None => EditResult::Unsupported,
-        };
-        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
-        core
+        }
     }
 }
 
@@ -702,13 +528,13 @@ fn container_node(
     };
     match &container.kind {
         core::ContainerKind::Split { orientation, children } => {
-            node.layout_kind = Some(LayoutKind::from(upstream_orientation(*orientation)));
+            node.layout_kind = Some(LayoutKind::from(engine_orientation(*orientation)));
             node.children = children.iter().map(|child| container_node(child)).collect();
         }
         core::ContainerKind::Leaf(leaf) => {
             node.pending_split = match leaf.preselect {
                 Preselect::Unset => None,
-                Preselect::Toward(direction) => Some(upstream_direction(direction)),
+                Preselect::Toward(direction) => Some(engine_direction(direction)),
             };
             match &leaf.content {
                 Content::Empty => node.node_type = ContainerNodeType::Placeholder,
@@ -747,22 +573,8 @@ fn container_node(
     node
 }
 
-/// A focus's answer, comparable.
-fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
-    (result.handled, result.window, result.raise.clone())
-}
-
-/// An edit's answer, comparable.
-fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
-    match result {
-        EditResult::Unsupported => ("unsupported", Vec::new()),
-        EditResult::Unchanged => ("unchanged", Vec::new()),
-        EditResult::Changed => ("changed", Vec::new()),
-        EditResult::Raise(windows) => ("raise", windows.clone()),
-    }
-}
-
-/// An edit as the core takes it; none for those upstream's BSP system has no case for.
+/// An edit as the core takes it; none for those the BSP trees have no case for (as upstream's
+/// system had none).
 fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
     use crate::layout_engine::systems::GroupEdit;
     use crate::layout_engine::{LayoutKind, ResizeOrientation, WindowDropAction};
@@ -814,24 +626,12 @@ fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
     })
 }
 
-/// Upstream's system as the core holds it.
-fn seed(upstream: &Upstream) -> CoreTree {
-    core_of_tables(
-        &upstream.layouts,
-        &upstream.nodes,
-        upstream.inactive.iter().copied().collect(),
-        insertion_point(upstream.window_insertion_point),
-        upstream.single_window_aspect_ratio,
-    )
-}
-
-/// Saved-form tables as the core's tree: each slotmap's slots, versions and free list.
+/// A loaded system's tables as the core's tree: each slotmap's slots, versions and free list
+/// (no window left out, no aspect ratio: those are not saved).
 fn core_of_tables(
     layouts: &SlotMap<LayoutId, LayoutState>,
     nodes: &SlotMap<NodeId, Node>,
-    left_out: BTreeSet<WindowId>,
     insertion: InsertionPoint,
-    aspect: Option<f64>,
 ) -> CoreTree {
     let dummy_node = Node {
         parent: None,
@@ -846,9 +646,9 @@ fn core_of_tables(
     CoreTree::from_parts(
         table(layouts, dummy_layout, |state| Layout { root: state.root }),
         table(nodes, dummy_node, core_node),
-        left_out,
+        BTreeSet::new(),
         insertion,
-        aspect,
+        None,
     )
 }
 
@@ -896,8 +696,8 @@ fn core_direction(direction: Direction) -> core::Direction {
     }
 }
 
-/// Upstream's two fullscreen flags as one fill (`fullscreen` first, as its projection reads
-/// them; its operations never set both).
+/// A saved leaf's two fullscreen flags as one fill (`fullscreen` first, as upstream's projection
+/// read them; the load warns of a file holding both).
 fn core_fill(fullscreen: bool, within_gaps: bool) -> core::Fill {
     match (fullscreen, within_gaps) {
         (true, _) => core::Fill::Screen,
@@ -906,7 +706,7 @@ fn core_fill(fullscreen: bool, within_gaps: bool) -> core::Fill {
     }
 }
 
-/// An upstream node as the core holds it.
+/// A saved node as the core holds it.
 fn core_node(node: &Node) -> core::Node<NodeId, WindowId> {
     let kind = match &node.kind {
         NodeKind::Split {
@@ -942,8 +742,8 @@ fn core_node(node: &Node) -> core::Node<NodeId, WindowId> {
     }
 }
 
-/// A leaf's members as the core holds them (an empty leaf keeps no fill: upstream's operations
-/// clear it as the leaf empties).
+/// A saved leaf's members as the core holds them (an empty leaf holds no fill; the load warns of
+/// a file whose empty leaf has a flag).
 fn core_content(members: &LeafMembers, fill: core::Fill) -> Content<WindowId> {
     match members {
         LeafMembers::Empty => Content::Empty,
@@ -962,83 +762,16 @@ fn core_content(members: &LeafMembers, fill: core::Fill) -> Content<WindowId> {
     }
 }
 
-/// The core's tree as upstream's system: the shadow re-seeded from the core. Each table keeps
-/// the core's slots and versions and takes its vacant slots in the core's order, so both
-/// allocate the same ids next.
-pub(super) fn upstream_of(core: &CoreTree) -> Upstream {
-    let dummy_node = upstream_node(&core::Node {
-        parent: Parent::Root,
-        kind: Kind::Leaf(Leaf {
-            content: Content::Empty,
-            preselect: Preselect::Unset,
-        }),
-    });
-    Upstream {
-        inactive: core.left_out().iter().copied().collect(),
-        layouts: slot_map(core.layouts(), upstream_layout, LayoutState {
-            root: NodeId::default(),
-        }),
-        nodes: slot_map(core.nodes(), upstream_node, dummy_node),
-        window_insertion_point: window_insertion_point(core.insertion()),
-        single_window_aspect_ratio: core.aspect(),
-    }
-}
+fn stored_layout(layout: &Layout<NodeId>) -> LayoutState { LayoutState { root: layout.root } }
 
-/// A core table as a slotmap with the same slots, versions and free list. A slotmap is only
-/// built through its saved form, whose load rebuilds the free list (the highest vacant slot
-/// first), so each vacant slot is written two versions back, then taken (`| 1`) and freed (`+
-/// 1`) again in the core's order: the last freed is taken first, as the core's last.
-fn slot_map<K: slotmap::Key + SlotKey, C, V: Clone + Serialize + DeserializeOwned>(
-    table: &SlotTable<K, C>,
-    convert: impl Fn(&C) -> V,
-    dummy: V,
-) -> SlotMap<K, V> {
-    let slots: Vec<SavedSlot<V>> = table
-        .saved()
-        .enumerate()
-        .map(|(index, (occupant, version))| SavedSlot {
-            version: match occupant {
-                Some(_) => version,
-                // The sentinel, never taken.
-                None if index == 0 => version,
-                None => version.wrapping_sub(2),
-            },
-            value: occupant.map(|(_, value)| convert(value)),
-        })
-        .collect();
-    let written = ron::to_string(&slots).expect("a slot sequence is written");
-    let mut map: SlotMap<K, V> = ron::from_str(&written).expect("a core table is a slot sequence");
-    let taken: HashMap<u32, K> = table
-        .free()
-        .iter()
-        .map(|_| {
-            let key = map.insert(dummy.clone());
-            (key.parts().0, key)
-        })
-        .collect();
-    for index in table.free() {
-        map.remove(taken[index]);
-    }
-    map
-}
-
-fn upstream_layout(layout: &Layout<NodeId>) -> LayoutState { LayoutState { root: layout.root } }
-
-fn window_insertion_point(value: InsertionPoint) -> WindowInsertionPoint {
-    match value {
-        InsertionPoint::NextToSelection => WindowInsertionPoint::NextToSelection,
-        InsertionPoint::EndOfTree => WindowInsertionPoint::EndOfTree,
-    }
-}
-
-fn upstream_orientation(orientation: core::Orientation) -> Orientation {
+fn engine_orientation(orientation: core::Orientation) -> Orientation {
     match orientation {
         core::Orientation::Horizontal => Orientation::Horizontal,
         core::Orientation::Vertical => Orientation::Vertical,
     }
 }
 
-fn upstream_direction(direction: core::Direction) -> Direction {
+fn engine_direction(direction: core::Direction) -> Direction {
     match direction {
         core::Direction::Left => Direction::Left,
         core::Direction::Right => Direction::Right,
@@ -1047,11 +780,11 @@ fn upstream_direction(direction: core::Direction) -> Direction {
     }
 }
 
-/// A core node as upstream holds it (and saves it): the inverse of [`core_node`].
-fn upstream_node(node: &core::Node<NodeId, WindowId>) -> Node {
+/// A core node as rift saves it: the inverse of [`core_node`].
+fn stored_node(node: &core::Node<NodeId, WindowId>) -> Node {
     let kind = match &node.kind {
         Kind::Split(split) => NodeKind::Split {
-            orientation: upstream_orientation(split.orientation),
+            orientation: engine_orientation(split.orientation),
             ratio: split.ratio,
             children: split.children,
             selected: match split.memory {
@@ -1084,7 +817,7 @@ fn upstream_node(node: &core::Node<NodeId, WindowId>) -> Node {
                 fullscreen_within_gaps,
                 preselected: match leaf.preselect {
                     Preselect::Unset => None,
-                    Preselect::Toward(direction) => Some(upstream_direction(direction)),
+                    Preselect::Toward(direction) => Some(engine_direction(direction)),
                 },
             }
         }
@@ -1098,130 +831,26 @@ fn upstream_node(node: &core::Node<NodeId, WindowId>) -> Node {
     }
 }
 
-/// Where the core's tree differs from upstream's system, if it does: layouts, nodes (ids
-/// compared directly), the windows left out, the settings.
-fn view_difference(core: &CoreTree, upstream: &Upstream) -> Option<String> {
-    let layouts: Vec<_> = upstream
-        .layouts
-        .iter()
-        .map(|(id, state)| (id, Layout { root: state.root }))
-        .collect();
-    let core_layouts: Vec<_> = core.layouts().iter().map(|(id, layout)| (id, *layout)).collect();
-    if layouts != core_layouts {
-        return Some(format!("layouts: upstream {layouts:?}, core {core_layouts:?}"));
-    }
-    let mut core_nodes = core.nodes().iter();
-    for (id, node) in upstream.nodes.iter() {
-        let expected = core_node(node);
-        match core_nodes.next() {
-            Some((core_id, core_node)) if core_id == id && *core_node == expected => {}
-            other => {
-                return Some(format!("node {id:?}: upstream {expected:?}, core {other:?}"));
-            }
-        }
-    }
-    if let Some(extra) = core_nodes.next() {
-        return Some(format!("a node upstream lacks: {extra:?}"));
-    }
-    let left_out: BTreeSet<_> = upstream.inactive.iter().copied().collect();
-    if &left_out != core.left_out() {
-        return Some(format!(
-            "left out: upstream {left_out:?}, core {:?}",
-            core.left_out()
-        ));
-    }
-    let settings = (
-        insertion_point(upstream.window_insertion_point),
-        upstream.single_window_aspect_ratio,
-    );
-    if settings != (core.insertion(), core.aspect()) {
-        return Some(format!(
-            "settings: upstream {settings:?}, core {:?}",
-            (core.insertion(), core.aspect())
-        ));
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
-    /// The core's tree seeded from a system takes its free list as the system's slotmap holds
-    /// it, not as a load would rebuild it (the highest vacant slot first): the next ids match.
-    #[test]
-    fn a_seeded_core_allocates_the_ids_upstream_would() {
-        let mut system = BspLayoutSystem::default();
-        let layouts: Vec<_> = (0..4).map(|_| system.create_layout()).collect();
-        // Vacate slots 1 and 3 (nodes and layouts), the lower last: upstream hands slot 1 out
-        // next, a load would hand out slot 3.
-        system.remove_layout(layouts[2]);
-        system.remove_layout(layouts[0]);
-        system.core = seed(&system.shadow.upstream);
-        let upstream = system.shadow.upstream.create_layout();
-        let core = system.core.create_layout();
-        assert_eq!(core, upstream);
-        assert_eq!(
-            system.core.layouts()[core].root,
-            system.shadow.upstream.layouts[upstream].root
-        );
-    }
-
-    /// Upstream's system re-seeded from the core (after a divergence) keeps the core's vacant
-    /// slots' versions and takes them in the core's order, not as a load would (the highest
-    /// first): the next ids match, and the save is the core's, byte for byte.
-    #[test]
-    fn a_shadow_reseeded_from_the_core_allocates_the_ids_the_core_would() {
-        let mut system = BspLayoutSystem::default();
-        let layouts: Vec<_> = (0..4).map(|_| system.create_layout()).collect();
-        system.remove_layout(layouts[2]);
-        system.remove_layout(layouts[0]);
-        system.shadow.upstream = upstream_of(&system.core);
-        assert_eq!(
-            ron::to_string(&system).unwrap(),
-            ron::to_string(&system.shadow.upstream).unwrap()
-        );
-        for _ in 0..3 {
-            let core = system.core.create_layout();
-            let upstream = system.shadow.upstream.create_layout();
-            assert_eq!(upstream, core);
-            assert_eq!(
-                system.shadow.upstream.layouts[upstream].root,
-                system.core.layouts()[core].root
-            );
-        }
-    }
-
-    /// A query upstream's system answers otherwise than the core is counted and fails a test.
-    #[test]
-    fn a_query_answered_otherwise_is_counted_and_fails_tests() {
-        let mut system = BspLayoutSystem::default();
-        system.create_layout();
-        system.shadow.upstream.set_window_participation(w(1), false);
-        let before = bsp_tree_divergences();
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            system.window_participates(w(1));
-        }));
-        assert!(failed.is_err());
-        assert!(bsp_tree_divergences() > before);
-    }
-
     /// A leaf with a preselected direction (only a saved file holds one) is split that way by
     /// the next window, which goes on that side and is selected; a window after it goes next to
     /// the selection as usual.
     #[test]
     fn a_preselected_direction_puts_the_next_window_on_that_side() {
-        let mut upstream = Upstream::new(WindowInsertionPoint::NextToSelection);
-        let layout = upstream.create_layout();
-        upstream.update(WindowChange::Add(layout, w(1), None));
-        let root = upstream.layouts[layout].root;
-        let NodeKind::Leaf { preselected, .. } = &mut upstream.nodes[root].kind else {
-            unreachable!("a layout of one window is a leaf");
-        };
-        *preselected = Some(Direction::Left);
-        let mut system = BspLayoutSystem::from(upstream);
+        let mut system = BspLayoutSystem::new(WindowInsertionPoint::NextToSelection);
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, w(1), None));
+        let file = written_as(
+            &ron::to_string(&system).unwrap(),
+            "preselected:None",
+            "preselected:Some(left)",
+        );
+        let mut system: BspLayoutSystem = ron::from_str(&file).unwrap();
         system.update(WindowChange::Add(layout, w(2), None));
         assert_eq!(system.window_slot(layout, w(2)), Some(vec![0]));
         assert_eq!(system.window_slot(layout, w(1)), Some(vec![1]));
@@ -1404,35 +1033,33 @@ mod tests {
     fn a_saved_system_loads_and_saves_byte_for_byte() {
         let file = include_str!("bsp_saved.ron").trim_end();
         assert_eq!(ron::to_string(&saved_fixture_system()).unwrap(), file);
-        let loaded: BspLayoutSystem = ron::from_str(file).unwrap();
+        let mut loaded: BspLayoutSystem = ron::from_str(file).unwrap();
         assert_eq!(ron::to_string(&loaded).unwrap(), file);
+        // The loaded tree takes its vacant slots as the saved form's slotmaps do once loaded
+        // (the highest first, after the abandoned nodes went): the next layout and its root
+        // land where the slotmaps put them.
+        let stored: StoredBspSystem = ron::from_str(file).unwrap();
+        let mut tables = Loaded::try_from(stored).unwrap();
+        let made = loaded.create_layout();
+        let root = loaded.core.layouts().get(made).unwrap().root;
+        let expected_root = tables.nodes.insert(tables.nodes.values().next().unwrap().clone());
+        assert_eq!(made, tables.layouts.insert(LayoutState { root: expected_root }));
+        assert_eq!(root, expected_root);
     }
 
-    /// Upstream's system differing from the core is counted and fails a test (a running Rift
-    /// warns and re-seeds it from the core).
-    #[test]
-    fn a_bsp_tree_divergence_is_counted_and_fails_tests() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-        system.shadow.upstream.set_window_participation(w(1), false);
-        let before = bsp_tree_divergences();
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            system.clone_layout(layout);
-        }));
-        assert!(failed.is_err());
-        assert!(bsp_tree_divergences() > before);
-    }
-
-    /// The twin's cost per operation at 10, 100 and 1000 windows (release:
-    /// `cargo test --release --lib measure_bsp_twin -- --ignored --nocapture`): upstream's
-    /// operation alone (the shadow's step), the core's step alone, and the whole-tree comparison
-    /// and a re-seed of the shadow from the core, each on its own. A plain release build pays
-    /// both steps on every operation and the comparison on every 32nd.
+    /// What rift pays per BSP operation and layout pass at 10, 100 and 1000 windows (release:
+    /// `cargo test --release --lib measure_bsp_system -- --ignored --nocapture`, and again with
+    /// `--features roc-core`): everyday operations (focus moves, swaps, resizes, a window added
+    /// and removed) through the system, and a layout pass. A plain build pays the core's tree
+    /// alone; a `roc-core` build pays the deciding Roc tree, the Rust tree as its shadow and the
+    /// view comparison on every operation, and both geometries on a pass.
     #[test]
     #[ignore]
-    fn measure_bsp_twin() {
+    fn measure_bsp_system() {
         use std::hint::black_box;
         use std::time::Instant;
+
+        use crate::layout_engine::ResizeOrientation;
 
         for count in [10_u32, 100, 1000] {
             let mut system = BspLayoutSystem::default();
@@ -1440,101 +1067,56 @@ mod tests {
             for idx in 1..=count {
                 system.update(WindowChange::Add(layout, w(idx), None));
             }
-            // A mix of everyday operations: focus moves, swaps, resizes, a window coming and
-            // going.
-            let ops = 4000_u32;
             let directions = [
                 Direction::Left,
                 Direction::Up,
                 Direction::Right,
                 Direction::Down,
             ];
-            let mut upstream = system.shadow.upstream.clone();
+            let ops = 4000_u32;
             let started = Instant::now();
             for i in 0..ops {
                 match i % 4 {
                     0 => drop(black_box(
-                        upstream.focus(layout, Focus::Direction(directions[(i / 4 % 4) as usize])),
+                        system.focus(layout, Focus::Direction(directions[(i / 4 % 4) as usize])),
                     )),
-                    1 => drop(black_box(upstream.edit_layout(
+                    1 => drop(black_box(system.edit_layout(
                         layout,
                         LayoutEdit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
                     ))),
-                    2 => drop(black_box(upstream.edit_layout(layout, LayoutEdit::Resize {
+                    2 => drop(black_box(system.edit_layout(layout, LayoutEdit::Resize {
                         amount: 0.05,
-                        orientation: crate::layout_engine::ResizeOrientation::Smart,
+                        orientation: ResizeOrientation::Smart,
                     }))),
                     _ => {
-                        upstream.update(WindowChange::Add(layout, w(count + 1), None));
-                        upstream.update(WindowChange::Remove(w(count + 1)));
+                        system.update(WindowChange::Add(layout, w(count + 1), None));
+                        system.update(WindowChange::Remove(w(count + 1)));
                     }
                 }
             }
-            let upstream_each = started.elapsed() / ops;
-            let mut core = system.core.clone();
-            let core_directions = directions.map(core_direction);
-            let started = Instant::now();
-            for i in 0..ops {
-                match i % 4 {
-                    0 => drop(black_box(core.focus(
-                        layout,
-                        core::Focus::Direction(core_directions[(i / 4 % 4) as usize]),
-                    ))),
-                    1 => drop(black_box(core.edit(
-                        layout,
-                        core::Edit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
-                    ))),
-                    2 => drop(black_box(core.edit(layout, core::Edit::Resize {
-                        amount: 0.05,
-                        along: core::ResizeAlong::Smart,
-                    }))),
-                    _ => {
-                        core.add_window(layout, w(count + 1));
-                        core.remove_window(w(count + 1));
-                    }
-                }
-            }
-            let core_each = started.elapsed() / ops;
-            assert!(view_difference(&core, &upstream).is_none());
-            let rounds = 200;
-            let started = Instant::now();
-            for _ in 0..rounds {
-                black_box(view_difference(&core, &upstream));
-            }
-            let view = started.elapsed() / rounds;
-            let started = Instant::now();
-            for _ in 0..rounds / 10 {
-                black_box(upstream_of(&core));
-            }
-            let reseed = started.elapsed() / (rounds / 10);
-            // Each pass builds the core's tree's shape beside upstream's system's.
-            let screen = objc2_core_foundation::CGRect::new(
+            let each = started.elapsed() / ops;
+            let screen = CGRect::new(
                 objc2_core_foundation::CGPoint::new(0.0, 0.0),
                 objc2_core_foundation::CGSize::new(3000.0, 2000.0),
             );
             let gaps = crate::common::config::GapSettings::default();
-            let root = upstream.layouts[layout].root;
+            let rounds = 200;
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(upstream.shape(root, screen, &HashMap::default(), &gaps));
-            }
-            let upstream_shape = started.elapsed() / rounds;
-            let started = Instant::now();
-            for _ in 0..rounds {
-                black_box(core.shape(
+                black_box(system.calculate_layout(
                     layout,
-                    crate::layout_engine::core_rect(screen),
-                    crate::layout_engine::core_gaps(&gaps),
-                    |_| None,
+                    screen,
+                    0.0,
+                    &HashMap::default(),
+                    &gaps,
+                    Default::default(),
+                    crate::layout_engine::Shadow::Run,
                 ));
             }
-            let core_shape = started.elapsed() / rounds;
+            let pass = started.elapsed() / rounds;
             eprintln!(
-                "{count} windows: upstream {upstream_each:?}/op, core step {core_each:?}/op \
-                 ({:.0}%), view {view:?} ({:?}/op every 32nd), re-seed {reseed:?}; a pass's \
-                 shape: upstream {upstream_shape:?}, core {core_shape:?}",
-                100.0 * core_each.as_secs_f64() / upstream_each.as_secs_f64(),
-                view / 32,
+                "{count} windows (roc-core: {}): {each:?}/op, a layout pass {pass:?}",
+                cfg!(feature = "roc-core")
             );
         }
     }

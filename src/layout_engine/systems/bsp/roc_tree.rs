@@ -24,7 +24,7 @@ use rift_core::slot_table::SlotTable;
 use rift_core_roc::RocBspTree;
 use rift_core_roc::bsp_tree::{Answer, Event, LayoutKey, NodeKey, TreeView};
 
-use super::twinned::CoreTree;
+use super::system::CoreTree;
 use crate::actor::app::WindowId;
 use crate::layout_engine::LayoutId;
 use crate::model::tree::NodeId;
