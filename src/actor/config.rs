@@ -258,10 +258,12 @@ impl ConfigActor {
             _ => {
                 let range = match &cmd {
                     ConfigCommand::SetAnimationDuration(v) => {
-                        Some(("animation_duration", *v, 0.0, 5.0))
+                        Some(("animation_duration", v.get(), 0.0, 5.0))
                     }
-                    ConfigCommand::SetAnimationFps(v) => Some(("animation_fps", *v, 0.0, 240.0)),
-                    ConfigCommand::SetStackOffset(v) => Some(("stack_offset", *v, 0.0, 200.0)),
+                    ConfigCommand::SetAnimationFps(v) => {
+                        Some(("animation_fps", v.get(), 0.0, 240.0))
+                    }
+                    ConfigCommand::SetStackOffset(v) => Some(("stack_offset", v.get(), 0.0, 200.0)),
                     _ => None,
                 };
                 if let Some((name, value, min, max)) = range
@@ -285,9 +287,9 @@ impl ConfigActor {
                         match cmd {
                             ConfigCommand::SetAnimate(v) => settings.animate = v,
                             ConfigCommand::SetAnimationDuration(v) => {
-                                settings.animation_duration = v
+                                settings.animation_duration = v.get()
                             }
-                            ConfigCommand::SetAnimationFps(v) => settings.animation_fps = v,
+                            ConfigCommand::SetAnimationFps(v) => settings.animation_fps = v.get(),
                             ConfigCommand::SetAnimationEasing(v) => settings.animation_easing = v,
                             ConfigCommand::SetMouseFollowsFocus(v) => {
                                 settings.mouse_follows_focus = v
@@ -299,15 +301,21 @@ impl ConfigActor {
                                 settings.focus_follows_mouse = v
                             }
                             ConfigCommand::SetStackOffset(v) => {
-                                settings.layout.stack.stack_offset = v
+                                settings.layout.stack.stack_offset = v.get()
                             }
                             ConfigCommand::SetOuterGaps { top, left, bottom, right } => {
-                                settings.layout.gaps.outer =
-                                    crate::common::config::OuterGaps { top, left, bottom, right };
+                                settings.layout.gaps.outer = crate::common::config::OuterGaps {
+                                    top: top.get(),
+                                    left: left.get(),
+                                    bottom: bottom.get(),
+                                    right: right.get(),
+                                };
                             }
                             ConfigCommand::SetInnerGaps { horizontal, vertical } => {
-                                settings.layout.gaps.inner =
-                                    crate::common::config::InnerGaps { horizontal, vertical };
+                                settings.layout.gaps.inner = crate::common::config::InnerGaps {
+                                    horizontal: horizontal.get(),
+                                    vertical: vertical.get(),
+                                };
                             }
                             ConfigCommand::SetWorkspaceNames(names) => {
                                 source.virtual_workspaces.workspace_names = names

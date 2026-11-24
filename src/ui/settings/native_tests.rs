@@ -1502,7 +1502,9 @@ fn keyboard_controls(
     let edited = apply(pending);
     assert_eq!(
         edited.keys["Alt + 8"],
-        WmCommand::ReactorCommand(Command::Layout(L::ResizeWindowBy { amount: 25.0 }))
+        WmCommand::ReactorCommand(Command::Layout(L::ResizeWindowBy {
+            amount: rift_protocol::Amount::literal(25.0)
+        }))
     );
     // Catalog search never changes a selection to a different action at the same index.
     click(&named::<NSButton>(&header, "Add Shortcut…").unwrap());

@@ -1,4 +1,5 @@
 use objc2_core_foundation::{CGPoint, CGSize};
+use rift_protocol::Amount;
 use test_log::test;
 
 use super::testing::*;
@@ -77,7 +78,8 @@ fn a_frame_write_that_failed_is_written_again_at_the_next_arrange() {
     reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
     apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
     let _ = apps.requests();
-    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.1 });
+    reactor
+        .handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: Amount::literal(0.1) });
     // The arrange's writes, left unanswered.
     let writes = |requests: Vec<Request>| -> Vec<(WindowId, CGRect, TransactionId)> {
         requests
@@ -225,12 +227,12 @@ fn geometry_commands_request_arrangement_without_camera_movement() {
     });
     for command in [
         LayoutCommand::MoveNode(Direction::Left),
-        LayoutCommand::ResizeWindowBy { amount: 0.1 },
+        LayoutCommand::ResizeWindowBy { amount: Amount::literal(0.1) },
         LayoutCommand::ToggleOrientation,
         LayoutCommand::Balance,
         LayoutCommand::JoinWindow(Direction::Right),
         LayoutCommand::CenterSelection,
-        LayoutCommand::AdjustMasterRatio(0.1),
+        LayoutCommand::AdjustMasterRatio(Amount::literal(0.1)),
     ] {
         let outcome = reactor.dispatch_test_layout_command(command.clone());
         assert_eq!(
@@ -8285,7 +8287,8 @@ fn native_tab_layout_fixture() -> (Apps, Reactor, CGRect, SpaceId, WindowId, Win
     let separate = WindowId::new(2, 2);
     reactor.handle_event(Event::ApplicationGloballyActivated(2));
     reactor.handle_event(Event::WindowServerFocusChanged(old, space));
-    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.1 });
+    reactor
+        .handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: Amount::literal(0.1) });
     apps.simulate_until_quiet(&mut reactor);
     reactor.stores.state.windows.window_mut(separate).unwrap().info.has_native_tabs = true;
     (apps, reactor, screen, space, old, separate)
@@ -10980,7 +10983,9 @@ fn simultaneous_display_membership_swap_preserves_both_original_layouts() {
         if side == 1 {
             reactor.handle_test_layout_command(LayoutCommand::ToggleOrientation);
             reactor.handle_test_layout_command(LayoutCommand::NextWindow);
-            reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.1 });
+            reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy {
+                amount: Amount::literal(0.1),
+            });
         }
         reactor.handle_test_layout_command(LayoutCommand::Ascend);
         reactor.handle_test_layout_command(LayoutCommand::ToggleStack);

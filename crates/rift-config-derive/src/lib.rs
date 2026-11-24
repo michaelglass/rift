@@ -343,7 +343,7 @@ pub fn command_catalog(input: TokenStream) -> TokenStream {
                 ("DisplaySelector", "Display"),
                 ("LayoutMode", "Layout"),
                 ("String", "Keymap"),
-                ("f64", "Number"),
+                ("Amount", "Number"),
                 ("i32", "Integer"),
             ];
             let selected = variant

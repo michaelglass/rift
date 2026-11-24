@@ -1410,7 +1410,9 @@ mod tests {
         assert_eq!(super::title(&floating, s, &[]), "Toggle floating centered");
         assert_eq!(template(&floating), template(&layout(L::ToggleWindowFloating)));
         assert_eq!(parse_toml(&toml_text(&floating)).unwrap(), floating);
-        let resize = layout(L::ResizeWindowBy { amount: 50.0 });
+        let resize = layout(L::ResizeWindowBy {
+            amount: rift_protocol::Amount::literal(50.0),
+        });
         assert_eq!(super::title(&resize, s, &[]), "Resize window by 50");
         let sequence = WmCommand::Sequence(vec![s.keys["Alt + H"].clone(), resize]);
         assert_eq!(

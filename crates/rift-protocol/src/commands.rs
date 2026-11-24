@@ -9,6 +9,69 @@ use crate::{
     WindowId, WorkspaceSelector,
 };
 
+/// A number a command carries (an amount, a delta, a ratio, a duration, a gap), parsed once
+/// where the command enters rift (IPC, the CLI, a config file, the settings window): always
+/// finite, since no layout or setting means a NaN or an infinity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Amount(f64);
+
+/// Why a number is not an [`Amount`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmountError {
+    NotANumber,
+    NotFinite,
+}
+
+impl std::fmt::Display for AmountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AmountError::NotANumber => "expected a number",
+            AmountError::NotFinite => "a command's number must be finite (not NaN or infinite)",
+        })
+    }
+}
+
+impl std::error::Error for AmountError {}
+
+impl Amount {
+    /// A literal the code writes; a non-finite one is a bug in that code.
+    pub const fn literal(value: f64) -> Self {
+        assert!(value.is_finite(), "a literal amount is finite");
+        Amount(value)
+    }
+
+    pub fn get(self) -> f64 { self.0 }
+}
+
+impl TryFrom<f64> for Amount {
+    type Error = AmountError;
+
+    fn try_from(value: f64) -> Result<Self, AmountError> {
+        if value.is_finite() {
+            Ok(Amount(value))
+        } else {
+            Err(AmountError::NotFinite)
+        }
+    }
+}
+
+impl From<Amount> for f64 {
+    fn from(amount: Amount) -> f64 { amount.0 }
+}
+
+impl std::str::FromStr for Amount {
+    type Err = AmountError;
+
+    fn from_str(text: &str) -> Result<Self, AmountError> {
+        text.trim().parse::<f64>().map_err(|_| AmountError::NotANumber)?.try_into()
+    }
+}
+
+impl std::fmt::Display for Amount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+}
+
 /// Editable argument types shared by command discovery and native settings.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommandArgument {
@@ -19,7 +82,7 @@ pub enum CommandArgument {
     Display(DisplaySelector),
     Layout(LayoutMode),
     Keymap(String),
-    Number(f64),
+    Number(Amount),
     Integer(i32),
     Backwards(bool),
 }
@@ -33,7 +96,7 @@ pub enum FloatingWindowSizePreset {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FloatingWindowSize {
-    Dimensions { w: f64, h: f64 },
+    Dimensions { w: Amount, h: Amount },
     Preset(FloatingWindowSizePreset),
 }
 
@@ -95,15 +158,18 @@ pub enum LayoutCommand {
     ResizeWindowGrow(ResizeOrientation),
     #[command(label = "Shrink window", order = 8)]
     ResizeWindowShrink(ResizeOrientation),
-    #[command(order = 9, sample = "Self::ResizeWindowBy { amount: 10.0 }")]
-    ResizeWindowBy { amount: f64 },
+    #[command(
+        order = 9,
+        sample = "Self::ResizeWindowBy { amount: Amount::literal(10.0) }"
+    )]
+    ResizeWindowBy { amount: Amount },
     #[command(
         group = 4,
         label = "Scroll strip by",
         order = 22,
-        sample = "Self::ScrollStrip { delta: 100.0 }"
+        sample = "Self::ScrollStrip { delta: Amount::literal(100.0) }"
     )]
-    ScrollStrip { delta: f64 },
+    ScrollStrip { delta: Amount },
     #[command(group = 4, order = 23)]
     SnapStrip,
     #[command(group = 4, label = "Cycle preset width", order = 24)]
@@ -152,9 +218,9 @@ pub enum LayoutCommand {
         group = 4,
         label = "Adjust master ratio by",
         order = 25,
-        sample = "Self::AdjustMasterRatio(0.05)"
+        sample = "Self::AdjustMasterRatio(Amount::literal(0.05))"
     )]
-    AdjustMasterRatio(f64),
+    AdjustMasterRatio(Amount),
     #[command(
         group = 4,
         label = "Adjust master count by",
@@ -261,22 +327,22 @@ pub enum MetricsCommand {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigCommand {
     SetAnimate(bool),
-    SetAnimationDuration(f64),
-    SetAnimationFps(f64),
+    SetAnimationDuration(Amount),
+    SetAnimationFps(Amount),
     SetAnimationEasing(AnimationEasing),
     SetMouseFollowsFocus(bool),
     SetMouseHidesOnFocus(bool),
     SetFocusFollowsMouse(bool),
-    SetStackOffset(f64),
+    SetStackOffset(Amount),
     SetOuterGaps {
-        top: f64,
-        left: f64,
-        bottom: f64,
-        right: f64,
+        top: Amount,
+        left: Amount,
+        bottom: Amount,
+        right: Amount,
     },
     SetInnerGaps {
-        horizontal: f64,
-        vertical: f64,
+        horizontal: Amount,
+        vertical: Amount,
     },
     SetWorkspaceNames(Vec<String>),
     Set {

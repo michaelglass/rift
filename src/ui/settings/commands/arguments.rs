@@ -409,21 +409,23 @@ pub(super) fn parameters(
     let s = model.source.borrow();
     if let Some((argument @ (Arg::Number(_) | Arg::Integer(_)), _)) = command_argument(cmd) {
         let (value, integer) = match argument {
-            Arg::Number(v) => (v, false),
+            Arg::Number(v) => (v.get(), false),
             Arg::Integer(v) => (v as f64, true),
             _ => unreachable!(),
         };
         let field = Style::number_field(&ui, value, integer);
         let (command, set) = (cmd.clone(), set.clone());
-        let apply = move |v| {
-            set(with_argument(
-                &command,
-                if integer {
-                    Arg::Integer(v as i32)
-                } else {
-                    Arg::Number(v)
-                },
-            ))
+        let apply = move |v: f64| {
+            // A number that is not finite is no command's: the command stays as it was.
+            let argument = if integer {
+                Arg::Integer(v as i32)
+            } else {
+                match rift_protocol::Amount::try_from(v) {
+                    Ok(amount) => Arg::Number(amount),
+                    Err(_) => return,
+                }
+            };
+            set(with_argument(&command, argument))
         };
         let field = if draft {
             field.on_edit(apply)
@@ -509,7 +511,10 @@ pub(super) fn parameters(
             use rift_protocol::{FloatingWindowSize as Size, FloatingWindowSizePreset as Preset};
             let dimensions = match options.size {
                 Some(size @ Size::Dimensions { .. }) => size,
-                _ => Size::Dimensions { w: 640.0, h: 480.0 },
+                _ => Size::Dimensions {
+                    w: rift_protocol::Amount::literal(640.0),
+                    h: rift_protocol::Amount::literal(480.0),
+                },
             };
             let Size::Dimensions { w, h } = dimensions else {
                 unreachable!()
@@ -525,11 +530,10 @@ pub(super) fn parameters(
                             return None;
                         }
                         let (w, h) = (
-                            dimensions[0].parse::<f64>().ok()?,
-                            dimensions[1].parse::<f64>().ok()?,
+                            dimensions[0].parse::<rift_protocol::Amount>().ok()?,
+                            dimensions[1].parse::<rift_protocol::Amount>().ok()?,
                         );
-                        (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0)
-                            .then_some(Size::Dimensions { w, h })
+                        (w.get() > 0.0 && h.get() > 0.0).then_some(Size::Dimensions { w, h })
                     })()
                     .ok_or("Enter a positive width × height, such as 640 × 480")?;
                     edited.borrow_mut().size = Some(size);

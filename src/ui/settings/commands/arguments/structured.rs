@@ -202,7 +202,7 @@ pub(super) fn editor(
                     },
                     Kind::Text,
                 ),
-                "i32" | "u32" | "usize" | "f64" => (
+                "i32" | "u32" | "usize" | "f64" | "Amount" => (
                     FormValue::Text {
                         value: if value.is_null() {
                             String::new()

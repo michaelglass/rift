@@ -1119,3 +1119,25 @@ fn replacing_shortcuts_is_atomic_and_scoped_to_the_reviewed_mode() {
     assert_eq!(reopened.keys, source.keys);
     assert_eq!(reopened.binding_modes, source.binding_modes);
 }
+
+/// A config file's command whose number is not finite (TOML writes `nan` and `inf`) is
+/// refused as the file is read: no binding can carry it to a layout.
+#[test]
+fn a_bound_command_whose_number_is_not_finite_is_refused() {
+    #[derive(serde::Deserialize, Debug)]
+    struct Bound {
+        #[allow(dead_code)]
+        command: crate::layout_engine::LayoutCommand,
+    }
+    for number in ["nan", "inf", "-inf"] {
+        for command in [
+            format!("command = {{ resize_window_by = {{ amount = {number} }} }}"),
+            format!("command = {{ adjust_master_ratio = {number} }}"),
+            format!("command = {{ scroll_strip = {{ delta = {number} }} }}"),
+        ] {
+            let error = toml::from_str::<Bound>(&command).unwrap_err();
+            assert!(error.to_string().contains("finite"), "{command}: {error}");
+        }
+    }
+    toml::from_str::<Bound>("command = { resize_window_by = { amount = -0.1 } }").unwrap();
+}

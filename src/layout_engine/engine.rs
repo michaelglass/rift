@@ -66,7 +66,7 @@ fn requested_floating_frame(
 ) -> CGRect {
     if let Some(size) = size {
         frame.size = match size {
-            FloatingWindowSize::Dimensions { w, h } => CGSize::new(w, h),
+            FloatingWindowSize::Dimensions { w, h } => CGSize::new(w.get(), h.get()),
             FloatingWindowSize::Preset(FloatingWindowSizePreset::Smart) => CGSize::new(
                 screen.size.width * SMART_FLOATING_WIDTH_RATIO,
                 screen.size.height * SMART_FLOATING_HEIGHT_RATIO,
@@ -2946,7 +2946,7 @@ impl LayoutEngine {
                     LayoutCommand::ResizeWindowGrow(orientation) => (0.05, orientation),
                     LayoutCommand::ResizeWindowShrink(orientation) => (-0.05, orientation),
                     LayoutCommand::ResizeWindowBy { amount } => {
-                        (amount, ResizeOrientation::Horizontal)
+                        (amount.get(), ResizeOrientation::Horizontal)
                     }
                     _ => unreachable!(),
                 };
@@ -2965,7 +2965,7 @@ impl LayoutEngine {
                 {
                     match command {
                         LayoutCommand::AdjustMasterRatio(delta) => {
-                            system.adjust_master_ratio(layout, delta)
+                            system.adjust_master_ratio(layout, delta.get())
                         }
                         LayoutCommand::AdjustMasterCount { delta } => {
                             system.adjust_master_count(layout, delta)
@@ -2989,7 +2989,9 @@ impl LayoutEngine {
                 let mut response = EventResponse::default();
                 match command {
                     LayoutCommand::ScrollStrip { delta } => {
-                        if let Some((direction, excess)) = system.scroll_by_delta(layout, delta) {
+                        if let Some((direction, excess)) =
+                            system.scroll_by_delta(layout, delta.get())
+                        {
                             let key = (workspace_id, layout, direction);
                             let accumulated = self
                                 .scroll_boundary
@@ -4540,7 +4542,9 @@ mod tests {
             Some(space),
             &[space],
             &HashMap::default(),
-            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            LayoutCommand::ResizeWindowBy {
+                amount: rift_protocol::Amount::literal(0.2),
+            },
         );
 
         let gaps = engine.layout_settings.gaps.clone();

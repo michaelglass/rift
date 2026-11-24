@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{self};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use rift_protocol::{EventKind, RiftRequest, RiftResponse};
+use rift_protocol::{Amount, EventKind, RiftRequest, RiftResponse};
 use rift_wm::actor::app::WindowId as InternalWindowId;
 use rift_wm::actor::reactor::{self, DisplaySelector};
 use rift_wm::common::config::{LayoutMode, WorkspaceSelector};
@@ -230,7 +230,7 @@ enum WindowCommands {
     ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
     ResizeBy {
         #[arg(long)]
-        amount: f64,
+        amount: Amount,
     },
     /// Close a window as if Command-W was pressed
     Close {
@@ -339,7 +339,7 @@ enum LayoutCommands {
     /// Toggle floating on the focused selection (tree focus)
     ToggleFocusFloat,
     /// Adjust master ratio by a delta (master/stack layout only)
-    AdjustMasterRatio { delta: f64 },
+    AdjustMasterRatio { delta: Amount },
     /// Adjust master count by a delta (master/stack layout only)
     AdjustMasterCount { delta: i32 },
     /// Promote the selected window into the master area (master/stack layout only)
@@ -349,7 +349,7 @@ enum LayoutCommands {
     /// Swap two windows by window id (`WindowId { pid: ..., idx: ... }`)
     SwapWindows { a: String, b: String },
     /// Scroll the strip by a normalized delta (scrolling layout only)
-    ScrollStrip { delta: f64 },
+    ScrollStrip { delta: Amount },
     /// Snap the strip to the nearest column boundary (scrolling layout only)
     SnapStrip,
     /// Switch to the next preset column width (scrolling layout only).
@@ -367,9 +367,9 @@ enum ConfigCommands {
     /// Update animation settings
     SetAnimate { value: String },
     /// Set the animation duration in seconds
-    SetAnimationDuration { value: f64 },
+    SetAnimationDuration { value: Amount },
     /// Set the animation frame rate
-    SetAnimationFps { value: f64 },
+    SetAnimationFps { value: Amount },
     /// Set the animation easing curve
     SetAnimationEasing { value: String },
 
@@ -390,19 +390,22 @@ enum ConfigCommands {
     },
 
     /// Update layout settings
-    SetStackOffset { value: f64 },
+    SetStackOffset { value: Amount },
     /// Set the default stack orientation behavior. Value should be one of:
     /// "perpendicular", "same", "horizontal", or "vertical"
     SetStackDefaultOrientation { value: String },
     /// Set the outer gap on each screen edge
     SetOuterGaps {
-        top: f64,
-        left: f64,
-        bottom: f64,
-        right: f64,
+        top: Amount,
+        left: Amount,
+        bottom: Amount,
+        right: Amount,
     },
     /// Set the horizontal and vertical gaps between windows
-    SetInnerGaps { horizontal: f64, vertical: f64 },
+    SetInnerGaps {
+        horizontal: Amount,
+        vertical: Amount,
+    },
 
     /// Update workspace settings
     SetWorkspaceNames { names: Vec<String> },
@@ -1222,6 +1225,44 @@ fn run_mach_subscription(event: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command's number that is not finite is refused where the command is read, so no
+    /// request reaches rift and no layout changes; negative and fractional numbers stand.
+    #[test]
+    fn a_command_number_that_is_not_finite_is_refused() {
+        for number in ["NaN", "nan", "inf", "-inf", "infinity"] {
+            let parsed = Cli::try_parse_from([
+                "rift-cli".to_string(),
+                "execute".into(),
+                "window".into(),
+                "resize-by".into(),
+                format!("--amount={number}"),
+            ]);
+            let error = parsed.err().unwrap_or_else(|| panic!("{number} was accepted"));
+            assert!(error.to_string().contains("finite"), "{number}: {error}");
+        }
+        for number in ["-0.10", "0.05", "10"] {
+            let cli = Cli::try_parse_from([
+                "rift-cli".to_string(),
+                "execute".into(),
+                "window".into(),
+                "resize-by".into(),
+                format!("--amount={number}"),
+            ])
+            .unwrap();
+            let Commands::Execute { command: execute } = cli.command else {
+                panic!("an execute command");
+            };
+            let request = build_execute_request(execute).unwrap();
+            let amount: f64 = number.parse().unwrap();
+            assert_eq!(
+                serde_json::to_value(request).unwrap(),
+                serde_json::json!({
+                    "execute_command": { "command": { "layout": { "resize_window_by": { "amount": amount } } } }
+                })
+            );
+        }
+    }
 
     #[test]
     fn binding_mode_query_and_subscription_parse() {
