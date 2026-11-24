@@ -472,11 +472,11 @@ fn suppression_respects_menu_mission_control_and_config() {
     reactor.menu_manager.menu_state = MenuState::Closed;
 
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
-    reactor.set_mission_control_active(true);
+    reactor.enter_mission_control(&mut Changes::default());
     ffm_updates(&mut rx);
     reactor.release_window(window, OWNER).unwrap();
     assert_eq!(ffm_updates(&mut rx), [false]);
-    reactor.set_mission_control_active(false);
+    reactor.leave_mission_control();
 
     reactor.claim_window(window, OWNER, SUPPRESS).unwrap();
     ffm_updates(&mut rx);

@@ -394,8 +394,9 @@ pub enum WindowInvalidationSource {
 enum Hold {
     #[default]
     Free,
-    /// A button is held, and these windows appeared under it (a tab torn out of its window).
-    /// They are admitted at the release, so none is tiled out from under the cursor (#689).
+    /// The left button is held, and these windows appeared under it (a tab torn out of
+    /// its window), by whichever event first reported them. They are admitted at the
+    /// release, so none is tiled out from under the cursor (#689).
     Press(Vec<WindowId>),
     /// macOS's Mission Control is open.
     MissionControl,
@@ -1694,10 +1695,9 @@ impl Reactor {
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
-            Event::WindowCreated(wid, mut window, ws_info, mouse) => {
+            Event::WindowCreated(wid, mut window, ws_info, _) => {
                 self.replace_native_tab(wid, &mut window);
-                let pressed = mouse == Some(MouseState::Down);
-                self.observe_created_window(changes, wid, window, ws_info, pressed);
+                self.observe_created_window(changes, wid, window, ws_info);
                 self.reconcile_observed_focus(changes, raised_window);
                 return Ok(());
             }
@@ -2293,12 +2293,11 @@ impl Reactor {
             }
             Event::MissionControlNativeEntered => {
                 self.drag_manager.reset();
-                self.admit_windows_created_under_press(changes);
-                self.set_mission_control_active(true);
+                self.enter_mission_control(changes);
                 return Ok(());
             }
             Event::MissionControlNativeExited => {
-                self.set_mission_control_active(false);
+                self.leave_mission_control();
                 self.try_apply_pending_space_change(changes);
                 self.refresh_windows_after_mission_control(changes);
                 return Ok(());
@@ -2713,7 +2712,9 @@ impl Reactor {
         changes: &mut Changes,
         button: crate::actor::drag::MouseButton,
     ) {
-        self.admit_windows_created_under_press(changes);
+        if button == crate::actor::drag::MouseButton::Left {
+            self.end_press(changes, Hold::Free);
+        }
         if self.is_mission_control_active()
             || (self.is_in_drag() && !self.drag_manager.actor.owns_button(button))
         {
@@ -5887,16 +5888,21 @@ impl Reactor {
         input_tx.send(crate::actor::input::Request::LayoutModesChanged(modes));
     }
 
-    /// Opening Mission Control ends a press: its windows are admitted first.
-    fn set_mission_control_active(&mut self, active: bool) {
-        if self.is_mission_control_active() == active {
+    /// Opening Mission Control ends a press: its windows are admitted under it.
+    fn enter_mission_control(&mut self, changes: &mut Changes) {
+        if self.is_mission_control_active() {
             return;
         }
-        self.hold = if active {
-            Hold::MissionControl
-        } else {
-            Hold::Free
-        };
+        self.end_press(changes, Hold::MissionControl);
+        self.hold = Hold::MissionControl;
+        self.update_focus_follows_mouse_state();
+    }
+
+    fn leave_mission_control(&mut self) {
+        if !self.is_mission_control_active() {
+            return;
+        }
+        self.hold = Hold::Free;
         self.update_focus_follows_mouse_state();
     }
 

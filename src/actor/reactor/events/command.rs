@@ -300,7 +300,7 @@ impl Reactor {
         if let Some(wm) = &self.communication_manager.wm_sender {
             wm.send(WmEvent::Command(WmCommand::Wm(command)));
         } else if matches!(command, WmCmd::DismissMissionControl) {
-            self.set_mission_control_active(false);
+            self.leave_mission_control();
         }
     }
 

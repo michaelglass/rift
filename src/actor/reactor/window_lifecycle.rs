@@ -19,6 +19,9 @@ impl Reactor {
         app_info: Option<&AppInfo>,
         reapply: bool,
     ) -> Option<AppRuleEffects> {
+        if self.held_by_press(wid) {
+            return None;
+        }
         match self.layout_manager.layout_engine.assign_window_with_app_info(
             &mut self.state.windows,
             wid,
@@ -179,29 +182,55 @@ impl Reactor {
         wid: WindowId,
         info: WindowInfo,
         native: Option<WindowServerInfo>,
-        pressed: bool,
     ) {
         if let Some(native) = native {
             self.state.windows.track_window_server_info(native);
         }
         self.observe_ax_window(changes, wid, info);
-        match (&mut self.hold, pressed) {
-            (super::Hold::Press(created), true) => created.push(wid),
-            (super::Hold::Free, true) => self.hold = super::Hold::Press(vec![wid]),
-            _ => self.admit_ax_window(changes, wid),
-        }
+        self.admit_ax_window(changes, wid);
         changes.refresh_notifications = true;
     }
 
-    pub(super) fn admit_windows_created_under_press(&mut self, changes: &mut Changes) {
-        let created = match std::mem::take(&mut self.hold) {
-            super::Hold::Press(created) => created,
+    /// Every admission passes through here, whichever event brought the window: the
+    /// created notification, a window-list refresh, a main-window change. A window
+    /// that appears while the button is held is recorded instead, so none is tiled
+    /// out from under the cursor (#689). One that already has a workspace is never
+    /// held: the press only delays a first admission.
+    fn held_by_press(&mut self, wid: WindowId) -> bool {
+        if self.state.windows.workspace_for_window(wid).is_some() {
+            return false;
+        }
+        match &mut self.hold {
+            super::Hold::Press(held) => {
+                if !held.contains(&wid) {
+                    held.push(wid);
+                }
+                true
+            }
+            super::Hold::Free
+                if crate::sys::event::get_mouse_state()
+                    == Some(crate::sys::event::MouseState::Down) =>
+            {
+                self.hold = super::Hold::Press(vec![wid]);
+                true
+            }
+            super::Hold::Free | super::Hold::MissionControl => false,
+        }
+    }
+
+    /// End a press, putting `next` in its place, and admit the windows it held.
+    /// `next` is in place before admission, so a held window is not recorded again:
+    /// Mission Control never holds, and by the time Rift sees a release the button
+    /// state already reads up.
+    pub(super) fn end_press(&mut self, changes: &mut Changes, next: super::Hold) {
+        let held = match std::mem::replace(&mut self.hold, next) {
+            super::Hold::Press(held) => held,
             other => {
                 self.hold = other;
                 return;
             }
         };
-        for wid in created {
+        for wid in held {
             self.admit_ax_window(changes, wid);
         }
     }
