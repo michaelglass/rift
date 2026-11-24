@@ -939,7 +939,10 @@ Boundary := [].{
 	## gaps, and every window's constraints the host knows.
 	BspFramesQuestion := { layout : U64, screen : Rect, gaps : Gaps, known : List(BspKnown) }
 
-	## A layout's frames, as the BSP geometry gives them for its tree's shape.
+	## A layout's frames, as the BSP geometry gives them for its tree's shape. A nominal, not a
+	## bare List(Frame) field: that made the other List(Frame) entries fail as polymorphic
+	## provided functions, likely roc-lang/roc#13363 (fixed in 3ef41a6, in no nightly yet); try
+	## the bare field at the next nightly bump.
 	BspFrames := { frames : List(Frame) }
 
 	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
