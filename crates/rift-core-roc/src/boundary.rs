@@ -4149,6 +4149,35 @@ impl BspTreeBox {
         (BspTreeBox(stepped.model), answer)
     }
 
+    /// A layout's frames, as the BSP geometry gives them for the trees' own shape: the screen,
+    /// the gaps, and every window's constraints the caller knows (by the window's word).
+    pub(crate) fn frames(
+        self,
+        layout: LayoutKey,
+        screen: Rect,
+        layout_gaps: Gaps,
+        known: &[(u64, WindowConstraints)],
+        host: &abi::RocHost,
+    ) -> (BspTreeBox, Vec<(WindowId, Rect)>) {
+        let known: Vec<abi::BoundaryBspKnown> = known
+            .iter()
+            .map(|&(window, held)| abi::BoundaryBspKnown {
+                window,
+                constraints: window_constraints(held),
+            })
+            .collect();
+        let question = abi::BoundaryBspFramesQuestion {
+            layout: layout.0,
+            screen: rect(screen),
+            gaps: gaps(layout_gaps),
+            known: list(&known, host),
+        };
+        // SAFETY: as in `step`; the question's list is allocated through the host and consumed
+        // by Roc; the frames are Roc's answer, read in full and released by `frames`.
+        let framed = unsafe { abi::roc_bsp_tree_frames(self.into_raw(), question) };
+        (BspTreeBox(framed.model), frames(framed.framed.frames, host))
+    }
+
     /// Each table's slots and free list, the windows left out in order, the settings.
     pub(crate) fn view(self, host: &abi::RocHost) -> (BspTreeBox, TreeView) {
         // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.

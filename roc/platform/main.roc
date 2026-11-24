@@ -66,6 +66,7 @@ platform ""
 			bsp_tree_seed : BspTreeSeed -> trees,
 			bsp_tree_step : trees, BspTreeEvent -> { model : trees, answer : BspTreeAnswer },
 			bsp_tree_view : trees -> { model : trees, layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect },
+			bsp_tree_frames : trees, BspFramesQuestion -> { model : trees, framed : BspFrames },
 		}
 	}
 	exposes [Boundary]
@@ -91,6 +92,7 @@ platform ""
 		"roc_bsp_tree_seed": bsp_tree_seed_for_host,
 		"roc_bsp_tree_step": bsp_tree_step_for_host,
 		"roc_bsp_tree_view": bsp_tree_view_for_host,
+		"roc_bsp_tree_frames": bsp_tree_frames_for_host,
 		"roc_bsp_tree_release": bsp_tree_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
@@ -144,7 +146,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [LifecycleStepped, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect]
+import Boundary exposing [LifecycleStepped, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, BspFrames]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary` (all but `LifecycleStepped`,
@@ -178,6 +180,9 @@ MainWindowsViewed := { model : Box(Mains), main_window : MaybeWord, native_focus
 
 ## A BSP layout system's trees after an operation, and what it answered.
 BspTreeStepped := { model : Box(Trees), answer : BspTreeAnswer }
+
+## A BSP layout system's trees, unchanged, and a layout's frames.
+BspTreeFramed := { model : Box(Trees), framed : BspFrames }
 
 ## A BSP layout system's trees, unchanged: each table's slots and free list, the windows left
 ## out in order, and the settings.
@@ -475,6 +480,14 @@ bsp_tree_view_for_host : Box(Trees) -> BspTreeViewed
 bsp_tree_view_for_host = |boxed| {
 	viewed = (core.bsp_tree_view)(Box.unbox(boxed))
 	{ model: Box.box(viewed.model), layouts: viewed.layouts, layout_free: viewed.layout_free, nodes: viewed.nodes, node_free: viewed.node_free, left_out: viewed.left_out, insertion: viewed.insertion, aspect: viewed.aspect }
+}
+
+## A layout's frames, from the trees' own shape (`Tree::shape`) through the BSP geometry, and
+## the trees back unchanged.
+bsp_tree_frames_for_host : Box(Trees), BspFramesQuestion -> BspTreeFramed
+bsp_tree_frames_for_host = |boxed, question| {
+	framed = (core.bsp_tree_frames)(Box.unbox(boxed), question)
+	{ model: Box.box(framed.model), framed: framed.framed }
 }
 
 ## The host cannot release a `Box(Trees)`: only Roc knows its layout.

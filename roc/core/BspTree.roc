@@ -8,7 +8,7 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
-import pf.Boundary exposing [Aspect, BspTreeSeed, BspDrop, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
+import pf.Boundary exposing [BspFramesQuestion, BspChildren, BspNode, BspShape, Constraints, WindowConstraints, WindowId, Aspect, BspTreeSeed, BspDrop, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
 
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
@@ -150,6 +150,82 @@ BspTree := [].{
 		insertion: trees.insertion,
 		aspect: trees.aspect,
 	}
+
+	# The shape (`Tree::shape`): the geometry's input.
+
+	## A layout's shape for the BSP geometry: its windows taking part, each with the constraints
+	## the host knows, pruned as the Rust tree prunes; none when the layout is unknown or nothing
+	## takes part. The tree's window words become the geometry's `WindowId`s here.
+	shape : Trees, BspFramesQuestion -> [Shaped(BspShape), Unshaped]
+	shape = |trees, question| {
+		known = Dict.from_list(question.known.map(|k| (k.window, k.constraints)))
+		match get(trees.layouts, question.layout) {
+			Held(root) =>
+				match shape_node(trees, known, root) {
+					Shaped(top) => Shaped({ screen: question.screen, gaps: question.gaps, aspect: trees.aspect, root: top })
+					Pruned => Unshaped
+				}
+			NotHeld => Unshaped
+		}
+	}
+
+	## A node's shape: a leaf's window taking part (or an empty leaf, while no window is left
+	## out), a split with the children that have one; pruned when none is left.
+	shape_node : Trees, Dict(U64, WindowConstraints), U64 -> [Shaped(BspNode), Pruned]
+	shape_node = |trees, known, key|
+		match kind(trees, key) {
+			Leaf(leaf) => {
+				placed =
+					match participating_member(trees, leaf.content) {
+						Some(word) => Placed(Window({ window: window_id(word), constraints: known_constraints(known, word) }))
+						Nothing =>
+							match leaf.content {
+								Empty if trees.left_out.is_empty() => Placed(Empty)
+								_ => Unplaced
+							}
+					}
+				match placed {
+					Placed(slot) => {
+						(fill, stacked) =
+							match leaf.content {
+								Empty => (Tiled, False)
+								Held({ members, fill: held_fill }) =>
+									match members {
+										Window(_) => (held_fill, False)
+										Stack(_) => (held_fill, True)
+									}
+							}
+						Shaped(BspNode.Leaf({ slot, fill, stacked }))
+					}
+					Unplaced => Pruned
+				}
+			}
+			Split(split) => {
+				sides =
+					match (shape_node(trees, known, split.first), shape_node(trees, known, split.second)) {
+						(Pruned, Pruned) => NoChildren
+						(Shaped(only), Pruned) => Children(BspChildren.One(only))
+						(Pruned, Shaped(only)) => Children(BspChildren.One(only))
+						(Shaped(first), Shaped(second)) => Children(BspChildren.Two(first, second))
+					}
+				match sides {
+					Children(shaped) => Shaped(BspNode.Split({ horizontal: same_orientation(split.orientation, Horizontal), ratio: split.ratio, children: shaped }))
+					NoChildren => Pruned
+				}
+			}
+		}
+
+	## A window's constraints, if the host knows them.
+	known_constraints : Dict(U64, WindowConstraints), U64 -> Constraints
+	known_constraints = |known, word|
+		match known.get(word) {
+			Ok(constraints) => Constrained(constraints)
+			Err(KeyNotFound) => Unconstrained
+		}
+
+	## The window a word names: its pid in the high half, its index in the low half.
+	window_id : U64 -> WindowId
+	window_id = |word| WindowId.{ pid: word.shr_zf_wrap(32).to_u32_wrap().to_i32_wrap(), idx: word.to_u32_wrap() }
 
 	# Layouts, participation and the settings.
 

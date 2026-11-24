@@ -8,7 +8,8 @@ use rift_core::layout::bsp_tree::{
     Content, Direction, DropAction, Edit, Focus, Focused, InsertionPoint, Kind, Members, Memory,
     Orientation, Participation, Preselect, Query, Resize, ResizeAlong, SplitKind,
 };
-use rift_core::plain::Rect;
+use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
+use rift_core::plain::{Rect, WindowId};
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
 use rift_core_roc::{AllocationCount, RocBspTree, narrow};
 
@@ -49,6 +50,63 @@ impl Rng {
             7 => at(100.0, 100.0, 400.0, 180.0),
             8 => at(50.0, 60.0, 620.0, 410.0),
             _ => at(100.0, 100.0, 0.0, 300.0),
+        }
+    }
+
+    fn length(&mut self, low: f64, high: f64) -> f64 {
+        low + (high - low) * (self.below(1 << 20) as f64 / f64::from(1 << 20))
+    }
+
+    /// A screen for a layout pass: the run's, or one drawn anywhere (narrow and empty too).
+    fn screen(&mut self) -> Rect {
+        if self.chance(50) {
+            SCREEN
+        } else {
+            Rect {
+                x: self.length(-2000.0, 3000.0),
+                y: self.length(-500.0, 1500.0),
+                w: self.length(0.0, 3500.0),
+                h: self.length(0.0, 2200.0),
+            }
+        }
+    }
+
+    fn gaps(&mut self) -> Gaps {
+        let mut gap = || {
+            if self.chance(40) {
+                0.0
+            } else {
+                self.length(0.0, 40.0)
+            }
+        };
+        Gaps {
+            top: gap(),
+            left: gap(),
+            bottom: gap(),
+            right: gap(),
+            horizontal: gap(),
+            vertical: gap(),
+        }
+    }
+
+    /// A window's constraints, as the layout differential draws them.
+    fn constraints(&mut self) -> WindowConstraints {
+        let mut maybe = |high: f64| {
+            if self.chance(50) {
+                0.0
+            } else {
+                self.length(1.0, high)
+            }
+        };
+        let (locked_width, locked_height) = (maybe(1500.0), maybe(1000.0));
+        let min = Size::reported(maybe(900.0), maybe(700.0));
+        let (max_width, max_height) = (maybe(1800.0), maybe(1200.0));
+        WindowConstraints {
+            sizing: Sizing::new(self.chance(70), self.chance(50), min),
+            locked_width,
+            locked_height,
+            max_width,
+            max_height,
         }
     }
 
@@ -288,6 +346,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
     let (mut steps, mut reused, mut deepest, mut resized) = (0, 0, 0, 0);
     let (mut queries, mut told, mut reached, mut stacked) = (0, 0, 0, 0);
     let mut descended = 0;
+    let (mut passes, mut framed, mut constrained, mut split) = (0, 0, 0, 0);
     for run in 0..runs {
         let insertion = rng.insertion();
         let mut rust = Tree::new(insertion);
@@ -353,6 +412,41 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
                     "run {run} step {step}: the seed (reloads at {reloads:?}) after {history:#?}"
                 );
             }
+            if rng.chance(40) {
+                // A layout pass: the Roc tree's own shape through the Roc geometry, against the
+                // Rust tree's shape through the Rust geometry, bit for bit.
+                // Mostly a live layout (biased toward those placing windows), else any made.
+                let live: Vec<LayoutKey> = rust.layouts().keys().collect();
+                let layout = match rng.pick(&live) {
+                    Some(layout) if rng.chance(85) => layout,
+                    _ => made.layout(&mut rng),
+                };
+                let (screen, gaps) = (rng.screen(), rng.gaps());
+                let mut known: Vec<(u64, WindowConstraints)> = Vec::new();
+                for window in WINDOWS {
+                    if rng.chance(40) {
+                        known.push((window, rng.constraints()));
+                    }
+                }
+                let expected = rust
+                    .shape(layout, screen, gaps, |window| {
+                        known.iter().find(|(held, _)| *held == window).map(|&(_, c)| c)
+                    })
+                    .map_or_else(Vec::new, |shape| shape.map(&window_id).frames());
+                let got = roc.frames(layout, screen, gaps, &known);
+                assert_eq!(
+                    frame_bits(&got),
+                    frame_bits(&expected),
+                    "run {run} step {step}: frames of {layout:?} on {screen:?}, {gaps:?}, {known:?} after {history:#?}"
+                );
+                passes += 1;
+                framed += expected.len();
+                split += usize::from(expected.len() >= 2);
+                constrained += expected
+                    .iter()
+                    .filter(|(window, _)| known.iter().any(|(held, _)| window_id(*held) == *window))
+                    .count();
+            }
             if rng.chance(50) {
                 let query = made.query(&mut rng, &rust);
                 let expected = bsp_tree::step(&mut rust, query.clone());
@@ -398,9 +492,40 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         deepest > 8,
         "no system grew past {deepest} nodes: the trees went unexercised"
     );
+    assert!(
+        constrained * 10 > framed && split * 10 > passes,
+        "{passes} layout passes placed {framed} windows ({split} passes two or more), {constrained} constrained"
+    );
+    eprintln!(
+        "bsp_tree: {passes} layout passes identical ({framed} windows placed, {split} passes placing two or more, {constrained} constrained)"
+    );
     eprintln!(
         "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something; {reached} focus moves reaching a window; {stacked} operations leaving a stack; {descended} descents moving the selection), the system compared after each"
     );
+}
+
+/// The window a tree's word names (its pid in the high half, its index in the low half).
+fn window_id(word: u64) -> WindowId {
+    WindowId {
+        pid: (word >> 32) as u32 as i32,
+        idx: word as u32,
+    }
+}
+
+/// Frames as words: each window's pid and index, each coordinate's bits.
+fn frame_bits(frames: &[(WindowId, Rect)]) -> Vec<u64> {
+    frames
+        .iter()
+        .flat_map(|(window, r)| {
+            [
+                u64::from(window.pid as u32) << 32 | u64::from(window.idx),
+                r.x.to_bits(),
+                r.y.to_bits(),
+                r.w.to_bits(),
+                r.h.to_bits(),
+            ]
+        })
+        .collect()
 }
 
 /// Roc has no `F64 -> F32`, so the core writes Rust's `as f32` out (`Geometry.narrow`): held to

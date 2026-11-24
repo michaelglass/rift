@@ -931,6 +931,17 @@ Boundary := [].{
 	## (in taking order: the last first), the windows left out, the settings.
 	BspTreeSeed := { layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect }
 
+	## A window's constraints the host knows, by the window's word (the tree's windows are
+	## words).
+	BspKnown := { window : U64, constraints : WindowConstraints }
+
+	## A layout's frames (`Tree::shape`, then the BSP geometry): the layout, the screen, the
+	## gaps, and every window's constraints the host knows.
+	BspFramesQuestion := { layout : U64, screen : Rect, gaps : Gaps, known : List(BspKnown) }
+
+	## A layout's frames, as the BSP geometry gives them for its tree's shape.
+	BspFrames := { frames : List(Frame) }
+
 	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
 	## app's windows, since Roc has no pid).
 	BspTreeEvent := [

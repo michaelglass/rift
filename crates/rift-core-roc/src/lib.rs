@@ -371,6 +371,22 @@ impl RocBspTree {
         boundary::in_place(&mut self.trees, |trees| trees.step(event, &host))
     }
 
+    /// A layout's frames: the trees' own shape for it (as `Tree::shape` builds it, with the
+    /// constraints in `known`, by window word) through the Roc BSP geometry (as
+    /// `Bsp::frames`); none when the layout is unknown or no window takes part.
+    pub fn frames(
+        &mut self,
+        layout: bsp_tree::LayoutKey,
+        screen: Rect,
+        gaps: rift_core::layout::Gaps,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+    ) -> Vec<(WindowId, Rect)> {
+        let host = host();
+        boundary::in_place(&mut self.trees, |trees| {
+            trees.frames(layout, screen, gaps, known, &host)
+        })
+    }
+
     /// The whole system, as [`bsp_tree::TreeView::from`] reads a `Tree`.
     pub fn view(&mut self) -> bsp_tree::TreeView {
         let host = host();
