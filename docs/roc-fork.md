@@ -18,14 +18,22 @@ through this docs commit once it is published (publish procedure: "Rulings that 
 Public-clean; the published tip's id is in the slice report). All checks green: 885 lib tests (3
 ignored, one of them `measure_layout_shadow`), 894 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
---all-targets --features roc-core` compiles with no errors and 332 warnings, counted as `cargo clippy
+--all-targets --features roc-core` compiles with no errors and 331 warnings (332 before the dead trees went), counted as `cargo clippy
 --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated | wc -l`
 (the bound: at most 336); no build warnings outside test code (`cargo test` prints three old
 unused-variable / unused-mut warnings in fuzz.rs, tests.rs and systems.rs).
 
-**Next: the Roadmap's next row, layout trees into the core** (planned with the lead first: the
-core's `layout::bsp_tree` and `traditional_tree` predate #688 and nothing in rift shadows them
-since merge (b)).
+**Next: layout trees into the core, re-planned (2026-11-24).** After #688 each system owns its
+tree and every edit; the core decides only geometry, from a shape rebuilt each pass. The
+pre-#688 core trees (`bsp_tree`, `traditional_tree`) had no caller since merge (b) and are
+deleted (the lead's ruling). Proposed, BSP first: a core BSP tree with #688's state ported from
+`systems/bsp.rs` operation by operation, held in test builds against `shape()` every pass and by
+an operation shadow (a core tree per layout stepped on every operation, answers and trees
+compared, node ids renumbered) with a drawn fuzzer; then a Roc mirror; then the flip (the core's
+tree is the state, the system's the shadow; saved from the core, old files byte-compatible); then
+the old tree goes. Then stack, traditional and master-stack, scrolling's columns, floating.
+Waiting on the lead: where the core tree lives (proposed: inside `BspLayoutSystem`, keyed by
+`LayoutId`) and node ids over IPC after the flip (proposed: the core's tags, same format).
 
 **The window store's single writer, done (the lead's ruling, 2026-11-24: the upstream PR plan's
 C1 step 2, narrow).** C1 step 2 is about the admission facts only (manageability, rule, AX kind,
@@ -1719,7 +1727,7 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Sizing (respect_min_size in the core) | S | Done, Rust (the play line) and Roc, with its own wire encoding. |
 | Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
 | Layout geometry: floating | S | Done, Rust and Roc: first frames and the cascade (`layout::floating`, `Floating.roc`). |
-| Layout trees into the core | L+ | **In progress, BSP first; traditional paused for upstream #688.** `layout::bsp_tree` holds a BSP layout (splits of two, leaves of nothing / a window / a stack, the selection as each split's memory, node tags the core mints) and every change rift makes to one; in test builds each of `BspLayoutSystem`'s operations is shadowed by the core on all traffic, and a tree fuzzer composes them. Next: the core answers (the flip), then the old system goes. Then traditional, scrolling's columns, floating. |
+| Layout trees into the core | L+ | **Re-planned 2026-11-24 (Handoff).** The pre-#688 core trees are deleted (no caller since merge (b)). Next: a core BSP tree ported from #688's `systems/bsp.rs` under an operation shadow, a Roc mirror, the flip (saved from the core), the old tree gone. Then stack, traditional and master-stack, scrolling's columns, floating. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. The admission facts' single writer (upstream plan C1 step 2) is done. A universal `apply(WindowChange)` over the store's other writers is not planned: raise it only when a Roc claim needs one step for the store, with that claim as the reason. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
