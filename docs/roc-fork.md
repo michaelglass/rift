@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, layout trees: slice 1 done, slice 2 next; the store's admission writer done): read this first
+## Handoff (2026-11-24, layout trees: slices 1 and 2 done, slice 3 next): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
@@ -23,7 +23,69 @@ ignored, one of them `measure_layout_shadow`), 894 with `roc-core`, the fuzzer a
 (the bound: at most 336); no build warnings outside test code (`cargo test` prints three old
 unused-variable / unused-mut warnings in fuzz.rs, tests.rs and systems.rs).
 
-**Next: layout trees, slice 2, the core BSP tree (the lead's rulings, 2026-11-24).** Slice 1
+**Layout trees, slice 2, done: the core's BSP tree, stepped beside upstream's system.** Commits
+(after 4d365f91): 09b58190 (the tree, layouts, participation, settings, the shape; the twin),
+7c1387d6 (queries), 628587c6 (window changes), c8790070 (focus), 28de94e3 (shape edits),
+1e2bdd50 (moves, swaps, drops), 1ef6c735 (joins, consume-or-expel, unjoin; every operation
+steps the core), a2d238d3 (the cost). Each message has its plants. Checks at the tip: 890 lib
+tests (3 ignored), 899 with `roc-core`, rift-core 106, the rest as above, clippy 331.
+- **The core:** `rift_core::layout::bsp_tree::Tree<L, N, W>`: `SlotTable<L, Layout { root }>`,
+  `SlotTable<N, Node { parent: Parent::Root | Split(N), kind }>`, the windows left out (a
+  `BTreeSet`), `InsertionPoint`, the aspect ratio. `Kind::Split(Split { orientation, ratio: f32,
+  children: [N; 2], memory: Memory::Stops | Toward(Side) })` / `Kind::Leaf(Leaf { content:
+  Content::Empty | Held { members: Members::Window(W) | Stack(Tabs { before, top, after }),
+  fill: Fill }, preselect: Preselect })`. Operations, upstream's one for one: `create_layout`,
+  `clone_layout`, `remove_layout`, `set_window_participation`, the settings, every query,
+  `add_window`, `remove_window`, `replace_window`, `close_app(predicate)`, `resize_window(Resize
+  { old, new, screen, tiling })`, `focus(Focus) -> Focused`, `edit(Edit) -> Edited`, and
+  `shape(layout, screen, gaps, constraints) -> Option<Bsp>` (the geometry's input, pruned as
+  upstream prunes). Ids are the SlotTable's, equal to upstream's slotmap ids (compared directly).
+- **The twin (`systems/bsp/twinned.rs`):** upstream's struct is `Upstream`, unchanged; rift's
+  `BspLayoutSystem { upstream, twin: Box<TwinnedBsp> }` (serialized as upstream, byte for byte;
+  deserialized through `From<Upstream>`, which seeds the core). Every operation steps both;
+  answers are compared on every operation (queries too), the whole tree (layouts, nodes by id,
+  left out, settings) on every operation in tests and `roc-core` builds and every 32nd in a plain
+  release build, each pass's shape on every pass. A difference: counted (`rift-cli metrics
+  show-timing`: `core: bsp tree divergences: N`), a test fails, a running Rift warns
+  `bsp-tree-divergence:` and re-seeds the core from upstream. Seeding reads each slotmap's slots
+  (vacant versions from its saved form) and its free list (the order a copy hands vacant slots
+  out), taken by `SlotTable::resumed` (a load would take the highest vacant slot first).
+- **The drawn fuzzer** (`bsp.rs`'s `drawn_system`, under the BSP differential, 3000 systems)
+  drives `BspLayoutSystem`: every edit and focus, layouts created, cloned and removed, windows
+  replaced, native resizes (into and out of the screen and tiling frames, nudges around the
+  half point), participation (windows in no layout too), the settings, the edits upstream has no
+  case for, drops straight to `edit_layout`, every query on a third of its steps, and reloads
+  through serde, most with a preselected leaf (only a saved file holds one).
+- **Upstream states the core does not hold (no operation reaches them; only a saved file can):**
+  both fullscreen flags set (read as `Fill::Screen`, as upstream's projection reads them; a
+  later toggle would then differ from upstream), and an empty leaf with a fullscreen flag
+  (dropped: upstream clears the flags as a leaf empties; only IPC's `container_tree` showed
+  it). Upstream's load normalizes neither. For slice 4 (saving from the core, old files
+  byte-compatible): normalize them at the load boundary with one warn line, or keep two flags;
+  the lead's call. A NaN ratio from a file compares unequal to itself (`f32`), so would report a
+  divergence; none is drawn.
+- **Cost (release, `measure_bsp_twin`, everyday operations: focus moves, swaps, resizes, a
+  window added and removed):**
+
+| windows | upstream / op | core step / op | whole-tree view | view per op (every 32nd) | re-seed | a pass's shape (upstream, core) |
+|---|---|---|---|---|---|---|
+| 10 | 68 ns | 80 ns | 181 ns | 6 ns | 110 us | 1.1 us, 1.0 us |
+| 100 | 0.79 us | 1.46 us | 2.7 us | 84 ns | 0.57 ms | 5.3 us, 5.3 us |
+| 1000 | 7.6 us | 14.0 us | 13.2 us | 0.41 us | 5.0 ms | 49 us, 49 us |
+
+  So a plain release build adds about 14.4 us to an operation at 1000 windows (the core's step,
+  about twice upstream's, plus the sampled view), and each pass builds the shape twice (about
+  49 us more at 1000 windows). Not optimized (premature bug-fixing first); a re-seed happens
+  only after a divergence.
+
+**Next: layout trees, slice 3, the Roc mirror of the BSP tree** (the lead's plan): a Roc
+`BspTree` with the same operations, held to the Rust core by a Rust/Roc differential over drawn
+operation sequences (answers and trees), plants in Roc. Then 4, the flip (policy (a)): the
+core's tree decides and is saved (old files byte-compatible); 5 deletes `Upstream`. The queued
+Roc nightly bump (below) is still waiting: the newest nightly is still nightly-2026-11-23-b5c77fc
+(checked 2026-11-24).
+
+**Slice 2's plan and rulings, as given (the lead's, 2026-11-24; done, above).** Slice 1
 (the dead pre-#688 core trees deleted) is done, and `SlotTable` now lives in the core
 (`rift_core::slot_table`, generic over `SlotKey`; see below). The plan, accepted: BSP, then
 traditional (covering stack, master-stack and traditional), then scrolling's columns, then
