@@ -4,7 +4,9 @@
 //! and stale keys meet the slot versions. Every operation must answer alike and leave the same
 //! whole system: each table's slots, versions and free list, the windows left out, the settings.
 
-use rift_core::layout::bsp_tree::{Direction, InsertionPoint, Participation, Query, Resize};
+use rift_core::layout::bsp_tree::{
+    Direction, Focus, Focused, InsertionPoint, Participation, Query, Resize,
+};
 use rift_core::plain::Rect;
 use rift_core_roc::bsp_tree::{self, Answer, Event, LayoutKey, Tree, TreeView};
 use rift_core_roc::{AllocationCount, RocBspTree, narrow};
@@ -121,7 +123,13 @@ impl Made {
     }
 
     fn event(&self, rng: &mut Rng) -> Event {
-        match rng.below(30) {
+        match rng.below(36) {
+            30..=35 => Event::Focus(self.layout(rng), match rng.below(5) {
+                0 => Focus::Select(rng.window()),
+                1 => Focus::Ascend,
+                2 => Focus::Descend,
+                _ => Focus::Direction(rng.direction()),
+            }),
             0..=2 => Event::CreateLayout,
             3 | 4 => Event::CloneLayout(self.layout(rng)),
             5 => Event::RemoveLayout(self.layout(rng)),
@@ -200,7 +208,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
     let mut rng = Rng(0xB5B7_7EE0_0000_0001);
     let before = AllocationCount::now();
     let (mut steps, mut reused, mut deepest, mut resized) = (0, 0, 0, 0);
-    let (mut queries, mut told) = (0, 0);
+    let (mut queries, mut told, mut reached) = (0, 0, 0);
     for run in 0..runs {
         let insertion = rng.insertion();
         let mut rust = Tree::new(insertion);
@@ -232,6 +240,9 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
             }
             made.answered(&expected);
             steps += 1;
+            if let Answer::Focused(Focused::Movement { window: Some(_), .. }) = expected {
+                reached += 1;
+            }
             if rng.chance(50) {
                 let query = made.query(&mut rng);
                 let expected = bsp_tree::step(&mut rust, query.clone());
@@ -272,7 +283,7 @@ fn the_roc_bsp_tree_answers_and_keeps_the_system_as_the_rust_tree_does() {
         "no system grew past {deepest} nodes: the trees went unexercised"
     );
     eprintln!(
-        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something), the system compared after each"
+        "bsp_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, systems of up to {deepest} nodes; {queries} queries, {told} telling something; {reached} focus moves reaching a window), the system compared after each"
     );
 }
 

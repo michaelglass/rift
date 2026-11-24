@@ -11,9 +11,9 @@ use rift_core::focus::{
 };
 use rift_core::layout::bsp::{self, Bsp};
 use rift_core::layout::bsp_tree::{
-    Content, Direction as TreeDirection, InsertionPoint, Kind, Layout, Leaf, Members, Memory,
-    Node as TreeNode, Orientation, Parent, Participation, Preselect, Query, Resize, Side, Split,
-    Tabs,
+    Content, Direction as TreeDirection, Focus as TreeFocus, Focused, InsertionPoint, Kind, Layout,
+    Leaf, Members, Memory, Node as TreeNode, Orientation, Parent, Participation, Preselect, Query,
+    Resize, Side, Split, Tabs,
 };
 use rift_core::layout::floating::{Floating, Newcomer, Seen};
 use rift_core::layout::scrolling::{
@@ -3516,6 +3516,14 @@ fn tree_event(event: TreeEvent, host: &abi::RocHost) -> abi::BoundaryBspTreeEven
             BoundaryBspTreeEventPayload.close_app(list(&windows, host)),
             Tag::CloseApp
         ),
+        TreeEvent::Focus(layout, focus) => union!(
+            BoundaryBspTreeEvent,
+            BoundaryBspTreeEventPayload.focus(abi::BoundaryBspFocusIn {
+                layout: layout.0,
+                focus: tree_focus(focus),
+            }),
+            Tag::Focus
+        ),
         TreeEvent::ContainsLayout(layout) => union!(
             BoundaryBspTreeEvent,
             BoundaryBspTreeEventPayload.contains_layout(layout.0),
@@ -3607,6 +3615,21 @@ fn from_tree_answer(answer: abi::BoundaryBspTreeAnswer) -> TreeAnswer {
             TreeAnswer::Participated(unsafe { *answer.borrow_payload_participated_unchecked() })
         }
         Tag::Done => TreeAnswer::Done,
+        Tag::Focused => {
+            let focused = unsafe { answer.borrow_payload_focused_unchecked() };
+            TreeAnswer::Focused(match focused.tag {
+                abi::BoundaryBspFocusedTag::Selection => Focused::Selection {
+                    handled: unsafe { *focused.borrow_payload_selection_unchecked() },
+                },
+                abi::BoundaryBspFocusedTag::Movement => {
+                    let movement = unsafe { focused.borrow_payload_movement_unchecked() };
+                    Focused::Movement {
+                        window: from_maybe_word(movement.window),
+                        raise: movement.raise.as_slice().to_vec(),
+                    }
+                }
+            })
+        }
         Tag::Verdict => TreeAnswer::Verdict(unsafe { *answer.borrow_payload_verdict_unchecked() }),
         Tag::Window => TreeAnswer::Window(from_maybe_word(unsafe {
             *answer.borrow_payload_window_unchecked()
@@ -3636,6 +3659,28 @@ fn tree_direction(direction: TreeDirection) -> abi::BoundaryBspDirection {
         TreeDirection::Right => abi::BoundaryBspDirection::Right,
         TreeDirection::Up => abi::BoundaryBspDirection::Up,
         TreeDirection::Down => abi::BoundaryBspDirection::Down,
+    }
+}
+
+fn tree_focus(focus: TreeFocus<u64>) -> abi::BoundaryBspFocus {
+    use abi::BoundaryBspFocusTag as Tag;
+    match focus {
+        TreeFocus::Select(window) => {
+            union!(
+                BoundaryBspFocus,
+                BoundaryBspFocusPayload.select(window),
+                Tag::Select
+            )
+        }
+        TreeFocus::Ascend => union!(BoundaryBspFocus, BoundaryBspFocusPayload.ascend, Tag::Ascend),
+        TreeFocus::Descend => {
+            union!(BoundaryBspFocus, BoundaryBspFocusPayload.descend, Tag::Descend)
+        }
+        TreeFocus::Direction(direction) => union!(
+            BoundaryBspFocus,
+            BoundaryBspFocusPayload.direction(tree_direction(direction)),
+            Tag::Direction
+        ),
     }
 }
 

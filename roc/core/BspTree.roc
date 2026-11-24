@@ -8,7 +8,7 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
-import pf.Boundary exposing [Aspect, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
+import pf.Boundary exposing [Aspect, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
 
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
@@ -88,6 +88,10 @@ BspTree := [].{
 			Windows(asked) => (trees, Windows(listed_windows(trees, asked)))
 			CanMoveWindow(asked) => (trees, Verdict(can_move_window(trees, asked)))
 			WindowSlot(asked) => (trees, WindowSlot(window_slot(trees, asked)))
+			Focus(asked) => {
+				(after, focused) = focus(trees, asked)
+				(after, Focused(focused))
+			}
 		}
 
 	view : Trees -> View
@@ -534,6 +538,102 @@ BspTree := [].{
 		match (a, b) {
 			(Horizontal, Horizontal) | (Vertical, Vertical) => True
 			(Horizontal, Vertical) | (Vertical, Horizontal) => False
+		}
+
+	# Focus.
+
+	## The selection moved (upstream's `focus`): a selection change says whether it was
+	## handled; a movement names the window it reached, if any, and those to raise.
+	focus : Trees, BspFocusIn -> (Trees, BspFocused)
+	focus = |trees, { layout, focus: moved }|
+		match moved {
+			Select(window) => {
+				(after, handled) = select_window(trees, layout, window)
+				(after, Selection(handled))
+			}
+			Ascend => {
+				(after, handled) = ascend(trees, layout)
+				(after, Selection(handled))
+			}
+			Descend => {
+				(after, handled) = descend(trees, layout)
+				(after, Selection(handled))
+			}
+			Direction(direction) => move_focus(trees, layout, direction)
+		}
+
+	## The window's leaf selected, the window on top of its stack (none: it is left out or
+	## not in the layout).
+	select_window : Trees, U64, U64 -> (Trees, Bool)
+	select_window = |trees, layout, window|
+		if trees.left_out.contains(window) {
+			(trees, False)
+		} else {
+			match node_for_window_in_layout(trees, layout, window) {
+				NotFound => (trees, False)
+				Found(leaf) => {
+					focused =
+						match content_of(trees, leaf, "select_window") {
+							Held(held) => set_content(trees, leaf, Held({ ..held, members: on_top(held.members, window) }), "select_window")
+							Empty => trees
+						}
+					(select(focused, leaf), True)
+				}
+			}
+		}
+
+	## The leaf standing for the selection's parent selected.
+	ascend : Trees, U64 -> (Trees, Bool)
+	ascend = |trees, layout|
+		match selection_of_layout(trees, layout) {
+			Selection(selected) =>
+				match parent(trees, selected) {
+					Parent(above) => (select(trees, descend_to_leaf(trees, above)), True)
+					NoParent => (trees, False)
+				}
+			NoSelection => (trees, False)
+		}
+
+	## The leaf standing for the selection selected, if that is another node.
+	descend : Trees, U64 -> (Trees, Bool)
+	descend = |trees, layout|
+		match selection_of_layout(trees, layout) {
+			Selection(selected) => {
+				leaf = descend_to_leaf(trees, selected)
+				if leaf != selected (select(trees, leaf), True) else (trees, False)
+			}
+			NoSelection => (trees, False)
+		}
+
+	## The neighbour leaf `direction` of the selection selected; its window, if one takes
+	## part, is reached and raised (tiled BSP windows never overlap, so only it is raised).
+	move_focus : Trees, U64, BspDirection -> (Trees, BspFocused)
+	move_focus = |trees, layout, direction| {
+		nowhere = Movement({ window: Nothing, raise: [] })
+		match selection_of_layout(trees, layout) {
+			NoSelection => (trees, nowhere)
+			Selection(selected) =>
+				match find_neighbor_leaf(trees, descend_to_leaf(trees, selected), direction) {
+					NoNeighbor => (trees, nowhere)
+					Neighbor(next) => {
+						window = participating_window(trees, next)
+						raise =
+							match window {
+								Some(reached) => [reached]
+								Nothing => []
+							}
+						(select(trees, next), Movement({ window, raise }))
+					}
+				}
+		}
+	}
+
+	## `window` on top: a stack moves it to the end, the others keeping their order.
+	on_top : BspMembers, U64 -> BspMembers
+	on_top = |members, window|
+		match members {
+			Window(_) => members
+			Stack(tabs) => Stack({ before: tabs_windows(tabs).keep_if(|member| member != window), top: window, after: [] })
 		}
 
 	# Selection and insertion.

@@ -884,6 +884,18 @@ Boundary := [].{
 	## its position in its stack, if stacked; none when the layout does not hold it.
 	BspSlot := [Slot(List(U64)), NoSlot]
 
+	## How the selection moves (upstream's `Focus`).
+	BspFocus := [Select(U64), Ascend, Descend, Direction(BspDirection)]
+
+	BspFocusIn := { layout : U64, focus : BspFocus }
+
+	## A focus movement: the window it reached, if any, and those to raise.
+	BspMovement := { window : MaybeWord, raise : List(U64) }
+
+	## What a focus did (upstream's `FocusResult`): whether a selection change was handled, or a
+	## movement.
+	BspFocused := [Selection(Bool), Movement(BspMovement)]
+
 	## One operation of the system (`Tree`'s methods, one for one; an app closing lists the
 	## app's windows, since Roc has no pid).
 	BspTreeEvent := [
@@ -908,11 +920,12 @@ Boundary := [].{
 		Windows(BspWindowsQuery),
 		CanMoveWindow(BspMoveQuery),
 		WindowSlot(BspWindowIn),
+		Focus(BspFocusIn),
 	]
 
 	## What an operation answers: a layout it made, whether a window's participation changed, a
 	## query's answer, or nothing.
-	BspTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(BspSlot)]
+	BspTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(BspSlot), Focused(BspFocused)]
 
 
 
