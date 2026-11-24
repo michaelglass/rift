@@ -15,11 +15,13 @@ The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
 shared geometry is brought up to upstream's #688 (below). `rearch/roc-next@fork` carries everything
 through this docs commit once it is published (publish procedure: "Rulings that bind",
-Public-clean; the published tip's id is in the slice report). All checks green: 883 lib tests (3
-ignored, one of them `measure_layout_shadow`), 892 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
+Public-clean; the published tip's id is in the slice report). All checks green: 885 lib tests (3
+ignored, one of them `measure_layout_shadow`), 894 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -p rift-core-roc
 --features roc`, `cargo test -p rift-core`, `cargo check --locked` both ways, fmt, and `cargo clippy
---all-targets --features roc-core` compiles (331 warnings, no errors); no build warnings either
-way.
+--all-targets --features roc-core` compiles with no errors and 332 warnings, counted as `cargo clippy
+--all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated | wc -l`
+(the bound: at most 336); no build warnings outside test code (`cargo test` prints three old
+unused-variable / unused-mut warnings in fuzz.rs, tests.rs and systems.rs).
 
 **Next: the Roadmap's next row, layout trees into the core** (planned with the lead first: the
 core's `layout::bsp_tree` and `traditional_tree` predate #688 and nothing in rift shadows them
@@ -42,8 +44,7 @@ Ruled out: a universal `apply(WindowChange)` over the store's other writers (win
 visibility, native fullscreen, rule floating, claims, the grip, topology); nothing upstream
 asks for it. Topology stays its own writer on the core. The old doc comment's "false if it
 already was" was wrong: invalidating an invalidated window answers `Invalidated` again.
-Clippy with `roc-core`, counted as `grep -E '^(warning|error)' | grep -v generated`, is 332 lines
-on both sides of these commits.
+Clippy with `roc-core` is 332 (the count above) on both sides of these commits.
 
 **The core's layout path made linear (the lead's approved design, after roc-fork-7's diagnosis).**
 Since the flip the core's frames are rift's cost, and the core's `place` recomputed each child's
