@@ -67,9 +67,20 @@ tests (3 ignored), 899 with `roc-core`, rift-core 106, the rest as above, clippy
   byte for byte as before. Tests: `a_saved_leaf_with_both_fullscreen_flags_loads_fullscreen`,
   `a_saved_empty_leaf_loads_without_fullscreen_flags`,
   `a_saved_split_with_a_share_not_a_number_loads_even` (each: the parsed form, the save, the
-  normalized bytes); a plant skipping each normalization fails its test. One reach left: a
-  resize edit with a NaN amount (`rift-cli` parses `NaN` as an `f64`) makes a NaN share, which
-  rift would save and then normalize on the next load.
+  normalized bytes); a plant skipping each normalization fails its test. The one operation
+  that made a NaN share, a resize by a NaN amount, can no longer be asked for (below).
+- **Command numbers are finite (the lead's ruling, 2026-11-24).** `rift_protocol::Amount` is
+  every number a command carries (resize amounts, the scroll delta, the master ratio's change, a
+  floating size, the animation, stack-offset and gap settings, a command's editable `Number`
+  argument): parsed once where a command enters rift (serde for IPC and config files, `FromStr`
+  for rift-cli and the settings window), refused when not finite (`rift-cli` names it; a config
+  file fails to read; the settings field keeps the command as it was). IPC's JSON could not carry
+  one already (`NaN` becomes `null`, refused); TOML (`nan`, `inf`) and the settings window
+  could. Tests: `a_command_number_that_is_not_finite_is_refused` (rift-cli),
+  `a_bound_command_whose_number_is_not_finite_is_refused` (config).
+- **Upstream candidate:** IPC accepts NaN/inf amounts; a NaN resize writes a NaN share that
+  saves and reloads (upstream's config files and settings window carry them; its JSON IPC
+  refuses them only because `NaN` is written as `null`).
 - **Upstream candidate:** upstream's saved BSP layout can hold states no operation reaches
   (both fullscreen flags, an empty leaf's fullscreen flag, a share that is not a finite
   number), and its load does not normalize them.
