@@ -3,62 +3,18 @@
 ## facts are what the platform's run of it asked (`Asking.Fact`), read in the same order;
 ## windows, Spaces, window-server ids and apps are one word each.
 
+import pf.Boundary exposing [MaybeSpace, RuleRun, Origin, AdmissionFacts, Veto, FactChange, Reading, Change, Presence, PresenceEvent, PresenceAnswer, Present, PresentWindow, KnownFacts, WindowAdmission, Invalidation, Revalidation, InventoryFacts, NativeEvidence, AxValidity, Retirement, SpaceWindows, RuleOutcome, NewWindow, TransientEntry, Departure, FactBool, FactSpace, FactEvidence, WordBool, WordSpace]
 import Asking exposing [ask, ask_word]
-
-## A Space, or none.
-MaybeSpace : [Space(U64), NoSpace]
-
-## Why app rules run: windows being admitted, or the rules re-applied.
-RuleRun : [Admission, Reapply]
-
-## Where a transient entry's evidence came from.
-Origin : [Native, Heuristic]
-
-## A fact the platform's run of the decision answered, or one it never asked.
-Fact(a) : [Asked(a), Unasked]
-
-## A fact asked about keys: each key asked and its answer.
-Answers(k, v) : List({ key : k, answer : v })
 
 ## What a decision decided, or the first fact it read that its question does not carry.
 Read(a) : Try(a, [Unasked(U64)])
-
-## What admission reads of a window (the platform's `Boundary.AdmissionFacts`).
-Facts : { manageability : [Manageable, Unmanageable], rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native : [Ordinary, Transient], minimize : [Shown, Minimized] }
-
-## Why a window is not admitted.
-Veto : [NativeTransient, Minimized, AxTransient, RuleIgnores, Unmanageable]
-
-## One admission fact, changed.
-FactChange : [Manageability([Manageable, Unmanageable]), Rule([NoRule, Manage, Ignore]), Ax([Ordinary, DialogWindow, Transient]), Native([Ordinary, Transient]), Minimize([Shown, Minimized])]
-
-## A reading of a window: its facts afresh, one fact changed, or its AX state gone.
-Reading : [Live(Facts), Changed(FactChange), Gone]
-
-## A change in whether rift manages a window.
-Change : [NoChange, Admitted, Suspended(Veto)]
-
-## A window's presence: none, live, or kept with its AX element invalidated.
-Presence : [NoPresence, Live(Facts), Invalidated(Facts)]
-
-## A window with AX state: valid, or invalidated (kept, with its facts, but not managed).
-Present : [Live(Facts), Invalidated(Facts)]
-
-## What an inventory knows of a window it is reconciled against.
-InventoryFacts : { report : [Reported, Omitted], view : [InView, OutOfView], minimize : [Shown, Minimized, NoAxState], fullscreen : [Recorded, NotRecorded], identity : [Known(U64), Unknown], validity : [Valid, Invalidated] }
-
-## What the window server says of an omitted window.
-NativeEvidence : { suitability : [Suitable, Unsuitable, SuitabilityUnknown], ordering : [OrderedIn, OrderedOut, OrderingUnknown], look : [AWindow, NotAWindow, LookUnknown] }
-
-## Why an inventory leaves a window alone.
-Keep : [Reported, OutOfView, NoAxState, Minimized, Fullscreen, NoNativeIdentity, NativeOrdering, NoNegativeEvidence]
 
 Lifecycle := [].{
 
 	## The windows app rules run over, by Space in Space order. Facts: 0 whether a window is
 	## reconcilable, 1 its Space, 2 whether a Space is active (asked once every window is placed,
 	## in Space order).
-	rule_targets : List(U64), RuleRun, Answers(U64, Bool), Answers(U64, MaybeSpace), Answers(U64, Bool) -> Read(List({ space : U64, windows : List(U64) }))
+	rule_targets : List(U64), RuleRun, List(WordBool), List(WordSpace), List(WordBool) -> Read(List(SpaceWindows))
 	rule_targets = |windows, run, reconcilable, spaces, active| {
 		var $groups = Ok([])
 		for window in windows {
@@ -90,7 +46,7 @@ Lifecycle := [].{
 	}
 
 	## Adds `window` to its Space's group, if the run considers it and it has a Space.
-	add_target : List({ space : U64, windows : List(U64) }), U64, RuleRun, Answers(U64, Bool), Answers(U64, MaybeSpace) -> Read(List({ space : U64, windows : List(U64) }))
+	add_target : List(SpaceWindows), U64, RuleRun, List(WordBool), List(WordSpace) -> Read(List(SpaceWindows))
 	add_target = |groups, window, run, reconcilable, spaces| {
 		considered =
 			match run {
@@ -109,7 +65,7 @@ Lifecycle := [].{
 	}
 
 	## Adds `window` to its Space's group, keeping the groups in Space order (a BTreeMap's).
-	add_to_space : List({ space : U64, windows : List(U64) }), U64, U64 -> List({ space : U64, windows : List(U64) })
+	add_to_space : List(SpaceWindows), U64, U64 -> List(SpaceWindows)
 	add_to_space = |groups, space, window| {
 		var $out = []
 		var $placed = False
@@ -130,7 +86,7 @@ Lifecycle := [].{
 	}
 
 	## Whether the layout hears of a window after its app rules ran.
-	rule_refreshes_layout : RuleRun, { workspace_before : MaybeSpace, workspace : U64, floating_before : Bool, floating : Bool, was_ignored : Bool, unavailable : Bool } -> Bool
+	rule_refreshes_layout : RuleRun, RuleOutcome -> Bool
 	rule_refreshes_layout = |run, outcome|
 		match run {
 			Reapply => True
@@ -147,7 +103,7 @@ Lifecycle := [].{
 	## The Space a new window moves to: in global mode, the pointer's other active display's,
 	## for a standard window no app rule places. Facts: 0 the pointer's Space, 1 whether a Space
 	## is active, 2 whether a rule names the window's workspace.
-	pointer_display_target : Bool, U64, Fact(MaybeSpace), Answers(U64, Bool), [Untracked, NotStandard, Standard], Fact(Bool) -> Read(MaybeSpace)
+	pointer_display_target : Bool, U64, FactSpace, List(WordBool), NewWindow, FactBool -> Read(MaybeSpace)
 	pointer_display_target = |global, opened_on, pointer, active, window, rule_names_workspace|
 		if global {
 			pointer_of = ask(pointer, 0)?
@@ -177,7 +133,7 @@ Lifecycle := [].{
 		}
 
 	## Whether `owner`'s window is a native transient. Fact: 0 whether it is exempt.
-	is_native_transient : [Entry({ origin : Origin, pid : U64 }), NoEntry], U64, Fact(Bool) -> Read(Bool)
+	is_native_transient : TransientEntry, U64, FactBool -> Read(Bool)
 	is_native_transient = |entry, owner, exempt|
 		match entry {
 			Entry({ origin: Native, pid }) =>
@@ -192,7 +148,7 @@ Lifecycle := [].{
 		}
 
 	## Whether a transient entry survives a departure.
-	keeps_transient : [Destroyed(MaybeSpace), Closed(U64), AppGone(U64)], U64, Origin, U64 -> Bool
+	keeps_transient : Departure, U64, Origin, U64 -> Bool
 	keeps_transient = |departure, id, origin, owner|
 		match departure {
 			Destroyed(gone) =>
@@ -222,7 +178,7 @@ Lifecycle := [].{
 
 	## Whether an inventory that omits a window says nothing about it. Facts: 0 its assignment,
 	## 1 whether a Space is active, 2 whether it is parked.
-	out_of_inventory_view : MaybeSpace, Fact(MaybeSpace), Answers(U64, Bool), Fact(Bool) -> Read(Bool)
+	out_of_inventory_view : MaybeSpace, FactSpace, List(WordBool), FactBool -> Read(Bool)
 	out_of_inventory_view = |native, assigned, active, parked| {
 		known =
 			match native {
@@ -239,7 +195,7 @@ Lifecycle := [].{
 
 	## Whether a title change re-applies a window's app rules. Facts: 0 its Space, 1 whether a
 	## Space is active, 2 whether it is reconcilable.
-	reapplies_on_title_change : Bool, Fact(MaybeSpace), Answers(U64, Bool), Fact(Bool) -> Read(Bool)
+	reapplies_on_title_change : Bool, FactSpace, List(WordBool), FactBool -> Read(Bool)
 	reapplies_on_title_change = |configured, space, active, reconcilable|
 		if configured {
 			space_of = ask(space, 0)?
@@ -255,7 +211,7 @@ Lifecycle := [].{
 		}
 
 	## Whether rift manages a window, and if not the first veto that applies.
-	admits : Facts -> [Admitted, Vetoed(Veto)]
+	admits : AdmissionFacts -> WindowAdmission
 	admits = |facts|
 		match facts.native {
 			Transient => Vetoed(NativeTransient)
@@ -292,7 +248,7 @@ Lifecycle := [].{
 		}
 
 	## A window's facts with one changed.
-	changed : Facts, FactChange -> Facts
+	changed : AdmissionFacts, FactChange -> AdmissionFacts
 	changed = |facts, change|
 		match change {
 			Manageability(manageability) => { ..facts, manageability }
@@ -304,7 +260,7 @@ Lifecycle := [].{
 
 	## A window's facts after a reading (none without AX state), and the change in its
 	## admission: only a change between admitted and vetoed is one.
-	read : [Known(Facts), NoFacts], Reading -> ([Known(Facts), NoFacts], Change)
+	read : KnownFacts, Reading -> (KnownFacts, Change)
 	read = |before, reading| {
 		after =
 			match reading {
@@ -346,7 +302,7 @@ Lifecycle := [].{
 
 	## A window's presence after an event, what the event came to (a read and its change, or
 	## whether it invalidated or revalidated), and whether rift manages it then.
-	presence_step : Presence, [Reading(Reading), Invalidate, Revalidate] -> { after : Presence, outcome : [Read(Change), Invalidated(Bool), Revalidated(Bool)], manages : Bool }
+	presence_step : Presence, PresenceEvent -> PresenceAnswer
 	presence_step = |before, event| {
 		(after, outcome) =
 			match event {
@@ -417,7 +373,7 @@ Lifecycle := [].{
 
 	## A window's presence after its AX element was invalidated, and whether it had AX state
 	## to invalidate.
-	presence_invalidate : Presence -> (Presence, [Invalidated, NoAxState])
+	presence_invalidate : Presence -> (Presence, Invalidation)
 	presence_invalidate = |before|
 		match before {
 			NoPresence => (NoPresence, NoAxState)
@@ -427,7 +383,7 @@ Lifecycle := [].{
 
 	## A window's presence after a positive AX observation, and whether it had been
 	## invalidated (a valid window, or one without AX state, had not).
-	presence_revalidate : Presence -> (Presence, [Revalidated, NotInvalidated])
+	presence_revalidate : Presence -> (Presence, Revalidation)
 	presence_revalidate = |before|
 		match before {
 			Invalidated(facts) => (Live(facts), Revalidated)
@@ -448,7 +404,7 @@ Lifecycle := [].{
 	}
 
 	## `window`'s AX element was invalidated: the windows after, and whether it had AX state.
-	windows_invalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), [Invalidated, NoAxState])
+	windows_invalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), Invalidation)
 	windows_invalidate = |windows, window| {
 		(after, invalidation) = presence_invalidate(presence_in(windows, window))
 		(with_presence(windows, window, after), invalidation)
@@ -456,14 +412,14 @@ Lifecycle := [].{
 
 	## A positive AX observation of `window`: the windows after, and whether it had been
 	## invalidated.
-	windows_revalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), [Revalidated, NotInvalidated])
+	windows_revalidate : Dict(U64, Present), U64 -> (Dict(U64, Present), Revalidation)
 	windows_revalidate = |windows, window| {
 		(after, revalidation) = presence_revalidate(presence_in(windows, window))
 		(with_presence(windows, window, after), revalidation)
 	}
 
 	## Every window with AX state and its presence.
-	windows_view : Dict(U64, Present) -> List({ window : U64, presence : Present })
+	windows_view : Dict(U64, Present) -> List(PresentWindow)
 	windows_view = |windows| windows.to_list().map(|(window, presence)| { window, presence })
 
 	## `window`'s presence, none without an entry.
@@ -500,7 +456,7 @@ Lifecycle := [].{
 	## Whether an inventory retires a window, or why it keeps it. Fact: 0 what the window server
 	## says of it, asked only for an omitted window in view with AX state, shown, not in
 	## fullscreen and with a native identity.
-	retirement : InventoryFacts, Fact(NativeEvidence) -> Read([Retire, Keep(Keep)])
+	retirement : InventoryFacts, FactEvidence -> Read(Retirement)
 	retirement = |facts, evidence|
 		match facts.report {
 			Reported => Ok(Keep(Reported))
@@ -529,7 +485,7 @@ Lifecycle := [].{
 
 	## Retirement on native evidence: kept while suitable and ordered out with a valid AX
 	## identity (ordering explains the omission), retired on any negative evidence.
-	judged : NativeEvidence, [Valid, Invalidated] -> [Retire, Keep(Keep)]
+	judged : NativeEvidence, AxValidity -> Retirement
 	judged = |native, validity| {
 		(suitable, unsuitable) =
 			match native.suitability {

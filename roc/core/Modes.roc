@@ -2,35 +2,25 @@
 ## and an initiative goes ahead only when every axis admits it. The verdict names the first axis,
 ## in the table's order, that refuses. Each axis's rule is an exhaustive match, no wildcard.
 
-## What user input does, as far as the table needs.
-InputClass : [Steering, Arranging, Inert, Hover]
-
-## Things Rift would do that a mode can refuse.
-Initiative : [UserInput(InputClass), Arrange, RetireWindows, SwitchWorkspaceFocus, WarpFocus, FollowActivation]
-
-## What the pointer is doing with windows (a window is one word).
-Pointer : [Idle, Pressing(U64), Dragging(U64)]
-
-## The axis that refused: every axis but the pointer refuses in one state only.
-Axis : [Pointer(Pointer), Menu, MissionControl, Modal, Viewport, FocusClaim, UserSpaces, Wake, WorkspaceSwitch, Topology]
+import pf.Boundary exposing [Initiative, PointerNow, MenuNow, MissionControlNow, ModalNow, ViewportNow, FocusClaimNow, UserSpacesNow, WakeNow, WorkspaceSwitchNow, TopologyNow, ModeVerdict]
 
 ## The modes Rift is in, one per axis.
 ModesNow : {
-	pointer : Pointer,
-	menu : [Closed, Open],
-	mission_control : [Inactive, Active],
-	modal : [Clear, Frontmost],
-	viewport : [Free, Gesturing],
-	focus_claim : [Free, PausesHover],
-	user_spaces : [Shown, None],
-	wake : [UserPresent, AwaitingInput],
-	workspace_switch : [Idle, Switching],
-	topology : [Settled, Unsettled],
+	pointer : PointerNow,
+	menu : MenuNow,
+	mission_control : MissionControlNow,
+	modal : ModalNow,
+	viewport : ViewportNow,
+	focus_claim : FocusClaimNow,
+	user_spaces : UserSpacesNow,
+	wake : WakeNow,
+	workspace_switch : WorkspaceSwitchNow,
+	topology : TopologyNow,
 }
 
 Modes := [].{
 	## The table's verdict on `initiative`: admitted, or the first axis that refuses it.
-	verdict : ModesNow, Initiative -> [Admitted, Refused(Axis)]
+	verdict : ModesNow, Initiative -> ModeVerdict
 	verdict = |m, initiative| {
 		refusals = [
 			if (may(initiative, m.pointer)) Admitted else Refused(Pointer(m.pointer)),
@@ -57,7 +47,7 @@ Modes := [].{
 	}
 
 	## The pointer's row (`rift_core::may`).
-	may : Initiative, Pointer -> Bool
+	may : Initiative, PointerNow -> Bool
 	may = |initiative, pointer|
 		match (initiative, pointer) {
 			(UserInput(Inert), Idle) => True
@@ -149,63 +139,63 @@ Modes := [].{
 			FollowActivation => False
 		}
 
-	refuses_menu : [Closed, Open], Initiative -> Bool
+	refuses_menu : MenuNow, Initiative -> Bool
 	refuses_menu = |menu, initiative|
 		match menu {
 			Open => hover(initiative)
 			Closed => False
 		}
 
-	refuses_mission_control : [Inactive, Active], Initiative -> Bool
+	refuses_mission_control : MissionControlNow, Initiative -> Bool
 	refuses_mission_control = |mission_control, initiative|
 		match mission_control {
 			Active => hover(initiative) or retire(initiative)
 			Inactive => False
 		}
 
-	refuses_modal : [Clear, Frontmost], Initiative -> Bool
+	refuses_modal : ModalNow, Initiative -> Bool
 	refuses_modal = |modal, initiative|
 		match modal {
 			Frontmost => hover(initiative)
 			Clear => False
 		}
 
-	refuses_viewport : [Free, Gesturing], Initiative -> Bool
+	refuses_viewport : ViewportNow, Initiative -> Bool
 	refuses_viewport = |viewport, initiative|
 		match viewport {
 			Gesturing => hover(initiative)
 			Free => False
 		}
 
-	refuses_focus_claim : [Free, PausesHover], Initiative -> Bool
+	refuses_focus_claim : FocusClaimNow, Initiative -> Bool
 	refuses_focus_claim = |focus_claim, initiative|
 		match focus_claim {
 			PausesHover => hover(initiative)
 			Free => False
 		}
 
-	refuses_user_spaces : [Shown, None], Initiative -> Bool
+	refuses_user_spaces : UserSpacesNow, Initiative -> Bool
 	refuses_user_spaces = |user_spaces, initiative|
 		match user_spaces {
 			None => retire(initiative)
 			Shown => False
 		}
 
-	refuses_wake : [UserPresent, AwaitingInput], Initiative -> Bool
+	refuses_wake : WakeNow, Initiative -> Bool
 	refuses_wake = |wake, initiative|
 		match wake {
 			AwaitingInput => follow_activation(initiative)
 			UserPresent => False
 		}
 
-	refuses_workspace_switch : [Idle, Switching], Initiative -> Bool
+	refuses_workspace_switch : WorkspaceSwitchNow, Initiative -> Bool
 	refuses_workspace_switch = |workspace_switch, initiative|
 		match workspace_switch {
 			Switching => follow_activation(initiative)
 			Idle => False
 		}
 
-	refuses_topology : [Settled, Unsettled], Initiative -> Bool
+	refuses_topology : TopologyNow, Initiative -> Bool
 	refuses_topology = |topology, initiative|
 		match topology {
 			Unsettled => layout_input(initiative)

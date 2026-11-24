@@ -1,71 +1,14 @@
 ## A scrolling layout's strip (`rift_core::layout::scrolling`): columns side by side in world
 ## space, each column's windows in rows sharing its height, and the camera's resting points.
 
+import pf.Boundary exposing [WindowId, Rect, WindowConstraints, AxisItem, Widths, Row, Column, Strip, Spot, Snap, Placed, Settle, Settled, Frame, Parking, FullscreenMode]
 import Geometry exposing [fixed_for_axis, max, min, normalized, reported_min, resizable_for_axis, round_rect, solve]
-
-WindowId : { pid : I32, idx : U32 }
-
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## A size an app reported, as rift parsed it: each axis finite and not negative.
-Size : { width : F64, height : F64 }
-
-## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
-## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
-Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
-
-WindowConstraints : {
-	sizing : Sizing,
-	locked_width : F64,
-	locked_height : F64,
-	max_width : F64,
-	max_height : F64,
-}
-
-AxisItem : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], weight : F64, can_grow : Bool }
-
-Widths : { ratio : F64, min_ratio : F64, max_ratio : F64, preserve_window_sizes : Bool, expand_single_column : Bool }
-
-## A window in a column: its constraints as reported, its share of the column's height.
-Row : { window : WindowId, constraints : WindowConstraints, weight : F64 }
-
-## A column with at least one window.
-Column : { id : U64, width : [Default, Proportion(F64), Exactly(F64)], first : Row, rest : List(Row) }
-
-## A strip with at least one column.
-Strip : {
-	tiling : Rect,
-	column_gap : F64,
-	row_gap : F64,
-	widths : Widths,
-	alignment : [Left, Center, Right],
-	navigation : [Anchored, Free],
-	first : Column,
-	rest : List(Column),
-}
-
-## A column in world space, and where the camera stops to show it.
-Spot : { id : U64, world_x : F64, width : F64, anchor : F64 }
-
-## A camera offset the camera may rest at, and the column it shows.
-Snap : { offset : F64, column : U64 }
-
-## Where a strip placed everything: its spots, its windows' frames, its snaps (at least one),
-## and the camera's bounds (the platform's `Boundary.Placed`).
-Placed : { first : Spot, rest : List(Spot), frames : List({ window : WindowId, frame : Rect }), first_snap : Snap, rest_snaps : List(Snap), low : F64, high : F64 }
-
-## How ties go when the camera settles: niri (the leftmost point, then the furthest column
-## wholly in view in the direction of travel), anchored (the earlier point), or anchored
-## towards the active column (a point showing it).
-Settle : [Niri, Anchored, AnchoredTowards(U64)]
-
-Settled : { column : U64, offset : F64 }
 
 ## A column's place among the strip's, which decides its anchor.
 Position : [Only, First, Middle, Last]
 
 ## How the camera shows a placed strip (`rift_core::layout::scrolling::Camera`).
-Camera : { screen : Rect, tiling : Rect, offset : F64, parking : [Park, InPlace] }
+Camera : { screen : Rect, tiling : Rect, offset : F64, parking : Parking }
 
 Scrolling := [].{
 
@@ -435,7 +378,7 @@ Scrolling := [].{
 	## Each window's frame on screen, in order: a fullscreen window's fullscreen frame; any other
 	## its world frame moved by the camera, parked when the camera parks and it is wholly outside
 	## the tiling area, then rounded (upstream's `translate_frames`, operation for operation).
-	translate : List((WindowId, Rect)), Camera, List((WindowId, [Screen, WithinGaps])) -> List((WindowId, Rect))
+	translate : List((WindowId, Rect)), Camera, List((WindowId, FullscreenMode)) -> List((WindowId, Rect))
 	translate = |frames, camera, fullscreen|
 		frames.map(
 			|(window, frame)| {

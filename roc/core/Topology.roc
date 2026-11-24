@@ -2,50 +2,11 @@
 ## data: a decision's facts are what the platform's run of it asked (`Asking.Fact`), read in the
 ## same order. Spaces, window-server ids and displays are one word each.
 
+import pf.Boundary exposing [WindowId, MaybeSpace, LookupOrigin, Standing, DiscoveredSpace, DiscoveryStanding, Displays, Incoming, Admission, FactWords, FactSpace, FactEventClass, FactOrigin, WordBool, WindowBool, OriginScreen, ScreenFound, WordTracked, ServerSpace, AppWindows, Target, TopologyNow]
 import Asking exposing [ask, ask_window, ask_word]
-
-WindowId : { pid : I32, idx : U32 }
-
-## A Space, or none.
-MaybeSpace : [Space(U64), NoSpace]
-
-## A point on the screens, or none.
-Origin : [At({ x : F64, y : F64 }), Nowhere]
-
-## Where an app inventory finds a window, by what the platform already knows of it.
-Standing : [RecoveringFullscreen, Untracked, Tracked]
-
-## The Space an app inventory takes a window to be on: live on exactly one Space, a
-## fullscreen one or a display's (also evidence of a fullscreen entry or exit); live on exactly
-## one other Space; or not live on exactly one, and what the platform resolves for it.
-DiscoveredSpace : [Observed(U64), Live(U64), Fallback(MaybeSpace)]
-
-## What an app inventory may do with a window it reports, for its discovery Space.
-DiscoveryStanding : [FullscreenRecorded, Placeholder, Admissible]
-
-## The displays of a snapshot: each screen's display (none without an id), each display's
-## Spaces in the platform's order.
-Displays : { screens : List([Display(U64), Unnamed]), spaces : List({ display : U64, spaces : List(U64) }) }
-
-## A snapshot being admitted.
-Incoming : {
-	displays : Displays,
-	remaps : List({ old : U64, new : U64 }),
-	display_set_changed : Bool,
-	force_refresh : Bool,
-	membership_complete : Bool,
-}
-
-## A fact the platform's run of the decision answered, or one it never asked.
-Fact(a) : [Asked(a), Unasked]
-
-## A fact asked about keys: each key asked and its answer.
-Answers(k, v) : List({ key : k, answer : v })
 
 ## What a decision decided, or the first fact it read that its question does not carry.
 Read(a) : Try(a, [Unasked(U64)])
-
-Admission : [Hold([MissionControl, MembershipIncomplete]), Commit({ invalidated : List(U64), lost : List(U64) })]
 
 Topology := [].{
 
@@ -54,7 +15,7 @@ Topology := [].{
 	## untracked window falls back to its recorded Space and a recovering one to none. Facts: 0
 	## its live Spaces, 1 whether a Space is observable, 2 its recorded Space, 3 its resolved
 	## Space.
-	discovered_space : Standing, Fact(List(U64)), Answers(U64, Bool), Fact(MaybeSpace), Fact(MaybeSpace) -> Read(DiscoveredSpace)
+	discovered_space : Standing, FactWords, List(WordBool), FactSpace, FactSpace -> Read(DiscoveredSpace)
 	discovered_space = |standing, live, observable, recorded, resolved| {
 		one_live = |{}| {
 			spaces = ask(live, 0)?
@@ -89,7 +50,7 @@ Topology := [].{
 	## A reported window's authoritative Space (native, else assigned) and the Space discovery
 	## may admit it on: only an admissible window's, preferring its assignment, then its native
 	## Space, then where its frame is. Fact: 0 where its frame is.
-	discovery_spaces : DiscoveryStanding, MaybeSpace, MaybeSpace, Fact(MaybeSpace) -> Read((MaybeSpace, MaybeSpace))
+	discovery_spaces : DiscoveryStanding, MaybeSpace, MaybeSpace, FactSpace -> Read((MaybeSpace, MaybeSpace))
 	discovery_spaces = |standing, native, assigned, by_frame| {
 		authoritative = or_space(native, assigned)
 		match standing {
@@ -109,7 +70,7 @@ Topology := [].{
 	## Whether to quarantine an event: while the topology is unsettled, window reports and the
 	## input that acts on windows are held back. Fact: 0 the event's class (asked only while
 	## unsettled).
-	quarantines : [Settled, Unsettled], Fact([WindowReport, WindowInput, Other]) -> Read(Bool)
+	quarantines : TopologyNow, FactEventClass -> Read(Bool)
 	quarantines = |topology, class|
 		match topology {
 			Settled => Ok(False)
@@ -126,7 +87,7 @@ Topology := [].{
 	## The display a selector names, and its active Space. Facts: 0 the current display's
 	## center (asked only without the source's), 1 the display found from an origin and its
 	## Space, 2 whether a Space is active (asked only for a display with a Space).
-	target_display : Origin, Fact(Origin), List({ key : Origin, answer : [Found({ display : U64, space : [Some(U64), Nothing] }), NotFound] }), Answers(U64, Bool) -> Read([Display({ display : U64, space : U64 }), DisplayNotFound, SpaceUnavailable])
+	target_display : LookupOrigin, FactOrigin, List(OriginScreen), List(WordBool) -> Read(Target)
 	target_display = |source_center, current_center, screens, active| {
 		origin =
 			match source_center {
@@ -148,7 +109,7 @@ Topology := [].{
 	}
 
 	## The `fact`-th fact's answer for an origin.
-	ask_origin : List({ key : Origin, answer : v }), Origin, U64 -> Read(v)
+	ask_origin : List(OriginScreen), LookupOrigin, U64 -> Read(ScreenFound)
 	ask_origin = |answers, key, fact| {
 		var $found = Err(Unasked(fact))
 		for entry in answers {
@@ -161,7 +122,7 @@ Topology := [].{
 	}
 
 	## Whether two origins are the same point (or both none).
-	same_origin : Origin, Origin -> Bool
+	same_origin : LookupOrigin, LookupOrigin -> Bool
 	same_origin = |a, b|
 		match a {
 			At(p) =>
@@ -257,7 +218,7 @@ Topology := [].{
 	## window is seen: the tracked windows live on an activated Space whose admission can still
 	## be reconciled. Facts: 0 the window a window-server id is tracked as, 1 whether a
 	## window's admission can be reconciled.
-	candidates : List({ server : U64, space : U64 }), List(U64), Answers(U64, [Tracked(WindowId), NotTracked]), Answers(WindowId, Bool) -> Read(List({ pid : I32, windows : List(WindowId) }))
+	candidates : List(ServerSpace), List(U64), List(WordTracked), List(WindowBool) -> Read(List(AppWindows))
 	candidates = |window_spaces, activated, tracked, reconcilable| {
 		var $by_app = Ok([])
 		for entry in window_spaces {
@@ -275,7 +236,7 @@ Topology := [].{
 	}
 
 	## Adds the window a window-server id is tracked as, if its admission can be reconciled.
-	add_candidate : List({ pid : I32, windows : List(WindowId) }), U64, Answers(U64, [Tracked(WindowId), NotTracked]), Answers(WindowId, Bool) -> Read(List({ pid : I32, windows : List(WindowId) }))
+	add_candidate : List(AppWindows), U64, List(WordTracked), List(WindowBool) -> Read(List(AppWindows))
 	add_candidate = |by_app, server, tracked, reconcilable| {
 		window_of = ask_word(tracked, server, 0)?
 		match window_of {
@@ -287,7 +248,7 @@ Topology := [].{
 		}
 	}
 
-	add_to_app : List({ pid : I32, windows : List(WindowId) }), WindowId -> List({ pid : I32, windows : List(WindowId) })
+	add_to_app : List(AppWindows), WindowId -> List(AppWindows)
 	add_to_app = |by_app, window| {
 		var $out = []
 		var $added = False

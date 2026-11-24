@@ -1,43 +1,16 @@
 ## A BSP layout's frames (`rift_core::layout::bsp`): every split divides its area in two along
 ## one axis, by a ratio, as far as its windows' constraints allow.
 
-import pf.Boundary exposing [BspNode]
+import pf.Boundary exposing [BspNode, BspShape, Gaps, WindowId, Rect, WindowConstraints, AxisItem, AxisFixed, AxisMax]
 import Geometry exposing [container_summary, fixed_for_axis, max, max_for_axis, min, normalized, reported_min, resizable_for_axis, solve, tiling_area]
 
-WindowId : { pid : I32, idx : U32 }
-
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## A size an app reported, as rift parsed it: each axis finite and not negative.
-Size : { width : F64, height : F64 }
-
-## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
-## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
-Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
-
-WindowConstraints : {
-	sizing : Sizing,
-	locked_width : F64,
-	locked_height : F64,
-	max_width : F64,
-	max_height : F64,
-}
-
-Gaps : { top : F64, left : F64, bottom : F64, right : F64, horizontal : F64, vertical : F64 }
-
 ## One subtree's constraints along an axis.
-Summary : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], can_grow : Bool }
-
-AxisItem : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], weight : F64, can_grow : Bool }
-
-Slot : [Empty, Window({ window : WindowId, constraints : [Constrained(WindowConstraints), Unconstrained] })]
-
-Fill : [Tiled, Screen, WithinGaps]
+Summary : { min : F64, fixed : AxisFixed, max : AxisMax, can_grow : Bool }
 
 ## A BSP node is the platform's (`Boundary.BspNode`).
 Node : BspNode
 
-Shape : { screen : Rect, gaps : Gaps, aspect : [Aspect(F64), Free], root : Node }
+Shape : BspShape
 
 # Rust's float operations.
 
@@ -119,7 +92,7 @@ Bsp := [].{
 				available = max(total - gap, 0.0)
 				axis = |child, weight| {
 					s = summary(bsp.gaps, child, horizontal)
-					{ min: s.min, fixed: s.fixed, max: s.max, weight: max(weight, 0.0), can_grow: s.can_grow }
+					AxisItem.{ min: s.min, fixed: s.fixed, max: s.max, weight: max(weight, 0.0), can_grow: s.can_grow }
 				}
 				# The first child starts where the split does; the second after the first and the
 				# gap (as one sum, the way the Rust adds it).
@@ -151,7 +124,7 @@ Bsp := [].{
 				match out {
 					[(window, frame)] => {
 						(w, h) = if (frame.w > frame.h * ratio) (frame.h * ratio, frame.h) else (frame.w, frame.w / ratio)
-						[(window, { x: area.x + (area.w - w) / 2.0, y: area.y + (area.h - h) / 2.0, w, h })]
+						[(window, Rect.{ x: area.x + (area.w - w) / 2.0, y: area.y + (area.h - h) / 2.0, w, h })]
 					}
 
 					[] | [_, _, ..] => out

@@ -1,74 +1,35 @@
 ## Decisions about virtual workspaces (`rift_core::workspaces`): which workspace a command
 ## reaches and where stepping goes. Workspaces, Spaces and names are one word each.
 
+import pf.Boundary exposing [Context, MaybeWord, Activation, SpaceActivation, WorkspaceSpace, Ownership, WindowOwnership, WorkspaceWindows, JoinedEvent, JoinedView, Outcome, Reached, CatalogEntry, ScopeEntry, Selector, FactWord, WordBool]
 import Asking exposing [ask, ask_word]
-
-## Where a command is given: the acting Space, and the Spaces visible now.
-Context : { space : U64, visible : List(U64) }
-
-## A workspace, when there is one.
-Maybe : [Some(U64), Nothing]
-
-## What a native Space shows.
-Activation : [Showing({ current : U64, previous : Maybe, remembered : Maybe }), Vacant(Maybe)]
 
 ## A change to the workspaces' topology, as the platform makes it.
 TopologyEvent : [
-	Created({ workspace : U64, space : U64 }),
+	Created(WorkspaceSpace),
 	Removed(U64),
-	Moved({ workspace : U64, space : U64 }),
-	Activated({ space : U64, activation : Activation }),
+	Moved(WorkspaceSpace),
+	Activated(SpaceActivation),
 	Cleared(U64),
 ]
 
 ## The catalog (each workspace with its Space, in catalog order) and what each Space shows (in
 ## the order the Spaces first got an activation).
-Topology : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }) }
-
-## Where a claimed window returns to when its claim ends.
-Destination : [Returns(U64), Nowhere]
-
-## Who places a window, when somebody does: a workspace, an external owner, or (held under the
-## user's hand, a workspace transfer having left it) nobody until the drop.
-## A claim, whole: its owner (the one part a decision reads), how it claimed, the id it claimed,
-## and where the window returns when it ends.
-Claim : { owner : U64, flags : { focus_follows_mouse : [Followed, Suppressed] }, original : U64, destination : Destination }
-
-Ownership : [Assigned(U64), Claimed(Claim), Held]
+Topology : { catalog : List(WorkspaceSpace), activations : List(SpaceActivation) }
 
 ## Who places each window, keyed by window, so no window has two owners; a window without
-## an entry is unowned. Views give them in window order (`in_order`).
+## an entry is unowned. Views give them in window order (`in_order`). A claim is kept whole: its
+## owner (the one part a decision reads), how it claimed, the id it claimed, and where the
+## window returns when it ends.
 Ownerships : Dict(U64, Ownership)
 
 ## The workspaces joined: the catalog, what each Space shows, and who places each window.
 ## Every workspace an activation or an ownership names is in the catalog.
 Joined : {
-	catalog : List({ workspace : U64, space : U64 }),
-	activations : List({ space : U64, activation : Activation }),
+	catalog : List(WorkspaceSpace),
+	activations : List(SpaceActivation),
 	owners : Ownerships,
 }
-
-## Who takes a removed workspace's windows and claims.
-Successor : [Into(U64), Unassign]
-
-## A change to the joined workspaces.
-JoinedEvent : [
-	Created({ workspace : U64, space : U64 }),
-	Removed({ workspace : U64, successor : Successor }),
-	Moved({ workspace : U64, space : U64 }),
-	Activated({ space : U64, activation : Activation }),
-	Cleared(U64),
-	Owned({ window : U64, owned : [Unowned, Owner(Ownership)] }),
-]
-
-## What an event met: accepted, or why it was refused (a refusal changes nothing).
-Outcome : [Accepted, Exists(U64), Unknown(U64), OwnSuccessor(U64), Shown({ workspace : U64, space : U64 })]
-
-## A fact the platform's run of the decision answered, or one it never asked.
-Fact(a) : [Asked(a), Unasked]
-
-## A fact asked about keys: each key asked and its answer.
-Answers(k, v) : List({ key : k, answer : v })
 
 ## What a decision decided, or the first fact it read that its question does not carry.
 Read(a) : Try(a, [Unasked(U64)])
@@ -87,7 +48,7 @@ Workspaces := [].{
 
 	## Where a step from `current` lands, if anywhere. Fact: 0 whether a workspace has windows
 	## (asked only when skipping empty ones, in the order the step meets them).
-	step : Bool, List({ id : U64, space : U64 }), Context, U64, Bool, Bool, Bool, Answers(U64, Bool) -> Read(Maybe)
+	step : Bool, List(CatalogEntry), Context, U64, Bool, Bool, Bool, List(WordBool) -> Read(MaybeWord)
 	step = |global, catalog, context, current, backwards, skip, stop, has_windows| {
 		reachable = |entry| eligible(global, context, entry.space)
 		if !catalog.any(|entry| entry.id == current and reachable(entry)) {
@@ -164,7 +125,7 @@ Workspaces := [].{
 	}
 
 	## The workspace a selector names in scope and its Space, if reachable.
-	resolve : Bool, List({ id : U64, space : U64, name : U64 }), Context, [Index(U64), Name(U64)] -> [Reached({ workspace : U64, space : U64 }), Unreached]
+	resolve : Bool, List(ScopeEntry), Context, Selector -> Reached
 	resolve = |global, scope, context, selector| {
 		named =
 			match selector {
@@ -238,7 +199,7 @@ Workspaces := [].{
 
 	## Every owned window and its ownership, in window order: the order every view and answer
 	## gives them in.
-	in_order : Ownerships -> List({ window : U64, ownership : Ownership })
+	in_order : Ownerships -> List(WindowOwnership)
 	in_order = |ownerships|
 		ownerships
 			.to_list()
@@ -263,7 +224,7 @@ Workspaces := [].{
 		$outcome
 	}
 
-	maybe_list : Maybe -> List(U64)
+	maybe_list : MaybeWord -> List(U64)
 	maybe_list = |maybe|
 		match maybe {
 			Some(workspace) => [workspace]
@@ -388,7 +349,7 @@ Workspaces := [].{
 
 	## The workspace navigation history points at and its Space, if it is on a Space and
 	## reachable. Fact: 0 the Space it is on (asked only with a history).
-	previous : Bool, Context, Maybe, Fact(Maybe) -> Read([Reached({ workspace : U64, space : U64 }), Unreached])
+	previous : Bool, Context, MaybeWord, FactWord -> Read(Reached)
 	previous = |global, context, last, on|
 		match last {
 			Some(id) => {
@@ -404,7 +365,7 @@ Workspaces := [].{
 	## Whether window discovery emits a window it found on a Space: unless the window is
 	## assigned to a workspace and the Space's active workspace is another one. Fact: 0 the
 	## Space's active workspace (asked only for an assigned window).
-	emits_window : Maybe, Fact(Maybe) -> Read(Bool)
+	emits_window : MaybeWord, FactWord -> Read(Bool)
 	emits_window = |assigned, active|
 		match assigned {
 			Nothing => Ok(True)
@@ -418,7 +379,7 @@ Workspaces := [].{
 		}
 
 	## What each event of a run met from empty workspaces, and the workspaces it leaves.
-	joined_after : List(JoinedEvent) -> { outcomes : List(Outcome), catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : Activation }), owners : List({ window : U64, ownership : Ownership }), windows : List({ workspace : U64, windows : List(U64) }) }
+	joined_after : List(JoinedEvent) -> JoinedView
 	joined_after = |events| {
 		(joined, outcomes) = events.fold(
 			({ catalog: [], activations: [], owners: Dict.empty() }, []),

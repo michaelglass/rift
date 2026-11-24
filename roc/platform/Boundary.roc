@@ -8,9 +8,17 @@ Boundary := [].{
 
 	# Shared geometry (`rift_core::plain`, `rift_core::layout`).
 
-	## A window: its app's pid and its index within the app.
-	WindowId := { pid : I32, idx : U32 }
+	## A window: its app's pid and its index within the app. Equal when both are.
+	WindowId := { pid : I32, idx : U32 }.{
+		is_eq : WindowId, WindowId -> Bool
+		is_eq = |a, b| a.pid == b.pid and a.idx == b.idx
 
+		## Hashed as its pid, then its index (a key of the core's windows).
+		to_hash : WindowId, Hasher -> Hasher
+		to_hash = |id, hasher| id.idx.to_hash(id.pid.to_hash(hasher))
+	}
+
+	## A frame.
 	Rect := { x : F64, y : F64, w : F64, h : F64 }
 
 	## A size an app reported, as rift parsed it: each axis finite and not negative.
@@ -73,6 +81,7 @@ Boundary := [].{
 	## A segment's maximum, if it has one.
 	AxisMax := [Max(F64), NoMax]
 
+	## One segment to solve, and what it is the length of.
 	AxisItem := { min : F64, fixed : AxisFixed, max : AxisMax, weight : F64, can_grow : Bool }
 
 	## Segments along one axis and the length they share (`solve_axis_lengths`).
@@ -109,6 +118,7 @@ Boundary := [].{
 	## A column's width: the default, a share of the view, or exactly so many points.
 	Width := [Default, Proportion(F64), Exactly(F64)]
 
+	## A window in a column: its constraints as reported, its share of the column's height.
 	Row := { window : WindowId, constraints : WindowConstraints, weight : F64 }
 
 	## A column with at least one window.
@@ -141,6 +151,7 @@ Boundary := [].{
 	## Where a window is seen, if it is.
 	Seen := [Live(Rect), Unseen]
 
+	## A window placed for the first time: its constraints, and the frame it is seen at, if seen.
 	Newcomer := { constraints : WindowConstraints, seen : Seen }
 
 	## Newcomers to a floating layout on `screen`, spread or not.
@@ -164,30 +175,83 @@ Boundary := [].{
 	# the decision, or the first fact it read that its question does not carry.
 
 	## A word (a Space, a workspace, a window-server id), or none.
-	MaybeWord := [Some(U64), Nothing]
+	MaybeWord := [Some(U64), Nothing].{
+		## The same word, or both none.
+		is_eq : MaybeWord, MaybeWord -> Bool
+		is_eq = |a, b|
+			match (a, b) {
+				(Some(x), Some(y)) => x == y
+				(Nothing, Nothing) => True
+				(Some(_), Nothing) | (Nothing, Some(_)) => False
+			}
+	}
 
 	## A window, or none.
 	MaybeWindow := [SomeWindow(WindowId), NoWindow]
 
-	FactBool := [Asked(Bool), Unasked]
+	FactBool := [Asked(Bool), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactBool -> Try(Bool, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## A fact of a word or none.
-	FactWord := [Asked(MaybeWord), Unasked]
+	FactWord := [Asked(MaybeWord), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactWord -> Try(MaybeWord, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## A fact of a window or none.
-	FactWindow := [Asked(MaybeWindow), Unasked]
+	FactWindow := [Asked(MaybeWindow), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactWindow -> Try(MaybeWindow, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## A fact of a list of words.
-	FactWords := [Asked(List(U64)), Unasked]
+	FactWords := [Asked(List(U64)), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactWords -> Try(List(U64), [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## A yes or no asked about a word.
-	WordBool := { key : U64, answer : Bool }
+	WordBool := { key : U64, answer : Bool }.{
+		## The key asked and its answer.
+		entry : WordBool -> { key : U64, answer : Bool }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	## A yes or no asked about a window.
-	WindowBool := { key : WindowId, answer : Bool }
+	WindowBool := { key : WindowId, answer : Bool }.{
+		## The key asked and its answer.
+		entry : WindowBool -> { key : WindowId, answer : Bool }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	## A window asked about a window.
-	WindowWindow := { key : WindowId, answer : WindowId }
+	WindowWindow := { key : WindowId, answer : WindowId }.{
+		## The key asked and its answer.
+		entry : WindowWindow -> { key : WindowId, answer : WindowId }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	## A word or none, decided.
 	WordAnswer := [Decided(MaybeWord), Unasked(U64)]
@@ -212,7 +276,15 @@ Boundary := [].{
 	## Whether an app is blacklisted for auto-focus; no bundle id, no listing.
 	Listing := [Listed(Bool), NoBundle]
 
-	FactListing := [Asked(Listing), Unasked]
+	FactListing := [Asked(Listing), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactListing -> Try(Listing, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	ActivationQuestion := { standard : FactBool, unavailable : FactBool, space : FactWord, workspace : FactWord, active_workspace : FactWord, pending_window : FactBool, mode_refusal : FactWord, active_space_fullscreen : FactBool, unmanageable_source : FactWord, blacklisted : FactListing }
 
@@ -221,6 +293,7 @@ Boundary := [].{
 	## Why an activation does not follow its window.
 	Stay := [NotStandard, Unavailable, NoSpace, NoWorkspace, AlreadyActive, PendingWindow, Mode(U64), FullscreenActive, Unmanageable(U64), NoBundleId, Blacklisted]
 
+	## Whether an activation follows its window, and where, or why not.
 	Follow := [To(FollowTo), Stay(Stay)]
 
 	FollowAnswer := [Decided(Follow), Unasked(U64)]
@@ -232,7 +305,15 @@ Boundary := [].{
 
 	Known := [Known(KnownWindow), Unknown]
 
-	FactKnown := [Asked(Known), Unasked]
+	FactKnown := [Asked(Known), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactKnown -> Try(Known, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	UntrackedQuestion := { under_cursor : MaybeWord, tracked : FactBool, known : FactKnown }
 
@@ -254,20 +335,29 @@ Boundary := [].{
 	## A floating window's frame, if the window is one.
 	MaybeFrame := [Frame(Rect), NoFrame]
 
-	WordFrame := { key : U64, answer : MaybeFrame }
+	WordFrame := { key : U64, answer : MaybeFrame }.{
+		## The key asked and its answer.
+		entry : WordFrame -> { key : U64, answer : MaybeFrame }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	WindowLevels := { level : I64, sub_level : I32 }
 
 	## A window's levels, if known.
 	MaybeLevels := [Levels(WindowLevels), NoLevels]
 
-	WordLevels := { key : U64, answer : MaybeLevels }
+	WordLevels := { key : U64, answer : MaybeLevels }.{
+		## The key asked and its answer.
+		entry : WordLevels -> { key : U64, answer : MaybeLevels }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	RaiseQuestion := { window : Pointed, space : MaybeWord, claimed : FactBool, admitted : FactBool, floating : FactBool, active : FactBool, in_active_workspace : FactBool, could_occlude : FactBool, order : FactWords, floaters : List(WordFrame), levels : List(WordLevels) }
 
 	## Why the window under the pointer is not raised.
 	Unraised := [Unknown, OutsideAdmission, NoSpace, InactiveSpace, OutsideActiveWorkspace, BuriesFloater]
 
+	## Whether focus-follows-mouse raises the window under the pointer, or why not.
 	MouseRaise := [Raise, Skip(Unraised)]
 
 	RaiseAnswer := [Decided(MouseRaise), Unasked(U64)]
@@ -280,7 +370,15 @@ Boundary := [].{
 	## What an event is, to an unsettled topology's quarantine.
 	EventClass := [WindowReport, WindowInput, Other]
 
-	FactEventClass := [Asked(EventClass), Unasked]
+	FactEventClass := [Asked(EventClass), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactEventClass -> Try(EventClass, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## Whether to quarantine an event: whether the topology is settled, the event's class.
 	QuarantineQuestion := { topology : TopologyNow, class : FactEventClass }
@@ -291,14 +389,26 @@ Boundary := [].{
 	## Where a display selector is looked up from, if anywhere.
 	LookupOrigin := [At(Point), Nowhere]
 
-	FactOrigin := [Asked(LookupOrigin), Unasked]
+	FactOrigin := [Asked(LookupOrigin), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactOrigin -> Try(LookupOrigin, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## A display a selector found (one word) and its Space.
 	FoundScreen := { display : U64, space : MaybeWord }
 
 	ScreenFound := [Found(FoundScreen), NotFound]
 
-	OriginScreen := { key : LookupOrigin, answer : ScreenFound }
+	OriginScreen := { key : LookupOrigin, answer : ScreenFound }.{
+		## The key asked and its answer.
+		entry : OriginScreen -> { key : LookupOrigin, answer : ScreenFound }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	TargetQuestion := { source_center : LookupOrigin, current_center : FactOrigin, screens : List(OriginScreen), active : List(WordBool) }
 
@@ -310,7 +420,15 @@ Boundary := [].{
 
 	TargetAnswer := [Decided(Target), Unasked(U64)]
 
-	FactSpace := [Asked(MaybeSpace), Unasked]
+	FactSpace := [Asked(MaybeSpace), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactSpace -> Try(MaybeSpace, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	## Where an app inventory finds a window, by what the platform already knows of it.
 	Standing := [RecoveringFullscreen, Untracked, Tracked]
@@ -322,6 +440,7 @@ Boundary := [].{
 
 	DiscoveredAnswer := [Decided(DiscoveredSpace), Unasked(U64)]
 
+	## What an app inventory may do with a window it reports, for its discovery Space.
 	DiscoveryStanding := [FullscreenRecorded, Placeholder, Admissible]
 
 	DiscoveryQuestion := { standing : DiscoveryStanding, native : MaybeSpace, assigned : MaybeSpace, by_frame : FactSpace }
@@ -332,15 +451,27 @@ Boundary := [].{
 	DiscoveryAnswer := [Decided(DiscoverySpaces), Unasked(U64)]
 
 	## A screen's display, or none for a display with no id (each display a word).
-	Screen := [Display(U64), Unnamed]
+	Screen := [Display(U64), Unnamed].{
+		## The same display, or both unnamed.
+		is_eq : Screen, Screen -> Bool
+		is_eq = |a, b|
+			match (a, b) {
+				(Display(x), Display(y)) => x == y
+				(Unnamed, Unnamed) => True
+				(Display(_), Unnamed) | (Unnamed, Display(_)) => False
+			}
+	}
 
 	DisplaySpaces := { display : U64, spaces : List(U64) }
 
+	## The displays of a snapshot: each screen's display (none without an id), each display's
+	## Spaces in the platform's order.
 	Displays := { screens : List(Screen), spaces : List(DisplaySpaces) }
 
 	## A Space macOS renumbered.
 	Remap := { old : U64, new : U64 }
 
+	## A snapshot being admitted.
 	Incoming := { displays : Displays, remaps : List(Remap), display_set_changed : Bool, force_refresh : Bool, membership_complete : Bool }
 
 	MissionControl := [Open, Closed]
@@ -359,7 +490,11 @@ Boundary := [].{
 	## The window a window-server id is tracked as, if any.
 	TrackedWindow := [Tracked(WindowId), NotTracked]
 
-	WordTracked := { key : U64, answer : TrackedWindow }
+	WordTracked := { key : U64, answer : TrackedWindow }.{
+		## The key asked and its answer.
+		entry : WordTracked -> { key : U64, answer : TrackedWindow }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	CandidatesQuestion := { window_spaces : List(ServerSpace), activated : List(U64), tracked : List(WordTracked), reconcilable : List(WindowBool) }
 
@@ -374,7 +509,11 @@ Boundary := [].{
 	RuleRun := [Admission, Reapply]
 
 	## A Space or none asked about a word.
-	WordSpace := { key : U64, answer : MaybeSpace }
+	WordSpace := { key : U64, answer : MaybeSpace }.{
+		## The key asked and its answer.
+		entry : WordSpace -> { key : U64, answer : MaybeSpace }
+		entry = |given| { key: given.key, answer: given.answer }
+	}
 
 	RuleTargetsQuestion := { windows : List(U64), run : RuleRun, reconcilable : List(WordBool), spaces : List(WordSpace), active : List(WordBool) }
 
@@ -430,6 +569,7 @@ Boundary := [].{
 
 	Minimize := [Shown, Minimized]
 
+	## What admission reads of a window.
 	AdmissionFacts := { manageability : Manageability, rule : Rule, ax : AxKind, native : NativeKind, minimize : Minimize }
 
 	## Why a window is not admitted.
@@ -440,6 +580,7 @@ Boundary := [].{
 	## One admission fact, changed.
 	FactChange := [Manageability(Manageability), Rule(Rule), Ax(AxKind), Native(NativeKind), Minimize(Minimize)]
 
+	## A reading of a window: its facts afresh, one fact changed, or its AX state gone.
 	Reading := [Live(AdmissionFacts), Changed(FactChange), Gone]
 
 	## A window's facts, or none without AX state.
@@ -452,6 +593,7 @@ Boundary := [].{
 
 	ReadAnswer := { after : KnownFacts, change : Change }
 
+	## A window's presence: none, live, or kept with its AX element invalidated.
 	Presence := [NoPresence, Live(AdmissionFacts), Invalidated(AdmissionFacts)]
 
 	PresenceEvent := [Reading(Reading), Invalidate, Revalidate]
@@ -468,6 +610,7 @@ Boundary := [].{
 	## The mode table's question: an initiative, and the modes Rift is in.
 	InputClass := [Steering, Arranging, Inert, Hover]
 
+	## Things Rift would do that a mode can refuse.
 	Initiative := [UserInput(InputClass), Arrange, RetireWindows, SwitchWorkspaceFocus, WarpFocus, FollowActivation]
 
 	## What the pointer is doing with windows.
@@ -540,6 +683,7 @@ Boundary := [].{
 
 	AxValidity := [Valid, Invalidated]
 
+	## What an inventory knows of a window it is reconciled against.
 	InventoryFacts := { report : Report, view : InventoryView, minimize : InventoryMinimize, fullscreen : FullscreenRecord, identity : NativeIdentity, validity : AxValidity }
 
 	## The window server's type for a window, if it says.
@@ -550,9 +694,18 @@ Boundary := [].{
 	## Whether the window server's record looks like a window, if it says.
 	Look := [AWindow, NotAWindow, LookUnknown]
 
+	## What the window server says of an omitted window.
 	NativeEvidence := { suitability : Suitability, ordering : Ordering, look : Look }
 
-	FactEvidence := [Asked(NativeEvidence), Unasked]
+	FactEvidence := [Asked(NativeEvidence), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactEvidence -> Try(NativeEvidence, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
 
 	InventoryQuestion := { facts : InventoryFacts, evidence : FactEvidence }
 
@@ -658,7 +811,16 @@ Boundary := [].{
 	MainWindowsViewed(model) := { model : Box(model), main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord }
 
 	## Where a claimed window returns to when its claim ends.
-	Destination := [Returns(U64), Nowhere]
+	Destination := [Returns(U64), Nowhere].{
+		## The same workspace, or both nowhere.
+		is_eq : Destination, Destination -> Bool
+		is_eq = |a, b|
+			match (a, b) {
+				(Returns(x), Returns(y)) => x == y
+				(Nowhere, Nowhere) => True
+				(Returns(_), Nowhere) | (Nowhere, Returns(_)) => False
+			}
+	}
 
 	## Whether focus follows the mouse while the claimed window is focused.
 	FocusFollowsMouse := [Followed, Suppressed]
@@ -684,6 +846,7 @@ Boundary := [].{
 
 	WorkspaceRemoved := { workspace : U64, successor : Successor }
 
+	## A change to the joined workspaces.
 	JoinedEvent := [Created(WorkspaceSpace), Removed(WorkspaceRemoved), Moved(WorkspaceSpace), Activated(SpaceActivation), Cleared(U64), Owned(OwnershipEvent)]
 
 	JoinedQuestion := { events : List(JoinedEvent) }
@@ -795,7 +958,16 @@ Boundary := [].{
 	NoteEffect := { window : WindowId, note : NoteKind }
 
 	## The timer: armed for a time, or not.
-	Armed := [Armed(U64), Disarmed]
+	Armed := [Armed(U64), Disarmed].{
+		## Armed for the same time, or both disarmed.
+		is_eq : Armed, Armed -> Bool
+		is_eq = |a, b|
+			match (a, b) {
+				(Armed(x), Armed(y)) => x == y
+				(Disarmed, Disarmed) => True
+				(Armed(_), Disarmed) | (Disarmed, Armed(_)) => False
+			}
+	}
 
 	UngripWhy := [Released, LetGo, Gone]
 

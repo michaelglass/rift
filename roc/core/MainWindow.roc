@@ -3,50 +3,24 @@
 ## (a cold start). A step answers the window to focus, if the event makes one known. Pids and
 ## windows are one word each (a pid sign-extended).
 
-## A window, or none.
-Maybe : [Some(U64), Nothing]
-
-## Who started an activation: Rift itself (its echo is not news), or anything else.
-Initiator : [Rift, Other]
-
-## Whether an app is frontmost by its own AX activation events.
-Standing : [Frontmost, Background]
+import pf.Boundary exposing [MaybeWord, MainActivation, Initiator, AppStanding, NativeFocus, MainWindowEvent, MainApp]
 
 ## One app as the machine knows it: its standing, who started its latest activation, and its
 ## main window.
-App : { standing : Standing, last_activation : Initiator, main_window : Maybe }
+App : { standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }
 
-## A window and its app.
-Focused : { pid : U64, window : U64 }
-
-## What the window server has said about focus: nothing yet, or the window it last reported
-## focused (and its app), while that window exists. Before its first answer, AX activation and
-## main-window events stand in for it; after it, they are metadata only.
-NativeFocus : [NotYetReported, Reported([NoWindow, Window(Focused)])]
-
-## Every app (by pid), the globally frontmost app and the native focus.
-Mains : { apps : Dict(U64, App), global_frontmost : Maybe, native_focus : NativeFocus }
+## Every app (by pid), the globally frontmost app and the native focus: what the window server
+## has said about focus (nothing yet, or the window it last reported focused, and its app, while
+## that window exists; before its first answer, AX activation and main-window events stand in for
+## it, after it they are metadata only).
+Mains : { apps : Dict(U64, App), global_frontmost : MaybeWord, native_focus : NativeFocus }
 
 ## What the platform observes that the machine reads.
-Event : [
-	Launched({ pid : U64, standing : Standing, main_window : Maybe }),
-	## The app's thread is gone.
-	Terminated(U64),
-	Activated({ pid : U64, initiator : Initiator }),
-	Deactivated(U64),
-	GloballyActivated(U64),
-	GloballyDeactivated(U64),
-	MainWindowChanged({ pid : U64, window : Maybe, initiator : Initiator }),
-	## The window server reports a window (of its app) focused.
-	NativeFocused(Focused),
-	## A window is retired (no replacement) or has a new identity: the main window and the
-	## native focus follow it.
-	Replaced({ pid : U64, window : U64, replacement : Maybe }),
-]
+Event : MainWindowEvent
 
 ## Whether an event can answer a window to focus: an AX event of an app the machine knows, and
 ## who started it; every other event is quiet.
-Asking : [Quiet, Asks({ pid : U64, initiator : Initiator })]
+Asking : [Quiet, Asks(MainActivation)]
 
 MainWindow := [].{
 
@@ -56,7 +30,7 @@ MainWindow := [].{
 	## Applies `event`; the window to focus, if the event makes one known. Only a cold start
 	## answers one (before the window server's first focus report): an AX event of the
 	## globally frontmost app that Rift did not start names its main window.
-	step : Mains, Event -> (Mains, Maybe)
+	step : Mains, Event -> (Mains, MaybeWord)
 	step = |mains, event| {
 		(after, asking) = apply(mains, event)
 		match asking {
@@ -132,7 +106,7 @@ MainWindow := [].{
 		}
 
 	## The apps with `pid`'s standing set, if it is known.
-	with_standing : Dict(U64, App), U64, Standing -> Dict(U64, App)
+	with_standing : Dict(U64, App), U64, AppStanding -> Dict(U64, App)
 	with_standing = |apps, pid, standing|
 		match apps.get(pid) {
 			Ok(known) => apps.insert(pid, { ..known, standing })
@@ -142,7 +116,7 @@ MainWindow := [].{
 	## Once the window server has reported focus, AX activation and main-window events are
 	## metadata and the cold-start fallback only: answering from them could replay the previous
 	## native focus while the new one is still being resolved.
-	cold_start : Mains, U64, Initiator -> Maybe
+	cold_start : Mains, U64, Initiator -> MaybeWord
 	cold_start = |mains, pid, initiator|
 		match mains.native_focus {
 			Reported(_) => Nothing
@@ -158,7 +132,7 @@ MainWindow := [].{
 
 	## The main window: the window server's focus if it belongs to the globally frontmost app,
 	## else that app's main window while it is frontmost.
-	main_window : Mains -> Maybe
+	main_window : Mains -> MaybeWord
 	main_window = |mains|
 		match mains.global_frontmost {
 			Nothing => Nothing
@@ -184,7 +158,7 @@ MainWindow := [].{
 		}
 
 	## Every app and its state, in pid order.
-	apps_in_order : Mains -> List({ pid : U64, standing : Standing, last_activation : Initiator, main_window : Maybe })
+	apps_in_order : Mains -> List(MainApp)
 	apps_in_order = |mains|
 		mains.apps
 			.to_list()

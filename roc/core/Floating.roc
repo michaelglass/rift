@@ -1,37 +1,14 @@
 ## A floating layout's first frames (`rift_core::layout::floating`): where a window goes the
 ## first time the layout places it.
 
+import pf.Boundary exposing [WindowId, Rect, WindowConstraints, Gaps, Newcomer, FloatingPlace, FloatingSlot]
 import Geometry exposing [fixed_for_axis, max, max_for_axis, min, normalized, reported_min, tiling_area]
 
-WindowId : { pid : I32, idx : U32 }
-
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## A size an app reported, as rift parsed it: each axis finite and not negative.
-Size : { width : F64, height : F64 }
-
-## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
-## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
-Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
-
-WindowConstraints : {
-	sizing : Sizing,
-	locked_width : F64,
-	locked_height : F64,
-	max_width : F64,
-	max_height : F64,
-}
-
-Gaps : { top : F64, left : F64, bottom : F64, right : F64, horizontal : F64, vertical : F64 }
-
 ## Where a window of a whole floating layout goes.
-Place : [Screen, WithinGaps, Kept(Rect), First(WindowConstraints)]
+Place : FloatingPlace
 
 ## One of a floating layout's windows: left out (holding its position in a cascade), or in.
-Slot : [LeftOut, Placed({ window : WindowId, place : Place })]
-
-## A window placed for the first time: its constraints, and the frame it is seen at, if seen.
-Newcomer : { constraints : WindowConstraints, seen : [Live(Rect), Unseen] }
+Slot : FloatingSlot
 
 Floating := [].{
 
@@ -44,7 +21,7 @@ Floating := [].{
 	centred = |screen, w, h| {
 		mid_x = screen.x + screen.w * 0.5
 		mid_y = screen.y + screen.h * 0.5
-		{ x: mid_x - w / 2.0, y: mid_y - h / 2.0, w, h }
+		Rect.{ x: mid_x - w / 2.0, y: mid_y - h / 2.0, w, h }
 	}
 
 	## A window's frame when nothing else is known: 70% of the screen on each axis, within its
@@ -91,7 +68,7 @@ Floating := [].{
 		available_y = max(screen.h - frame.h, 0.0)
 		span_x = min(slots * cascade_step, available_x)
 		span_y = min(slots * cascade_step, available_y)
-		{
+		Rect.{
 			x: screen.x + available_x / 2.0 - span_x / 2.0 + span_x * fraction,
 			y: screen.y + available_y / 2.0 - span_y / 2.0 + span_y * fraction,
 			w: frame.w,
@@ -137,7 +114,7 @@ Floating := [].{
 									WithinGaps => tiling_area(screen, gaps)
 									Kept(kept) => kept
 									First(constraints) => {
-										first = initial_frame(screen, { constraints, seen: Unseen })
+										first = initial_frame(screen, Newcomer.{ constraints, seen: Unseen })
 										if (cascading) cascade(screen, first, acc.position.to_f64() / slots, slots) else first
 									}
 								}

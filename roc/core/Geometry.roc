@@ -1,38 +1,17 @@
 ## Layout geometry every system shares (`rift_core::layout` and `layout::axis`), bit for bit
 ## with the Rust: the float helpers are Rust's (`f64::round`, `max`, `min`, `sum`), not Roc's.
+## The shared geometry types are the platform's (`Boundary`).
 
-WindowId : { pid : I32, idx : U32 }
+import pf.Boundary exposing [Rect, Size, Sizing, WindowConstraints, Gaps, AxisItem, AxisFixed, AxisMax]
 
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## A size an app reported, as rift parsed it: each axis finite and not negative.
-Size : { width : F64, height : F64 }
-
-## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
-## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
-Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
-
-WindowConstraints : {
-	sizing : Sizing,
-	locked_width : F64,
-	locked_height : F64,
-	max_width : F64,
-	max_height : F64,
-}
-
-Gaps : { top : F64, left : F64, bottom : F64, right : F64, horizontal : F64, vertical : F64 }
-
-## One subtree's constraints along an axis.
-Summary : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], can_grow : Bool }
-
-## One segment to solve, and what it is the length of.
-AxisItem : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], weight : F64, can_grow : Bool }
+## A subtree's constraints along an axis.
+Summary : { min : F64, fixed : AxisFixed, max : AxisMax, can_grow : Bool }
 
 ## A container's summary being gathered, one child at a time.
-Gathered : { count : U64, low : F64, fixed : [Fixed(F64), Free], high : [Max(F64), NoMax], can_grow : Bool, focused : F64 }
+Gathered : { count : U64, low : F64, fixed : AxisFixed, high : AxisMax, can_grow : Bool, focused : F64 }
 
 ## A segment's bounds, sanitized.
-Segment : { low : F64, high : [Max(F64), NoMax], weight : F64, grows : Bool, fixed : [Fixed(F64), Free] }
+Segment : { low : F64, high : AxisMax, weight : F64, grows : Bool, fixed : AxisFixed }
 
 ## A segment and how far solving it has got.
 Placed : { segment : Segment, state : [Set(F64), Growing] }
@@ -129,7 +108,7 @@ Geometry := [].{
 		max_height0 = clean(c.max_height)
 		max_width = if (max_width0 > 0.0 and max_width0 < low.width) low.width else max_width0
 		max_height = if (max_height0 > 0.0 and max_height0 < low.height) low.height else max_height0
-		{
+		WindowConstraints.{
 			sizing: c.sizing,
 			locked_width: clean(c.locked_width),
 			locked_height: clean(c.locked_height),
@@ -164,7 +143,7 @@ Geometry := [].{
 	max_for_axis : WindowConstraints, Bool -> F64
 	max_for_axis = |c, horizontal| if (horizontal) c.max_width else c.max_height
 
-	fixed_for_axis : WindowConstraints, Bool -> [Fixed(F64), Free]
+	fixed_for_axis : WindowConstraints, Bool -> AxisFixed
 	fixed_for_axis = |c, horizontal| {
 		locked = if (horizontal) c.locked_width else c.locked_height
 		low = reported_min(c, horizontal)
@@ -192,7 +171,7 @@ Geometry := [].{
 		y0 = round(rect.y)
 		x1 = round(rect.x + rect.w)
 		y1 = round(rect.y + rect.h)
-		{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+		Rect.{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 	}
 
 	tiling_area : Rect, Gaps -> Rect
@@ -200,7 +179,7 @@ Geometry := [].{
 		if gaps.top == 0.0 and gaps.left == 0.0 and gaps.bottom == 0.0 and gaps.right == 0.0 {
 			screen
 		} else {
-			round_rect({
+			round_rect(Rect.{
 				x: screen.x + gaps.left,
 				y: screen.y + gaps.top,
 				w: max(screen.w - gaps.left - gaps.right, 0.0),

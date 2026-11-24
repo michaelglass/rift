@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
+import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer]
 import Geometry
 import Bsp
 import Traditional
@@ -17,37 +17,10 @@ import Workspaces
 import Modes
 import MainWindow
 
-WindowId : { pid : I32, idx : U32 }
-
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-Desire : { window : WindowId, frame : Rect, request : U32 }
-
-WriteFx : { window : WindowId, frame : Rect, request : U32 }
-
-Button : [Left, Right]
-
-## An event is the platform's (`Boundary.Event`): taking the platform's own type, not one of
-## the same shape, is what keeps this nightly's `roc build` from hanging on the step.
-
-
-Reply : [NoNews, InTransit, Acked, Refused, Foreign]
-
-Effect : [
-	Write(WriteFx),
-	Animate({ window : WindowId, from : Rect, to : Rect, request : U32 }),
-	Pending({ window : WindowId, target : [Target(Rect), NoTarget] }),
-	Plan({ request : U32, positions : List(WriteFx), frames : List(WriteFx) }),
-	Queued(WindowId),
-	Seen({ window : WindowId, frame : Rect }),
-	Replied({ window : WindowId, reply : Reply }),
-	Note({ window : WindowId, note : [Discarded, TimedOut, GaveUp] }),
-	Timer(Armed),
-	Grip(WindowId),
-	DragBegan(WindowId),
-	Ungrip({ window : WindowId, why : [Released, LetGo, Gone], changed : List(WindowId) }),
-	Regrip({ from : WindowId, to : WindowId }),
-]
+## The events, effects and their payloads are the platform's (`Boundary.Event`,
+## `Boundary.Effect`): taking the platform's own types, not ones of the same shape, is what keeps
+## `roc build` from hanging on the step.
+WriteFx : WriteEffect
 
 ## The request of the latest frame Rift sent a window, if any.
 Last : [Sent(U32), NeverSent]
@@ -87,26 +60,22 @@ Record : { seen : Rect, sync : Sync }
 
 Grip : [Idle, Held({ window : WindowId, button : Button, phase : [Pressed, Dragging(List(WindowId))] })]
 
-Armed : [Armed(U64), Disarmed]
 
 ## The lifecycle kept between events: every window with AX state and its presence (valid, or
-## invalidated), by window. `Lifecycle.Present`, written out: the platform needs the name here.
-Windows : Dict(U64, [Live(WindowFacts), Invalidated(WindowFacts)])
-
-## What admission reads of a window (`Lifecycle.Facts`).
-WindowFacts : { manageability : [Manageable, Unmanageable], rule : [NoRule, Manage, Ignore], ax : [Ordinary, DialogWindow, Transient], native : [Ordinary, Transient], minimize : [Shown, Minimized] }
+## invalidated), by window (`Lifecycle`'s, written out: the platform needs the name here).
+Windows : Dict(U64, Present)
 
 ## Who places each window, kept between events, keyed by window, so no window has two owners
 ## (`Workspaces.Ownerships`, written out: the platform needs the name here).
-Owners : Dict(U64, [Assigned(U64), Claimed({ owner : U64, flags : { focus_follows_mouse : [Followed, Suppressed] }, original : U64, destination : [Returns(U64), Nowhere] }), Held])
+Owners : Dict(U64, Ownership)
 
 ## The workspaces joined, kept between events: the catalog, what each Space shows and who places
 ## each window (`Workspaces.Joined`, written out: the platform needs the name here).
-Joined : { catalog : List({ workspace : U64, space : U64 }), activations : List({ space : U64, activation : [Showing({ current : U64, previous : [Some(U64), Nothing], remembered : [Some(U64), Nothing] }), Vacant([Some(U64), Nothing])] }), owners : Owners }
+Joined : { catalog : List(WorkspaceSpace), activations : List(SpaceActivation), owners : Owners }
 
 ## Which window is the main one, kept between events: every app by pid, the globally frontmost
 ## app and the native focus (`MainWindow.Mains`, written out: the platform needs the name here).
-Mains : { apps : Dict(U64, { standing : [Frontmost, Background], last_activation : [Rift, Other], main_window : [Some(U64), Nothing] }), global_frontmost : [Some(U64), Nothing], native_focus : [NotYetReported, Reported([NoWindow, Window({ pid : U64, window : U64 })])] }
+Mains : { apps : Dict(U64, { standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }), global_frontmost : MaybeWord, native_focus : NativeFocus }
 
 Model : {
 	windows : Dict(WindowId, Record),
@@ -125,8 +94,8 @@ Model : {
 
 core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view }
 
-# The layout questions, typed (`Boundary`). Each core's own types are structural, so the
-# platform's named ones pass straight in; the answers become the platform's.
+# The layout questions, typed (`Boundary`). The core modules take and answer the platform's own
+# types: a plain record or union never passes for a named one, nor a named one for a plain one.
 
 ## A BSP layout's frames.
 bsp : BspShape -> List(Frame)
@@ -166,44 +135,73 @@ axis : AxisQuestion -> List(F64)
 axis = |question| Geometry.solve(question.items, question.usable)
 
 # The focus questions, typed (`Boundary`): each decision on its question's facts, or the
-# first fact it read that the question does not carry.
+# first fact it read that the question does not carry. Each answer is its question's own
+# platform type, so each entry builds it (a generic helper could not name it).
 
-## A decision, or the first fact it read that its question does not carry.
-decision_of : Try(a, [Unasked(U64)]) -> [Decided(a), Unasked(U64)]
-decision_of = |read|
-	match read {
+removal_focus : RemovalQuestion -> RemovalAnswer
+removal_focus = |q|
+	match Focus.removal_focus(q.removal, q.focused, q.removed_space, q.native_focus, q.successors, q.inactive) {
 		Ok(answer) => Decided(answer)
 		Err(Unasked(fact)) => Unasked(fact)
 	}
 
-removal_focus : RemovalQuestion -> RemovalAnswer
-removal_focus = |q| decision_of(Focus.removal_focus(q.removal, q.focused, q.removed_space, q.native_focus, q.successors, q.inactive))
-
 focus_candidate : CandidateQuestion -> WordAnswer
-focus_candidate = |q| decision_of(Focus.focus_candidate(q.preferred, q.last_focused, q.in_workspace, q.visible))
+focus_candidate = |q|
+	match Focus.focus_candidate(q.preferred, q.last_focused, q.in_workspace, q.visible) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 hides_focus : HidesQuestion -> VerdictAnswer
-hides_focus = |q| decision_of(Focus.hides_focus(q.window, q.main, q.focused, q.in_inactive_workspace))
+hides_focus = |q|
+	match Focus.hides_focus(q.window, q.main, q.focused, q.in_inactive_workspace) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 activation_follow : ActivationQuestion -> FollowAnswer
-activation_follow = |q| decision_of(Focus.activation_follow(q))
+activation_follow = |q|
+	match Focus.activation_follow(q) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 display_to_follow : DisplayFollowQuestion -> WordAnswer
-display_to_follow = |q| decision_of(Focus.display_to_follow(q.focused_space, q.previous, q.active, q.on_known_display))
+display_to_follow = |q|
+	match Focus.display_to_follow(q.focused_space, q.previous, q.active, q.on_known_display) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 untracked_focus : UntrackedQuestion -> UntrackedAnswer
-untracked_focus = |q| decision_of(Focus.untracked_focus(q.under_cursor, q.tracked, q.known))
+untracked_focus = |q|
+	match Focus.untracked_focus(q.under_cursor, q.tracked, q.known) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 mouse_raise : RaiseQuestion -> RaiseAnswer
-mouse_raise = |q| decision_of(Focus.mouse_raise(q))
+mouse_raise = |q|
+	match Focus.mouse_raise(q) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 focuses_desktop : DesktopQuestion -> VerdictAnswer
-focuses_desktop = |q| decision_of(Focus.focuses_desktop(q.active, q.workspace_empty))
+focuses_desktop = |q|
+	match Focus.focuses_desktop(q.active, q.workspace_empty) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 # The topology questions, typed (`Boundary`).
 
 discovered_space : DiscoveredQuestion -> DiscoveredAnswer
-discovered_space = |q| decision_of(Topology.discovered_space(q.standing, q.live, q.observable, q.recorded, q.resolved))
+discovered_space = |q|
+	match Topology.discovered_space(q.standing, q.live, q.observable, q.recorded, q.resolved) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 discovery_spaces : DiscoveryQuestion -> DiscoveryAnswer
 discovery_spaces = |q|
@@ -213,10 +211,18 @@ discovery_spaces = |q|
 	}
 
 quarantines : QuarantineQuestion -> VerdictAnswer
-quarantines = |q| decision_of(Topology.quarantines(q.topology, q.class))
+quarantines = |q|
+	match Topology.quarantines(q.topology, q.class) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 target_display : TargetQuestion -> TargetAnswer
-target_display = |q| decision_of(Topology.target_display(q.source_center, q.current_center, q.screens, q.active))
+target_display = |q|
+	match Topology.target_display(q.source_center, q.current_center, q.screens, q.active) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 admit_space_snapshot : AdmitQuestion -> Admission
 admit_space_snapshot = |q| {
@@ -229,12 +235,20 @@ admit_space_snapshot = |q| {
 }
 
 app_rule_candidates : CandidatesQuestion -> CandidatesAnswer
-app_rule_candidates = |q| decision_of(Topology.candidates(q.window_spaces, q.activated, q.tracked, q.reconcilable))
+app_rule_candidates = |q|
+	match Topology.candidates(q.window_spaces, q.activated, q.tracked, q.reconcilable) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 # The lifecycle questions, typed (`Boundary`).
 
 rule_targets : RuleTargetsQuestion -> RuleTargetsAnswer
-rule_targets = |q| decision_of(Lifecycle.rule_targets(q.windows, q.run, q.reconcilable, q.spaces, q.active))
+rule_targets = |q|
+	match Lifecycle.rule_targets(q.windows, q.run, q.reconcilable, q.spaces, q.active) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 rule_refreshes_layout : RuleRefreshQuestion -> Bool
 rule_refreshes_layout = |q| Lifecycle.rule_refreshes_layout(q.run, q.outcome)
@@ -246,11 +260,18 @@ pointer_display_target = |q| {
 			Global => True
 			PerDisplay => False
 		}
-	decision_of(Lifecycle.pointer_display_target(global, q.opened_on, q.pointer, q.active, q.window, q.rule_names_workspace))
+	match Lifecycle.pointer_display_target(global, q.opened_on, q.pointer, q.active, q.window, q.rule_names_workspace) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 }
 
 is_native_transient : NativeTransientQuestion -> VerdictAnswer
-is_native_transient = |q| decision_of(Lifecycle.is_native_transient(q.entry, q.owner, q.exempt))
+is_native_transient = |q|
+	match Lifecycle.is_native_transient(q.entry, q.owner, q.exempt) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 keeps_transient : KeepsTransientQuestion -> Bool
 keeps_transient = |q| Lifecycle.keeps_transient(q.departure, q.id, q.origin, q.owner)
@@ -259,7 +280,11 @@ misplaced : MisplacedQuestion -> Bool
 misplaced = |q| Lifecycle.misplaced(q.assigned, q.native)
 
 out_of_inventory_view : OutOfViewQuestion -> VerdictAnswer
-out_of_inventory_view = |q| decision_of(Lifecycle.out_of_inventory_view(q.native, q.assigned, q.active, q.parked))
+out_of_inventory_view = |q|
+	match Lifecycle.out_of_inventory_view(q.native, q.assigned, q.active, q.parked) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 reapplies_on_title_change : TitleChangeQuestion -> VerdictAnswer
 reapplies_on_title_change = |q| {
@@ -268,7 +293,10 @@ reapplies_on_title_change = |q| {
 			Reapply => True
 			Ignore => False
 		}
-	decision_of(Lifecycle.reapplies_on_title_change(configured, q.space, q.active, q.reconcilable))
+	match Lifecycle.reapplies_on_title_change(configured, q.space, q.active, q.reconcilable) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 }
 
 window_admission : AdmissionFacts -> WindowAdmission
@@ -374,12 +402,16 @@ lifecycle_net : NetQuestion -> Change
 lifecycle_net = |q| Lifecycle.net(q.first, q.then)
 
 inventory_retirement : InventoryQuestion -> RetirementAnswer
-inventory_retirement = |q| decision_of(Lifecycle.retirement(q.facts, q.evidence))
+inventory_retirement = |q|
+	match Lifecycle.retirement(q.facts, q.evidence) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 # The workspace questions, typed (`Boundary`).
 
 ## Whether workspaces map onto displays one set across them (global) or per display.
-global : [PerDisplay, Global] -> Bool
+global : WorkspaceMode -> Bool
 global = |mode|
 	match mode {
 		Global => True
@@ -403,20 +435,31 @@ workspace_step = |q| {
 			Stop => True
 			Wrap => False
 		}
-	decision_of(Workspaces.step(global(q.mode), q.catalog, q.context, q.current, backwards, skip, stop, q.has_windows))
+	match Workspaces.step(global(q.mode), q.catalog, q.context, q.current, backwards, skip, stop, q.has_windows) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 }
 
 workspace_resolve : ResolveQuestion -> Reached
 workspace_resolve = |q| Workspaces.resolve(global(q.mode), q.scope, q.context, q.selector)
 
 workspace_previous : PreviousQuestion -> ReachedAnswer
-workspace_previous = |q| decision_of(Workspaces.previous(global(q.mode), q.context, q.last, q.on))
+workspace_previous = |q|
+	match Workspaces.previous(global(q.mode), q.context, q.last, q.on) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 workspace_eligible : EligibleQuestion -> Bool
 workspace_eligible = |q| Workspaces.eligible(global(q.mode), q.context, q.on)
 
 emits_window : EmitsQuestion -> VerdictAnswer
-emits_window = |q| decision_of(Workspaces.emits_window(q.assigned, q.active))
+emits_window = |q|
+	match Workspaces.emits_window(q.assigned, q.active) {
+		Ok(answer) => Decided(answer)
+		Err(Unasked(fact)) => Unasked(fact)
+	}
 
 joined_steps : JoinedQuestion -> JoinedView
 joined_steps = |q| Workspaces.joined_after(q.events)
@@ -496,7 +539,7 @@ last_of = |sync|
 		Outside({ request, .. }) => Sent(request)
 	}
 
-pending_of : Sync -> [Target(Rect), NoTarget]
+pending_of : Sync -> PendingTarget
 pending_of = |sync|
 	match sync {
 		InFlight({ target, .. }) => Target(target)
@@ -573,7 +616,7 @@ rekey = |model, from, to| {
 	remove(moved, from)
 }
 
-note : Model, WindowId, [Discarded, TimedOut, GaveUp] -> Model
+note : Model, WindowId, NoteKind -> Model
 note = |model, window, what| { ..model, notes: model.notes.append(Note({ window, note: what })) }
 
 distrust : Model, WindowId -> Model
@@ -694,7 +737,7 @@ release = |model, now, request, window, next, whose, after|
 		}
 	}
 
-Read : { now : U64, request : U32, window : WindowId, frame : Rect, as_of : [AsOf(U32), Unstamped] }
+Read : Observation
 
 ## A report of where a window is (see `Reconciler::observe`).
 observe : Model, Read, [Rift, User], [User, Nobody] -> (Model, Reply, List(WriteFx))
@@ -1036,7 +1079,7 @@ queued = |model, window, desired| {
 	(seen, [Queued(window), fx])
 }
 
-ungrip : Model, [Released, LetGo, Gone] -> (Model, List(Effect))
+ungrip : Model, UngripWhy -> (Model, List(Effect))
 ungrip = |model, why|
 	match model.grip {
 		Idle => (model, [])
@@ -1113,7 +1156,7 @@ forget = |model, window| {
 	}
 }
 
-PlanFx : { request : U32, positions : List(WriteFx), frames : List(WriteFx) }
+PlanFx : PlanEffect
 
 ## One write of an arrange pass into the plan for its request (plans in the order first written).
 add_to_plan : List(PlanFx), U32, WriteFx, Bool -> List(PlanFx)
@@ -1131,7 +1174,7 @@ add_to_plan = |plans, request, write, moves_only| {
 	}
 }
 
-arrange : Model, U64, [Arrange, ArrangePositions], List(Desire) -> (Model, List(Effect))
+arrange : Model, U64, Want, List(Desire) -> (Model, List(Effect))
 arrange = |model0, now, how, desires| {
 	grip = model0.grip
 	var $model = model0
@@ -1450,6 +1493,7 @@ same_button = |a, b|
 step : Model, Event -> { model : Model, effects : List(Effect) }
 step = |model0, event| {
 	(decided, decisions) = decide({ ..model0, notes: [], touched: [] }, event)
+	pending : List(Effect)
 	pending =
 		dedup(decided.touched).map(
 			|window| {

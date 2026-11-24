@@ -3,44 +3,19 @@
 ## Questions on plain data; Spaces, workspaces, window-server ids, modes and apps are one word
 ## each, and a window with an app is a WindowId (its app is its pid).
 
+import pf.Boundary exposing [WindowId, MaybeWord, MaybeWindow, Removal, RemovalFocus, FactBool, FactWord, FactWindow, FactWords, FactKnown, FactListing, WordBool, WindowBool, WindowWindow, WordFrame, WordLevels, ActivationQuestion, Follow, FollowTo, UntrackedFocus, Surface, KeyWindow, RaiseQuestion, MouseRaise, Rect]
 import Asking exposing [ask, ask_window, ask_word]
-
-WindowId : { pid : I32, idx : U32 }
-
-## A word, or none.
-Maybe : [Some(U64), Nothing]
-
-## A window, or none.
-MaybeWindow : [SomeWindow(WindowId), NoWindow]
-
-## A fact the platform's run of the decision answered, or one it never asked.
-Fact(a) : [Asked(a), Unasked]
-
-## A fact asked about keys: each key asked and its answer. Any other key was not asked.
-Answers(k, v) : List({ key : k, answer : v })
 
 ## What a decision decided, or the first fact it read that its question does not carry (the
 ## fact's place among the question's facts): it decides in another order than the platform's.
 Read(a) : Try(a, [Unasked(U64)])
-
-## A frame.
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## A window's level and sub-level, if known.
-Levels : [Levels({ level : I64, sub_level : I32 }), NoLevels]
-
-## Whether focus-follows-mouse raises the window under the pointer, or why not.
-Raise : [Raise, Skip([Unknown, OutsideAdmission, NoSpace, InactiveSpace, OutsideActiveWorkspace, BuriesFloater])]
-
-## Whether an activation follows its window, and where, or why not.
-Follow : [To({ space : U64, workspace : U64 }), Stay([NotStandard, Unavailable, NoSpace, NoWorkspace, AlreadyActive, PendingWindow, Mode(U64), FullscreenActive, Unmanageable(U64), NoBundleId, Blacklisted])]
 
 Focus := [].{
 
 	## What a removal does to focus. Facts: 0 the removed window's Space, 1 macOS's key window, 2
 	## the successor a native window is tracked as, 3 whether a successor is in an inactive
 	## workspace.
-	removal_focus : [AppClosed(I32), WindowRemoved(WindowId)], MaybeWindow, Fact(Maybe), Fact(MaybeWindow), Answers(WindowId, WindowId), Answers(WindowId, Bool) -> Read([Unaffected, KeepNative(WindowId), Refocus(U64)])
+	removal_focus : Removal, MaybeWindow, FactWord, FactWindow, List(WindowWindow), List(WindowBool) -> Read(RemovalFocus)
 	removal_focus = |removal, focused, removed_space, native_focus, successors, inactive| {
 		removed =
 			match focused {
@@ -87,7 +62,7 @@ Focus := [].{
 	## The window to focus: preferred, else last focused, else the first of the workspace's,
 	## whichever is visible first. Facts: 0 the last focused window, 1 the workspace's windows, 2
 	## whether a window is visible.
-	focus_candidate : Maybe, Fact(Maybe), Fact(List(U64)), Answers(U64, Bool) -> Read(Maybe)
+	focus_candidate : MaybeWord, FactWord, FactWords, List(WordBool) -> Read(MaybeWord)
 	focus_candidate = |preferred, last_focused, in_workspace, visible| {
 		visible_one = |candidate|
 			match candidate {
@@ -129,7 +104,7 @@ Focus := [].{
 
 	## Whether `window`, the main or the focused one, is hidden in an inactive workspace. Fact: 0
 	## whether it is in an inactive workspace.
-	hides_focus : U64, Maybe, Maybe, Fact(Bool) -> Read(Bool)
+	hides_focus : U64, MaybeWord, MaybeWord, FactBool -> Read(Bool)
 	hides_focus = |window, main, focused, in_inactive_workspace| {
 		is = |candidate|
 			match candidate {
@@ -141,7 +116,7 @@ Focus := [].{
 
 	## Whether an activation follows its window to its Space and workspace, or why it stays.
 	## Facts 0 to 9, in the order they are asked.
-	activation_follow : { standard : Fact(Bool), unavailable : Fact(Bool), space : Fact(Maybe), workspace : Fact(Maybe), active_workspace : Fact(Maybe), pending_window : Fact(Bool), mode_refusal : Fact(Maybe), active_space_fullscreen : Fact(Bool), unmanageable_source : Fact(Maybe), blacklisted : Fact([Listed(Bool), NoBundle]) } -> Read(Follow)
+	activation_follow : ActivationQuestion -> Read(Follow)
 	activation_follow = |facts| {
 		standard = ask(facts.standard, 0)?
 		if !standard {
@@ -179,7 +154,7 @@ Focus := [].{
 	}
 
 	## The rest of an activation follow, once its window's workspace is not the active one.
-	after_active : { standard : Fact(Bool), unavailable : Fact(Bool), space : Fact(Maybe), workspace : Fact(Maybe), active_workspace : Fact(Maybe), pending_window : Fact(Bool), mode_refusal : Fact(Maybe), active_space_fullscreen : Fact(Bool), unmanageable_source : Fact(Maybe), blacklisted : Fact([Listed(Bool), NoBundle]) }, U64, U64 -> Read(Follow)
+	after_active : ActivationQuestion, U64, U64 -> Read(Follow)
 	after_active = |facts, space, workspace| {
 		pending = ask(facts.pending_window, 5)?
 		if pending {
@@ -213,7 +188,7 @@ Focus := [].{
 
 	## The display to activate after a command moved the focused window. Facts: 0 whether a Space
 	## is active, 1 whether it is on a known display.
-	display_to_follow : Maybe, Maybe, Answers(U64, Bool), Answers(U64, Bool) -> Read(Maybe)
+	display_to_follow : MaybeWord, MaybeWord, List(WordBool), List(WordBool) -> Read(MaybeWord)
 	display_to_follow = |focused_space, previous, active, on_known_display|
 		match focused_space {
 			Some(space) => {
@@ -240,7 +215,7 @@ Focus := [].{
 	## Whether to make the untracked window under the cursor key. Facts: 0 whether it is
 	## tracked, 1 what is known of it (its layer and its app): only an application window (layer 0)
 	## is made key.
-	untracked_focus : Maybe, Fact(Bool), Fact([Known({ layer : I32, owner : U64 }), Unknown]) -> Read([Nothing, SystemSurface({ layer : I32, window : U64 }), MakeKey({ owner : U64, window : U64 })])
+	untracked_focus : MaybeWord, FactBool, FactKnown -> Read(UntrackedFocus)
 	untracked_focus = |under_cursor, tracked, known|
 		match under_cursor {
 			Nothing => Ok(Nothing)
@@ -264,7 +239,7 @@ Focus := [].{
 	## 3 whether its Space is active, 4 whether it is in the active workspace, 5 whether it could
 	## cover a floating window, 6 the Space's stacking order, 7 a floating window's frame, 8 a
 	## window's levels.
-	mouse_raise : { window : [Hovered({ frame : Rect, server : Maybe }), Untracked], space : Maybe, claimed : Fact(Bool), admitted : Fact(Bool), floating : Fact(Bool), active : Fact(Bool), in_active_workspace : Fact(Bool), could_occlude : Fact(Bool), order : Fact(List(U64)), floaters : Answers(U64, [Frame(Rect), NoFrame]), levels : Answers(U64, Levels) } -> Read(Raise)
+	mouse_raise : RaiseQuestion -> Read(MouseRaise)
 	mouse_raise = |q|
 		match q.window {
 			Untracked => Ok(Skip(Unknown))
@@ -321,7 +296,7 @@ Focus := [].{
 	## that is above it at the same level: the windows in front of it in `order`, each a floating
 	## window's frame (fact 7), and the candidate's and its levels (fact 8, the candidate's
 	## first).
-	raise_buries_a_floater : U64, Rect, List(U64), Answers(U64, [Frame(Rect), NoFrame]), Answers(U64, Levels) -> Read(Bool)
+	raise_buries_a_floater : U64, Rect, List(U64), List(WordFrame), List(WordLevels) -> Read(Bool)
 	raise_buries_a_floater = |candidate, frame, order, floaters, levels| {
 		var $buries = Ok(False)
 		var $reached = False
@@ -367,6 +342,6 @@ Focus := [].{
 	contains = |outer, inner| outer.x <= inner.x and outer.y <= inner.y and outer.x + outer.w >= inner.x + inner.w and outer.y + outer.h >= inner.y + inner.h
 
 	## Whether to focus a Space's desktop. Fact: 0 whether its workspace is empty.
-	focuses_desktop : Bool, Fact(Bool) -> Read(Bool)
+	focuses_desktop : Bool, FactBool -> Read(Bool)
 	focuses_desktop = |active, workspace_empty| if active ask(workspace_empty, 0) else Ok(False)
 }

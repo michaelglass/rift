@@ -2,50 +2,20 @@
 ## their children out along an axis by weight, or stack them with an offset (one shown on top),
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
-import pf.Boundary exposing [TraditionalNode]
+import pf.Boundary exposing [TraditionalNode, TraditionalShape, StackLine, Child, Fill, WindowId, Rect, WindowConstraints, AxisItem, AxisFixed, AxisMax]
 import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, tiled_min, tiling_area]
 
-WindowId : { pid : I32, idx : U32 }
-
-Rect : { x : F64, y : F64, w : F64, h : F64 }
-
-## A size an app reported, as rift parsed it: each axis finite and not negative.
-Size : { width : F64, height : F64 }
-
-## How tiling may size a window, with the minimum it reports: kept at its own size; resizable,
-## the minimum advisory (traditional tiling may shrink it below); resizable, never below it.
-Sizing : [Fixed(Size), Resizable(Size), ResizableAtLeastMin(Size)]
-
-WindowConstraints : {
-	sizing : Sizing,
-	locked_width : F64,
-	locked_height : F64,
-	max_width : F64,
-	max_height : F64,
-}
-
-Gaps : { top : F64, left : F64, bottom : F64, right : F64, horizontal : F64, vertical : F64 }
-
 ## One subtree's constraints along an axis.
-Summary : { min : F64, fixed : [Fixed(F64), Free], max : [Max(F64), NoMax], can_grow : Bool }
-
-Fill : [Tiled, Screen, WithinGaps]
+Summary : { min : F64, fixed : AxisFixed, max : AxisMax, can_grow : Bool }
 
 ## Along an axis by weight, or a stack with the child at `focused` on top.
 ## A stack's frames: its container (without the bar), each window's size, and the offset.
 StackLayout : { container : Rect, w : F64, h : F64, offset : F64, horizontal : Bool }
 
-## The bar a stack reserves room for (none when `thickness` is 0); `top`: a horizontal stack's
-## bar is above it, `left`: a vertical stack's is left of it.
-StackLine : { thickness : F64, spacing : F64, top : Bool, left : Bool }
-
-## A container's child and its weight (the share of an axis it asks for).
-Child : { size : F32, node : Node }
-
 ## A traditional node is the platform's (`Boundary.TraditionalNode`).
 Node : TraditionalNode
 
-Shape : { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, root : Node }
+Shape : TraditionalShape
 
 Traditional := [].{
 
@@ -166,7 +136,7 @@ Traditional := [].{
 		(dx, dy) = if (layout.horizontal) (shift, 0.0) else (0.0, shift)
 		max_x = max(container.x + container.w - layout.w, container.x)
 		max_y = max(container.y + container.h - layout.h, container.y)
-		round_rect({
+		round_rect(Rect.{
 			x: clamp(container.x + dx, container.x, max_x),
 			y: clamp(container.y + dy, container.y, max_y),
 			w: layout.w,
@@ -260,7 +230,7 @@ Traditional := [].{
 				|child| {
 					s = summary(shape, child.node, horizontal)
 					weight = if (equal) 1.0 else F32.to_f64(child.size)
-					{ min: s.min, fixed: s.fixed, max: s.max, weight, can_grow: s.can_grow }
+					AxisItem.{ min: s.min, fixed: s.fixed, max: s.max, weight, can_grow: s.can_grow }
 				},
 			)
 		# Each child starts where the one before ended, after the gap; the first where the
