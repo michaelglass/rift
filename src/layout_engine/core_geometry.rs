@@ -97,32 +97,35 @@ pub(crate) fn decide_traditional(
     decide(what, &shape, upstream, rust, roc)
 }
 
-/// A shadow that differed from the deciding core, or the Roc core failing to answer.
+/// A shadow (frames, or a placement) that differed from the deciding core, or the Roc core
+/// failing to answer.
 #[derive(Debug, PartialEq)]
-enum Divergence<E> {
-    /// The layout system's frames.
-    System(Vec<(WindowId, Rect)>),
-    /// Under `roc-core`, the Rust core's frames.
+enum Divergence<T, E> {
+    /// The layout system's.
+    System(T),
+    /// Under `roc-core`, the Rust core's.
     #[cfg_attr(not(feature = "roc-core"), allow(dead_code))]
-    RustCore(Vec<(WindowId, Rect)>),
+    RustCore(T),
     /// Under `roc-core`, the Roc core could not answer: the Rust core decides.
     #[cfg_attr(not(feature = "roc-core"), allow(dead_code))]
     RocFailed(E),
 }
 
-/// The deciding core's frames and every shadow that differs from them: the Roc core's frames
-/// (`roc`, `Some` only under `roc-core`) when it answers, else the Rust core's (`rust`); the Rust
-/// core's are a shadow when the Roc core decides, the system's (`upstream`) always.
-fn decided<E>(
-    upstream: Vec<(WindowId, Rect)>,
-    rust: Vec<(WindowId, Rect)>,
-    roc: Option<Result<Vec<(WindowId, Rect)>, E>>,
-) -> (Vec<(WindowId, Rect)>, Vec<Divergence<E>>) {
+/// The deciding core's answer and every shadow that differs from it (compared by `key`): the
+/// Roc core's (`roc`, `Some` only under `roc-core`) when it answers, else the Rust core's
+/// (`rust`); the Rust core's is a shadow when the Roc core decides, the system's (`upstream`)
+/// always.
+fn decided<T, E, K: PartialEq>(
+    upstream: T,
+    rust: T,
+    roc: Option<Result<T, E>>,
+    key: impl Fn(&T) -> K,
+) -> (T, Vec<Divergence<T, E>>) {
     let mut divergences = Vec::new();
     let core = match roc {
         None => rust,
         Some(Ok(roc)) => {
-            if bits(&rust) != bits(&roc) {
+            if key(&rust) != key(&roc) {
                 divergences.push(Divergence::RustCore(rust));
             }
             roc
@@ -132,7 +135,7 @@ fn decided<E>(
             rust
         }
     };
-    if bits(&upstream) != bits(&core) {
+    if key(&upstream) != key(&core) {
         divergences.push(Divergence::System(upstream));
     }
     (core, divergences)
@@ -158,21 +161,31 @@ fn decide<E: std::fmt::Debug>(
     }));
     #[cfg(not(feature = "roc-core"))]
     let roc: Option<Result<Vec<(WindowId, Rect)>, E>> = None;
-    let (core, divergences) = decided(upstream, rust, roc);
+    let (core, divergences) = decided(upstream, rust, roc, |frames| bits(frames));
+    report_all(what, shape, divergences, &core);
+    core.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
+}
+
+/// Reports each divergence from the deciding core's answer (`core`).
+fn report_all<T: std::fmt::Debug, E: std::fmt::Debug>(
+    what: &str,
+    shape: &impl std::fmt::Debug,
+    divergences: Vec<Divergence<T, E>>,
+    core: &T,
+) {
     for divergence in divergences {
         match divergence {
             Divergence::System(theirs) => {
-                report_divergence("layout-divergence", what, shape, &theirs, &core)
+                report_divergence("layout-divergence", what, shape, &theirs, core)
             }
             Divergence::RustCore(rust) => {
-                report_divergence("roc-divergence", what, shape, &rust, &core)
+                report_divergence("roc-divergence", what, shape, &rust, core)
             }
             Divergence::RocFailed(error) => {
-                report_divergence("roc-divergence", what, shape, &error, &core)
+                report_divergence("roc-divergence", what, shape, &error, core)
             }
         }
     }
-    core.into_iter().map(|(window, frame)| (window, cg_rect(frame))).collect()
 }
 
 /// Counts a divergence, then fails the test, or in a running Rift warns it (the core's frames
@@ -216,109 +229,85 @@ pub(crate) fn decide_bsp(
     decide("bsp", &shape, upstream, rust, roc)
 }
 
-/// Where a scrolling layout's system placed its strip in world space: each column (id, x,
-/// width), each window's frame, the camera's resting points (offset, the column's id) and its
-/// bounds.
-#[cfg(any(test, feature = "roc-core"))]
-#[derive(Debug)]
+/// A scrolling strip placed in world space: each column (id, x, width), each window's frame,
+/// the camera's resting points (offset, the column's id) and its bounds. Nothing placed (no
+/// window takes part) is no column, frame or resting point, and bounds at 0.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StripPlacement {
     pub columns: Vec<(u64, f64, f64)>,
-    pub frames: Vec<(WindowId, CGRect)>,
+    pub frames: Vec<(WindowId, Rect)>,
     pub snaps: Vec<(f64, u64)>,
     pub bounds: (f64, f64),
 }
 
-/// The placement as words: ids as they are, floats as their bits.
-#[cfg(any(test, feature = "roc-core"))]
-fn placement_words<W: Copy>(
-    columns: impl Iterator<Item = (u64, f64, f64)>,
-    frames: &[(W, Rect)],
-    snaps: impl Iterator<Item = (f64, u64)>,
-    bounds: (f64, f64),
-    window: impl Fn(W) -> u64,
-) -> Vec<u64> {
-    let mut words = Vec::new();
-    for (id, x, width) in columns {
-        words.extend([id, x.to_bits(), width.to_bits()]);
-    }
-    words.push(u64::MAX);
-    for &(w, r) in frames {
-        words.push(window(w));
-        words.extend([r.x, r.y, r.w, r.h].map(f64::to_bits));
-    }
-    words.push(u64::MAX);
-    for (offset, column) in snaps {
-        words.extend([offset.to_bits(), column]);
-    }
-    words.extend([bounds.0.to_bits(), bounds.1.to_bits()]);
-    words
-}
-
-/// The core's placement of a scrolling `strip` (none: no window takes part, so no column, frame
-/// or resting point, and bounds at 0) as words.
-#[cfg(any(test, feature = "roc-core"))]
-fn placed_words<W: Copy>(
-    placed: Option<rift_core::layout::scrolling::Placed<W, u64>>,
-    window: impl Fn(W) -> u64,
-) -> Vec<u64> {
-    match placed {
-        None => placement_words(std::iter::empty(), &[], std::iter::empty(), (0.0, 0.0), window),
-        Some(placed) => placement_words(
-            std::iter::once(&placed.first)
-                .chain(&placed.rest)
-                .map(|spot| (spot.id, spot.world_x, spot.width)),
-            &placed.frames,
-            std::iter::once(&placed.snaps.0)
-                .chain(&placed.snaps.1)
-                .map(|snap| (snap.offset, snap.column)),
-            placed.bounds,
-            window,
-        ),
-    }
-}
-
-/// Holds the core's placement of a scrolling strip (none: no window takes part) to the
-/// scrolling system's (`Geometry::build`), word for word; under `roc-core` the Roc core's too.
-/// The system's placement stands either way: a difference fails tests and a running Rift warns
-/// `layout-divergence:` (the Rust core) or `roc-divergence:` (the Roc core).
-#[cfg(any(test, feature = "roc-core"))]
-pub(crate) fn check_strip(
-    strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
-    upstream: &StripPlacement,
-) {
-    let frames: Vec<(WindowId, Rect)> = upstream
-        .frames
-        .iter()
-        .map(|&(window, frame)| (window, core_rect(frame)))
-        .collect();
-    let theirs = placement_words(
-        upstream.columns.iter().copied(),
-        &frames,
-        upstream.snaps.iter().copied(),
-        upstream.bounds,
-        window_word,
-    );
-    let rust = placed_words(
-        strip.as_ref().map(rift_core::layout::scrolling::Strip::place),
-        window_word,
-    );
-    if rust != theirs {
-        diverged("layout-divergence", "scrolling", &strip, upstream, &rust);
-    }
-    #[cfg(feature = "roc-core")]
-    {
-        let plain = |w: rift_core::plain::WindowId| window_word(of_plain(w));
-        let roc = match &strip {
-            None => Ok(placed_words(None, plain)),
-            Some(strip) => rift_core_roc::place_strip(strip.clone().map(&to_plain, &|id| id))
-                .map(|placed| placed_words(Some(placed), plain)),
-        };
-        match roc {
-            Ok(roc) if roc == theirs => {}
-            Ok(roc) => diverged("roc-divergence", "scrolling", &strip, upstream, &roc),
-            Err(error) => diverged("roc-divergence", "scrolling", &strip, upstream, &error),
+impl StripPlacement {
+    /// The core's placement (none: nothing placed), as the platform holds it: the columns'
+    /// anchors are the core's own and are dropped.
+    fn of_placed<W: Copy>(
+        placed: Option<rift_core::layout::scrolling::Placed<W, u64>>,
+        window: impl Fn(W) -> WindowId,
+    ) -> Self {
+        match placed {
+            None => Self {
+                columns: Vec::new(),
+                frames: Vec::new(),
+                snaps: Vec::new(),
+                bounds: (0.0, 0.0),
+            },
+            Some(placed) => Self {
+                columns: placed.spots().map(|spot| (spot.id, spot.world_x, spot.width)).collect(),
+                frames: placed.frames.iter().map(|&(w, frame)| (window(w), frame)).collect(),
+                snaps: std::iter::once(&placed.snaps.0)
+                    .chain(&placed.snaps.1)
+                    .map(|snap| (snap.offset, snap.column))
+                    .collect(),
+                bounds: placed.bounds,
+            },
         }
     }
+
+    /// The placement as words: ids as they are, floats as their bits.
+    fn words(&self) -> Vec<u64> {
+        let mut words = Vec::new();
+        for &(id, x, width) in &self.columns {
+            words.extend([id, x.to_bits(), width.to_bits()]);
+        }
+        words.push(u64::MAX);
+        for &(w, r) in &self.frames {
+            words.push(window_word(w));
+            words.extend([r.x, r.y, r.w, r.h].map(f64::to_bits));
+        }
+        words.push(u64::MAX);
+        for &(offset, column) in &self.snaps {
+            words.extend([offset.to_bits(), column]);
+        }
+        words.extend([self.bounds.0.to_bits(), self.bounds.1.to_bits()]);
+        words
+    }
+}
+
+/// Where rift places a scrolling strip (none: no window takes part): the core's placement (the
+/// Roc core's under `roc-core`, else the Rust core's), with the scrolling system's own
+/// (`upstream`) the shadow, held word for word, as [`decide_traditional`].
+pub(crate) fn decide_strip(
+    strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
+    upstream: StripPlacement,
+) -> StripPlacement {
+    let rust = StripPlacement::of_placed(
+        strip.as_ref().map(rift_core::layout::scrolling::Strip::place),
+        |w| w,
+    );
+    #[cfg(feature = "roc-core")]
+    let roc = Some(match &strip {
+        None => Ok(StripPlacement::of_placed::<WindowId>(None, |w| w)),
+        Some(strip) => rift_core_roc::place_strip(strip.clone().map(&to_plain, &|id| id))
+            .map(|placed| StripPlacement::of_placed(Some(placed), of_plain)),
+    });
+    #[cfg(not(feature = "roc-core"))]
+    let roc: Option<Result<StripPlacement, std::convert::Infallible>> = None;
+    let (core, divergences) = decided(upstream, rust, roc, StripPlacement::words);
+    report_all("scrolling", &strip, divergences, &core);
+    core
 }
 
 /// The frames rift gives a placed strip shown by a camera: the core's (`translate`; the Roc
@@ -364,7 +353,6 @@ fn no_roc() -> Result<Vec<(rift_core::plain::WindowId, Rect)>, std::convert::Inf
 }
 
 /// A window as one word (its pid's bits above its index).
-#[cfg(any(test, feature = "roc-core"))]
 fn window_word(window: WindowId) -> u64 {
     (u64::from(window.pid as u32) << 32) | u64::from(window.idx.get())
 }
@@ -390,50 +378,22 @@ fn of_plain(window: rift_core::plain::WindowId) -> WindowId {
     WindowId { pid: window.pid, idx }
 }
 
-#[cfg(any(test, feature = "roc-core"))]
-fn diverged(
-    label: &str,
-    what: &str,
-    shape: &impl std::fmt::Debug,
-    upstream: &impl std::fmt::Debug,
-    core: &impl std::fmt::Debug,
-) {
-    #[cfg(test)]
-    panic!("{label}: {what} {shape:?}: upstream {upstream:?}, core {core:?}");
-    #[cfg(not(test))]
-    tracing::warn!(
-        what,
-        ?shape,
-        ?upstream,
-        ?core,
-        "{label}: the core's frames differ from the layout system's"
-    );
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 
-    /// The core's placement as the check compares it.
-    pub(crate) fn placed_words_for_test(
-        placed: Option<rift_core::layout::scrolling::Placed<WindowId, u64>>,
-    ) -> Vec<u64> {
-        placed_words(placed, window_word)
+    /// A placement as the decision compares it.
+    pub(crate) fn placement_words_for_test(placement: &StripPlacement) -> Vec<u64> {
+        placement.words()
     }
 
-    /// A system's placement as the check compares it.
-    pub(crate) fn placement_words_for_test(upstream: &StripPlacement) -> Vec<u64> {
-        let frames: Vec<(WindowId, Rect)> = upstream
-            .frames
-            .iter()
-            .map(|&(window, frame)| (window, core_rect(frame)))
-            .collect();
-        placement_words(
-            upstream.columns.iter().copied(),
-            &frames,
-            upstream.snaps.iter().copied(),
-            upstream.bounds,
-            window_word,
+    /// The Rust core's placement of `strip`, as the decision holds it.
+    pub(crate) fn rust_placement_for_test(
+        strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
+    ) -> StripPlacement {
+        StripPlacement::of_placed(
+            strip.as_ref().map(rift_core::layout::scrolling::Strip::place),
+            |w| w,
         )
     }
 
@@ -450,10 +410,12 @@ pub(crate) mod tests {
     fn the_rust_core_decides_over_the_systems_frames() {
         let core = vec![frame(1, 0.0), frame(2, 100.0)];
         let system = vec![frame(1, 0.0), frame(2, 101.0)];
-        let (frames, divergences) = decided::<()>(system.clone(), core.clone(), None);
+        let (frames, divergences) =
+            decided::<_, (), _>(system.clone(), core.clone(), None, |f| bits(f));
         assert_eq!(frames, core);
         assert_eq!(divergences, vec![Divergence::System(system)]);
-        let (frames, divergences) = decided::<()>(core.clone(), core.clone(), None);
+        let (frames, divergences) =
+            decided::<_, (), _>(core.clone(), core.clone(), None, |f| bits(f));
         assert_eq!(frames, core);
         assert_eq!(divergences, vec![]);
     }
@@ -465,13 +427,14 @@ pub(crate) mod tests {
         let roc = vec![frame(1, 0.0)];
         let rust = vec![frame(1, 1.0)];
         let (frames, divergences) =
-            decided::<()>(rust.clone(), rust.clone(), Some(Ok(roc.clone())));
+            decided::<_, (), _>(rust.clone(), rust.clone(), Some(Ok(roc.clone())), |f| bits(f));
         assert_eq!(frames, roc);
         assert_eq!(divergences, vec![
             Divergence::RustCore(rust.clone()),
             Divergence::System(rust.clone())
         ]);
-        let (frames, divergences) = decided(roc.clone(), rust.clone(), Some(Err("no answer")));
+        let (frames, divergences) =
+            decided(roc.clone(), rust.clone(), Some(Err("no answer")), |f| bits(f));
         assert_eq!(frames, rust);
         assert_eq!(divergences, vec![
             Divergence::RocFailed("no answer"),

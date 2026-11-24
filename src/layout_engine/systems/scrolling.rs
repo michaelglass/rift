@@ -249,10 +249,11 @@ struct ColumnGeometry {
     width: f64,
 }
 
+/// A camera offset the camera may rest at, and the column it shows.
 #[derive(Clone, Copy, Debug)]
 struct SnapPoint {
     offset: f64,
-    column: usize,
+    column: ColumnId,
 }
 
 #[derive(Clone, Debug)]
@@ -452,7 +453,6 @@ fn shown(
 /// A scrolling layout's strip as the core's geometry takes it: the columns with a window that
 /// takes part, each with those windows (a window with no constraints is resizable), as
 /// `Geometry::build` reads them (none: no window takes part). Arguments as `build` takes them.
-#[cfg(any(test, feature = "roc-core"))]
 fn strip(
     state: &LayoutState,
     settings: &ScrollingLayoutSettings,
@@ -516,6 +516,8 @@ fn strip(
 }
 
 impl Geometry {
+    /// The strip's geometry: placed by the core (policy (a)), with the system's own placement
+    /// ([`shadow_placement`]) its shadow.
     fn build(
         state: &LayoutState,
         settings: &ScrollingLayoutSettings,
@@ -525,145 +527,38 @@ impl Geometry {
         constraint_revision: Option<u64>,
         gaps: GapSettings,
     ) -> Self {
+        use crate::layout_engine::cg_rect;
         let tiling = compute_tiling_area(screen, &gaps);
-        let mut columns = Vec::with_capacity(state.arrangement.columns.len());
-        let mut frames =
-            Vec::with_capacity(state.arrangement.columns.iter().map(|c| c.rows.len()).sum());
-        let constraint = |wid: &WindowId| {
-            constraints
-                .get(wid)
-                .copied()
-                .unwrap_or(WindowLayoutConstraints {
-                    sizing: super::Sizing::Resizable,
-                    ..Default::default()
-                })
-                .normalized()
-        };
-        let mut x = 0.0;
-        let active_columns = if inactive.is_empty() {
-            state.arrangement.columns.len()
-        } else {
-            state
-                .arrangement
-                .columns
-                .iter()
-                .filter(|c| c.windows().any(|w| !inactive.contains(w)))
-                .count()
-        };
-        for column in &state.arrangement.columns {
-            let active_rows = column.rows.iter().filter(|row| !inactive.contains(&row.window));
-            let mut rows = Vec::with_capacity(column.rows.len());
-            let mut min: f64 = 1.0;
-            let mut fixed: f64 = 0.0;
-            let mut max = f64::INFINITY;
-            let mut flexible = false;
-            for row in active_rows.clone() {
-                let c = constraint(&row.window);
-                let fixed_width = c.fixed_for_axis(true);
-                min = min.max(c.min_width);
-                fixed = fixed.max(fixed_width.unwrap_or(0.0));
-                flexible |= fixed_width.is_none();
-                if c.max_width > 0.0 {
-                    max = max.min(c.max_width);
-                }
-                let fixed_height = c.fixed_for_axis(false);
-                rows.push(AxisConstraints {
-                    min: c.min_height,
-                    fixed: fixed_height,
-                    max: (c.max_height > 0.0).then_some(c.max_height),
-                    weight: (row.height - c.min_height).max(0.001),
-                    can_grow: fixed_height.is_none(),
-                });
-            }
-            if rows.is_empty() {
-                continue;
-            }
-            let base = if settings.expand_single_column && active_columns == 1 {
-                tiling.size.width
-            } else {
-                column.resolved_width(
-                    tiling.size.width,
-                    gaps.inner.horizontal,
-                    settings,
-                    &constraints,
-                    inactive,
-                )
-            };
-            let width = if flexible {
-                base.min(max).max(min).max(fixed)
-            } else {
-                min.max(fixed)
-            };
-            columns.push(ColumnGeometry {
-                id: column.id,
-                world_x: x,
-                width,
-            });
-            let available =
-                (tiling.size.height - gaps.inner.vertical * (rows.len() - 1) as f64).max(0.0);
-            let heights = solve_axis_lengths(rows, available);
-            let mut y = tiling.origin.y;
-            for (row, height) in active_rows.zip(heights) {
-                let wid = row.window;
-                let mut size = CGSize::new(width, height);
-                let c = constraint(&wid);
-                size.width = c.fixed_for_axis(true).unwrap_or(width).max(c.min_width).min(width);
-                size.height =
-                    c.fixed_for_axis(false).unwrap_or(height).max(c.min_height).min(height);
-                if c.max_width > 0.0 {
-                    size.width = size.width.min(c.max_width);
-                }
-                if c.max_height > 0.0 {
-                    size.height = size.height.min(c.max_height);
-                }
-                frames.push((wid, CGRect::new(CGPoint::new(x, y), size)));
-                y += height + gaps.inner.vertical;
-            }
-            x += width + gaps.inner.horizontal;
-        }
-        let mut geometry = Self {
+        let placed = crate::layout_engine::core_geometry::decide_strip(
+            strip(state, settings, inactive, screen, &constraints, &gaps),
+            shadow_placement(state, settings, inactive, tiling, &constraints, &gaps),
+        );
+        Self {
             screen,
             tiling,
             gaps,
             constraints,
             constraint_revision,
-            columns,
-            frames,
-            bounds: (0.0, 0.0),
-            snaps: Vec::new(),
-        };
-        // The bounds are resting positions, not topology-derived column indices.
-        geometry.snaps = geometry.snap_points(settings);
-        if !geometry.snaps.is_empty() {
-            geometry.bounds = geometry
+            columns: placed
+                .columns
+                .into_iter()
+                .map(|(id, world_x, width)| ColumnGeometry {
+                    id: ColumnId(id),
+                    world_x,
+                    width,
+                })
+                .collect(),
+            frames: placed.frames.into_iter().map(|(w, frame)| (w, cg_rect(frame))).collect(),
+            bounds: placed.bounds,
+            snaps: placed
                 .snaps
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), snap| {
-                    (min.min(snap.offset), max.max(snap.offset))
-                });
+                .into_iter()
+                .map(|(offset, column)| SnapPoint {
+                    offset,
+                    column: ColumnId(column),
+                })
+                .collect(),
         }
-        #[cfg(any(test, feature = "roc-core"))]
-        crate::layout_engine::core_geometry::check_strip(
-            strip(
-                state,
-                settings,
-                inactive,
-                screen,
-                &geometry.constraints,
-                &geometry.gaps,
-            ),
-            &crate::layout_engine::core_geometry::StripPlacement {
-                columns: geometry.columns.iter().map(|c| (c.id.0, c.world_x, c.width)).collect(),
-                frames: geometry.frames.clone(),
-                snaps: geometry
-                    .snaps
-                    .iter()
-                    .map(|snap| (snap.offset, geometry.columns[snap.column].id.0))
-                    .collect(),
-                bounds: geometry.bounds,
-            },
-        );
-        geometry
     }
 
     fn same_projected_constraints(
@@ -690,59 +585,194 @@ impl Geometry {
         self.columns.iter().find(|c| c.id == id).copied()
     }
 
-    fn snap_points(&self, settings: &ScrollingLayoutSettings) -> Vec<SnapPoint> {
-        let Some(first) = self.columns.first() else {
-            return Vec::new();
-        };
-        let view = self.tiling.size.width;
-        let anchored = settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored;
-        if anchored {
-            return self
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(index, _)| SnapPoint {
-                    offset: self.anchor_offset(index, settings.alignment),
-                    column: index,
-                })
-                .collect();
+    fn anchor_offset(&self, index: usize, alignment: ScrollingAlignment) -> f64 {
+        anchor_offset(&self.columns, index, self.tiling.size.width, alignment)
+    }
+}
+
+/// Where the scrolling system places a strip itself (`tiling` the screen's tiling area): since
+/// the core decides (policy (a)), the shadow `Geometry::build` holds the core's placement to.
+/// Arguments as `build` takes them.
+fn shadow_placement(
+    state: &LayoutState,
+    settings: &ScrollingLayoutSettings,
+    inactive: &HashSet<WindowId>,
+    tiling: CGRect,
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    gaps: &GapSettings,
+) -> crate::layout_engine::core_geometry::StripPlacement {
+    use crate::layout_engine::core_rect;
+    let mut columns = Vec::with_capacity(state.arrangement.columns.len());
+    let mut frames =
+        Vec::with_capacity(state.arrangement.columns.iter().map(|c| c.rows.len()).sum());
+    let constraint = |wid: &WindowId| {
+        constraints
+            .get(wid)
+            .copied()
+            .unwrap_or(WindowLayoutConstraints {
+                sizing: super::Sizing::Resizable,
+                ..Default::default()
+            })
+            .normalized()
+    };
+    let mut x = 0.0;
+    let active_columns = if inactive.is_empty() {
+        state.arrangement.columns.len()
+    } else {
+        state
+            .arrangement
+            .columns
+            .iter()
+            .filter(|c| c.windows().any(|w| !inactive.contains(w)))
+            .count()
+    };
+    for column in &state.arrangement.columns {
+        let active_rows = column.rows.iter().filter(|row| !inactive.contains(&row.window));
+        let mut rows = Vec::with_capacity(column.rows.len());
+        let mut min: f64 = 1.0;
+        let mut fixed: f64 = 0.0;
+        let mut max = f64::INFINITY;
+        let mut flexible = false;
+        for row in active_rows.clone() {
+            let c = constraint(&row.window);
+            let fixed_width = c.fixed_for_axis(true);
+            min = min.max(c.min_width);
+            fixed = fixed.max(fixed_width.unwrap_or(0.0));
+            flexible |= fixed_width.is_none();
+            if c.max_width > 0.0 {
+                max = max.min(c.max_width);
+            }
+            let fixed_height = c.fixed_for_axis(false);
+            rows.push(AxisConstraints {
+                min: c.min_height,
+                fixed: fixed_height,
+                max: (c.max_height > 0.0).then_some(c.max_height),
+                weight: (row.height - c.min_height).max(0.001),
+                can_grow: fixed_height.is_none(),
+            });
         }
-        let last = self.columns.last().unwrap();
-        let left = first.world_x;
-        let right = last.world_x + last.width - view;
-        let mut points = vec![SnapPoint { offset: left, column: 0 }, SnapPoint {
-            offset: right,
-            column: self.columns.len() - 1,
-        }];
-        for (index, column) in self.columns.iter().enumerate() {
-            for offset in [column.world_x, column.world_x + column.width - view] {
-                if left < offset && offset < right {
-                    points.push(SnapPoint { offset, column: index });
-                }
+        if rows.is_empty() {
+            continue;
+        }
+        let base = if settings.expand_single_column && active_columns == 1 {
+            tiling.size.width
+        } else {
+            column.resolved_width(
+                tiling.size.width,
+                gaps.inner.horizontal,
+                settings,
+                constraints,
+                inactive,
+            )
+        };
+        let width = if flexible {
+            base.min(max).max(min).max(fixed)
+        } else {
+            min.max(fixed)
+        };
+        columns.push(ColumnGeometry {
+            id: column.id,
+            world_x: x,
+            width,
+        });
+        let available =
+            (tiling.size.height - gaps.inner.vertical * (rows.len() - 1) as f64).max(0.0);
+        let heights = solve_axis_lengths(rows, available);
+        let mut y = tiling.origin.y;
+        for (row, height) in active_rows.zip(heights) {
+            let wid = row.window;
+            let mut size = CGSize::new(width, height);
+            let c = constraint(&wid);
+            size.width = c.fixed_for_axis(true).unwrap_or(width).max(c.min_width).min(width);
+            size.height = c.fixed_for_axis(false).unwrap_or(height).max(c.min_height).min(height);
+            if c.max_width > 0.0 {
+                size.width = size.width.min(c.max_width);
+            }
+            if c.max_height > 0.0 {
+                size.height = size.height.min(c.max_height);
+            }
+            frames.push((wid, core_rect(CGRect::new(CGPoint::new(x, y), size))));
+            y += height + gaps.inner.vertical;
+        }
+        x += width + gaps.inner.horizontal;
+    }
+    // The bounds are resting positions, not topology-derived column indices.
+    let snaps = snap_points(&columns, tiling.size.width, settings);
+    let bounds = if snaps.is_empty() {
+        (0.0, 0.0)
+    } else {
+        snaps.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), snap| {
+            (min.min(snap.offset), max.max(snap.offset))
+        })
+    };
+    crate::layout_engine::core_geometry::StripPlacement {
+        columns: columns.iter().map(|c| (c.id.0, c.world_x, c.width)).collect(),
+        frames,
+        snaps: snaps.iter().map(|snap| (snap.offset, snap.column.0)).collect(),
+        bounds,
+    }
+}
+
+/// The shadow's resting points over its `columns` in a view `view` wide.
+fn snap_points(
+    columns: &[ColumnGeometry],
+    view: f64,
+    settings: &ScrollingLayoutSettings,
+) -> Vec<SnapPoint> {
+    let Some(first) = columns.first() else {
+        return Vec::new();
+    };
+    let anchored = settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored;
+    if anchored {
+        return columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| SnapPoint {
+                offset: anchor_offset(columns, index, view, settings.alignment),
+                column: column.id,
+            })
+            .collect();
+    }
+    let last = columns.last().unwrap();
+    let left = first.world_x;
+    let right = last.world_x + last.width - view;
+    let mut points = vec![SnapPoint { offset: left, column: first.id }, SnapPoint {
+        offset: right,
+        column: last.id,
+    }];
+    for column in columns {
+        for offset in [column.world_x, column.world_x + column.width - view] {
+            if left < offset && offset < right {
+                points.push(SnapPoint { offset, column: column.id });
             }
         }
-        points
     }
+    points
+}
 
-    fn anchor_offset(&self, index: usize, alignment: ScrollingAlignment) -> f64 {
-        let column = self.columns[index];
-        if column.width >= self.tiling.size.width {
+fn anchor_offset(
+    columns: &[ColumnGeometry],
+    index: usize,
+    view: f64,
+    alignment: ScrollingAlignment,
+) -> f64 {
+    let column = columns[index];
+    if column.width >= view {
+        return column.world_x;
+    }
+    // Preserve Rift's anchored first/last-column policy.
+    if columns.len() > 1 {
+        if index == 0 {
             return column.world_x;
         }
-        // Preserve Rift's anchored first/last-column policy.
-        if self.columns.len() > 1 {
-            if index == 0 {
-                return column.world_x;
-            }
-            if index + 1 == self.columns.len() {
-                return column.world_x + column.width - self.tiling.size.width;
-            }
+        if index + 1 == columns.len() {
+            return column.world_x + column.width - view;
         }
-        match alignment {
-            ScrollingAlignment::Left => column.world_x,
-            ScrollingAlignment::Center => centered_offset(self.tiling.size.width, column),
-            ScrollingAlignment::Right => column.world_x + column.width - self.tiling.size.width,
-        }
+    }
+    match alignment {
+        ScrollingAlignment::Left => column.world_x,
+        ScrollingAlignment::Center => centered_offset(view, column),
+        ScrollingAlignment::Right => column.world_x + column.width - view,
     }
 }
 
@@ -1784,6 +1814,12 @@ impl ScrollingLayoutSystem {
         let g = state.geometry.as_ref()?;
         let from_offset = state.camera.viewport.offset();
         let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
+        // After a gesture, a tie goes to a point showing the active column (asked only of a
+        // strip with resting points, so with columns).
+        let away = |snap: &SnapPoint| {
+            gesture_release
+                && snap.column != state.arrangement.columns[state.arrangement.active_column].id
+        };
         let snap = g.snaps.iter().min_by(|a, b| {
             (a.offset - projected)
                 .abs()
@@ -1793,44 +1829,38 @@ impl ScrollingLayoutSystem {
                         // Niri sorts snaps by position before nearest-point selection.
                         a.offset.total_cmp(&b.offset)
                     } else {
-                        (gesture_release
-                            && g.columns[a.column].id
-                                != state.arrangement.columns[state.arrangement.active_column].id)
-                            .cmp(
-                                &(gesture_release
-                                    && g.columns[b.column].id
-                                        != state.arrangement.columns
-                                            [state.arrangement.active_column]
-                                            .id),
-                            )
+                        away(a).cmp(&away(b))
                     }
                 })
         })?;
-        let mut index = snap.column;
+        let mut column = snap.column;
         if niri {
             // Choose the furthest fully visible column
             // in the direction of travel.
-            index = if projected >= from_offset {
+            let past = |c: &&ColumnGeometry| c.id != snap.column;
+            column = if projected >= from_offset {
                 g.columns
                     .iter()
-                    .enumerate()
-                    .skip(index + 1)
-                    .take_while(|(_, column)| {
-                        column.world_x + column.width <= snap.offset + g.tiling.size.width
+                    .skip_while(past)
+                    .skip(1)
+                    .take_while(|next| {
+                        next.world_x + next.width <= snap.offset + g.tiling.size.width
                     })
                     .last()
-                    .map_or(index, |(next, _)| next)
+                    .map_or(column, |next| next.id)
             } else {
-                (0..index)
+                g.columns
+                    .iter()
                     .rev()
-                    .take_while(|&next| g.columns[next].world_x >= snap.offset)
+                    .skip_while(past)
+                    .skip(1)
+                    .take_while(|next| next.world_x >= snap.offset)
                     .last()
-                    .unwrap_or(index)
+                    .map_or(column, |next| next.id)
             };
         }
         let offset = snap.offset;
-        let canonical_index =
-            state.arrangement.columns.iter().position(|c| c.id == g.columns[index].id)?;
+        let canonical_index = state.arrangement.columns.iter().position(|c| c.id == column)?;
         if canonical_index != state.arrangement.active_column {
             state.camera.fullscreen_restore = None;
         }
@@ -2752,6 +2782,111 @@ pub(crate) mod tests {
         ]);
     }
 
+    /// Columns sit a column gap apart and a column's rows a row gap apart (what rift does with a
+    /// scrolling layout, whichever core places it).
+    #[test]
+    fn columns_and_rows_are_placed_their_gaps_apart() {
+        let mut f = Fixture::new(3);
+        f.gaps.inner.horizontal = 20.0;
+        f.gaps.inner.vertical = 10.0;
+        f.prepare();
+        f.select(3);
+        f.system
+            .edit(
+                f.layout,
+                LayoutEdit::Group(GroupEdit::ConsumeOrExpel(Direction::Left)),
+            )
+            .discard();
+        f.prepare();
+        let frames = f.system.calculate_layout(
+            f.layout,
+            f.screen,
+            0.0,
+            &f.constraints,
+            &f.gaps,
+            Default::default(),
+        );
+        let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+        // Half of the 1000-point screen and one gap, less the gap: 490 points a column; the
+        // second column's two rows share its 800 points less one gap.
+        assert_eq!(frames, vec![
+            (wid(1), rect(0.0, 0.0, 490.0, 800.0)),
+            (wid(2), rect(510.0, 0.0, 490.0, 395.0)),
+            (wid(3), rect(510.0, 405.0, 490.0, 395.0)),
+        ]);
+    }
+
+    /// Anchored and left-aligned, the last two of four half-view columns rest at the same point:
+    /// a release after a gesture goes to the active one, any other release to the earlier one.
+    #[test]
+    fn after_a_gesture_a_tied_resting_point_shows_the_active_column() {
+        let mut f = Fixture::new(4);
+        let settings = ScrollingLayoutSettings {
+            focus_navigation_style: ScrollingFocusNavigationStyle::Anchored,
+            ..f.system.settings.clone()
+        };
+        f.system.update_settings(&settings);
+        f.prepare();
+        for (gesture, window) in [(true, 4), (false, 3)] {
+            f.select(4);
+            let release = f.system.settle(f.layout, 1000.0, 0.0, gesture).unwrap();
+            assert_eq!((release.window, release.offset), (wid(window), 1000.0));
+        }
+    }
+
+    /// Niri: a release shows the furthest column wholly in view in the direction of travel.
+    #[test]
+    fn a_niri_release_shows_the_furthest_column_in_view_its_way() {
+        let mut f = Fixture::new(5);
+        f.prepare();
+        // Five half-view columns at 0, 500, 1000, 1500 and 2000; the camera rests at 0, 500,
+        // 1000 and 1500.
+        for (from, projected, window, offset) in [
+            (0.0, 480.0, 3, 500.0),
+            (0.0, 1020.0, 4, 1000.0),
+            (1400.0, 1010.0, 3, 1000.0),
+            (1500.0, 520.0, 2, 500.0),
+        ] {
+            f.system.layouts[f.layout].camera.viewport = Viewport::Static(from);
+            let release = f.system.settle(f.layout, projected, 0.0, true).unwrap();
+            assert_eq!(
+                (release.window, release.offset),
+                (wid(window), offset),
+                "from {from} to {projected}"
+            );
+        }
+    }
+
+    /// Anchored and centred, the camera rests with a middle column in the middle of the view and
+    /// the last column at the view's right edge: snapping goes to the nearest such point (what
+    /// rift does with a scrolling layout, whichever core places it).
+    #[test]
+    fn a_centred_strip_snaps_to_the_nearest_column_centred() {
+        let mut f = Fixture::new(4);
+        let settings = ScrollingLayoutSettings {
+            alignment: ScrollingAlignment::Center,
+            focus_navigation_style: ScrollingFocusNavigationStyle::Anchored,
+            ..f.system.settings.clone()
+        };
+        f.system.update_settings(&settings);
+        f.prepare();
+        // Four 500-point columns in a 1000-point view: the camera rests at 0 (the first column),
+        // 250 and 750 (the middle two, centred) and 1000 (the last).
+        for (offset, window, target) in [(700.0, 3, 750.0), (400.0, 2, 250.0), (900.0, 4, 1000.0)] {
+            f.system.layouts[f.layout].camera.viewport = Viewport::Static(offset);
+            assert_eq!(
+                f.system.snap_to_nearest_column(f.layout),
+                Some(wid(window)),
+                "from {offset}"
+            );
+            assert_eq!(
+                f.system.layouts[f.layout].camera.viewport.target(),
+                target,
+                "from {offset}"
+            );
+        }
+    }
+
     #[test]
     fn consume_expel_and_horizontal_extraction_preserve_identity_sizing_and_focus() {
         for direction in [Direction::Left, Direction::Right] {
@@ -3052,7 +3187,8 @@ mod core_geometry_tests {
         (system, layout, windows)
     }
 
-    /// The core places a scrolling strip as upstream's `Geometry::build` does, bit for bit:
+    /// The core places a scrolling strip as the scrolling system's own placement does (its
+    /// shadow, upstream's `Geometry::build`), bit for bit:
     /// columns, world frames, the camera's resting points and bounds, over drawn systems,
     /// settings, screens, gaps and window constraints.
     #[test]
@@ -3065,45 +3201,27 @@ mod core_geometry_tests {
             let constraints = drawn_constraints_for(&mut rng, &windows);
             let gaps = drawn_gaps(&mut rng);
             let state = &system.layouts[layout];
-            let geometry = Geometry::build(
+            let tiling = compute_tiling_area(screen, &gaps);
+            let theirs = shadow_placement(
                 state,
                 &system.settings,
                 &system.inactive,
-                screen,
-                constraints.clone(),
-                None,
-                gaps.clone(),
+                tiling,
+                &constraints,
+                &gaps,
             );
-            let core = strip(
+            let core = crate::layout_engine::core_geometry::tests::rust_placement_for_test(strip(
                 state,
                 &system.settings,
                 &system.inactive,
                 screen,
                 &constraints,
                 &gaps,
-            )
-            .map(|strip| strip.place());
-            let words =
-                |placed| crate::layout_engine::core_geometry::tests::placed_words_for_test(placed);
-            let theirs = crate::layout_engine::core_geometry::tests::placement_words_for_test(
-                &crate::layout_engine::core_geometry::StripPlacement {
-                    columns: geometry
-                        .columns
-                        .iter()
-                        .map(|c| (c.id.0, c.world_x, c.width))
-                        .collect(),
-                    frames: geometry.frames.clone(),
-                    snaps: geometry
-                        .snaps
-                        .iter()
-                        .map(|snap| (snap.offset, geometry.columns[snap.column].id.0))
-                        .collect(),
-                    bounds: geometry.bounds,
-                },
-            );
-            assert_eq!(words(core), theirs, "{}", system.draw_tree(layout));
+            ));
+            let words = crate::layout_engine::core_geometry::tests::placement_words_for_test;
+            assert_eq!(words(&core), words(&theirs), "{}", system.draw_tree(layout));
             cases += 1;
-            frames_seen += geometry.frames.len();
+            frames_seen += theirs.frames.len();
         }
         eprintln!("scrolling: {cases} strips, {frames_seen} frames identical");
         assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
