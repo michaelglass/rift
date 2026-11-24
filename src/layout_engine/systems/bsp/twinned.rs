@@ -715,4 +715,120 @@ mod tests {
         assert!(failed.is_err());
         assert!(bsp_tree_divergences() > before);
     }
+
+    /// The twin's cost per operation at 10, 100 and 1000 windows (release:
+    /// `cargo test --release --lib measure_bsp_twin -- --ignored --nocapture`): upstream's
+    /// operation alone, the core's step alone, and the whole-tree comparison and a re-seed, each
+    /// on its own. A plain release build pays the step on every operation and the comparison on
+    /// every 32nd.
+    #[test]
+    #[ignore]
+    fn measure_bsp_twin() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        for count in [10_u32, 100, 1000] {
+            let mut system = BspLayoutSystem::default();
+            let layout = system.create_layout();
+            for idx in 1..=count {
+                system.update(WindowChange::Add(layout, w(idx), None));
+            }
+            // A mix of everyday operations: focus moves, swaps, resizes, a window coming and
+            // going.
+            let ops = 4000_u32;
+            let directions = [
+                Direction::Left,
+                Direction::Up,
+                Direction::Right,
+                Direction::Down,
+            ];
+            let mut upstream = system.upstream.clone();
+            let started = Instant::now();
+            for i in 0..ops {
+                match i % 4 {
+                    0 => drop(black_box(
+                        upstream.focus(layout, Focus::Direction(directions[(i / 4 % 4) as usize])),
+                    )),
+                    1 => drop(black_box(upstream.edit_layout(
+                        layout,
+                        LayoutEdit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
+                    ))),
+                    2 => drop(black_box(upstream.edit_layout(layout, LayoutEdit::Resize {
+                        amount: 0.05,
+                        orientation: crate::layout_engine::ResizeOrientation::Smart,
+                    }))),
+                    _ => {
+                        upstream.update(WindowChange::Add(layout, w(count + 1), None));
+                        upstream.update(WindowChange::Remove(w(count + 1)));
+                    }
+                }
+            }
+            let upstream_each = started.elapsed() / ops;
+            let mut core = system.twin.core.clone();
+            let core_directions = directions.map(core_direction);
+            let started = Instant::now();
+            for i in 0..ops {
+                match i % 4 {
+                    0 => drop(black_box(core.focus(
+                        layout,
+                        core::Focus::Direction(core_directions[(i / 4 % 4) as usize]),
+                    ))),
+                    1 => drop(black_box(core.edit(
+                        layout,
+                        core::Edit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
+                    ))),
+                    2 => drop(black_box(core.edit(layout, core::Edit::Resize {
+                        amount: 0.05,
+                        along: core::ResizeAlong::Smart,
+                    }))),
+                    _ => {
+                        core.add_window(layout, w(count + 1));
+                        core.remove_window(w(count + 1));
+                    }
+                }
+            }
+            let core_each = started.elapsed() / ops;
+            assert!(view_difference(&core, &upstream).is_none());
+            let rounds = 200;
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(view_difference(&core, &upstream));
+            }
+            let view = started.elapsed() / rounds;
+            let started = Instant::now();
+            for _ in 0..rounds / 10 {
+                black_box(seed(&upstream));
+            }
+            let reseed = started.elapsed() / (rounds / 10);
+            // Each pass builds the core's tree's shape beside upstream's system's.
+            let screen = objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                objc2_core_foundation::CGSize::new(3000.0, 2000.0),
+            );
+            let gaps = crate::common::config::GapSettings::default();
+            let root = upstream.layouts[layout].root;
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(upstream.shape(root, screen, &HashMap::default(), &gaps));
+            }
+            let upstream_shape = started.elapsed() / rounds;
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(core.shape(
+                    layout,
+                    crate::layout_engine::core_rect(screen),
+                    crate::layout_engine::core_gaps(&gaps),
+                    |_| None,
+                ));
+            }
+            let core_shape = started.elapsed() / rounds;
+            eprintln!(
+                "{count} windows: upstream {upstream_each:?}/op, core step {core_each:?}/op \
+                 ({:.0}%), view {view:?} ({:?}/op every 32nd), re-seed {reseed:?}; a pass's \
+                 shape: upstream {upstream_shape:?}, core {core_shape:?}",
+                100.0 * core_each.as_secs_f64() / upstream_each.as_secs_f64(),
+                view / 32,
+            );
+        }
+    }
 }
