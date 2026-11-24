@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, layout trees: slice 4 done, the core's BSP tree decides; 4b next): read this first
+## Handoff (2026-11-24, layout trees: 4b done, under `roc-core` the Roc BSP tree and its shape decide; 5 next, on the lead's go): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-4 are done for
 BSP. `rearch/roc-next@fork` carries everything through this docs commit once it is published
@@ -20,6 +20,35 @@ rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both 
 `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, 4b, done: the shape in Roc; under `roc-core` the Roc tree decides.** Three commits
+after the slice 4 docs commit; each message has its plants, checks and costs.
+- **rift-cli's BSP views read the core** (the lead's ruling: first, so slice 5 only deletes):
+  `Tree::container(layout)` (each node, whether the selection's memory rests on it, its share of
+  its parent, a split's children or the leaf as held) and `Tree::draw(layout)`, pure, in
+  `rift_core`; the platform maps a container to `ContainerTreeNode`. Upstream's views are held
+  to them on every call (the drawn fuzzer asks both on every query step).
+- **`Tree::shape` in Roc** (`BspTree.shape`): the words become the geometry's `WindowId` there;
+  `bsp_tree_frames` (`RocBspTree::frames`) answers a layout's frames from the Roc tree's own shape
+  through the Roc geometry, the question carrying the screen, gaps and every known window's
+  constraints by word. Held by the rift-core-roc differential: layout passes on 40% of steps,
+  192,174 identical bit for bit with the Rust tree's shape through the Rust geometry (136,424
+  windows placed, 54,567 constrained).
+- **Under `roc-core` the Roc tree and its shape decide** (`systems/bsp/roc_tree.rs`, `RocTree`,
+  in `BspLayoutSystem` beside the core): every operation's and query's answer is the Roc tree's
+  (parsed back to rift's types; an answer of another kind than the operation's falls back to the
+  Rust tree's, already reported), and `calculate_layout` gives the Roc tree's frames
+  (`decide_bsp_tree`), with the Rust geometry's frames for the Rust tree's shape and upstream's
+  the shadows. The Rust tree is the Roc tree's shadow: its answer and whole view compared on every
+  operation, a difference counted (`roc-core: bsp tree re-seeds`), panicking in tests, or warned
+  `roc-divergence:` and the Rust tree re-seeded from the Roc tree's view (`core_of`; a query's
+  difference is only reported). Upstream stays the Rust tree's shadow, compared after the Roc
+  decision. Saving stays from the Rust tree, which under `roc-core` equals the Roc tree after
+  every operation. Without `roc-core` nothing changed: the Rust tree decides.
+- **Cost (release, `roc-core`, `measure_bsp_roc_tree`):** a Roc layout pass 7 / 62 / 557 us
+  against the Rust tree's shape and geometry 2.3 / 19 / 170 us at 10 / 100 / 1000 windows (a
+  `roc-core` pass pays both, the Rust one as the shadow); the Roc step 0.35 / 1.5 / 29 us, the view
+  comparison 0.45 / 2.7 / 34 us, a Rust re-seed from the Roc view 0.8 / 3.8 / 42 us.
 
 **Layout trees, slice 4, done: the flip (policy (a)).** Two commits after d911eb9b: the flip, and
 the Roc tree as a shadow under `roc-core`. Each message has its plants, checks and costs.
@@ -48,8 +77,8 @@ the Roc tree as a shadow under `roc-core`. Each message has its plants, checks a
   re-seeds`), panics in tests, or warns `roc-divergence:` and re-seeds the Roc tree from the core.
   An app closing lists the app's windows the core holds (in layouts or left out). Windows are
   `Word`s, ordered as `WindowId` (pid, then index), so the trees' orderings agree.
-- **Still read from the shadow:** `draw_tree` and `container_tree` (IPC), identical while the views
-  hold; slice 5 must port them to the core before `Upstream` goes.
+- **`draw_tree` and `container_tree` (IPC)** read the shadow at slice 4's end; 4b moved them to the
+  core.
 - **Plants:** 10/10 for the flip (core, shadow, conversion, save only, re-seed), 8/8 for the Roc
   shadow (Roc and conversion). A trap found on the way: a plant runner that restores the file with
   an older mtime than the planted build leaves cargo's planted object in place (the next plants
@@ -119,18 +148,16 @@ message has its plants and checks.
   not compile; upstream's `Move` is `Moved` at the boundary (`BspEdit`, `BspDropAction`), as the
   floating slot's `Placed` was for `in`.
 
-**Next: layout trees, 4b, then 5 (the lead's rulings, 2026-11-24).**
+**Next: layout trees, 5 (waits for the lead's go).**
 - **4 (done, above):** the Rust core's tree decides and is saved in every build; upstream's
   system is its shadow, re-seeded from the core; under `roc-core` the Roc tree is a second shadow,
   re-seeded from the core through `bsp_tree_seed`. The shape is built from the Rust core's tree
   (option (a)).
-- **4b, not optional, before 5:** port `Tree::shape` to Roc, converting the tree's window words to
-  `WindowId` at the boundary, so under `roc-core` a Roc-decided tree feeds the Roc geometry with no
-  Rust tree in between (option (b)). Then under `roc-core` the Roc tree and its shape decide, and
-  the Rust tree becomes the shadow, re-seeded from the Roc tree's view (policy (a)). Held by a
-  differential, with plants.
-- **5 (waits for the lead's go):** delete `Upstream` once nothing reads it (`draw_tree` and
-  `container_tree` first).
+- **4b (done, above):** the shape in Roc; under `roc-core` the Roc tree and its shape decide, the
+  Rust tree its shadow, re-seeded from the Roc tree's view.
+- **5 (waits for the lead's go):** delete `Upstream` (nothing reads it for an answer: rift-cli's
+  views read the core since 4b). Its load (`TryFrom<StoredBspSystem>`, the old forms and the
+  normalizations) has to move to the core's side first, and the saved form (`Saved`) stays.
 - The queued Roc nightly bump still waits: the newest nightly is still
   nightly-2026-11-23-b5c77fc (checked 2026-11-24).
 
@@ -1709,6 +1736,11 @@ notes called several of these friction; they are Roc's design, and the core foll
 
 ### Unknown (behaviour at this commit, not documented)
 
+- **A `List(Frame)` field in a `requires` entry's result record beside the model variable**
+  (`bsp_tree_frames : trees, Q -> { model : trees, frames : List(Frame) }`) made every other
+  entry answering `List(Frame)` (`bsp_for_host`, `traditional_for_host`, ...) fail as "a
+  polymorphic provided function". Workaround: the field is a nominal (`BspFrames := { frames :
+  List(Frame) }`). Not reduced to a minimal case or filed yet.
 - **`F64` rounding.** `round_to_*_try` rounds by `floor(x + 0.5)` (`Builtin.roc`,
   `f64_round_to_whole`), which differs from Rust's `f64::round` at `0.49999999999999994` and
   loses the sign of a zero; there is no `F64 -> F64` round or floor. The geometry writes Rust's
@@ -2007,7 +2039,7 @@ replay test and the differential green, and ends with the Roc app deciding it.
 | Sizing (respect_min_size in the core) | S | Done, Rust (the play line) and Roc, with its own wire encoding. |
 | Layout geometry: scrolling | M | Done, Rust and Roc: the strip's placement and where the camera settles (`layout::scrolling`, `Scrolling.roc`). The camera's spring and gesture motion stay rift's (time-sampled presentation). |
 | Layout geometry: floating | S | Done, Rust and Roc: first frames and the cascade (`layout::floating`, `Floating.roc`). |
-| Layout trees into the core | L+ | **Re-planned 2026-11-24 (Handoff).** The pre-#688 core trees are deleted (no caller since merge (b)). BSP: the core tree (ported from #688's `systems/bsp.rs`), its Roc mirror and the flip (saved from the core) are done; next the shape in Roc (4b), then the old tree gone. Then stack, traditional and master-stack, scrolling's columns, floating. |
+| Layout trees into the core | L+ | **Re-planned 2026-11-24 (Handoff).** The pre-#688 core trees are deleted (no caller since merge (b)). BSP: the core tree (ported from #688's `systems/bsp.rs`), its Roc mirror, the flip (saved from the core) and the shape in Roc (under `roc-core` the Roc tree decides) are done; next the old tree gone (5, on the lead's go). Then stack, traditional and master-stack, scrolling's columns, floating. |
 | Window lifecycle complete | M | Admission, visibility, minimize, claims as core events. The admission facts' single writer (upstream plan C1 step 2) is done. A universal `apply(WindowChange)` over the store's other writers is not planned: raise it only when a Roc claim needs one step for the store, with that claim as the reason. |
 | Workspaces and spaces | L | Virtual workspaces, space membership, the topology quarantine and snapshot merge. |
 | Focus and raise | M | Focus follows mouse, raise sequencing; raise FIFO replay conflicts with discard-never-queue. |
