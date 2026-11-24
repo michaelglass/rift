@@ -2872,6 +2872,9 @@ pub(crate) mod tests {
             (0.0, 1020.0, 4, 1000.0),
             (1400.0, 1010.0, 3, 1000.0),
             (1500.0, 520.0, 2, 500.0),
+            // Midway between 1000 and the right end (1500): niri takes the leftmost of the two,
+            // though the right end comes first among the resting points.
+            (1000.0, 1250.0, 4, 1000.0),
         ] {
             f.system.layouts[f.layout].camera.viewport = Viewport::Static(from);
             let release = f.system.settle(f.layout, projected, 0.0, true).unwrap();
