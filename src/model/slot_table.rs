@@ -29,7 +29,11 @@ macro_rules! slot_keys {
     )*};
 }
 
-slot_keys!(crate::model::VirtualWorkspaceId);
+slot_keys!(
+    crate::model::VirtualWorkspaceId,
+    crate::model::tree::NodeId,
+    crate::layout_engine::LayoutId,
+);
 
 /// The saved slot sequence, each value written as `write` makes it of its key and value.
 pub(crate) fn saved<'a, K: SlotKey, V, T: Serialize + 'a>(

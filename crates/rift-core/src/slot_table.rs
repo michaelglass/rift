@@ -23,6 +23,8 @@ pub enum SlotsError {
     TooMany,
     FirstNotEmpty,
     InconsistentOccupation,
+    /// A free list that is not the table's vacant slots (not one of slotmap's refusals).
+    NotTheVacantSlots,
 }
 
 impl std::fmt::Display for SlotsError {
@@ -31,6 +33,7 @@ impl std::fmt::Display for SlotsError {
             SlotsError::TooMany => "too many slots",
             SlotsError::FirstNotEmpty => "first slot not empty",
             SlotsError::InconsistentOccupation => "inconsistent occupation in Slot",
+            SlotsError::NotTheVacantSlots => "a free list that is not the vacant slots",
         })
     }
 }
@@ -196,6 +199,19 @@ impl<K: SlotKey, V> SlotTable<K, V> {
             slots,
             _key: std::marker::PhantomData,
         })
+    }
+
+    /// The same slots, their vacant ones taken in `order`, the first taken first: a live
+    /// table's free list, which a load does not rebuild (a load takes the highest first).
+    /// Refused unless `order` names every vacant slot but the sentinel once.
+    pub fn resumed(mut self, order: &[u32]) -> Result<Self, SlotsError> {
+        let mut taken: Vec<u32> = order.to_vec();
+        taken.sort_unstable();
+        if taken != free_list(&self.slots) {
+            return Err(SlotsError::NotTheVacantSlots);
+        }
+        self.free = order.iter().rev().copied().collect();
+        Ok(self)
     }
 
     /// The same slots, each value made into another of its key and value.

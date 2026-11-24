@@ -416,6 +416,7 @@ pub use traditional::TraditionalLayoutSystem;
 mod bsp;
 pub(crate) mod constraints;
 pub use bsp::BspLayoutSystem;
+pub(crate) use bsp::bsp_tree_divergences;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
 pub(crate) mod scrolling;

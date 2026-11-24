@@ -16,6 +16,10 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeO
 use crate::model::selection::*;
 use crate::model::tree::NodeId;
 
+mod twinned;
+pub use twinned::BspLayoutSystem;
+pub(crate) use twinned::bsp_tree_divergences;
+
 fn bsp_leaf_constraints(
     c: WindowLayoutConstraints,
     horizontal: bool,
@@ -198,9 +202,11 @@ impl Serialize for Node {
     }
 }
 
+/// Upstream's (#688) BSP system, which decides; [`BspLayoutSystem`] steps the core's tree
+/// beside it.
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 #[serde(try_from = "StoredBspSystem")]
-pub struct BspLayoutSystem {
+pub(crate) struct Upstream {
     #[serde(skip)]
     inactive: HashSet<WindowId>,
     layouts: SlotMap<LayoutId, LayoutState>,
@@ -265,7 +271,7 @@ enum LegacyKind {
     },
 }
 
-impl TryFrom<StoredBspSystem> for BspLayoutSystem {
+impl TryFrom<StoredBspSystem> for Upstream {
     type Error = String;
 
     fn try_from(stored: StoredBspSystem) -> Result<Self, String> {
@@ -373,7 +379,7 @@ impl TryFrom<StoredBspSystem> for BspLayoutSystem {
     }
 }
 
-impl BspLayoutSystem {
+impl Upstream {
     fn kind(&self, node: NodeId) -> &NodeKind { &self.nodes[node].kind }
 
     fn kind_mut(&mut self, node: NodeId) -> &mut NodeKind { &mut self.nodes[node].kind }
@@ -653,7 +659,7 @@ impl BspLayoutSystem {
     }
 }
 
-impl BspLayoutSystem {
+impl Upstream {
     pub fn new(window_insertion_point: WindowInsertionPoint) -> Self {
         Self {
             window_insertion_point,
@@ -927,7 +933,7 @@ impl BspLayoutSystem {
 }
 
 struct BspProjection<'a> {
-    system: &'a BspLayoutSystem,
+    system: &'a Upstream,
     prepared: &'a ConstraintCache,
     screen: CGRect,
     tiling: CGRect,
@@ -1010,8 +1016,8 @@ mod tests {
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
-    fn tiled(windows: &[u32]) -> (BspLayoutSystem, LayoutId) {
-        let mut system = BspLayoutSystem::default();
+    fn tiled(windows: &[u32]) -> (Upstream, LayoutId) {
+        let mut system = Upstream::default();
         let layout = system.create_layout();
         for &window in windows {
             system.add_window_after_selection(layout, w(window));
@@ -1020,7 +1026,7 @@ mod tests {
     }
 
     fn calculate_frames(
-        system: &BspLayoutSystem,
+        system: &Upstream,
         layout: LayoutId,
         size: CGSize,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
@@ -1208,7 +1214,7 @@ mod tests {
     }
 }
 
-impl LayoutSystem for BspLayoutSystem {
+impl LayoutSystem for Upstream {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.layouts
             .get(layout)
@@ -1578,7 +1584,7 @@ impl LayoutSystem for BspLayoutSystem {
     }
 }
 
-impl BspLayoutSystem {
+impl Upstream {
     pub(in crate::layout_engine) fn can_move_window(
         &self,
         layout: LayoutId,
@@ -1905,9 +1911,9 @@ impl BspLayoutSystem {
     }
 }
 
-impl BspLayoutSystem {
+impl Upstream {
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        fn write_node(this: &BspLayoutSystem, node: NodeId, out: &mut String, indent: usize) {
+        fn write_node(this: &Upstream, node: NodeId, out: &mut String, indent: usize) {
             for _ in 0..indent {
                 out.push_str("  ");
             }
@@ -1938,7 +1944,7 @@ impl BspLayoutSystem {
 
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         fn snapshot(
-            system: &BspLayoutSystem,
+            system: &Upstream,
             node: NodeId,
             selected: NodeId,
         ) -> rift_protocol::ContainerTreeNode {
@@ -2028,7 +2034,7 @@ impl BspLayoutSystem {
     }
 }
 
-impl BspLayoutSystem {
+impl Upstream {
     /// A BSP layout as the core's geometry takes it, from `root`, pruned as `prepare_geometry`
     /// prunes it (none: nothing takes space). Arguments as `calculate_layout` takes them.
     /// The frames the BSP system computes itself: since the core decides (policy (a)), the
@@ -2165,24 +2171,84 @@ mod core_geometry_tests {
     /// A BSP system after random edits: windows added and removed, closed apps, every focus,
     /// splits of every kind, joins, unjoins, consume-or-expel, moves, drops of every kind (stacks
     /// among them), resizes, swaps, rebalances, orientation toggles, fullscreen of a leaf or a
-    /// split, participation, a single window's aspect ratio.
-    fn drawn_system(rng: &mut Rng) -> (BspLayoutSystem, LayoutId, Vec<WindowId>) {
-        let insertion = if rng.chance(50) {
-            WindowInsertionPoint::NextToSelection
-        } else {
-            WindowInsertionPoint::EndOfTree
-        };
+    /// split, participation, a single window's aspect ratio; and, for the core's tree stepped
+    /// beside it (every operation compared), layouts created, cloned and removed, windows
+    /// replaced, native resizes into and out of fullscreen, the settings changed, and every
+    /// query asked.
+    pub(super) fn drawn_system(rng: &mut Rng) -> (BspLayoutSystem, LayoutId, Vec<WindowId>) {
+        let insertion = drawn_insertion(rng);
         let mut system = BspLayoutSystem::new(insertion);
         if rng.chance(30) {
             system.set_single_window_aspect_ratio(Some(rng.length(0.3, 3.0)));
         }
         let layout = system.create_layout();
+        let mut others: Vec<LayoutId> = Vec::new();
         let mut windows: Vec<WindowId> = Vec::new();
         let mut next = 0;
         for _ in 0..rng.below(40) {
             let pick = |rng: &mut Rng, windows: &[WindowId]| {
                 windows[rng.below(windows.len() as u64) as usize]
             };
+            // Most edits go to the layout drawn for frames, some to the others.
+            let layout = if !others.is_empty() && rng.chance(15) {
+                others[rng.below(others.len() as u64) as usize]
+            } else {
+                layout
+            };
+            if rng.chance(20) {
+                asked(rng, &system, layout, &windows);
+            }
+            if rng.chance(12) {
+                match rng.below(6) {
+                    0 => others.push(system.create_layout()),
+                    1 | 2 => others.push(system.clone_layout(layout)),
+                    3 if !others.is_empty() => {
+                        let removed = others.swap_remove(rng.below(others.len() as u64) as usize);
+                        system.remove_layout(removed);
+                    }
+                    3 => system.remove_layout(LayoutId::default()),
+                    4 => system.set_window_insertion_point(drawn_insertion(rng)),
+                    _ => system.set_single_window_aspect_ratio(
+                        [None, Some(rng.length(0.3, 3.0)), Some(0.0), Some(f64::NAN)]
+                            [rng.below(4) as usize],
+                    ),
+                }
+                continue;
+            }
+            if !windows.is_empty() && rng.chance(8) {
+                let from = pick(rng, &windows);
+                let to = if rng.chance(50) {
+                    pick(rng, &windows)
+                } else {
+                    next += 1;
+                    WindowId::new(from.pid, next)
+                };
+                windows.retain(|w| *w != from && *w != to);
+                windows.push(to);
+                system.update(WindowChange::Replace(from, to));
+                continue;
+            }
+            if !windows.is_empty() && rng.chance(8) {
+                let window = pick(rng, &windows);
+                let screen = drawn_screen(rng);
+                let gaps = drawn_gaps(rng);
+                let tiling = crate::layout_engine::utils::compute_tiling_area(screen, &gaps);
+                let mut frame = || match rng.below(4) {
+                    0 => screen,
+                    1 => tiling,
+                    _ => drawn_screen(rng),
+                };
+                let (old, new) = (frame(), frame());
+                system.update(WindowChange::Resize {
+                    layout,
+                    window,
+                    old,
+                    new,
+                    screen,
+                    gaps: &gaps,
+                });
+                continue;
+            }
             match rng.below(17) {
                 0..=3 => {
                     next += 1;
@@ -2297,6 +2363,40 @@ mod core_geometry_tests {
         (system, layout, windows)
     }
 
+    fn drawn_insertion(rng: &mut Rng) -> WindowInsertionPoint {
+        if rng.chance(50) {
+            WindowInsertionPoint::NextToSelection
+        } else {
+            WindowInsertionPoint::EndOfTree
+        }
+    }
+
+    /// Every query, about drawn windows (some not in the layout).
+    fn asked(rng: &mut Rng, system: &BspLayoutSystem, layout: LayoutId, windows: &[WindowId]) {
+        let window = match windows {
+            [] => WindowId::new(1, 9999),
+            _ => windows[rng.below(windows.len() as u64) as usize],
+        };
+        let direction = drawn_direction(rng);
+        let _ = system.selected_window(layout);
+        let _ = system.window_in_direction(layout, direction);
+        let _ = system.contains_window(layout, window);
+        let _ = system.has_any_fullscreen_node(layout);
+        let _ = system.has_windows_for_app(layout, window.pid);
+        let _ = system.window_participates(window);
+        let _ = system.contains_layout(layout);
+        for query in [
+            WindowQuery::All,
+            WindowQuery::Visible,
+            WindowQuery::Selection,
+            WindowQuery::Stack(window),
+        ] {
+            let _ = system.windows(layout, query);
+        }
+        let _ = system.can_move_window(layout, window, direction);
+        let _ = system.window_slot(layout, window);
+    }
+
     /// The core's frames for a BSP layout are the system's own (`shadow_frames`), bit for bit, over
     /// drawn systems, screens, gaps and window constraints.
     #[test]
@@ -2308,8 +2408,19 @@ mod core_geometry_tests {
             let screen = drawn_screen(&mut rng);
             let constraints = drawn_constraints_for(&mut rng, &windows);
             let gaps = drawn_gaps(&mut rng);
-            // Drawn but unused (a BSP layout has no bar): the draws stay as they were.
-            let _ = drawn_line(&mut rng);
+            // A BSP layout has no bar: the line is drawn only for the pass's arguments.
+            let line = drawn_line(&mut rng);
+            // The pass rift makes: the core's tree's shape held to upstream's system's.
+            let _ = system.calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &gaps,
+                line,
+                crate::layout_engine::Shadow::Run,
+            );
+            let system = &system.upstream;
             let upstream = system.shadow_frames(layout, screen, &constraints, &gaps);
             let root = system.layouts[layout].root;
             let core: Vec<(WindowId, CGRect)> = system
