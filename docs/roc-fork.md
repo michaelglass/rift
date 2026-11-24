@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-24, the Roc nightly bumped): read this first
+## Handoff (2026-11-24, the Roc nightly bumped; the layout flip six of seven): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. W4d+W6 is done; core geometry on
 upstream's layout systems (Next item 2) is complete: stack, master-stack, traditional, floating, BSP, scrolling's placement and its translation, and the core's
@@ -21,11 +21,47 @@ ignored), 877 with `roc-core`, the fuzzer at 2000 × 40 both ways, `cargo test -
 --all-targets --features roc-core` compiles (no errors; the old warnings stand); no build warnings
 either way.
 
-**Next: the layout flip (the lead's ruling, 2026-11-24, policy (a)).** The core decides each
-layout system's frames (Roc under `roc-core`, else Rust); a difference warns `layout-divergence:` /
-`roc-divergence:` (tests panic), the core's frames are used, and divergences are counted in
-`rift-cli metrics show-timing`. One system per commit, with plants both ways. Then: the window
-store's single writer, the Roadmap.
+**Next: the scrolling placement's flip, the last of the layout flip.** Then the window store's
+single writer, the Roadmap.
+
+**The layout flip (the lead's ruling, 2026-11-24, policy (a)): six of seven sites done.** The core
+decides the frames of stack (e19d50a8), master-stack (b0af4547), traditional (fc76dc2f), floating
+(a0a85f58), BSP (b53a4f20) and scrolling's translation (1a3fb330): the Roc core's under `roc-core`,
+else the Rust core's, in every build. Each system's `calculate_layout` (scrolling:
+`translate_frames`) returns `core_geometry::decide_*(shape, &self.shadow_frames(..))`: the
+system's own frames, now `shadow_frames` (`shadow_translation`), are the shadow. The decision is
+the pure `decided(upstream, rust, roc) -> (frames, Vec<Divergence>)` (`System`, `RustCore`,
+`RocFailed`: the Roc core failing to answer lets the Rust core decide) and one reporting edge,
+`report_divergence`, that counts (`LAYOUT_DIVERGENCES`, printed by `rift-cli metrics show-timing`
+as `core: layout divergences: N` in every build), then panics in tests or warns
+`layout-divergence:` (a system) / `roc-divergence:` (the Rust core, or the Roc core's failure) in a
+running Rift; the core's frames are used. The shape builders (`shape`, `tiles::shape`, `shown`)
+and the conversions are built in every build. Each differential now holds the core to the
+system's `shadow_frames`, not to `calculate_layout` (which is the core). Without `roc-core` the
+shadow is still compared on every layout (it is computed anyway; the bit comparison is cheap); the
+lead may rule it test/roc-core only.
+- Plants per system, run with the divergence panics on and then off (`report_divergence` and the
+  old `diverged` both warn instead): a Rust-core bug fails behaviour tests with the panic off (rift
+  follows the core); the same bug in the system's shadow path fails none (only the differential and
+  `a_layout_divergence_is_counted_and_fails_tests`, which expects the panic); a Roc-core bug under
+  `roc-core` fails behaviour tests with the panic off. Counts are in each commit message. Most
+  systems had no behaviour test that saw their frames (the reactor's stack tests run the
+  traditional system; most draws have no gaps and even splits), so each commit adds one literal
+  test: `a_stack_reserves_its_bar_and_offsets_each_window`, `a_master_stack_layout_keeps_its_inner_gaps`,
+  `a_new_floating_window_takes_most_of_the_screen_centred`,
+  `a_resized_split_gives_its_first_window_the_larger_share`,
+  `columns_out_of_view_are_parked_with_a_point_showing`; traditional's existing
+  `toggling_stack_tabs_reserves_and_publishes_only_while_enabled` and
+  `native_tabs_reserve_the_configured_edge_without_changing_stack_direction` caught its plant.
+- **Left: the scrolling placement** (`Geometry::build`, `check_strip`, still a check: the system's
+  placement stands). Its flip rebuilds the `Geometry` from the core's `Placed`: the columns (id,
+  world x, width), the frames, the snaps (the core names a snap's column by id, `Geometry` by its
+  index among the columns) and the bounds; a placement the core cannot place (no participating
+  window) is the system's empty geometry. Plants as above, through `check_strip`'s words.
+- Tooling (session-local, the pattern): a plant runner applies one replacement, runs `cargo test
+  --lib` (with `--features roc-core` for Roc plants) with the panics on, then with both
+  `#[cfg(test)] panic!` lines in `core_geometry` turned to warnings, lists the failures and
+  restores the files.
 
 **The Roc nightly bump (2026-11-24).** Pinned `nightly-2026-11-23-b5c77fc` (`roc/NIGHTLY`; the local
 install's `current` and `safe` point at it, `src` is a roc-lang/roc checkout at b5c77fc for the glue
