@@ -74,8 +74,8 @@ fn show_layout_core() {
     let shadows = crate::layout_engine::layout_shadows();
     println!("core: layout divergences: {divergences} (shadows run: {shadows})");
     tracing::info!(divergences, shadows, "core: layout divergences");
-    // The core's BSP tree, stepped beside upstream's BSP system (each one a
-    // `bsp-tree-divergence:`, after which the core's tree is re-seeded).
+    // Upstream's BSP system, stepped beside the core's deciding BSP tree (each one a
+    // `bsp-tree-divergence:`, after which upstream's system is re-seeded from the core).
     let bsp_tree = crate::layout_engine::systems::bsp_tree_divergences();
     println!("core: bsp tree divergences: {bsp_tree}");
     tracing::info!(bsp_tree, "core: bsp tree divergences");

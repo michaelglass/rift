@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(rename = "SerdeSlot")]
 pub(crate) struct SavedSlot<T> {
-    value: Option<T>,
-    version: u32,
+    pub(crate) value: Option<T>,
+    pub(crate) version: u32,
 }
 
 /// Makes slotmap key types the table's keys: a key's ffi form is `version << 32 | index`.

@@ -2271,9 +2271,19 @@ mod core_geometry_tests {
                 continue;
             }
             if rng.chance(4) {
-                // Saved and loaded (the settings are not saved: rift sets them again), some
-                // leaf maybe given a preselected direction, which only a saved file holds.
-                let mut upstream = system.upstream.clone();
+                // The shadow re-seeded from the core (as after a divergence): both go on
+                // allocating the same ids.
+                system.shadow.upstream = twinned::upstream_of(&system.core);
+            }
+            if rng.chance(4) {
+                // Saved from the core, byte for byte as upstream's system saves; then loaded
+                // (the settings are not saved: rift sets them again), some leaf maybe given a
+                // preselected direction, which only a saved file holds.
+                assert_eq!(
+                    ron::to_string(&system).unwrap(),
+                    ron::to_string(&system.shadow.upstream).unwrap()
+                );
+                let mut upstream = system.shadow.upstream.clone();
                 let leaves: Vec<NodeId> = upstream
                     .nodes
                     .iter()
@@ -2286,7 +2296,8 @@ mod core_geometry_tests {
                         *preselected = Some(drawn_direction(rng));
                     }
                 }
-                let saved = ron::to_string(&BspLayoutSystem::from(upstream)).unwrap();
+                let saved = ron::to_string(&BspLayoutSystem::from(upstream.clone())).unwrap();
+                assert_eq!(saved, ron::to_string(&upstream).unwrap());
                 system = ron::from_str(&saved).unwrap();
                 system.set_window_insertion_point(insertion);
                 system.set_single_window_aspect_ratio(aspect);
@@ -2533,7 +2544,7 @@ mod core_geometry_tests {
                 line,
                 crate::layout_engine::Shadow::Run,
             );
-            let system = &system.upstream;
+            let system = &system.shadow.upstream;
             let upstream = system.shadow_frames(layout, screen, &constraints, &gaps);
             let root = system.layouts[layout].root;
             let core: Vec<(WindowId, CGRect)> = system
