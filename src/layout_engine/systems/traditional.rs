@@ -25,6 +25,32 @@ impl Default for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
+    /// The frames the traditional system computes itself: since the core decides (policy (a)),
+    /// the shadow `calculate_layout` holds the core's to.
+    pub(crate) fn shadow_frames(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Vec<(WindowId, CGRect)> {
+        let root = self.tiles.root(layout);
+        super::tiles::project(
+            &self.tiles,
+            root,
+            |_| root,
+            screen,
+            stack_offset,
+            constraints,
+            gaps,
+            stack_line,
+            true,
+            None,
+        )
+    }
+
     pub fn new(window_insertion_point: WindowInsertionPoint, equalize_nodes: bool) -> Self {
         Self {
             tiles: GroupLayouts::default(),
@@ -229,6 +255,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn remove_layout(&mut self, layout: LayoutId) { self.tiles.remove_layout(layout) }
 
+    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
+    /// shadow.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -238,25 +266,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let root = self.tiles.root(layout);
-        let frames = super::tiles::project(
-            &self.tiles,
-            root,
-            |_| root,
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-            true,
-            None,
-        );
-        #[cfg(any(test, feature = "roc-core"))]
-        crate::layout_engine::core_geometry::check_traditional(
+        crate::layout_engine::core_geometry::decide_traditional(
             "traditional",
             super::tiles::shape(
                 &self.tiles,
-                root,
+                self.tiles.root(layout),
                 None,
                 screen,
                 stack_offset,
@@ -264,9 +278,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 gaps,
                 stack_line,
             ),
-            &frames,
-        );
-        frames
+            &self.shadow_frames(layout, screen, stack_offset, constraints, gaps, stack_line),
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -1108,7 +1121,7 @@ mod tests {
         (system, layout, windows)
     }
 
-    /// The core's frames for a traditional layout are upstream's `calculate_layout`'s, bit for
+    /// The core's frames for a traditional layout are the system's own (`shadow_frames`), bit for
     /// bit, over drawn systems, screens, gaps, offsets, bars and window constraints.
     #[test]
     fn the_core_tiles_traditional_layouts_as_the_traditional_system_does() {
@@ -1122,8 +1135,7 @@ mod tests {
             let gaps = drawn_gaps(&mut rng);
             let offset = drawn_offset(&mut rng);
             let line = drawn_line(&mut rng);
-            let upstream =
-                system.calculate_layout(layout, screen, offset, &constraints, &gaps, line);
+            let upstream = system.shadow_frames(layout, screen, offset, &constraints, &gaps, line);
             let root = system.tiles.root(layout);
             let core = core_frames(super::super::tiles::shape(
                 &system.tiles,

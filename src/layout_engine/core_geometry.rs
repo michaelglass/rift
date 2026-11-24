@@ -198,29 +198,9 @@ fn report_divergence(
     );
 }
 
-/// Holds the core's frames for a traditional `shape` (none: nothing takes space) to the frames
-/// rift's layout system computed (`upstream`), bit for bit; under `roc-core` the Roc core's too.
-/// rift's frames stand either way: a difference fails tests and a running Rift warns
-/// `layout-divergence:` (the Rust core) or `roc-divergence:` (the Roc core).
-#[cfg(any(test, feature = "roc-core"))]
-pub(crate) fn check_traditional(
-    what: &str,
-    shape: Option<Traditional<WindowId>>,
-    upstream: &[(WindowId, CGRect)],
-) {
-    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
-    #[cfg(feature = "roc-core")]
-    let roc = || match &shape {
-        None => Ok(Vec::new()),
-        Some(shape) => rift_core_roc::tile_traditional(shape.clone().map(&to_plain)),
-    };
-    #[cfg(not(feature = "roc-core"))]
-    let roc = no_roc;
-    check(what, &shape, upstream, rust, roc);
-}
-
-/// Holds the core's frames for a BSP `shape` (none: nothing takes space) to the BSP system's, as
-/// [`check_traditional`] does.
+/// Holds the core's frames for a BSP `shape` (none: nothing takes space) to the BSP system's, bit
+/// for bit; under `roc-core` the Roc core's too. The system's frames stand: a difference fails
+/// tests and a running Rift warns `layout-divergence:` or `roc-divergence:`.
 #[cfg(any(test, feature = "roc-core"))]
 pub(crate) fn check_bsp(
     shape: Option<rift_core::layout::bsp::Bsp<WindowId>>,
@@ -300,7 +280,7 @@ fn placed_words<W: Copy>(
 
 /// Holds the core's placement of a scrolling strip (none: no window takes part) to the
 /// scrolling system's (`Geometry::build`), word for word; under `roc-core` the Roc core's too.
-/// The system's placement stands either way, as [`check_traditional`]'s frames do.
+/// The system's placement stands either way, as [`check_bsp`]'s frames do.
 #[cfg(any(test, feature = "roc-core"))]
 pub(crate) fn check_strip(
     strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
@@ -342,7 +322,7 @@ pub(crate) fn check_strip(
 }
 
 /// Holds the core's frames for a placed strip shown by a camera (`translate`) to the scrolling
-/// system's (`translate_frames`), as [`check_traditional`] does.
+/// system's (`translate_frames`), as [`check_bsp`] does.
 #[cfg(any(test, feature = "roc-core"))]
 pub(crate) fn check_translation(
     world: &[(WindowId, Rect)],
@@ -364,7 +344,7 @@ pub(crate) fn check_translation(
 }
 
 /// Holds the core's frames for a floating layout to the floating system's, as
-/// [`check_traditional`] does.
+/// [`check_bsp`] does.
 #[cfg(any(test, feature = "roc-core"))]
 pub(crate) fn check_floating(
     layout: rift_core::layout::floating::Layout<WindowId>,
