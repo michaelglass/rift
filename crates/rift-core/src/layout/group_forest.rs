@@ -28,6 +28,9 @@ use super::{Gaps, WindowConstraints};
 use crate::plain::Rect;
 use crate::slot_table::{SlotKey, SlotTable};
 
+mod views;
+pub use views::{ContainerView, Held, Role};
+
 /// What a container does with its children: lays them out side by side along an axis, or
 /// stacks them (one shown) offset along an axis. Upstream's `LayoutKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

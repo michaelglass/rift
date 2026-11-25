@@ -527,7 +527,7 @@ mod tests {
         let layout = traditional.create_layout();
         traditional.update(WindowChange::Add(layout, w(1), None));
         traditional.update(WindowChange::Add(layout, w(2), None));
-        let tree = traditional.tiles().container_tree(layout);
+        let tree = traditional.container_tree(layout);
         assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Container);
         assert_eq!(window_nodes(&tree).len(), 2);
         assert_eq!(
@@ -535,7 +535,7 @@ mod tests {
             1
         );
         traditional.focus(layout, Focus::Select(w(1))).handled;
-        assert_stable_unique_ids(&tree, &traditional.tiles().container_tree(layout));
+        assert_stable_unique_ids(&tree, &traditional.container_tree(layout));
 
         let mut bsp = BspLayoutSystem::default();
         let layout = bsp.create_layout();
@@ -759,7 +759,7 @@ mod participation_tests {
 impl LayoutSystemKind {
     pub fn draw_tree(&self, layout: LayoutId) -> String {
         match self {
-            Self::Traditional(system) => system.tiles().draw_tree(layout, &[]),
+            Self::Traditional(system) => system.draw_tree(layout),
             Self::Bsp(system) => system.draw_tree(layout),
             Self::Stack(system) => system.draw_tree(layout),
             Self::MasterStack(system) => system.draw_tree(layout),
@@ -770,7 +770,7 @@ impl LayoutSystemKind {
 
     pub fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         match self {
-            Self::Traditional(system) => system.tiles().container_tree(layout),
+            Self::Traditional(system) => system.container_tree(layout),
             Self::Bsp(system) => system.container_tree(layout),
             Self::Stack(system) => system.container_tree(layout),
             Self::MasterStack(system) => system.container_tree(layout),

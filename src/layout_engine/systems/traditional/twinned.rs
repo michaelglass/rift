@@ -11,8 +11,9 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackLineReserve, WindowInsertionPoint};
 use crate::layout_engine::systems::group_twin::{
-    VIEW_ALWAYS, VIEW_EVERY, core_edit, core_focus, core_query, edit_result, edit_words,
-    focus_result, focus_words, participation, pass, report, resize, seed, view_difference,
+    VIEW_ALWAYS, VIEW_EVERY, container_node, core_edit, core_focus, core_query, edit_result,
+    edit_words, focus_result, focus_words, participation, pass, report, resize, seed,
+    view_difference,
 };
 use crate::layout_engine::systems::groups::GroupLayouts;
 use crate::layout_engine::systems::{
@@ -99,6 +100,23 @@ impl TraditionalLayoutSystem {
     /// Upstream's forest (the group bar's projection and rift-cli's views read it).
     pub(in crate::layout_engine::systems) fn tiles(&self) -> &GroupLayouts { &self.upstream.tiles }
 
+    /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
+        let core = self.twin.core.forest().draw(layout);
+        self.viewed("draw_tree", self.upstream.tiles.draw_tree(layout, &[]), core)
+    }
+
+    /// rift-cli's container view of the layout: the core's (upstream's held to it on every
+    /// call).
+    pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        let core = container_node(self.twin.core.forest().container_view(layout));
+        self.viewed(
+            "container_tree",
+            self.upstream.tiles.container_tree(layout),
+            core,
+        )
+    }
+
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         self.answered(
             "window_slot",
@@ -152,6 +170,19 @@ impl TraditionalLayoutSystem {
         );
         let core = (self.twin.core.insertion(), self.twin.core.new_sibling());
         (upstream != core).then(|| format!("settings: upstream {upstream:?}, core {core:?}"))
+    }
+
+    /// A view both answered, the core's given: a difference is reported (the next step's view
+    /// re-seeds the core).
+    fn viewed<A: PartialEq + std::fmt::Debug>(&self, what: &str, upstream: A, core: A) -> A {
+        if upstream != core {
+            report(
+                SYSTEM,
+                what,
+                &format!("views: upstream {upstream:?}, core {core:?}"),
+            );
+        }
+        core
     }
 
     /// A query both answered: a difference is reported (the next step's view re-seeds the
@@ -414,6 +445,10 @@ mod tests {
                     system.window_slot(layout, window);
                 },
                 &reloaded,
+                &|system, layout| {
+                    system.draw_tree(layout);
+                    system.container_tree(layout);
+                },
             );
             windows += drawn.windows.len();
             layouts += drawn.layouts.len();

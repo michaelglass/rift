@@ -232,6 +232,50 @@ pub(super) fn view_difference(core: &CoreForest, tiles: &GroupLayouts) -> Option
     None
 }
 
+/// A core kind as upstream's layout kind.
+pub(super) fn layout_kind(kind: Kind) -> LayoutKind {
+    match kind {
+        Kind::Split(core::Orientation::Horizontal) => LayoutKind::Horizontal,
+        Kind::Split(core::Orientation::Vertical) => LayoutKind::Vertical,
+        Kind::Stack(core::Orientation::Horizontal) => LayoutKind::HorizontalStack,
+        Kind::Stack(core::Orientation::Vertical) => LayoutKind::VerticalStack,
+    }
+}
+
+/// The core's container view as rift-cli's protocol carries it (upstream's
+/// `container_tree_with_roles`: ids as slotmap's ffi words, no frames, no pending split).
+pub(super) fn container_node(
+    view: core::ContainerView<NodeId, WindowId>,
+) -> rift_protocol::ContainerTreeNode {
+    use rift_protocol::{ContainerNodeType, ContainerTreeNode};
+    use slotmap::Key;
+    let (node_type, layout_kind, window_id, children) = match view.held {
+        core::Held::Window(window) => {
+            (ContainerNodeType::Window, None, Some(window.into()), vec![])
+        }
+        core::Held::Container { kind, children } => (
+            ContainerNodeType::Container,
+            Some(layout_kind(kind)),
+            None,
+            children.into_iter().map(container_node).collect(),
+        ),
+    };
+    ContainerTreeNode {
+        node_id: view.node.data().as_ffi(),
+        node_type,
+        frame: Default::default(),
+        layout_kind,
+        weight: view.weight.map(f64::from),
+        window_id,
+        is_selected: view.selected,
+        is_fullscreen: view.fill == Fill::Screen,
+        is_fullscreen_within_gaps: view.fill == Fill::WithinGaps,
+        role: view.role.name().map(str::to_owned),
+        pending_split: None,
+        children,
+    }
+}
+
 pub(super) fn default_orientation(
     orientation: StackDefaultOrientation,
 ) -> core::DefaultOrientation {
@@ -413,11 +457,13 @@ pub(super) mod drawn {
     }
 
     /// A saved system's text, sometimes with a state only a saved file holds: a container's
-    /// selection memory cleared while it has children (no operation clears one so).
+    /// selection memory cleared while it has children (no operation clears one so), or a
+    /// child's size negative (no operation writes one).
     pub(in crate::layout_engine::systems) fn with_saved_only_states(
         rng: &mut Rng,
         text: &str,
     ) -> String {
+        let text = &with_a_negative_size(rng, text);
         const HELD: &str = "selection:Some((";
         let held: Vec<usize> = text.match_indices(HELD).map(|(at, _)| at).collect();
         if held.is_empty() || !rng.chance(30) {
@@ -426,6 +472,21 @@ pub(super) mod drawn {
         let at = held[rng.below(held.len() as u64) as usize];
         let end = at + text[at..].find("))").expect("a saved selection closes") + 2;
         format!("{}selection:None{}", &text[..at], &text[end..])
+    }
+
+    /// `text` with one saved size other than 0 (a root's is 0) negated, on a tenth of calls.
+    fn with_a_negative_size(rng: &mut Rng, text: &str) -> String {
+        const SIZE: &str = "size:";
+        let sizes: Vec<usize> = text
+            .match_indices(SIZE)
+            .map(|(at, _)| at + SIZE.len())
+            .filter(|&at| !text[at..].starts_with("0.0,") && !text[at..].starts_with('-'))
+            .collect();
+        if sizes.is_empty() || !rng.chance(10) {
+            return text.to_owned();
+        }
+        let at = sizes[rng.below(sizes.len() as u64) as usize];
+        format!("{}-{}", &text[..at], &text[at..])
     }
 
     /// What a run has made so far.
@@ -590,9 +651,16 @@ pub(super) mod drawn {
         (old, new, screen, gaps)
     }
 
-    /// Every query, answered by both sides (the twin compares them).
-    fn query<S: LayoutSystem>(rng: &mut Rng, system: &S, drawn: &mut Drawn) {
+    /// Every query, answered by both sides (the twin compares them), the system's own views
+    /// (rift-cli's) through `views`.
+    fn query<S: LayoutSystem>(
+        rng: &mut Rng,
+        system: &S,
+        drawn: &mut Drawn,
+        views: &impl Fn(&S, LayoutId),
+    ) {
         let layout = drawn.layout(rng);
+        views(system, layout);
         let window = drawn.window(rng);
         system.contains_layout(layout);
         system.selected_window(layout);
@@ -632,6 +700,7 @@ pub(super) mod drawn {
         steps: u64,
         own: &mut impl FnMut(&mut Rng, &mut S, &mut Drawn),
         reload: &impl Fn(&mut Rng, &S) -> S,
+        views: &impl Fn(&S, LayoutId),
     ) -> Drawn {
         let mut drawn = Drawn {
             layouts: vec![system.create_layout()],
@@ -730,7 +799,7 @@ pub(super) mod drawn {
                 _ => {}
             }
             if rng.chance(33) {
-                query(rng, system, &mut drawn);
+                query(rng, system, &mut drawn, views);
             }
         }
         drawn
