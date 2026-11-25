@@ -9,7 +9,7 @@ use super::{
     Away, EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery,
 };
 use crate::actor::app::WindowId;
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::common::config::{
     GapSettings, StackDefaultOrientation, StackLineReserve, WindowInsertionPoint,
     default_stack_orientation,
@@ -45,18 +45,18 @@ struct Stack {
 fn unit_weight() -> f64 { 1.0 }
 
 impl Stack {
-    fn active_index(&self, inactive: &HashSet<WindowId>) -> Option<usize> {
+    fn active_index(&self, away: Away<'_>) -> Option<usize> {
         self.members
             .iter()
-            .position(|m| Some(m.id) == self.active && !inactive.contains(&m.window))
-            .or_else(|| self.members.iter().position(|m| !inactive.contains(&m.window)))
+            .position(|m| Some(m.id) == self.active && away.participates(m.window))
+            .or_else(|| self.members.iter().position(|m| away.participates(m.window)))
     }
 
-    fn visible_index(&self, inactive: &HashSet<WindowId>) -> Option<usize> {
+    fn visible_index(&self, away: Away<'_>) -> Option<usize> {
         if self.root_selected {
-            self.members.iter().position(|m| !inactive.contains(&m.window))
+            self.members.iter().position(|m| away.participates(m.window))
         } else {
-            self.active_index(inactive)
+            self.active_index(away)
         }
     }
 
@@ -88,17 +88,18 @@ impl Stack {
         self.members.insert(index, member);
     }
 
-    fn neighbor(&self, direction: Direction, inactive: &HashSet<WindowId>) -> Option<usize> {
+    fn neighbor(&self, direction: Direction, away: Away<'_>) -> Option<usize> {
         if self.root_selected || self.kind.orientation() != direction.orientation() {
             return None;
         }
-        let index = self.active_index(inactive)?;
+        let index = self.active_index(away)?;
         match direction {
             Direction::Left | Direction::Up => {
-                (0..index).rev().find(|&i| !inactive.contains(&self.members[i].window))
+                (0..index).rev().find(|&i| away.participates(self.members[i].window))
             }
-            Direction::Right | Direction::Down => (index + 1..self.members.len())
-                .find(|&i| !inactive.contains(&self.members[i].window)),
+            Direction::Right | Direction::Down => {
+                (index + 1..self.members.len()).find(|&i| away.participates(self.members[i].window))
+            }
         }
     }
 }
@@ -109,8 +110,6 @@ pub struct StackLayoutSystem {
     layouts: SlotMap<LayoutId, Stack>,
     next_node: u32,
     default_orientation: StackDefaultOrientation,
-    #[serde(skip)]
-    inactive: HashSet<WindowId>,
     #[serde(skip)]
     window_insertion_point: WindowInsertionPoint,
 }
@@ -201,7 +200,6 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
             layouts,
             next_node,
             default_orientation,
-            inactive: Default::default(),
             window_insertion_point: Default::default(),
         })
     }
@@ -225,7 +223,6 @@ impl StackLayoutSystem {
             next_node: 1,
             default_orientation,
             window_insertion_point,
-            inactive: Default::default(),
         }
     }
 
@@ -273,17 +270,18 @@ impl StackLayoutSystem {
         let (full, gaps) = if stack.root_selected {
             (&mut stack.fullscreen, &mut stack.within_gaps)
         } else {
-            let index = stack.active_index(&self.inactive).unwrap();
+            let index = stack.active_index(away).unwrap();
             let m = &mut stack.members[index];
             (&mut m.fullscreen, &mut m.within_gaps)
         };
         if super::toggle_fullscreen_mode(full, gaps, within) {
-            self.visible_windows_in_layout(layout)
+            self.visible_windows_in_layout(layout, away)
         } else {
             Vec::new()
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn collect_group_containers(
         &self,
         layout: LayoutId,
@@ -292,9 +290,10 @@ impl StackLayoutSystem {
         gaps: &GapSettings,
         _line: StackLineReserve,
         selection_path_only: bool,
+        away: Away<'_>,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         let stack = &self.layouts[layout];
-        let Some(active) = stack.visible_index(&self.inactive) else {
+        let Some(active) = stack.visible_index(away) else {
             return Vec::new();
         };
         if stack.fullscreen
@@ -309,7 +308,7 @@ impl StackLayoutSystem {
             .members
             .iter()
             .enumerate()
-            .filter(|(_, m)| !self.inactive.contains(&m.window))
+            .filter(|(_, m)| away.participates(m.window))
             .map(|(i, m)| {
                 if i < active {
                     selected_index += 1;
@@ -331,12 +330,6 @@ impl StackLayoutSystem {
 impl LayoutSystem for StackLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.layouts[layout].members.iter().any(|member| member.window.pid == pid)
-    }
-
-    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
-
-    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        super::update_participation(&mut self.inactive, window, participates)
     }
 
     fn create_layout(&mut self) -> LayoutId {
@@ -383,11 +376,11 @@ impl LayoutSystem for StackLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         line: StackLineReserve,
-        _away: Away<'_>,
+        away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let stack = &self.layouts[layout];
-        let count = stack.members.iter().filter(|m| self.window_participates(m.window)).count();
-        let Some(active) = stack.visible_index(&self.inactive) else {
+        let count = stack.members.iter().filter(|m| away.participates(m.window)).count();
+        let Some(active) = stack.visible_index(away) else {
             return Vec::new();
         };
         let horizontal = stack.kind == LayoutKind::HorizontalStack;
@@ -408,7 +401,7 @@ impl LayoutSystem for StackLayoutSystem {
         stack
             .members
             .iter()
-            .filter(|m| self.window_participates(m.window))
+            .filter(|m| away.participates(m.window))
             .enumerate()
             .map(|(i, m)| {
                 let frame = if m.fullscreen {
@@ -428,9 +421,9 @@ impl LayoutSystem for StackLayoutSystem {
             .collect()
     }
 
-    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId, away: Away<'_>) -> Option<WindowId> {
         let s = &self.layouts[layout];
-        s.active_index(&self.inactive).map(|i| s.members[i].window)
+        s.active_index(away).map(|i| s.members[i].window)
     }
 
     fn selection_contains_window(
@@ -451,22 +444,22 @@ impl LayoutSystem for StackLayoutSystem {
         &self,
         layout: LayoutId,
         direction: Direction,
-        _away: Away<'_>,
+        away: Away<'_>,
     ) -> Option<WindowId> {
         let stack = &self.layouts[layout];
         if !stack.root_selected
             && let Some(member) = stack
                 .members
                 .iter()
-                .find(|m| Some(m.id) == stack.active && self.window_participates(m.window))
+                .find(|m| Some(m.id) == stack.active && away.participates(m.window))
         {
             return Some(member.window);
         }
         match direction {
             Direction::Left | Direction::Up => {
-                stack.members.iter().rev().find(|m| self.window_participates(m.window))
+                stack.members.iter().rev().find(|m| away.participates(m.window))
             }
-            _ => stack.members.iter().find(|m| self.window_participates(m.window)),
+            _ => stack.members.iter().find(|m| away.participates(m.window)),
         }
         .map(|m| m.window)
     }
@@ -482,16 +475,18 @@ impl LayoutSystem for StackLayoutSystem {
                 || s.within_gaps
                 || s.members
                     .iter()
-                    .any(|m| self.window_participates(m.window) && (m.fullscreen || m.within_gaps)))
+                    .any(|m| away.participates(m.window) && (m.fullscreen || m.within_gaps)))
     }
 
     fn parent_of_selection_is_stacked(&self, _layout: LayoutId, _away: Away<'_>) -> bool { true }
 
     fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.all_windows_in_layout(layout) }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
+    fn windows(&self, layout: LayoutId, query: WindowQuery, away: Away<'_>) -> Vec<WindowId> {
         match query {
-            WindowQuery::Visible | WindowQuery::Selection => self.visible_windows_in_layout(layout),
+            WindowQuery::Visible | WindowQuery::Selection => {
+                self.visible_windows_in_layout(layout, away)
+            }
             WindowQuery::Stack(window) => {
                 if self.contains_window(layout, window) {
                     self.all_windows_in_layout(layout)
@@ -504,7 +499,9 @@ impl LayoutSystem for StackLayoutSystem {
 
     fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult {
         match focus {
-            Focus::Select(window) => FocusResult::selection(self.select_window(layout, window)),
+            Focus::Select(window) => {
+                FocusResult::selection(self.select_window(layout, window, away))
+            }
             Focus::Ascend | Focus::Descend => FocusResult::selection({
                 if self.selected_window(layout, away).is_none() {
                     return FocusResult::selection(false);
@@ -514,7 +511,7 @@ impl LayoutSystem for StackLayoutSystem {
                     != select_root
             }),
             Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
+                FocusResult::movement(self.move_focus(layout, direction, away))
             }
         }
     }
@@ -525,17 +522,15 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
-    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
+    fn update(&mut self, change: WindowChange<'_>, away: Away<'_>) {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                self.inactive.remove(&window);
                 for s in self.layouts.values_mut() {
                     s.remove(window);
                 }
             }
             WindowChange::Replace(from, to) => {
-                super::replace_participation(&mut self.inactive, from, to);
                 for s in self.layouts.values_mut() {
                     for m in &mut s.members {
                         if m.window == from {
@@ -545,7 +540,6 @@ impl LayoutSystem for StackLayoutSystem {
                 }
             }
             WindowChange::CloseApp(pid) => {
-                self.inactive.retain(|w| w.pid != pid);
                 for stack in self.layouts.values_mut() {
                     stack.retain(|member| member.window.pid != pid);
                 }
@@ -557,7 +551,7 @@ impl LayoutSystem for StackLayoutSystem {
                 new,
                 screen,
                 gaps,
-            } => self.on_window_resized(layout, window, old, new, screen, gaps),
+            } => self.on_window_resized(layout, window, old, new, screen, gaps, away),
         }
     }
 
@@ -571,10 +565,10 @@ impl LayoutSystem for StackLayoutSystem {
                 if s.root_selected {
                     return EditResult::Unchanged;
                 }
-                let Some(i) = s.active_index(&self.inactive) else {
+                let Some(i) = s.active_index(away) else {
                     return EditResult::Unchanged;
                 };
-                let target = if let Some(target) = s.neighbor(direction, &self.inactive) {
+                let target = if let Some(target) = s.neighbor(direction, away) {
                     target
                 } else if has_display_neighbor || s.kind.orientation() == direction.orientation() {
                     return EditResult::Unchanged;
@@ -596,18 +590,18 @@ impl LayoutSystem for StackLayoutSystem {
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps, away))
             }
-            LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
+            LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b, away)),
             LayoutEdit::ReorderTab { window, target } => {
-                EditResult::from(self.move_stack_tab(layout, window, target))
+                EditResult::from(self.move_stack_tab(layout, window, target, away))
             }
             LayoutEdit::Drop { source, target, .. } => EditResult::from({
                 source != target
-                    && self.swap_windows(layout, source, target)
-                    && self.select_window(layout, source)
+                    && self.swap_windows(layout, source, target, away)
+                    && self.select_window(layout, source, away)
             }),
             LayoutEdit::Group(GroupEdit::Stack(_)) => EditResult::Raise({
                 self.toggle_orientation(layout);
-                self.visible_windows_in_layout(layout)
+                self.visible_windows_in_layout(layout, away)
             }),
             LayoutEdit::ToggleOrientation => {
                 self.toggle_orientation(layout);
@@ -623,22 +617,19 @@ impl StackLayoutSystem {
         self.layouts[layout].members.iter().map(|m| m.window).collect()
     }
 
-    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+    fn visible_windows_in_layout(&self, layout: LayoutId, away: Away<'_>) -> Vec<WindowId> {
         let stack = &self.layouts[layout];
-        stack
-            .visible_index(&self.inactive)
-            .map(|i| stack.members[i].window)
-            .into_iter()
-            .collect()
+        stack.visible_index(away).map(|i| stack.members[i].window).into_iter().collect()
     }
 
     fn move_focus(
         &mut self,
         layout: LayoutId,
         direction: Direction,
+        away: Away<'_>,
     ) -> (Option<WindowId>, Vec<WindowId>) {
         let s = &mut self.layouts[layout];
-        let Some(i) = s.neighbor(direction, &self.inactive) else {
+        let Some(i) = s.neighbor(direction, away) else {
             return (None, Vec::new());
         };
         s.active = Some(s.members[i].id);
@@ -662,8 +653,8 @@ impl StackLayoutSystem {
         );
     }
 
-    fn select_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
-        if !self.window_participates(window) {
+    fn select_window(&mut self, layout: LayoutId, window: WindowId, away: Away<'_>) -> bool {
+        if !away.participates(window) {
             return false;
         }
         let s = &mut self.layouts[layout];
@@ -675,6 +666,7 @@ impl StackLayoutSystem {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn on_window_resized(
         &mut self,
         layout: LayoutId,
@@ -683,8 +675,9 @@ impl StackLayoutSystem {
         new: CGRect,
         screen: CGRect,
         gaps: &GapSettings,
+        away: Away<'_>,
     ) {
-        if !self.window_participates(window) {
+        if !away.participates(window) {
             return;
         }
         let Some(m) = self.layouts[layout].members.iter_mut().find(|m| m.window == window) else {
@@ -700,8 +693,8 @@ impl StackLayoutSystem {
         );
     }
 
-    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        if !self.window_participates(a) || !self.window_participates(b) {
+    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId, away: Away<'_>) -> bool {
+        if !away.participates(a) || !away.participates(b) {
             return false;
         }
         let s = &mut self.layouts[layout];
@@ -726,8 +719,14 @@ impl StackLayoutSystem {
         true
     }
 
-    fn move_stack_tab(&mut self, layout: LayoutId, window: WindowId, target: WindowId) -> bool {
-        if !self.window_participates(window) || !self.window_participates(target) {
+    fn move_stack_tab(
+        &mut self,
+        layout: LayoutId,
+        window: WindowId,
+        target: WindowId,
+        away: Away<'_>,
+    ) -> bool {
+        if !away.participates(window) || !away.participates(target) {
             return false;
         }
         let s = &mut self.layouts[layout];
@@ -880,7 +879,9 @@ mod tests {
         }
         assert!(system.focus(layout, Focus::Ascend, Away::nothing()).handled);
         assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(3)));
-        assert_eq!(system.visible_windows_in_layout(layout), vec![w(1)]);
+        assert_eq!(system.visible_windows_in_layout(layout, Away::nothing()), vec![
+            w(1)
+        ]);
         assert_eq!(
             system.window_in_direction(layout, Direction::Left, Away::nothing()),
             Some(w(3))
@@ -890,7 +891,9 @@ mod tests {
             Some(w(1))
         );
         assert!(system.focus(layout, Focus::Descend, Away::nothing()).handled);
-        assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
+        assert_eq!(system.visible_windows_in_layout(layout, Away::nothing()), vec![
+            w(3)
+        ]);
         assert!(
             system
                 .edit(
@@ -910,7 +913,7 @@ mod tests {
         );
         let survivor = WindowId::new(2, 1);
         system.add_window_after_selection(layout, survivor);
-        system.select_window(layout, w(1));
+        system.select_window(layout, w(1), Away::nothing());
         system.update(WindowChange::CloseApp(1), Away::nothing());
         assert_eq!(system.all_windows_in_layout(layout), vec![survivor]);
         assert_eq!(system.selected_window(layout, Away::nothing()), Some(survivor));

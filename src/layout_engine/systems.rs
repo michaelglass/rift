@@ -950,6 +950,7 @@ impl LayoutSystemKind {
                 gaps,
                 stack_line,
                 selection_path_only,
+                away,
             ),
             LayoutSystemKind::Floating(s) => {
                 s.collect_group_containers(layout_id, screen, gaps, selection_path_only, away)
