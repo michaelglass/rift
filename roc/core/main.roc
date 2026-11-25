@@ -17,6 +17,7 @@ import Workspaces
 import Modes
 import MainWindow
 import BspTree
+import Slots
 
 ## The events, effects and their payloads are the platform's (`Boundary.Event`,
 ## `Boundary.Effect`): taking the platform's own types, not ones of the same shape, is what keeps
@@ -82,8 +83,8 @@ Mains : { apps : Dict(U64, { standing : AppStanding, last_activation : Initiator
 ## slot tables, the windows left out of layout, the settings (`BspTree.Trees`, written out: the
 ## platform needs the name here).
 Trees : {
-	layouts : { slots : List([Occupied({ version : U32, value : U64 }), Vacant(U32)]), free : List(U32) },
-	nodes : { slots : List([Occupied({ version : U32, value : BspTreeNode }), Vacant(U32)]), free : List(U32) },
+	layouts : Slots(U64),
+	nodes : Slots(BspTreeNode),
 	left_out : Set(U64),
 	insertion : BspInsertion,
 	aspect : Aspect,

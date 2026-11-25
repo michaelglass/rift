@@ -8,14 +8,8 @@
 ## lookups crash, naming what looked and the key.
 
 import Geometry
+import Slots
 import pf.Boundary exposing [BspFramesQuestion, BspChildren, BspNode, BspShape, Constraints, WindowConstraints, WindowId, Aspect, BspTreeSeed, BspDrop, BspEditIn, BspEdited, BspFullscreen, BspResize, BspResizeAlong, BspFocusIn, BspFocused, BspAppIn, BspLayoutDirection, BspMoveQuery, BspSlot, BspWindowsQuery, BspContent, BspDirection, BspMembers, BspNativeResize, BspOrientation, BspReplacement, BspSide, BspTabs, BspTreeSplit, BspWindowIn, Fill, MaybeWord, Rect, BspInsertion, BspKind, BspLayoutSlot, BspNodeSlot, BspParent, BspParticipation, BspTakesPart, BspTreeAnswer, BspTreeEvent, BspTreeNode]
-
-## One slot: a value under an odd version, or vacant under an even one.
-Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
-
-## Values by key, in slots, with slotmap's (1.1) rules. Slot 0 is the sentinel: always vacant,
-## never handed out. `free` holds the vacant slots in the order they are taken: the last first.
-Slots(v) : { slots : List(Slot(v)), free : List(U32) }
 
 ## A BSP layout system: every layout's root, every node, the windows left out of layout, and
 ## its settings (the width/height a layout's only window is fitted to is finite and positive).
@@ -43,8 +37,8 @@ BspTree := [].{
 
 	empty : BspInsertion -> Trees
 	empty = |insertion| {
-		layouts: no_slots({}),
-		nodes: no_slots({}),
+		layouts: Slots.empty({}),
+		nodes: Slots.empty({}),
 		left_out: Set.empty(),
 		insertion,
 		aspect: Free,
@@ -105,7 +99,7 @@ BspTree := [].{
 			CloseApp(windows) => (close_app(trees, windows), Done)
 			ResizeWindow(resize) => (resize_window(trees, resize), Done)
 			ContainsLayout(layout) =>
-				match get(trees.layouts, layout) {
+				match Slots.get(trees.layouts, layout) {
 					Held(_) => (trees, Verdict(True))
 					NotHeld => (trees, Verdict(False))
 				}
@@ -159,7 +153,7 @@ BspTree := [].{
 	shape : Trees, BspFramesQuestion -> [Shaped(BspShape), Unshaped]
 	shape = |trees, question| {
 		known = Dict.from_list(question.known.map(|k| (k.window, k.constraints)))
-		match get(trees.layouts, question.layout) {
+		match Slots.get(trees.layouts, question.layout) {
 			Held(root) =>
 				match shape_node(trees, known, root) {
 					Shaped(top) => Shaped({ screen: question.screen, gaps: question.gaps, aspect: trees.aspect, root: top })
@@ -250,17 +244,17 @@ BspTree := [].{
 	create_layout : Trees -> (Trees, U64)
 	create_layout = |trees| {
 		(with_leaf, leaf) = make_leaf(trees, Empty)
-		(layouts, layout) = insert(with_leaf.layouts, leaf)
+		(layouts, layout) = Slots.insert(with_leaf.layouts, leaf)
 		({ ..with_leaf, layouts }, layout)
 	}
 
 	## A copy of the layout's tree under new keys (a new layout when there is none).
 	clone_layout : Trees, U64 -> (Trees, U64)
 	clone_layout = |trees, layout|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			Held(root) => {
 				(cloned, clone) = clone_node(trees, root, Root)
-				(layouts, key) = insert(cloned.layouts, clone)
+				(layouts, key) = Slots.insert(cloned.layouts, clone)
 				({ ..cloned, layouts }, key)
 			}
 			NotHeld => create_layout(trees)
@@ -268,7 +262,7 @@ BspTree := [].{
 
 	remove_layout : Trees, U64 -> Trees
 	remove_layout = |trees, layout| {
-		(layouts, took) = remove(trees.layouts, layout)
+		(layouts, took) = Slots.remove(trees.layouts, layout)
 		match took {
 			Took(root) => remove_subtree({ ..trees, layouts }, root)
 			NotHeld => trees
@@ -284,7 +278,7 @@ BspTree := [].{
 		if contains_window(trees, layout, window) {
 			trees
 		} else {
-			match get(trees.layouts, layout) {
+			match Slots.get(trees.layouts, layout) {
 				NotHeld => trees
 				Held(root) =>
 					match trees.insertion {
@@ -433,7 +427,7 @@ BspTree := [].{
 	## The window the layout's selection shows, if one takes part.
 	selected_window : Trees, U64 -> MaybeWord
 	selected_window = |trees, layout|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			Held(root) => participating_window(trees, current_selection(trees, root))
 			NotHeld => Nothing
 		}
@@ -442,7 +436,7 @@ BspTree := [].{
 	## side that way first.
 	window_in_direction : Trees, BspLayoutDirection -> MaybeWord
 	window_in_direction = |trees, { layout, direction }|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			Held(root) => window_in_direction_from(trees, root, direction)
 			NotHeld => Nothing
 		}
@@ -468,7 +462,7 @@ BspTree := [].{
 	## screen within its gaps.
 	has_any_fullscreen_node : Trees, U64 -> Bool
 	has_any_fullscreen_node = |trees, layout|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			Held(root) => has_fullscreen_in_subtree(trees, root)
 			NotHeld => False
 		}
@@ -484,7 +478,7 @@ BspTree := [].{
 	## Whether the layout holds one of the app's windows (those listed).
 	has_windows_for_app : Trees, BspAppIn -> Bool
 	has_windows_for_app = |trees, { layout, windows }|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			Held(root) => windows_under(trees, root).any(|window| windows.contains(window))
 			NotHeld => False
 		}
@@ -492,7 +486,7 @@ BspTree := [].{
 	## The layout's windows a query lists (upstream's `WindowQuery`).
 	listed_windows : Trees, BspWindowsQuery -> List(U64)
 	listed_windows = |trees, { layout, query }|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			NotHeld => []
 			Held(root) =>
 				match query {
@@ -770,7 +764,7 @@ BspTree := [].{
 			}
 			Resize(resize) => resize_selection(trees, layout, resize)
 			Rebalance =>
-				match get(trees.layouts, layout) {
+				match Slots.get(trees.layouts, layout) {
 					Held(root) => {
 						(after, _) = rebalance_node(trees, root, Horizontal)
 						(after, Changed)
@@ -923,7 +917,7 @@ BspTree := [].{
 									match content(detached, target) {
 										Content(Empty) => {
 											placed = replace_child(detached, target, moving)
-											(nodes, _) = remove(placed.nodes, target)
+											(nodes, _) = Slots.remove(placed.nodes, target)
 											{ ..placed, nodes }
 										}
 										_ => {
@@ -1171,7 +1165,7 @@ BspTree := [].{
 	## window takes part).
 	selection_of_layout : Trees, U64 -> [Selection(U64), NoSelection]
 	selection_of_layout = |trees, layout|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			NotHeld => NoSelection
 			Held(root) => {
 				selected = current_selection(trees, root)
@@ -1295,7 +1289,7 @@ BspTree := [].{
 	## A window put at the layout's selection: into an empty leaf, or splitting a held one.
 	insert_window_at_selection : Trees, U64, U64 -> Trees
 	insert_window_at_selection = |trees, layout, window|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			NotHeld => trees
 			Held(root) => {
 				selection =
@@ -1332,13 +1326,13 @@ BspTree := [].{
 					match parent(emptied, leaf) {
 						Parent(_) => {
 							detached = detach_child(emptied, leaf)
-							(nodes, _) = remove(detached.nodes, leaf)
+							(nodes, _) = Slots.remove(detached.nodes, leaf)
 							{ ..detached, nodes }
 						}
 						NoParent => emptied
 					}
 				root =
-					match get(pruned.layouts, layout) {
+					match Slots.get(pruned.layouts, layout) {
 						Held(found) => found
 						NotHeld => {
 							crash "BspTree.remove_member: no layout ${layout.to_str()}"
@@ -1361,7 +1355,7 @@ BspTree := [].{
 			}
 		split = split_of(trees, above, "detach_child")
 		sibling = if split.first == key split.second else split.first
-		(nodes, took) = remove(trees.nodes, sibling)
+		(nodes, took) = Slots.remove(trees.nodes, sibling)
 		sibling_node =
 			match took {
 				Took(found) => found
@@ -1394,7 +1388,7 @@ BspTree := [].{
 	## The leaf of the layout holding `window`, first in order.
 	node_for_window_in_layout : Trees, U64, U64 -> [Found(U64), NotFound]
 	node_for_window_in_layout = |trees, layout, window|
-		match get(trees.layouts, layout) {
+		match Slots.get(trees.layouts, layout) {
 			Held(root) => find_window(trees, root, window)
 			NotHeld => NotFound
 		}
@@ -1417,7 +1411,7 @@ BspTree := [].{
 		trees.layouts.slots.map_with_index(
 			|slot, index|
 				match slot {
-					Occupied({ version, .. }) => [key_of(index, version)]
+					Occupied({ version, .. }) => [Slots.key_of(index, version)]
 					Vacant(_) => []
 				},
 		)
@@ -1689,7 +1683,7 @@ BspTree := [].{
 	## The node `key` names, which the tree holds (`op` names what looked).
 	node : Trees, U64, Str -> BspTreeNode
 	node = |trees, key, op|
-		match get(trees.nodes, key) {
+		match Slots.get(trees.nodes, key) {
 			Held(found) => found
 			NotHeld => {
 				crash "BspTree.${op}: no node ${key.to_str()}"
@@ -1699,7 +1693,7 @@ BspTree := [].{
 	## The tree with `key`'s node replaced, which the tree holds (`op` names what wrote).
 	set_node : Trees, U64, BspTreeNode, Str -> Trees
 	set_node = |trees, key, value, op|
-		match replace(trees.nodes, key, value) {
+		match Slots.replace(trees.nodes, key, value) {
 			Held(nodes) => { ..trees, nodes }
 			NotHeld => {
 				crash "BspTree.${op}: no node ${key.to_str()}"
@@ -1711,7 +1705,7 @@ BspTree := [].{
 
 	make_node : Trees, BspKind -> (Trees, U64)
 	make_node = |trees, made| {
-		(nodes, key) = insert(trees.nodes, { parent: Root, kind: made })
+		(nodes, key) = Slots.insert(trees.nodes, { parent: Root, kind: made })
 		({ ..trees, nodes }, key)
 	}
 
@@ -1752,86 +1746,8 @@ BspTree := [].{
 				Children(first, second) => remove_subtree(remove_subtree(trees, first), second)
 				Childless => trees
 			}
-		(nodes, _) = remove(pruned.nodes, root)
+		(nodes, _) = Slots.remove(pruned.nodes, root)
 		{ ..pruned, nodes }
 	}
 
-	# The slot table (`rift_core::slot_table`, slotmap's rules).
-
-	no_slots : {} -> Slots(v)
-	no_slots = |{}| { slots: [Vacant(0)], free: [] }
-
-	## The key of slot `index` under `version`.
-	key_of : U64, U32 -> U64
-	key_of = |index, version| version.to_u64().shl_wrap(32).bitwise_or(index)
-
-	## A key's slot index and version.
-	parts : U64 -> (U64, U32)
-	parts = |key| (key.bitwise_and(0xFFFF_FFFF), key.shr_zf_wrap(32).to_u32_wrap())
-
-	## `value` stored in the most recently vacated slot (at its version `| 1`), or a new one
-	## (at version 1).
-	insert : Slots(v), v -> (Slots(v), U64)
-	insert = |table, value|
-		match table.free.last() {
-			Ok(index) => {
-				at = index.to_u64()
-				version =
-					match table.slots.get(at) {
-						Ok(Vacant(vacant)) => vacant.bitwise_or(1)
-						_ => {
-							crash "BspTree.insert: free slot ${at.to_str()} is not vacant"
-						}
-					}
-				slots = put(table.slots, at, Occupied({ version, value }))
-				({ slots, free: table.free.drop_last(1) }, key_of(at, version))
-			}
-			Err(_) => {
-				at = table.slots.len()
-				({ ..table, slots: table.slots.append(Occupied({ version: 1, value })) }, key_of(at, 1))
-			}
-		}
-
-	## `key`'s value taken out; its slot (at its version plus one) is the next one taken.
-	remove : Slots(v), U64 -> (Slots(v), [Took(v), NotHeld])
-	remove = |table, key| {
-		(index, version) = parts(key)
-		match table.slots.get(index) {
-			Ok(Occupied(held)) if held.version == version => {
-				slots = put(table.slots, index, Vacant(version.plus_wrap(1)))
-				({ slots, free: table.free.append(index.to_u32_wrap()) }, Took(held.value))
-			}
-			_ => (table, NotHeld)
-		}
-	}
-
-	get : Slots(v), U64 -> [Held(v), NotHeld]
-	get = |table, key| {
-		(index, version) = parts(key)
-		match table.slots.get(index) {
-			Ok(Occupied(held)) if held.version == version => Held(held.value)
-			_ => NotHeld
-		}
-	}
-
-	## The table with `key`'s value replaced, if it holds one.
-	replace : Slots(v), U64, v -> [Held(Slots(v)), NotHeld]
-	replace = |table, key, value| {
-		(index, version) = parts(key)
-		match table.slots.get(index) {
-			Ok(Occupied(held)) if held.version == version =>
-				Held({ ..table, slots: put(table.slots, index, Occupied({ version, value })) })
-			_ => NotHeld
-		}
-	}
-
-	## The slots with slot `index`, one just read, set.
-	put : List(Slot(v)), U64, Slot(v) -> List(Slot(v))
-	put = |slots, index, slot|
-		match slots.set(index, slot) {
-			Ok(set) => set
-			Err(OutOfBounds) => {
-				crash "BspTree.put: no slot ${index.to_str()}"
-			}
-		}
 }
