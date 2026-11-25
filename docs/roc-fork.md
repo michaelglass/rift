@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP done through slice 5, upstream's BSP system deleted): read this first
+## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slice 1 done): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
 BSP (all five). `rearch/roc-next@fork` carries everything through this docs commit once it is published
@@ -20,6 +20,44 @@ rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both 
 `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, the stack, slice 1, done: the core's stacks beside upstream's stack system.** Two
+commits after the rulings' docs commit; each message has its plants and checks. At the tip:
+workspace tests 1036 (4 ignored), the lib with `roc-core` 914 (5 ignored), the rest as below,
+clippy 331.
+- **The core:** `rift_core::layout::stack_tree::Stacks<L, W>`: `SlotTable<L, Stack>`, the
+  saved `next_node` counter (member and stack ids are `Id`, upstream's `NodeId` word; minted
+  `1 << 32 | n`), the default orientation (upstream's four cases), the windows left out, the
+  insertion point. `Stack { id, members: Vec<Member { id, window, weight, fill }>, selection,
+  orientation, fill }`; `Selection = Nothing | Member(Id) | Root(Id)`. **Root carries the member
+  it was selected from:** upstream's `root_selected` keeps `active`, which stays the selected
+  window (`selected_window`, a fullscreen toggle's fallback, a new window's insertion point) and
+  is where `Descend` returns; a `Root` without it would change behaviour. Nothing exactly when
+  there are no members (held by every operation and the load). Every operation and query
+  ported one for one; `Fill` is the traditional geometry's.
+- **The twin (`systems/stack/twinned.rs`):** upstream's struct is `Upstream`, unchanged but for
+  its load; `StackLayoutSystem { upstream, twin: Box<Twinned> }`, serialized as upstream. Every
+  operation steps both; answers compared on every operation (queries too, the group bar's
+  container included), the whole system on every operation in tests and `roc-core` builds and
+  every 32nd in a plain release build, each pass's shape on every pass. A difference: counted
+  (`rift-cli metrics show-timing`: `core: stack tree divergences: N`), a test panics, a running
+  Rift warns `stack-tree-divergence:` and re-seeds the core from upstream. `draw_tree` and
+  `container_tree` still read upstream (slice 3 moves them).
+- **The load normalizes (the W2b rule, one `stack-load:` warn each):** a tiled layout kind on a
+  stack (to its stack kind, as the legacy load maps one), both fullscreen flags on a stack or a
+  member (fullscreen), a selection naming no member while there are members (the first member),
+  an empty stack with a selection (none). Upstream keeps them all (an upstream candidate).
+  Files rift writes load and save byte for byte as before.
+- **The drawn fuzzer** (`stack.rs`'s `drawn_system`, 3000 systems) draws every operation,
+  every query on a third of its steps, and reloads; each case's pass goes through the twin.
+- **Plants:** 15/15 in the core, 2/2 in the shadow's conversion, 5/5 for the load's
+  normalizations.
+- **Cost (release, `measure_stack_twin`):** upstream 72 ns / 0.10 us / 0.86 us an operation,
+  the core 76 ns / 94 ns / 0.77 us at 10 / 100 / 1000 windows; the whole-system view 0.43 /
+  0.37 / 2.7 us (85 ns an operation at 1 in 32, 1000 windows); a re-seed 28 us / 0.15 ms /
+  1.5 ms; a pass's shape 0.38 / 0.98 / 6.9 us upstream's, 0.26 / 0.93 / 6.8 us the core's.
+- **Next: slice 2, the Roc mirror** (`roc/core/StackTree.roc`, a differential in
+  `crates/rift-core-roc/tests/stack_tree.rs`, a seed entry), as BSP's slice 3.
 
 **Layout trees, slice 5, done: upstream's BSP system deleted.** Three commits after the 4b docs
 commit; each message has its plants and checks.
