@@ -14,17 +14,6 @@ pub(crate) struct SelectionInfo {
 }
 
 impl Selection {
-    pub fn current_selection(&self, root: NodeId) -> NodeId {
-        let mut node = root;
-        while let Some(info) = self.nodes.get(node) {
-            if info.stop_here {
-                break;
-            }
-            node = info.selected_child;
-        }
-        node
-    }
-
     pub(crate) fn selected_child(&self, node: NodeId) -> Option<NodeId> {
         self.nodes
             .get(node)
