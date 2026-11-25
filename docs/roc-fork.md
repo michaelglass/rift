@@ -184,8 +184,51 @@ message has its plants and checks.
   not compile; upstream's `Move` is `Moved` at the boundary (`BspEdit`, `BspDropAction`), as the
   floating slot's `Placed` was for `in`.
 
-**Next: layout trees, the next system (the lead's order: traditional, covering stack,
-master-stack and traditional; then scrolling's columns; then floating), on the lead's go.**
+**Next: layout trees, the traditional family (the lead's go, 2026-11-25), same five slices as
+BSP. The plan below waits for the lead's rulings on its questions.**
+
+*What the code shows (2026-11-25).* The three systems already hand the core's traditional
+geometry (`rift_core::layout::traditional`, mirrored in `Traditional.roc`) a `Traditional` shape
+through `decide_traditional`, so only their trees move. They hold two different trees:
+- `StackLayoutSystem` (`systems/stack.rs`, 1108 lines): per layout one `Stack { id, members:
+  Vec<Member { id, window, weight, fullscreen, within_gaps }>, active: Option<NodeId>,
+  root_selected, kind, fullscreen, within_gaps }`, members minted by a `next_node: u32` counter,
+  a legacy load from the old forest (`LegacyStackForest`).
+- `TraditionalLayoutSystem` and `MasterStackLayoutSystem` share `GroupLayouts` (`groups.rs`,
+  `tiles.rs`, `model/tree.rs`): one slotmap forest (`NodeMap`, sibling links `parent`,
+  `prev_sibling`, `next_sibling`, `first_child`, `last_child`) of nodes with `LayoutInfo { size,
+  kind, is_fullscreen, is_fullscreen_within_gaps }` and contents `Container(children with a
+  selection) | RegionPair { regions, selection, primary_first } | Window`, a saved window index
+  (`window_nodes: BTreeMap<WindowId, [(layout, node)]>`), and `layout_roots: SlotMap<LayoutId,
+  LayoutRoot>`. Master-stack adds its regions (master and stack containers) and settings; a
+  legacy load reads the older topology-and-components form.
+
+*Proposed order.* (1) Stack, alone: the smallest tree, its own ids, its own save. (2) The group
+forest once, as one core tree serving both traditional and master-stack (they share every
+operation on it; master-stack's regions are a node kind), each system then a thin shim over it.
+Each goes through the five slices; the stack's slices 1-5 come before the forest's slice 1.
+
+*The QA lessons, as they apply (one fact per thing, nothing stored that can be derived, ids not
+positions).*
+- Stack: `active: Option<NodeId>` with `root_selected: bool` is one fact in two fields
+  (`Selection = Root | Member(id) | Nothing`); each `fullscreen`/`within_gaps` pair is a `Fill`
+  (as BSP's); members are found by id, never by index. The forest: a node's children as an
+  ordered list of ids (no sibling links to keep consistent); a container's selection memory as an
+  id of one of its children; `RegionPair`'s `primary_first` read from the children's order.
+- The forest's window index is derived (which leaf holds which window, per layout): the core
+  derives it and does not store it; it is written into the saved form (byte-compatible) and, on
+  load, checked against the tree.
+
+*Questions for the lead.*
+1. The order above (stack alone first, then the forest once for traditional and master-stack):
+   right?
+2. A saved window index that disagrees with its tree (a file holding a window the tree does not,
+   or the other way): normalize to the tree with one `*-load:` warn (the W2b rule), or refuse with
+   a typed error (where upstream's load refuses, keep refusing)? Proposed: keep every refusal
+   upstream's load makes, normalize the rest to the tree.
+3. The stack's `next_node` counter is saved and mints member ids: keep it as the core's id source
+   (saved as now), or mint member ids from a slot table like BSP's nodes (changing saved ids, so
+   not byte-compatible)? Proposed: keep the counter (byte-compatible; ids are already ids).
 - **4 (done, above):** the Rust core's tree decides and is saved in every build; upstream's
   system is its shadow, re-seeded from the core; under `roc-core` the Roc tree is a second shadow,
   re-seeded from the core through `bsp_tree_seed`. The shape is built from the Rust core's tree
