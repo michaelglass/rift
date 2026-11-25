@@ -784,7 +784,7 @@ impl LayoutSystemKind {
             Self::Traditional(system) => system.window_slot(layout, window),
             Self::Bsp(system) => system.window_slot(layout, window),
             Self::Stack(system) => system.window_slot(layout, window),
-            Self::MasterStack(system) => system.tiles.window_slot(layout, window),
+            Self::MasterStack(system) => system.window_slot(layout, window),
             Self::Scrolling(system) => system.window_slot(layout, window),
             Self::Floating(system) => system.groups.window_slot(layout, window),
         }
@@ -808,7 +808,7 @@ impl LayoutSystemKind {
             Self::Traditional(system) => (system.tiles(), system.tiles().root(layout), None),
             Self::MasterStack(system) => {
                 let (root, master, stack) = system.region_roots(layout);
-                (&system.tiles, root, Some((master, stack)))
+                (system.tiles(), root, Some((master, stack)))
             }
             _ => return None,
         };

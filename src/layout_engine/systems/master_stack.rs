@@ -12,9 +12,12 @@ use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, LayoutSystem, Orientation};
 use crate::model::tree::{NodeId, Placement};
 
+mod twinned;
+pub use twinned::MasterStackLayoutSystem;
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(from = "StoredMasterStack")]
-pub struct MasterStackLayoutSystem {
+pub struct Upstream {
     #[serde(rename = "inner")]
     pub(super) tiles: GroupLayouts,
     #[serde(skip)]
@@ -35,7 +38,7 @@ struct StoredMasterStack {
     regions: slotmap::SecondaryMap<LayoutId, Regions>,
 }
 
-impl From<StoredMasterStack> for MasterStackLayoutSystem {
+impl From<StoredMasterStack> for Upstream {
     fn from(stored: StoredMasterStack) -> Self {
         let mut system = Self {
             tiles: stored.tiles,
@@ -82,11 +85,11 @@ impl From<StoredMasterStack> for MasterStackLayoutSystem {
     }
 }
 
-impl Default for MasterStackLayoutSystem {
+impl Default for Upstream {
     fn default() -> Self { Self::new(MasterStackSettings::default()) }
 }
 
-impl MasterStackLayoutSystem {
+impl Upstream {
     /// A master-stack layout as the core's geometry takes it (none when nothing takes space).
     /// Arguments as `calculate_layout` takes them.
     /// The frames the master-stack system computes itself: since the core decides (policy (a)),
@@ -462,7 +465,7 @@ impl MasterStackLayoutSystem {
     }
 }
 
-impl LayoutSystem for MasterStackLayoutSystem {
+impl LayoutSystem for Upstream {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.tiles.has_windows_for_app(layout, pid)
     }
@@ -618,7 +621,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 }
 
-impl MasterStackLayoutSystem {
+impl Upstream {
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         if self.tiles.contains_window(layout, wid) {
             return;
@@ -725,7 +728,7 @@ impl MasterStackLayoutSystem {
     }
 }
 
-impl MasterStackLayoutSystem {
+impl Upstream {
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
         let (_, master, stack) = self.region_roots(layout);
         self.tiles.draw_tree(layout, &[(master, "master"), (stack, "stack")])
@@ -739,7 +742,7 @@ impl MasterStackLayoutSystem {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Upstream as MasterStackLayoutSystem, *};
     use crate::layout_engine::ResizeOrientation;
     use crate::layout_engine::systems::drawn::*;
 

@@ -3,7 +3,7 @@
 //! stepped on every operation and held to it (`group_twin` says how).
 
 use objc2_core_foundation::CGRect;
-use rift_core::layout::group_forest::{NewSibling, Participation, Pass, Resize, Traditional};
+use rift_core::layout::group_forest::{NewSibling, Traditional};
 use serde::{Deserialize, Serialize};
 
 use super::Upstream;
@@ -11,8 +11,8 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackLineReserve, WindowInsertionPoint};
 use crate::layout_engine::systems::group_twin::{
-    VIEW_ALWAYS, VIEW_EVERY, core_edit, core_focus, edit_result, edit_words, focus_result,
-    focus_words, report, seed, view_difference,
+    VIEW_ALWAYS, VIEW_EVERY, core_edit, core_focus, core_query, edit_result, edit_words,
+    focus_result, focus_words, participation, pass, report, resize, seed, view_difference,
 };
 use crate::layout_engine::systems::groups::GroupLayouts;
 use crate::layout_engine::systems::{
@@ -356,58 +356,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 }
 
-pub(in crate::layout_engine::systems) fn participation(participates: bool) -> Participation {
-    if participates {
-        Participation::TakesPart
-    } else {
-        Participation::LeftOut
-    }
-}
-
-pub(in crate::layout_engine::systems) fn core_query(
-    query: WindowQuery,
-) -> rift_core::layout::group_forest::Query<WindowId> {
-    use rift_core::layout::group_forest::Query;
-    match query {
-        WindowQuery::All => Query::All,
-        WindowQuery::Visible => Query::Visible,
-        WindowQuery::Selection => Query::Selection,
-        WindowQuery::Stack(window) => Query::Stack(window),
-    }
-}
-
-pub(in crate::layout_engine::systems) fn pass(
-    screen: CGRect,
-    gaps: &GapSettings,
-    offset: f64,
-    line: StackLineReserve,
-) -> Pass {
-    use crate::layout_engine::core_geometry::{core_gaps, core_rect, core_stack_line};
-    Pass {
-        screen: core_rect(screen),
-        gaps: core_gaps(gaps),
-        stack_offset: offset,
-        stack_line: core_stack_line(line),
-    }
-}
-
-pub(in crate::layout_engine::systems) fn resize(
-    old: CGRect,
-    new: CGRect,
-    screen: CGRect,
-    gaps: &GapSettings,
-) -> Resize {
-    use crate::layout_engine::core_geometry::core_rect;
-    Resize {
-        old: core_rect(old),
-        new: core_rect(new),
-        screen: core_rect(screen),
-        tiling: core_rect(crate::layout_engine::utils::compute_tiling_area(screen, gaps)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use rift_core::layout::group_forest::Participation;
+
     use super::*;
     use crate::layout_engine::systems::drawn::{Rng, drawn_direction};
     use crate::layout_engine::systems::group_twin::drawn;

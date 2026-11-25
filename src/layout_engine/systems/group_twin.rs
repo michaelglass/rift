@@ -11,16 +11,17 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use objc2_core_foundation::CGRect;
 use rift_core::layout::group_forest::{
-    self as core, Body, Container, DropAction, Fill, Forest, Kind, Members, Memory, Node, Place,
-    Side,
+    self as core, Body, Container, DropAction, Fill, Forest, Kind, Members, Memory, Node,
+    Participation, Pass, Place, Resize, Side,
 };
 
 use super::groups::{GroupLayouts, LayoutRoot};
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, core_direction};
+use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowQuery, core_direction};
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
-use crate::common::config::StackDefaultOrientation;
+use crate::common::config::{GapSettings, StackDefaultOrientation, StackLineReserve};
 use crate::layout_engine::{LayoutId, LayoutKind, ResizeOrientation, WindowDropAction};
 use crate::model::selection::SelectionInfo;
 use crate::model::slot_table::{SlotTable, of_slotmap};
@@ -337,6 +338,49 @@ pub(super) fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
         EditResult::Unchanged => ("unchanged", Vec::new()),
         EditResult::Changed => ("changed", Vec::new()),
         EditResult::Raise(windows) => ("raise", windows.clone()),
+    }
+}
+
+pub(super) fn participation(participates: bool) -> Participation {
+    if participates {
+        Participation::TakesPart
+    } else {
+        Participation::LeftOut
+    }
+}
+
+pub(super) fn core_query(query: WindowQuery) -> rift_core::layout::group_forest::Query<WindowId> {
+    use rift_core::layout::group_forest::Query;
+    match query {
+        WindowQuery::All => Query::All,
+        WindowQuery::Visible => Query::Visible,
+        WindowQuery::Selection => Query::Selection,
+        WindowQuery::Stack(window) => Query::Stack(window),
+    }
+}
+
+pub(super) fn pass(
+    screen: CGRect,
+    gaps: &GapSettings,
+    offset: f64,
+    line: StackLineReserve,
+) -> Pass {
+    use crate::layout_engine::core_geometry::{core_gaps, core_rect, core_stack_line};
+    Pass {
+        screen: core_rect(screen),
+        gaps: core_gaps(gaps),
+        stack_offset: offset,
+        stack_line: core_stack_line(line),
+    }
+}
+
+pub(super) fn resize(old: CGRect, new: CGRect, screen: CGRect, gaps: &GapSettings) -> Resize {
+    use crate::layout_engine::core_geometry::core_rect;
+    Resize {
+        old: core_rect(old),
+        new: core_rect(new),
+        screen: core_rect(screen),
+        tiling: core_rect(crate::layout_engine::utils::compute_tiling_area(screen, gaps)),
     }
 }
 
