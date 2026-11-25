@@ -536,12 +536,10 @@ impl TraditionalLayoutSystem {
 
         let local_selected_child = self.tiles.tree.map.local_selection(parent);
         let next_sibling = parent.next_sibling(map);
-        let parent_size = map[parent].layout.size.max(0.0);
+        let parent_size = map.size(parent).max(0.0);
         // Save weights before detach events normalize the remaining siblings.
-        let children: Vec<_> = parent
-            .children(map)
-            .map(|child| (child, map[child].layout.size.max(0.0)))
-            .collect();
+        let children: Vec<_> =
+            parent.children(map).map(|child| (child, map.size(child).max(0.0))).collect();
         let total: f32 = children.iter().map(|(_, weight)| weight).sum();
         let count = children.len() as f32;
         for (child, weight) in children {
@@ -556,7 +554,7 @@ impl TraditionalLayoutSystem {
             } else {
                 self.tiles.tree.move_node(child, Placement::Back(grandparent));
             }
-            self.tiles.tree.map[child].layout.size = promoted_size;
+            *self.tiles.tree.map.size_mut(child) = promoted_size;
         }
         self.tiles.tree.remove(parent);
         if let Some(selected) =
@@ -584,14 +582,14 @@ impl TraditionalLayoutSystem {
             return;
         }
 
-        let selected_size = self.tiles.tree.map[selection].layout.size.max(0.0);
+        let selected_size = self.tiles.tree.map.size(selection).max(0.0);
         if selected_size <= f32::EPSILON {
             // Recover from stale/uninitialized size metadata by forcing an even split.
-            self.tiles.tree.map[selection].layout.size = 1.0;
-            self.tiles.tree.map[new_sibling].layout.size = 1.0;
+            *self.tiles.tree.map.size_mut(selection) = 1.0;
+            *self.tiles.tree.map.size_mut(new_sibling) = 1.0;
         } else {
-            self.tiles.tree.map[selection].layout.size = selected_size * 0.5;
-            self.tiles.tree.map[new_sibling].layout.size = selected_size * 0.5;
+            *self.tiles.tree.map.size_mut(selection) = selected_size * 0.5;
+            *self.tiles.tree.map.size_mut(new_sibling) = selected_size * 0.5;
         }
     }
 }
@@ -700,19 +698,19 @@ impl TraditionalLayoutSystem {
         }
 
         if node1.parent(map) == Some(ancestor) && node2.parent(map) == Some(ancestor) {
-            let size1 = self.tiles.tree.map[node1].layout.size.max(0.0);
-            let size2 = self.tiles.tree.map[node2].layout.size.max(0.0);
+            let size1 = self.tiles.tree.map.size(node1).max(0.0);
+            let size2 = self.tiles.tree.map.size(node2).max(0.0);
             let tree = &mut self.tiles.tree;
             let new_container = tree.insert(Placement::Before(node1));
             // Put both shares into the replacement before the moves normalize
             // the source siblings. All surviving weights then scale together.
-            tree.map[new_container].layout.size = size1 + size2;
-            tree.map[node1].layout.size = 0.0;
-            tree.map[node2].layout.size = 0.0;
+            *tree.map.size_mut(new_container) = size1 + size2;
+            *tree.map.size_mut(node1) = 0.0;
+            *tree.map.size_mut(node2) = 0.0;
             tree.move_node(node1, Placement::Back(new_container));
             tree.move_node(node2, Placement::Back(new_container));
-            tree.map[node1].layout.size = size1;
-            tree.map[node2].layout.size = size2;
+            *tree.map.size_mut(node1) = size1;
+            *tree.map.size_mut(node2) = size2;
             return new_container;
         }
         let container = self.tiles.tree.insert(Placement::Back(ancestor));
@@ -833,18 +831,18 @@ mod tests {
         let n2 = system.tiles.tree.window.node_for(layout, w2).unwrap();
         let n3 = system.tiles.tree.window.node_for(layout, w3).unwrap();
         let group = n1.parent(system.tiles.map()).unwrap();
-        system.tiles.tree.map[group].layout.size = 6.0;
-        system.tiles.tree.map[n3].layout.size = 4.0;
+        *system.tiles.tree.map.size_mut(group) = 6.0;
+        *system.tiles.tree.map.size_mut(n3) = 4.0;
 
-        system.tiles.tree.map[n1].layout.size = 3.0;
-        system.tiles.tree.map[n2].layout.size = 1.0;
+        *system.tiles.tree.map.size_mut(n1) = 3.0;
+        *system.tiles.tree.map.size_mut(n2) = 1.0;
 
         system.tiles.select(n1);
         system.unjoin_selection(layout);
 
-        assert!((system.tiles.tree.map[n1].layout.size - 4.5).abs() < 0.0001);
-        assert!((system.tiles.tree.map[n2].layout.size - 1.5).abs() < 0.0001);
-        assert!((system.tiles.tree.map[n3].layout.size - 4.0).abs() < 0.0001);
+        assert!((system.tiles.tree.map.size(n1) - 4.5).abs() < 0.0001);
+        assert!((system.tiles.tree.map.size(n2) - 1.5).abs() < 0.0001);
+        assert!((system.tiles.tree.map.size(n3) - 4.0).abs() < 0.0001);
         assert!((system.tiles.tree.map.children_total(root) - 10.0).abs() < 0.0001);
     }
 
@@ -861,18 +859,18 @@ mod tests {
         let n1 = system.tiles.tree.window.node_for(layout, w(178)).unwrap();
         let n2 = system.tiles.tree.window.node_for(layout, w(179)).unwrap();
         let n3 = system.tiles.tree.window.node_for(layout, w(180)).unwrap();
-        system.tiles.tree.map[n1].layout.size = 5.0;
-        system.tiles.tree.map[n2].layout.size = 2.0;
-        system.tiles.tree.map[n3].layout.size = 1.0;
+        *system.tiles.tree.map.size_mut(n1) = 5.0;
+        *system.tiles.tree.map.size_mut(n2) = 2.0;
+        *system.tiles.tree.map.size_mut(n3) = 1.0;
 
         assert!(system.move_node(layout, n2, Direction::Right));
 
         assert_eq!(root.children(system.tiles.map()).collect::<Vec<_>>(), vec![
             n1, n3, n2
         ]);
-        assert!((system.tiles.tree.map[n1].layout.size - 5.0).abs() < 0.0001);
-        assert!((system.tiles.tree.map[n2].layout.size - 2.0).abs() < 0.0001);
-        assert!((system.tiles.tree.map[n3].layout.size - 1.0).abs() < 0.0001);
+        assert!((system.tiles.tree.map.size(n1) - 5.0).abs() < 0.0001);
+        assert!((system.tiles.tree.map.size(n2) - 2.0).abs() < 0.0001);
+        assert!((system.tiles.tree.map.size(n3) - 1.0).abs() < 0.0001);
         assert!((system.tiles.tree.map.children_total(root) - 8.0).abs() < 0.0001);
     }
 

@@ -30,13 +30,13 @@ impl Placement {
         .filter(|&parent| map.window(parent).is_none())
     }
 
-    fn link(self, node: NodeId, parent: NodeId, map: &mut NodeMap) {
+    fn link(self, node: NodeId, parent: NodeId, size: f32, map: &mut NodeMap) {
         let (prev, next) = match self {
             Self::Back(_) => (parent.last_child(map), None),
             Self::Before(sibling) => (sibling.prev_sibling(map), Some(sibling)),
             Self::After(sibling) => (Some(sibling), sibling.next_sibling(map)),
         };
-        map.link_child(node, parent, prev, next);
+        map.link_child(node, parent, size, prev, next);
     }
 }
 
@@ -47,8 +47,7 @@ impl Tree {
         let parent = placement.parent(&self.map).expect("invalid tile insertion");
         assert!(!self.map[parent].is_region_pair());
         let node = self.create_root();
-        self.map[node].layout.size = 1.0;
-        placement.link(node, parent, &mut self.map);
+        placement.link(node, parent, 1.0, &mut self.map);
         node
     }
 
@@ -79,15 +78,16 @@ impl Tree {
         {
             return false;
         }
-        if let Some(old) = old_parent.filter(|_| changed_parent) {
-            self.detach(node, old);
-        } else {
-            self.map.unlink(node);
-        }
-        placement.link(node, parent, &mut self.map);
-        if changed_parent {
-            self.map[node].layout.size = 1.0;
-        }
+        // A node keeps its size moving among its siblings and starts afresh under a new parent.
+        let size = match old_parent {
+            Some(old) if changed_parent => {
+                self.detach(node, old);
+                1.0
+            }
+            Some(_) => self.map.unlink(node),
+            None => 1.0,
+        };
+        placement.link(node, parent, size, &mut self.map);
         if let Some(old) = old_parent.filter(|_| changed_parent) {
             self.prune_container(old);
         }
@@ -115,7 +115,7 @@ impl Tree {
         if !self.map.normalize_weights(parent) {
             let mut child = parent.first_child(&self.map);
             while let Some(node) = child {
-                self.map[node].layout.size = 1.0;
+                *self.map.size_mut(node) = 1.0;
                 child = node.next_sibling(&self.map);
             }
         }
@@ -130,9 +130,9 @@ impl Tree {
                 if child.next_sibling(&self.map).is_some() {
                     break;
                 }
+                let size = self.map.size(node);
                 self.map.unlink(child);
-                Placement::After(node).link(child, parent, &mut self.map);
-                self.map[child].layout.size = self.map[node].layout.size;
+                Placement::After(node).link(child, parent, size, &mut self.map);
             }
             self.map.detach_selection(node);
             self.map.unlink(node);
@@ -163,7 +163,8 @@ impl Tree {
             };
             *next = old.next_sibling(&self.map);
             let new = self.copy_tile(old, layout);
-            Placement::Back(*new_parent).link(new, *new_parent, &mut self.map);
+            let size = self.map.size(old);
+            Placement::Back(*new_parent).link(new, *new_parent, size, &mut self.map);
             self.map.remap_child_selection(*original_parent, *new_parent, old, new);
             if let Some(child) = old.first_child(&self.map) {
                 stack.push((Some(child), old, new));
@@ -258,14 +259,44 @@ impl NodeMap {
         }
     }
 
+    /// Where `node` sits: a layout root, or a container's child with its size.
+    pub(crate) fn place(&self, node: NodeId) -> Place { self[node].place }
+
+    /// A child's share among its siblings. Panics on a root, which has no size.
+    #[track_caller]
+    pub(crate) fn size(&self, node: NodeId) -> f32 {
+        match self[node].place {
+            Place::Child { size, .. } => size,
+            Place::Root => panic!("a root has no size"),
+        }
+    }
+
+    /// A child's share among its siblings, to change. Panics on a root, which has no size.
+    #[track_caller]
+    pub(crate) fn size_mut(&mut self, node: NodeId) -> &mut f32 {
+        match &mut self[node].place {
+            Place::Child { size, .. } => size,
+            Place::Root => panic!("a root has no size"),
+        }
+    }
+
+    /// Restores a node's saved layout: a root's saved size never meant anything and is dropped.
+    pub(crate) fn restore_layout(&mut self, node: NodeId, stored: StoredLayout) {
+        let (info, size) = stored.split();
+        self[node].layout = info;
+        if let Place::Child { size: stored_size, .. } = &mut self[node].place {
+            *stored_size = size;
+        }
+    }
+
     pub(crate) fn children_total(&self, parent: NodeId) -> f32 {
-        parent.children(self).map(|child| self[child].layout.size.max(0.0)).sum()
+        parent.children(self).map(|child| self.size(child).max(0.0)).sum()
     }
 
     /// Preserve sibling proportions with a mean weight of one.
     pub(crate) fn normalize_weights(&mut self, parent: NodeId) -> bool {
         let (count, total) = parent.children(self).fold((0, 0.0_f32), |(count, total), child| {
-            (count + 1, total + self[child].layout.size.max(0.0))
+            (count + 1, total + self.size(child).max(0.0))
         });
         if !total.is_finite() || total <= f32::EPSILON {
             return false;
@@ -273,7 +304,7 @@ impl NodeMap {
         let scale = count as f32 / total;
         let mut child = parent.first_child(self);
         while let Some(node) = child {
-            self[node].layout.size *= scale;
+            *self.size_mut(node) *= scale;
             child = node.next_sibling(self);
         }
         true
@@ -310,7 +341,7 @@ slotmap::new_key_type! {
 impl NodeId {
     #[track_caller]
     pub fn parent(self, map: &NodeMap) -> Option<NodeId> {
-        map.map.get(self).and_then(|n| n.parent)
+        map.map.get(self).and_then(|n| n.place.parent())
     }
 
     #[track_caller]
@@ -385,7 +416,7 @@ impl NodeId {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
-            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.parent));
+            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.place.parent()));
             node
         })
     }
@@ -411,7 +442,7 @@ impl NodeId {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
-            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.parent));
+            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.place.parent()));
             node.map(|n| (n, next))
         })
     }
@@ -438,21 +469,71 @@ impl NodeId {
     pub fn is_empty(self, map: &NodeMap) -> bool { self.first_child(map).is_none() }
 }
 
+/// What a node knows about how it is laid out. A child's size lives in its `Place`.
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LayoutInfo {
+    pub(crate) kind: LayoutKind,
+    pub(crate) is_fullscreen: bool,
+    pub(crate) is_fullscreen_within_gaps: bool,
+}
+
+/// A node's layout as saved, with a size on every node.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) struct LayoutInfo {
-    pub(crate) size: f32,
-    pub(crate) kind: LayoutKind,
+pub(crate) struct StoredLayout {
+    size: f32,
+    kind: LayoutKind,
     #[serde(default)]
-    pub(crate) is_fullscreen: bool,
+    is_fullscreen: bool,
     #[serde(default)]
-    pub(crate) is_fullscreen_within_gaps: bool,
+    is_fullscreen_within_gaps: bool,
+}
+
+impl StoredLayout {
+    fn new(info: LayoutInfo, size: f32) -> Self {
+        Self {
+            size,
+            kind: info.kind,
+            is_fullscreen: info.is_fullscreen,
+            is_fullscreen_within_gaps: info.is_fullscreen_within_gaps,
+        }
+    }
+
+    fn split(self) -> (LayoutInfo, f32) {
+        let info = LayoutInfo {
+            kind: self.kind,
+            is_fullscreen: self.is_fullscreen,
+            is_fullscreen_within_gaps: self.is_fullscreen_within_gaps,
+        };
+        (info, self.size)
+    }
+}
+
+/// Where a node sits: a layout root (or a node not placed yet), or a container's child with its
+/// share of the container among its siblings. A root has no size.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(crate) enum Place {
+    #[default]
+    Root,
+    Child {
+        parent: NodeId,
+        size: f32,
+    },
+}
+
+impl Place {
+    fn parent(self) -> Option<NodeId> {
+        match self {
+            Place::Child { parent, .. } => Some(parent),
+            Place::Root => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(from = "StoredNode", into = "StoredNode")]
 pub struct Node {
-    parent: Option<NodeId>,
+    place: Place,
     prev_sibling: Option<NodeId>,
     next_sibling: Option<NodeId>,
     pub(crate) layout: LayoutInfo,
@@ -490,7 +571,7 @@ struct StoredNode {
     first_child: Option<NodeId>,
     last_child: Option<NodeId>,
     #[serde(default)]
-    layout: LayoutInfo,
+    layout: StoredLayout,
     #[serde(default)]
     selection: Option<SelectionInfo>,
     #[serde(default)]
@@ -519,11 +600,17 @@ impl From<StoredNode> for Node {
                 selection: stored.selection,
             }),
         };
+        let (layout, size) = stored.layout.split();
+        let place = match stored.parent {
+            Some(parent) => Place::Child { parent, size },
+            // A root's saved size never meant anything.
+            None => Place::Root,
+        };
         Self {
-            parent: stored.parent,
+            place,
             prev_sibling: stored.prev_sibling,
             next_sibling: stored.next_sibling,
-            layout: stored.layout,
+            layout,
             contents,
         }
     }
@@ -532,13 +619,18 @@ impl From<StoredNode> for Node {
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
         let children = node.children().unwrap_or_default();
+        // A root is saved with size 0, the size every new root had.
+        let (parent, size) = match node.place {
+            Place::Child { parent, size } => (Some(parent), size),
+            Place::Root => (None, 0.0),
+        };
         Self {
-            parent: node.parent,
+            parent,
             prev_sibling: node.prev_sibling,
             next_sibling: node.next_sibling,
             first_child: children.first,
             last_child: children.last,
-            layout: node.layout,
+            layout: StoredLayout::new(node.layout, size),
             selection: children.selection,
             window: node.window(),
             master_first: match node.contents {
@@ -601,12 +693,13 @@ impl NodeMap {
         &mut self,
         id: NodeId,
         parent: NodeId,
+        size: f32,
         prev: Option<NodeId>,
         next: Option<NodeId>,
     ) {
         let Some(node) = self.map.get_mut(id) else { return };
         debug_assert!(node.prev_sibling.is_none() && node.next_sibling.is_none());
-        node.parent = Some(parent);
+        node.place = Place::Child { parent, size };
         node.prev_sibling = prev;
         node.next_sibling = next;
         if let Some(prev) = prev {
@@ -621,12 +714,15 @@ impl NodeMap {
         }
     }
 
+    /// Takes a child out of its parent, making it a root, and returns the size it had.
     #[track_caller]
-    fn unlink(&mut self, id: NodeId) {
-        let Some(node) = self.map.get_mut(id) else { return };
+    fn unlink(&mut self, id: NodeId) -> f32 {
+        let node = &mut self.map[id];
         let prev = node.prev_sibling.take();
         let next = node.next_sibling.take();
-        let Some(parent) = node.parent.take() else { return };
+        let Place::Child { parent, size } = std::mem::take(&mut node.place) else {
+            panic!("a root has no parent to leave");
+        };
         if let Some(prev) = prev {
             self[prev].next_sibling = next;
         } else {
@@ -637,6 +733,7 @@ impl NodeMap {
         } else {
             self[parent].children_mut().last = prev;
         }
+        size
     }
 }
 
@@ -789,7 +886,7 @@ mod tests {
             );
             for child in self.get_children(parent) {
                 assert_eq!(
-                    self.tree.map[child].parent,
+                    child.parent(&self.tree.map),
                     Some(parent),
                     "child has incorrect parent"
                 );
@@ -991,5 +1088,24 @@ mod tests {
         t.tree.move_node(t.child3, Placement::After(t.child2));
         t.assert_children_are([t.gc1, t.child3], t.root);
         assert!(!t.tree.map.contains(t.child2));
+    }
+
+    #[test]
+    fn a_root_has_no_size_and_a_saved_one_is_dropped() {
+        let t = TestTree::new();
+        assert_eq!(t.tree.map.place(t.root), Place::Root);
+        assert_eq!(t.tree.map.place(t.child1), Place::Child {
+            parent: t.root,
+            size: 1.0
+        });
+
+        let mut saved: Vec<StoredNode> = [t.root, t.child1]
+            .into_iter()
+            .map(|node| StoredNode::from(t.tree.map[node]))
+            .collect();
+        assert_eq!(saved[0].layout.size, 0.0);
+        saved[0].layout.size = 7.0;
+        let root = Node::from(saved.remove(0));
+        assert_eq!(root.place, Place::Root);
     }
 }

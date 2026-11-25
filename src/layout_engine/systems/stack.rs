@@ -145,7 +145,7 @@ impl LegacyStackForest {
                             Some(Member {
                                 id,
                                 window,
-                                weight: f64::from(info.size),
+                                weight: f64::from(map.size(id)),
                                 fullscreen: info.is_fullscreen,
                                 within_gaps: info.is_fullscreen_within_gaps,
                             })

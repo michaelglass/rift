@@ -11,7 +11,8 @@ use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{
-    LayoutInfo, NodeId, NodeMap, Placement, Tree, WindowIndex, WindowNodeInfo, WindowNodeInfoVec,
+    NodeId, NodeMap, Place, Placement, StoredLayout, Tree, WindowIndex, WindowNodeInfo,
+    WindowNodeInfoVec,
 };
 
 fn perpendicular(orientation: Orientation) -> Orientation {
@@ -68,7 +69,7 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Tree, D::Error> {
     #[derive(Deserialize, Default)]
     struct LegacyLayout {
-        info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
+        info: slotmap::SecondaryMap<NodeId, StoredLayout>,
     }
     #[derive(Deserialize)]
     struct StoredIndex {
@@ -105,7 +106,7 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
                 "layout metadata references a missing node",
             ));
         }
-        map[node].layout = layout;
+        map.restore_layout(node, layout);
     }
     for (node, selection) in &data.selection.nodes {
         if !map.contains(node)
@@ -231,7 +232,8 @@ impl NodeMap {
 
     pub(crate) fn assume_size_of(&mut self, new: NodeId, old: NodeId) {
         assert_eq!(new.parent(self), old.parent(self));
-        self[new].layout.size = core::mem::replace(&mut self[old].layout.size, 0.0);
+        let size = core::mem::replace(self.size_mut(old), 0.0);
+        *self.size_mut(new) = size;
     }
 
     pub(super) fn set_kind(&mut self, node: NodeId, kind: LayoutKind) {
@@ -247,15 +249,14 @@ impl NodeMap {
 
     fn debug(&self, node: NodeId, is_container: bool) -> String {
         let info = &self[node].layout;
+        let size = match self.place(node) {
+            Place::Child { size, .. } => format!("size {size}"),
+            Place::Root => "root".to_owned(),
+        };
         if is_container {
-            format!(
-                "{:?} [size {} total={}]",
-                info.kind,
-                info.size,
-                self.children_total(node)
-            )
+            format!("{:?} [{size} total={}]", info.kind, self.children_total(node))
         } else {
-            format!("[size {}]", info.size)
+            format!("[{size}]")
         }
     }
 }
@@ -424,7 +425,10 @@ impl GroupLayouts {
                 },
                 frame: Default::default(),
                 layout_kind: window.is_none().then_some(info.kind),
-                weight: node.parent(system.map()).map(|_| f64::from(info.size)),
+                weight: match system.tree.map.place(node) {
+                    Place::Child { size, .. } => Some(f64::from(size)),
+                    Place::Root => None,
+                },
                 window_id: window.map(Into::into),
                 is_selected: node == selected,
                 is_fullscreen: info.is_fullscreen,

@@ -213,8 +213,8 @@ impl MasterStackLayoutSystem {
         let total = 2.0_f32;
         let master_size = (ratio * total).max(0.05);
         let stack_size = (total - master_size).max(0.05);
-        self.tiles.tree.map[master].layout.size = master_size;
-        self.tiles.tree.map[stack].layout.size = stack_size;
+        *self.tiles.tree.map.size_mut(master) = master_size;
+        *self.tiles.tree.map.size_mut(stack) = stack_size;
     }
 
     pub(super) fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {

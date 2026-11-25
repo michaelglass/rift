@@ -60,16 +60,16 @@ impl NodeMap {
         let Some(parent) = node.parent(self) else { return None };
         let total = self.children_total(parent);
         (total.is_finite() && total > f32::EPSILON)
-            .then(|| f64::from(self[node].layout.size.max(0.0)) / f64::from(total))
+            .then(|| f64::from(self.size(node).max(0.0)) / f64::from(total))
     }
 
     fn take_share(&mut self, node: NodeId, from: NodeId, share: f32) {
         assert_eq!(node.parent(self), from.parent(self));
         const MIN_NODE_SIZE: f32 = 0.05;
-        let share = share.min(self[from].layout.size - MIN_NODE_SIZE);
-        let share = share.max(MIN_NODE_SIZE - self[node].layout.size);
-        self[from].layout.size -= share;
-        self[node].layout.size += share;
+        let share = share.min(self.size(from) - MIN_NODE_SIZE);
+        let share = share.max(MIN_NODE_SIZE - self.size(node));
+        *self.size_mut(from) -= share;
+        *self.size_mut(node) += share;
         self.normalize_weights(node.parent(self).unwrap());
     }
 
@@ -261,7 +261,7 @@ impl Projection<'_> {
             .iter()
             .map(|&child| {
                 let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
-                let weight = f64::from(map[child].layout.size);
+                let weight = f64::from(map.size(child));
                 total += weight;
                 invalid |= !weight.is_finite() || weight < 0.0;
                 AxisConstraints {
@@ -372,7 +372,7 @@ pub(super) fn rebalance(map: &mut NodeMap, root: NodeId) -> bool {
     let mut changed = false;
     let mut child = root.first_child(map);
     while let Some(node) = child {
-        changed |= std::mem::replace(&mut map[node].layout.size, 1.0) != 1.0;
+        changed |= std::mem::replace(map.size_mut(node), 1.0) != 1.0;
         changed |= rebalance(map, node);
         child = node.next_sibling(map);
     }
