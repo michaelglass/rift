@@ -964,6 +964,97 @@ Boundary := [].{
 	## query's answer, or nothing.
 	BspTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(BspSlot), Focused(BspFocused), Edited(BspEdited)]
 
+	# A stack layout system's stacks (`rift_core::layout::stack_tree`). Shared with the BSP
+	# tree: orientations, directions, the insertion point, participation, a window in a layout,
+	# a replacement, a native resize, the queries, focus and its answer, a pair, an edit's answer.
+
+	## The orientation a new stack takes (`DefaultOrientation`).
+	StackDefault := [Perpendicular, Same, Horizontal, Vertical]
+
+	## The system's settings: a new stack's orientation, where a new window goes.
+	StackSettings := { orientation : StackDefault, insertion : BspInsertion }
+
+	## A populated stack's selection: a member, or the stack itself remembering a member.
+	StackSelection := [Member(U64), Root(U64)]
+
+	## A window in a stack: its id, its saved weight, how it fills the screen.
+	StackMember := { id : U64, window : U64, weight : F64, fill : Fill }
+
+	## At least one member (the first and the rest) and the selection resting on one of them.
+	StackPopulated := { first : StackMember, rest : List(StackMember), selection : StackSelection }
+
+	## A stack's windows: none, or at least one with the selection.
+	StackMembers := [Empty, Populated(StackPopulated)]
+
+	## One layout's stack.
+	StackTreeStack := { id : U64, members : StackMembers, orientation : BspOrientation, fill : Fill }
+
+	StackLayoutHeld := { version : U32, stack : StackTreeStack }
+
+	## One slot of the system's table: a stack under an odd version, or vacant.
+	StackLayoutSlot := [Occupied(StackLayoutHeld), Vacant(U32)]
+
+	## A system as the platform holds it (`Stacks::from_parts`): the table's slots and free list
+	## (in taking order: the last first), the id counter, the settings, the windows left out.
+	StackTreeSeed := { layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) }
+
+	## Where a move past the stack's end would go, beyond the layout.
+	StackBeyond := [AnotherDisplay, Nothing]
+
+	StackMove := { direction : BspDirection, beyond : StackBeyond }
+
+	## A tab moved to another's place.
+	StackTab := { window : U64, target : U64 }
+
+	## The edits a stack has a case for (a drop's pair: the source, then the target).
+	StackEdit := [Moved(StackMove), Fullscreen(BspFullscreen), Swap(BspPair), ReorderTab(StackTab), Drop(BspPair), Restack, ToggleOrientation]
+
+	StackEditIn := { layout : U64, edit : StackEdit }
+
+	## How much of the selection the group bar's question covers.
+	StackScope := [Whole, SelectionPath]
+
+	StackGroupIn := { layout : U64, scope : StackScope }
+
+	## A stack as the group bar shows it: its windows taking part, the shown one's position.
+	StackGroup := { stack : U64, orientation : BspOrientation, windows : List(U64), selected : U64 }
+
+	StackGroupAnswer := [Group(StackGroup), NoGroup]
+
+	## A window's position in its stack.
+	StackSlot := [Slot(U64), NoSlot]
+
+	## One operation of the system (`Stacks`' methods, one for one; an app closing lists the
+	## app's windows, since Roc has no pid).
+	StackTreeEvent := [
+		CreateLayout,
+		CloneLayout(U64),
+		RemoveLayout(U64),
+		Participation(BspParticipation),
+		Settings(StackSettings),
+		AddWindow(BspWindowIn),
+		RemoveWindow(U64),
+		ReplaceWindow(BspReplacement),
+		CloseApp(List(U64)),
+		ResizeWindow(BspNativeResize),
+		ContainsLayout(U64),
+		WindowParticipates(U64),
+		SelectedWindow(U64),
+		SelectionContainsWindow(BspWindowIn),
+		WindowInDirection(BspLayoutDirection),
+		ContainsWindow(BspWindowIn),
+		HasAnyFullscreenNode(U64),
+		HasWindowsForApp(BspAppIn),
+		Windows(BspWindowsQuery),
+		WindowSlot(BspWindowIn),
+		GroupContainer(StackGroupIn),
+		Focus(BspFocusIn),
+		Edit(StackEditIn),
+	]
+
+	## What an operation answers.
+	StackTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(StackSlot), Group(StackGroupAnswer), Focused(BspFocused), Edited(BspEdited)]
+
 
 
 	## Where a claimed window returns to when its claim ends.

@@ -4240,3 +4240,8 @@ impl Drop for BspTreeBox {
         unsafe { abi::roc_bsp_tree_release(self.0) }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The stack layout system's stacks.
+
+pub(crate) mod stack_tree;

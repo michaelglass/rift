@@ -84,4 +84,17 @@ Slots(v) := { slots : List(Slot(v)), free : List(U32) }.{
 				crash "Slots.put: no slot ${index.to_str()}"
 			}
 		}
+
+	## Every held value changed by `change`, the slots and versions as they were.
+	map_values : Slots(v), (v -> v) -> Slots(v)
+	map_values = |table, change| {
+		..table,
+		slots: table.slots.map(
+			|slot|
+				match slot {
+					Occupied({ version, value }) => Occupied({ version, value: change(value) })
+					Vacant(version) => Vacant(version)
+				},
+		),
+	}
 }

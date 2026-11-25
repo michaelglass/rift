@@ -583,6 +583,231 @@ pub mod bsp_tree {
     }
 }
 
+/// A stack layout system's stacks (`rift_core::layout::stack_tree::Stacks`) kept in Roc between
+/// operations.
+pub struct RocStackTree {
+    stacks: boundary::stack_tree::StackTreeBox,
+}
+
+// SAFETY: as `RocCore`: the box is owned, never shared, and only stepped through `&mut self`.
+unsafe impl Send for RocStackTree {}
+
+impl RocStackTree {
+    /// As `Stacks::new`.
+    pub fn new(
+        orientation: rift_core::layout::stack_tree::DefaultOrientation,
+        insertion: rift_core::layout::stack_tree::InsertionPoint,
+    ) -> Self {
+        RocStackTree {
+            stacks: boundary::stack_tree::StackTreeBox::new(orientation, insertion),
+        }
+    }
+
+    /// The system `view` holds, as `Stacks::from_parts` takes it: `view` must be one
+    /// [`stack_tree::StacksView::stacks`] parses (a Rust system's view, or a load's).
+    pub fn seeded(view: &stack_tree::StacksView) -> Self {
+        let host = host();
+        RocStackTree {
+            stacks: boundary::stack_tree::StackTreeBox::seeded(view, &host),
+        }
+    }
+
+    /// One operation, as [`stack_tree::step`] applies it to a `Stacks`.
+    pub fn step(&mut self, event: stack_tree::Event) -> stack_tree::Answer {
+        let host = host();
+        boundary::in_place(&mut self.stacks, |stacks| stacks.step(event, &host))
+    }
+
+    /// The whole system, as [`stack_tree::StacksView::from`] reads a `Stacks`.
+    pub fn view(&mut self) -> stack_tree::StacksView {
+        let host = host();
+        boundary::in_place(&mut self.stacks, |stacks| stacks.view(&host))
+    }
+}
+
+/// The stack system's operations and view, on plain keys, and the Rust system they are held to.
+pub mod stack_tree {
+    use rift_core::layout::stack_tree::{
+        DefaultOrientation, Direction, Edit, Edited, Focus, Focused, GroupContainer,
+        InsertionPoint, Participation, Query, Resize, Stack,
+    };
+    use rift_core::slot_table::{SlotTable, SlotsError};
+
+    pub use crate::bsp_tree::LayoutKey;
+    use crate::bsp_tree::Saved;
+
+    /// The Rust system, on plain keys and windows as words.
+    pub type Stacks = rift_core::layout::stack_tree::Stacks<LayoutKey, u64>;
+
+    /// How much of the selection the group bar's question covers (`group_container`'s
+    /// `selection_path_only`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Scope {
+        Whole,
+        SelectionPath,
+    }
+
+    /// One operation of the system (`Stacks`' methods, one for one; an app closing lists its
+    /// windows, which `close_app`'s predicate tells).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Event {
+        CreateLayout,
+        CloneLayout(LayoutKey),
+        RemoveLayout(LayoutKey),
+        Participation(u64, Participation),
+        Settings(DefaultOrientation, InsertionPoint),
+        AddWindow(LayoutKey, u64),
+        RemoveWindow(u64),
+        ReplaceWindow {
+            from: u64,
+            to: u64,
+        },
+        CloseApp(Vec<u64>),
+        ResizeWindow(LayoutKey, u64, Resize),
+        ContainsLayout(LayoutKey),
+        WindowParticipates(u64),
+        SelectedWindow(LayoutKey),
+        SelectionContainsWindow(LayoutKey, u64),
+        WindowInDirection(LayoutKey, Direction),
+        ContainsWindow(LayoutKey, u64),
+        HasAnyFullscreenNode(LayoutKey),
+        /// The app's windows, which `has_windows_for_app`'s predicate tells.
+        HasWindowsForApp(LayoutKey, Vec<u64>),
+        Windows(LayoutKey, Query<u64>),
+        WindowSlot(LayoutKey, u64),
+        GroupContainer(LayoutKey, Scope),
+        Focus(LayoutKey, Focus<u64>),
+        Edit(LayoutKey, Edit<u64>),
+    }
+
+    /// What an operation answers.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Answer {
+        Layout(LayoutKey),
+        Participated(bool),
+        Done,
+        Verdict(bool),
+        Window(Option<u64>),
+        Windows(Vec<u64>),
+        WindowSlot(Option<usize>),
+        Group(Option<GroupContainer<u64>>),
+        Focused(Focused<u64>),
+        Edited(Edited<u64>),
+    }
+
+    /// `event` applied to the Rust system, and what it answers.
+    pub fn step(stacks: &mut Stacks, event: Event) -> Answer {
+        match event {
+            Event::CreateLayout => Answer::Layout(stacks.create_layout()),
+            Event::CloneLayout(layout) => Answer::Layout(stacks.clone_layout(layout)),
+            Event::RemoveLayout(layout) => {
+                stacks.remove_layout(layout);
+                Answer::Done
+            }
+            Event::Participation(window, participation) => {
+                Answer::Participated(stacks.set_window_participation(window, participation))
+            }
+            Event::Settings(orientation, insertion) => {
+                stacks.update_settings(orientation, insertion);
+                Answer::Done
+            }
+            Event::AddWindow(layout, window) => {
+                stacks.add_window(layout, window);
+                Answer::Done
+            }
+            Event::RemoveWindow(window) => {
+                stacks.remove_window(window);
+                Answer::Done
+            }
+            Event::ReplaceWindow { from, to } => {
+                stacks.replace_window(from, to);
+                Answer::Done
+            }
+            Event::CloseApp(windows) => {
+                stacks.close_app(|window| windows.contains(&window));
+                Answer::Done
+            }
+            Event::ResizeWindow(layout, window, resize) => {
+                stacks.resize_window(layout, window, resize);
+                Answer::Done
+            }
+            Event::ContainsLayout(layout) => Answer::Verdict(stacks.contains_layout(layout)),
+            Event::WindowParticipates(window) => {
+                Answer::Verdict(stacks.window_participates(window))
+            }
+            Event::SelectedWindow(layout) => Answer::Window(stacks.selected_window(layout)),
+            Event::SelectionContainsWindow(layout, window) => {
+                Answer::Verdict(stacks.selection_contains_window(layout, window))
+            }
+            Event::WindowInDirection(layout, direction) => {
+                Answer::Window(stacks.window_in_direction(layout, direction))
+            }
+            Event::ContainsWindow(layout, window) => {
+                Answer::Verdict(stacks.contains_window(layout, window))
+            }
+            Event::HasAnyFullscreenNode(layout) => {
+                Answer::Verdict(stacks.has_any_fullscreen_node(layout))
+            }
+            Event::HasWindowsForApp(layout, windows) => Answer::Verdict(
+                stacks.has_windows_for_app(layout, |window| windows.contains(&window)),
+            ),
+            Event::Windows(layout, query) => Answer::Windows(stacks.windows(layout, query)),
+            Event::WindowSlot(layout, window) => {
+                Answer::WindowSlot(stacks.window_slot(layout, window))
+            }
+            Event::GroupContainer(layout, scope) => {
+                Answer::Group(stacks.group_container(layout, scope == Scope::SelectionPath))
+            }
+            Event::Focus(layout, focus) => Answer::Focused(stacks.focus(layout, focus)),
+            Event::Edit(layout, edit) => Answer::Edited(stacks.edit(layout, edit)),
+        }
+    }
+
+    /// The whole system, comparable: the table's slots and free list, the counter, the
+    /// settings, the windows left out in order.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct StacksView {
+        pub layouts: Vec<Saved<Stack<u64>>>,
+        pub layout_free: Vec<u32>,
+        pub next_node: u32,
+        pub orientation: DefaultOrientation,
+        pub insertion: InsertionPoint,
+        pub left_out: Vec<u64>,
+    }
+
+    impl StacksView {
+        /// The Rust system this view holds, its table parsed as slotmap reads it (refused as
+        /// slotmap refuses it, or when the free list is not the table's vacant slots).
+        pub fn stacks(&self) -> Result<Stacks, SlotsError> {
+            let taking: Vec<u32> = self.layout_free.iter().rev().copied().collect();
+            Ok(Stacks::from_parts(
+                SlotTable::parse(self.layouts.clone())?.resumed(&taking)?,
+                self.next_node,
+                self.orientation,
+                self.left_out.iter().copied().collect(),
+                self.insertion,
+            ))
+        }
+    }
+
+    impl From<&Stacks> for StacksView {
+        fn from(stacks: &Stacks) -> Self {
+            StacksView {
+                layouts: stacks
+                    .layouts()
+                    .saved()
+                    .map(|(held, version)| (held.map(|(_, stack)| stack.clone()), version))
+                    .collect(),
+                layout_free: stacks.layouts().free().to_vec(),
+                next_node: stacks.next_node(),
+                orientation: stacks.orientation(),
+                insertion: stacks.insertion(),
+                left_out: stacks.left_out().iter().copied().collect(),
+            }
+        }
+    }
+}
+
 pub mod main_window {
     use rift_core::main_window::{App, MainWindows, NativeFocus};
 

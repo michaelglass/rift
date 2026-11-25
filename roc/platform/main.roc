@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -67,6 +67,10 @@ platform ""
 			bsp_tree_step : trees, BspTreeEvent -> { model : trees, answer : BspTreeAnswer },
 			bsp_tree_view : trees -> { model : trees, layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect },
 			bsp_tree_frames : trees, BspFramesQuestion -> { model : trees, frames : List(Frame) },
+			stack_tree_init : StackSettings -> stacks,
+			stack_tree_seed : StackTreeSeed -> stacks,
+			stack_tree_step : stacks, StackTreeEvent -> { model : stacks, answer : StackTreeAnswer },
+			stack_tree_view : stacks -> { model : stacks, layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) },
 		}
 	}
 	exposes [Boundary]
@@ -94,6 +98,11 @@ platform ""
 		"roc_bsp_tree_view": bsp_tree_view_for_host,
 		"roc_bsp_tree_frames": bsp_tree_frames_for_host,
 		"roc_bsp_tree_release": bsp_tree_release_for_host,
+		"roc_stack_tree_init": stack_tree_init_for_host,
+		"roc_stack_tree_seed": stack_tree_seed_for_host,
+		"roc_stack_tree_step": stack_tree_step_for_host,
+		"roc_stack_tree_view": stack_tree_view_for_host,
+		"roc_stack_tree_release": stack_tree_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
@@ -146,7 +155,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -189,6 +198,13 @@ BspTreeFramed := { model : Box(Trees), frames : List(Frame) }
 ## A BSP layout system's trees, unchanged: each table's slots and free list, the windows left
 ## out in order, and the settings.
 BspTreeViewed := { model : Box(Trees), layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(BspNodeSlot), node_free : List(U32), left_out : List(U64), insertion : BspInsertion, aspect : Aspect }
+
+## A stack layout system's stacks after an operation, and what it answered.
+StackTreeStepped := { model : Box(Stacks), answer : StackTreeAnswer }
+
+## A stack layout system's stacks, unchanged: the table's slots and free list, the id counter,
+## the settings, the windows left out in order.
+StackTreeViewed := { model : Box(Stacks), layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) }
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -495,6 +511,35 @@ bsp_tree_frames_for_host = |boxed, question| {
 ## The host cannot release a `Box(Trees)`: only Roc knows its layout.
 bsp_tree_release_for_host : Box(Trees) -> {}
 bsp_tree_release_for_host = |_| {}
+
+## A stack layout system's stacks (`rift_core::layout::stack_tree::Stacks`), kept between
+## operations: no layouts, under `settings`.
+stack_tree_init_for_host : StackSettings -> Box(Stacks)
+stack_tree_init_for_host = |settings| Box.box((core.stack_tree_init)(settings))
+
+## A stack layout system as the platform holds it (a load, or a re-seed): the host has parsed
+## it (slotmap's refusals, the free list naming the vacant slots).
+stack_tree_seed_for_host : StackTreeSeed -> Box(Stacks)
+stack_tree_seed_for_host = |seed| Box.box((core.stack_tree_seed)(seed))
+
+## One operation of the system: the stacks after it, and what it answered.
+stack_tree_step_for_host : Box(Stacks), StackTreeEvent -> StackTreeStepped
+stack_tree_step_for_host = |boxed, event| {
+	stepped = (core.stack_tree_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), answer: stepped.answer }
+}
+
+## The table's slots and free list, the counter, the settings and the windows left out, and the
+## stacks back unchanged.
+stack_tree_view_for_host : Box(Stacks) -> StackTreeViewed
+stack_tree_view_for_host = |boxed| {
+	viewed = (core.stack_tree_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), layouts: viewed.layouts, layout_free: viewed.layout_free, next_node: viewed.next_node, settings: viewed.settings, left_out: viewed.left_out }
+}
+
+## The host cannot release a `Box(Stacks)`: only Roc knows its layout.
+stack_tree_release_for_host : Box(Stacks) -> {}
+stack_tree_release_for_host = |_| {}
 
 ## Rust's `value as f32`.
 narrow_for_host : F64 -> F32
