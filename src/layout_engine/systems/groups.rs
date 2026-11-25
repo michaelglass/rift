@@ -1076,3 +1076,51 @@ impl GroupLayouts {
         self.tree.map.set_kind(node, kind);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+
+    use super::*;
+
+    /// One tree as saved with each node linking its siblings (the middle child of each
+    /// container is reachable only through those links).
+    const LINKED: &str = "(map:(map:[(value:None,version:0),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:Some((idx:2,version:1)),last_child:Some((idx:4,version:1)),layout:(size:0.0,kind:vertical_stack,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:Some((selected_child:(idx:3,version:1),stop_here:false)),window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:None,next_sibling:Some((idx:3,version:1)),first_child:None,last_child:None,layout:(size:0.5,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:Some((pid:1,idx:1)))),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:Some((idx:2,version:1)),next_sibling:Some((idx:4,version:1)),first_child:Some((idx:5,version:1)),last_child:Some((idx:6,version:1)),layout:(size:1.5,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:Some((idx:3,version:1)),next_sibling:None,first_child:None,last_child:None,layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:Some((pid:1,idx:4)))),version:1),(value:Some((parent:Some((idx:3,version:1)),prev_sibling:None,next_sibling:Some((idx:6,version:1)),first_child:None,last_child:None,layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:Some((pid:1,idx:2)))),version:1),(value:Some((parent:Some((idx:3,version:1)),prev_sibling:Some((idx:5,version:1)),next_sibling:None,first_child:None,last_child:None,layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:Some((pid:1,idx:3)))),version:1)]),window:(window_nodes:{(pid:1,idx:1):([(layout:(idx:1,version:1),node:(idx:2,version:1))]),(pid:1,idx:2):([(layout:(idx:1,version:1),node:(idx:5,version:1))]),(pid:1,idx:3):([(layout:(idx:1,version:1),node:(idx:6,version:1))]),(pid:1,idx:4):([(layout:(idx:1,version:1),node:(idx:4,version:1))])}))";
+
+    /// The same tree as saved before a node held its own layout, selection and window: those
+    /// sat in flat tables beside sibling-linked nodes.
+    const FLAT: &str = "(map:(map:[(value:None,version:0),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:Some((idx:2,version:1)),last_child:Some((idx:4,version:1)))),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:None,next_sibling:Some((idx:3,version:1)),first_child:None,last_child:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:Some((idx:2,version:1)),next_sibling:Some((idx:4,version:1)),first_child:Some((idx:5,version:1)),last_child:Some((idx:6,version:1)))),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:Some((idx:3,version:1)),next_sibling:None,first_child:None,last_child:None)),version:1),(value:Some((parent:Some((idx:3,version:1)),prev_sibling:None,next_sibling:Some((idx:6,version:1)),first_child:None,last_child:None)),version:1),(value:Some((parent:Some((idx:3,version:1)),prev_sibling:Some((idx:5,version:1)),next_sibling:None,first_child:None,last_child:None)),version:1)]),data:(selection:(nodes:[(value:None,version:0),(value:Some((selected_child:(idx:3,version:1),stop_here:false)),version:1),(value:None,version:0),(value:None,version:0),(value:None,version:0),(value:None,version:0),(value:None,version:0)]),layout:(info:[(value:None,version:0),(value:Some((size:0.0,kind:vertical_stack,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:0.5,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:1.5,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1)]),window:(windows:[(value:None,version:0),(value:None,version:0),(value:Some((pid:1,idx:1)),version:1),(value:None,version:0),(value:Some((pid:1,idx:4)),version:1),(value:Some((pid:1,idx:2)),version:1),(value:Some((pid:1,idx:3)),version:1)],window_nodes:{(pid:1,idx:1):([(layout:(idx:1,version:1),node:(idx:2,version:1))]),(pid:1,idx:2):([(layout:(idx:1,version:1),node:(idx:5,version:1))]),(pid:1,idx:3):([(layout:(idx:1,version:1),node:(idx:6,version:1))]),(pid:1,idx:4):([(layout:(idx:1,version:1),node:(idx:4,version:1))])})))";
+
+    #[derive(Deserialize)]
+    struct Saved {
+        #[serde(deserialize_with = "deserialize_tile_tree")]
+        tree: Tree,
+    }
+
+    #[test]
+    fn every_saved_shape_of_a_tree_loads_to_the_same_tree() {
+        let mut layouts = slotmap::SlotMap::<LayoutId, ()>::with_key();
+        let layout = layouts.insert(());
+        let mut tree = Tree::default();
+        let root = tree.create_root();
+        tree.map.set_kind(root, LayoutKind::VerticalStack);
+        let [first, split, last] = [(); 3].map(|()| tree.insert(Placement::Back(root)));
+        let [left, right] = [(); 2].map(|()| tree.insert(Placement::Back(split)));
+        *tree.map.size_mut(first) = 0.5;
+        *tree.map.size_mut(split) = 1.5;
+        for (node, idx) in [(first, 1), (left, 2), (right, 3), (last, 4)] {
+            tree.window.set_window(&mut tree.map, layout, node, WindowId::new(1, idx));
+        }
+        tree.map.select_locally(split);
+        let listed = ron::to_string(&tree).unwrap();
+        assert!(listed.contains("children:") && !listed.contains("next_sibling"));
+
+        let load = |saved: &str| {
+            let saved: Saved = ron::from_str(&format!("(tree:{saved})")).unwrap();
+            ron::to_string(&saved.tree).unwrap()
+        };
+        assert_eq!(load(&listed), listed);
+        assert_eq!(load(LINKED), listed);
+        assert_eq!(load(FLAT), listed);
+    }
+}

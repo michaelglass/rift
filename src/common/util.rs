@@ -1,4 +1,14 @@
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tracing::{error, trace};
+
+/// Reads `slots` back as a slotmap with the same keys and a new value type, through their saved
+/// form. A slotmap's keys can only be chosen by deserializing it, and it cannot change its value
+/// type while keeping them, so code that rebuilds a map's values under the saved keys writes the
+/// slots it has and reads them back as the map it needs.
+pub(crate) fn rekey_values<T: Serialize, U: DeserializeOwned>(slots: &T) -> Result<U, ron::Error> {
+    ron::from_str(&ron::to_string(slots)?).map_err(|error| error.code)
+}
 
 pub fn parse_command(command: &str) -> Vec<String> {
     let mut parts = Vec::new();

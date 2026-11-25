@@ -204,6 +204,20 @@ fn assert_rejected(file: &str, message: &str) {
 }
 
 #[test]
+fn files_listing_children_carry_a_schema_that_builds_linking_siblings_refuse() {
+    // Schema 5 was the last whose group trees linked siblings. A build refuses any file stamped
+    // newer than its own schema (see the "newer than supported" check below), so a build at 5
+    // refuses a file that lists children rather than loading its trees without them.
+    const LAST_WITH_SIBLING_LINKS: u32 = 5;
+    let current = super::snapshot::CURRENT_SCHEMA_VERSION;
+    assert!(current > LAST_WITH_SIBLING_LINKS);
+    let a = SpaceId::new(900);
+    let saved = session(&VirtualWorkspaceSettings::default(), &[(a, "x", &[win(7, 1)])]);
+    assert!(saved.contains(&format!("\"schema_version\":{current}")));
+    assert!(saved.contains("children:") && !saved.contains("next_sibling"));
+}
+
+#[test]
 fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     let per_display = VirtualWorkspaceSettings::default();
     let shared = VirtualWorkspaceSettings {
@@ -242,9 +256,11 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         let _: LayoutSystemKind = ron::from_str(&migrated).unwrap();
     }
     let empty = session(&per_display, &[(a, "x", &[])]);
-    LayoutEngine::deserialize_from_str(&empty.replacen("\"schema_version\":5,", "", 1)).unwrap();
+    let current = super::snapshot::CURRENT_SCHEMA_VERSION;
+    let header = format!("\"schema_version\":{current}");
+    LayoutEngine::deserialize_from_str(&empty.replacen(&format!("{header},"), "", 1)).unwrap();
     assert_rejected(
-        &empty.replacen("\"schema_version\":5", "\"schema_version\":6", 1),
+        &empty.replacen(&header, &format!("\"schema_version\":{}", current + 1), 1),
         "newer than supported",
     );
     for version in [None, Some(1), Some(2)] {
@@ -333,7 +349,11 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
     let before = engine.serialize_to_string(&store);
     for bad in [
         good[..good.len() - 20].to_owned(),
-        good.replacen("\"schema_version\":5", "\"schema_version\":99", 1),
+        good.replacen(
+            &format!("\"schema_version\":{}", super::snapshot::CURRENT_SCHEMA_VERSION),
+            "\"schema_version\":99",
+            1,
+        ),
         good.replacen("width:800.0", "width:-1.0", 1),
     ] {
         for scope in [RestoreScope::Space, RestoreScope::Workspace] {

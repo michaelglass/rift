@@ -4,7 +4,9 @@ use std::collections::hash_map::Entry;
 use super::*;
 use crate::layout_engine::systems::{WindowChange, WindowQuery};
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 5;
+/// 6: a saved group tree lists each container's children instead of linking siblings, so builds
+/// before it refuse these files instead of loading every tree without its children.
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 fn legacy_schema_version() -> u32 { 0 }
 

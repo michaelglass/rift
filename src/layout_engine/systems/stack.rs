@@ -165,7 +165,7 @@ impl LegacyStackForest {
                 super::SavedSlot { value, version: slot.version }
             })
             .collect();
-        let layouts = ron::from_str(&ron::to_string(&slots)?).map_err(|error| error.code)?;
+        let layouts = crate::common::util::rekey_values(&slots)?;
         Ok((layouts, next_node))
     }
 }
