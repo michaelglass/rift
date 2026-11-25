@@ -65,7 +65,8 @@ fn core_of(upstream: &Upstream) -> CoreTraditional {
 }
 
 impl From<Upstream> for TraditionalLayoutSystem {
-    fn from(upstream: Upstream) -> Self {
+    fn from(mut upstream: Upstream) -> Self {
+        upstream.tiles.normalize_load(SYSTEM);
         let twin = Box::new(Twinned {
             core: core_of(&upstream),
             steps: 0,
@@ -449,6 +450,132 @@ mod tests {
             index[0].2.parts().0,
             clone_leaf.parts().0,
             "the clone's leaf, freed last"
+        );
+    }
+
+    /// `file` with `from` (which it holds once) written as `to`.
+    fn written_as(file: &str, from: &str, to: &str) -> String {
+        assert_eq!(file.matches(from).count(), 1, "{from} in {file}");
+        file.replace(from, to)
+    }
+
+    /// `corrupt` loads (its twin agreeing with upstream's system) and saves as `normalized`.
+    fn loads_normalized(corrupt: &str, normalized: &str) {
+        assert_ne!(corrupt, normalized);
+        let mut loaded: TraditionalLayoutSystem = ron::from_str(corrupt).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), normalized);
+        loaded.create_layout();
+    }
+
+    /// Two windows side by side in one layout, the second selected.
+    fn two_windows() -> (TraditionalLayoutSystem, LayoutId) {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, w(1), None));
+        system.update(WindowChange::Add(layout, w(2), None));
+        (system, layout)
+    }
+
+    #[test]
+    fn a_saved_node_with_both_fullscreen_flags_loads_fullscreen() {
+        let (mut system, layout) = two_windows();
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .discard();
+        let normalized = ron::to_string(&system).unwrap();
+        let corrupt = written_as(
+            &normalized,
+            "is_fullscreen:true,is_fullscreen_within_gaps:false",
+            "is_fullscreen:true,is_fullscreen_within_gaps:true",
+        );
+        loads_normalized(&corrupt, &normalized);
+    }
+
+    #[test]
+    fn a_saved_window_kind_loads_as_the_default() {
+        let (system, _) = two_windows();
+        let normalized = ron::to_string(&system).unwrap();
+        let corrupt = written_as(
+            &normalized,
+            "kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,\
+             window:Some((pid:1,idx:1))",
+            "kind:vertical_stack,is_fullscreen:false,is_fullscreen_within_gaps:false),\
+             selection:None,window:Some((pid:1,idx:1))",
+        );
+        loads_normalized(&corrupt, &normalized);
+    }
+
+    #[test]
+    fn a_saved_root_size_loads_as_zero() {
+        let (system, _) = two_windows();
+        let normalized = ron::to_string(&system).unwrap();
+        for size in ["2.5", "-0.0", "NaN"] {
+            let corrupt = written_as(&normalized, "size:0.0,", &format!("size:{size},"));
+            loads_normalized(&corrupt, &normalized);
+        }
+    }
+
+    /// Entries naming no leaf of theirs (another window's leaf, a missing layout), and a leaf
+    /// listed twice, are dropped; a leaf the index misses is appended.
+    #[test]
+    fn a_saved_window_index_is_normalized_to_the_tree() {
+        let (system, _) = two_windows();
+        let normalized = ron::to_string(&system).unwrap();
+        let first = "(pid:1,idx:1):([(layout:(idx:1,version:1),node:(idx:2,version:1))])";
+        let second = "(pid:1,idx:2):([(layout:(idx:1,version:1),node:(idx:3,version:1))])";
+        let entry = |layout: u32, node: u32| {
+            format!("(layout:(idx:{layout},version:1),node:(idx:{node},version:1))")
+        };
+        for (from, to) in [
+            (
+                first,
+                format!("(pid:1,idx:1):([{},{}])", entry(1, 2), entry(1, 3)),
+            ),
+            (
+                first,
+                format!("(pid:1,idx:1):([{},{}])", entry(1, 2), entry(7, 2)),
+            ),
+            (
+                first,
+                format!("(pid:1,idx:1):([{},{}])", entry(1, 2), entry(1, 2)),
+            ),
+            (second, "(pid:1,idx:2):([])".to_owned()),
+            (second, format!("(pid:1,idx:3):([{}])", entry(1, 3))),
+        ] {
+            loads_normalized(&written_as(&normalized, from, &to), &normalized);
+        }
+    }
+
+    /// A window's leaves keep the index's saved order (the load stamps them in it): listed
+    /// clone first, the source's leaf is freed last and the next leaf takes its slot.
+    #[test]
+    fn a_saved_window_index_keeps_its_order() {
+        use rift_core::slot_table::SlotKey;
+        let mut system = TraditionalLayoutSystem::default();
+        let source = system.create_layout();
+        system.update(WindowChange::Add(source, w(1), None));
+        let clone = system.clone_layout(source);
+        let file = ron::to_string(&system).unwrap();
+        let index = system.twin.core.forest().index();
+        let (source_leaf, clone_leaf) = (index[0].2, index[1].2);
+        let entry = |layout: LayoutId, node: NodeId| {
+            let ((l, lv), (n, nv)) = (layout.parts(), node.parts());
+            format!("(layout:(idx:{l},version:{lv}),node:(idx:{n},version:{nv}))")
+        };
+        let reordered = written_as(
+            &file,
+            &format!("[{},{}]", entry(source, source_leaf), entry(clone, clone_leaf)),
+            &format!("[{},{}]", entry(clone, clone_leaf), entry(source, source_leaf)),
+        );
+        let mut system: TraditionalLayoutSystem = ron::from_str(&reordered).unwrap();
+        assert_eq!(ron::to_string(&system).unwrap(), reordered);
+        system.update(WindowChange::Remove(w(1)));
+        system.update(WindowChange::Add(clone, w(2), None));
+        let index = system.twin.core.forest().index();
+        assert_eq!(
+            index[0].2.parts().0,
+            source_leaf.parts().0,
+            "the source's leaf, freed last"
         );
     }
 

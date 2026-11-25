@@ -261,6 +261,82 @@ impl NodeMap {
 }
 
 impl GroupLayouts {
+    /// States only a saved file holds, normalized at the traditional and master-stack loads with
+    /// one `{system}-load:` warn each (the W2b rule; upstream keeps them, an upstream candidate):
+    /// both fullscreen flags on a node (fullscreen, as the projection reads them); a window's
+    /// layout kind other than the default (no operation reads or writes one); a root's size other
+    /// than 0 (a root has no siblings to share with); and a window index that disagrees with the
+    /// tree (entries naming no leaf of theirs in that layout, or a leaf twice, dropped; leaves it
+    /// misses appended in layout and tree order; one warn). The index's order is otherwise kept:
+    /// it orders a window's leaves by when they entered their layouts. Floating, which also holds
+    /// a `GroupLayouts`, keeps its load as it was.
+    pub(super) fn normalize_load(&mut self, system: &str) {
+        let nodes: Vec<NodeId> = self.tree.map.slots().keys().collect();
+        for node in nodes {
+            let is_window = self.tree.map.window(node).is_some();
+            let is_root = node.parent(&self.tree.map).is_none();
+            let info = &mut self.tree.map[node].layout;
+            if info.is_fullscreen && info.is_fullscreen_within_gaps {
+                info.is_fullscreen_within_gaps = false;
+                tracing::warn!(?node, "{system}-load: both fullscreen flags; loaded fullscreen");
+            }
+            if is_window && info.kind != LayoutKind::default() {
+                tracing::warn!(?node, kind = ?info.kind, "{system}-load: a window's layout kind; loaded as the default");
+                info.kind = LayoutKind::default();
+            }
+            if is_root && info.size.to_bits() != 0.0_f32.to_bits() {
+                tracing::warn!(
+                    ?node,
+                    size = info.size,
+                    "{system}-load: a root's size; loaded as 0"
+                );
+                info.size = 0.0;
+            }
+        }
+        let map = &self.tree.map;
+        let leaves: Vec<(WindowId, LayoutId, NodeId)> = self
+            .layout_roots
+            .iter()
+            .flat_map(|(layout, root)| {
+                root.0
+                    .traverse_preorder(map)
+                    .filter_map(move |node| map.window(node).map(|window| (window, layout, node)))
+            })
+            .collect();
+        let is_leaf: HashSet<(WindowId, LayoutId, NodeId)> = leaves.iter().copied().collect();
+        let saved = std::mem::take(&mut self.tree.window.window_nodes);
+        let mut kept = HashSet::default();
+        let (mut dropped, mut added) = (0, 0);
+        for (window, infos) in saved {
+            for info in infos.0 {
+                if is_leaf.contains(&(window, info.layout, info.node)) && kept.insert(info.node) {
+                    self.tree.window.window_nodes.entry(window).or_default().0.push(info);
+                } else {
+                    dropped += 1;
+                }
+            }
+        }
+        for (window, layout, node) in leaves {
+            if kept.insert(node) {
+                self.tree
+                    .window
+                    .window_nodes
+                    .entry(window)
+                    .or_default()
+                    .0
+                    .push(WindowNodeInfo { layout, node });
+                added += 1;
+            }
+        }
+        if dropped + added > 0 {
+            tracing::warn!(
+                dropped,
+                added,
+                "{system}-load: the window index disagreed with the tree; normalized to it"
+            );
+        }
+    }
+
     pub(super) fn remove_window(&mut self, window: WindowId) -> Vec<WindowNodeInfo> {
         self.inactive.remove(&window);
         let removed = self.tree.window.take_window(window);

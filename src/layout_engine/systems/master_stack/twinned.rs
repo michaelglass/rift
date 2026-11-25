@@ -96,7 +96,8 @@ fn core_of(upstream: &Upstream) -> CoreMasterStack {
 }
 
 impl From<Upstream> for MasterStackLayoutSystem {
-    fn from(upstream: Upstream) -> Self {
+    fn from(mut upstream: Upstream) -> Self {
+        upstream.tiles.normalize_load(SYSTEM);
         let twin = Box::new(Twinned {
             core: core_of(&upstream),
             steps: 0,
@@ -504,6 +505,27 @@ mod tests {
             layouts += drawn.layouts.len();
         }
         eprintln!("master-stack twin: {layouts} layouts, {windows} windows at the end");
+    }
+
+    /// The master-stack load normalizes as the traditional one does (both fullscreen flags here).
+    #[test]
+    fn a_saved_master_stack_node_with_both_fullscreen_flags_loads_fullscreen() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, WindowId::new(1, 1), None));
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: true })
+            .discard();
+        let normalized = ron::to_string(&system).unwrap();
+        let flags = "is_fullscreen:false,is_fullscreen_within_gaps:true";
+        assert_eq!(normalized.matches(flags).count(), 1);
+        let corrupt =
+            normalized.replace(flags, "is_fullscreen:true,is_fullscreen_within_gaps:true");
+        let normalized =
+            normalized.replace(flags, "is_fullscreen:true,is_fullscreen_within_gaps:false");
+        let mut loaded: MasterStackLayoutSystem = ron::from_str(&corrupt).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), normalized);
+        loaded.create_layout();
     }
 
     fn drawn_direction_of(rng: &mut Rng) -> Direction {
