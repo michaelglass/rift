@@ -750,6 +750,7 @@ impl Upstream {
 mod tests {
     use super::*;
     use crate::layout_engine::TraditionalLayoutSystem;
+    use crate::layout_engine::engine::GroupContainerInfo;
     use crate::layout_engine::systems::LayoutEdit;
     use crate::layout_engine::systems::drawn::*;
 
@@ -936,6 +937,170 @@ mod tests {
         assert_eq!(frames, vec![
             (w(1), rect(24.0, 0.0, 976.0, 788.0)),
             (w(2), rect(24.0, 12.0, 976.0, 788.0))
+        ]);
+    }
+
+    /// A horizontal stack of four windows, the second selected, the fourth left out.
+    fn four_with_one_left_out() -> (StackLayoutSystem, LayoutId) {
+        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        system.focus(layout, Focus::Select(w(2)));
+        system.set_window_participation(w(4), false);
+        (system, layout)
+    }
+
+    fn screen_and_gaps() -> (CGRect, GapSettings) {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let screen = CGRect::new(CGPoint::new(0.0, 25.0), CGSize::new(1000.0, 800.0));
+        let mut gaps = GapSettings::default();
+        gaps.outer.top = 10.0;
+        gaps.outer.left = 20.0;
+        gaps.outer.bottom = 30.0;
+        gaps.outer.right = 40.0;
+        (screen, gaps)
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    fn frames(system: &StackLayoutSystem, layout: LayoutId) -> Vec<(WindowId, CGRect)> {
+        let (screen, gaps) = screen_and_gaps();
+        system.calculate_layout(
+            layout,
+            screen,
+            12.0,
+            &HashMap::default(),
+            &gaps,
+            StackLineReserve::default(),
+            crate::layout_engine::Shadow::Run,
+        )
+    }
+
+    fn group(
+        system: &StackLayoutSystem,
+        layout: LayoutId,
+        path_only: bool,
+    ) -> Vec<GroupContainerInfo> {
+        let (screen, gaps) = screen_and_gaps();
+        system.collect_group_containers(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            StackLineReserve::default(),
+            path_only,
+        )
+    }
+
+    /// rift-cli's drawing of a stack layout (`stack_drawn.txt`: the stack as upstream's system
+    /// wrote it with `{:#?}`, ids as slotmap writes a key) and its container view: the stack,
+    /// each member with its weight, the selected member, the window left out still listed.
+    #[test]
+    fn rift_cli_draws_and_lists_a_stack_and_its_members() {
+        let (system, layout) = four_with_one_left_out();
+        assert_eq!(
+            system.draw_tree(layout),
+            include_str!("stack/stack_drawn.txt").trim_end()
+        );
+        let tree = system.container_tree(layout);
+        assert_eq!(
+            (tree.node_id, tree.layout_kind, tree.is_selected),
+            ((1 << 32) | 1, Some(LayoutKind::HorizontalStack), false)
+        );
+        let members: Vec<_> = tree
+            .children
+            .iter()
+            .map(|m| (m.node_id, m.window_id, m.weight, m.is_selected))
+            .collect();
+        assert_eq!(
+            members,
+            (1..=4)
+                .map(|idx| (
+                    (1 << 32) | u64::from(idx + 1),
+                    Some(w(idx).into()),
+                    Some(1.0),
+                    idx == 2
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The group bar shows the windows taking part (the selected one counted among them), over
+    /// the tiling area; none for the selection path while the shown member fills the tiling
+    /// area, and none at all while the stack fills the screen.
+    #[test]
+    fn the_group_bar_shows_the_members_taking_part() {
+        let (mut system, layout) = four_with_one_left_out();
+        let shown = vec![GroupContainerInfo {
+            node_id: NodeId::from(KeyData::from_ffi((1 << 32) | 1)),
+            container_kind: LayoutKind::HorizontalStack,
+            frame: rect(20.0, 35.0, 940.0, 760.0),
+            total_count: 3,
+            selected_index: 1,
+            window_ids: vec![w(1), w(2), w(3)],
+        }];
+        let words = |infos: Vec<GroupContainerInfo>| -> Vec<_> {
+            infos
+                .into_iter()
+                .map(|i| {
+                    (
+                        i.node_id,
+                        i.container_kind,
+                        i.frame,
+                        i.total_count,
+                        i.selected_index,
+                        i.window_ids,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(words(group(&system, layout, false)), words(shown.clone()));
+        assert_eq!(words(group(&system, layout, true)), words(shown.clone()));
+        system.edit(layout, LayoutEdit::Fullscreen { within_gaps: true }).discard();
+        assert_eq!(words(group(&system, layout, false)), words(shown));
+        assert!(group(&system, layout, true).is_empty());
+        let _ = system.focus(layout, Focus::Ascend);
+        system.edit(layout, LayoutEdit::Fullscreen { within_gaps: false }).discard();
+        assert!(group(&system, layout, false).is_empty());
+        assert!(group(&system, layout, true).is_empty());
+    }
+
+    /// A stack's frames for each fill: tiled members offset along the stack in the tiling area,
+    /// a member filling the tiling area or the screen, the whole stack on the screen (the window
+    /// left out placed nowhere).
+    #[test]
+    fn a_stack_places_each_fill() {
+        let (mut system, layout) = four_with_one_left_out();
+        let tiled = |x| rect(x, 35.0, 916.0, 760.0);
+        assert_eq!(frames(&system, layout), vec![
+            (w(1), tiled(20.0)),
+            (w(2), tiled(32.0)),
+            (w(3), tiled(44.0))
+        ]);
+        system.edit(layout, LayoutEdit::Fullscreen { within_gaps: true }).discard();
+        assert_eq!(frames(&system, layout), vec![
+            (w(1), tiled(20.0)),
+            (w(2), rect(20.0, 35.0, 940.0, 760.0)),
+            (w(3), tiled(44.0))
+        ]);
+        system.edit(layout, LayoutEdit::Fullscreen { within_gaps: false }).discard();
+        assert!(system.container_tree(layout).children[1].is_fullscreen);
+        assert_eq!(frames(&system, layout), vec![
+            (w(1), tiled(20.0)),
+            (w(2), rect(0.0, 25.0, 1000.0, 800.0)),
+            (w(3), tiled(44.0))
+        ]);
+        let _ = system.focus(layout, Focus::Ascend);
+        system.edit(layout, LayoutEdit::Fullscreen { within_gaps: false }).discard();
+        assert_eq!(frames(&system, layout), vec![
+            (w(1), rect(0.0, 25.0, 976.0, 800.0)),
+            (w(2), rect(0.0, 25.0, 1000.0, 800.0)),
+            (w(3), rect(24.0, 25.0, 976.0, 800.0))
         ]);
     }
 

@@ -1,0 +1,64 @@
+Stack {
+    id: NodeId(
+        1v1,
+    ),
+    members: [
+        Member {
+            id: NodeId(
+                2v1,
+            ),
+            window: WindowId {
+                pid: 1,
+                idx: 1,
+            },
+            weight: 1.0,
+            fullscreen: false,
+            within_gaps: false,
+        },
+        Member {
+            id: NodeId(
+                3v1,
+            ),
+            window: WindowId {
+                pid: 1,
+                idx: 2,
+            },
+            weight: 1.0,
+            fullscreen: false,
+            within_gaps: false,
+        },
+        Member {
+            id: NodeId(
+                4v1,
+            ),
+            window: WindowId {
+                pid: 1,
+                idx: 3,
+            },
+            weight: 1.0,
+            fullscreen: false,
+            within_gaps: false,
+        },
+        Member {
+            id: NodeId(
+                5v1,
+            ),
+            window: WindowId {
+                pid: 1,
+                idx: 4,
+            },
+            weight: 1.0,
+            fullscreen: false,
+            within_gaps: false,
+        },
+    ],
+    active: Some(
+        NodeId(
+            3v1,
+        ),
+    ),
+    root_selected: false,
+    kind: HorizontalStack,
+    fullscreen: false,
+    within_gaps: false,
+}
