@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slice 1 done): read this first
+## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slices 1 and 2 done): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
 BSP (all five). `rearch/roc-next@fork` carries everything through this docs commit once it is published
@@ -20,6 +20,37 @@ rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both 
 `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, the stack, slice 2, done: the Roc mirror.** Three commits after the slice 1
+docs commit (the lead's slice 1 rulings first); each message has its plants and checks.
+- **A stack's members are `Empty | Populated { members: NonEmpty, selection }`** (the lead's
+  ruling on slice 1: `Nothing` was an invariant the type did not hold). `Selection = Member(Id)
+  | Root(Id)`; `NonEmpty` changes length only through operations that keep an element; retain
+  rebuilds it through `NonEmpty::new` (the last member gone makes the stack `Empty`) and picks
+  the selection's successor from the kept members' positions, with no unreachable branch.
+  Plants 4/4.
+- **`Slots.roc`:** BspTree's slot table, unchanged, as its own nominal type module `Slots(v)`,
+  shared by both trees (plus `map_values`, which the stacks use). Plants 3/3 (the BSP
+  differential).
+- **`roc/core/StackTree.roc`:** every `Stacks` operation and query, one for one, in the same
+  order of mintings. Members are found as zippers (before, the member, after; from the front or
+  the back), never by index. A missing layout crashes naming the lookup and the key (hand-checked:
+  `[roc crashed] StackTree.climb: no layout 4294967297`). The boundary (`StackTreeSeed`,
+  `StackTreeEvent`, `StackTreeAnswer`, `stack_tree_init/seed/step/view/release`) reuses the BSP
+  tree's shared types (orientation, direction, insertion, participation, window-in-layout,
+  replacement, native resize, queries, focus, pair, edit answer). Rust: `RocStackTree`,
+  `rift_core_roc::stack_tree` (`Event`, `Answer`, `Scope`, `step`, `StacksView`), the conversions
+  in `boundary/stack_tree.rs`.
+- **The differential** (`crates/rift-core-roc/tests/stack_tree.rs`, 8000 runs of 60 operations,
+  2.1 s): operations on live layouts (stale keys only for remove and contains: upstream's
+  `Index` panics on the rest), a query after half, a reload on 3% with saved-only states
+  (weights other than 1, a fill on an empty stack). 480,000 operations and 239,000 queries
+  identical, the whole view compared after each, no Roc allocation left live. Plants 28/28 in
+  Roc, 2/2 in the conversions.
+- **Not ported to Roc yet: `Stacks::shape`** (slice 4 builds it in Roc, as BSP's 4b did).
+- **Next: slice 3, the flip** (policy (a): the core decides and is saved byte-compatible;
+  upstream's system its shadow, re-seeded from the core on a divergence; rift-cli's views moved
+  to the core early; under `roc-core` the Roc stacks a second shadow).
 
 **Layout trees, the stack, slice 1, done: the core's stacks beside upstream's stack system.** Two
 commits after the rulings' docs commit; each message has its plants and checks. At the tip:
@@ -294,6 +325,11 @@ positions).*
 - **5 (done, above):** `Upstream` deleted; the load builds the core's tree.
 - **The Roc nightly bump (done 2026-11-25, below):** pinned nightly-2026-11-24-ff5e544; every
   workaround for roc#13363, #13348, #13349 and #13350 removed, one commit each.
+
+**Upstream candidate:** upstream's saved stack layout can hold states no operation reaches (a
+tiled layout kind on a stack, both fullscreen flags on a stack or a member, a selection naming
+no member while there are members, an empty stack with a selection), and its load keeps them
+(the fork normalizes each with a `stack-load:` warn, the lead's ruling).
 
 **Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
 -0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
