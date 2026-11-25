@@ -1,10 +1,10 @@
-//! The stack layout system with the core's stacks beside it (layout trees, stack slice 1).
-//! Upstream's system ([`Upstream`]) decides; the core's [`Stacks`] is stepped on every
-//! operation, in every build, and held to it: each answer is compared on every operation, the
-//! whole system (the view) on every operation in tests and `roc-core` builds and every
-//! [`VIEW_EVERY`]th in a plain release build, and each pass's shape (what the core's geometry is
-//! handed) on every pass. A difference is counted, fails a test, or in a running Rift is warned
-//! and the core re-seeded from upstream's system.
+//! The stack layout system: the core's stacks decide (layout trees, stack slice 3, the flip,
+//! policy (a)) and are saved in upstream's form, byte for byte; upstream's system
+//! ([`Upstream`]) is their shadow, stepped on every operation in every build and held to them:
+//! each answer is compared on every operation, the whole system (the view) on every operation in
+//! tests and `roc-core` builds and every [`VIEW_EVERY`]th in a plain release build, and each
+//! pass's shape and frames on every pass. A difference is counted, fails a test, or in a running
+//! Rift is warned and the shadow re-seeded from the core (the deciding side stands).
 
 use std::collections::BTreeSet;
 use std::fmt::Debug;
@@ -30,7 +30,7 @@ use crate::layout_engine::systems::{
     WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
 };
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
-use crate::model::slot_table::of_slotmap;
+use crate::model::slot_table::{SavedSlot, of_slotmap, saved, to_slotmap};
 use crate::model::tree::NodeId;
 
 /// The core's stacks over rift's ids.
@@ -47,35 +47,51 @@ static STACK_TREE_DIVERGENCES: AtomicU64 = AtomicU64::new(0);
 /// Differences between the core's stacks and upstream's stack system, counted process-wide.
 pub(crate) fn stack_tree_divergences() -> u64 { STACK_TREE_DIVERGENCES.load(Ordering::Relaxed) }
 
-/// The stack layout system: upstream's decides, and the core's stacks are stepped beside it.
+/// The stack layout system: the core's stacks decide, and upstream's system is stepped beside
+/// them. Loaded through upstream's load (which parses the legacy form and normalizes what only a
+/// file holds), saved from the core in the same form.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(from = "Upstream")]
 pub struct StackLayoutSystem {
-    upstream: Upstream,
+    core: CoreStacks,
     /// Boxed: the system is one variant of `LayoutSystemKind`.
-    twin: Box<Twinned>,
+    shadow: Box<Shadow>,
 }
 
-/// The core's stacks and how many operations stepped them.
+/// Upstream's system and how many operations stepped it.
 #[derive(Clone, Debug)]
-struct Twinned {
-    core: CoreStacks,
+struct Shadow {
+    upstream: Upstream,
     steps: u64,
+}
+
+/// The core's stacks as upstream saves its system (the field names and order of upstream's
+/// derived form, under its original name), byte for byte.
+#[derive(Serialize)]
+#[serde(rename = "StackLayoutSystem")]
+struct Saved {
+    layouts: Vec<SavedSlot<Stack>>,
+    next_node: u32,
+    default_orientation: StackDefaultOrientation,
 }
 
 impl Serialize for StackLayoutSystem {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.upstream.serialize(serializer)
+        Saved {
+            layouts: saved(self.core.layouts(), |_, stack| upstream_stack(stack)).collect(),
+            next_node: self.core.next_node(),
+            default_orientation: stack_default_orientation(self.core.orientation()),
+        }
+        .serialize(serializer)
     }
 }
 
 impl From<Upstream> for StackLayoutSystem {
     fn from(upstream: Upstream) -> Self {
-        let twin = Box::new(Twinned {
+        Self {
             core: seed(&upstream),
-            steps: 0,
-        });
-        Self { upstream, twin }
+            shadow: Box::new(Shadow { upstream, steps: 0 }),
+        }
     }
 }
 
@@ -98,9 +114,8 @@ impl StackLayoutSystem {
         orientation: StackDefaultOrientation,
         insertion: WindowInsertionPoint,
     ) {
-        self.upstream.update_settings(orientation, insertion);
-        self.twin
-            .core
+        self.shadow.upstream.update_settings(orientation, insertion);
+        self.core
             .update_settings(default_orientation(orientation), insertion_point(insertion));
         self.stepped("update_settings", &(), &());
     }
@@ -114,7 +129,7 @@ impl StackLayoutSystem {
         line: StackLineReserve,
         selection_path_only: bool,
     ) -> Vec<GroupContainerInfo> {
-        let upstream = self.upstream.collect_group_containers(
+        let upstream = self.shadow.upstream.collect_group_containers(
             layout,
             screen,
             offset,
@@ -122,38 +137,40 @@ impl StackLayoutSystem {
             line,
             selection_path_only,
         );
-        let core = self.twin.core.group_container(layout, selection_path_only).map(|c| {
-            GroupContainerInfo {
-                node_id: node_id(c.stack),
-                container_kind: layout_kind(c.orientation),
-                frame: crate::layout_engine::utils::compute_tiling_area(screen, gaps),
-                total_count: c.windows.len(),
-                selected_index: c.selected,
-                window_ids: c.windows,
-            }
-        });
+        let core =
+            self.core
+                .group_container(layout, selection_path_only)
+                .map(|c| GroupContainerInfo {
+                    node_id: node_id(c.stack),
+                    container_kind: layout_kind(c.orientation),
+                    frame: crate::layout_engine::utils::compute_tiling_area(screen, gaps),
+                    total_count: c.windows.len(),
+                    selected_index: c.selected,
+                    window_ids: c.windows,
+                });
+        let core: Vec<GroupContainerInfo> = core.into_iter().collect();
         self.answered(
             "collect_group_containers",
             upstream.iter().map(container_words).collect::<Vec<_>>(),
             core.iter().map(container_words).collect(),
         );
-        upstream
+        core
     }
 
     /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        let core = self.twin.core.draw(layout);
-        self.answered("draw_tree", self.upstream.draw_tree(layout), core.clone());
+        let core = self.core.draw(layout);
+        self.answered("draw_tree", self.shadow.upstream.draw_tree(layout), core.clone());
         core
     }
 
     /// rift-cli's container view of the layout: the core's (upstream's held to it on every
     /// call).
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let core = container_node(self.twin.core.container(layout));
+        let core = container_node(self.core.container(layout));
         self.answered(
             "container_tree",
-            self.upstream.container_tree(layout),
+            self.shadow.upstream.container_tree(layout),
             core.clone(),
         );
         core
@@ -162,8 +179,8 @@ impl StackLayoutSystem {
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         self.answered(
             "window_slot",
-            self.upstream.window_slot(layout, window),
-            self.twin.core.window_slot(layout, window).map(|i| vec![i]),
+            self.shadow.upstream.window_slot(layout, window),
+            self.core.window_slot(layout, window).map(|i| vec![i]),
         )
     }
 
@@ -177,7 +194,9 @@ impl StackLayoutSystem {
         gaps: &GapSettings,
         line: StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        self.upstream.shadow_frames(layout, screen, offset, constraints, gaps, line)
+        self.shadow
+            .upstream
+            .shadow_frames(layout, screen, offset, constraints, gaps, line)
     }
 
     #[cfg(test)]
@@ -190,35 +209,55 @@ impl StackLayoutSystem {
         gaps: &GapSettings,
         line: StackLineReserve,
     ) -> Option<rift_core::layout::traditional::Traditional<WindowId>> {
-        self.upstream.shape(layout, screen, offset, constraints, gaps, line)
+        use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
+        use crate::layout_engine::{core_gaps, core_rect};
+        self.core.shape(
+            layout,
+            core_rect(screen),
+            core_gaps(gaps),
+            offset,
+            core_stack_line(line),
+            |window| constraints.get(&window).copied().map(core_constraints),
+        )
     }
 
-    /// After an operation upstream's system and the core both took: their answers compared,
-    /// and the systems when due; a difference is reported and the core re-seeded.
+    /// Upstream's system re-seeded from the core, as after a divergence.
+    #[cfg(test)]
+    pub(crate) fn reseed_shadow(&mut self) { self.shadow.upstream = upstream_of(&self.core); }
+
+    /// Upstream's system saved as upstream saves it (the core's save is held to it).
+    #[cfg(test)]
+    pub(crate) fn upstream_saved(&self) -> String {
+        ron::to_string(&self.shadow.upstream).expect("upstream's system is written")
+    }
+
+    /// After an operation the core and upstream's system both took: their answers compared,
+    /// and the systems when due; a difference is reported and the shadow re-seeded from the
+    /// core.
     fn stepped<A: PartialEq + Debug>(&mut self, what: &str, upstream: &A, core: &A) {
-        self.twin.steps += 1;
+        self.shadow.steps += 1;
         let answers_differ = upstream != core;
         if answers_differ {
             report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
         }
-        let view_due = VIEW_ALWAYS || self.twin.steps.is_multiple_of(VIEW_EVERY);
-        let view =
-            (answers_differ || view_due).then(|| view_difference(&self.twin.core, &self.upstream));
+        let view_due = VIEW_ALWAYS || self.shadow.steps.is_multiple_of(VIEW_EVERY);
+        let view = (answers_differ || view_due)
+            .then(|| view_difference(&self.core, &self.shadow.upstream));
         if let Some(Some(difference)) = &view {
             report(what, difference);
         }
         if answers_differ || matches!(view, Some(Some(_))) {
-            self.twin.core = seed(&self.upstream);
+            self.shadow.upstream = upstream_of(&self.core);
         }
     }
 
-    /// A query both answered: a difference is reported (the next step's view re-seeds the
-    /// core).
+    /// A query both answered, the core's answer given: a difference is reported (the next
+    /// step's view re-seeds the shadow).
     fn answered<A: PartialEq + Debug>(&self, what: &str, upstream: A, core: A) -> A {
         if upstream != core {
             report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
         }
-        upstream
+        core
     }
 }
 
@@ -232,7 +271,7 @@ fn report(what: &str, difference: &str) {
         what,
         divergences,
         difference,
-        "stack-tree-divergence: the core's stacks differ from upstream's; re-seeded"
+        "stack-tree-divergence: upstream's stack system differs from the core's stacks; re-seeded from the core"
     );
 }
 
@@ -240,61 +279,61 @@ impl LayoutSystem for StackLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.answered(
             "has_windows_for_app",
-            self.upstream.has_windows_for_app(layout, pid),
-            self.twin.core.has_windows_for_app(layout, |window| window.pid == pid),
+            self.shadow.upstream.has_windows_for_app(layout, pid),
+            self.core.has_windows_for_app(layout, |window| window.pid == pid),
         )
     }
 
     fn window_participates(&self, window: WindowId) -> bool {
         self.answered(
             "window_participates",
-            self.upstream.window_participates(window),
-            self.twin.core.window_participates(window),
+            self.shadow.upstream.window_participates(window),
+            self.core.window_participates(window),
         )
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        let upstream = self.upstream.set_window_participation(window, participates);
+        let upstream = self.shadow.upstream.set_window_participation(window, participates);
         let participation = if participates {
             Participation::TakesPart
         } else {
             Participation::LeftOut
         };
-        let core = self.twin.core.set_window_participation(window, participation);
+        let core = self.core.set_window_participation(window, participation);
         self.stepped("set_window_participation", &upstream, &core);
-        upstream
+        core
     }
 
     fn create_layout(&mut self) -> LayoutId {
-        let upstream = self.upstream.create_layout();
-        let core = self.twin.core.create_layout();
+        let upstream = self.shadow.upstream.create_layout();
+        let core = self.core.create_layout();
         self.stepped("create_layout", &upstream, &core);
-        upstream
+        core
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool {
         self.answered(
             "contains_layout",
-            self.upstream.contains_layout(layout),
-            self.twin.core.contains_layout(layout),
+            self.shadow.upstream.contains_layout(layout),
+            self.core.contains_layout(layout),
         )
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let upstream = self.upstream.clone_layout(layout);
-        let core = self.twin.core.clone_layout(layout);
+        let upstream = self.shadow.upstream.clone_layout(layout);
+        let core = self.core.clone_layout(layout);
         self.stepped("clone_layout", &upstream, &core);
-        upstream
+        core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        self.upstream.remove_layout(layout);
-        self.twin.core.remove_layout(layout);
+        self.shadow.upstream.remove_layout(layout);
+        self.core.remove_layout(layout);
         self.stepped("remove_layout", &(), &());
     }
 
-    /// Upstream's frames (the core's geometry decides them, policy (a)); the core's stacks'
-    /// shape is held to upstream's system's on every pass.
+    /// The core geometry's frames for the core's shape (policy (a)): upstream's shape is held to
+    /// the core's on every pass, upstream's geometry is the frames' shadow.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -307,8 +346,8 @@ impl LayoutSystem for StackLayoutSystem {
     ) -> Vec<(WindowId, CGRect)> {
         use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
         use crate::layout_engine::{core_gaps, core_rect};
-        let upstream = self.upstream.shape(layout, screen, offset, constraints, gaps, line);
-        let core = self.twin.core.shape(
+        let upstream = self.shadow.upstream.shape(layout, screen, offset, constraints, gaps, line);
+        let core = self.core.shape(
             layout,
             core_rect(screen),
             core_gaps(gaps),
@@ -322,52 +361,55 @@ impl LayoutSystem for StackLayoutSystem {
                 &format!("shapes: upstream {upstream:?}, core {core:?}"),
             );
         }
-        self.upstream
-            .calculate_layout(layout, screen, offset, constraints, gaps, line, shadow)
+        crate::layout_engine::core_geometry::decide_traditional("stack", core, shadow, || {
+            self.shadow
+                .upstream
+                .shadow_frames(layout, screen, offset, constraints, gaps, line)
+        })
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.answered(
             "selected_window",
-            self.upstream.selected_window(layout),
-            self.twin.core.selected_window(layout),
+            self.shadow.upstream.selected_window(layout),
+            self.core.selected_window(layout),
         )
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
         self.answered(
             "selection_contains_window",
-            self.upstream.selection_contains_window(layout, window),
-            self.twin.core.selection_contains_window(layout, window),
+            self.shadow.upstream.selection_contains_window(layout, window),
+            self.core.selection_contains_window(layout, window),
         )
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         self.answered(
             "window_in_direction",
-            self.upstream.window_in_direction(layout, direction),
-            self.twin.core.window_in_direction(layout, core_direction(direction)),
+            self.shadow.upstream.window_in_direction(layout, direction),
+            self.core.window_in_direction(layout, core_direction(direction)),
         )
     }
 
     fn contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
         self.answered(
             "contains_window",
-            self.upstream.contains_window(layout, window),
-            self.twin.core.contains_window(layout, window),
+            self.shadow.upstream.contains_window(layout, window),
+            self.core.contains_window(layout, window),
         )
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         self.answered(
             "has_any_fullscreen_node",
-            self.upstream.has_any_fullscreen_node(layout),
-            self.twin.core.has_any_fullscreen_node(layout),
+            self.shadow.upstream.has_any_fullscreen_node(layout),
+            self.core.has_any_fullscreen_node(layout),
         )
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
-        self.upstream.parent_of_selection_is_stacked(layout)
+        self.shadow.upstream.parent_of_selection_is_stacked(layout)
     }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
@@ -379,30 +421,30 @@ impl LayoutSystem for StackLayoutSystem {
         };
         self.answered(
             "windows",
-            self.upstream.windows(layout, query),
-            self.twin.core.windows(layout, core_query),
+            self.shadow.upstream.windows(layout, query),
+            self.core.windows(layout, core_query),
         )
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        let upstream = self.upstream.focus(layout, focus);
+        let upstream = self.shadow.upstream.focus(layout, focus);
         let core_focus = match focus {
             Focus::Select(window) => core::Focus::Select(window),
             Focus::Ascend => core::Focus::Ascend,
             Focus::Descend => core::Focus::Descend,
             Focus::Direction(direction) => core::Focus::Direction(core_direction(direction)),
         };
-        let core = match self.twin.core.focus(layout, core_focus) {
+        let core = match self.core.focus(layout, core_focus) {
             core::Focused::Selection { handled } => FocusResult::selection(handled),
             core::Focused::Movement { window, raise } => FocusResult::movement((window, raise)),
         };
         self.stepped("focus", &focus_words(&upstream), &focus_words(&core));
-        upstream
+        core
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
         use crate::layout_engine::core_rect;
-        let core = &mut self.twin.core;
+        let core = &mut self.core;
         match change {
             WindowChange::Add(layout, window, _) => core.add_window(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
@@ -424,14 +466,14 @@ impl LayoutSystem for StackLayoutSystem {
                 tiling: core_rect(crate::layout_engine::utils::compute_tiling_area(screen, gaps)),
             }),
         }
-        self.upstream.update(change);
+        self.shadow.upstream.update(change);
         self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        let upstream = self.upstream.edit_layout(layout, edit);
+        let upstream = self.shadow.upstream.edit_layout(layout, edit);
         let core = match core_edit(edit) {
-            Some(edit) => match self.twin.core.edit(layout, edit) {
+            Some(edit) => match self.core.edit(layout, edit) {
                 core::Edited::Unsupported => EditResult::Unsupported,
                 core::Edited::Unchanged => EditResult::Unchanged,
                 core::Edited::Changed => EditResult::Changed,
@@ -441,7 +483,7 @@ impl LayoutSystem for StackLayoutSystem {
             None => EditResult::Unsupported,
         };
         self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
-        upstream
+        core
     }
 }
 
@@ -626,6 +668,71 @@ fn seed(upstream: &Upstream) -> CoreStacks {
     )
 }
 
+/// The core's stacks as upstream's system: the shadow re-seeded from the core. The table keeps
+/// the core's slots and versions and takes its vacant slots in the core's order, so both
+/// allocate the same layouts next.
+fn upstream_of(core: &CoreStacks) -> Upstream {
+    let dummy = upstream_stack(&CoreStack {
+        id: Id::from_word(0),
+        members: Members::Empty,
+        orientation: Orientation::Vertical,
+        fill: Fill::Tiled,
+    });
+    Upstream {
+        layouts: to_slotmap(core.layouts(), upstream_stack, dummy),
+        next_node: core.next_node(),
+        default_orientation: stack_default_orientation(core.orientation()),
+        inactive: core.left_out().iter().copied().collect(),
+        window_insertion_point: window_insertion_point(core.insertion()),
+    }
+}
+
+/// A core stack as upstream's: the selection as `active` and `root_selected`, each fill as two
+/// flags, the orientation as a stack layout kind.
+fn upstream_stack(stack: &CoreStack<WindowId>) -> Stack {
+    let flags = |fill: Fill| (fill == Fill::Screen, fill == Fill::WithinGaps);
+    let (fullscreen, within_gaps) = flags(stack.fill);
+    let selection = stack.selection();
+    Stack {
+        id: node_id(stack.id),
+        members: stack
+            .list()
+            .iter()
+            .map(|member| {
+                let (fullscreen, within_gaps) = flags(member.fill);
+                Member {
+                    id: node_id(member.id),
+                    window: member.window,
+                    weight: member.weight,
+                    fullscreen,
+                    within_gaps,
+                }
+            })
+            .collect(),
+        active: selection.map(|chosen| node_id(chosen.member())),
+        root_selected: matches!(selection, Some(Selection::Root(_))),
+        kind: layout_kind(stack.orientation),
+        fullscreen,
+        within_gaps,
+    }
+}
+
+fn stack_default_orientation(orientation: DefaultOrientation) -> StackDefaultOrientation {
+    match orientation {
+        DefaultOrientation::Perpendicular => StackDefaultOrientation::Perpendicular,
+        DefaultOrientation::Same => StackDefaultOrientation::Same,
+        DefaultOrientation::Horizontal => StackDefaultOrientation::Horizontal,
+        DefaultOrientation::Vertical => StackDefaultOrientation::Vertical,
+    }
+}
+
+fn window_insertion_point(value: core::InsertionPoint) -> WindowInsertionPoint {
+    match value {
+        core::InsertionPoint::NextToSelection => WindowInsertionPoint::NextToSelection,
+        core::InsertionPoint::EndOfTree => WindowInsertionPoint::EndOfTree,
+    }
+}
+
 /// Where the core's stacks differ from upstream's system, if they do: layouts (ids compared
 /// directly), the member counter, the windows left out, the settings.
 fn view_difference(core: &CoreStacks, upstream: &Upstream) -> Option<String> {
@@ -679,14 +786,32 @@ mod tests {
         // hand out slot 3.
         system.remove_layout(layouts[2]);
         system.remove_layout(layouts[0]);
-        system.twin.core = seed(&system.upstream);
-        let upstream = system.upstream.create_layout();
-        let core = system.twin.core.create_layout();
+        system.core = seed(&system.shadow.upstream);
+        let upstream = system.shadow.upstream.create_layout();
+        let core = system.core.create_layout();
         assert_eq!(core, upstream);
         assert_eq!(
-            system.twin.core.layouts()[core].id,
-            core_id(system.upstream.layouts[upstream].id)
+            system.core.layouts()[core].id,
+            core_id(system.shadow.upstream.layouts[upstream].id)
         );
+    }
+
+    /// Upstream's system re-seeded from the core (after a divergence) takes the core's free list,
+    /// so both hand out the same layouts next.
+    #[test]
+    fn a_shadow_reseeded_from_the_core_allocates_the_ids_the_core_would() {
+        let mut system = StackLayoutSystem::default();
+        let layouts: Vec<_> = (0..5).map(|_| system.create_layout()).collect();
+        for layout in [layouts[3], layouts[0], layouts[2]] {
+            system.remove_layout(layout);
+        }
+        system.shadow.upstream = upstream_of(&system.core);
+        for _ in 0..4 {
+            let upstream = system.shadow.upstream.create_layout();
+            let core = system.core.create_layout();
+            assert_eq!(upstream, core);
+        }
+        assert_eq!(view_difference(&system.core, &system.shadow.upstream), None);
     }
 
     /// A query the core answers otherwise than upstream's system is counted and fails a test.
@@ -694,7 +819,7 @@ mod tests {
     fn a_query_answered_otherwise_is_counted_and_fails_tests() {
         let mut system = StackLayoutSystem::default();
         system.create_layout();
-        system.twin.core.set_window_participation(w(1), Participation::LeftOut);
+        system.shadow.upstream.set_window_participation(w(1), false);
         let before = stack_tree_divergences();
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             system.window_participates(w(1));
@@ -709,7 +834,7 @@ mod tests {
     fn a_stack_tree_divergence_is_counted_and_fails_tests() {
         let mut system = StackLayoutSystem::default();
         let layout = system.create_layout();
-        system.twin.core.set_window_participation(w(1), Participation::LeftOut);
+        system.shadow.upstream.set_window_participation(w(1), false);
         let before = stack_tree_divergences();
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             system.clone_layout(layout);
@@ -747,7 +872,7 @@ mod tests {
             }
             // A mix of everyday operations: focus moves, swaps, fullscreen, a window coming and
             // going.
-            let mut upstream = system.upstream.clone();
+            let mut upstream = system.shadow.upstream.clone();
             let started = Instant::now();
             for i in 0..ops {
                 match i % 4 {
@@ -770,7 +895,7 @@ mod tests {
                 }
             }
             let upstream_each = each(started, ops);
-            let mut core = system.twin.core.clone();
+            let mut core = system.core.clone();
             let started = Instant::now();
             for i in 0..ops {
                 match i % 4 {
@@ -795,12 +920,12 @@ mod tests {
             let rounds = 200;
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(view_difference(&system.twin.core, &system.upstream));
+                black_box(view_difference(&system.core, &system.shadow.upstream));
             }
             let view_each = each(started, rounds);
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(seed(&system.upstream));
+                black_box(upstream_of(&system.core));
             }
             let seed_each = each(started, rounds);
             let screen = CGRect::new(
@@ -812,12 +937,19 @@ mod tests {
             let line = StackLineReserve::default();
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(system.upstream.shape(layout, screen, 12.0, &constraints, &gaps, line));
+                black_box(system.shadow.upstream.shape(
+                    layout,
+                    screen,
+                    12.0,
+                    &constraints,
+                    &gaps,
+                    line,
+                ));
             }
             let upstream_shape = each(started, rounds);
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(system.twin.core.shape(
+                black_box(system.core.shape(
                     layout,
                     core_rect(screen),
                     core_gaps(&gaps),

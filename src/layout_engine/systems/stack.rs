@@ -1228,8 +1228,16 @@ mod tests {
                 continue;
             }
             if rng.chance(4) {
-                // Saved and loaded (the insertion point is not saved: rift sets it again).
-                system = ron::from_str(&ron::to_string(&system).unwrap()).unwrap();
+                // Upstream's system re-seeded from the core (as after a divergence): the two go
+                // on alike.
+                system.reseed_shadow();
+            }
+            if rng.chance(4) {
+                // Saved and loaded (the insertion point is not saved: rift sets it again). The
+                // core's save is upstream's, byte for byte.
+                let saved = ron::to_string(&system).unwrap();
+                assert_eq!(saved, system.upstream_saved());
+                system = ron::from_str(&saved).unwrap();
                 system.update_settings(orientation, insertion);
                 continue;
             }
