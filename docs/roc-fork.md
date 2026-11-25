@@ -2305,6 +2305,175 @@ notes called several of these friction; they are Roc's design, and the core foll
   `allocate_box`, whose header depends on whether the payload holds refcounted values (the
   glue's own `decref` for each field says which); a wrong header crashes the differential.
 
+### Roc issue drafts (2026-11-25; the owner decides about filing)
+
+Two glue problems seen in the group forest's slice 4, each reduced to a platform and app outside
+rift and checked at the pinned nightly (`nightly-2026-11-24-ff5e544`) and the newest
+(`nightly-2026-11-25-d5a4f1e`): the same output at both. Neither is roc-lang/roc#13348 coming
+back: that issue's repro (a one-tag union with two payloads) still gives a `Stepped` struct with
+both at both nightlies. No open or closed roc-lang/roc issue reports either (searched
+2026-11-25).
+
+**(a) A one-tag union's alias names the element of its `List` or `Box` payload.** A new bug,
+not #13348's (several payloads; this is one). Flattening the union to its payload is the glue's
+design (`TypeTable.declares_tag_union`: "Every other tag union is its payload's type"), and
+every function signature and record field is right; only the generated `pub type` aliases are
+wrong. Rift's way round it (since slice 4): every answer union has several tags.
+
+> **roc glue: a one-tag union's type alias names the element of its List or Box payload**
+>
+> `nightly-2026-11-25-d5a4f1e` (and `nightly-2026-11-24-ff5e544`), macOS arm64, `RustGlue.roc`
+> at the same commit.
+>
+> `platform/Abi.roc`:
+>
+> ```roc
+> Abi := [].{
+> 	Rect := { x : F64, y : F64, w : F64, h : F64 }
+> 	Frame := { window : U64, frame : Rect }
+> 	Answer := [Frames(List(Frame))]
+> 	Boxed := [Boxed(Box(Frame))]
+> }
+> ```
+>
+> `platform/main.roc`:
+>
+> ```roc
+> platform ""
+> 	requires {} { answer : U64 -> Answer, boxed : U64 -> Boxed }
+> 	exposes [Abi]
+> 	packages {}
+> 	provides { "roc_answer": answer_for_host, "roc_boxed": boxed_for_host }
+> 	targets: {
+> 		arm64mac: { inputs: [app], output: Archive },
+> 	}
+>
+> import Abi exposing [Answer, Boxed]
+>
+> answer_for_host : U64 -> Answer
+> answer_for_host = |n| answer(n)
+>
+> boxed_for_host : U64 -> Boxed
+> boxed_for_host = |n| boxed(n)
+> ```
+>
+> ```sh
+> roc glue src/glue/src/RustGlue.roc out platform/main.roc
+> ```
+>
+> ### Actual
+>
+> The functions return the payloads, but the aliases name the list's and the box's element:
+>
+> ```rust
+> pub type AbiAnswer = AbiFrame;
+> pub type AbiAnswerFrames = AbiFrame;
+> pub type AbiBoxed = AbiFrame;
+> pub type AbiBoxedBoxed = AbiFrame;
+>
+> pub fn roc_answer(arg0: u64) -> RocListWith<AbiFrame, false>;
+> pub fn roc_boxed(arg0: u64) -> *mut AbiFrame;
+> ```
+>
+> So `let a: AbiAnswer = roc_answer(1);` does not compile. A payload with no named type in it
+> (`[Words(List(U64))]`, `[Word(U64)]`, `[Text(Str)]`) gets no alias at all; a record payload
+> (`Record := [One(Frame)]`) gets the right one (`AbiRecord = AbiFrame`). A record field of the union's type
+> is right (`pub answer: RocListWith<AbiFrame, false>`).
+>
+> ### Expected
+>
+> Each alias names the type the functions use:
+>
+> ```rust
+> pub type AbiAnswer = RocListWith<AbiFrame, false>;
+> pub type AbiAnswerFrames = RocListWith<AbiFrame, false>;
+> pub type AbiBoxed = *mut AbiFrame;
+> pub type AbiBoxedBoxed = *mut AbiFrame;
+> ```
+>
+> (and, for consistency, `AbiWords = RocListWith<u64, false>`, or no aliases for one-tag unions).
+
+**(b) `RocList<T>::decref` is shallow: by design and documented, so not a bug as such.** The
+generated text says so ("Shallow: it never touches the elements. To release an owned list whose
+elements are refcounted, call that list's generated `decref_list_of_...` helper instead"), the
+deep helper exists for every list of refcounted elements at the boundary
+(`decref_list_of_abi_bar`, built on `release_with`), and a generated union's `decref` is deep.
+The repro below shows the leak and the right call. What is left is a sharp edge, which the owner
+may or may not want to raise: `RocList<T>` is `RocListWith<T, true>`, the glue's own marker for
+"the elements hold references", yet its `decref` frees the spine and leaks every element when it
+drops the last reference. Rift's `boundary/group_forest.rs` calls only the deep releases now (no
+`decref` on a list field anywhere in `rift-core-roc`).
+
+> **RustGlue: `RocList<T>::decref` leaks the elements of a list whose elements hold references**
+>
+> `nightly-2026-11-25-d5a4f1e` (and `nightly-2026-11-24-ff5e544`), macOS arm64, `RustGlue.roc`
+> at the same commit.
+>
+> `platform/Abi.roc`:
+>
+> ```roc
+> Abi := [].{
+> 	Bar := { windows : List(U64) }
+> }
+> ```
+>
+> `platform/main.roc`:
+>
+> ```roc
+> platform ""
+> 	requires {} { bars : U64 -> List(Bar) }
+> 	exposes [Abi]
+> 	packages {}
+> 	provides { "roc_bars": bars_for_host }
+> 	targets: {
+> 		arm64mac: { inputs: [app], output: Archive },
+> 	}
+>
+> import Abi exposing [Bar]
+>
+> bars_for_host : U64 -> List(Bar)
+> bars_for_host = |n| bars(n)
+> ```
+>
+> `app.roc`:
+>
+> ```roc
+> app [bars] { pf: platform "platform/main.roc" }
+>
+> import pf.Abi exposing [Bar]
+>
+> bars : U64 -> List(Bar)
+> bars = |n| [{ windows: [n, n + 1] }, { windows: [n + 2] }]
+> ```
+>
+> ```sh
+> roc build --target=arm64mac --output=libapp.a app.roc
+> roc glue src/glue/src/RustGlue.roc glue platform/main.roc
+> ```
+>
+> A Rust host (`include!`s the glue, links `libapp.a`, its `roc_alloc` / `roc_dealloc` count
+> live allocations):
+>
+> ```rust
+> let bars = unsafe { abi::roc_bars(1) };            // 3 live: the list, two window lists
+> unsafe { bars.decref(&host) };                      // 2 live
+>
+> let bars = unsafe { abi::roc_bars(1) };
+> unsafe { abi::decref_list_of_abi_bar(bars, &host) } // 0 live
+> ```
+>
+> ### Actual
+>
+> `decref` frees the list and leaves both window lists allocated, with nothing left that refers
+> to them. Its doc comment says it is shallow, but the type is `RocListWith<AbiBar, true>`: the
+> glue knows the elements hold references.
+>
+> ### Expected
+>
+> One of: `decref` on `RocListWith<T, true>` releases the elements too (as a union's generated
+> `decref` does); or the shallow release has a name that says so (`decref_spine`) and only
+> `RocListWith<T, false>` has a plain `decref`.
+
 ### Worked well
 
 - `output: Archive` links into cargo with nothing but `rustc-link-lib=static`.
