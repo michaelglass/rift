@@ -34,7 +34,8 @@ protocol's field. The shape passes it as a child's size, which the stack geometr
 layout-mode switch re-adds windows in order and carries no weights; no operation writes it
 (new members get 1.0, only the legacy forest writes others). Moving it to the `stored.rs`
 boundary would make the IPC views report 1.0 (or none) and stop legacy-derived files saving
-back byte for byte, so it waits for the lead's ruling (reported with the proposed change).
+back byte for byte. The lead's ruling: keep it (upstream shows it over IPC; the fork matches
+upstream), and list it as an upstream candidate.
 
 **Layout trees, the stack, slice 5, done: upstream's stack system deleted.** Three commits after
 the slice 4 docs commit; each message has its plants, checks and costs.
@@ -458,6 +459,9 @@ positions).*
 tiled layout kind on a stack, both fullscreen flags on a stack or a member, a selection naming
 no member while there are members, an empty stack with a selection), and its load keeps them
 (the fork normalizes each with a `stack-load:` warn, the lead's ruling).
+
+**Upstream candidate:** a stack member's weight is saved and shown over IPC but never affects a
+frame; no operation writes it.
 
 **Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
 -0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
