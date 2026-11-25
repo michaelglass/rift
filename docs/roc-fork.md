@@ -9,17 +9,47 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 1): read this first
+## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 2): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
 BSP and for the stack. `rearch/roc-next@fork` carries everything through this docs commit once it
 is published (publish procedure: "Rulings that bind", Public-clean; the published tip's id is in
 the slice report). All checks green at the tip: workspace tests 1049 (7 ignored), the lib with
-`roc-core` 928 (9 ignored), `cargo test -p rift-core-roc --features roc` 52 (9 ignored), `cargo
+`roc-core` 928 (9 ignored), `cargo test -p rift-core-roc --features roc` 55 (9 ignored), `cargo
 test -p rift-core` 107, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt,
 and `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
+
+**The group forest, slice 2, done (2026-11-25): the Roc mirror.** One commit after the slice 1
+docs commit; its message has the plants, checks and costs.
+- **`roc/core/GroupForest.roc`:** the forest as the Rust core holds it (`layouts : Slots(U64)`,
+  `nodes : Slots(GroupTreeNode)`, `left_out`, `next_stamp`; the platform's node types
+  `GroupPlace`, `GroupBody`, `GroupContainer`, `GroupMembers`, `GroupMemory`, `GroupKind`), every
+  forest operation and query and both systems' own, one for one, in the same order of
+  allocations and stamps. The seed derives the next stamp as `Forest::from_parts` does. Floats
+  follow Rust bit for bit: `f32::max`/`min` as arm64's `fmaxnm`/`fminnm` (`max32`, `min32`),
+  `as f32` through `Geometry.narrow`, sums from -0. A missing node or layout crashes naming the
+  helper and the key (hand-checked: `[roc crashed] GroupForest.window_index: no node
+  4294967297`). Not ported yet: `Forest::shape` (slice 4).
+- **The boundary: one machine per system** (`Traditionals`, `Masters`; `traditional_tree_*`,
+  `master_stack_*`: init, seed, step, view, release), so neither system's operations can reach
+  the other. Events: the forest's shared ones (`GroupForestEvent`) inside each system's
+  (`TraditionalEvent`, `MasterStackEvent`); answers `BspTreeAnswer`; a view is the seed's type
+  (`TraditionalSeed`, `MasterStackSeed`). Rust: `RocTraditional`, `RocMasterStack`,
+  `rift_core_roc::group_forest` (`ForestEvent`, the system events, `step_traditional`,
+  `step_master_stack`, `ForestView`, `TraditionalView`, `MasterStackView`), the conversions in
+  `boundary/group_forest.rs`.
+- **The differential** (`crates/rift-core-roc/tests/group_forest.rs`, 3000 runs of 80
+  operations per system, about 11 s): 480,000 operations and 239,000 queries identical, the
+  whole system (both tables, every node, sizes by their written form, stamps, settings) after
+  each; reloads with saved-only states; master-stack settings changes often of one field; a
+  scripted focus move into a stack whose selection stops there (drawn runs reach it once in
+  about 30,000). `RIFT_GROUP_FOREST_RUNS` sets the count.
+- **Plants:** Roc 56/57 (one equivalent: a move's in-place guard), the conversions 3/3.
+- **Next: slice 3, the flip** (the core decides and is saved byte-exactly, upstream the shadow
+  re-seeded from the core; the group bar's projection, `draw_tree` and `container_tree` moved to
+  the core first; under `roc-core` the Roc forest a second shadow).
 
 **The group forest, slice 1, done (2026-11-25): the core's forest beside upstream's traditional
 and master-stack systems.** Four commits after the rulings' docs commit; each message has its
@@ -513,6 +543,10 @@ no member while there are members, an empty stack with a selection), and its loa
 
 **Upstream candidate:** a stack member's weight is saved and shown over IPC but never affects a
 frame; no operation writes it.
+
+**Upstream candidate (fix pending upstream, fork branch `pr/layout-ghost-windows`):** master-stack
+counts windows left out of layout (away) toward `master_count`, so a master window that is away
+empties the master area. The fork matches upstream main and keeps the behaviour until it lands.
 
 **Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
 -0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
