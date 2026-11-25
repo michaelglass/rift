@@ -154,7 +154,11 @@ impl Stack {
     }
 }
 
+#[cfg(feature = "roc-core")]
+mod roc_shadow;
 mod twinned;
+#[cfg(feature = "roc-core")]
+pub(crate) use roc_shadow::stack_tree_reseeds;
 pub use twinned::StackLayoutSystem;
 pub(crate) use twinned::stack_tree_divergences;
 
@@ -1235,8 +1239,18 @@ mod tests {
             if rng.chance(4) {
                 // Saved and loaded (the insertion point is not saved: rift sets it again). The
                 // core's save is upstream's, byte for byte.
-                let saved = ron::to_string(&system).unwrap();
+                let mut saved = ron::to_string(&system).unwrap();
                 assert_eq!(saved, system.upstream_saved());
+                // Some member given a weight other than 1, which only a file from the old
+                // forest holds.
+                let members = saved.matches("weight:1.0").count();
+                if members > 0 && rng.chance(40) {
+                    let at =
+                        saved.match_indices("weight:1.0").nth(rng.below(members as u64) as usize);
+                    let at = at.unwrap().0;
+                    let weight = ["weight:2.5", "weight:0.25", "weight:0.0"][rng.below(3) as usize];
+                    saved.replace_range(at..at + "weight:1.0".len(), weight);
+                }
                 system = ron::from_str(&saved).unwrap();
                 system.update_settings(orientation, insertion);
                 continue;

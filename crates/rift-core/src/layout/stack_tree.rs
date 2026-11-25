@@ -80,6 +80,11 @@ impl<T> NonEmpty<T> {
 
     pub fn last(&self) -> &T { self.0.last().expect("a non-empty list has a last element") }
 
+    /// Each element changed by `change`: as many, so still non-empty.
+    pub fn map<U>(&self, change: impl FnMut(&T) -> U) -> NonEmpty<U> {
+        NonEmpty(self.0.iter().map(change).collect())
+    }
+
     /// `item` put at `index` (at most the length).
     pub fn insert(&mut self, index: usize, item: T) { self.0.insert(index, item); }
 

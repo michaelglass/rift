@@ -15,9 +15,13 @@ use rift_core::layout::stack_tree::{
     self as core, Beyond, DefaultOrientation, Fill, Id, Member as CoreMember, Members, NonEmpty,
     Orientation, Participation, Query, Resize, Selection, Stack as CoreStack, Stacks,
 };
+#[cfg(feature = "roc-core")]
+use rift_core_roc::stack_tree::{Answer, Event, Scope};
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
+#[cfg(feature = "roc-core")]
+use super::roc_shadow::{self as roc, RocShadow};
 use super::{Member, Stack, Upstream};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -34,7 +38,7 @@ use crate::model::slot_table::{SavedSlot, of_slotmap, saved, to_slotmap};
 use crate::model::tree::NodeId;
 
 /// The core's stacks over rift's ids.
-pub(super) type CoreStacks = Stacks<LayoutId, WindowId>;
+pub(crate) type CoreStacks = Stacks<LayoutId, WindowId>;
 
 /// How often a plain release build compares the whole system (the twins' sampling).
 const VIEW_EVERY: u64 = 32;
@@ -58,11 +62,14 @@ pub struct StackLayoutSystem {
     shadow: Box<Shadow>,
 }
 
-/// Upstream's system and how many operations stepped it.
+/// Upstream's system and how many operations stepped it; under `roc-core` also the Roc stacks,
+/// a second shadow.
 #[derive(Clone, Debug)]
 struct Shadow {
     upstream: Upstream,
     steps: u64,
+    #[cfg(feature = "roc-core")]
+    roc: RocShadow,
 }
 
 /// The core's stacks as upstream saves its system (the field names and order of upstream's
@@ -88,9 +95,15 @@ impl Serialize for StackLayoutSystem {
 
 impl From<Upstream> for StackLayoutSystem {
     fn from(upstream: Upstream) -> Self {
+        let core = seed(&upstream);
         Self {
-            core: seed(&upstream),
-            shadow: Box::new(Shadow { upstream, steps: 0 }),
+            shadow: Box::new(Shadow {
+                #[cfg(feature = "roc-core")]
+                roc: RocShadow::seeded(&core),
+                upstream,
+                steps: 0,
+            }),
+            core,
         }
     }
 }
@@ -115,9 +128,16 @@ impl StackLayoutSystem {
         insertion: WindowInsertionPoint,
     ) {
         self.shadow.upstream.update_settings(orientation, insertion);
-        self.core
-            .update_settings(default_orientation(orientation), insertion_point(insertion));
+        let (orientation, insertion) =
+            (default_orientation(orientation), insertion_point(insertion));
+        self.core.update_settings(orientation, insertion);
         self.stepped("update_settings", &(), &());
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "update_settings",
+            Event::Settings(orientation, insertion),
+            Answer::Done,
+        );
     }
 
     pub(crate) fn collect_group_containers(
@@ -148,6 +168,21 @@ impl StackLayoutSystem {
                     selected_index: c.selected,
                     window_ids: c.windows,
                 });
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "collect_group_containers",
+            Event::GroupContainer(
+                roc::layout_key(layout),
+                if selection_path_only {
+                    Scope::SelectionPath
+                } else {
+                    Scope::Whole
+                },
+            ),
+            Answer::Group(roc::group(
+                &self.core.group_container(layout, selection_path_only),
+            )),
+        );
         let core: Vec<GroupContainerInfo> = core.into_iter().collect();
         self.answered(
             "collect_group_containers",
@@ -177,11 +212,47 @@ impl StackLayoutSystem {
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        let core = self.core.window_slot(layout, window);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "window_slot",
+            Event::WindowSlot(roc::layout_key(layout), roc::window(window)),
+            Answer::WindowSlot(core),
+        );
         self.answered(
             "window_slot",
             self.shadow.upstream.window_slot(layout, window),
-            self.core.window_slot(layout, window).map(|i| vec![i]),
+            core.map(|i| vec![i]),
         )
+    }
+
+    /// An edit the core decides (under `roc-core` the Roc stacks take it too).
+    fn core_edit(
+        &mut self,
+        layout: LayoutId,
+        edit: core::Edit<WindowId>,
+    ) -> core::Edited<WindowId> {
+        let edited = self.core.edit(layout, edit);
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "edit_layout",
+            Event::Edit(roc::layout_key(layout), roc::edit(edit)),
+            Answer::Edited(roc::edited(&edited)),
+        );
+        edited
+    }
+
+    /// Under `roc-core`, the Roc stacks take an operation the core decided (answering
+    /// `answer`); a difference re-seeds them from the core.
+    #[cfg(feature = "roc-core")]
+    fn roc_stepped(&mut self, what: &str, event: Event, answer: Answer) {
+        self.shadow.roc.stepped(&self.core, what, event, answer);
+    }
+
+    /// Under `roc-core`, the Roc stacks answer a query the core answered (`answer`).
+    #[cfg(feature = "roc-core")]
+    fn roc_asked(&self, what: &str, event: Event, answer: Answer) {
+        self.shadow.roc.asked(what, event, answer);
     }
 
     #[cfg(test)]
@@ -221,9 +292,19 @@ impl StackLayoutSystem {
         )
     }
 
+    /// The deciding core, for tests that reach past the system.
+    #[cfg(test)]
+    pub(crate) fn core_for_tests(&self) -> &CoreStacks { &self.core }
+
     /// Upstream's system re-seeded from the core, as after a divergence.
     #[cfg(test)]
-    pub(crate) fn reseed_shadow(&mut self) { self.shadow.upstream = upstream_of(&self.core); }
+    pub(crate) fn reseed_shadow(&mut self) {
+        self.shadow.upstream = upstream_of(&self.core);
+        #[cfg(feature = "roc-core")]
+        {
+            self.shadow.roc = RocShadow::seeded(&self.core);
+        }
+    }
 
     /// Upstream's system saved as upstream saves it (the core's save is held to it).
     #[cfg(test)]
@@ -277,18 +358,35 @@ fn report(what: &str, difference: &str) {
 
 impl LayoutSystem for StackLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
+        let core = self.core.has_windows_for_app(layout, |window| window.pid == pid);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "has_windows_for_app",
+            Event::HasWindowsForApp(
+                roc::layout_key(layout),
+                roc::app_windows(&self.core, |window| window.pid == pid),
+            ),
+            Answer::Verdict(core),
+        );
         self.answered(
             "has_windows_for_app",
             self.shadow.upstream.has_windows_for_app(layout, pid),
-            self.core.has_windows_for_app(layout, |window| window.pid == pid),
+            core,
         )
     }
 
     fn window_participates(&self, window: WindowId) -> bool {
+        let core = self.core.window_participates(window);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "window_participates",
+            Event::WindowParticipates(roc::window(window)),
+            Answer::Verdict(core),
+        );
         self.answered(
             "window_participates",
             self.shadow.upstream.window_participates(window),
-            self.core.window_participates(window),
+            core,
         )
     }
 
@@ -301,6 +399,12 @@ impl LayoutSystem for StackLayoutSystem {
         };
         let core = self.core.set_window_participation(window, participation);
         self.stepped("set_window_participation", &upstream, &core);
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "set_window_participation",
+            Event::Participation(roc::window(window), participation),
+            Answer::Participated(core),
+        );
         core
     }
 
@@ -308,14 +412,27 @@ impl LayoutSystem for StackLayoutSystem {
         let upstream = self.shadow.upstream.create_layout();
         let core = self.core.create_layout();
         self.stepped("create_layout", &upstream, &core);
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "create_layout",
+            Event::CreateLayout,
+            Answer::Layout(roc::layout_key(core)),
+        );
         core
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool {
+        let core = self.core.contains_layout(layout);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "contains_layout",
+            Event::ContainsLayout(roc::layout_key(layout)),
+            Answer::Verdict(core),
+        );
         self.answered(
             "contains_layout",
             self.shadow.upstream.contains_layout(layout),
-            self.core.contains_layout(layout),
+            core,
         )
     }
 
@@ -323,6 +440,12 @@ impl LayoutSystem for StackLayoutSystem {
         let upstream = self.shadow.upstream.clone_layout(layout);
         let core = self.core.clone_layout(layout);
         self.stepped("clone_layout", &upstream, &core);
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "clone_layout",
+            Event::CloneLayout(roc::layout_key(layout)),
+            Answer::Layout(roc::layout_key(core)),
+        );
         core
     }
 
@@ -330,6 +453,12 @@ impl LayoutSystem for StackLayoutSystem {
         self.shadow.upstream.remove_layout(layout);
         self.core.remove_layout(layout);
         self.stepped("remove_layout", &(), &());
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "remove_layout",
+            Event::RemoveLayout(roc::layout_key(layout)),
+            Answer::Done,
+        );
     }
 
     /// The core geometry's frames for the core's shape (policy (a)): upstream's shape is held to
@@ -369,42 +498,77 @@ impl LayoutSystem for StackLayoutSystem {
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+        let core = self.core.selected_window(layout);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "selected_window",
+            Event::SelectedWindow(roc::layout_key(layout)),
+            Answer::Window(core.map(roc::window)),
+        );
         self.answered(
             "selected_window",
             self.shadow.upstream.selected_window(layout),
-            self.core.selected_window(layout),
+            core,
         )
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+        let core = self.core.selection_contains_window(layout, window);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "selection_contains_window",
+            Event::SelectionContainsWindow(roc::layout_key(layout), roc::window(window)),
+            Answer::Verdict(core),
+        );
         self.answered(
             "selection_contains_window",
             self.shadow.upstream.selection_contains_window(layout, window),
-            self.core.selection_contains_window(layout, window),
+            core,
         )
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+        let core = self.core.window_in_direction(layout, core_direction(direction));
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "window_in_direction",
+            Event::WindowInDirection(roc::layout_key(layout), core_direction(direction)),
+            Answer::Window(core.map(roc::window)),
+        );
         self.answered(
             "window_in_direction",
             self.shadow.upstream.window_in_direction(layout, direction),
-            self.core.window_in_direction(layout, core_direction(direction)),
+            core,
         )
     }
 
     fn contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+        let core = self.core.contains_window(layout, window);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "contains_window",
+            Event::ContainsWindow(roc::layout_key(layout), roc::window(window)),
+            Answer::Verdict(core),
+        );
         self.answered(
             "contains_window",
             self.shadow.upstream.contains_window(layout, window),
-            self.core.contains_window(layout, window),
+            core,
         )
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+        let core = self.core.has_any_fullscreen_node(layout);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
+            "has_any_fullscreen_node",
+            Event::HasAnyFullscreenNode(roc::layout_key(layout)),
+            Answer::Verdict(core),
+        );
         self.answered(
             "has_any_fullscreen_node",
             self.shadow.upstream.has_any_fullscreen_node(layout),
-            self.core.has_any_fullscreen_node(layout),
+            core,
         )
     }
 
@@ -419,11 +583,14 @@ impl LayoutSystem for StackLayoutSystem {
             WindowQuery::Selection => Query::Selection,
             WindowQuery::Stack(window) => Query::Stack(window),
         };
-        self.answered(
+        let core = self.core.windows(layout, core_query);
+        #[cfg(feature = "roc-core")]
+        self.roc_asked(
             "windows",
-            self.shadow.upstream.windows(layout, query),
-            self.core.windows(layout, core_query),
-        )
+            Event::Windows(roc::layout_key(layout), roc::query(core_query)),
+            Answer::Windows(roc::windows(&core)),
+        );
+        self.answered("windows", self.shadow.upstream.windows(layout, query), core)
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
@@ -434,7 +601,14 @@ impl LayoutSystem for StackLayoutSystem {
             Focus::Descend => core::Focus::Descend,
             Focus::Direction(direction) => core::Focus::Direction(core_direction(direction)),
         };
-        let core = match self.core.focus(layout, core_focus) {
+        let focused = self.core.focus(layout, core_focus);
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped(
+            "focus",
+            Event::Focus(roc::layout_key(layout), roc::focus(core_focus)),
+            Answer::Focused(roc::focused(&focused)),
+        );
+        let core = match focused {
             core::Focused::Selection { handled } => FocusResult::selection(handled),
             core::Focused::Movement { window, raise } => FocusResult::movement((window, raise)),
         };
@@ -443,37 +617,21 @@ impl LayoutSystem for StackLayoutSystem {
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
-        use crate::layout_engine::core_rect;
-        let core = &mut self.core;
-        match change {
-            WindowChange::Add(layout, window, _) => core.add_window(layout, window),
-            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                core.remove_window(window)
-            }
-            WindowChange::Replace(from, to) => core.replace_window(from, to),
-            WindowChange::CloseApp(pid) => core.close_app(|window| window.pid == pid),
-            WindowChange::Resize {
-                layout,
-                window,
-                old,
-                new,
-                screen,
-                gaps,
-            } => core.resize_window(layout, window, Resize {
-                old: core_rect(old),
-                new: core_rect(new),
-                screen: core_rect(screen),
-                tiling: core_rect(crate::layout_engine::utils::compute_tiling_area(screen, gaps)),
-            }),
-        }
+        let applied = Applied::of(&change);
+        // Read before the core applies it: an app's windows are the ones the core holds.
+        #[cfg(feature = "roc-core")]
+        let event = applied.event(&self.core);
+        applied.apply(&mut self.core);
         self.shadow.upstream.update(change);
         self.stepped("update", &(), &());
+        #[cfg(feature = "roc-core")]
+        self.roc_stepped("update", event, Answer::Done);
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         let upstream = self.shadow.upstream.edit_layout(layout, edit);
         let core = match core_edit(edit) {
-            Some(edit) => match self.core.edit(layout, edit) {
+            Some(edit) => match self.core_edit(layout, edit) {
                 core::Edited::Unsupported => EditResult::Unsupported,
                 core::Edited::Unchanged => EditResult::Unchanged,
                 core::Edited::Changed => EditResult::Changed,
@@ -484,6 +642,74 @@ impl LayoutSystem for StackLayoutSystem {
         };
         self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
         core
+    }
+}
+
+/// A window change as the core takes it.
+enum Applied {
+    Add(LayoutId, WindowId),
+    Remove(WindowId),
+    Replace(WindowId, WindowId),
+    CloseApp(pid_t),
+    Resize(LayoutId, WindowId, Resize),
+}
+
+impl Applied {
+    fn of(change: &WindowChange<'_>) -> Self {
+        use crate::layout_engine::core_rect;
+        match *change {
+            WindowChange::Add(layout, window, _) => Applied::Add(layout, window),
+            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
+                Applied::Remove(window)
+            }
+            WindowChange::Replace(from, to) => Applied::Replace(from, to),
+            WindowChange::CloseApp(pid) => Applied::CloseApp(pid),
+            WindowChange::Resize {
+                layout,
+                window,
+                old,
+                new,
+                screen,
+                gaps,
+            } => Applied::Resize(layout, window, Resize {
+                old: core_rect(old),
+                new: core_rect(new),
+                screen: core_rect(screen),
+                tiling: core_rect(crate::layout_engine::utils::compute_tiling_area(screen, gaps)),
+            }),
+        }
+    }
+
+    fn apply(&self, core: &mut CoreStacks) {
+        match *self {
+            Applied::Add(layout, window) => core.add_window(layout, window),
+            Applied::Remove(window) => core.remove_window(window),
+            Applied::Replace(from, to) => core.replace_window(from, to),
+            Applied::CloseApp(pid) => core.close_app(|window| window.pid == pid),
+            Applied::Resize(layout, window, resize) => core.resize_window(layout, window, resize),
+        }
+    }
+
+    /// The change as the Roc stacks take it (an app closing lists the app's windows the core
+    /// holds, as Roc has no pid).
+    #[cfg(feature = "roc-core")]
+    fn event(&self, core: &CoreStacks) -> Event {
+        match *self {
+            Applied::Add(layout, window) => {
+                Event::AddWindow(roc::layout_key(layout), roc::window(window))
+            }
+            Applied::Remove(window) => Event::RemoveWindow(roc::window(window)),
+            Applied::Replace(from, to) => Event::ReplaceWindow {
+                from: roc::window(from),
+                to: roc::window(to),
+            },
+            Applied::CloseApp(pid) => {
+                Event::CloseApp(roc::app_windows(core, |window| window.pid == pid))
+            }
+            Applied::Resize(layout, window, resize) => {
+                Event::ResizeWindow(roc::layout_key(layout), roc::window(window), resize)
+            }
+        }
     }
 }
 
