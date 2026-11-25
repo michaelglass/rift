@@ -46,7 +46,7 @@ enum Participation {
 /// A real change in whether the layout shows a window. Repeated observations of the
 /// same state settle to no change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ParticipationChange {
+pub enum ParticipationChange {
     Suspended,
     Resumed,
 }

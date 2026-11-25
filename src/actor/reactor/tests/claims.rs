@@ -319,9 +319,12 @@ fn destroying_a_claimed_window_removes_its_preserved_layout() {
         assert!(!engine.is_window_floating(window));
         assert_eq!(engine.get_floating_position(workspace, window), None);
         assert!(
-            !engine.workspaces_mut()[workspace]
-                .layout_system
-                .set_window_participation(window, true),
+            engine.workspaces()[workspace]
+                .layout_state
+                .all_layouts()
+                .all(|layout| !engine.workspaces()[workspace]
+                    .layout_system
+                    .contains_window(layout, window)),
             "a retired tiled slot cannot be reactivated"
         );
         assert!(!reactor.test_active_workspace_windows(space).contains(&window));

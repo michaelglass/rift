@@ -2223,7 +2223,7 @@ mod tests {
             &Default::default(),
             Away::nothing(),
         );
-        system.begin_viewport_gesture(layout, now);
+        system.begin_viewport_gesture(layout, now, Away::nothing());
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let camera = CameraAnimation {

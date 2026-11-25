@@ -731,7 +731,11 @@ impl Reactor {
             .layout_manager
             .layout_engine
             .handle_event(&mut self.state.windows, LayoutEvent::SpaceExposed(space, size));
-        self.layout_manager.layout_engine.update_space_display(space, display);
+        self.layout_manager.layout_engine.update_space_display(
+            space,
+            display,
+            Away::from_store(&self.state.windows),
+        );
     }
 
     fn recompute_and_set_active_spaces(
@@ -3626,9 +3630,11 @@ impl Reactor {
             else {
                 continue;
             };
-            self.layout_manager
-                .layout_engine
-                .update_space_display(space, Some(display_uuid));
+            self.layout_manager.layout_engine.update_space_display(
+                space,
+                Some(display_uuid),
+                Away::from_store(&self.state.windows),
+            );
         }
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
@@ -5880,7 +5886,7 @@ impl Reactor {
             if mode == crate::common::config::LayoutMode::Scrolling &&
                 !engine.workspaces().active_layout_for_space(space).is_some_and(|(ws, layout)| {
                     matches!(&engine.workspaces()[ws].layout_system,
-                        crate::layout_engine::LayoutSystemKind::Scrolling(system) if system.viewport_gesture_available(layout))
+                        crate::layout_engine::LayoutSystemKind::Scrolling(system) if system.viewport_gesture_available(layout, Away::from_store(&self.state.windows)))
                 }) {
                 mode = crate::common::config::LayoutMode::Traditional;
             }

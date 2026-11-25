@@ -539,6 +539,7 @@ impl Reactor {
                         *workspace_id,
                         screen.frame,
                         &gaps,
+                        Away::from_store(&self.state.windows),
                     )
                 })
                 .unwrap_or_default();

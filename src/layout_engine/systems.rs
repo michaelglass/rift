@@ -157,6 +157,17 @@ pub enum Candidates<'a> {
     Shown(Away<'a>),
 }
 
+impl Candidates<'_> {
+    pub fn contains_away(self, window: WindowId) -> bool {
+        match self {
+            Candidates::Any => false,
+            Candidates::Shown(away) => away.contains(window),
+        }
+    }
+
+    pub fn admits(self, window: WindowId) -> bool { !self.contains_away(window) }
+}
+
 /// Which nodes of one layout take part in it.
 pub(super) enum Participating {
     /// Nothing in the layout is away: every node takes part, empty placeholders included.
@@ -171,24 +182,6 @@ impl Participating {
             Self::All => true,
             Self::Only(nodes) => nodes.contains(&node),
         }
-    }
-}
-
-fn update_participation(
-    inactive: &mut HashSet<WindowId>,
-    window: WindowId,
-    participates: bool,
-) -> bool {
-    if participates {
-        inactive.remove(&window)
-    } else {
-        inactive.insert(window)
-    }
-}
-
-fn replace_participation(inactive: &mut HashSet<WindowId>, from: WindowId, to: WindowId) {
-    if inactive.remove(&from) {
-        inactive.insert(to);
     }
 }
 
@@ -362,9 +355,16 @@ fn track_fullscreen_resize(
 
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
-    fn window_participates(&self, _window: WindowId) -> bool { true }
-
-    fn set_window_participation(&mut self, _window: WindowId, _participates: bool) -> bool { false }
+    /// A window's participation really changed, as the window store's transition
+    /// reports it. Systems that react to the change itself, such as scrolling moving
+    /// its selection off a column that went away, do so here.
+    fn participation_changed(
+        &mut self,
+        _window: WindowId,
+        _change: crate::model::window_store::ParticipationChange,
+        _away: Away<'_>,
+    ) {
+    }
 
     fn create_layout(&mut self) -> LayoutId;
 
@@ -604,11 +604,11 @@ mod tests {
         let layout = scrolling.create_layout();
         scrolling.update(WindowChange::Add(layout, w(1), None), Away::nothing());
         scrolling.update(WindowChange::Add(layout, w(2), None), Away::nothing());
-        let tree = scrolling.container_tree(layout);
+        let tree = scrolling.container_tree(layout, Away::nothing());
         assert!(tree.children.iter().all(|node| node.role.as_deref() == Some("column")));
         assert_eq!(window_nodes(&tree).len(), 2);
         scrolling.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
-        assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
+        assert_stable_unique_ids(&tree, &scrolling.container_tree(layout, Away::nothing()));
     }
 }
 mod floating;
@@ -630,17 +630,6 @@ pub enum LayoutSystemKind {
 }
 
 impl LayoutSystemKind {
-    /// Seed a freshly loaded layout's participation without editing its saved viewport.
-    pub(crate) fn initialize_dormant_windows(&mut self, windows: Vec<WindowId>) {
-        if let Self::Scrolling(system) = self {
-            system.initialize_dormant_windows(windows);
-        } else {
-            for window in windows {
-                self.set_window_participation(window, false);
-            }
-        }
-    }
-
     pub(crate) fn preview_clone(&self) -> Option<Self> {
         match self {
             Self::Traditional(system) => Some(Self::Traditional(system.clone())),
@@ -661,19 +650,27 @@ mod participation_tests {
     use crate::layout_engine::Away;
     use crate::layout_engine::systems::{Focus, LayoutEdit, WindowChange};
 
-    /// What the engine reads from the window store: marks `window` away or back.
+    /// What the engine does when the store's participation flips: marks `window`
+    /// away or back and tells the system about the change.
     fn set_away(
         system: &mut LayoutSystemKind,
         away: &mut HashSet<WindowId>,
         window: WindowId,
         is_away: bool,
     ) {
-        if is_away {
-            away.insert(window);
+        let changed = if is_away {
+            away.insert(window)
         } else {
-            away.remove(&window);
+            away.remove(&window)
+        };
+        if changed {
+            let change = if is_away {
+                crate::model::window_store::ParticipationChange::Suspended
+            } else {
+                crate::model::window_store::ParticipationChange::Resumed
+            };
+            system.participation_changed(window, change, Away::only(away));
         }
-        system.set_window_participation(window, !is_away);
     }
 
     #[test]
@@ -859,7 +856,7 @@ impl LayoutSystemKind {
             Self::Bsp(system) => system.container_tree(layout),
             Self::Stack(system) => system.container_tree(layout),
             Self::MasterStack(system) => system.container_tree(layout, away),
-            Self::Scrolling(system) => system.container_tree(layout),
+            Self::Scrolling(system) => system.container_tree(layout, away),
             Self::Floating(system) => system.groups.container_tree(layout, away),
         }
     }

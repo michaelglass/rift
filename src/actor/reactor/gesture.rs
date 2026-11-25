@@ -5,7 +5,8 @@ use super::animation::scrolling_bounds;
 use super::{Changes, Reactor};
 use crate::actor::gesture::{Context, Control, Lifecycle, Motion};
 use crate::layout_engine::{
-    EventResponse, LayoutCommand, LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId,
+    Away, EventResponse, LayoutCommand, LayoutId, LayoutSystem, LayoutSystemKind,
+    VirtualWorkspaceId,
 };
 
 pub(super) struct ViewportSession {
@@ -105,7 +106,11 @@ impl Reactor {
                 else {
                     return;
                 };
-                if !system.begin_viewport_gesture(layout, Instant::now()) {
+                if !system.begin_viewport_gesture(
+                    layout,
+                    Instant::now(),
+                    Away::from_store(&self.state.windows),
+                ) {
                     return;
                 }
                 system.update_viewport_gesture(layout, 0.0, context.started);
@@ -264,7 +269,12 @@ impl Reactor {
             system.cancel_viewport_gesture(s.layout);
             None
         } else {
-            system.end_viewport_gesture(s.layout, s.timestamp, animate)
+            system.end_viewport_gesture(
+                s.layout,
+                s.timestamp,
+                animate,
+                Away::from_store(&self.state.windows),
+            )
         };
         if !visible {
             self.viewport_gesture = Some(s);

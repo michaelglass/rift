@@ -321,7 +321,7 @@ impl VirtualWorkspace {
             LayoutSystemKind::Scrolling(system) => {
                 let mut mode_settings = settings.scrolling.effective_for_display(display);
                 mode_settings.base = settings.resolved_base_for(mode);
-                system.update_settings(&mode_settings);
+                system.update_settings(&mode_settings, candidates);
             }
         }
     }

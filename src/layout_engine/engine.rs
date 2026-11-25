@@ -18,6 +18,7 @@ use crate::layout_engine::systems::{
 use crate::layout_engine::{Away, LayoutSystem};
 use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
+use crate::model::window_store::ParticipationChange;
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
     WindowStore, WindowVisibility,
@@ -212,9 +213,10 @@ impl LayoutConstraints {
         layout: LayoutId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
+        away: Away<'_>,
     ) {
         if let LayoutSystemKind::Scrolling(scrolling) = system {
-            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps);
+            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps, away);
         }
     }
 }
@@ -226,6 +228,15 @@ enum WindowRelocation {
     Directional(Direction),
 }
 
+/// A workspace's layout as it was before a native departure, kept to put back.
+#[derive(Debug)]
+struct NativeLayout {
+    system: LayoutSystemKind,
+    state: super::workspaces::WorkspaceLayoutState,
+    /// The windows that were away when it was saved: putting it back reports to the
+    /// layout only the windows whose participation changed since.
+    away: HashSet<WindowId>,
+}
 pub struct LayoutEngine {
     floating: FloatingManager,
     floating_positions: FloatingPositionStore,
@@ -240,8 +251,7 @@ pub struct LayoutEngine {
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
     // Display-relocation recovery only; temporary absence never snapshots topology.
-    native_layouts:
-        HashMap<VirtualWorkspaceId, (LayoutSystemKind, super::workspaces::WorkspaceLayoutState)>,
+    native_layouts: HashMap<VirtualWorkspaceId, NativeLayout>,
     native_reconcile_batch: Option<HashSet<VirtualWorkspaceId>>,
     // Windows a display departure moved to another display, by where they came from.
     evicted: HashMap<WindowId, EvictedWindow>,
@@ -468,7 +478,7 @@ impl LayoutEngine {
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
         let (mut system, before) =
             self.prospective_drop_tree(workspace, layout, source, target, action, away)?;
-        self.window_layout_constraints.prepare(&mut system, layout, screen, &gaps);
+        self.window_layout_constraints.prepare(&mut system, layout, screen, &gaps, away);
         let frame = self
             .project_arrangement(&system, layout, screen, &gaps, stack_line.reserve(), away)
             .into_iter()
@@ -527,7 +537,7 @@ impl LayoutEngine {
                 system.can_move_window(layout, source, direction, away)
             }
             LayoutSystemKind::Scrolling(system) => {
-                system.can_move_window(layout, source, direction)
+                system.can_move_window(layout, source, direction, away)
             }
             LayoutSystemKind::Stack(_) | LayoutSystemKind::Floating(_) => false,
         })
@@ -611,6 +621,7 @@ impl LayoutEngine {
                 Some(self.window_layout_constraints.revision),
                 gaps,
                 true,
+                away,
             );
         }
         system.calculate_layout(
@@ -681,8 +692,13 @@ impl LayoutEngine {
                 WindowChange::Add(new_layout, wid, None),
                 Away::from_store(window_store),
             );
+            // The new system starts with every window shown: report the ones away.
             if !window_store.participates(wid) {
-                workspace.layout_system.set_window_participation(wid, false);
+                workspace.layout_system.participation_changed(
+                    wid,
+                    ParticipationChange::Suspended,
+                    Away::from_store(window_store),
+                );
             }
         }
 
@@ -702,7 +718,7 @@ impl LayoutEngine {
         }
 
         if mode == LayoutMode::Scrolling {
-            self.sync_scrolling_widths_for_space(space);
+            self.sync_scrolling_widths_for_space(space, Away::from_store(window_store));
         }
 
         true
@@ -868,7 +884,7 @@ impl LayoutEngine {
             }
         }
         for space in self.workspaces.initialized_spaces() {
-            self.sync_scrolling_widths_for_space(space);
+            self.sync_scrolling_widths_for_space(space, Away::from_store(window_store));
         }
     }
 
@@ -1351,8 +1367,8 @@ impl LayoutEngine {
     // Native reconciliation deliberately does not use this boundary.
     fn forget_native_layout_for_window_id(&mut self, wid: WindowId, away: Away<'_>) {
         self.evicted.remove(&wid);
-        for (system, _) in self.native_layouts.values_mut() {
-            system.update(WindowChange::Remove(wid), away);
+        for native in self.native_layouts.values_mut() {
+            native.system.update(WindowChange::Remove(wid), away);
         }
         self.prune_native_layouts();
     }
@@ -1374,8 +1390,11 @@ impl LayoutEngine {
     }
 
     fn prune_native_layouts(&mut self) {
-        self.native_layouts.retain(|_, (system, state)| {
-            state.all_layouts().any(|layout| !system.all_windows(layout).is_empty())
+        self.native_layouts.retain(|_, native| {
+            native
+                .state
+                .all_layouts()
+                .any(|layout| !native.system.all_windows(layout).is_empty())
         });
     }
 
@@ -1396,7 +1415,15 @@ impl LayoutEngine {
         }
         let current = &self.workspaces[workspace];
         if let Some(system) = current.layout_system.preview_clone() {
-            self.native_layouts.insert(workspace, (system, current.layout_state.clone()));
+            let away = (current.layout_state.all_layouts())
+                .flat_map(|layout| current.layout_system.all_windows(layout))
+                .filter(|&window| !windows.participates(window))
+                .collect();
+            self.native_layouts.insert(workspace, NativeLayout {
+                system,
+                state: current.layout_state.clone(),
+                away,
+            });
         }
     }
 
@@ -1493,7 +1520,12 @@ impl LayoutEngine {
         workspace: VirtualWorkspaceId,
         returning: Option<WindowId>,
     ) {
-        let Some((saved, state)) = self.native_layouts.get(&workspace) else {
+        let Some(NativeLayout {
+            system: saved,
+            state,
+            away: saved_away,
+        }) = self.native_layouts.get(&workspace)
+        else {
             return;
         };
         if returning.is_some_and(|window| {
@@ -1547,9 +1579,15 @@ impl LayoutEngine {
                 }
             }
         }
-        // Display recovery restores topology, never historical eligibility.
+        // Display recovery restores topology, never historical eligibility: tell the
+        // layout which windows' participation changed since it was saved.
         for &window in &ordered {
-            system.set_window_participation(window, windows.participates(window));
+            let change = match (saved_away.contains(&window), windows.participates(window)) {
+                (true, true) => ParticipationChange::Resumed,
+                (false, false) => ParticipationChange::Suspended,
+                _ => continue,
+            };
+            system.participation_changed(window, change, Away::from_store(windows));
         }
         state.ensure_active(size, &mut system);
         if let Some(focused) = self.focused_window.filter(|window| desired.contains(window))
@@ -1574,7 +1612,13 @@ impl LayoutEngine {
             let projected = workspace
                 .active_layout()
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
-            workspace.layout_system.set_window_participation(wid, false);
+            if suspended {
+                workspace.layout_system.participation_changed(
+                    wid,
+                    ParticipationChange::Suspended,
+                    Away::from_store(window_store),
+                );
+            }
             let changed = (suspended && projected) || self.floating.is_active(workspace.space, wid);
             self.floating.remove_active_for_window(wid);
             if self.focused_window == Some(wid) {
@@ -1677,9 +1721,13 @@ impl LayoutEngine {
         }
         let should_be_floating = self.floating.is_floating(wid);
         let resumed = window_store.settle_participation(wid, true).is_some();
-        self.workspaces[assigned_workspace]
-            .layout_system
-            .set_window_participation(wid, true);
+        if resumed {
+            self.workspaces[assigned_workspace].layout_system.participation_changed(
+                wid,
+                ParticipationChange::Resumed,
+                Away::from_store(window_store),
+            );
+        }
 
         if should_be_floating {
             self.floating.add_active(space, wid.pid, wid);
@@ -1781,7 +1829,12 @@ impl LayoutEngine {
         Some((workspace_id, self.workspaces[workspace_id].name.clone()))
     }
 
-    pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<&str>) {
+    pub fn update_space_display(
+        &mut self,
+        space: SpaceId,
+        display_uuid: Option<&str>,
+        away: Away<'_>,
+    ) {
         // An unchanged topology mapping is a no-op.
         if display_uuid.is_none() && !self.space_display_map.contains_key(&space) {
             return;
@@ -1817,16 +1870,16 @@ impl LayoutEngine {
         } else {
             self.space_display_map.remove(&space);
         }
-        self.sync_scrolling_widths_for_space(space);
+        self.sync_scrolling_widths_for_space(space, away);
     }
 
-    fn sync_scrolling_widths_for_space(&mut self, space: SpaceId) {
+    fn sync_scrolling_widths_for_space(&mut self, space: SpaceId, away: Away<'_>) {
         let display = self.space_display_map.get(&space).and_then(Option::as_deref);
         let widths = self.layout_settings.scrolling.widths_for_display(display);
         for (_, ws) in self.workspaces.workspaces.iter_mut() {
             if ws.space == space {
                 if let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system {
-                    system.update_width_settings(widths);
+                    system.update_width_settings(widths, away);
                 }
             }
         }
@@ -2039,7 +2092,7 @@ impl LayoutEngine {
             LayoutEvent::SpaceExposed(space, size) => {
                 self.debug_tree(space);
 
-                self.ensure_workspace_layouts(space, size);
+                self.ensure_workspace_layouts(space, size, Away::from_store(window_store));
             }
             #[cfg(test)]
             LayoutEvent::TestWindowsObserved(space, windows, app_info) => {
@@ -2223,8 +2276,10 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::AppClosed(pid) => {
-                for (system, _) in self.native_layouts.values_mut() {
-                    system.update(WindowChange::CloseApp(pid), Away::from_store(window_store));
+                for native in self.native_layouts.values_mut() {
+                    native
+                        .system
+                        .update(WindowChange::CloseApp(pid), Away::from_store(window_store));
                 }
                 let changed = self.workspaces.layout_spaces().into_iter().any(|space| {
                     self.workspaces.active_layout_for_space(space).is_some_and(
@@ -2935,11 +2990,16 @@ impl LayoutEngine {
                         }
                     }
                     LayoutCommand::SnapStrip => {
-                        response.focus_window = system.snap_to_nearest_column(layout);
+                        response.focus_window =
+                            system.snap_to_nearest_column(layout, Away::from_store(window_store));
                         response.changed = response.focus_window.is_some();
                     }
                     LayoutCommand::SwitchPresetColumnWidth { backwards } => {
-                        response.changed = system.switch_preset_column_width(layout, backwards);
+                        response.changed = system.switch_preset_column_width(
+                            layout,
+                            backwards,
+                            Away::from_store(window_store),
+                        );
                     }
                     LayoutCommand::CenterSelection => system.center_selected_column(layout),
                     _ => unreachable!(),
@@ -2965,6 +3025,7 @@ impl LayoutEngine {
             layout,
             screen,
             gaps,
+            away,
         );
         self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line, away)
     }
@@ -3070,7 +3131,13 @@ impl LayoutEngine {
                 });
                 positions.extend(frames.unwrap_or_else(|| {
                     let system = &mut self.workspaces[active_workspace_id].layout_system;
-                    self.window_layout_constraints.prepare(system, layout, screen, gaps);
+                    self.window_layout_constraints.prepare(
+                        system,
+                        layout,
+                        screen,
+                        gaps,
+                        Away::from_store(window_store),
+                    );
                     if finish_scrolling && let LayoutSystemKind::Scrolling(scrolling) = system {
                         scrolling.finish_viewport(layout);
                     }
@@ -3217,6 +3284,7 @@ impl LayoutEngine {
         workspace: VirtualWorkspaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
+        away: Away<'_>,
     ) -> HashMap<WindowId, CGRect> {
         match (
             &self.workspaces[workspace].layout_system,
@@ -3230,6 +3298,7 @@ impl LayoutEngine {
                     Some(self.window_layout_constraints.revision),
                     gaps,
                     false,
+                    away,
                 )
                 .into_iter()
                 .collect(),
@@ -3455,7 +3524,7 @@ impl LayoutEngine {
             }
             LayoutCommand::CreateWorkspace => match self.workspaces.create_workspace(space, None) {
                 Ok(_workspace_id) => {
-                    self.sync_scrolling_widths_for_space(space);
+                    self.sync_scrolling_widths_for_space(space, Away::from_store(window_store));
                     EventResponse {
                         changed: true,
                         ..EventResponse::default()
@@ -3626,7 +3695,11 @@ impl LayoutEngine {
             return EventResponse::default();
         };
 
-        self.ensure_workspace_layouts(target_space, target_screen_size);
+        self.ensure_workspace_layouts(
+            target_space,
+            target_screen_size,
+            Away::from_store(window_store),
+        );
         if !self.relocate_window_to_workspace(
             window_store,
             source_workspace_id,
@@ -3681,7 +3754,11 @@ impl LayoutEngine {
             };
             let focus = self.preferred_focus_for_workspace(window_store, source_space, id, None);
             let members = window_store.workspace_windows(id);
-            self.ensure_workspace_layouts(target_space, target_screen_size);
+            self.ensure_workspace_layouts(
+                target_space,
+                target_screen_size,
+                Away::from_store(window_store),
+            );
             let moved: Vec<_> = members
                 .into_iter()
                 .filter(|&window| {
@@ -3739,13 +3816,13 @@ impl LayoutEngine {
         if reason == crate::model::virtual_workspace::WorkspaceTransferReason::Explicit
             && let Some(source_size) = source_size
         {
-            self.ensure_workspace_layouts(source, source_size);
+            self.ensure_workspace_layouts(source, source_size, Away::from_store(windows));
         }
         if reason == crate::model::virtual_workspace::WorkspaceTransferReason::Explicit {
             let display = self.display_uuid_for_space(source).map(str::to_owned);
-            self.update_space_display(source, display.as_deref());
+            self.update_space_display(source, display.as_deref(), Away::from_store(windows));
         }
-        self.sync_scrolling_widths_for_space(target);
+        self.sync_scrolling_widths_for_space(target, Away::from_store(windows));
         self.workspaces[id].ensure_layout_for_size(size);
         for &window in &members {
             self.evicted.remove(&window);
@@ -3769,9 +3846,9 @@ impl LayoutEngine {
         }
     }
 
-    fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize) {
+    fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize, away: Away<'_>) {
         self.workspaces.ensure_layouts_for_size(space, screen_size);
-        self.sync_scrolling_widths_for_space(space);
+        self.sync_scrolling_widths_for_space(space, away);
     }
 
     fn relocate_window_to_workspace(
@@ -3871,11 +3948,12 @@ impl LayoutEngine {
 
         if suspended {
             self.suspend_window(windows, window);
-        } else if observed {
-            windows.settle_participation(window, true);
-            self.workspaces[destination]
-                .layout_system
-                .set_window_participation(window, true);
+        } else if observed && windows.settle_participation(window, true).is_some() {
+            self.workspaces[destination].layout_system.participation_changed(
+                window,
+                ParticipationChange::Resumed,
+                Away::from_store(windows),
+            );
         }
         if directional.is_none() && self.focused_window == Some(window) {
             self.focused_window = None;
@@ -3976,9 +4054,12 @@ impl LayoutEngine {
         if let Some(eviction) = self.evicted.remove(&from) {
             self.evicted.insert(to, eviction);
         }
-        for (system, _) in self.native_layouts.values_mut() {
-            system.update(WindowChange::Remove(to), away);
-            system.update(WindowChange::Replace(from, to), away);
+        for native in self.native_layouts.values_mut() {
+            native.system.update(WindowChange::Remove(to), away);
+            native.system.update(WindowChange::Replace(from, to), away);
+            if native.away.remove(&from) {
+                native.away.insert(to);
+            }
         }
         // A live `to` identity can already be provisionally present when a saved `from` identity
         // is matched. Remove that projection before replacement; LayoutSystem::replace_window is

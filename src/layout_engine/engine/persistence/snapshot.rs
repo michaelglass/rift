@@ -203,17 +203,19 @@ impl PersistedLayout {
         }
         for workspace in self.workspaces.catalog().collect::<Vec<_>>() {
             let entry = &mut self.workspaces[workspace];
-            let mut members: Vec<_> = (entry.layout_state.all_layouts())
+            // Saved windows stay away until a live window matches one: the store doesn't
+            // know them, so nothing needs marking.
+            let members: Vec<_> = (entry.layout_state.all_layouts())
                 .flat_map(|layout| entry.layout_system.all_windows(layout))
                 .collect();
-            members.retain(|&window| {
+            for window in members {
                 match pending.entry(window) {
                     // A window already retained in this workspace shares participation across
                     // all its saved layout configurations.
                     Entry::Occupied(saved)
                         if saved.get().workspace == workspace && saved.get().frame.is_none() =>
                     {
-                        return false;
+                        continue;
                     }
                     Entry::Vacant(slot) => {
                         if let Some(fingerprint) = windows.remove(&window) {
@@ -222,16 +224,14 @@ impl PersistedLayout {
                                 workspace,
                                 frame: None,
                             });
-                            return true;
+                            continue;
                         }
                     }
                     Entry::Occupied(_) => {}
                 }
                 // Pruning a saved layout is structural: no saved window is live yet.
                 entry.layout_system.forget_window(window);
-                false
-            });
-            entry.layout_system.initialize_dormant_windows(members);
+            }
             if entry
                 .last_focused()
                 .is_some_and(|window| pending.get(&window).is_none_or(|s| s.workspace != workspace))

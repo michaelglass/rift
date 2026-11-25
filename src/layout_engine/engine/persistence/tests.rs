@@ -68,7 +68,7 @@ fn fresh(
     for (space, display) in spaces {
         let size = CGSize::new(1200.0, 800.0);
         let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(*space, size));
-        engine.update_space_display(*space, Some(*display));
+        engine.update_space_display(*space, Some(*display), Away::from_store(&store));
     }
     (engine, store)
 }
@@ -398,9 +398,9 @@ fn single_display_restore_keeps_the_surviving_desktops_catalog() {
         engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
         engine.workspaces.ensure_space_initialized(old);
         if exposed {
-            engine.update_space_display(old, Some("display"));
+            engine.update_space_display(old, Some("display"), Away::nothing());
         }
-        engine.update_space_display(current, Some("display"));
+        engine.update_space_display(current, Some("display"), Away::nothing());
         let expected = engine.workspaces.workspace_ids(current);
         let saved = engine.serialize_to_string(&WindowStore::default());
         let (mut engine, mut store) = boot(&settings, &saved);
@@ -588,6 +588,10 @@ fn scrolling_checkpoint_preserves_selection_and_viewport_through_readmission() {
 
     for minimize_selection in [false, true] {
         store.window_mut(selected).unwrap().info.is_minimized = minimize_selection;
+        if minimize_selection {
+            // Minimizing reaches the layout as a suspension, as the reactor reports it.
+            let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(selected));
+        }
         restore(
             &mut engine,
             &mut store,
