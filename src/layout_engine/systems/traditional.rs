@@ -153,7 +153,16 @@ impl TraditionalLayoutSystem {
         let target_stack_parent =
             target_parent.filter(|&parent| self.tiles.layout(parent).is_stacked());
 
+        // The target lies in the join's direction, so on a backwards join it comes first: first
+        // in the selection's stack, and first in a split made for the pair.
         let backwards = matches!(direction, Direction::Left | Direction::Up);
+        let in_order = |selection_side, target_side| {
+            if backwards {
+                (target_side, selection_side)
+            } else {
+                (selection_side, target_side)
+            }
+        };
         let join = match (selection_stack_parent, target_stack_parent) {
             (Some(stack), None) => Some((stack, target, backwards)),
             (None, Some(stack)) => Some((stack, selection, !backwards)),
@@ -179,13 +188,15 @@ impl TraditionalLayoutSystem {
                 return;
             }
             if sp != tp && self.are_containers_mergeable(sp, tp, direction) {
-                let parent = self.find_or_create_smart_common_parent(sp, tp, direction);
+                let (first, second) = in_order(sp, tp);
+                let parent = self.find_or_create_smart_common_parent(first, second, direction);
                 self.tiles.set_layout(parent, kind);
                 self.tiles.select(parent);
                 return;
             }
         }
-        let parent = self.find_or_create_smart_common_parent(selection, target, direction);
+        let (first, second) = in_order(selection, target);
+        let parent = self.find_or_create_smart_common_parent(first, second, direction);
         if !self.tiles.layout(parent).is_stacked() {
             self.tiles.set_layout(parent, kind);
         }
@@ -949,5 +960,69 @@ mod tests {
             assert_eq!(bar, expected_bar);
             assert_eq!(system.tiles.tree.map.kind(root), kind);
         }
+    }
+    /// The windows taking part in layout, left to right, with their widths.
+    fn shown_left_to_right(system: &TraditionalLayoutSystem, layout: LayoutId) -> Vec<(u32, i64)> {
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(3000., 800.));
+        let mut frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &Default::default(),
+            &Default::default(),
+            Default::default(),
+        );
+        frames.retain(|(window, _)| system.tiles.window_participates(*window));
+        frames.sort_by(|a, b| a.1.origin.x.total_cmp(&b.1.origin.x));
+        frames
+            .into_iter()
+            .map(|(window, frame)| (window.idx.get(), frame.size.width as i64))
+            .collect()
+    }
+
+    /// Windows added in `order`, with the `away` ones left out of layout.
+    fn side_by_side_with_away(order: &[WindowId]) -> (TraditionalLayoutSystem, LayoutId) {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for &window in order {
+            system.add_window_after_selection(layout, window);
+        }
+        for window in away() {
+            system.set_window_participation(window, false);
+        }
+        (system, layout)
+    }
+
+    /// Two windows of another app that are away (left out of layout).
+    fn away() -> [WindowId; 2] { [WindowId::new(958, 1), WindowId::new(958, 2)] }
+
+    fn join(system: &mut TraditionalLayoutSystem, layout: LayoutId, from: WindowId, to: Direction) {
+        system.focus(layout, Focus::Select(from));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(to)));
+    }
+
+    #[test]
+    fn joining_toward_the_left_keeps_the_pair_in_order() {
+        let (mut system, layout) = side_by_side_with_away(&[w(4), w(1), w(2)]);
+        let before = shown_left_to_right(&system, layout);
+        join(&mut system, layout, w(1), Direction::Left);
+        assert_eq!(shown_left_to_right(&system, layout), before);
+        let parent = |window| {
+            system
+                .tiles
+                .window_node(layout, window)
+                .and_then(|n| n.parent(system.tiles.map()))
+        };
+        assert_eq!(parent(w(4)), parent(w(1)), "4 and 1 are joined");
+    }
+
+    #[test]
+    fn away_windows_beside_a_split_do_not_reorder_a_later_join() {
+        let (mut system, layout) =
+            side_by_side_with_away(&[w(4), w(1), w(2), away()[0], away()[1]]);
+        let before = shown_left_to_right(&system, layout);
+        join(&mut system, layout, w(4), Direction::Right);
+        join(&mut system, layout, w(2), Direction::Left);
+        assert_eq!(shown_left_to_right(&system, layout), before);
     }
 }
