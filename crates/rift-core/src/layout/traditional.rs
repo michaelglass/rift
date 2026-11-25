@@ -494,21 +494,18 @@ pub fn stack_frames(
     };
     (0..count).map(move |index| {
         let shift = index as f64 * offset;
-        let (dx, dy) = if horizontal {
-            (shift, 0.0)
-        } else {
-            (0.0, shift)
-        };
         let w = window_w.min(container.w);
         let h = window_h.min(container.h);
         let max_x = (container.x + container.w - w).max(container.x);
         let max_y = (container.y + container.h - h).max(container.y);
-        round(Rect {
-            x: (container.x + dx).clamp(container.x, max_x),
-            y: (container.y + dy).clamp(container.y, max_y),
-            w,
-            h,
-        })
+        // Only the stack's own axis moves (as upstream's frames): the other coordinate is the
+        // container's as it is, so a -0.0 stays -0.0 (adding 0.0 would make it 0.0).
+        let (x, y) = if horizontal {
+            ((container.x + shift).clamp(container.x, max_x), container.y)
+        } else {
+            (container.x, (container.y + shift).clamp(container.y, max_y))
+        };
+        round(Rect { x, y, w, h })
     })
 }
 
@@ -516,6 +513,25 @@ pub fn stack_frames(
 mod tests {
     use super::*;
     use crate::layout::Size;
+
+    /// A stack's frames move only along the stack's axis: across it each frame keeps the
+    /// container's coordinate as it is, a -0.0 included (upstream's frames keep it; adding a 0.0
+    /// shift made it 0.0).
+    #[test]
+    fn a_stack_keeps_a_negative_zero_origin_across_its_axis() {
+        let rect = Rect {
+            x: -0.0,
+            y: -0.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        for horizontal in [false, true] {
+            for frame in stack_frames(rect, 3, 12.0, horizontal, StackLine::default()) {
+                let across = if horizontal { frame.y } else { frame.x };
+                assert_eq!(across.to_bits(), (-0.0f64).to_bits(), "horizontal {horizontal}");
+            }
+        }
+    }
 
     fn constraints(sizing: Sizing) -> WindowConstraints {
         WindowConstraints { sizing, ..Default::default() }

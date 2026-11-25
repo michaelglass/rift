@@ -185,15 +185,12 @@ Traditional := [].{
 	stack_frame = |layout, position| {
 		container = layout.container
 		shift = position.to_f64() * layout.offset
-		(dx, dy) = if (layout.horizontal) (shift, 0.0) else (0.0, shift)
 		max_x = max(container.x + container.w - layout.w, container.x)
 		max_y = max(container.y + container.h - layout.h, container.y)
-		round_rect(Rect.{
-			x: clamp(container.x + dx, container.x, max_x),
-			y: clamp(container.y + dy, container.y, max_y),
-			w: layout.w,
-			h: layout.h,
-		})
+		# Only the stack's own axis moves: the other coordinate is the container's as it is (a
+		# -0.0 stays -0.0).
+		(x, y) = if (layout.horizontal) (clamp(container.x + shift, container.x, max_x), container.y) else (container.x, clamp(container.y + shift, container.y, max_y))
+		round_rect(Rect.{ x, y, w: layout.w, h: layout.h })
 	}
 
 	place : Shape, Summarized, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
