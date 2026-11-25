@@ -64,6 +64,10 @@ required-features = ["roc"]
 name = "stack_tree"
 required-features = ["roc"]
 
+[[test]]
+name = "group_forest"
+required-features = ["roc"]
+
 [dependencies]
 rift-core = { path = "../rift-core" }
 libmimalloc-sys = { version = "0.1.39", optional = true }

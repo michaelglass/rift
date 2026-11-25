@@ -1060,6 +1060,144 @@ Boundary := [].{
 	## What an operation answers.
 	StackTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(StackSlot), Group(StackGroupAnswer), Focused(BspFocused), Edited(BspEdited)]
 
+	# The group forest (`rift_core::layout::group_forest`): the tree the traditional and
+	# master-stack systems share, and each system's settings and operations. Shared with the BSP
+	# tree and the stacks: orientations, directions, sides, the insertion point, participation,
+	# a window in a layout, a replacement, a native resize, the queries, focus, a pair, a layout
+	# slot (a layout's root node), an operation's answer (`BspTreeAnswer`).
+
+	## What a container does with its children (`Kind`): lays them out along an axis, or stacks
+	## them along one.
+	GroupKind := [Split(BspOrientation), Stack(BspOrientation)]
+
+	## A master-stack layout's two regions in order, and which is the master region.
+	GroupRegions := { first : U64, second : U64, primary : BspSide }
+
+	## A container's children (`Members`): an ordered list, or a region pair.
+	GroupMembers := [Children(List(U64)), Regions(GroupRegions)]
+
+	## Where a container's selection goes (`Memory`): nowhere remembered, on into a child, or it
+	## stops here remembering the child it came through.
+	GroupMemory := [Unset, Toward(U64), Stops(U64)]
+
+	GroupContainer := { kind : GroupKind, members : GroupMembers, memory : GroupMemory }
+
+	## A window leaf: the window, and the stamp taken when it entered the layout (the window
+	## index's order).
+	GroupLeaf := { window : U64, stamp : U64 }
+
+	## What a node is (`Body`).
+	GroupBody := [Window(GroupLeaf), Container(GroupContainer)]
+
+	## A container's child: its parent and its size among its siblings.
+	GroupChildPlace := { parent : U64, size : F32 }
+
+	## A node's place (`Place`): a root (or not placed yet), or a child.
+	GroupPlace := [Root, Child(GroupChildPlace)]
+
+	GroupTreeNode := { place : GroupPlace, fill : Fill, body : GroupBody }
+
+	GroupNodeHeld := { version : U32, node : GroupTreeNode }
+
+	## One slot of the node table: a node under an odd version, or vacant.
+	GroupNodeSlot := [Occupied(GroupNodeHeld), Vacant(U32)]
+
+	## A forest as the platform holds it (`Forest::from_parts`): each table's slots and free list
+	## (in taking order: the last first), the windows left out. The next stamp is derived.
+	GroupForestSeed := { layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(GroupNodeSlot), node_free : List(U32), left_out : List(U64) }
+
+	## The weight a window added next to the selection takes (`NewSibling`).
+	GroupNewSibling := [AverageWeight, HalvesSelection]
+
+	TraditionalSettings := { insertion : BspInsertion, new_sibling : GroupNewSibling }
+
+	## A traditional system as the platform holds it (`Traditional::from_parts`).
+	TraditionalSeed := { forest : GroupForestSeed, settings : TraditionalSettings }
+
+	## Which side of the screen the master region takes (`MasterSide`).
+	MasterSide := [Left, Right, Top, Bottom]
+
+	## Where a new window goes once the master region is full (`NewWindowPlacement`).
+	MasterPlacement := [Master, Stack, Focused]
+
+	## A region's orientation: across the root's, or fixed (`Arrangement`).
+	MasterArrangement := [Derived, Fixed(BspOrientation)]
+
+	## Where a new window goes within its region (`RegionInsertion`).
+	MasterInsertion := [NextToSelection, EndOfTree, Front]
+
+	MasterSettings := { insertion : MasterInsertion, ratio : F64, count : U64, side : MasterSide, placement : MasterPlacement, master : MasterArrangement, stack : MasterArrangement }
+
+	## A master-stack system as the platform holds it (`MasterStack::from_parts`).
+	MasterStackSeed := { forest : GroupForestSeed, settings : MasterSettings }
+
+	## What a dropped window does, of the actions that reach the forest (`DropAction`).
+	GroupDropAction := [Swap, Stack, Insert(BspDirection)]
+
+	GroupDrop := { source : U64, target : U64, action : GroupDropAction }
+
+	## An edit of a layout (`Edit`).
+	GroupEdit := [Moved(StackMove), Split(GroupKind), Fullscreen(BspFullscreen), Swap(BspPair), ReorderTab(StackTab), Drop(GroupDrop), Join(BspDirection), ConsumeOrExpel(BspDirection), Stack(StackDefault), Unstack(StackDefault), Unjoin, Resize(BspResize), Rebalance, ToggleOrientation]
+
+	GroupEditIn := { layout : U64, edit : GroupEdit }
+
+	## The forest's own operations and queries, the same in both systems (an app's windows
+	## listed, since Roc has no pid).
+	GroupForestEvent := [
+		CloneLayout(U64),
+		RemoveLayout(U64),
+		Participation(BspParticipation),
+		ReplaceWindow(BspReplacement),
+		ResizeWindow(BspNativeResize),
+		ContainsLayout(U64),
+		WindowParticipates(U64),
+		SelectedWindow(U64),
+		SelectionContainsWindow(BspWindowIn),
+		WindowInDirection(BspLayoutDirection),
+		ContainsWindow(BspWindowIn),
+		HasAnyFullscreenNode(U64),
+		HasWindowsForApp(BspAppIn),
+		ParentOfSelectionIsStacked(U64),
+		Windows(BspWindowsQuery),
+		WindowSlot(BspWindowIn),
+		Focus(BspFocusIn),
+	]
+
+	## Where a traditional system adds a window: next to the selection, or along a direction at
+	## the root's edge.
+	TraditionalToward := [AfterSelection, Toward(BspDirection)]
+
+	TraditionalAdd := { layout : U64, window : U64, toward : TraditionalToward }
+
+	## One operation of the traditional system (`Traditional`'s methods, one for one).
+	TraditionalEvent := [
+		Forest(GroupForestEvent),
+		CreateLayout,
+		Settings(TraditionalSettings),
+		AddWindow(TraditionalAdd),
+		RemoveWindow(U64),
+		RemoveAndRebalance(U64),
+		CloseApp(List(U64)),
+		CanMoveWindow(BspMoveQuery),
+		Edit(GroupEditIn),
+	]
+
+	## One operation of the master-stack system (`MasterStack`'s methods, one for one).
+	MasterStackEvent := [
+		Forest(GroupForestEvent),
+		CreateLayout,
+		Settings(MasterSettings),
+		AddWindow(BspWindowIn),
+		RemoveWindow(U64),
+		CloseApp(List(U64)),
+		AdjustRatio(F64),
+		AdjustCount(I32),
+		Promote(U64),
+		SwapMasterStack(U64),
+		CanMoveWindow(BspMoveQuery),
+		Edit(GroupEditIn),
+	]
+
 
 
 	## Where a claimed window returns to when its claim ends.

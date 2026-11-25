@@ -19,7 +19,7 @@ use crate::abi;
 use crate::bsp_tree::LayoutKey;
 use crate::stack_tree::{Answer, Event, Pass, Scope, StacksView};
 
-fn default_orientation(orientation: DefaultOrientation) -> abi::BoundaryStackDefault {
+pub(super) fn default_orientation(orientation: DefaultOrientation) -> abi::BoundaryStackDefault {
     match orientation {
         DefaultOrientation::Perpendicular => abi::BoundaryStackDefault::Perpendicular,
         DefaultOrientation::Same => abi::BoundaryStackDefault::Same,

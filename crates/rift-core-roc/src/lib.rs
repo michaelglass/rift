@@ -641,6 +641,88 @@ impl RocStackTree {
     }
 }
 
+/// A traditional layout system (`rift_core::layout::group_forest::Traditional`) kept in Roc
+/// between operations.
+pub struct RocTraditional {
+    system: boundary::group_forest::TraditionalBox,
+}
+
+// SAFETY: as `RocCore`: the box is owned, never shared, and only stepped through `&mut self`.
+unsafe impl Send for RocTraditional {}
+
+impl RocTraditional {
+    /// As `Traditional::new`.
+    pub fn new(
+        insertion: rift_core::layout::group_forest::InsertionPoint,
+        new_sibling: rift_core::layout::group_forest::NewSibling,
+    ) -> Self {
+        RocTraditional {
+            system: boundary::group_forest::TraditionalBox::new(insertion, new_sibling),
+        }
+    }
+
+    /// The system `view` holds, as `Traditional::from_parts` takes it: `view` must be one
+    /// [`group_forest::TraditionalView::traditional`] parses (a Rust system's view, or a load's).
+    pub fn seeded(view: &group_forest::TraditionalView) -> Self {
+        let host = host();
+        RocTraditional {
+            system: boundary::group_forest::TraditionalBox::seeded(view, &host),
+        }
+    }
+
+    /// One operation, as [`group_forest::step_traditional`] applies it to a `Traditional`.
+    pub fn step(&mut self, event: group_forest::TraditionalEvent) -> group_forest::Answer {
+        let host = host();
+        boundary::in_place(&mut self.system, |system| system.step(event, &host))
+    }
+
+    /// The whole system, as [`group_forest::TraditionalView::from`] reads a `Traditional`.
+    pub fn view(&mut self) -> group_forest::TraditionalView {
+        let host = host();
+        boundary::in_place(&mut self.system, |system| system.view(&host))
+    }
+}
+
+/// A master-stack layout system (`rift_core::layout::group_forest::MasterStack`) kept in Roc
+/// between operations.
+pub struct RocMasterStack {
+    system: boundary::group_forest::MasterStackBox,
+}
+
+// SAFETY: as `RocCore`: the box is owned, never shared, and only stepped through `&mut self`.
+unsafe impl Send for RocMasterStack {}
+
+impl RocMasterStack {
+    /// As `MasterStack::new`.
+    pub fn new(settings: rift_core::layout::group_forest::MasterSettings) -> Self {
+        RocMasterStack {
+            system: boundary::group_forest::MasterStackBox::new(settings),
+        }
+    }
+
+    /// The system `view` holds, as `MasterStack::from_parts` takes it: `view` must be one
+    /// [`group_forest::MasterStackView::master_stack`] parses (a Rust system's view, or a
+    /// load's).
+    pub fn seeded(view: &group_forest::MasterStackView) -> Self {
+        let host = host();
+        RocMasterStack {
+            system: boundary::group_forest::MasterStackBox::seeded(view, &host),
+        }
+    }
+
+    /// One operation, as [`group_forest::step_master_stack`] applies it to a `MasterStack`.
+    pub fn step(&mut self, event: group_forest::MasterStackEvent) -> group_forest::Answer {
+        let host = host();
+        boundary::in_place(&mut self.system, |system| system.step(event, &host))
+    }
+
+    /// The whole system, as [`group_forest::MasterStackView::from`] reads a `MasterStack`.
+    pub fn view(&mut self) -> group_forest::MasterStackView {
+        let host = host();
+        boundary::in_place(&mut self.system, |system| system.view(&host))
+    }
+}
+
 /// The stack system's operations and view, on plain keys, and the Rust system they are held to.
 pub mod stack_tree {
     use rift_core::layout::stack_tree::{
@@ -829,6 +911,321 @@ pub mod stack_tree {
                 orientation: stacks.orientation(),
                 insertion: stacks.insertion(),
                 left_out: stacks.left_out().iter().copied().collect(),
+            }
+        }
+    }
+}
+
+/// The group forest's systems (traditional and master-stack) on plain keys, their operations and
+/// views, and the Rust systems they are held to.
+pub mod group_forest {
+    use rift_core::layout::group_forest::{
+        Direction, Edit, Focus, InsertionPoint, MasterSettings, NewSibling, Node, Participation,
+        Query, Resize,
+    };
+    use rift_core::slot_table::{SlotKey, SlotTable, SlotsError};
+
+    use crate::bsp_tree::Saved;
+    pub use crate::bsp_tree::{Answer, LayoutKey, NodeKey};
+
+    /// The Rust forest, on plain keys and windows as words.
+    pub type Forest = rift_core::layout::group_forest::Forest<LayoutKey, NodeKey, u64>;
+
+    /// The Rust traditional system.
+    pub type Traditional = rift_core::layout::group_forest::Traditional<LayoutKey, NodeKey, u64>;
+
+    /// The Rust master-stack system.
+    pub type MasterStack = rift_core::layout::group_forest::MasterStack<LayoutKey, NodeKey, u64>;
+
+    /// The forest's own operations and queries, the same in both systems (an app's windows
+    /// listed, which the predicates tell).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ForestEvent {
+        CloneLayout(LayoutKey),
+        RemoveLayout(LayoutKey),
+        Participation(u64, Participation),
+        ReplaceWindow { from: u64, to: u64 },
+        ResizeWindow(LayoutKey, u64, Resize),
+        ContainsLayout(LayoutKey),
+        WindowParticipates(u64),
+        SelectedWindow(LayoutKey),
+        SelectionContainsWindow(LayoutKey, u64),
+        WindowInDirection(LayoutKey, Direction),
+        ContainsWindow(LayoutKey, u64),
+        HasAnyFullscreenNode(LayoutKey),
+        HasWindowsForApp(LayoutKey, Vec<u64>),
+        ParentOfSelectionIsStacked(LayoutKey),
+        Windows(LayoutKey, Query<u64>),
+        WindowSlot(LayoutKey, u64),
+        Focus(LayoutKey, Focus<u64>),
+    }
+
+    /// One operation of the traditional system (`Traditional`'s methods, one for one).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum TraditionalEvent {
+        Forest(ForestEvent),
+        CreateLayout,
+        Settings(InsertionPoint, NewSibling),
+        /// A window added next to the selection, or along a direction at the root's edge.
+        AddWindow(LayoutKey, u64, Option<Direction>),
+        RemoveWindow(u64),
+        RemoveAndRebalance(u64),
+        CloseApp(Vec<u64>),
+        CanMoveWindow(LayoutKey, u64, Direction),
+        Edit(LayoutKey, Edit<u64>),
+    }
+
+    /// One operation of the master-stack system (`MasterStack`'s methods, one for one).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum MasterStackEvent {
+        Forest(ForestEvent),
+        CreateLayout,
+        Settings(MasterSettings),
+        AddWindow(LayoutKey, u64),
+        RemoveWindow(u64),
+        CloseApp(Vec<u64>),
+        AdjustRatio(f64),
+        AdjustCount(i32),
+        Promote(LayoutKey),
+        SwapMasterStack(LayoutKey),
+        CanMoveWindow(LayoutKey, u64, Direction),
+        Edit(LayoutKey, Edit<u64>),
+    }
+
+    /// A forest event applied to either system (both delegate the same methods to the forest).
+    macro_rules! forest_step {
+        ($system:expr, $event:expr) => {{
+            let system = $system;
+            match $event {
+                ForestEvent::CloneLayout(layout) => Answer::Layout(system.clone_layout(layout)),
+                ForestEvent::RemoveLayout(layout) => {
+                    system.remove_layout(layout);
+                    Answer::Done
+                }
+                ForestEvent::Participation(window, participation) => {
+                    Answer::Participated(system.set_window_participation(window, participation))
+                }
+                ForestEvent::ReplaceWindow { from, to } => {
+                    system.replace_window(from, to);
+                    Answer::Done
+                }
+                ForestEvent::ResizeWindow(layout, window, resize) => {
+                    system.resize_window(layout, window, resize);
+                    Answer::Done
+                }
+                ForestEvent::Focus(layout, focus) => Answer::Focused(system.focus(layout, focus)),
+                query => query_answer(system.forest(), query),
+            }
+        }};
+    }
+
+    /// A forest query's answer.
+    fn query_answer(forest: &Forest, query: ForestEvent) -> Answer {
+        match query {
+            ForestEvent::ContainsLayout(layout) => Answer::Verdict(forest.contains_layout(layout)),
+            ForestEvent::WindowParticipates(window) => {
+                Answer::Verdict(forest.window_participates(window))
+            }
+            ForestEvent::SelectedWindow(layout) => Answer::Window(forest.selected_window(layout)),
+            ForestEvent::SelectionContainsWindow(layout, window) => {
+                Answer::Verdict(forest.selection_contains_window(layout, window))
+            }
+            ForestEvent::WindowInDirection(layout, direction) => {
+                Answer::Window(forest.window_in_direction(layout, direction))
+            }
+            ForestEvent::ContainsWindow(layout, window) => {
+                Answer::Verdict(forest.contains_window(layout, window))
+            }
+            ForestEvent::HasAnyFullscreenNode(layout) => {
+                Answer::Verdict(forest.has_any_fullscreen_node(layout))
+            }
+            ForestEvent::HasWindowsForApp(layout, windows) => Answer::Verdict(
+                forest.has_windows_for_app(layout, |window| windows.contains(&window)),
+            ),
+            ForestEvent::ParentOfSelectionIsStacked(layout) => {
+                Answer::Verdict(forest.parent_of_selection_is_stacked(layout))
+            }
+            ForestEvent::Windows(layout, query) => Answer::Windows(forest.windows(layout, query)),
+            ForestEvent::WindowSlot(layout, window) => {
+                Answer::WindowSlot(forest.window_slot(layout, window))
+            }
+            ForestEvent::CloneLayout(_)
+            | ForestEvent::RemoveLayout(_)
+            | ForestEvent::Participation(..)
+            | ForestEvent::ReplaceWindow { .. }
+            | ForestEvent::ResizeWindow(..)
+            | ForestEvent::Focus(..) => unreachable!("forest_step applies the forest's changes"),
+        }
+    }
+
+    /// `event` applied to the Rust traditional system, and what it answers.
+    pub fn step_traditional(system: &mut Traditional, event: TraditionalEvent) -> Answer {
+        match event {
+            TraditionalEvent::Forest(event) => forest_step!(system, event),
+            TraditionalEvent::CreateLayout => Answer::Layout(system.create_layout()),
+            TraditionalEvent::Settings(insertion, new_sibling) => {
+                system.set_window_insertion_point(insertion);
+                system.set_new_sibling(new_sibling);
+                Answer::Done
+            }
+            TraditionalEvent::AddWindow(layout, window, toward) => {
+                system.add_window(layout, window, toward);
+                Answer::Done
+            }
+            TraditionalEvent::RemoveWindow(window) => {
+                system.remove_window(window);
+                Answer::Done
+            }
+            TraditionalEvent::RemoveAndRebalance(window) => {
+                system.remove_and_rebalance(window);
+                Answer::Done
+            }
+            TraditionalEvent::CloseApp(windows) => {
+                system.close_app(|window| windows.contains(&window));
+                Answer::Done
+            }
+            TraditionalEvent::CanMoveWindow(layout, window, direction) => {
+                Answer::Verdict(system.can_move_window(layout, window, direction))
+            }
+            TraditionalEvent::Edit(layout, edit) => Answer::Edited(system.edit(layout, edit)),
+        }
+    }
+
+    /// `event` applied to the Rust master-stack system, and what it answers.
+    pub fn step_master_stack(system: &mut MasterStack, event: MasterStackEvent) -> Answer {
+        match event {
+            MasterStackEvent::Forest(event) => forest_step!(system, event),
+            MasterStackEvent::CreateLayout => Answer::Layout(system.create_layout()),
+            MasterStackEvent::Settings(settings) => {
+                system.update_settings(settings);
+                Answer::Done
+            }
+            MasterStackEvent::AddWindow(layout, window) => {
+                system.add_window(layout, window);
+                Answer::Done
+            }
+            MasterStackEvent::RemoveWindow(window) => {
+                system.remove_window(window);
+                Answer::Done
+            }
+            MasterStackEvent::CloseApp(windows) => {
+                system.close_app(|window| windows.contains(&window));
+                Answer::Done
+            }
+            MasterStackEvent::AdjustRatio(delta) => {
+                system.adjust_master_ratio(delta);
+                Answer::Done
+            }
+            MasterStackEvent::AdjustCount(delta) => {
+                system.adjust_master_count(delta);
+                Answer::Done
+            }
+            MasterStackEvent::Promote(layout) => {
+                system.promote_to_master(layout);
+                Answer::Done
+            }
+            MasterStackEvent::SwapMasterStack(layout) => {
+                system.swap_master_stack(layout);
+                Answer::Done
+            }
+            MasterStackEvent::CanMoveWindow(layout, window, direction) => {
+                Answer::Verdict(system.can_move_window(layout, window, direction))
+            }
+            MasterStackEvent::Edit(layout, edit) => Answer::Edited(system.edit(layout, edit)),
+        }
+    }
+
+    fn saved<K: SlotKey, V: Clone>(table: &SlotTable<K, V>) -> Vec<Saved<V>> {
+        table
+            .saved()
+            .map(|(held, version)| (held.map(|(_, value)| value.clone()), version))
+            .collect()
+    }
+
+    /// A whole forest, comparable: each table's slots and free list, the windows left out in
+    /// order (stamps are on the leaves; the next stamp is derived from them).
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ForestView {
+        pub layouts: Vec<Saved<NodeKey>>,
+        pub layout_free: Vec<u32>,
+        pub nodes: Vec<Saved<Node<NodeKey, u64>>>,
+        pub node_free: Vec<u32>,
+        pub left_out: Vec<u64>,
+    }
+
+    impl ForestView {
+        /// The Rust forest this view holds, its tables parsed as slotmap reads them (refused as
+        /// slotmap refuses them, or when a free list is not the table's vacant slots).
+        pub fn forest(&self) -> Result<Forest, SlotsError> {
+            let taking = |free: &[u32]| free.iter().rev().copied().collect::<Vec<u32>>();
+            Ok(Forest::from_parts(
+                SlotTable::parse(self.layouts.clone())?.resumed(&taking(&self.layout_free))?,
+                SlotTable::parse(self.nodes.clone())?.resumed(&taking(&self.node_free))?,
+                self.left_out.iter().copied().collect(),
+            ))
+        }
+    }
+
+    impl From<&Forest> for ForestView {
+        fn from(forest: &Forest) -> Self {
+            ForestView {
+                layouts: saved(forest.layout_table()),
+                layout_free: forest.layout_table().free().to_vec(),
+                nodes: saved(forest.nodes()),
+                node_free: forest.nodes().free().to_vec(),
+                left_out: forest.left_out().iter().copied().collect(),
+            }
+        }
+    }
+
+    /// A whole traditional system, comparable.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TraditionalView {
+        pub forest: ForestView,
+        pub insertion: InsertionPoint,
+        pub new_sibling: NewSibling,
+    }
+
+    impl TraditionalView {
+        /// The Rust system this view holds (refused as [`ForestView::forest`] refuses).
+        pub fn traditional(&self) -> Result<Traditional, SlotsError> {
+            Ok(Traditional::from_parts(
+                self.forest.forest()?,
+                self.insertion,
+                self.new_sibling,
+            ))
+        }
+    }
+
+    impl From<&Traditional> for TraditionalView {
+        fn from(system: &Traditional) -> Self {
+            TraditionalView {
+                forest: ForestView::from(system.forest()),
+                insertion: system.insertion(),
+                new_sibling: system.new_sibling(),
+            }
+        }
+    }
+
+    /// A whole master-stack system, comparable.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct MasterStackView {
+        pub forest: ForestView,
+        pub settings: MasterSettings,
+    }
+
+    impl MasterStackView {
+        /// The Rust system this view holds (refused as [`ForestView::forest`] refuses).
+        pub fn master_stack(&self) -> Result<MasterStack, SlotsError> {
+            Ok(MasterStack::from_parts(self.forest.forest()?, self.settings))
+        }
+    }
+
+    impl From<&MasterStack> for MasterStackView {
+        fn from(system: &MasterStack) -> Self {
+            MasterStackView {
+                forest: ForestView::from(system.forest()),
+                settings: system.settings(),
             }
         }
     }

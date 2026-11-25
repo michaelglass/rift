@@ -4249,3 +4249,8 @@ impl Drop for BspTreeBox {
 // The stack layout system's stacks.
 
 pub(crate) mod stack_tree;
+
+// ---------------------------------------------------------------------------------------------
+// The group forest's traditional and master-stack layout systems.
+
+pub(crate) mod group_forest;

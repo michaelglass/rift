@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -72,6 +72,14 @@ platform ""
 			stack_tree_step : stacks, StackTreeEvent -> { model : stacks, answer : StackTreeAnswer },
 			stack_tree_view : stacks -> { model : stacks, layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) },
 			stack_tree_frames : stacks, StackFramesQuestion -> { model : stacks, frames : List(Frame) },
+			traditional_tree_init : TraditionalSettings -> traditionals,
+			traditional_tree_seed : TraditionalSeed -> traditionals,
+			traditional_tree_step : traditionals, TraditionalEvent -> { model : traditionals, answer : BspTreeAnswer },
+			traditional_tree_view : traditionals -> { model : traditionals, view : TraditionalSeed },
+			master_stack_init : MasterSettings -> masters,
+			master_stack_seed : MasterStackSeed -> masters,
+			master_stack_step : masters, MasterStackEvent -> { model : masters, answer : BspTreeAnswer },
+			master_stack_view : masters -> { model : masters, view : MasterStackSeed },
 		}
 	}
 	exposes [Boundary]
@@ -105,6 +113,16 @@ platform ""
 		"roc_stack_tree_view": stack_tree_view_for_host,
 		"roc_stack_tree_frames": stack_tree_frames_for_host,
 		"roc_stack_tree_release": stack_tree_release_for_host,
+		"roc_traditional_tree_init": traditional_tree_init_for_host,
+		"roc_traditional_tree_seed": traditional_tree_seed_for_host,
+		"roc_traditional_tree_step": traditional_tree_step_for_host,
+		"roc_traditional_tree_view": traditional_tree_view_for_host,
+		"roc_traditional_tree_release": traditional_tree_release_for_host,
+		"roc_master_stack_init": master_stack_init_for_host,
+		"roc_master_stack_seed": master_stack_seed_for_host,
+		"roc_master_stack_step": master_stack_step_for_host,
+		"roc_master_stack_view": master_stack_view_for_host,
+		"roc_master_stack_release": master_stack_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
@@ -157,7 +175,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -210,6 +228,18 @@ StackTreeViewed := { model : Box(Stacks), layouts : List(StackLayoutSlot), layou
 
 ## A stack layout system's stacks, unchanged, and a layout's frames.
 StackTreeFramed := { model : Box(Stacks), frames : List(Frame) }
+
+## A traditional layout system's forest after an operation, and what it answered.
+TraditionalTreeStepped := { model : Box(Traditionals), answer : BspTreeAnswer }
+
+## A traditional layout system, unchanged, and the system as the platform holds it.
+TraditionalTreeViewed := { model : Box(Traditionals), view : TraditionalSeed }
+
+## A master-stack layout system's forest after an operation, and what it answered.
+MasterStackStepped := { model : Box(Masters), answer : BspTreeAnswer }
+
+## A master-stack layout system, unchanged, and the system as the platform holds it.
+MasterStackViewed := { model : Box(Masters), view : MasterStackSeed }
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -557,3 +587,57 @@ stack_tree_release_for_host = |_| {}
 ## Rust's `value as f32`.
 narrow_for_host : F64 -> F32
 narrow_for_host = |value| (core.narrow)(value)
+
+## A traditional layout system (`rift_core::layout::group_forest::Traditional`), kept between
+## operations: no layouts, no windows left out.
+traditional_tree_init_for_host : TraditionalSettings -> Box(Traditionals)
+traditional_tree_init_for_host = |settings| Box.box((core.traditional_tree_init)(settings))
+
+## A traditional layout system as the platform holds it (the host parses it first).
+traditional_tree_seed_for_host : TraditionalSeed -> Box(Traditionals)
+traditional_tree_seed_for_host = |seed| Box.box((core.traditional_tree_seed)(seed))
+
+## One operation of the system: the forest after it, and what it answered.
+traditional_tree_step_for_host : Box(Traditionals), TraditionalEvent -> TraditionalTreeStepped
+traditional_tree_step_for_host = |boxed, event| {
+	stepped = (core.traditional_tree_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), answer: stepped.answer }
+}
+
+## The system as the platform holds it, and the system back unchanged.
+traditional_tree_view_for_host : Box(Traditionals) -> TraditionalTreeViewed
+traditional_tree_view_for_host = |boxed| {
+	viewed = (core.traditional_tree_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), view: viewed.view }
+}
+
+## The host cannot release a `Box(Traditionals)`: only Roc knows its layout.
+traditional_tree_release_for_host : Box(Traditionals) -> {}
+traditional_tree_release_for_host = |_| {}
+
+## A master-stack layout system (`rift_core::layout::group_forest::MasterStack`), kept between
+## operations: no layouts, no windows left out.
+master_stack_init_for_host : MasterSettings -> Box(Masters)
+master_stack_init_for_host = |settings| Box.box((core.master_stack_init)(settings))
+
+## A master-stack layout system as the platform holds it (the host parses it first).
+master_stack_seed_for_host : MasterStackSeed -> Box(Masters)
+master_stack_seed_for_host = |seed| Box.box((core.master_stack_seed)(seed))
+
+## One operation of the system: the forest after it, and what it answered.
+master_stack_step_for_host : Box(Masters), MasterStackEvent -> MasterStackStepped
+master_stack_step_for_host = |boxed, event| {
+	stepped = (core.master_stack_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), answer: stepped.answer }
+}
+
+## The system as the platform holds it, and the system back unchanged.
+master_stack_view_for_host : Box(Masters) -> MasterStackViewed
+master_stack_view_for_host = |boxed| {
+	viewed = (core.master_stack_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), view: viewed.view }
+}
+
+## The host cannot release a `Box(Masters)`: only Roc knows its layout.
+master_stack_release_for_host : Box(Masters) -> {}
+master_stack_release_for_host = |_| {}
