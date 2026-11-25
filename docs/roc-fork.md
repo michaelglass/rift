@@ -9,17 +9,54 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slices 1-3 done): read this first
+## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slices 1-4 done): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
-BSP (all five). `rearch/roc-next@fork` carries everything through this docs commit once it is published
-(publish procedure: "Rulings that bind", Public-clean; the published tip's id is in the slice
-report). All checks green at the tip: workspace tests 1028 (4 ignored), the lib with `roc-core`
-906 (5 ignored), `cargo test -p rift-core-roc --features roc` 51 (9 ignored), `cargo test -p
-rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and
-`cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
-counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
-grep -v generated | wc -l` (the bound: at most 336).
+BSP (all five), slices 1-4 for the stack. `rearch/roc-next@fork` carries everything through this
+docs commit once it is published (publish procedure: "Rulings that bind", Public-clean; the
+published tip's id is in the slice report). All checks green at the tip: workspace tests 1038 (5
+ignored), the lib with `roc-core` 917 (7 ignored), `cargo test -p rift-core-roc --features roc`
+52 (9 ignored), `cargo test -p rift-core` 107, the fuzzer at 2000 × 40 both ways, `cargo check
+--locked` both ways, fmt, and `cargo clippy --all-targets --features roc-core` compiles with no
+errors and 331 warnings, counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep
+-E '^(warning|error)' | grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, the stack, slice 4, done: under `roc-core` the Roc stacks decide** (BSP's 4b).
+Two commits after the slice 3 docs commit; each message has its plants, checks and costs.
+- **`Stacks::shape` in Roc** (`StackTree.shape`): the words become the geometry's `WindowId`
+  there, a member's weight its share through `Geometry.narrow`; a layout the system does not
+  hold crashes (`stack_at`), as Rust's `Index` panics. `stack_tree_frames`
+  (`RocStackTree::frames`) answers a layout's frames from that shape through the Roc traditional
+  geometry; the question (`StackFramesQuestion`) carries a `Pass` (screen, gaps, stack offset,
+  stack line) and every known window's constraints by word (`BspKnown`, shared). The
+  rift-core-roc differential gains layout passes on 40% of steps (live layouts only): 191,836
+  identical bit for bit with the Rust shape through the Rust geometry. Plants 13/15, two
+  equivalent (below).
+- **A stack member's weight reaches no frame:** the traditional geometry reads a child's size
+  only on an axis, and a stack layout is a stack of windows. So a weight plant is equivalent
+  through frames; slice 3's weight plant is caught since the Roc stacks decide, through the
+  Rust stacks re-seeded from the Roc view (upstream, holding the saved weight, then differs).
+  Also equivalent: a `WithinGaps` stack passed through to the shape (at the root it places at
+  the tiling area, the root's own rect).
+- **Under `roc-core` the Roc stacks and their shape decide** (`systems/stack/roc_stacks.rs`,
+  `RocStacks`, in `StackLayoutSystem` beside the core): every answer is the Roc stacks' (parsed
+  back; an answer of another kind falls back to the Rust stacks', already reported), and
+  `calculate_layout` gives the Roc stacks' frames (`decide_stack_tree`), with the Rust geometry's
+  frames for the Rust stacks' shape and upstream's the shadows. The Rust stacks are the Roc
+  stacks' shadow: answer and whole view compared on every operation, a difference counted
+  (`roc-core: stack tree re-seeds`), panicking in tests, or warned `roc-divergence:` and the Rust
+  stacks re-seeded from the Roc view (`core_of`). Upstream stays the Rust stacks' shadow. Saving
+  stays from the Rust stacks. Plants 15/15. The drawn fuzzer re-seeds the Rust stacks from the
+  Roc view on 4% of its steps.
+- **Cost (release, `roc-core`, `measure_stack_roc_stacks`, 10 / 100 / 1000 windows):** a Roc
+  layout pass 4.2 / 29 / 142 us against the Rust shape and geometry 1.9 / 8.3 / 30 us (a
+  `roc-core` pass pays both); the Roc step 0.53 / 1.7 / 10.9 us, the view comparison 0.61 / 0.80 /
+  1.9 us, a Rust re-seed from the Roc view 0.24 / 0.32 / 0.66 us.
+- **Next: slice 5** deletes `Upstream`: the legacy forest load and the slice 1 normalizations
+  move to a `systems/stack/stored.rs` building the core first (as BSP's), the saved form held to
+  fixtures byte for byte; upstream's unit tests retargeted to the system; the shadow plumbing
+  deleted; costs re-measured. Then the group forest (traditional and master-stack) waits for the
+  lead's go.
 
 **Layout trees, the stack, slice 3, done: the flip (policy (a)).** Four commits after the slice 2
 docs commit; each message has its plants, checks and costs. At the tip: workspace tests 1038
