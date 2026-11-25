@@ -21,8 +21,20 @@ and `cargo clippy --all-targets --features roc-core` compiles with no errors and
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
 
-**Next: the group forest** (traditional and master-stack, one core tree; the lead's plan above
-the stack's slices) **waits for the lead's go.**
+**Next: the group forest** (traditional and master-stack as one core tree, each system a thin
+shim over it; the lead's go, 2026-11-25): the same five slices and rules as the stack's, the QA
+lessons as in the plan above the stack's slices; report at each slice end, stop on design
+questions. Start from "What the code shows" there (`groups.rs`, `tiles.rs`, `model/tree.rs`,
+the saved window index ruling).
+
+**A stack member's weight (the lead asked for its readers, 2026-11-25): kept on the core's
+members.** Readers beyond the saved form: rift-cli's drawing (`draw_tree`) and container view
+(`container_tree`, `ContainerTreeNode.weight`), both IPC output; nothing inside rift reads the
+protocol's field. The shape passes it as a child's size, which the stack geometry ignores; a
+layout-mode switch re-adds windows in order and carries no weights; no operation writes it
+(new members get 1.0, only the legacy forest writes others). Moving it to the `stored.rs`
+boundary would make the IPC views report 1.0 (or none) and stop legacy-derived files saving
+back byte for byte, so it waits for the lead's ruling (reported with the proposed change).
 
 **Layout trees, the stack, slice 5, done: upstream's stack system deleted.** Three commits after
 the slice 4 docs commit; each message has its plants, checks and costs.
