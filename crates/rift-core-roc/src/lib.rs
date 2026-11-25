@@ -681,6 +681,59 @@ impl RocTraditional {
         let host = host();
         boundary::in_place(&mut self.system, |system| system.view(&host))
     }
+
+    /// A layout's frames: the forest's own shape for it (as `Forest::shape` builds it, with the
+    /// constraints in `known`, by window word) through the Roc traditional geometry; none when
+    /// nothing takes part. A layout the system does not hold is a broken system (Roc crashes, as
+    /// `Forest::shape` panics).
+    pub fn frames(
+        &mut self,
+        layout: group_forest::LayoutKey,
+        pass: group_forest::Pass,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+    ) -> Vec<(WindowId, Rect)> {
+        let host = host();
+        let question = boundary::group_forest::frames_question(layout, pass, known, &host);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_frames)
+        })
+    }
+
+    /// A layout pass with its group bars, as `Forest::project` gives them.
+    pub fn project(
+        &mut self,
+        layout: group_forest::LayoutKey,
+        pass: group_forest::Pass,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+        bars: group_forest::Bars,
+    ) -> group_forest::Projected {
+        let host = host();
+        let question = boundary::group_forest::project_question(layout, pass, known, bars, &host);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_projected)
+        })
+    }
+
+    /// A layout's container view, as `Forest::container_view` gives it.
+    pub fn container_view(
+        &mut self,
+        layout: group_forest::LayoutKey,
+    ) -> group_forest::ContainerView {
+        let host = host();
+        let question = boundary::group_forest::container_question(layout);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_container)
+        })
+    }
+
+    /// A layout's drawing as rows, as `Forest::rows` gives them.
+    pub fn rows(&mut self, layout: group_forest::LayoutKey) -> Vec<group_forest::Row> {
+        let host = host();
+        let question = boundary::group_forest::draw_question(layout);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_rows)
+        })
+    }
 }
 
 /// A master-stack layout system (`rift_core::layout::group_forest::MasterStack`) kept in Roc
@@ -720,6 +773,59 @@ impl RocMasterStack {
     pub fn view(&mut self) -> group_forest::MasterStackView {
         let host = host();
         boundary::in_place(&mut self.system, |system| system.view(&host))
+    }
+
+    /// A layout's frames: the forest's own shape for it (as `Forest::shape` builds it, with the
+    /// constraints in `known`, by window word) through the Roc traditional geometry; none when
+    /// nothing takes part. A layout the system does not hold is a broken system (Roc crashes, as
+    /// `Forest::shape` panics).
+    pub fn frames(
+        &mut self,
+        layout: group_forest::LayoutKey,
+        pass: group_forest::Pass,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+    ) -> Vec<(WindowId, Rect)> {
+        let host = host();
+        let question = boundary::group_forest::frames_question(layout, pass, known, &host);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_frames)
+        })
+    }
+
+    /// A layout pass with its group bars, as `Forest::project` gives them.
+    pub fn project(
+        &mut self,
+        layout: group_forest::LayoutKey,
+        pass: group_forest::Pass,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+        bars: group_forest::Bars,
+    ) -> group_forest::Projected {
+        let host = host();
+        let question = boundary::group_forest::project_question(layout, pass, known, bars, &host);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_projected)
+        })
+    }
+
+    /// A layout's container view, as `Forest::container_view` gives it.
+    pub fn container_view(
+        &mut self,
+        layout: group_forest::LayoutKey,
+    ) -> group_forest::ContainerView {
+        let host = host();
+        let question = boundary::group_forest::container_question(layout);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_container)
+        })
+    }
+
+    /// A layout's drawing as rows, as `Forest::rows` gives them.
+    pub fn rows(&mut self, layout: group_forest::LayoutKey) -> Vec<group_forest::Row> {
+        let host = host();
+        let question = boundary::group_forest::draw_question(layout);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_rows)
+        })
     }
 }
 
@@ -919,6 +1025,7 @@ pub mod stack_tree {
 /// The group forest's systems (traditional and master-stack) on plain keys, their operations and
 /// views, and the Rust systems they are held to.
 pub mod group_forest {
+    pub use rift_core::layout::group_forest::{Bars, Pass};
     use rift_core::layout::group_forest::{
         Direction, Edit, Focus, InsertionPoint, MasterSettings, NewSibling, Node, Participation,
         Query, Resize,
@@ -927,6 +1034,19 @@ pub mod group_forest {
 
     use crate::bsp_tree::Saved;
     pub use crate::bsp_tree::{Answer, LayoutKey, NodeKey};
+
+    /// A layout's container view, on plain keys and windows as words.
+    pub type ContainerView = rift_core::layout::group_forest::ContainerView<NodeKey, u64>;
+
+    /// One row of a layout's drawing, on plain keys and windows as words.
+    pub type Row = rift_core::layout::group_forest::Row<NodeKey, u64>;
+
+    /// A layout pass's frames (the geometry's windows) and its group bars, each in tree order.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Projected {
+        pub frames: Vec<(rift_core::plain::WindowId, rift_core::plain::Rect)>,
+        pub bars: Vec<rift_core::layout::group_forest::GroupBar<NodeKey, u64>>,
+    }
 
     /// The Rust forest, on plain keys and windows as words.
     pub type Forest = rift_core::layout::group_forest::Forest<LayoutKey, NodeKey, u64>;

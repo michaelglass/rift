@@ -1112,6 +1112,57 @@ Boundary := [].{
 
 	TraditionalSettings := { insertion : BspInsertion, new_sibling : GroupNewSibling }
 
+	## Which stacks a layout pass gives a group bar (`Bars`).
+	GroupBars := [Every, SelectionPath]
+
+	## A layout pass with its group bars (`Forest::project`).
+	GroupProjectQuestion := { pass : StackFramesQuestion, bars : GroupBars }
+
+	## What a group forest system is asked about a layout: its frames (`Forest::shape`, then the
+	## traditional geometry), a pass with its group bars, the container view, or the drawing (each
+	## of the last two by the layout's key).
+	GroupLayoutQuestion := [Frames(StackFramesQuestion), Project(GroupProjectQuestion), Container(U64), Draw(U64)]
+
+	## A stack's group bar (`GroupBar`): the stack, its orientation, its frame, a window for each
+	## child holding one that takes part, and which of them is the focused child's.
+	GroupBar := { stack : U64, orientation : BspOrientation, frame : Rect, windows : List(U64), selected : U64 }
+
+	## A layout pass's frames and its group bars, each in tree order (`Projected`).
+	GroupProjected := { frames : List(Frame), bars : List(GroupBar) }
+
+	## What a node plays in a layout's views (`Role`).
+	GroupRole := [Plain, Master, Stack]
+
+	## A node's size among its siblings, none at the root.
+	GroupWeight := [AtRoot, Weight(F32)]
+
+	## A container in the container view: its kind and its children's views.
+	GroupViewContainer := { kind : GroupKind, children : List(GroupContainerView) }
+
+	## What a node of the container view holds (`Held`).
+	GroupViewHeld := [Window(U64), Container(GroupViewContainer)]
+
+	## A node as rift's container view shows it (`ContainerView`).
+	GroupContainerView := { node : U64, selected : Bool, weight : GroupWeight, fill : Fill, role : GroupRole, held : GroupViewHeld }
+
+	## A glyph leading to a drawn row (`Branch`).
+	GroupBranch := [Blank, Last, Through, Tee]
+
+	## Whether a drawn row's node is its parent's selection (`Mark`).
+	GroupMark := [Root, Chosen, NotChosen]
+
+	## A drawn container: its kind and its children's total size.
+	GroupDrawnContainer := { kind : GroupKind, total : F32 }
+
+	## What a drawn row shows of its node (`Drawn`).
+	GroupDrawn := [Window(U64), Container(GroupDrawnContainer)]
+
+	## One node of a layout's drawing (`Row`).
+	GroupRow := { branches : List(GroupBranch), mark : GroupMark, node : U64, held : GroupDrawn, size : F32, role : GroupRole }
+
+	## A group forest layout question's answer.
+	GroupLayoutAnswer := [Frames(List(Frame)), Projected(GroupProjected), Container(GroupContainerView), Drawn(List(GroupRow))]
+
 	## A traditional system as the platform holds it (`Traditional::from_parts`).
 	TraditionalSeed := { forest : GroupForestSeed, settings : TraditionalSettings }
 

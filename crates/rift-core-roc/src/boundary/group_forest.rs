@@ -4,21 +4,25 @@
 
 use std::mem::ManuallyDrop;
 
+use rift_core::layout::WindowConstraints;
 use rift_core::layout::group_forest::{
-    Arrangement, Beyond, Body, Container, DropAction, Edit, Fill, InsertionPoint, Kind,
-    MasterSettings, MasterSide, Members, Memory, NewSibling, NewWindowPlacement, Node, Place,
-    RegionInsertion, ResizeAlong,
+    Arrangement, Bars, Beyond, Body, Branch, Container, ContainerView, Drawn, DropAction, Edit,
+    Fill, GroupBar, Held, InsertionPoint, Kind, Mark, MasterSettings, MasterSide, Members, Memory,
+    NewSibling, NewWindowPlacement, Node, Pass, Place, RegionInsertion, ResizeAlong, Role, Row,
 };
+use rift_core::plain::{Rect, WindowId};
 
 use super::stack_tree::default_orientation;
 use super::{
-    from_insertion, from_orientation, from_side, from_tree_answer, insertion, list, rect,
-    traditional_fill, tree_direction, tree_focus, tree_orientation, tree_query, tree_side,
+    frames, from_insertion, from_orientation, from_rect, from_side, from_tree_answer, from_window,
+    gaps, insertion, list, rect, stack_line, traditional_fill, tree_direction, tree_focus,
+    tree_orientation, tree_query, tree_side, window_constraints,
 };
 use crate::abi;
 use crate::bsp_tree::{Answer, LayoutKey, NodeKey, Saved};
 use crate::group_forest::{
-    ForestEvent, ForestView, MasterStackEvent, MasterStackView, TraditionalEvent, TraditionalView,
+    ForestEvent, ForestView, MasterStackEvent, MasterStackView, Projected, TraditionalEvent,
+    TraditionalView,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -838,6 +842,243 @@ fn master_stack_event(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Layout questions (`Forest::shape` and its geometry, `project`, `container_view`, `rows`).
+
+/// A layout pass as the platform asks it: the layout, the pass, the constraints the caller knows.
+fn pass_question(
+    layout: LayoutKey,
+    pass: Pass,
+    known: &[(u64, WindowConstraints)],
+    host: &abi::RocHost,
+) -> abi::BoundaryStackFramesQuestion {
+    let known: Vec<abi::BoundaryBspKnown> = known
+        .iter()
+        .map(|&(window, held)| abi::BoundaryBspKnown {
+            window,
+            constraints: window_constraints(held),
+        })
+        .collect();
+    abi::BoundaryStackFramesQuestion {
+        layout: layout.0,
+        screen: rect(pass.screen),
+        gaps: gaps(pass.gaps),
+        stack_offset: pass.stack_offset,
+        stack_line: stack_line(pass.stack_line),
+        known: list(&known, host),
+    }
+}
+
+/// A layout's frames.
+pub(crate) fn frames_question(
+    layout: LayoutKey,
+    pass: Pass,
+    known: &[(u64, WindowConstraints)],
+    host: &abi::RocHost,
+) -> abi::BoundaryGroupLayoutQuestion {
+    use abi::BoundaryGroupLayoutQuestionTag as Tag;
+    union!(
+        BoundaryGroupLayoutQuestion,
+        BoundaryGroupLayoutQuestionPayload.frames(pass_question(layout, pass, known, host)),
+        Tag::Frames
+    )
+}
+
+/// A layout pass with the group bars `bars` asks for.
+pub(crate) fn project_question(
+    layout: LayoutKey,
+    pass: Pass,
+    known: &[(u64, WindowConstraints)],
+    bars: Bars,
+    host: &abi::RocHost,
+) -> abi::BoundaryGroupLayoutQuestion {
+    use abi::BoundaryGroupLayoutQuestionTag as Tag;
+    union!(
+        BoundaryGroupLayoutQuestion,
+        BoundaryGroupLayoutQuestionPayload.project(abi::BoundaryGroupProjectQuestion {
+            pass: pass_question(layout, pass, known, host),
+            bars: match bars {
+                Bars::Every => abi::BoundaryGroupBars::Every,
+                Bars::SelectionPath => abi::BoundaryGroupBars::SelectionPath,
+            },
+        }),
+        Tag::Project
+    )
+}
+
+/// A layout's container view.
+pub(crate) fn container_question(layout: LayoutKey) -> abi::BoundaryGroupLayoutQuestion {
+    use abi::BoundaryGroupLayoutQuestionTag as Tag;
+    union!(
+        BoundaryGroupLayoutQuestion,
+        BoundaryGroupLayoutQuestionPayload.container(layout.0),
+        Tag::Container
+    )
+}
+
+/// A layout's drawing.
+pub(crate) fn draw_question(layout: LayoutKey) -> abi::BoundaryGroupLayoutQuestion {
+    use abi::BoundaryGroupLayoutQuestionTag as Tag;
+    union!(
+        BoundaryGroupLayoutQuestion,
+        BoundaryGroupLayoutQuestionPayload.draw(layout.0),
+        Tag::Draw
+    )
+}
+
+/// The frames a frames question answers (Roc answers each question with its own kind).
+pub(crate) fn read_frames(
+    answer: abi::BoundaryGroupLayoutAnswer,
+    host: &abi::RocHost,
+) -> Vec<(WindowId, Rect)> {
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryGroupLayoutAnswerTag::Frames,
+        "a frames question's answer"
+    );
+    // SAFETY: the tag says the payload is the frames, which `frames` reads and releases.
+    frames(*unsafe { answer.borrow_payload_frames_unchecked() }, host)
+}
+
+/// The pass a project question answers.
+pub(crate) fn read_projected(
+    answer: abi::BoundaryGroupLayoutAnswer,
+    host: &abi::RocHost,
+) -> Projected {
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryGroupLayoutAnswerTag::Projected,
+        "a pass's answer"
+    );
+    // SAFETY: the tag says the payload is the pass, read in full here; the answer is then
+    // released (its bars' windows with it: a list's own release is shallow).
+    let projected = unsafe { answer.borrow_payload_projected_unchecked() };
+    let read = Projected {
+        frames: projected
+            .frames
+            .as_slice()
+            .iter()
+            .map(|frame| (from_window(frame.window), from_rect(frame.frame)))
+            .collect(),
+        bars: projected
+            .bars
+            .as_slice()
+            .iter()
+            .map(|bar| GroupBar {
+                stack: NodeKey(bar.stack),
+                orientation: from_orientation(bar.orientation),
+                frame: from_rect(bar.frame),
+                windows: bar.windows.as_slice().to_vec(),
+                selected: usize::try_from(bar.selected).expect("a bar's index fits a usize"),
+            })
+            .collect(),
+    };
+    unsafe { answer.decref(host) };
+    read
+}
+
+fn from_role(role: abi::BoundaryGroupRole) -> Role {
+    match role {
+        abi::BoundaryGroupRole::Plain => Role::Plain,
+        abi::BoundaryGroupRole::Master => Role::Master,
+        abi::BoundaryGroupRole::Stack => Role::Stack,
+    }
+}
+
+fn from_view(view: &abi::BoundaryGroupContainerView) -> ContainerView<NodeKey, u64> {
+    ContainerView {
+        node: NodeKey(view.node),
+        selected: view.selected,
+        weight: match view.weight.tag {
+            abi::BoundaryGroupWeightTag::AtRoot => None,
+            // SAFETY: the tag says the payload is the weight.
+            abi::BoundaryGroupWeightTag::Weight => {
+                Some(unsafe { *view.weight.borrow_payload_weight_unchecked() })
+            }
+        },
+        fill: from_fill(view.fill),
+        role: from_role(view.role),
+        held: match view.held.tag {
+            // SAFETY (each arm): the tag says which payload it is.
+            abi::BoundaryGroupViewHeldTag::Window => {
+                Held::Window(unsafe { *view.held.borrow_payload_window_unchecked() })
+            }
+            abi::BoundaryGroupViewHeldTag::Container => {
+                let container = unsafe { view.held.borrow_payload_container_unchecked() };
+                Held::Container {
+                    kind: from_kind(container.kind),
+                    children: container.children.as_slice().iter().map(from_view).collect(),
+                }
+            }
+        },
+    }
+}
+
+/// The container view a container question answers.
+pub(crate) fn read_container(
+    answer: abi::BoundaryGroupLayoutAnswer,
+    host: &abi::RocHost,
+) -> ContainerView<NodeKey, u64> {
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryGroupLayoutAnswerTag::Container,
+        "a container view"
+    );
+    let view = from_view(unsafe { answer.borrow_payload_container_unchecked() });
+    // SAFETY: the answer is Roc's, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    view
+}
+
+/// The rows a draw question answers.
+pub(crate) fn read_rows(
+    answer: abi::BoundaryGroupLayoutAnswer,
+    host: &abi::RocHost,
+) -> Vec<Row<NodeKey, u64>> {
+    assert_eq!(answer.tag, abi::BoundaryGroupLayoutAnswerTag::Drawn, "a drawing");
+    // SAFETY: the tag says the payload is the rows, read in full here, then released.
+    let rows = unsafe { answer.borrow_payload_drawn_unchecked() }
+        .as_slice()
+        .iter()
+        .map(|row| Row {
+            branches: row
+                .branches
+                .as_slice()
+                .iter()
+                .map(|glyph| match glyph {
+                    abi::BoundaryGroupBranch::Blank => Branch::Blank,
+                    abi::BoundaryGroupBranch::Last => Branch::Last,
+                    abi::BoundaryGroupBranch::Through => Branch::Through,
+                    abi::BoundaryGroupBranch::Tee => Branch::Tee,
+                })
+                .collect(),
+            mark: match row.mark {
+                abi::BoundaryGroupMark::Root => Mark::Root,
+                abi::BoundaryGroupMark::Chosen => Mark::Chosen,
+                abi::BoundaryGroupMark::NotChosen => Mark::NotChosen,
+            },
+            node: NodeKey(row.node),
+            held: match row.held.tag {
+                // SAFETY (each arm): the tag says which payload it is.
+                abi::BoundaryGroupDrawnTag::Window => {
+                    Drawn::Window(unsafe { *row.held.borrow_payload_window_unchecked() })
+                }
+                abi::BoundaryGroupDrawnTag::Container => {
+                    let container = unsafe { row.held.borrow_payload_container_unchecked() };
+                    Drawn::Container {
+                        kind: from_kind(container.kind),
+                        total: container.total,
+                    }
+                }
+            },
+            size: row.size,
+            role: from_role(row.role),
+        })
+        .collect();
+    unsafe { answer.decref(host) };
+    rows
+}
+
+// ---------------------------------------------------------------------------------------------
 // The boxes.
 
 /// The traditional system's box, which only Roc can read or free; only the
@@ -878,6 +1119,19 @@ impl TraditionalBox {
         let answer = from_tree_answer(stepped.answer);
         unsafe { stepped.answer.decref(host) };
         (TraditionalBox(stepped.model), answer)
+    }
+
+    /// A layout question, its answer read by `read` (which releases it).
+    pub(crate) fn layout<T>(
+        self,
+        question: abi::BoundaryGroupLayoutQuestion,
+        host: &abi::RocHost,
+        read: impl FnOnce(abi::BoundaryGroupLayoutAnswer, &abi::RocHost) -> T,
+    ) -> (TraditionalBox, T) {
+        // SAFETY: as in `step`; the question's lists are allocated through the host and consumed
+        // by Roc; the answer is Roc's, handed to `read`.
+        let laid = unsafe { abi::roc_traditional_tree_layout(self.into_raw(), question) };
+        (TraditionalBox(laid.model), read(laid.answer, host))
     }
 
     /// The forest's tables and free lists, the windows left out, the settings.
@@ -931,6 +1185,18 @@ impl MasterStackBox {
         let answer = from_tree_answer(stepped.answer);
         unsafe { stepped.answer.decref(host) };
         (MasterStackBox(stepped.model), answer)
+    }
+
+    /// A layout question, its answer read by `read` (which releases it).
+    pub(crate) fn layout<T>(
+        self,
+        question: abi::BoundaryGroupLayoutQuestion,
+        host: &abi::RocHost,
+        read: impl FnOnce(abi::BoundaryGroupLayoutAnswer, &abi::RocHost) -> T,
+    ) -> (MasterStackBox, T) {
+        // SAFETY: as in `TraditionalBox::layout`.
+        let laid = unsafe { abi::roc_master_stack_layout(self.into_raw(), question) };
+        (MasterStackBox(laid.model), read(laid.answer, host))
     }
 
     /// The forest's tables and free lists, the windows left out, the settings.

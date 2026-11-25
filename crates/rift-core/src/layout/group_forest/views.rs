@@ -100,58 +100,139 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
     }
 
     /// A layout drawn as text (upstream's `draw_tree`, written as the `ascii_tree` crate writes
-    /// a tree): each node with whether its parent's selection goes into it, its id, its window
-    /// or kind, its size (and a container's children's total), and its role.
+    /// a tree): its rows, rendered.
     pub fn draw(&self, layout: L) -> String
     where
         N: Debug,
         W: Debug, {
+        render(&self.rows(layout))
+    }
+
+    /// A layout's drawing as rows, in preorder: each node with the branch glyphs leading to it,
+    /// whether its parent's selection goes into it, its id, its window or kind (and a
+    /// container's children's total), its size, and its role.
+    pub fn rows(&self, layout: L) -> Vec<Row<N, W>> {
         let root = self.root(layout);
-        let mut out = String::new();
-        self.draw_node(root, root, &mut Vec::new(), &mut out);
+        let mut out = Vec::new();
+        self.row_of(root, root, Vec::new(), Vec::new(), &mut out);
         out
     }
 
-    /// One node's line and its children's, `level` holding how many siblings were left to draw
-    /// at each ancestor's depth (this node's included).
-    fn draw_node(&self, root: N, node: N, level: &mut Vec<usize>, out: &mut String)
-    where
-        N: Debug,
-        W: Debug, {
-        let depth = level.len();
-        for (at, &left) in level.iter().enumerate() {
-            let last = at + 1 == depth;
-            out.push_str(match (left == 1, last) {
-                (true, false) => "   ",
-                (true, true) => " └─",
-                (false, false) => " │ ",
-                (false, true) => " ├─",
+    /// One node's row and its children's: `lead` the glyphs before it, `rest` the glyphs its
+    /// children's rows start with.
+    fn row_of(
+        &self,
+        root: N,
+        node: N,
+        lead: Vec<Branch>,
+        rest: Vec<Branch>,
+        out: &mut Vec<Row<N, W>>,
+    ) {
+        let mark = match self.parent(node) {
+            None => Mark::Root,
+            Some(parent) if self.local_selection_of(parent) == Some(node) => Mark::Chosen,
+            Some(_) => Mark::NotChosen,
+        };
+        let held = match &self.nodes[node].body {
+            Body::Window { window, .. } => Drawn::Window(*window),
+            Body::Container(container) => Drawn::Container {
+                kind: container.kind,
+                total: self.children_total(node),
+            },
+        };
+        out.push(Row {
+            branches: lead,
+            mark,
+            node,
+            held,
+            size: self.size(node),
+            role: self.role(root, node),
+        });
+        let children = self.children(node);
+        for (at, &child) in children.iter().enumerate() {
+            let last = at + 1 == children.len();
+            let with = |glyph: Branch| {
+                let mut glyphs = rest.clone();
+                glyphs.push(glyph);
+                glyphs
+            };
+            let (lead, below) = if last {
+                (with(Branch::Last), with(Branch::Blank))
+            } else {
+                (with(Branch::Tee), with(Branch::Through))
+            };
+            self.row_of(root, child, lead, below, out);
+        }
+    }
+}
+
+/// A glyph leading to a row: before the row's own node, the last of its siblings (`Last`) or not
+/// (`Tee`); at an ancestor's depth, past that ancestor's last sibling (`Blank`) or not
+/// (`Through`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Branch {
+    Blank,
+    Last,
+    Through,
+    Tee,
+}
+
+/// Whether a row's node is its parent's selection (none at the root).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Root,
+    Chosen,
+    NotChosen,
+}
+
+/// What a row shows of its node: a window, or a container's kind and its children's total.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Drawn<W> {
+    Window(W),
+    Container { kind: Kind, total: f32 },
+}
+
+/// One node of a layout's drawing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row<N, W> {
+    pub branches: Vec<Branch>,
+    pub mark: Mark,
+    pub node: N,
+    pub held: Drawn<W>,
+    pub size: f32,
+    pub role: Role,
+}
+
+/// A drawing's rows as text: the glyphs, ids and numbers as upstream's `draw_tree` writes them
+/// (ids by `{:?}`, sizes by `f32`'s display).
+pub fn render<N: Debug, W: Debug>(rows: &[Row<N, W>]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        for glyph in &row.branches {
+            out.push_str(match glyph {
+                Branch::Blank => "   ",
+                Branch::Last => " └─",
+                Branch::Through => " │ ",
+                Branch::Tee => " ├─",
             });
         }
-        let status = match self.parent(node) {
-            None => "",
-            Some(parent) if self.local_selection_of(parent) == Some(node) => "☒ ",
-            Some(_) => "☐ ",
+        let mark = match row.mark {
+            Mark::Root => "",
+            Mark::Chosen => "☒ ",
+            Mark::NotChosen => "☐ ",
         };
-        let size = self.size(node);
-        let held = match &self.nodes[node].body {
-            Body::Window { window, .. } => format!("{window:?} [size {size}]"),
-            Body::Container(container) => format!(
-                "{} [size {size} total={}]",
-                kind_name(container.kind),
-                self.children_total(node)
-            ),
+        let size = row.size;
+        let held = match row.held {
+            Drawn::Window(ref window) => format!("{window:?} [size {size}]"),
+            Drawn::Container { kind, total } => {
+                format!("{} [size {size} total={total}]", kind_name(kind))
+            }
         };
-        out.push_str(&format!(" {status}{node:?} {held}"));
-        if let Some(role) = self.role(root, node).name() {
+        out.push_str(&format!(" {mark}{:?} {held}", row.node));
+        if let Some(role) = row.role.name() {
             out.push_str(&format!(" [{role}]"));
         }
         out.push('\n');
-        let children = self.children(node);
-        for (at, &child) in children.iter().enumerate() {
-            level.push(children.len() - at);
-            self.draw_node(root, child, level, out);
-            level.pop();
-        }
     }
+    out
 }

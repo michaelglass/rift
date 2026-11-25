@@ -171,7 +171,7 @@ BspTree := [].{
 			Leaf(leaf) => {
 				placed =
 					match participating_member(trees, leaf.content) {
-						Some(word) => Placed(Window({ window: window_id(word), constraints: known_constraints(known, word) }))
+						Some(word) => Placed(Window({ window: Geometry.window_id(word), constraints: Geometry.known_constraints(known, word) }))
 						Nothing =>
 							match leaf.content {
 								Empty if trees.left_out.is_empty() => Placed(Empty)
@@ -209,17 +209,6 @@ BspTree := [].{
 			}
 		}
 
-	## A window's constraints, if the host knows them.
-	known_constraints : Dict(U64, WindowConstraints), U64 -> Constraints
-	known_constraints = |known, word|
-		match known.get(word) {
-			Ok(constraints) => Constrained(constraints)
-			Err(KeyNotFound) => Unconstrained
-		}
-
-	## The window a word names: its pid in the high half, its index in the low half.
-	window_id : U64 -> WindowId
-	window_id = |word| WindowId.{ pid: word.shr_zf_wrap(32).to_u32_wrap().to_i32_wrap(), idx: word.to_u32_wrap() }
 
 	# Layouts, participation and the settings.
 

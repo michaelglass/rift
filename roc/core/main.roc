@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackTreeStack, StackFramesQuestion, GroupTreeNode, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent]
+import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackTreeStack, StackFramesQuestion, GroupTreeNode, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer]
 import Geometry
 import Bsp
 import Traditional
@@ -131,7 +131,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_seed, bsp_tree_step, bsp_tree_view, bsp_tree_frames, stack_tree_init, stack_tree_seed, stack_tree_step, stack_tree_view, stack_tree_frames, traditional_tree_init, traditional_tree_seed, traditional_tree_step, traditional_tree_view, master_stack_init, master_stack_seed, master_stack_step, master_stack_view, narrow }
+core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_seed, bsp_tree_step, bsp_tree_view, bsp_tree_frames, stack_tree_init, stack_tree_seed, stack_tree_step, stack_tree_view, stack_tree_frames, traditional_tree_init, traditional_tree_seed, traditional_tree_step, traditional_tree_view, traditional_tree_layout, master_stack_init, master_stack_seed, master_stack_step, master_stack_view, master_stack_layout, narrow }
 
 # The layout questions, typed (`Boundary`). The core modules take and answer the platform's own
 # types: a plain record or union never passes for a named one, nor a named one for a plain one.
@@ -142,7 +142,7 @@ bsp = |shape| Bsp.frames(shape).map(|(window, frame)| { window, frame })
 
 ## A traditional layout's frames.
 traditional : TraditionalShape -> List(Frame)
-traditional = |shape| Traditional.frames(shape).map(|(window, frame)| { window, frame })
+traditional = |shape| Traditional.frames(Traditional.from_platform(shape)).map(|(window, frame)| { window, frame })
 
 ## Where a scrolling strip places its columns, windows and camera.
 strip : Strip -> Placed
@@ -523,6 +523,10 @@ traditional_tree_step = |system, event| {
 traditional_tree_view : Traditionals -> { model : Traditionals, view : TraditionalSeed }
 traditional_tree_view = |system| { model: system, view: GroupForest.traditional_view(system) }
 
+## A traditional layout question's answer (the system unchanged).
+traditional_tree_layout : Traditionals, GroupLayoutQuestion -> { model : Traditionals, answer : GroupLayoutAnswer }
+traditional_tree_layout = |system, question| { model: system, answer: forest_layout(system.forest, question) }
+
 ## A master-stack layout system: no layouts, no windows left out.
 master_stack_init : MasterSettings -> Masters
 master_stack_init = |settings| GroupForest.master_empty(settings)
@@ -541,6 +545,30 @@ master_stack_step = |system, event| {
 ## The master-stack system as the platform holds it.
 master_stack_view : Masters -> { model : Masters, view : MasterStackSeed }
 master_stack_view = |system| { model: system, view: GroupForest.master_view(system) }
+
+## A master-stack layout question's answer (the system unchanged).
+master_stack_layout : Masters, GroupLayoutQuestion -> { model : Masters, answer : GroupLayoutAnswer }
+master_stack_layout = |system, question| { model: system, answer: forest_layout(system.forest, question) }
+
+## A group forest layout question's answer: a layout's frames are its shape (`Forest::shape`)
+## through the traditional geometry (none when nothing takes part); a pass with its group bars,
+## the container view and the drawing are the forest's own (`Forest::project`, `container_view`,
+## `rows`).
+forest_layout : GroupForestHeld, GroupLayoutQuestion -> GroupLayoutAnswer
+forest_layout = |forest, question|
+	match question {
+		Frames(asked) =>
+			Frames(
+				match GroupForest.shape(forest, asked) {
+					Shaped(shape) => Traditional.frames(shape).map(|(window, frame)| { window, frame })
+					Unshaped => []
+				},
+			)
+
+		Project({ pass, bars }) => Projected(GroupForest.project(forest, pass, bars))
+		Container(layout) => Container(GroupForest.container_view(forest, layout))
+		Draw(layout) => Drawn(GroupForest.rows(forest, layout))
+	}
 
 ## The mode table's verdict on an initiative.
 mode_verdict : ModesQuestion -> ModeVerdict

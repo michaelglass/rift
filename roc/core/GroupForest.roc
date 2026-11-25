@@ -10,7 +10,8 @@
 
 import Geometry
 import Slots
-import pf.Boundary exposing [BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
+import Traditional exposing [Branch, Laid, Tree, TreeAxis, TreeStack]
+import pf.Boundary exposing [Frame, GroupBar, GroupBars, GroupBranch, GroupContainerView, GroupProjected, GroupRole, GroupRow, StackFramesQuestion, WindowConstraints, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
 
 ## A forest: every layout's root, every node, the windows left out of layout, the next stamp.
 Forest : {
@@ -21,7 +22,7 @@ Forest : {
 }
 
 ## The traditional layout system: the forest and its settings (`Traditional`).
-Traditional : { forest : Forest, settings : TraditionalSettings }
+Traditionals : { forest : Forest, settings : TraditionalSettings }
 
 ## The master-stack layout system: the forest, each layout's root a region pair, and its
 ## settings (`MasterStack`).
@@ -43,13 +44,13 @@ GroupForest := [].{
 
 	# The systems' boundary: init, seed, step, view.
 
-	traditional_empty : TraditionalSettings -> Traditional
+	traditional_empty : TraditionalSettings -> Traditionals
 	traditional_empty = |settings| { forest: empty_forest({}), settings }
 
-	traditional_seeded : TraditionalSeed -> Traditional
+	traditional_seeded : TraditionalSeed -> Traditionals
 	traditional_seeded = |seed| { forest: seeded_forest(seed.forest), settings: seed.settings }
 
-	traditional_view : Traditional -> TraditionalSeed
+	traditional_view : Traditionals -> TraditionalSeed
 	traditional_view = |system| { forest: forest_view(system.forest), settings: system.settings }
 
 	master_empty : MasterSettings -> Master
@@ -114,7 +115,7 @@ GroupForest := [].{
 	}
 
 	## One operation of the traditional system, and what it answers.
-	traditional_step : Traditional, TraditionalEvent -> (Traditional, BspTreeAnswer)
+	traditional_step : Traditionals, TraditionalEvent -> (Traditionals, BspTreeAnswer)
 	traditional_step = |system, event|
 		match event {
 			Forest(asked) => {
@@ -1290,6 +1291,262 @@ GroupForest := [].{
 			)
 		}
 
+	# The shape (`Forest::shape`): the traditional geometry's input.
+
+	## A layout's shape for the traditional geometry: the nodes taking part, laid out from the
+	## root, or from the master region when a tiled root's stack region takes none; none when that
+	## node takes no part. Each stack is labelled with its key; the windows' words become the
+	## geometry's `WindowId`s here, with the constraints the host knows.
+	shape : Forest, StackFramesQuestion -> [Shaped(Laid(U64)), Unshaped]
+	shape = |forest, question|
+		match laid_out(forest, question.layout) {
+			NothingLaidOut => Unshaped
+			LaidOut(active, start) => {
+				Shaped(shape_from(forest, question, active, start))
+			}
+		}
+
+	## The shape laid out from `start`.
+	shape_from : Forest, StackFramesQuestion, Set(U64), U64 -> Laid(U64)
+	shape_from = |forest, question, active, start| {
+		known = Dict.from_list(question.known.map(|k| (k.window, k.constraints)))
+		Laid.{
+			screen: question.screen,
+			area: Geometry.tiling_area(question.screen, question.gaps),
+			gaps: question.gaps,
+			stack_offset: question.stack_offset,
+			stack_line: question.stack_line,
+			root: shape_node(forest, active, known, start),
+		}
+	}
+
+	## A layout pass with its group bars (`Forest::project`): each window's frame and the bar of
+	## each stack `bars` asks for, each stack's frame as the geometry placed it; none while the
+	## layout's root fills.
+	project : Forest, StackFramesQuestion, GroupBars -> GroupProjected
+	project = |forest, question, bars|
+		match laid_out(forest, question.layout) {
+			NothingLaidOut => { frames: [], bars: [] }
+			LaidOut(active, start) => {
+				placed = Traditional.placed(shape_from(forest, question, active, start))
+				stacks = Dict.from_list(placed.stacks)
+				top = root(forest, question.layout, "project")
+				barred = if is_tiled(node(forest, top, "project").fill) bars_from(forest, start, active, stacks, bars, []) else []
+				frames : List(Frame)
+				frames = placed.frames.map(|(window, frame)| { window, frame })
+				{ frames, bars: barred }
+			}
+		}
+
+	## The bars under `key` (taking part) after `out`: a node that fills ends the walk below it
+	## (and along the selection path drops every bar found).
+	bars_from : Forest, U64, Set(U64), Dict(U64, Rect), GroupBars, List(GroupBar) -> List(GroupBar)
+	bars_from = |forest, key, active, stacks, bars, out| {
+		held = node(forest, key, "bars_from")
+		if is_tiled(held.fill) {
+			match held.body {
+				Window(_) => out
+				Container(holding) => {
+					taking_part = children(forest, key).keep_if(|child| active.contains(child))
+					shown = |{}| participating_child(forest, key, False, |child| active.contains(child))
+					(with_bar, chosen) =
+						match holding.kind {
+							Stack(orientation) => {
+								focused =
+									match shown({}) {
+										Some(child) => child
+										Nothing => crash "GroupForest.bars_from: stack ${key.to_str()} takes part with no child taking part"
+									}
+								frame =
+									match stacks.get(key) {
+										Ok(placed) => placed
+										Err(KeyNotFound) => crash "GroupForest.bars_from: stack ${key.to_str()} was not placed"
+									}
+								(out.append(group_bar(forest, key, orientation, frame, taking_part, focused)), Some(focused))
+							}
+
+							Split(_) =>
+								match bars {
+									SelectionPath => (out, shown({}))
+									Every => (out, Nothing)
+								}
+						}
+					walked = |child|
+						match bars {
+							Every => True
+							SelectionPath =>
+								match chosen {
+									Some(on_path) => on_path == child
+									Nothing => False
+								}
+						}
+					taking_part.fold(with_bar, |acc, child| if walked(child) bars_from(forest, child, active, stacks, bars, acc) else acc)
+				}
+			}
+		} else {
+			match bars {
+				SelectionPath => []
+				Every => out
+			}
+		}
+	}
+
+	## A stack's bar: one window per child holding one that takes part (the child's focus
+	## target), and which of them stands for the focused child.
+	group_bar : Forest, U64, BspOrientation, Rect, List(U64), U64 -> GroupBar
+	group_bar = |forest, stack, orientation, frame, taking_part, focused| {
+		(windows, selected) =
+			taking_part.fold(
+				([], 0),
+				|(listed, chosen), child|
+					match find_best_focus_target(forest, child) {
+						Found(_, window) => (listed.append(window), if child == focused listed.len() else chosen)
+						NotFound => (listed, chosen)
+					},
+			)
+		{ stack, orientation, frame, windows, selected }
+	}
+
+	# rift-cli's views (`views.rs`).
+
+	## The role `key` plays in the layout rooted at `top`.
+	role : Forest, U64, U64 -> GroupRole
+	role = |forest, top, key|
+		match regions(forest, top) {
+			Regions(master, stack) => if key == master Master else if key == stack Stack else Plain
+			NoRegions => Plain
+		}
+
+	## A layout's nodes as rift's container view shows them (`Forest::container_view`).
+	container_view : Forest, U64 -> GroupContainerView
+	container_view = |forest, layout| {
+		top = root(forest, layout, "container_view")
+		container_of(forest, top, top, selection(forest, layout))
+	}
+
+	container_of : Forest, U64, U64, U64 -> GroupContainerView
+	container_of = |forest, top, key, selected| {
+		held = node(forest, key, "container_of")
+		{
+			node: key,
+			selected: key == selected,
+			weight: match held.place {
+				Root => AtRoot
+				Child({ size: share, .. }) => Weight(share)
+			},
+			fill: held.fill,
+			role: role(forest, top, key),
+			held: match held.body {
+				Window({ window, .. }) => Window(window)
+				Container(holding) => Container({ kind: holding.kind, children: children(forest, key).map(|child| container_of(forest, top, child, selected)) })
+			},
+		}
+	}
+
+	## A layout's drawing as rows, in preorder (`Forest::rows`).
+	rows : Forest, U64 -> List(GroupRow)
+	rows = |forest, layout| {
+		top = root(forest, layout, "rows")
+		row_of(forest, top, top, [], [], [])
+	}
+
+	## One node's row and its children's after `out`: `lead` the glyphs before it, `rest` the
+	## glyphs its children's rows start with.
+	row_of : Forest, U64, U64, List(GroupBranch), List(GroupBranch), List(GroupRow) -> List(GroupRow)
+	row_of = |forest, top, key, lead, rest, out| {
+		held = node(forest, key, "row_of")
+		mark =
+			match held.place {
+				Root => Root
+				Child({ parent: above, .. }) =>
+					match local_selection_of(forest, above) {
+						Some(chosen) => if chosen == key Chosen else NotChosen
+						Nothing => NotChosen
+					}
+			}
+		drawn =
+			match held.body {
+				Window({ window, .. }) => Window(window)
+				Container(holding) => Container({ kind: holding.kind, total: children_total(forest, key) })
+			}
+		row = { branches: lead, mark, node: key, held: drawn, size: size(forest, key), role: role(forest, top, key) }
+		listed = children(forest, key)
+		(_, drawn_out) =
+			listed.fold(
+				(listed.len(), out.append(row)),
+				|(left, acc), child| {
+					(glyph, below) = if left == 1 (Last, Blank) else (Tee, Through)
+					(left - 1, row_of(forest, top, child, rest.append(glyph), rest.append(below), acc))
+				},
+			)
+		drawn_out
+	}
+
+	## What a layout pass lays out (`laid_out`): the nodes taking part, and the node laid out from.
+	laid_out : Forest, U64 -> [LaidOut(Set(U64), U64), NothingLaidOut]
+	laid_out = |forest, layout| {
+		top = root(forest, layout, "laid_out")
+		active = postorder(forest, top).fold(
+			Set.empty(),
+			|held, key| if subtree_participates(forest, key, |child| held.contains(child)) held.insert(key) else held,
+		)
+		start =
+			if is_tiled(node(forest, top, "laid_out").fill) {
+				match regions(forest, top) {
+					Regions(master, stack) => if active.contains(stack) top else master
+					NoRegions => top
+				}
+			} else {
+				top
+			}
+		if active.contains(start) LaidOut(active, start) else NothingLaidOut
+	}
+
+	## A node taking part as the geometry takes it: a container keeps its children taking part, a
+	## stack the child shown (its selection if it takes part, else the first that does) between
+	## those before and after it.
+	shape_node : Forest, Set(U64), Dict(U64, WindowConstraints), U64 -> Tree(U64)
+	shape_node = |forest, active, known, key| {
+		held = node(forest, key, "shape_node")
+		match held.body {
+			Window({ window, .. }) => Tree.Window({ window: Geometry.window_id(window), constraints: Geometry.known_constraints(known, window), fill: held.fill })
+			Container(holding) => {
+				branch = |child| Branch.{ size: size(forest, child), node: shape_node(forest, active, known, child) }
+				taking_part = children(forest, key).keep_if(|child| active.contains(child))
+				match holding.kind {
+					Stack(orientation) => {
+						focused =
+							match participating_child(forest, key, False, |child| active.contains(child)) {
+								Some(chosen) => chosen
+								Nothing => crash "GroupForest.shape_node: stack ${key.to_str()} takes part with no child taking part"
+							}
+						around =
+							taking_part.fold(
+								Before([]),
+								|at, child|
+									match at {
+										Before(before) => if child == focused Around(before, []) else Before(before.append(child))
+										Around(before, after) => Around(before, after.append(child))
+									},
+							)
+						match around {
+							Around(before, after) =>
+								Tree.Stack(TreeStack.{ label: key, horizontal: same_orientation(orientation, Horizontal), fill: held.fill, before: before.map(branch), focused: branch(focused), after: after.map(branch) })
+
+							Before(_) => crash "GroupForest.shape_node: stack ${key.to_str()} shows ${focused.to_str()}, not a child taking part"
+						}
+					}
+
+					Split(orientation) =>
+						match taking_part {
+							[first, .. as rest] => Tree.Axis(TreeAxis.{ horizontal: same_orientation(orientation, Horizontal), fill: held.fill, first: branch(first), rest: rest.map(branch) })
+							[] => crash "GroupForest.shape_node: container ${key.to_str()} takes part with no child taking part"
+						}
+				}
+			}
+		}
+	}
+
 	# The window index, derived.
 
 	## Every (window, layout, leaf), by window, then by stamp.
@@ -2242,7 +2499,7 @@ GroupForest := [].{
 
 	# The traditional system.
 
-	traditional_add_window : Traditional, TraditionalAdd -> Traditional
+	traditional_add_window : Traditionals, TraditionalAdd -> Traditionals
 	traditional_add_window = |system, { layout, window: window_word, toward }| {
 		forest = system.forest
 		if contains_window(forest, layout, window_word) {
@@ -2276,7 +2533,7 @@ GroupForest := [].{
 		}
 	}
 
-	add_window_after_selection : Traditional, U64, U64 -> Forest
+	add_window_after_selection : Traditionals, U64, U64 -> Forest
 	add_window_after_selection = |system, layout, window_word| {
 		forest = system.forest
 		match system.settings.insertion {
@@ -2302,7 +2559,7 @@ GroupForest := [].{
 		}
 	}
 
-	smart_window_insertion : Traditional, U64, U64, U64 -> (Forest, U64)
+	smart_window_insertion : Traditionals, U64, U64, U64 -> (Forest, U64)
 	smart_window_insertion = |system, layout, chosen, window_word| {
 		forest = system.forest
 		(nested, placement) =
@@ -2354,7 +2611,7 @@ GroupForest := [].{
 			}
 		)
 
-	traditional_edit : Traditional, GroupEditIn -> (Forest, BspEdited)
+	traditional_edit : Traditionals, GroupEditIn -> (Forest, BspEdited)
 	traditional_edit = |system, { layout, edit }| {
 		forest = system.forest
 		match edit {

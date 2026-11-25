@@ -9,19 +9,26 @@
 //! children, memory), the windows left out, the settings. On 3% of steps a reload: both seeded
 //! from the Rust system's view, sometimes with states only a saved file holds (a container's
 //! memory cleared while it has children, children's weights other than the operations write).
+//! On 40% of steps a layout pass of a live layout: the Roc forest's own shape through the Roc
+//! geometry against the Rust forest's shape through the Rust geometry (frames bit for bit), the
+//! pass with its group bars (`Forest::project`, every stack's bar or the selection path's), and
+//! rift-cli's container view and drawing rows.
 
 use std::fmt::Debug;
 
 use rift_core::layout::group_forest::{
-    Arrangement, Beyond, Body, Container, DefaultOrientation, Direction, DropAction, Edit, Edited,
-    Fill, Focus, Focused, InsertionPoint, Kind, MasterSettings, MasterSide, Memory, NewSibling,
-    NewWindowPlacement, Orientation, Participation, Place, Query, RegionInsertion, Resize,
-    ResizeAlong,
+    Arrangement, Bars, Beyond, Body, Container, DefaultOrientation, Direction, DropAction, Edit,
+    Edited, Fill, Focus, Focused, InsertionPoint, Kind, MasterSettings, MasterSide, Memory,
+    NewSibling, NewWindowPlacement, Orientation, Participation, Pass, Place, Query,
+    RegionInsertion, Resize, ResizeAlong,
 };
-use rift_core::plain::Rect;
+use rift_core::layout::traditional::StackLine;
+use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
+use rift_core::plain::{Rect, WindowId};
 use rift_core_roc::group_forest::{
-    self, Answer, Forest, ForestEvent, ForestView, LayoutKey, MasterStack, MasterStackEvent,
-    MasterStackView, Traditional, TraditionalEvent, TraditionalView,
+    self, Answer, ContainerView, Forest, ForestEvent, ForestView, LayoutKey, MasterStack,
+    MasterStackEvent, MasterStackView, Projected, Row, Traditional, TraditionalEvent,
+    TraditionalView,
 };
 use rift_core_roc::{AllocationCount, RocMasterStack, RocTraditional};
 
@@ -58,6 +65,78 @@ impl Rng {
 
     fn length(&mut self, low: f64, high: f64) -> f64 {
         low + (high - low) * (self.below(1 << 20) as f64 / f64::from(1 << 20))
+    }
+
+    /// A layout pass's surroundings: the run's screen or one drawn anywhere (narrow and empty
+    /// too), gaps, a stack offset and a stack line (often none).
+    fn pass(&mut self) -> Pass {
+        let screen = if self.chance(50) {
+            SCREEN
+        } else {
+            Rect {
+                x: self.length(-2000.0, 3000.0),
+                y: self.length(-500.0, 1500.0),
+                w: self.length(0.0, 3500.0),
+                h: self.length(0.0, 2200.0),
+            }
+        };
+        let gap = |rng: &mut Self| {
+            if rng.chance(40) {
+                0.0
+            } else {
+                rng.length(0.0, 40.0)
+            }
+        };
+        let gaps = Gaps {
+            top: gap(self),
+            left: gap(self),
+            bottom: gap(self),
+            right: gap(self),
+            horizontal: gap(self),
+            vertical: gap(self),
+        };
+        let stack_offset = if self.chance(30) {
+            0.0
+        } else {
+            self.length(0.0, 60.0)
+        };
+        let stack_line = StackLine {
+            thickness: if self.chance(50) {
+                0.0
+            } else {
+                self.length(0.0, 12.0)
+            },
+            spacing: self.length(0.0, 8.0),
+            top: self.chance(50),
+            left: self.chance(50),
+        };
+        Pass {
+            screen,
+            gaps,
+            stack_offset,
+            stack_line,
+        }
+    }
+
+    /// A window's constraints, as the layout differential draws them.
+    fn constraints(&mut self) -> WindowConstraints {
+        let mut maybe = |high: f64| {
+            if self.chance(50) {
+                0.0
+            } else {
+                self.length(1.0, high)
+            }
+        };
+        let (locked_width, locked_height) = (maybe(1500.0), maybe(1000.0));
+        let min = Size::reported(maybe(900.0), maybe(700.0));
+        let (max_width, max_height) = (maybe(1800.0), maybe(1200.0));
+        WindowConstraints {
+            sizing: Sizing::new(self.chance(70), self.chance(50), min),
+            locked_width,
+            locked_height,
+            max_width,
+            max_height,
+        }
     }
 
     fn direction(&mut self) -> Direction {
@@ -414,7 +493,62 @@ trait Twin {
     fn views(&mut self) -> (Self::View, Self::View);
     /// Both reseeded from the Rust system's view, sometimes with saved-only states; the view.
     fn reload(&mut self, rng: &mut Rng) -> Self::View;
+    /// The Rust system's forest and the Roc twin.
+    fn parts(&mut self) -> (&Forest, &mut dyn RocLayouts);
 }
+
+/// A Roc twin's layout questions.
+trait RocLayouts {
+    fn frames(
+        &mut self,
+        layout: LayoutKey,
+        pass: Pass,
+        known: &[(u64, WindowConstraints)],
+    ) -> Vec<(WindowId, Rect)>;
+    fn project(
+        &mut self,
+        layout: LayoutKey,
+        pass: Pass,
+        known: &[(u64, WindowConstraints)],
+        bars: Bars,
+    ) -> Projected;
+    fn container_view(&mut self, layout: LayoutKey) -> ContainerView;
+    fn rows(&mut self, layout: LayoutKey) -> Vec<Row>;
+}
+
+macro_rules! roc_layouts {
+    ($roc:ty) => {
+        impl RocLayouts for $roc {
+            fn frames(
+                &mut self,
+                layout: LayoutKey,
+                pass: Pass,
+                known: &[(u64, WindowConstraints)],
+            ) -> Vec<(WindowId, Rect)> {
+                <$roc>::frames(self, layout, pass, known)
+            }
+
+            fn project(
+                &mut self,
+                layout: LayoutKey,
+                pass: Pass,
+                known: &[(u64, WindowConstraints)],
+                bars: Bars,
+            ) -> Projected {
+                <$roc>::project(self, layout, pass, known, bars)
+            }
+
+            fn container_view(&mut self, layout: LayoutKey) -> ContainerView {
+                <$roc>::container_view(self, layout)
+            }
+
+            fn rows(&mut self, layout: LayoutKey) -> Vec<Row> { <$roc>::rows(self, layout) }
+        }
+    };
+}
+
+roc_layouts!(RocTraditional);
+roc_layouts!(RocMasterStack);
 
 struct TraditionalTwin {
     rust: Traditional,
@@ -481,6 +615,8 @@ impl Twin for TraditionalTwin {
         self.roc = RocTraditional::seeded(&view);
         view
     }
+
+    fn parts(&mut self) -> (&Forest, &mut dyn RocLayouts) { (self.rust.forest(), &mut self.roc) }
 }
 
 struct MasterStackTwin {
@@ -551,6 +687,8 @@ impl Twin for MasterStackTwin {
         self.roc = RocMasterStack::seeded(&view);
         view
     }
+
+    fn parts(&mut self) -> (&Forest, &mut dyn RocLayouts) { (self.rust.forest(), &mut self.roc) }
 }
 
 /// What the runs reached, so a generator that stops reaching a case fails.
@@ -567,6 +705,14 @@ struct Reached {
     nested: usize,
     stacked: usize,
     largest: usize,
+    passes: usize,
+    framed: usize,
+    several: usize,
+    constrained: usize,
+    bars: usize,
+    bar_past_first: usize,
+    master_start: usize,
+    filled_root: usize,
 }
 
 /// Views compared by their written form too, so a size's sign of zero counts.
@@ -622,6 +768,12 @@ fn run<T: Twin>(seed: u64, runs: u64, steps: usize) -> Reached {
                     Body::Container(Container { kind: Kind::Stack(_), .. })
                 ) && node.fill == Fill::Tiled
             }));
+            if rng.chance(40)
+                && let Some(layout) = rng.pick(&live(twin.forest()))
+            {
+                let at = format!("run {run} step {step}: {layout:?} after {history:#?}");
+                layout_pass(&mut rng, twin.parts(), layout, &mut reached, &at);
+            }
             if rng.chance(3) {
                 let view = twin.reload(&mut rng);
                 reached.reloads += 1;
@@ -660,6 +812,88 @@ fn run<T: Twin>(seed: u64, runs: u64, steps: usize) -> Reached {
     reached
 }
 
+fn window_id(word: u64) -> WindowId {
+    WindowId {
+        pid: (word >> 32) as u32 as i32,
+        idx: word as u32,
+    }
+}
+
+/// A layout pass of a live layout, every layout question asked of both: the Rust forest's
+/// answers (its shape through the Rust geometry) against the Roc twin's.
+fn layout_pass(
+    rng: &mut Rng,
+    (forest, roc): (&Forest, &mut dyn RocLayouts),
+    layout: LayoutKey,
+    reached: &mut Reached,
+    at: &str,
+) {
+    let pass = rng.pass();
+    let mut known: Vec<(u64, WindowConstraints)> = Vec::new();
+    for window in WINDOWS {
+        if rng.chance(40) {
+            known.push((window, rng.constraints()));
+        }
+    }
+    let constraints = |window: u64| known.iter().find(|(held, _)| *held == window).map(|&(_, c)| c);
+    let expected = forest
+        .shape(layout, pass, &constraints)
+        .map_or_else(Vec::new, |shape| shape.map(&window_id).frames());
+    let got = roc.frames(layout, pass, &known);
+    assert!(
+        same(&got, &expected),
+        "{at}\nframes in {pass:?}, {known:?}: rust {expected:?}, roc {got:?}"
+    );
+    let bars = if rng.chance(50) {
+        Bars::Every
+    } else {
+        Bars::SelectionPath
+    };
+    let projected = forest.project(layout, pass, &constraints, bars);
+    let expected_projected = Projected {
+        frames: projected
+            .frames
+            .iter()
+            .map(|&(window, frame)| (window_id(window), frame))
+            .collect(),
+        bars: projected.bars,
+    };
+    let got_projected = roc.project(layout, pass, &known, bars);
+    assert!(
+        same(&got_projected, &expected_projected),
+        "{at}\n{bars:?} pass in {pass:?}, {known:?}: rust {expected_projected:?}, roc {got_projected:?}"
+    );
+    let (view, got_view) = (forest.container_view(layout), roc.container_view(layout));
+    assert!(
+        same(&got_view, &view),
+        "{at}\ncontainer view: rust {view:?}, roc {got_view:?}"
+    );
+    let (rows, got_rows) = (forest.rows(layout), roc.rows(layout));
+    assert!(
+        same(&got_rows, &rows),
+        "{at}\nrows: rust {rows:?}, roc {got_rows:?}"
+    );
+    reached.passes += 1;
+    reached.framed += expected.len();
+    reached.several += usize::from(expected.len() >= 2);
+    reached.constrained += expected
+        .iter()
+        .filter(|(window, _)| known.iter().any(|(held, _)| window_id(*held) == *window))
+        .count();
+    reached.bars += expected_projected.bars.len();
+    reached.bar_past_first += expected_projected.bars.iter().filter(|bar| bar.selected > 0).count();
+    let root = forest.root(layout);
+    reached.filled_root += usize::from(forest.node(root).fill != Fill::Tiled);
+    reached.master_start += usize::from(
+        forest.node(root).fill == Fill::Tiled
+            && forest.regions(root).is_some_and(|(master, stack)| {
+                !forest.windows(layout, Query::All).is_empty()
+                    && forest.children(stack).is_empty()
+                    && !forest.children(master).is_empty()
+            }),
+    );
+}
+
 fn runs(default: u64) -> u64 {
     std::env::var("RIFT_GROUP_FOREST_RUNS").map_or(default, |n| n.parse().unwrap())
 }
@@ -677,6 +911,15 @@ fn assert_reached(reached: &Reached) {
         "no nesting or stacking: {reached:?}"
     );
     assert!(reached.largest >= 5, "layouts stayed small: {reached:?}");
+    assert!(
+        reached.passes > 0
+            && reached.several * 10 > reached.passes
+            && reached.constrained * 10 > reached.framed
+            && reached.bars > 0
+            && reached.bar_past_first > 0
+            && reached.filled_root > 0,
+        "layout passes reached little: {reached:?}"
+    );
 }
 
 #[test]

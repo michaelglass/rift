@@ -2,7 +2,7 @@
 ## their children out along an axis by weight, or stack them with an offset (one shown on top),
 ## as far as the windows' constraints allow. Stack and master-stack layouts are traditional too.
 
-import pf.Boundary exposing [TraditionalNode, TraditionalShape, TraditionalWindow, StackLine, Child, Fill, WindowId, Rect, WindowConstraints, AxisItem, AxisFixed, AxisMax]
+import pf.Boundary exposing [TraditionalNode, TraditionalShape, TraditionalWindow, StackLine, Fill, Gaps, WindowId, Rect, WindowConstraints, AxisItem, AxisFixed, AxisMax]
 import Geometry exposing [container_summary, fixed_for_axis, gather, gather_start, gathered, max, max_for_axis, min, normalized, round_rect, solve, tiled_min, tiling_area]
 
 ## One subtree's constraints along an axis.
@@ -15,24 +15,51 @@ Along : { horizontal : Summary, vertical : Summary }
 ## A stack's frames: its container (without the bar), each window's size, and the offset.
 StackLayout : { container : Rect, w : F64, h : F64, offset : F64, horizontal : Bool }
 
-## A traditional node is the platform's (`Boundary.TraditionalNode`).
-Node : TraditionalNode
-
-Shape : TraditionalShape
+## Each window's frame and each stack's (its label and the frame its windows are offset
+## within), in tree order.
+Out(s) : { frames : List((WindowId, Rect)), stacks : List((s, Rect)) }
 
 Traditional := [].{
 
-	## A node with its subtree's constraints along both axes, made for one `frames` and dropped
+	## A traditional layout as the core lays it out (`Traditional<W, S>`): the platform's shape
+	## (`Boundary.TraditionalShape`), each stack carrying a label (`s`) that `placed` answers
+	## beside the stack's frame. The platform's own shape has none (`{}`).
+	Laid(s) := { screen : Rect, area : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, root : Tree(s) }
+
+	Tree(s) := [Window(TraditionalWindow), Axis(TreeAxis(s)), Stack(TreeStack(s))]
+
+	TreeAxis(s) := { horizontal : Bool, fill : Fill, first : Branch(s), rest : List(Branch(s)) }
+
+	TreeStack(s) := { label : s, horizontal : Bool, fill : Fill, before : List(Branch(s)), focused : Branch(s), after : List(Branch(s)) }
+
+	## A container's child and its weight.
+	Branch(s) := { size : F32, node : Tree(s) }
+
+	## A node with its subtree's constraints along both axes, made for one `placed` and dropped
 	## with it (as the Rust core's `Summarized`).
-	Summarized := { along : Along, node : Annotated }
+	Summarized(s) := { along : Along, node : Annotated(s) }
 
-	Annotated := [Window(TraditionalWindow), Axis(SummarizedAxis), Stack(SummarizedStack)]
+	Annotated(s) := [Window(TraditionalWindow), Axis(SummarizedAxis(s)), Stack(SummarizedStack(s))]
 
-	SummarizedAxis := { horizontal : Bool, fill : Fill, first : SummarizedChild, rest : List(SummarizedChild) }
+	SummarizedAxis(s) := { horizontal : Bool, fill : Fill, first : SummarizedChild(s), rest : List(SummarizedChild(s)) }
 
-	SummarizedStack := { horizontal : Bool, fill : Fill, before : List(SummarizedChild), focused : SummarizedChild, after : List(SummarizedChild) }
+	SummarizedStack(s) := { label : s, horizontal : Bool, fill : Fill, before : List(SummarizedChild(s)), focused : SummarizedChild(s), after : List(SummarizedChild(s)) }
 
-	SummarizedChild := { size : F32, node : Summarized }
+	SummarizedChild(s) := { size : F32, node : Summarized(s) }
+
+	## The platform's shape (no labels) as the geometry lays it out.
+	from_platform : TraditionalShape -> Laid({})
+	from_platform = |shape| Laid.{ screen: shape.screen, area: shape.area, gaps: shape.gaps, stack_offset: shape.stack_offset, stack_line: shape.stack_line, root: tree_of(shape.root) }
+
+	tree_of : TraditionalNode -> Tree({})
+	tree_of = |node| {
+		branch = |c| Branch.{ size: c.size, node: tree_of(c.node) }
+		match node {
+			TraditionalNode.Window(window) => Tree.Window(window)
+			TraditionalNode.Axis({ horizontal, fill, first, rest }) => Tree.Axis(TreeAxis.{ horizontal, fill, first: branch(first), rest: rest.map(branch) })
+			TraditionalNode.Stack({ horizontal, fill, before, focused, after }) => Tree.Stack(TreeStack.{ label: {}, horizontal, fill, before: before.map(branch), focused: branch(focused), after: after.map(branch) })
+		}
+	}
 
 	## `f64::clamp`.
 	clamp : F64, F64, F64 -> F64
@@ -108,11 +135,11 @@ Traditional := [].{
 	## The tree with each subtree's constraints along both axes, folded once bottom-up (a
 	## container asks each child's along its own axis; recomputing them at every level made a
 	## deep tree's frames quadratic).
-	summarized : Shape, Node -> Summarized
+	summarized : Laid(s), Tree(s) -> Summarized(s)
 	summarized = |shape, node| {
 		child = |c| SummarizedChild.{ size: c.size, node: summarized(shape, c.node) }
 		match node {
-			TraditionalNode.Window(window) => {
+			Tree.Window(window) => {
 				leaf = |horizontal|
 					match window.constraints {
 						Constrained(c) => leaf_summary(c, horizontal)
@@ -121,7 +148,7 @@ Traditional := [].{
 				Summarized.{ along: both(leaf), node: Annotated.Window(window) }
 			}
 
-			TraditionalNode.Axis({ horizontal: along, fill, first, rest }) => {
+			Tree.Axis({ horizontal: along, fill, first, rest }) => {
 				first_s = child(first)
 				rest_s = rest.map(child)
 				container = |horizontal| {
@@ -136,7 +163,7 @@ Traditional := [].{
 				}
 			}
 
-			TraditionalNode.Stack({ horizontal: along, fill, before, focused, after }) => {
+			Tree.Stack({ label, horizontal: along, fill, before, focused, after }) => {
 				before_s = before.map(child)
 				focused_s = child(focused)
 				after_s = after.map(child)
@@ -148,16 +175,16 @@ Traditional := [].{
 				}
 				Summarized.{
 					along: both(container),
-					node: Annotated.Stack(SummarizedStack.{ horizontal: along, fill, before: before_s, focused: focused_s, after: after_s }),
+					node: Annotated.Stack(SummarizedStack.{ label, horizontal: along, fill, before: before_s, focused: focused_s, after: after_s }),
 				}
 			}
 		}
 	}
 
-	gap_along : Shape, Bool -> F64
+	gap_along : Laid(s), Bool -> F64
 	gap_along = |shape, horizontal| if (horizontal) shape.gaps.horizontal else shape.gaps.vertical
 
-	filled : Shape, Fill, Rect -> Rect
+	filled : Laid(s), Fill, Rect -> Rect
 	filled = |shape, fill, rect|
 		match fill {
 			Tiled => rect
@@ -193,7 +220,7 @@ Traditional := [].{
 		round_rect(Rect.{ x, y, w: layout.w, h: layout.h })
 	}
 
-	place : Shape, Summarized, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	place : Laid(s), Summarized(s), Rect, Out(s) -> Out(s)
 	place = |shape, node, rect0, out|
 		match node.node {
 			Annotated.Window({ window, constraints, fill }) => {
@@ -220,17 +247,19 @@ Traditional := [].{
 
 						Unconstrained => rect
 					}
-				out.append((window, frame))
+				{ ..out, frames: out.frames.append((window, frame)) }
 			}
 
-			Annotated.Stack({ horizontal, fill, before, focused, after }) =>
-				stack(shape, before, focused, after, horizontal, filled(shape, fill, rect0), out)
+			Annotated.Stack({ label, horizontal, fill, before, focused, after }) => {
+				rect = filled(shape, fill, rect0)
+				stack(shape, before, focused, after, horizontal, rect, { ..out, stacks: out.stacks.append((label, rect)) })
+			}
 
 			Annotated.Axis({ horizontal, fill, first, rest }) =>
 				axis(shape, first, rest, horizontal, filled(shape, fill, rect0), out)
 		}
 
-	stack : Shape, List(SummarizedChild), SummarizedChild, List(SummarizedChild), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	stack : Laid(s), List(SummarizedChild(s)), SummarizedChild(s), List(SummarizedChild(s)), Bool, Rect, Out(s) -> Out(s)
 	stack = |shape, before, focused, after, horizontal, rect, out0| {
 		count = before.len() + 1 + after.len()
 		axis_len = if (horizontal) rect.w else rect.h
@@ -252,11 +281,11 @@ Traditional := [].{
 		layout = stack_layout(rect, count, offset, horizontal, shape.stack_line)
 		# Behind the window on top, then it, then the rest, each at its position.
 		add = |(position, out), child| (position + 1, place(shape, child.node, stack_frame(layout, position), out))
-		(_, placed) = after.fold(add(before.fold((0, out0), add), focused), add)
-		placed
+		(_, out) = after.fold(add(before.fold((0, out0), add), focused), add)
+		out
 	}
 
-	axis : Shape, SummarizedChild, List(SummarizedChild), Bool, Rect, List((WindowId, Rect)) -> List((WindowId, Rect))
+	axis : Laid(s), SummarizedChild(s), List(SummarizedChild(s)), Bool, Rect, Out(s) -> Out(s)
 	axis = |shape, first, rest, horizontal, rect, out0| {
 		children = [first].concat(rest)
 		# Weights as upstream's `layout_axis` reads them (since #688): each as an F64, and equal
@@ -284,7 +313,7 @@ Traditional := [].{
 			)
 		# Each child starts where the one before ended, after the gap; the first where the
 		# container does.
-		(_, placed) =
+		(_, laid) =
 			List.map2(children, solve(items, usable), |child, length| (child.node, length)).fold(
 				(Start, out0),
 				|(at, out), (node, length)| {
@@ -297,10 +326,14 @@ Traditional := [].{
 					(After(offset + length), place(shape, node, frame, out))
 				},
 			)
-		placed
+		laid
 	}
 
-	frames : Shape -> List((WindowId, Rect))
-	frames = |shape|
-		place(shape, summarized(shape, shape.root), shape.area, [])
+	## Each window's frame and each stack's (with its label), in tree order.
+	placed : Laid(s) -> Out(s)
+	placed = |shape| place(shape, summarized(shape, shape.root), shape.area, { frames: [], stacks: [] })
+
+	## Each window's frame, in tree order.
+	frames : Laid(s) -> List((WindowId, Rect))
+	frames = |shape| placed(shape).frames
 }

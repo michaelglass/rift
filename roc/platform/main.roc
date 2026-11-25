@@ -76,10 +76,12 @@ platform ""
 			traditional_tree_seed : TraditionalSeed -> traditionals,
 			traditional_tree_step : traditionals, TraditionalEvent -> { model : traditionals, answer : BspTreeAnswer },
 			traditional_tree_view : traditionals -> { model : traditionals, view : TraditionalSeed },
+			traditional_tree_layout : traditionals, GroupLayoutQuestion -> { model : traditionals, answer : GroupLayoutAnswer },
 			master_stack_init : MasterSettings -> masters,
 			master_stack_seed : MasterStackSeed -> masters,
 			master_stack_step : masters, MasterStackEvent -> { model : masters, answer : BspTreeAnswer },
 			master_stack_view : masters -> { model : masters, view : MasterStackSeed },
+			master_stack_layout : masters, GroupLayoutQuestion -> { model : masters, answer : GroupLayoutAnswer },
 		}
 	}
 	exposes [Boundary]
@@ -117,11 +119,13 @@ platform ""
 		"roc_traditional_tree_seed": traditional_tree_seed_for_host,
 		"roc_traditional_tree_step": traditional_tree_step_for_host,
 		"roc_traditional_tree_view": traditional_tree_view_for_host,
+		"roc_traditional_tree_layout": traditional_tree_layout_for_host,
 		"roc_traditional_tree_release": traditional_tree_release_for_host,
 		"roc_master_stack_init": master_stack_init_for_host,
 		"roc_master_stack_seed": master_stack_seed_for_host,
 		"roc_master_stack_step": master_stack_step_for_host,
 		"roc_master_stack_view": master_stack_view_for_host,
+		"roc_master_stack_layout": master_stack_layout_for_host,
 		"roc_master_stack_release": master_stack_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
@@ -175,7 +179,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -240,6 +244,12 @@ MasterStackStepped := { model : Box(Masters), answer : BspTreeAnswer }
 
 ## A master-stack layout system, unchanged, and the system as the platform holds it.
 MasterStackViewed := { model : Box(Masters), view : MasterStackSeed }
+
+## A traditional system, unchanged, and what a layout question answers.
+TraditionalTreeLaidOut := { model : Box(Traditionals), answer : GroupLayoutAnswer }
+
+## A master-stack system, unchanged, and what a layout question answers.
+MasterStackLaidOut := { model : Box(Masters), answer : GroupLayoutAnswer }
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -611,6 +621,13 @@ traditional_tree_view_for_host = |boxed| {
 	{ model: Box.box(viewed.model), view: viewed.view }
 }
 
+## A traditional layout question's answer, and the system back unchanged.
+traditional_tree_layout_for_host : Box(Traditionals), GroupLayoutQuestion -> TraditionalTreeLaidOut
+traditional_tree_layout_for_host = |boxed, question| {
+	laid = (core.traditional_tree_layout)(Box.unbox(boxed), question)
+	{ model: Box.box(laid.model), answer: laid.answer }
+}
+
 ## The host cannot release a `Box(Traditionals)`: only Roc knows its layout.
 traditional_tree_release_for_host : Box(Traditionals) -> {}
 traditional_tree_release_for_host = |_| {}
@@ -636,6 +653,13 @@ master_stack_view_for_host : Box(Masters) -> MasterStackViewed
 master_stack_view_for_host = |boxed| {
 	viewed = (core.master_stack_view)(Box.unbox(boxed))
 	{ model: Box.box(viewed.model), view: viewed.view }
+}
+
+## A master-stack layout question's answer, and the system back unchanged.
+master_stack_layout_for_host : Box(Masters), GroupLayoutQuestion -> MasterStackLaidOut
+master_stack_layout_for_host = |boxed, question| {
+	laid = (core.master_stack_layout)(Box.unbox(boxed), question)
+	{ model: Box.box(laid.model), answer: laid.answer }
 }
 
 ## The host cannot release a `Box(Masters)`: only Roc knows its layout.

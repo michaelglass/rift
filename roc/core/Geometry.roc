@@ -2,7 +2,7 @@
 ## with the Rust: the float helpers are Rust's (`f64::round`, `max`, `min`, `sum`), not Roc's.
 ## The shared geometry types are the platform's (`Boundary`).
 
-import pf.Boundary exposing [Rect, Size, Sizing, WindowConstraints, Gaps, AxisItem, AxisFixed, AxisMax]
+import pf.Boundary exposing [Constraints, Rect, Size, Sizing, WindowConstraints, WindowId, Gaps, AxisItem, AxisFixed, AxisMax]
 
 ## A subtree's constraints along an axis.
 Summary : { min : F64, fixed : AxisFixed, max : AxisMax, can_grow : Bool }
@@ -19,6 +19,18 @@ Placed : { segment : Segment, state : [Set(F64), Growing] }
 Geometry := [].{
 	epsilon : F64
 	epsilon = F64.from_bits(4372995238176751616)
+
+	## A window's constraints, if the host knows them (by the window's word).
+	known_constraints : Dict(U64, WindowConstraints), U64 -> Constraints
+	known_constraints = |known, word|
+		match known.get(word) {
+			Ok(constraints) => Constrained(constraints)
+			Err(KeyNotFound) => Unconstrained
+		}
+
+	## The window a word names: its pid in the high half, its index in the low half.
+	window_id : U64 -> WindowId
+	window_id = |word| WindowId.{ pid: word.shr_zf_wrap(32).to_u32_wrap().to_i32_wrap(), idx: word.to_u32_wrap() }
 
 	## Rust's `value as f32`: the nearest `F32`, ties to even (an infinity past its range, zero
 	## or a subnormal below it, the sign kept; a NaN stays a NaN).

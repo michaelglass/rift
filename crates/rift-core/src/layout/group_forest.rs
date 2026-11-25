@@ -29,7 +29,7 @@ use crate::plain::Rect;
 use crate::slot_table::{SlotKey, SlotSet, SlotTable};
 
 mod views;
-pub use views::{ContainerView, Held, Role};
+pub use views::{Branch, ContainerView, Drawn, Held, Mark, Role, Row, render};
 
 /// What a container does with its children: lays them out side by side along an axis, or
 /// stacks them (one shown) offset along an axis. Upstream's `LayoutKind`.
