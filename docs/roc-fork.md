@@ -9,17 +9,73 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 2): read this first
+## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 3): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
-BSP and for the stack. `rearch/roc-next@fork` carries everything through this docs commit once it
-is published (publish procedure: "Rulings that bind", Public-clean; the published tip's id is in
-the slice report). All checks green at the tip: workspace tests 1049 (7 ignored), the lib with
-`roc-core` 928 (9 ignored), `cargo test -p rift-core-roc --features roc` 55 (9 ignored), `cargo
-test -p rift-core` 107, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt,
-and `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
-counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
-grep -v generated | wc -l` (the bound: at most 336).
+BSP and for the stack, slices 1-3 for the group forest (traditional and master-stack).
+`rearch/roc-next@fork` carries everything through this docs commit once it is published (publish
+procedure: "Rulings that bind", Public-clean; the published tip's id is in the slice report). All
+checks green at the tip: workspace tests 1050 (7 ignored), the lib with `roc-core` 929 (10
+ignored), `cargo test -p rift-core-roc --features roc` 55 (9 ignored), `cargo test -p rift-core`
+108, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and `cargo clippy
+--all-targets --features roc-core` compiles with no errors and 331 warnings, counted as `cargo
+clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated |
+wc -l` (the bound: at most 336).
+
+**The group forest, slice 3, done (2026-11-25): the flip (policy (a)).** Five commits after the
+slice 2 docs commit; each message has its plants, checks and costs.
+- **rift-cli's views read the core** (`group_forest::views`): `Forest::container_view(layout)`
+  (each node, whether it is the selection, its size among its siblings, its fill, its `Role`:
+  the root region pair's master or stack, else `Plain`; a window or a container's kind and
+  children), mapped by the platform to `ContainerTreeNode`; `Forest::draw(layout)`, upstream's
+  `draw_tree` with the `ascii_tree` writer ported (rift-core has no dependencies). Plants 9/9.
+  The drawn fuzzers' reloads now also write a negative child size (a saved-only state).
+- **The group bar reads the core:** the traditional geometry's shape labels each stack
+  (`Traditional<W, S = ()>`; `Traditional::placed` answers each stack's frame beside the
+  windows'); `Forest::project(layout, pass, constraints, Bars)` gives the frames and each
+  stack's `GroupBar` (frame, one window per child taking part, the focused child's index) as
+  upstream's projection walks (`Bars::SelectionPath` follows the selection; a filled node ends
+  the walk and, on the selection path, drops the bars found). A group bar pass's frames are
+  decided as `calculate_layout` decides them. Plants 9/9 (five equivalent by construction,
+  listed in the commit). Found on the way: rift's only caller passing a group output to
+  `calculate_layout_with_groups` passes none, so the emit-frames path is reached only by tests;
+  the bar itself comes through `collect_group_containers`.
+- **The flip** (`traditional/twinned.rs`, `master_stack/twinned.rs`): `{ core, shadow:
+  Box<Shadow { upstream, steps, roc (roc-core only) }> }`. Every answer is the core's; upstream
+  steps in every build, compared as before, and is re-seeded from the core on a difference
+  (`upstream_of`: `group_stored::upstream_tiles`, slotmaps through `model::slot_table::to_slotmap`,
+  restored and now writing each value in the saved form of the slotmap's type; master-stack's
+  settings written over the old ones). `calculate_layout`: the core geometry's frames for the
+  core's shape (`decide_traditional`), upstream's projection the shadow. **Saving is the
+  core's** (`group_stored::Saved`: node slots with their links, sizes, kinds, fill flags,
+  selections, windows and region order; the index in stamp order; master-stack's under
+  `inner`), held to upstream's bytes at every drawn reload. Loads still go through upstream's
+  load and the slice 1 normalizations. Plants 12/12.
+- **Under `roc-core`, the Roc forest is a second shadow** (`systems/group_roc.rs`, `RocShadow`
+  over `RocTraditional` / `RocMasterStack`): seeded from the core, stepped with every operation
+  and query, answer and whole view compared; a difference counted (`roc-core: group forest
+  re-seeds`), panicking in tests, or warned `roc-divergence:` and re-seeded from the core. **The
+  views compare entry stamps by rank:** a seed derives the next stamp from the leaves, while a
+  live forest keeps counting past leaves since removed, so a Roc forest seeded from a live core
+  stamps lower; only the order is behaviour. (Carrying the counter in the view would be the
+  alternative; the slice 4 decision flips which side seeds which, so worth a look then.) Plants
+  11/11 (two equivalent).
+- **The shape, optimized:** the nodes taking part were a `BTreeSet<N>`; they are a
+  `rift_core::slot_table::SlotSet` (keys by slot and version). The core's shape at 10 / 100 /
+  1000 windows: 1.1 / 9.5 / 159 us before, 0.78 / 5.1 / 45 us after (upstream's 0.85 / 5.5 / 50
+  us); master-stack 1.1 / 4.8 / 55 us before, 0.77 / 2.4 / 14 us after (upstream's 0.74 / 2.8 /
+  22 us). An allocation-free `participating_child` was tried and measured no gain; left out.
+  Plants 3/3.
+- **Cost (release, after the slice):** a plain build pays the core (0.24 / 1.0 / 11 us an
+  operation; master-stack 0.35 / 1.0 / 8.6 us) and upstream as the shadow (83 ns / 0.24 / 1.9
+  us; 86 ns / 0.22 / 1.4 us), the view 1 in 32, a shadow re-seed 58 us / 0.55 / 5.6 ms.
+  `roc-core` adds the Roc step (0.76 / 6.4 / 101 us at 10 / 100 / 1000 windows in one layout),
+  a view comparison (0.46 / 2.9 / 25 us) on every operation.
+- **Next: slice 4, under `roc-core` the Roc forest decides:** `Forest::shape` in Roc (words to
+  `WindowId` at the boundary) with a frames entry and a differential; then the Roc forest's
+  answers and frames are rift's under `roc-core`, the Rust forest its shadow re-seeded from the
+  Roc view, upstream staying the Rust forest's shadow. The group bar and rift-cli's views stay
+  on the Rust forest until Roc has them (or move with the shape: a question for the lead).
 
 **The group forest, slice 2, done (2026-11-25): the Roc mirror.** One commit after the slice 1
 docs commit; its message has the plants, checks and costs.
@@ -47,9 +103,7 @@ docs commit; its message has the plants, checks and costs.
   scripted focus move into a stack whose selection stops there (drawn runs reach it once in
   about 30,000). `RIFT_GROUP_FOREST_RUNS` sets the count.
 - **Plants:** Roc 56/57 (one equivalent: a move's in-place guard), the conversions 3/3.
-- **Next: slice 3, the flip** (the core decides and is saved byte-exactly, upstream the shadow
-  re-seeded from the core; the group bar's projection, `draw_tree` and `container_tree` moved to
-  the core first; under `roc-core` the Roc forest a second shadow).
+- **Next: slice 3, the flip** (done above).
 
 **The group forest, slice 1, done (2026-11-25): the core's forest beside upstream's traditional
 and master-stack systems.** Four commits after the rulings' docs commit; each message has its
