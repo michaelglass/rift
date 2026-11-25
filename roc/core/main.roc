@@ -1384,7 +1384,7 @@ decide = |model, event| {
 				Idle => (model, [])
 			}
 
-		Released(up) => {
+		Release(up) => {
 			ends =
 				match grip {
 					Idle => False

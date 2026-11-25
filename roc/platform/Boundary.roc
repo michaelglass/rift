@@ -1067,9 +1067,8 @@ Boundary := [].{
 	Event := [
 		Press(Press),
 		Drag(WindowId),
-		## A button came up (`Release`, renamed: a tag named `Release` collides with the glue's
-		## own `<Type>Release` helpers).
-		Released(ReleaseOf),
+		## A button came up.
+		Release(ReleaseOf),
 		LetGo,
 		Gone(WindowId),
 		Rekeyed(Rekey),

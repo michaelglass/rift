@@ -2623,7 +2623,7 @@ pub(crate) fn event(event: Event<Plain>, host: &abi::RocHost) -> abi::BoundaryEv
         }
         Event::Release(up) => union!(
             BoundaryEvent,
-            BoundaryEventPayload.released(match up {
+            BoundaryEventPayload.release(match up {
                 Release::Button(released) => union!(
                     BoundaryReleaseOf,
                     BoundaryReleaseOfPayload.button_up(button(released)),
@@ -2632,7 +2632,7 @@ pub(crate) fn event(event: Event<Plain>, host: &abi::RocHost) -> abi::BoundaryEv
                 Release::Missed =>
                     union!(BoundaryReleaseOf, BoundaryReleaseOfPayload.missed, Up::Missed),
             }),
-            Tag::Released
+            Tag::Release
         ),
         Event::LetGo => union!(BoundaryEvent, BoundaryEventPayload.let_go, Tag::LetGo),
         Event::Gone { window: id } => {
