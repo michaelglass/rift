@@ -77,7 +77,12 @@ impl Reactor {
         if kind == Some(crate::actor::drag::DragKind::NativeResize) {
             let engine = &mut self.layout_manager.layout_engine;
             if engine.is_window_floating(window) {
-                engine.store_floating_position(workspace, window, source.last_frame);
+                engine.store_floating_position(
+                    workspace,
+                    window,
+                    source.last_frame,
+                    Away::from_store(&self.state.windows),
+                );
             }
             return;
         }

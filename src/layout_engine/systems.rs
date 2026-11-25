@@ -150,7 +150,7 @@ impl<'a> Away<'a> {
 
 /// Which windows a selection repair may land on.
 #[derive(Clone, Copy)]
-pub(super) enum Candidates<'a> {
+pub enum Candidates<'a> {
     /// Structure alone: pruning a saved layout before any of its windows is live.
     Any,
     /// Windows that aren't away.
@@ -570,7 +570,7 @@ mod tests {
         let layout = traditional.create_layout();
         traditional.update(WindowChange::Add(layout, w(1), None), Away::nothing());
         traditional.update(WindowChange::Add(layout, w(2), None), Away::nothing());
-        let tree = traditional.tiles.container_tree(layout);
+        let tree = traditional.tiles.container_tree(layout, Away::nothing());
         assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Container);
         assert_eq!(window_nodes(&tree).len(), 2);
         assert_eq!(
@@ -578,7 +578,7 @@ mod tests {
             1
         );
         traditional.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
-        assert_stable_unique_ids(&tree, &traditional.tiles.container_tree(layout));
+        assert_stable_unique_ids(&tree, &traditional.tiles.container_tree(layout, Away::nothing()));
 
         let mut bsp = BspLayoutSystem::default();
         let layout = bsp.create_layout();
@@ -595,7 +595,7 @@ mod tests {
         let layout = master_stack.create_layout();
         master_stack.update(WindowChange::Add(layout, w(1), None), Away::nothing());
         master_stack.update(WindowChange::Add(layout, w(2), None), Away::nothing());
-        let tree = master_stack.container_tree(layout);
+        let tree = master_stack.container_tree(layout, Away::nothing());
         let roles: Vec<_> = tree.children.iter().filter_map(|node| node.role.as_deref()).collect();
         assert!(roles.contains(&"master"), "{tree:#?}");
         assert!(roles.contains(&"stack"), "{tree:#?}");
@@ -849,14 +849,18 @@ impl LayoutSystemKind {
         }
     }
 
-    pub fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+    pub fn container_tree(
+        &self,
+        layout: LayoutId,
+        away: Away<'_>,
+    ) -> rift_protocol::ContainerTreeNode {
         match self {
-            Self::Traditional(system) => system.tiles.container_tree(layout),
+            Self::Traditional(system) => system.tiles.container_tree(layout, away),
             Self::Bsp(system) => system.container_tree(layout),
             Self::Stack(system) => system.container_tree(layout),
-            Self::MasterStack(system) => system.container_tree(layout),
+            Self::MasterStack(system) => system.container_tree(layout, away),
             Self::Scrolling(system) => system.container_tree(layout),
-            Self::Floating(system) => system.groups.container_tree(layout),
+            Self::Floating(system) => system.groups.container_tree(layout, away),
         }
     }
 
@@ -884,6 +888,7 @@ impl LayoutSystemKind {
         emit_frames: bool,
         groups: &mut Vec<crate::layout_engine::engine::GroupContainerInfo>,
         selection_path_only: bool,
+        away: Away<'_>,
     ) -> Option<Vec<(WindowId, CGRect)>> {
         let (forest, root, regions) = match self {
             Self::Traditional(system) => (&system.tiles, system.tiles.root(layout), None),
@@ -904,6 +909,7 @@ impl LayoutSystemKind {
             stack_line,
             emit_frames,
             Some(tiles::GroupOutput { groups, selection_path_only }),
+            away,
         ))
     }
 
@@ -916,6 +922,7 @@ impl LayoutSystemKind {
         gaps: &GapSettings,
         stack_line: crate::common::config::StackLineReserve,
         selection_path_only: bool,
+        away: Away<'_>,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         let mut groups = Vec::new();
         if self
@@ -929,6 +936,7 @@ impl LayoutSystemKind {
                 false,
                 &mut groups,
                 selection_path_only,
+                away,
             )
             .is_some()
         {
@@ -944,7 +952,7 @@ impl LayoutSystemKind {
                 selection_path_only,
             ),
             LayoutSystemKind::Floating(s) => {
-                s.collect_group_containers(layout_id, screen, gaps, selection_path_only)
+                s.collect_group_containers(layout_id, screen, gaps, selection_path_only, away)
             }
             _ => Vec::new(),
         }

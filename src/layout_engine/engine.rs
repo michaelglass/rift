@@ -400,7 +400,12 @@ impl LayoutEngine {
         }
         if let Some(frame) = drop.frame {
             windows.clear_floating_display_geometry(drop.window);
-            self.store_floating_position(destination, drop.window, frame);
+            self.store_floating_position(
+                destination,
+                drop.window,
+                frame,
+                Away::from_store(windows),
+            );
         }
         self.workspaces.set_last_focused_window(space, destination, Some(drop.window));
         true
@@ -513,13 +518,13 @@ impl LayoutEngine {
         ];
         directions.map(|direction| match baseline {
             LayoutSystemKind::Traditional(system) => {
-                system.can_move_window(layout, source, direction)
+                system.can_move_window(layout, source, direction, away)
             }
             LayoutSystemKind::Bsp(system) => {
                 system.can_move_window(layout, source, direction, away)
             }
             LayoutSystemKind::MasterStack(system) => {
-                system.can_move_window(layout, source, direction)
+                system.can_move_window(layout, source, direction, away)
             }
             LayoutSystemKind::Scrolling(system) => {
                 system.can_move_window(layout, source, direction)
@@ -543,7 +548,7 @@ impl LayoutEngine {
         let workspace_index = self.workspaces.workspace_index(target.space, workspace_id)?;
         let layout = workspace.active_layout()?;
         let selected_window = workspace.layout_system.selected_window(layout, away);
-        let container_tree = workspace.layout_system.container_tree(layout);
+        let container_tree = workspace.layout_system.container_tree(layout, away);
 
         Some(WorkspaceLayoutQuerySnapshot {
             workspace_id,
@@ -786,6 +791,7 @@ impl LayoutEngine {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
         selection_path_only: bool,
+        away: Away<'_>,
     ) -> Vec<GroupContainerInfo> {
         let Some((ws_id, layout_id)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
@@ -799,26 +805,27 @@ impl LayoutEngine {
             gaps,
             stack_line,
             selection_path_only,
+            away,
         )
     }
 }
 
 impl LayoutEngine {
-    pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
+    pub fn set_layout_settings(&mut self, settings: &LayoutSettings, away: Away<'_>) {
         if &self.layout_settings != settings {
-            self.apply_layout_settings(settings);
+            self.apply_layout_settings(settings, away);
         }
     }
 
     // Hydrated systems carry saved settings even though the runtime settings
     // field starts at its default. Loading must apply the current configuration.
-    fn apply_layout_settings(&mut self, settings: &LayoutSettings) {
+    fn apply_layout_settings(&mut self, settings: &LayoutSettings, away: Away<'_>) {
         self.native_layouts.clear();
         self.layout_settings = settings.clone();
 
         for (_, ws) in self.workspaces.workspaces.iter_mut() {
             let display = self.space_display_map.get(&ws.space).and_then(Option::as_deref);
-            ws.apply_layout_settings(settings, display);
+            ws.apply_layout_settings(settings, display, away);
         }
     }
 
@@ -2646,7 +2653,7 @@ impl LayoutEngine {
                 let windows = if let LayoutSystemKind::Floating(system) =
                     &mut self.workspaces[workspace_id].layout_system
                 {
-                    system.cycle_windows(layout)
+                    system.cycle_windows(layout, Away::from_store(window_store))
                 } else if is_floating {
                     self.active_floating_windows_in_workspace(window_store, space)
                 } else {
@@ -2855,14 +2862,22 @@ impl LayoutEngine {
                     &mut self.workspaces[workspace_id].layout_system
                 {
                     match command {
-                        LayoutCommand::AdjustMasterRatio(delta) => {
-                            system.adjust_master_ratio(layout, delta)
+                        LayoutCommand::AdjustMasterRatio(delta) => system.adjust_master_ratio(
+                            layout,
+                            delta,
+                            Away::from_store(window_store),
+                        ),
+                        LayoutCommand::AdjustMasterCount { delta } => system.adjust_master_count(
+                            layout,
+                            delta,
+                            Away::from_store(window_store),
+                        ),
+                        LayoutCommand::PromoteToMaster => {
+                            system.promote_to_master(layout, Away::from_store(window_store))
                         }
-                        LayoutCommand::AdjustMasterCount { delta } => {
-                            system.adjust_master_count(layout, delta)
+                        LayoutCommand::SwapMasterStack => {
+                            system.swap_master_stack(layout, Away::from_store(window_store))
                         }
-                        LayoutCommand::PromoteToMaster => system.promote_to_master(layout),
-                        LayoutCommand::SwapMasterStack => system.swap_master_stack(layout),
                         _ => unreachable!(),
                     }
                 }
@@ -2871,9 +2886,11 @@ impl LayoutEngine {
             LayoutCommand::RotateMasterStackNext | LayoutCommand::RotateMasterStackPrev => {
                 let backwards = matches!(command, LayoutCommand::RotateMasterStackPrev);
                 let changed = match &mut self.workspaces[workspace_id].layout_system {
-                    LayoutSystemKind::MasterStack(system) => {
-                        system.rotate_master_stack(layout, backwards)
-                    }
+                    LayoutSystemKind::MasterStack(system) => system.rotate_master_stack(
+                        layout,
+                        backwards,
+                        Away::from_store(window_store),
+                    ),
                     _ => false,
                 };
                 if changed {
@@ -3035,6 +3052,7 @@ impl LayoutEngine {
                         true,
                         groups,
                         false,
+                        Away::from_store(window_store),
                     ) {
                         return Some(frames);
                     }
@@ -3046,6 +3064,7 @@ impl LayoutEngine {
                         gaps,
                         stack_line,
                         false,
+                        Away::from_store(window_store),
                     );
                     None
                 });
@@ -3147,8 +3166,9 @@ impl LayoutEngine {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        away: Away<'_>,
     ) -> Vec<GroupContainerInfo> {
-        self.collect_group_containers_for_space(space, screen, gaps, stack_line, true)
+        self.collect_group_containers_for_space(space, screen, gaps, stack_line, true, away)
     }
 
     pub fn active_workspace_for_space_has_fullscreen(
@@ -3185,8 +3205,9 @@ impl LayoutEngine {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        away: Away<'_>,
     ) -> Vec<GroupContainerInfo> {
-        self.collect_group_containers_for_space(space, screen, gaps, stack_line, false)
+        self.collect_group_containers_for_space(space, screen, gaps, stack_line, false, away)
     }
 
     /// Scrolling strips expose their calculated coordinates before native offscreen parking.
@@ -3890,7 +3911,7 @@ impl LayoutEngine {
         if self.is_window_floating(window)
             && let Some(assignment) = windows.workspace_for_window(window)
         {
-            self.store_floating_position(assignment, window, frame);
+            self.store_floating_position(assignment, window, frame, Away::from_store(windows));
         }
     }
 
@@ -3899,9 +3920,10 @@ impl LayoutEngine {
         workspace: VirtualWorkspaceId,
         window: WindowId,
         frame: CGRect,
+        away: Away<'_>,
     ) {
         if let LayoutSystemKind::Floating(system) = &mut self.workspaces[workspace].layout_system {
-            system.store_frame(window, frame);
+            system.store_frame(window, frame, away);
             return;
         }
         self.floating_positions.store(workspace, window, frame);
@@ -3990,10 +4012,11 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         floating_positions: &[(WindowId, CGRect)],
+        away: Away<'_>,
     ) {
         if let Some(workspace) = self.workspaces.active_workspace(space) {
             for &(window, frame) in floating_positions {
-                self.store_floating_position(workspace, window, frame);
+                self.store_floating_position(workspace, window, frame, away);
             }
         }
     }
@@ -4557,7 +4580,9 @@ mod tests {
         let ws2 = workspaces[1].0;
 
         let layout = engine.workspaces.active_layout(space, ws1).unwrap();
-        let before = engine.workspaces[ws1].layout_system.container_tree(layout);
+        let before = engine.workspaces[ws1]
+            .layout_system
+            .container_tree(layout, Away::from_store(&window_store));
         assert!(!engine.relocate_window_to_workspace(
             &mut window_store,
             ws1,
@@ -4567,7 +4592,9 @@ mod tests {
         ));
         assert_eq!(window_store.workspace_for_window(wid), Some(ws1));
         assert_eq!(
-            engine.workspaces[ws1].layout_system.container_tree(layout),
+            engine.workspaces[ws1]
+                .layout_system
+                .container_tree(layout, Away::from_store(&window_store)),
             before
         );
 

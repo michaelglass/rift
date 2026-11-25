@@ -48,7 +48,7 @@ pub(crate) struct WindowDropRequest {
 }
 pub(crate) use systems::LayoutId;
 pub use systems::{
-    Away, BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,
+    Away, BspLayoutSystem, Candidates, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,
     ScrollingLayoutSystem, StackLayoutSystem, TraditionalLayoutSystem,
 };
 

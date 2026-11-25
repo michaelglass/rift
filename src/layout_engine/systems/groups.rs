@@ -4,7 +4,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
-use super::{EditResult, Focus, FocusResult, Participating, WindowQuery};
+use super::{Away, Candidates, EditResult, Focus, FocusResult, Participating, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashSet;
 use crate::layout_engine::utils::compute_tiling_area;
@@ -56,8 +56,6 @@ impl From<LayoutRoot> for (Option<NodeId>, &'static str) {
 
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(super) struct GroupLayouts {
-    #[serde(skip)]
-    pub(super) inactive: HashSet<WindowId>,
     #[serde(deserialize_with = "deserialize_tile_tree")]
     pub(super) tree: Tree,
     pub(super) layout_roots: slotmap::SlotMap<LayoutId, LayoutRoot>,
@@ -262,7 +260,6 @@ impl NodeMap {
 
 impl GroupLayouts {
     pub(super) fn remove_window(&mut self, window: WindowId) -> Vec<WindowNodeInfo> {
-        self.inactive.remove(&window);
         let removed = self.tree.window.take_window(window);
         for info in &removed {
             self.tree.remove(info.node);
@@ -271,25 +268,25 @@ impl GroupLayouts {
     }
 
     pub(super) fn replace_window(&mut self, from: WindowId, to: WindowId) {
-        super::replace_participation(&mut self.inactive, from, to);
         self.tree.window.replace_window(&mut self.tree.map, from, to);
     }
 
     pub(super) fn close_app(&mut self, pid: pid_t) {
-        self.inactive.retain(|w| w.pid != pid);
         for node in self.tree.window.take_nodes_for_app(pid) {
             self.tree.remove(node);
         }
     }
 
-    pub(super) fn toggle_orientation(&mut self, layout: LayoutId) -> EditResult {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
+    pub(super) fn toggle_orientation(&mut self, layout: LayoutId, away: Away<'_>) -> EditResult {
+        if self.layout_has_away(self.root(layout), away)
+            && self.find_best_focus_target(self.root(layout), away).is_none()
+        {
             return EditResult::Unchanged;
         }
         use crate::layout_engine::LayoutKind;
 
         let map = self.map();
-        let selection_node = self.selection(layout);
+        let selection_node = self.selection(layout, away);
 
         let target_node = match selection_node.parent(map) {
             Some(p) => p,
@@ -318,34 +315,48 @@ impl GroupLayouts {
         &mut self,
         layout: LayoutId,
         within_gaps: bool,
+        away: Away<'_>,
     ) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
+        if self.layout_has_away(self.root(layout), away)
+            && self.find_best_focus_target(self.root(layout), away).is_none()
+        {
             return Vec::new();
         }
-        let node = self.selection(layout);
+        let node = self.selection(layout, away);
         let info = &mut self.tree.map[node].layout;
         if super::toggle_fullscreen_mode(
             &mut info.is_fullscreen,
             &mut info.is_fullscreen_within_gaps,
             within_gaps,
         ) {
-            self.visible_windows_under_internal(node)
+            self.visible_windows_under_internal(node, away)
         } else {
             Vec::new()
         }
     }
 
-    pub(super) fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) -> EditResult {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
+    pub(super) fn split_selection(
+        &mut self,
+        layout: LayoutId,
+        kind: LayoutKind,
+        away: Away<'_>,
+    ) -> EditResult {
+        if self.layout_has_away(self.root(layout), away)
+            && self.find_best_focus_target(self.root(layout), away).is_none()
+        {
             return EditResult::Unchanged;
         }
-        let selection = self.selection(layout);
+        let selection = self.selection(layout, away);
         self.nest_in_container_internal(layout, selection, kind);
         EditResult::Changed
     }
 
-    pub(super) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.container_tree_with_roles(layout, &[])
+    pub(super) fn container_tree(
+        &self,
+        layout: LayoutId,
+        away: Away<'_>,
+    ) -> rift_protocol::ContainerTreeNode {
+        self.container_tree_with_roles(layout, &[], away)
     }
 
     pub(super) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
@@ -406,6 +417,7 @@ impl GroupLayouts {
         &self,
         layout: LayoutId,
         roles: &[(NodeId, &str)],
+        away: Away<'_>,
     ) -> rift_protocol::ContainerTreeNode {
         fn snapshot(
             system: &GroupLayouts,
@@ -438,7 +450,7 @@ impl GroupLayouts {
             }
         }
 
-        snapshot(self, self.root(layout), self.selection(layout), roles)
+        snapshot(self, self.root(layout), self.selection(layout, away), roles)
     }
 
     pub(super) fn draw_tree(&self, layout: LayoutId, labels: &[(NodeId, &str)]) -> String {
@@ -450,19 +462,30 @@ impl GroupLayouts {
 
     pub(super) fn select(&mut self, selection: NodeId) { self.tree.map.select(selection) }
 
-    pub(super) fn traverse_internal(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+    pub(super) fn traverse_internal(
+        &self,
+        from: NodeId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<NodeId> {
         let map = &self.tree.map;
-        if let Some(sibling) = self.move_over(from, direction) {
+        if let Some(sibling) = self.move_over(from, direction, away) {
             return Some(sibling);
         }
         from.ancestors(map)
             .skip(1)
-            .find_map(|ancestor| self.move_over(ancestor, direction))
-            .map(|target| self.descend_into_target(target, direction, map))
+            .find_map(|ancestor| self.move_over(ancestor, direction, away))
+            .map(|target| self.descend_into_target(target, direction, map, away))
     }
 
-    fn descend_into_target(&self, target: NodeId, direction: Direction, map: &NodeMap) -> NodeId {
-        let active = self.participating_nodes(target);
+    fn descend_into_target(
+        &self,
+        target: NodeId,
+        direction: Direction,
+        map: &NodeMap,
+        away: Away<'_>,
+    ) -> NodeId {
+        let active = self.participating_nodes(target, away);
         let mut current = target;
         while let Some(child) = map.participating_child(
             current,
@@ -475,35 +498,48 @@ impl GroupLayouts {
         current
     }
 
-    fn visible_windows_under_internal(&self, node: NodeId) -> Vec<WindowId> {
+    fn visible_windows_under_internal(&self, node: NodeId, away: Away<'_>) -> Vec<WindowId> {
         let mut windows = Vec::new();
-        self.visit_visible_windows(node, &mut |_, window| {
-            windows.push(window);
-            ControlFlow::<()>::Continue(())
-        })
+        self.visit_visible_windows(
+            node,
+            &mut |_, window| {
+                windows.push(window);
+                ControlFlow::<()>::Continue(())
+            },
+            away,
+        )
         .continue_value();
         windows
     }
 
-    pub(super) fn first_visible_window(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
-        self.visit_visible_windows(node, &mut |node, window| ControlFlow::Break((node, window)))
-            .break_value()
+    pub(super) fn first_visible_window(
+        &self,
+        node: NodeId,
+        away: Away<'_>,
+    ) -> Option<(NodeId, WindowId)> {
+        self.visit_visible_windows(
+            node,
+            &mut |node, window| ControlFlow::Break((node, window)),
+            away,
+        )
+        .break_value()
     }
 
     pub(super) fn visit_visible_windows<B>(
         &self,
         node: NodeId,
         visit: &mut impl FnMut(NodeId, WindowId) -> ControlFlow<B>,
+        away: Away<'_>,
     ) -> ControlFlow<B, bool> {
         let map = self.map();
-        let group_limit = if self.inactive.is_empty() {
+        let group_limit = if !self.layout_has_away(node, away) {
             BranchLimit::First
         } else {
             BranchLimit::FirstVisible
         };
         map.walk_windows(
             node,
-            &|window| self.window_participates(window),
+            &|window| away.participates(window),
             &|node| {
                 if map.kind(node).is_group() {
                     (map.local_selection(node), false, group_limit)
@@ -515,7 +551,12 @@ impl GroupLayouts {
         )
     }
 
-    pub(super) fn move_over(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+    pub(super) fn move_over(
+        &self,
+        from: NodeId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<NodeId> {
         let Some(parent) = from.parent(&self.tree.map) else {
             return None;
         };
@@ -528,7 +569,9 @@ impl GroupLayouts {
         };
         let mut next = sibling(from);
         while let Some(node) = next {
-            if self.inactive.is_empty() || self.find_best_focus_target(node).is_some() {
+            if !self.layout_has_away(node, away)
+                || self.find_best_focus_target(node, away).is_some()
+            {
                 return Some(node);
             }
             next = sibling(node);
@@ -578,13 +621,14 @@ impl GroupLayouts {
         rect: CGRect,
         children: &[NodeId],
         selected_index: usize,
+        away: Away<'_>,
     ) -> crate::layout_engine::engine::GroupContainerInfo {
         // One representative per non-empty child, in child order: left to right for a
         // horizontal stack, top to bottom for a vertical one.
         let mut window_ids = Vec::with_capacity(children.len());
         let mut representative_selection = 0;
         for (i, &child) in children.iter().enumerate() {
-            if let Some((_, wid)) = self.find_best_focus_target(child) {
+            if let Some((_, wid)) = self.find_best_focus_target(child, away) {
                 if i == selected_index {
                     representative_selection = window_ids.len();
                 }
@@ -615,11 +659,13 @@ impl GroupLayouts {
         parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
     }
 
-    pub(super) fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
+    pub(super) fn descend_selection(&mut self, layout: LayoutId, away: Away<'_>) -> bool {
+        if self.layout_has_away(self.root(layout), away)
+            && self.find_best_focus_target(self.root(layout), away).is_none()
+        {
             return false;
         }
-        if let Some(child) = self.tree.map.last_selection(self.selection(layout)) {
+        if let Some(child) = self.tree.map.last_selection(self.selection(layout, away)) {
             self.select(child);
             return true;
         }
@@ -630,10 +676,11 @@ impl GroupLayouts {
         &mut self,
         layout: LayoutId,
         direction: Direction,
+        away: Away<'_>,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let selection = self.selection(layout);
-        if let Some(new_node) = self.traverse_internal(selection, direction) {
-            let focus_target = self.find_best_focus_target(new_node);
+        let selection = self.selection(layout, away);
+        if let Some(new_node) = self.traverse_internal(selection, direction, away) {
+            let focus_target = self.find_best_focus_target(new_node, away);
             let Some((focus_node, focus_window)) = focus_target else {
                 return (None, vec![]);
             };
@@ -646,7 +693,7 @@ impl GroupLayouts {
                 }
                 node = parent;
             }
-            let raise_windows = self.visible_windows_under_internal(highest_revealed);
+            let raise_windows = self.visible_windows_under_internal(highest_revealed, away);
             (Some(focus_window), raise_windows)
         } else {
             (None, vec![])
@@ -657,11 +704,14 @@ impl GroupLayouts {
         &mut self,
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
+        away: Away<'_>,
     ) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
+        if self.layout_has_away(self.root(layout), away)
+            && self.find_best_focus_target(self.root(layout), away).is_none()
+        {
             return Vec::new();
         }
-        let selection = self.selection(layout);
+        let selection = self.selection(layout, away);
         let container = if self.window_at(selection).is_some() {
             selection.parent(self.map())
         } else {
@@ -681,11 +731,11 @@ impl GroupLayouts {
         if let Some(first) = container.first_child(self.map()) {
             self.select(first);
         }
-        self.visible_windows_under_internal(container)
+        self.visible_windows_under_internal(container, away)
     }
 
-    fn stacked_selection_container(&self, layout: LayoutId) -> Option<NodeId> {
-        let selection = self.selection(layout);
+    fn stacked_selection_container(&self, layout: LayoutId, away: Away<'_>) -> Option<NodeId> {
+        let selection = self.selection(layout, away);
         let stacked = |&node: &NodeId| self.layout(node).is_stacked();
         if self.window_at(selection).is_some() {
             selection.ancestors(self.map()).skip(1).find(stacked)
@@ -700,11 +750,14 @@ impl GroupLayouts {
         &mut self,
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
+        away: Away<'_>,
     ) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
+        if self.layout_has_away(self.root(layout), away)
+            && self.find_best_focus_target(self.root(layout), away).is_none()
+        {
             return Vec::new();
         }
-        let Some(container) = self.stacked_selection_container(layout) else {
+        let Some(container) = self.stacked_selection_container(layout, away) else {
             return Vec::new();
         };
         let orientation =
@@ -713,7 +766,7 @@ impl GroupLayouts {
             Orientation::Horizontal => LayoutKind::Horizontal,
             Orientation::Vertical => LayoutKind::Vertical,
         });
-        self.visible_windows_under_internal(container)
+        self.visible_windows_under_internal(container, away)
     }
 
     pub(super) fn move_stack_tab(
@@ -721,8 +774,9 @@ impl GroupLayouts {
         layout: LayoutId,
         window: WindowId,
         target: WindowId,
+        away: Away<'_>,
     ) -> bool {
-        if !self.window_participates(window) || !self.window_participates(target) {
+        if !away.participates(window) || !away.participates(target) {
             return false;
         }
         let map = &self.tree.map;
@@ -756,8 +810,14 @@ impl GroupLayouts {
         self.tree.move_node(moving, place)
     }
 
-    pub(super) fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        if !self.window_participates(a) || !self.window_participates(b) {
+    pub(super) fn swap_windows(
+        &mut self,
+        layout: LayoutId,
+        a: WindowId,
+        b: WindowId,
+        away: Away<'_>,
+    ) -> bool {
+        if !away.participates(a) || !away.participates(b) {
             return false;
         }
         let node_a = match self.tree.window.node_for(layout, a) {
@@ -773,7 +833,7 @@ impl GroupLayouts {
             return false;
         }
 
-        let selection = self.selection(layout);
+        let selection = self.selection(layout, away);
         // Exchange the occupants of the slots without restructuring the tree.
         // Reparenting a leaf can collapse a single-child container mid-swap.
         let index = &mut self.tree.window;
@@ -815,18 +875,6 @@ impl GroupLayouts {
             })
     }
 
-    pub(super) fn window_participates(&self, window: WindowId) -> bool {
-        !self.inactive.contains(&window)
-    }
-
-    pub(super) fn set_window_participation(
-        &mut self,
-        window: WindowId,
-        participates: bool,
-    ) -> bool {
-        super::update_participation(&mut self.inactive, window, participates)
-    }
-
     pub(super) fn create_layout(&mut self) -> LayoutId {
         let root = self.tree.create_root();
         self.layout_roots.insert(LayoutRoot(root))
@@ -846,19 +894,49 @@ impl GroupLayouts {
         self.tree.remove(self.layout_roots.remove(layout).unwrap().0)
     }
 
-    pub(super) fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.focused_leaf(layout).map(|(_, window)| window)
+    pub(super) fn selected_window(&self, layout: LayoutId, away: Away<'_>) -> Option<WindowId> {
+        self.focused_leaf(layout, away).map(|(_, window)| window)
     }
 
-    pub(super) fn focused_leaf(&self, layout: LayoutId) -> Option<(NodeId, WindowId)> {
+    /// The focused leaf among `candidates`: by structure alone for a saved layout
+    /// before any window is live.
+    pub(super) fn focused_leaf_among(
+        &self,
+        layout: LayoutId,
+        candidates: Candidates<'_>,
+    ) -> Option<(NodeId, WindowId)> {
+        match candidates {
+            Candidates::Shown(away) => self.focused_leaf(layout, away),
+            Candidates::Any => {
+                let root = self.root(layout);
+                let selection = self.tree.map.current_selection(root);
+                let any = |_| true;
+                self.tree.map.focus_target(selection, &any).or_else(|| {
+                    (selection != root).then(|| self.tree.map.focus_target(root, &any)).flatten()
+                })
+            }
+        }
+    }
+
+    pub(super) fn focused_leaf(
+        &self,
+        layout: LayoutId,
+        away: Away<'_>,
+    ) -> Option<(NodeId, WindowId)> {
         let root = self.root(layout);
         let selection = self.tree.map.current_selection(root);
-        self.find_best_focus_target(selection)
-            .or_else(|| (selection != root).then(|| self.find_best_focus_target(root)).flatten())
+        self.find_best_focus_target(selection, away).or_else(|| {
+            (selection != root).then(|| self.find_best_focus_target(root, away)).flatten()
+        })
     }
 
-    pub(super) fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
-        let selection = self.selection(layout);
+    pub(super) fn selection_contains_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        away: Away<'_>,
+    ) -> bool {
+        let selection = self.selection(layout, away);
         self.window_node(layout, window)
             .is_some_and(|node| node.ancestors(self.map()).any(|ancestor| ancestor == selection))
     }
@@ -867,25 +945,21 @@ impl GroupLayouts {
         &self,
         layout: LayoutId,
         direction: Direction,
+        away: Away<'_>,
     ) -> Option<WindowId> {
         let map = self.map();
         // Enter along the near edge. Across an axis, a split remembers the path used
         // to leave it, while a stack prefers its presented child.
         let reverse = matches!(direction, Direction::Left | Direction::Up);
-        map.find_window(
-            self.root(layout),
-            &|window| self.window_participates(window),
-            &|node| {
-                let kind = map.kind(node);
-                let preferred =
-                    if kind.is_stacked() || kind.orientation() != direction.orientation() {
-                        map.local_selection(node)
-                    } else {
-                        None
-                    };
-                (preferred, reverse)
-            },
-        )
+        map.find_window(self.root(layout), &|window| away.participates(window), &|node| {
+            let kind = map.kind(node);
+            let preferred = if kind.is_stacked() || kind.orientation() != direction.orientation() {
+                map.local_selection(node)
+            } else {
+                None
+            };
+            (preferred, reverse)
+        })
         .map(|(_, window)| window)
     }
 
@@ -893,41 +967,47 @@ impl GroupLayouts {
         self.window_node(layout, wid).is_some()
     }
 
-    pub(super) fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    pub(super) fn has_any_fullscreen_node(&self, layout: LayoutId, away: Away<'_>) -> bool {
         self.root(layout).traverse_preorder(self.map()).any(|node| {
             self.map().is_effectively_fullscreen(node)
-                && (self.inactive.is_empty() || self.find_best_focus_target(node).is_some())
+                && (!self.layout_has_away(node, away)
+                    || self.find_best_focus_target(node, away).is_some())
         })
     }
 
-    pub(super) fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
-        self.stacked_selection_container(layout).is_some()
+    pub(super) fn parent_of_selection_is_stacked(&self, layout: LayoutId, away: Away<'_>) -> bool {
+        self.stacked_selection_container(layout, away).is_some()
     }
 
     pub(super) fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> {
         self.windows_with_nodes(layout).map(|(_, window)| window).collect()
     }
 
-    pub(super) fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    pub(super) fn windows(
+        &self,
+        layout: LayoutId,
+        query: WindowQuery,
+        away: Away<'_>,
+    ) -> Vec<WindowId> {
         match query {
             WindowQuery::Visible => {
                 let root = self.root(layout);
-                self.visible_windows_under_internal(root)
+                self.visible_windows_under_internal(root, away)
             }
             WindowQuery::Selection => {
-                let selection = self.selection(layout);
-                self.visible_windows_under_internal(selection)
+                let selection = self.selection(layout, away);
+                self.visible_windows_under_internal(selection, away)
             }
             WindowQuery::Stack(window) => self.stack_members(layout, window),
         }
     }
 
-    pub(super) fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    pub(super) fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult {
         match focus {
             Focus::Select(window) => FocusResult::selection({
                 let wid = window;
 
-                if self.inactive.contains(&wid) {
+                if away.contains(wid) {
                     return FocusResult::selection(false);
                 }
                 if let Some(node) = self.tree.window.node_for(layout, wid) {
@@ -938,20 +1018,20 @@ impl GroupLayouts {
                 }
             }),
             Focus::Ascend => FocusResult::selection({
-                if !self.inactive.is_empty()
-                    && self.find_best_focus_target(self.root(layout)).is_none()
+                if self.layout_has_away(self.root(layout), away)
+                    && self.find_best_focus_target(self.root(layout), away).is_none()
                 {
                     return FocusResult::selection(false);
                 }
-                if let Some(parent) = self.selection(layout).parent(self.map()) {
+                if let Some(parent) = self.selection(layout, away).parent(self.map()) {
                     self.select(parent);
                     return FocusResult::selection(true);
                 }
                 false
             }),
-            Focus::Descend => FocusResult::selection(self.descend_selection(layout)),
+            Focus::Descend => FocusResult::selection(self.descend_selection(layout, away)),
             Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
+                FocusResult::movement(self.move_focus(layout, direction, away))
             }
         }
     }
@@ -960,9 +1040,10 @@ impl GroupLayouts {
         &self,
         node: NodeId,
         child_participates: impl FnMut(NodeId) -> bool,
+        away: Away<'_>,
     ) -> bool {
         if let Some(window) = self.window_at(node) {
-            self.window_participates(window)
+            away.participates(window)
         } else {
             node.children(self.map()).any(child_participates)
         }
@@ -970,36 +1051,47 @@ impl GroupLayouts {
 
     /// The nodes under `root` that take part: those holding a shown window, or every
     /// node while nothing in `root`'s layout is away.
-    fn participating_nodes(&self, root: NodeId) -> Participating {
+    fn participating_nodes(&self, root: NodeId, away: Away<'_>) -> Participating {
         let map = self.map();
         let layout_root = root.ancestors(map).last().unwrap_or(root);
-        let away = |node| self.window_at(node).is_some_and(|w| !self.window_participates(w));
-        if self.inactive.is_empty() || !layout_root.traverse_preorder(map).any(away) {
+        if !self.layout_has_away(layout_root, away) {
             return Participating::All;
         }
         let mut active = HashSet::default();
         for node in root.traverse_postorder(map) {
-            if self.subtree_participates(node, |child| active.contains(&child)) {
+            if self.subtree_participates(node, |child| active.contains(&child), away) {
                 active.insert(node);
             }
         }
         Participating::Only(active)
     }
 
-    pub(super) fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
-        self.tree.map.focus_target(node, &|window| self.window_participates(window))
+    /// Whether anything in `node`'s layout is away.
+    pub(super) fn layout_has_away(&self, node: NodeId, away: Away<'_>) -> bool {
+        let map = self.map();
+        let root = node.ancestors(map).last().unwrap_or(node);
+        root.traverse_preorder(map)
+            .any(|node| self.window_at(node).is_some_and(|window| away.contains(window)))
+    }
+
+    pub(super) fn find_best_focus_target(
+        &self,
+        node: NodeId,
+        away: Away<'_>,
+    ) -> Option<(NodeId, WindowId)> {
+        self.tree.map.focus_target(node, &|window| away.participates(window))
     }
 
     pub(super) fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].0 }
 
-    pub(super) fn selection(&self, layout: LayoutId) -> NodeId {
+    pub(super) fn selection(&self, layout: LayoutId, away: Away<'_>) -> NodeId {
         let root = self.root(layout);
         let selection = self.map().current_selection(root);
         if selection != root
-            && !self.inactive.is_empty()
-            && self.find_best_focus_target(selection).is_none()
+            && self.layout_has_away(selection, away)
+            && self.find_best_focus_target(selection, away).is_none()
         {
-            return self.find_best_focus_target(root).map_or(root, |(node, _)| node);
+            return self.find_best_focus_target(root, away).map_or(root, |(node, _)| node);
         }
         selection
     }
@@ -1043,17 +1135,18 @@ impl GroupLayouts {
         self.tree.window.window_nodes.contains_key(&wid)
     }
 
-    pub(super) fn visible_stack_child(&self, node: NodeId) -> Option<NodeId> {
-        self.map()
-            .participating_child(node, false, |child| self.first_visible_window(child).is_some())
+    pub(super) fn visible_stack_child(&self, node: NodeId, away: Away<'_>) -> Option<NodeId> {
+        self.map().participating_child(node, false, |child| {
+            self.first_visible_window(child, away).is_some()
+        })
     }
 
-    pub(super) fn node_is_visible(&self, node: NodeId) -> bool {
-        self.window_at(node).is_some_and(|window| self.window_participates(window))
+    pub(super) fn node_is_visible(&self, node: NodeId, away: Away<'_>) -> bool {
+        self.window_at(node).is_some_and(|window| away.participates(window))
             && node.ancestors_with_parent(self.map()).all(|(child, parent)| {
                 parent.is_none_or(|parent| {
                     !self.layout(parent).is_stacked()
-                        || self.visible_stack_child(parent) == Some(child)
+                        || self.visible_stack_child(parent, away) == Some(child)
                 })
             })
     }

@@ -116,7 +116,8 @@ impl LayoutEngine {
         layout_settings: &LayoutSettings,
     ) -> Result<(), String> {
         let plan = self.workspaces.plan_settings_names(virtual_workspace_config, true)?;
-        self.apply_layout_settings(layout_settings);
+        // Right after loading, no saved window is live yet.
+        self.apply_layout_settings(layout_settings, Away::everything());
         self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
         self.workspaces.apply_settings(virtual_workspace_config, layout_settings, plan);
         Ok(())

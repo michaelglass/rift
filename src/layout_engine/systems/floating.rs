@@ -93,8 +93,9 @@ impl FloatingLayoutSystem {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         selection_path_only: bool,
+        away: Away<'_>,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        let selection = self.groups.selection(layout);
+        let selection = self.groups.selection(layout, away);
         let root = self.groups.root(layout);
         root.traverse_preorder(self.groups.map())
             .filter(|node| self.groups.layout(*node).is_stacked())
@@ -104,9 +105,9 @@ impl FloatingLayoutSystem {
             })
             .filter_map(|node| {
                 let children: Vec<_> = node.children(self.groups.map()).collect();
-                let selected = self.groups.visible_stack_child(node)?;
+                let selected = self.groups.visible_stack_child(node, away)?;
                 let index = children.iter().position(|child| *child == selected)?;
-                let (window, wid) = self.groups.first_visible_window(selected)?;
+                let (window, wid) = self.groups.first_visible_window(selected, away)?;
                 if self.groups.fullscreen_frame(window, screen, gaps).is_some() {
                     return None;
                 }
@@ -119,6 +120,7 @@ impl FloatingLayoutSystem {
                     frame,
                     &children,
                     index,
+                    away,
                 ))
             })
             .collect()
@@ -131,8 +133,8 @@ impl FloatingLayoutSystem {
             .collect()
     }
 
-    fn selected_container(&self, layout: LayoutId) -> Option<NodeId> {
-        let selection = self.groups.selection(layout);
+    fn selected_container(&self, layout: LayoutId, away: Away<'_>) -> Option<NodeId> {
+        let selection = self.groups.selection(layout, away);
         let container = if self.groups.window_at(selection).is_some() {
             selection.parent(self.groups.map())?
         } else {
@@ -158,18 +160,18 @@ impl FloatingLayoutSystem {
         }
     }
 
-    pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some((node, _)) = self.groups.focused_leaf(layout)
+    pub(crate) fn cycle_windows(&self, layout: LayoutId, away: Away<'_>) -> Vec<WindowId> {
+        if let Some((node, _)) = self.groups.focused_leaf(layout, away)
             && let Some(parent) = node.parent(self.groups.map())
             && self.groups.layout(parent).is_stacked()
         {
             return self
                 .groups
                 .windows_from(parent, Some(parent), true)
-                .filter(|&window| self.window_participates(window))
+                .filter(|&window| away.participates(window))
                 .collect();
         }
-        self.groups.windows(layout, WindowQuery::Visible)
+        self.groups.windows(layout, WindowQuery::Visible, away)
     }
 
     fn directional_window(
@@ -178,49 +180,59 @@ impl FloatingLayoutSystem {
         focused: WindowId,
         direction: Direction,
         exclude: Option<NodeId>,
+        away: Away<'_>,
     ) -> Option<(NodeId, WindowId)> {
         let source = self.frame(focused)?;
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
         let mut best: Option<((NodeId, WindowId), bool, f64)> = None;
-        let _ = self.groups.visit_visible_windows(self.groups.root(layout), &mut |node, wid| {
-            if wid != focused
-                && !exclude.is_some_and(|parent| {
-                    node.ancestors(self.groups.map()).any(|ancestor| ancestor == parent)
-                })
-                && let Some(frame) = self.frame(wid)
-            {
-                let candidate = frame.mid();
-                let (across, overlaps) = if horizontal {
-                    (
-                        candidate.y - origin.y,
-                        source.origin.y < frame.max().y && frame.origin.y < source.max().y,
-                    )
-                } else {
-                    (
-                        candidate.x - origin.x,
-                        source.origin.x < frame.max().x && frame.origin.x < source.max().x,
-                    )
-                };
-                if let Some(along) = (origin.x, origin.y)
-                    .distance_in_direction((candidate.x, candidate.y), direction)
-                    && along > 0.0
+        let _ = self.groups.visit_visible_windows(
+            self.groups.root(layout),
+            &mut |node, wid| {
+                if wid != focused
+                    && !exclude.is_some_and(|parent| {
+                        node.ancestors(self.groups.map()).any(|ancestor| ancestor == parent)
+                    })
+                    && let Some(frame) = self.frame(wid)
                 {
-                    let distance = along * along + across * across;
-                    if best.is_none_or(|(_, outside, previous)| {
-                        (!overlaps).cmp(&outside).then(distance.total_cmp(&previous)).is_lt()
-                    }) {
-                        best = Some(((node, wid), !overlaps, distance));
+                    let candidate = frame.mid();
+                    let (across, overlaps) = if horizontal {
+                        (
+                            candidate.y - origin.y,
+                            source.origin.y < frame.max().y && frame.origin.y < source.max().y,
+                        )
+                    } else {
+                        (
+                            candidate.x - origin.x,
+                            source.origin.x < frame.max().x && frame.origin.x < source.max().x,
+                        )
+                    };
+                    if let Some(along) = (origin.x, origin.y)
+                        .distance_in_direction((candidate.x, candidate.y), direction)
+                        && along > 0.0
+                    {
+                        let distance = along * along + across * across;
+                        if best.is_none_or(|(_, outside, previous)| {
+                            (!overlaps).cmp(&outside).then(distance.total_cmp(&previous)).is_lt()
+                        }) {
+                            best = Some(((node, wid), !overlaps, distance));
+                        }
                     }
                 }
-            }
-            std::ops::ControlFlow::<()>::Continue(())
-        });
+                std::ops::ControlFlow::<()>::Continue(())
+            },
+            away,
+        );
         best.map(|(target, _, _)| target)
     }
 
-    fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        let (node, focused) = self.groups.focused_leaf(layout)?;
+    fn focus_target(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<WindowId> {
+        let (node, focused) = self.groups.focused_leaf(layout, away)?;
         let parent = node.parent(self.groups.map())?;
         let kind = self.groups.layout(parent);
         let forward = matches!(direction, Direction::Right | Direction::Down);
@@ -235,7 +247,7 @@ impl FloatingLayoutSystem {
         if kind.orientation() == direction.orientation() && stack_target.is_some() {
             return stack_target;
         }
-        self.directional_window(layout, focused, direction, None)
+        self.directional_window(layout, focused, direction, None, away)
             .map(|(_, window)| window)
             .or(stack_target)
             .or_else(|| {
@@ -363,9 +375,9 @@ impl FloatingLayoutSystem {
         }
     }
 
-    pub fn store_frame(&mut self, wid: WindowId, frame: CGRect) {
+    pub fn store_frame(&mut self, wid: WindowId, frame: CGRect, away: Away<'_>) {
         let occurrences = self.groups.tree.window.occurrences(wid);
-        if !occurrences.iter().any(|info| self.groups.node_is_visible(info.node)) {
+        if !occurrences.iter().any(|info| self.groups.node_is_visible(info.node, away)) {
             return;
         }
         self.geometry.entry(wid).or_default().frame = Some(frame);
@@ -403,35 +415,27 @@ impl FloatingLayoutSystem {
     }
 }
 impl LayoutSystem for FloatingLayoutSystem {
-    fn window_participates(&self, window: WindowId) -> bool {
-        self.groups.window_participates(window)
-    }
-
-    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        self.groups.set_window_participation(window, participates)
-    }
-
     fn contains_layout(&self, layout: LayoutId) -> bool { self.groups.contains_layout(layout) }
 
-    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
-        self.groups.selected_window(layout)
+    fn selected_window(&self, layout: LayoutId, away: Away<'_>) -> Option<WindowId> {
+        self.groups.selected_window(layout, away)
     }
 
     fn selection_contains_window(
         &self,
         layout: LayoutId,
         window: WindowId,
-        _away: Away<'_>,
+        away: Away<'_>,
     ) -> bool {
-        self.groups.selection_contains_window(layout, window)
+        self.groups.selection_contains_window(layout, window, away)
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         self.groups.contains_window(layout, wid)
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId, _away: Away<'_>) -> bool {
-        self.groups.has_any_fullscreen_node(layout)
+    fn has_any_fullscreen_node(&self, layout: LayoutId, away: Away<'_>) -> bool {
+        self.groups.has_any_fullscreen_node(layout, away)
     }
 
     fn create_layout(&mut self) -> LayoutId { self.groups.create_layout() }
@@ -456,7 +460,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
-        _away: Away<'_>,
+        away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let count = if self.spread_on_initialization {
             self.groups.windows_with_nodes(layout).count()
@@ -466,7 +470,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         self.groups
             .windows_with_nodes(layout)
             .enumerate()
-            .filter(|(_, (_, wid))| self.groups.window_participates(*wid))
+            .filter(|(_, (_, wid))| away.participates(*wid))
             .map(|(index, (node, wid))| {
                 let frame = self
                     .groups
@@ -490,39 +494,41 @@ impl LayoutSystem for FloatingLayoutSystem {
         &self,
         layout: LayoutId,
         direction: Direction,
-        _away: Away<'_>,
+        away: Away<'_>,
     ) -> Option<WindowId> {
-        self.focus_target(layout, direction)
+        self.focus_target(layout, direction, away)
     }
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.groups.has_windows_for_app(layout, pid)
     }
 
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId, _away: Away<'_>) -> bool {
-        self.groups.parent_of_selection_is_stacked(layout)
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId, away: Away<'_>) -> bool {
+        self.groups.parent_of_selection_is_stacked(layout, away)
     }
 
     fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.groups.all_windows(layout) }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
-        self.groups.windows(layout, query)
+    fn windows(&self, layout: LayoutId, query: WindowQuery, away: Away<'_>) -> Vec<WindowId> {
+        self.groups.windows(layout, query, away)
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus, _away: Away<'_>) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult {
         match focus {
             Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
+                FocusResult::movement(self.move_focus(layout, direction, away))
             }
-            _ => self.groups.focus(layout, focus),
+            _ => self.groups.focus(layout, focus, away),
         }
     }
 
     fn forget_window(&mut self, window: WindowId) { self.remove_window(window) }
 
-    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
+    fn update(&mut self, change: WindowChange<'_>, away: Away<'_>) {
         match change {
-            WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
+            WindowChange::Add(layout, window, _) => {
+                self.add_window_after_selection(layout, window, away)
+            }
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
                 self.remove_window(window)
             }
@@ -541,53 +547,57 @@ impl LayoutSystem for FloatingLayoutSystem {
                 self.geometry.retain(|wid, _| wid.pid != pid);
                 self.groups.close_app(pid)
             }
-            WindowChange::Resize { window, new, .. } => self.store_frame(window, new),
+            WindowChange::Resize { window, new, .. } => self.store_frame(window, new, away),
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, _away: Away<'_>) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move { .. } => EditResult::Unchanged,
 
             LayoutEdit::Fullscreen { within_gaps } => {
-                EditResult::Raise(self.groups.toggle_fullscreen(layout, within_gaps))
+                EditResult::Raise(self.groups.toggle_fullscreen(layout, within_gaps, away))
             }
-            LayoutEdit::Swap(a, b) => EditResult::from(self.groups.swap_windows(layout, a, b)),
+            LayoutEdit::Swap(a, b) => {
+                EditResult::from(self.groups.swap_windows(layout, a, b, away))
+            }
             LayoutEdit::ReorderTab { window, target } => {
-                EditResult::from(self.groups.move_stack_tab(layout, window, target))
+                EditResult::from(self.groups.move_stack_tab(layout, window, target, away))
             }
-            LayoutEdit::ToggleOrientation => self.groups.toggle_orientation(layout),
+            LayoutEdit::ToggleOrientation => self.groups.toggle_orientation(layout, away),
             LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                EditResult::from(self.join_selection_with_direction(layout, direction))
+                EditResult::from(self.join_selection_with_direction(layout, direction, away))
             }
             LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
-                if self.selected_container(layout).is_some() {
-                    EditResult::from(self.unjoin_selection(layout))
+                if self.selected_container(layout, away).is_some() {
+                    EditResult::from(self.unjoin_selection(layout, away))
                 } else {
-                    EditResult::from(self.join_selection_with_direction(layout, direction))
+                    EditResult::from(self.join_selection_with_direction(layout, direction, away))
                 }
             }
             LayoutEdit::Group(GroupEdit::Stack(orientation)) => {
                 EditResult::Raise({
-                    let Some(focused) = self.groups.selected_window(layout) else {
+                    let Some(focused) = self.groups.selected_window(layout, away) else {
                         return EditResult::Raise(Vec::new());
                     };
                     // Only an explicitly joined container can become a floating stack.
-                    let Some(container) = self.selected_container(layout) else {
+                    let Some(container) = self.selected_container(layout, away) else {
                         return EditResult::Raise(Vec::new());
                     };
                     let members = self.members(container);
                     let save = !self.groups.layout(container).is_stacked();
                     self.align_members(&members, focused, save);
-                    self.groups.apply_stacking_to_parent_of_selection(layout, orientation);
-                    self.groups.focus(layout, Focus::Select(focused)).handled;
-                    self.groups.windows(layout, WindowQuery::Selection)
+                    self.groups.apply_stacking_to_parent_of_selection(layout, orientation, away);
+                    self.groups.focus(layout, Focus::Select(focused), away).handled;
+                    self.groups.windows(layout, WindowQuery::Selection, away)
                 })
             }
             LayoutEdit::Group(GroupEdit::Unstack(orientation)) => {
-                EditResult::Raise(self.unstack_parent_of_selection(layout, orientation))
+                EditResult::Raise(self.unstack_parent_of_selection(layout, orientation, away))
             }
-            LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(self.unjoin_selection(layout)),
+            LayoutEdit::Group(GroupEdit::Unjoin) => {
+                EditResult::from(self.unjoin_selection(layout, away))
+            }
             _ => EditResult::Unsupported,
         }
     }
@@ -598,15 +608,16 @@ impl FloatingLayoutSystem {
         &mut self,
         layout: LayoutId,
         direction: Direction,
+        away: Away<'_>,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let target = self.focus_target(layout, direction);
+        let target = self.focus_target(layout, direction, away);
         if let Some(wid) = target {
-            self.groups.focus(layout, Focus::Select(wid)).handled;
+            self.groups.focus(layout, Focus::Select(wid), away).handled;
         }
         (target, target.into_iter().collect())
     }
 
-    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
+    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId, away: Away<'_>) {
         if self.groups.contains_window(layout, wid) {
             return;
         }
@@ -615,7 +626,7 @@ impl FloatingLayoutSystem {
         let anchor = (self.insertion == WindowInsertionPoint::NextToSelection)
             .then(|| {
                 self.groups
-                    .selection(layout)
+                    .selection(layout, away)
                     .ancestors(self.groups.map())
                     .find(|node| node.parent(self.groups.map()) == Some(root))
             })
@@ -635,15 +646,20 @@ impl FloatingLayoutSystem {
         self.groups.remove_window(wid);
     }
 
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some((selection, focused)) = self.groups.focused_leaf(layout) else {
+    fn join_selection_with_direction(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> bool {
+        let Some((selection, focused)) = self.groups.focused_leaf(layout, away) else {
             return false;
         };
         let root = self.groups.root(layout);
         let parent = selection.parent(self.groups.map()).unwrap_or(root);
         let exclude = (parent != root).then_some(parent);
         let Some((target_node, target)) =
-            self.directional_window(layout, focused, direction, exclude)
+            self.directional_window(layout, focused, direction, exclude, away)
         else {
             return false;
         };
@@ -672,16 +688,17 @@ impl FloatingLayoutSystem {
         &mut self,
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
+        away: Away<'_>,
     ) -> Vec<WindowId> {
-        let focused = self.groups.selected_window(layout);
-        let selection = self.groups.selection(layout);
+        let focused = self.groups.selected_window(layout, away);
+        let selection = self.groups.selection(layout, away);
         let container = selection
             .ancestors(self.groups.map())
             .find(|node| self.groups.layout(*node).is_stacked());
         let Some(container) = container else {
             return Vec::new();
         };
-        let visible = self.groups.unstack_parent_of_selection(layout, default_orientation);
+        let visible = self.groups.unstack_parent_of_selection(layout, default_orientation, away);
         for wid in self.groups.windows_from(container, Some(container), true) {
             if let Some(geometry) = self.geometry.get_mut(&wid) {
                 let restore = geometry.restore.take();
@@ -691,13 +708,13 @@ impl FloatingLayoutSystem {
             }
         }
         if let Some(wid) = focused {
-            self.groups.focus(layout, Focus::Select(wid)).handled;
+            self.groups.focus(layout, Focus::Select(wid), away).handled;
         }
         visible
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) -> bool {
-        let Some((selection, wid)) = self.groups.focused_leaf(layout) else {
+    fn unjoin_selection(&mut self, layout: LayoutId, away: Away<'_>) -> bool {
+        let Some((selection, wid)) = self.groups.focused_leaf(layout, away) else {
             return false;
         };
         let Some(parent) = selection.parent(self.groups.map()) else {
@@ -726,8 +743,12 @@ mod tests {
         let mut system = FloatingLayoutSystem::default();
         let layout = system.create_layout();
         for index in 1..=4 {
-            system.add_window_after_selection(layout, w(index));
-            system.store_frame(w(index), rect(20. + (index - 1) as f64 * 250., 40.));
+            system.add_window_after_selection(layout, w(index), Away::nothing());
+            system.store_frame(
+                w(index),
+                rect(20. + (index - 1) as f64 * 250., 40.),
+                Away::nothing(),
+            );
         }
         system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         (system, layout)
@@ -747,16 +768,18 @@ mod tests {
     #[test]
     fn suspended_stack_selection_leaves_the_visible_tab_interactive() {
         let (mut system, layout) = fixture();
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
         stack(&mut system, layout);
-        system.set_window_participation(w(1), false);
-        assert!(system.windows(layout, WindowQuery::Visible, Away::nothing()).contains(&w(2)));
+        let away_windows: crate::common::collections::HashSet<_> = [w(1)].into_iter().collect();
+        let away = Away::only(&away_windows);
+        assert!(system.windows(layout, WindowQuery::Visible, away).contains(&w(2)));
 
         let moved = rect(100., 80.);
-        system.store_frame(w(2), moved);
+        system.store_frame(w(2), moved, away);
         assert_eq!(system.frame(w(2)), Some(moved));
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
-        let groups = system.collect_group_containers(layout, screen, &Default::default(), false);
+        let groups =
+            system.collect_group_containers(layout, screen, &Default::default(), false, away);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].window_ids, [w(2)]);
         assert_eq!(groups[0].frame, moved);
@@ -770,29 +793,34 @@ mod tests {
             system.windows(layout, WindowQuery::Visible, Away::nothing()).len(),
             4
         );
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
         assert_ne!(system.frame(w(1)), system.frame(w(2)));
         stack(&mut system, layout);
-        system.join_selection_with_direction(layout, Direction::Right);
-        assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
-        system.add_window_after_selection(layout, w(5));
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
+        assert_eq!(system.cycle_windows(layout, Away::nothing()), vec![
+            w(1),
+            w(2),
+            w(3)
+        ]);
+        system.add_window_after_selection(layout, w(5), Away::nothing());
         system.update(WindowChange::Add(layout, w(6), None), Away::nothing());
         assert_eq!(
             system.windows(layout, WindowQuery::Visible, Away::nothing()).len(),
             4
         );
         system.focus(layout, Focus::Select(w(2)), Away::nothing()).handled;
-        system.store_frame(w(2), rect(100., 80.));
-        system.store_frame(w(1), rect(999., 999.));
+        system.store_frame(w(2), rect(100., 80.), Away::nothing());
+        system.store_frame(w(1), rect(999., 999.), Away::nothing());
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
         system.geometry.get_mut(&w(4)).unwrap().restore = Some(rect(999., 999.));
-        system.unjoin_selection(layout);
+        system.unjoin_selection(layout, Away::nothing());
         assert_eq!(system.frame(w(2)), Some(rect(270., 40.)));
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         system.unstack_parent_of_selection(
             layout,
             crate::common::config::default_stack_orientation(),
+            Away::nothing(),
         );
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
         assert_eq!(system.frame(w(3)), Some(rect(520., 40.)));
@@ -801,24 +829,33 @@ mod tests {
     #[test]
     fn directional_focus_reaches_hidden_members_and_neighboring_windows() {
         let (mut system, layout) = fixture();
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
         assert!(system.focus(layout, Focus::Ascend, Away::nothing()).handled);
         stack(&mut system, layout);
         assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(1)));
-        system.store_frame(w(3), rect(20., 400.));
+        system.store_frame(w(3), rect(20., 400.), Away::nothing());
         for (direction, expected) in [
             (Direction::Down, w(2)),
             (Direction::Down, w(3)),
             (Direction::Up, w(2)),
             (Direction::Up, w(1)),
         ] {
-            assert_eq!(system.move_focus(layout, direction).0, Some(expected));
+            assert_eq!(
+                system.move_focus(layout, direction, Away::nothing()).0,
+                Some(expected)
+            );
         }
         system.remove_window(w(3));
         system.remove_window(w(4));
-        assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(2)));
-        assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(1)));
-        system.unjoin_selection(layout);
+        assert_eq!(
+            system.move_focus(layout, Direction::Right, Away::nothing()).0,
+            Some(w(2))
+        );
+        assert_eq!(
+            system.move_focus(layout, Direction::Right, Away::nothing()).0,
+            Some(w(1))
+        );
+        system.unjoin_selection(layout, Away::nothing());
         assert_eq!(system.all_windows(layout).len(), 2);
         assert!(!system.parent_of_selection_is_stacked(layout, Away::nothing()));
     }
@@ -826,14 +863,18 @@ mod tests {
     #[test]
     fn saved_stack_frames_survive_identity_changes_and_layout_clones() {
         let (mut system, layout) = fixture();
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
         stack(&mut system, layout);
         system.focus(layout, Focus::Select(w(3)), Away::nothing()).handled;
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
         stack(&mut system, layout);
         system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
-        system.join_selection_with_direction(layout, Direction::Right);
-        assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
+        system.join_selection_with_direction(layout, Direction::Right, Away::nothing());
+        assert_eq!(system.cycle_windows(layout, Away::nothing()), vec![
+            w(1),
+            w(2),
+            w(3)
+        ]);
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         let bytes = ron::to_string(&system).unwrap();
         let mut restored: FloatingLayoutSystem = ron::from_str(&bytes).unwrap();

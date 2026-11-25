@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 
 use super::groups::GroupLayouts;
-use super::{EditResult, WindowLayoutConstraints};
+use super::{Away, EditResult, WindowLayoutConstraints};
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::layout_engine::systems::constraints::{
@@ -133,6 +133,7 @@ impl Projection<'_> {
         rect: CGRect,
         sizes: &mut Vec<(WindowId, CGRect)>,
         mut collect: bool,
+        away: Away<'_>,
     ) {
         let (prepared, map, screen, stack_offset, constraints, gaps, stack_line) = (
             self.prepared,
@@ -202,6 +203,7 @@ impl Projection<'_> {
                         rect,
                         &children,
                         focused_idx,
+                        away,
                     ));
                 }
                 let (min, fixed, _, _) = prepared[&children[focused_idx]][is_horizontal as usize];
@@ -224,6 +226,7 @@ impl Projection<'_> {
                         layout.get_frame_for_index(idx),
                         sizes,
                         collect && (!selection_only || child == focused_child),
+                        away,
                     );
                 }
             }
@@ -234,10 +237,12 @@ impl Projection<'_> {
                 info.kind == Horizontal,
                 collect && selection_only,
                 collect,
+                away,
             ),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layout_axis(
         &mut self,
         node: NodeId,
@@ -246,6 +251,7 @@ impl Projection<'_> {
         horizontal: bool,
         selection_only: bool,
         collect: bool,
+        away: Away<'_>,
     ) {
         let (prepared, map, gaps) = (self.prepared, self.map, self.gaps);
         let children: Vec<_> =
@@ -292,6 +298,7 @@ impl Projection<'_> {
                 axis_slot(rect, horizontal, offset, seg_len).round(),
                 sizes,
                 collect && (!selection_only || selected == Some(child)),
+                away,
             );
             offset += seg_len;
             offset += inner_gap;
@@ -357,7 +364,6 @@ pub(super) fn stack_layout_result(
 }
 
 pub(super) fn remove_and_rebalance(tiles: &mut GroupLayouts, window: WindowId) {
-    tiles.inactive.remove(&window);
     for info in tiles.tree.window.take_window(window) {
         let node = info.node;
         let parent = node.parent(tiles.map());
@@ -379,6 +385,7 @@ pub(super) fn rebalance(map: &mut NodeMap, root: NodeId) -> bool {
     changed
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resize_window(
     tiles: &mut GroupLayouts,
     layout: LayoutId,
@@ -387,8 +394,9 @@ pub(super) fn resize_window(
     new: CGRect,
     screen: CGRect,
     gaps: &crate::common::config::GapSettings,
+    away: Away<'_>,
 ) {
-    if !tiles.window_participates(window) {
+    if !away.participates(window) {
         return;
     }
     let Some(node) = tiles.window_node(layout, window) else {
@@ -403,7 +411,7 @@ pub(super) fn resize_window(
         screen,
         gaps,
     ) {
-        set_frame_from_resize(tiles, node, old, new, screen);
+        set_frame_from_resize(tiles, node, old, new, screen, away);
     }
 }
 
@@ -412,24 +420,27 @@ pub(super) fn resize_selection(
     layout: LayoutId,
     amount: f64,
     orientation: ResizeOrientation,
+    away: Away<'_>,
 ) -> EditResult {
-    if !tiles.inactive.is_empty() && tiles.find_best_focus_target(tiles.root(layout)).is_none() {
+    if tiles.layout_has_away(tiles.root(layout), away)
+        && tiles.find_best_focus_target(tiles.root(layout), away).is_none()
+    {
         return EditResult::Unchanged;
     }
     if amount == 0.0 {
         return EditResult::Unchanged;
     }
-    let selection = tiles.selection(layout);
+    let selection = tiles.selection(layout, away);
     if tiles.window_at(selection).is_none() {
         return EditResult::Unchanged;
     }
     let changed = match orientation {
         ResizeOrientation::Horizontal => [Direction::Right, Direction::Left]
             .into_iter()
-            .any(|direction| resize_internal(tiles, selection, amount, direction)),
+            .any(|direction| resize_internal(tiles, selection, amount, direction, away)),
         ResizeOrientation::Vertical => [Direction::Down, Direction::Up]
             .into_iter()
-            .any(|direction| resize_internal(tiles, selection, amount, direction)),
+            .any(|direction| resize_internal(tiles, selection, amount, direction, away)),
         ResizeOrientation::Smart => {
             let mut node = selection;
             while let Some(parent) = node.parent(tiles.map()) {
@@ -441,7 +452,7 @@ pub(super) fn resize_selection(
                     };
                     if directions
                         .into_iter()
-                        .any(|direction| resize_internal(tiles, node, amount, direction))
+                        .any(|direction| resize_internal(tiles, node, amount, direction, away))
                     {
                         return EditResult::Changed;
                     }
@@ -459,8 +470,9 @@ pub(super) fn resize_internal(
     node: NodeId,
     screen_ratio: f64,
     direction: Direction,
+    away: Away<'_>,
 ) -> bool {
-    let Some((resizing_node, sibling)) = resize_pair(tiles, node, direction) else {
+    let Some((resizing_node, sibling)) = resize_pair(tiles, node, direction, away) else {
         return false;
     };
     let exchange_rate = resizing_node
@@ -487,13 +499,14 @@ fn resize_pair(
     tiles: &GroupLayouts,
     node: NodeId,
     direction: Direction,
+    away: Away<'_>,
 ) -> Option<(NodeId, NodeId)> {
     let map = tiles.map();
     node.ancestors_with_parent(map).find_map(|(candidate, parent)| {
         if map.kind(parent?).is_group() {
             return None;
         }
-        tiles.move_over(candidate, direction).map(|sibling| (candidate, sibling))
+        tiles.move_over(candidate, direction, away).map(|sibling| (candidate, sibling))
     })
 }
 
@@ -503,6 +516,7 @@ pub(super) fn set_frame_from_resize(
     old_frame: CGRect,
     new_frame: CGRect,
     screen: CGRect,
+    away: Away<'_>,
 ) {
     const RESIZE_DELTA_EPSILON: f64 = 1.0;
     let choose_edge = |mut edges: [(Direction, f64); 2]| {
@@ -515,7 +529,7 @@ pub(super) fn set_frame_from_resize(
             edges.swap(0, 1);
         }
         edges.into_iter().find(|&(direction, delta)| {
-            delta != 0.0 && resize_pair(tiles, node, direction).is_some()
+            delta != 0.0 && resize_pair(tiles, node, direction, away).is_some()
         })
     };
     let horizontal = choose_edge([
@@ -531,7 +545,7 @@ pub(super) fn set_frame_from_resize(
         (vertical, screen.size.height),
     ] {
         if let Some((direction, delta)) = edge {
-            resize_internal(tiles, node, delta / extent, direction);
+            resize_internal(tiles, node, delta / extent, direction, away);
         }
     }
 }
@@ -542,13 +556,13 @@ pub(super) fn apply_explicit_window_drop(
     source: WindowId,
     target: WindowId,
     action: crate::layout_engine::WindowDropAction,
+    away: Away<'_>,
 ) -> bool {
-    if source == target || !tiles.window_participates(source) || !tiles.window_participates(target)
-    {
+    if source == target || !away.participates(source) || !away.participates(target) {
         return false;
     }
     if action == crate::layout_engine::WindowDropAction::Swap {
-        return tiles.swap_windows(layout, source, target);
+        return tiles.swap_windows(layout, source, target, away);
     }
     let Some(source_node) = tiles.window_node(layout, source) else {
         return false;
@@ -653,12 +667,13 @@ pub(super) fn project(
     stack_line: crate::common::config::StackLineReserve,
     emit_frames: bool,
     groups: Option<GroupOutput<'_>>,
+    away: Away<'_>,
 ) -> Vec<(WindowId, CGRect)> {
     let map = &tiles.tree.map;
     let collect = groups.is_some() && !map.is_effectively_fullscreen(node);
     let mut prepared = ConstraintCache::default();
     for child in node.traverse_postorder(map) {
-        if tiles.subtree_participates(child, |node| prepared.contains_key(&node)) {
+        if tiles.subtree_participates(child, |node| prepared.contains_key(&node), away) {
             let axes = [false, true].map(|horizontal| {
                 tiles.tree.map.node_axis_constraints(
                     &prepared,
@@ -695,6 +710,7 @@ pub(super) fn project(
         compute_tiling_area(screen, gaps),
         &mut sizes,
         collect,
+        away,
     );
     sizes
 }

@@ -145,9 +145,12 @@ impl Reactor {
                 .workspace_for_window(&self.state.windows, space, wid)
             && self.layout_manager.layout_engine.is_window_floating(wid)
         {
-            self.layout_manager
-                .layout_engine
-                .store_floating_position(workspace, wid, new_frame);
+            self.layout_manager.layout_engine.store_floating_position(
+                workspace,
+                wid,
+                new_frame,
+                Away::from_store(&self.state.windows),
+            );
         }
 
         if self.drag_manager.actor.update_native(wid, new_frame) {

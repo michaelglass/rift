@@ -260,9 +260,10 @@ impl Reactor {
         let rules_changed =
             self.config.virtual_workspaces.app_rules != new_config.virtual_workspaces.app_rules;
         self.config = new_config;
-        self.layout_manager
-            .layout_engine
-            .set_layout_settings(&self.config.settings.layout);
+        self.layout_manager.layout_engine.set_layout_settings(
+            &self.config.settings.layout,
+            Away::from_store(&self.state.windows),
+        );
         self.layout_manager.layout_engine.update_virtual_workspace_settings(
             &self.state.windows,
             &self.config.virtual_workspaces,

@@ -3699,7 +3699,12 @@ impl Reactor {
                         target,
                     );
                     if projected != frame {
-                        engine.store_floating_position(workspace, window, projected);
+                        engine.store_floating_position(
+                            workspace,
+                            window,
+                            projected,
+                            Away::from_store(&self.state.windows),
+                        );
                         changes.arrange(Some(space), Presentation::Animated);
                     }
                 }
@@ -4977,6 +4982,7 @@ impl Reactor {
                 workspace,
                 placement.window,
                 frame,
+                Away::from_store(&self.state.windows),
             );
         }
         self.write_window_frame(placement.window, frame, false, None);
@@ -6311,9 +6317,11 @@ impl Reactor {
             .collect::<Vec<_>>();
 
         if !floating_windows_in_workspace.is_empty() {
-            self.layout_manager
-                .layout_engine
-                .store_floating_window_positions(space, &floating_windows_in_workspace);
+            self.layout_manager.layout_engine.store_floating_window_positions(
+                space,
+                &floating_windows_in_workspace,
+                Away::from_store(&self.state.windows),
+            );
         }
     }
 }

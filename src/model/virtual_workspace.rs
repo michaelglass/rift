@@ -14,7 +14,7 @@ use crate::common::config::{
 use crate::common::log::trace_misc;
 use crate::layout_engine::systems::{self, LayoutSystemKind};
 use crate::layout_engine::workspaces::WorkspaceLayoutState;
-use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
+use crate::layout_engine::{Away, Candidates, Direction, LayoutId, LayoutSystem};
 use crate::model::WindowStore;
 use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
 use crate::sys::screen::SpaceId;
@@ -270,7 +270,8 @@ impl VirtualWorkspace {
             LayoutMode::MasterStack => systems::MasterStackLayoutSystem::default().into(),
             LayoutMode::Scrolling => systems::ScrollingLayoutSystem::default().into(),
         };
-        Self::configure_layout_system(&mut system, mode, settings, None);
+        // A new system holds no windows yet: configuring it is structural.
+        Self::configure_layout_system(&mut system, mode, settings, None, Candidates::Any);
         system
     }
 
@@ -278,8 +279,15 @@ impl VirtualWorkspace {
         &mut self,
         settings: &LayoutSettings,
         display: Option<&str>,
+        away: Away<'_>,
     ) {
-        Self::configure_layout_system(&mut self.layout_system, self.layout_mode, settings, display);
+        Self::configure_layout_system(
+            &mut self.layout_system,
+            self.layout_mode,
+            settings,
+            display,
+            Candidates::Shown(away),
+        );
     }
 
     fn configure_layout_system(
@@ -287,6 +295,7 @@ impl VirtualWorkspace {
         mode: LayoutMode,
         settings: &LayoutSettings,
         display: Option<&str>,
+        candidates: Candidates<'_>,
     ) {
         let insertion_point = settings.window_insertion_point_for(mode);
         match system {
@@ -307,7 +316,7 @@ impl VirtualWorkspace {
             LayoutSystemKind::MasterStack(system) => {
                 let mut mode_settings = settings.master_stack.clone();
                 mode_settings.base = settings.resolved_base_for(mode);
-                system.update_settings(mode_settings);
+                system.update_settings(mode_settings, candidates);
             }
             LayoutSystemKind::Scrolling(system) => {
                 let mut mode_settings = settings.scrolling.effective_for_display(display);

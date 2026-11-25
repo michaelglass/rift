@@ -294,7 +294,10 @@ fn scrolling_resize_places_the_new_geometry_on_the_first_frame() {
         layout.scrolling.animate = Some(true);
         layout.scrolling.column_width_ratio = 0.5;
         layout.scrolling.preserve_window_sizes = false;
-        reactor.layout_manager.layout_engine.set_layout_settings(layout);
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(layout, Away::from_store(&reactor.state.windows));
         reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
         reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
             workspace: None,
@@ -1109,7 +1112,7 @@ fn scrolling_focus_warps_to_revealed_window() {
         reactor
             .layout_manager
             .layout_engine
-            .set_layout_settings(&config.settings.layout);
+            .set_layout_settings(&config.settings.layout, Away::from_store(&reactor.state.windows));
         reactor.config = config;
         reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
         reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
@@ -2008,10 +2011,12 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
     if let Some(w) = reactor.state.windows.window_mut(wid) {
         w.frame_monotonic = floating_frame;
     }
-    reactor
-        .layout_manager
-        .layout_engine
-        .store_floating_position(workspace, wid, floating_frame);
+    reactor.layout_manager.layout_engine.store_floating_position(
+        workspace,
+        wid,
+        floating_frame,
+        Away::from_store(&reactor.state.windows),
+    );
 
     (reactor, wid, space1, screen, floating_frame)
 }
@@ -2321,7 +2326,7 @@ fn scrolling_display_transfer_ignores_intermediate_native_width() {
     reactor
         .layout_manager
         .layout_engine
-        .set_layout_settings(&config.settings.layout);
+        .set_layout_settings(&config.settings.layout, Away::from_store(&reactor.state.windows));
     reactor.config = config;
     for space in [b, a] {
         reactor.space_state.command_space = Some(space);
@@ -2817,6 +2822,7 @@ fn cross_display_drag_relocates_the_window_once_and_preserves_floating() {
                 source,
                 wid,
                 initial_frame,
+                Away::from_store(&reactor.state.windows),
             );
         }
         // Use the accepted frame after tiling. Changing its size on mouse-down
@@ -3546,7 +3552,13 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
         WindowChange::Add(layout, duplicate_wid, None),
         Away::from_store(&reactor.state.windows),
     );
-    assert!(has_window_in_layout(
+    // A slot the store never admitted is never drawn: the ghost can't appear at all.
+    assert!(
+        reactor.layout_manager.layout_engine.workspaces()[active_workspace]
+            .layout_system
+            .contains_window(layout, duplicate_wid)
+    );
+    assert!(!has_window_in_layout(
         &mut reactor,
         user_space,
         frame,
@@ -7554,10 +7566,10 @@ fn assert_scrolling_close_returns_to_previous_column(window_count: pid_t) {
     scrolling.column_width_ratio = 1.0;
     scrolling.max_column_width_ratio = 1.0;
     scrolling.preserve_window_sizes = false;
-    reactor
-        .layout_manager
-        .layout_engine
-        .set_layout_settings(&reactor.config.settings.layout);
+    reactor.layout_manager.layout_engine.set_layout_settings(
+        &reactor.config.settings.layout,
+        Away::from_store(&reactor.state.windows),
+    );
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
         workspace: None,
@@ -8190,10 +8202,12 @@ fn native_tab_floating_transitions_preserve_position_and_floating_state() {
             .unwrap();
         let frame = CGRect::new(CGPoint::new(75., 110.), CGSize::new(430., 320.));
         reactor.state.windows.window_mut(old).unwrap().frame_monotonic = frame;
-        reactor
-            .layout_manager
-            .layout_engine
-            .store_floating_position(workspace, old, frame);
+        reactor.layout_manager.layout_engine.store_floating_position(
+            workspace,
+            old,
+            frame,
+            Away::from_store(&reactor.state.windows),
+        );
         let before = test_layout(&mut reactor, space, screen);
         let old_info = reactor.state.windows.window(old).unwrap().info.clone();
         let old_wsid = old_info.sys_id.unwrap();
@@ -8764,6 +8778,7 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
         active_workspace,
         old_wid,
         stored_position,
+        Away::from_store(&reactor.state.windows),
     );
 
     rekey_window(&mut reactor, old_wid, new_wid);
@@ -12642,10 +12657,10 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                     .serialize_to_string(&reactor.state.windows);
                 reactor.layout_manager.layout_engine =
                     LayoutEngine::deserialize_from_str(&snapshot).unwrap();
-                reactor
-                    .layout_manager
-                    .layout_engine
-                    .set_layout_settings(&reactor.config.settings.layout);
+                reactor.layout_manager.layout_engine.set_layout_settings(
+                    &reactor.config.settings.layout,
+                    Away::from_store(&reactor.state.windows),
+                );
                 let ids: Vec<_> = (1..=3).map(|idx| WindowId::new(1, idx)).collect();
                 let discovered = ids
                     .iter()
@@ -12772,7 +12787,7 @@ fn overview_activation_arranges_and_focuses_under_cover() {
         reactor
             .layout_manager
             .layout_engine
-            .set_layout_settings(&config.settings.layout);
+            .set_layout_settings(&config.settings.layout, Away::from_store(&reactor.state.windows));
         reactor.config = config;
         reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
             workspace: None,

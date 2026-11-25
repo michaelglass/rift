@@ -288,6 +288,7 @@ impl LayoutManager {
             screen.frame,
             &gaps,
             reactor.config.settings.ui.stack_line.reserve(),
+            Away::from_store(&reactor.state.windows),
         );
         let fullscreen =
             reactor.layout_manager.layout_engine.active_workspace_for_space_has_fullscreen(

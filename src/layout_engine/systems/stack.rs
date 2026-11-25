@@ -845,7 +845,7 @@ mod tests {
                 Away::nothing(),
             )
             .into_windows();
-        let expected = inner.tiles.container_tree(layout);
+        let expected = inner.tiles.container_tree(layout, Away::nothing());
         let legacy = Legacy {
             inner: &inner,
             default_orientation: StackDefaultOrientation::Horizontal,
