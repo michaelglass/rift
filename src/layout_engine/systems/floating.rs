@@ -132,12 +132,7 @@ impl FloatingLayoutSystem {
     }
 
     fn selected_container(&self, layout: LayoutId) -> Option<NodeId> {
-        let selection = self.groups.selection(layout);
-        let container = if self.groups.window_at(selection).is_some() {
-            selection.parent(self.groups.map())?
-        } else {
-            selection
-        };
+        let container = self.groups.selection_container(layout)?;
         (container != self.groups.root(layout)).then_some(container)
     }
 

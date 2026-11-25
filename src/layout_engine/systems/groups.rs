@@ -702,13 +702,9 @@ impl GroupLayouts {
         if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return Vec::new();
         }
-        let selection = self.selection(layout);
-        let container = if self.window_at(selection).is_some() {
-            selection.parent(self.map())
-        } else {
-            Some(selection)
+        let Some(container) = self.selection_container(layout) else {
+            return Vec::new();
         };
-        let Some(container) = container else { return Vec::new() };
         let kind = self.container_kind(container);
         let orientation = if kind.is_stacked() {
             perpendicular(kind.orientation())
@@ -766,6 +762,15 @@ impl GroupLayouts {
     }
 
     pub(super) fn is_stack(&self, node: NodeId) -> bool { self.shape(node) == Shape::Stack }
+
+    /// The container the selection stands for: a selected window's parent, else the selection.
+    pub(super) fn selection_container(&self, layout: LayoutId) -> Option<NodeId> {
+        let selection = self.selection(layout);
+        match self.shape(selection) {
+            Shape::Window => selection.parent(self.map()),
+            Shape::Stack | Shape::Split { .. } => Some(selection),
+        }
+    }
 
     /// `node` itself if it is a stack, else the nearest stack around it.
     pub(super) fn own_or_enclosing_stack(&self, node: NodeId) -> Option<NodeId> {
