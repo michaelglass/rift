@@ -140,10 +140,23 @@ impl StackLayoutSystem {
         upstream
     }
 
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String { self.upstream.draw_tree(layout) }
+    /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
+        let core = self.twin.core.draw(layout);
+        self.answered("draw_tree", self.upstream.draw_tree(layout), core.clone());
+        core
+    }
 
+    /// rift-cli's container view of the layout: the core's (upstream's held to it on every
+    /// call).
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.upstream.container_tree(layout)
+        let core = container_node(self.twin.core.container(layout));
+        self.answered(
+            "container_tree",
+            self.upstream.container_tree(layout),
+            core.clone(),
+        );
+        core
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
@@ -491,6 +504,38 @@ fn core_edit(edit: LayoutEdit) -> Option<core::Edit<WindowId>> {
             | GroupEdit::Unjoin,
         ) => return None,
     })
+}
+
+/// The core's container view as rift-cli's node: the stack, then each member.
+fn container_node(container: core::Container<WindowId>) -> rift_protocol::ContainerTreeNode {
+    use rift_protocol::{ContainerNodeType, ContainerTreeNode as Node};
+    let flags = |fill: Fill| (fill == Fill::Screen, fill == Fill::WithinGaps);
+    let (is_fullscreen, is_fullscreen_within_gaps) = flags(container.fill);
+    Node {
+        node_id: container.stack.word(),
+        layout_kind: Some(layout_kind(container.orientation)),
+        is_selected: container.selected,
+        is_fullscreen,
+        is_fullscreen_within_gaps,
+        children: container
+            .members
+            .into_iter()
+            .map(|held| {
+                let (is_fullscreen, is_fullscreen_within_gaps) = flags(held.member.fill);
+                Node {
+                    node_id: held.member.id.word(),
+                    node_type: ContainerNodeType::Window,
+                    window_id: Some(held.member.window.into()),
+                    weight: Some(held.member.weight),
+                    is_selected: held.selected,
+                    is_fullscreen,
+                    is_fullscreen_within_gaps,
+                    ..Default::default()
+                }
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 fn default_orientation(orientation: StackDefaultOrientation) -> DefaultOrientation {

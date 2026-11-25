@@ -781,6 +781,135 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
     }
 }
 
+/// A stack as rift's container view shows it: whether the stack itself is selected (or empty),
+/// its fill, and each member with whether it is the selection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Container<W> {
+    pub stack: Id,
+    pub orientation: Orientation,
+    pub selected: bool,
+    pub fill: Fill,
+    pub members: Vec<ContainedMember<W>>,
+}
+
+/// A member as the container view shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainedMember<W> {
+    pub member: Member<W>,
+    pub selected: bool,
+}
+
+/// Upstream's stack as `{:#?}` writes it (rift-cli's tree drawing): its field names, its ids as
+/// slotmap writes a key (`NodeId(1v1)`), its kind as a layout kind, its two pairs of fullscreen
+/// flags and its selection as `active` and `root_selected`.
+mod drawn {
+    use std::fmt;
+
+    pub(super) struct NodeId(pub(super) u64);
+
+    /// A key's data as slotmap writes it: `{index}v{version}`.
+    struct KeyData(u64);
+
+    impl fmt::Debug for KeyData {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}v{}", self.0 as u32, self.0 >> 32)
+        }
+    }
+
+    /// The key as slotmap's `new_key_type!` writes it: a tuple struct around its data.
+    impl fmt::Debug for NodeId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_tuple("NodeId").field(&KeyData(self.0)).finish()
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) enum LayoutKind {
+        HorizontalStack,
+        VerticalStack,
+    }
+
+    // Read only by `Debug`: the fields are the drawing.
+    #[allow(dead_code)]
+    #[derive(Debug)]
+    pub(super) struct Member<W> {
+        pub(super) id: NodeId,
+        pub(super) window: W,
+        pub(super) weight: f64,
+        pub(super) fullscreen: bool,
+        pub(super) within_gaps: bool,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Debug)]
+    pub(super) struct Stack<W> {
+        pub(super) id: NodeId,
+        pub(super) members: Vec<Member<W>>,
+        pub(super) active: Option<NodeId>,
+        pub(super) root_selected: bool,
+        pub(super) kind: LayoutKind,
+        pub(super) fullscreen: bool,
+        pub(super) within_gaps: bool,
+    }
+}
+
+impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
+    /// The layout as rift's container view shows it (upstream's `container_tree`): the stack is
+    /// selected while it is itself the selection or empty; a member while it is the selection.
+    pub fn container(&self, layout: L) -> Container<W> {
+        let stack = &self.layouts[layout];
+        let selection = stack.selection();
+        Container {
+            stack: stack.id,
+            orientation: stack.orientation,
+            selected: matches!(selection, None | Some(Selection::Root(_))),
+            fill: stack.fill,
+            members: stack
+                .list()
+                .iter()
+                .map(|member| ContainedMember {
+                    member: member.clone(),
+                    selected: selection == Some(Selection::Member(member.id)),
+                })
+                .collect(),
+        }
+    }
+
+    /// The layout as rift-cli draws it: upstream's stack written by `{:#?}`.
+    pub fn draw(&self, layout: L) -> String
+    where W: std::fmt::Debug {
+        let stack = &self.layouts[layout];
+        let flags = |fill: Fill| (fill == Fill::Screen, fill == Fill::WithinGaps);
+        let (fullscreen, within_gaps) = flags(stack.fill);
+        let drawn = drawn::Stack {
+            id: drawn::NodeId(stack.id.word()),
+            members: stack
+                .list()
+                .iter()
+                .map(|member| {
+                    let (fullscreen, within_gaps) = flags(member.fill);
+                    drawn::Member {
+                        id: drawn::NodeId(member.id.word()),
+                        window: member.window,
+                        weight: member.weight,
+                        fullscreen,
+                        within_gaps,
+                    }
+                })
+                .collect(),
+            active: stack.active().map(|id| drawn::NodeId(id.word())),
+            root_selected: stack.root_selected(),
+            kind: match stack.orientation {
+                Orientation::Horizontal => drawn::LayoutKind::HorizontalStack,
+                Orientation::Vertical => drawn::LayoutKind::VerticalStack,
+            },
+            fullscreen,
+            within_gaps,
+        };
+        format!("{drawn:#?}")
+    }
+}
+
 /// A fill toggled (upstream's `toggle_fullscreen_mode`): the mode asked for is turned off if it
 /// is on, else on (replacing the other).
 fn toggled(fill: Fill, within_gaps: bool) -> Fill {
