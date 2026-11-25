@@ -649,13 +649,6 @@ Boundary := [].{
 	PresentWindow := { window : U64, presence : Present }
 
 
-	## The lifecycle after a reading, and the change in the window's admission. Generic in the
-	## model, here and not in the platform module beside the other machines' results:
-	## roc-lang/roc#13363 (nightly-2026-11-23-b5c77fc) makes any provided function answering a bare
-	## type (`lifecycle_net`'s `Change`) "polymorphic" when a type declared in the platform module
-	## wraps it. Fixed upstream (3ef41a6); it moves beside the others on the next nightly.
-	LifecycleStepped(model) := { model : Box(model), change : Change }
-
 	## Whether an invalidation found AX state to invalidate.
 	Invalidation := [Invalidated, NoAxState]
 
