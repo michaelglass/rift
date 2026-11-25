@@ -12,7 +12,6 @@ use rift_core::layout::bsp_tree::{
 };
 #[cfg(feature = "roc-core")]
 use rift_core_roc::bsp_tree::{Answer as RocAnswer, Event as RocEvent};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
@@ -24,10 +23,10 @@ use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::systems::{
     EditResult, Focus, FocusResult, LayoutEdit, LayoutSystem, WindowChange,
-    WindowLayoutConstraints, WindowQuery,
+    WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
 };
 use crate::layout_engine::{Direction, LayoutId, Orientation};
-use crate::model::slot_table::{SavedSlot, SlotKey, SlotTable, saved};
+use crate::model::slot_table::{SavedSlot, of_slotmap, saved};
 use crate::model::tree::NodeId;
 
 /// The core's tree over rift's ids.
@@ -644,55 +643,18 @@ fn core_of_tables(
     };
     let dummy_layout = LayoutState { root: NodeId::default() };
     CoreTree::from_parts(
-        table(layouts, dummy_layout, |state| Layout { root: state.root }),
-        table(nodes, dummy_node, core_node),
+        of_slotmap(layouts, dummy_layout, |state| Layout { root: state.root }),
+        of_slotmap(nodes, dummy_node, core_node),
         BTreeSet::new(),
         insertion,
         None,
     )
 }
 
-/// A live slotmap as the core's table: its slots, vacant ones and their versions included (read
-/// from its saved form), and its free list (the order a copy hands its vacant slots out; a load
-/// rebuilds it otherwise).
-fn table<K: slotmap::Key + SlotKey, V: Clone + Serialize + DeserializeOwned, C>(
-    map: &SlotMap<K, V>,
-    dummy: V,
-    convert: impl Fn(&V) -> C,
-) -> SlotTable<K, C> {
-    let written = ron::to_string(map).expect("a slotmap is written");
-    let saved: Vec<SavedSlot<V>> = ron::from_str(&written).expect("a written slotmap is read");
-    let vacant = saved.len() - 1 - map.len();
-    let mut copy = map.clone();
-    let order: Vec<u32> = (0..vacant).map(|_| copy.insert(dummy.clone()).parts().0).collect();
-    crate::model::slot_table::parse::<K, V>(saved)
-        .expect("a written slotmap is a slot sequence")
-        .map(|_, value| Ok::<_, std::convert::Infallible>(convert(&value)))
-        .unwrap_or_else(|never| match never {})
-        .resumed(&order)
-        .expect("a slotmap's free list is its vacant slots")
-}
-
-fn insertion_point(value: WindowInsertionPoint) -> InsertionPoint {
-    match value {
-        WindowInsertionPoint::NextToSelection => InsertionPoint::NextToSelection,
-        WindowInsertionPoint::EndOfTree => InsertionPoint::EndOfTree,
-    }
-}
-
 fn core_orientation(orientation: Orientation) -> core::Orientation {
     match orientation {
         Orientation::Horizontal => core::Orientation::Horizontal,
         Orientation::Vertical => core::Orientation::Vertical,
-    }
-}
-
-fn core_direction(direction: Direction) -> core::Direction {
-    match direction {
-        Direction::Left => core::Direction::Left,
-        Direction::Right => core::Direction::Right,
-        Direction::Up => core::Direction::Up,
-        Direction::Down => core::Direction::Down,
     }
 }
 

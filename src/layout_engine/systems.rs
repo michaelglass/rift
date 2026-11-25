@@ -143,6 +143,29 @@ fn replace_participation(inactive: &mut HashSet<WindowId>, from: WindowId, to: W
     }
 }
 
+/// The insertion setting as the core's trees take it.
+pub(super) fn insertion_point(
+    value: crate::common::config::WindowInsertionPoint,
+) -> rift_core::layout::bsp_tree::InsertionPoint {
+    use rift_core::layout::bsp_tree::InsertionPoint;
+
+    use crate::common::config::WindowInsertionPoint;
+    match value {
+        WindowInsertionPoint::NextToSelection => InsertionPoint::NextToSelection,
+        WindowInsertionPoint::EndOfTree => InsertionPoint::EndOfTree,
+    }
+}
+
+/// A direction as the core's trees take it.
+pub(super) fn core_direction(direction: Direction) -> rift_core::layout::bsp_tree::Direction {
+    match direction {
+        Direction::Left => rift_core::layout::bsp_tree::Direction::Left,
+        Direction::Right => rift_core::layout::bsp_tree::Direction::Right,
+        Direction::Up => rift_core::layout::bsp_tree::Direction::Up,
+        Direction::Down => rift_core::layout::bsp_tree::Direction::Down,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum WindowQuery {
     All,
@@ -549,6 +572,7 @@ pub use floating::FloatingLayoutSystem;
 pub(crate) mod drawn;
 mod stack;
 pub use stack::StackLayoutSystem;
+pub(crate) use stack::stack_tree_divergences;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

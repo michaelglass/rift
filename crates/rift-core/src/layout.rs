@@ -7,6 +7,7 @@ pub mod bsp;
 pub mod bsp_tree;
 pub mod floating;
 pub mod scrolling;
+pub mod stack_tree;
 pub mod traditional;
 
 use crate::plain::Rect;

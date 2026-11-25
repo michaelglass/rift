@@ -3,7 +3,9 @@
 //! table to a real `SlotMap`: ids allocated, lookups, slot order and the bytes written.
 
 pub(crate) use rift_core::slot_table::{SlotKey, SlotTable, SlotsError};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use slotmap::SlotMap;
 
 /// A slot as it is saved (slotmap's `SerdeSlot`): the value if occupied, and the version.
 #[derive(Serialize, Deserialize)]
@@ -51,6 +53,27 @@ pub(crate) fn parse<K: SlotKey, V>(
     saved: Vec<SavedSlot<V>>,
 ) -> Result<SlotTable<K, V>, SlotsError> {
     SlotTable::parse(saved.into_iter().map(|slot| (slot.value, slot.version)).collect())
+}
+
+/// A live slotmap as the core's table: its slots, vacant ones and their versions included (read
+/// from its saved form), and its free list (the order a copy hands its vacant slots out; a load
+/// rebuilds it otherwise).
+pub(crate) fn of_slotmap<K: slotmap::Key + SlotKey, V: Clone + Serialize + DeserializeOwned, C>(
+    map: &SlotMap<K, V>,
+    dummy: V,
+    convert: impl Fn(&V) -> C,
+) -> SlotTable<K, C> {
+    let written = ron::to_string(map).expect("a slotmap is written");
+    let saved: Vec<SavedSlot<V>> = ron::from_str(&written).expect("a written slotmap is read");
+    let vacant = saved.len() - 1 - map.len();
+    let mut copy = map.clone();
+    let order: Vec<u32> = (0..vacant).map(|_| copy.insert(dummy.clone()).parts().0).collect();
+    parse::<K, V>(saved)
+        .expect("a written slotmap is a slot sequence")
+        .map(|_, value| Ok::<_, std::convert::Infallible>(convert(&value)))
+        .unwrap_or_else(|never| match never {})
+        .resumed(&order)
+        .expect("a slotmap's free list is its vacant slots")
 }
 
 #[cfg(test)]

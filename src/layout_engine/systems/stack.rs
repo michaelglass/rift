@@ -45,6 +45,57 @@ struct Stack {
 fn unit_weight() -> f64 { 1.0 }
 
 impl Stack {
+    /// A saved stack as an operation leaves one (one `stack-load:` warn per state fixed; upstream's
+    /// load keeps them all, an upstream candidate): a stack layout kind (`stack_kind`, as the
+    /// legacy load maps one), never both fullscreen flags (fullscreen wins, as the projection reads
+    /// them), and a selection naming a member exactly when there are members (the first when it
+    /// names none; nothing selected, the stack included, when there are none).
+    fn normalize(&mut self, layout: LayoutId) {
+        let kind = Upstream::stack_kind(self.kind);
+        if kind != self.kind {
+            tracing::warn!(?layout, saved = ?self.kind, ?kind, "stack-load: normalized the stack's layout kind");
+            self.kind = kind;
+        }
+        if self.fullscreen && self.within_gaps {
+            tracing::warn!(
+                ?layout,
+                "stack-load: normalized a stack with both fullscreen flags to fullscreen"
+            );
+            self.within_gaps = false;
+        }
+        for member in &mut self.members {
+            if member.fullscreen && member.within_gaps {
+                tracing::warn!(
+                    ?layout,
+                    member = ?member.id,
+                    "stack-load: normalized a member with both fullscreen flags to fullscreen"
+                );
+                member.within_gaps = false;
+            }
+        }
+        let names_a_member = self.members.iter().any(|m| Some(m.id) == self.active);
+        match self.members.first() {
+            Some(first) if !names_a_member => {
+                tracing::warn!(
+                    ?layout,
+                    active = ?self.active,
+                    "stack-load: normalized a selection naming no member to the first member"
+                );
+                self.active = Some(first.id);
+            }
+            None if self.active.is_some() || self.root_selected => {
+                tracing::warn!(
+                    ?layout,
+                    active = ?self.active,
+                    root_selected = self.root_selected,
+                    "stack-load: normalized an empty stack's selection away"
+                );
+                (self.active, self.root_selected) = (None, false);
+            }
+            _ => {}
+        }
+    }
+
     fn active_index(&self, inactive: &HashSet<WindowId>) -> Option<usize> {
         self.members
             .iter()
@@ -103,9 +154,15 @@ impl Stack {
     }
 }
 
-/// A stack owns an ordered list; selection and fullscreen never require rebuilding it.
+mod twinned;
+pub use twinned::StackLayoutSystem;
+pub(crate) use twinned::stack_tree_divergences;
+
+/// Upstream's stack system (#688): a stack owns an ordered list; selection and fullscreen never
+/// require rebuilding it. Since layout trees' stack slice 1 the core's stacks are stepped beside
+/// it ([`StackLayoutSystem`]).
 #[derive(Clone, Serialize, Debug)]
-pub struct StackLayoutSystem {
+pub struct Upstream {
     layouts: SlotMap<LayoutId, Stack>,
     next_node: u32,
     default_orientation: StackDefaultOrientation,
@@ -159,7 +216,7 @@ impl LegacyStackForest {
                         active,
                         members,
                         root_selected: selected == root,
-                        kind: StackLayoutSystem::stack_kind(info.kind),
+                        kind: Upstream::stack_kind(info.kind),
                         fullscreen: info.is_fullscreen,
                         within_gaps: info.is_fullscreen_within_gaps,
                     }
@@ -172,7 +229,7 @@ impl LegacyStackForest {
     }
 }
 
-impl<'de> Deserialize<'de> for StackLayoutSystem {
+impl<'de> Deserialize<'de> for Upstream {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Wire {
@@ -192,11 +249,14 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
             default_orientation,
             inner,
         } = Wire::deserialize(deserializer)?;
-        let (layouts, next_node) = if let Some(inner) = inner {
+        let (mut layouts, next_node) = if let Some(inner) = inner {
             inner.migrate().map_err(serde::de::Error::custom)?
         } else {
             (layouts, next_node)
         };
+        for (layout, stack) in &mut layouts {
+            stack.normalize(layout);
+        }
         Ok(Self {
             layouts,
             next_node,
@@ -207,11 +267,11 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
     }
 }
 
-impl Default for StackLayoutSystem {
+impl Default for Upstream {
     fn default() -> Self { Self::new(default_stack_orientation()) }
 }
 
-impl StackLayoutSystem {
+impl Upstream {
     pub fn new(orientation: StackDefaultOrientation) -> Self {
         Self::new_with_insertion_point(orientation, WindowInsertionPoint::default())
     }
@@ -323,7 +383,7 @@ impl StackLayoutSystem {
     }
 }
 
-impl LayoutSystem for StackLayoutSystem {
+impl LayoutSystem for Upstream {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.layouts[layout].members.iter().any(|member| member.window.pid == pid)
     }
@@ -563,7 +623,7 @@ impl LayoutSystem for StackLayoutSystem {
     }
 }
 
-impl StackLayoutSystem {
+impl Upstream {
     /// The frames the stack system computes itself: since the core decides (policy (a)), the
     /// shadow `calculate_layout` holds the core's to.
     pub(crate) fn shadow_frames(
@@ -803,7 +863,7 @@ impl StackLayoutSystem {
     }
 }
 
-impl StackLayoutSystem {
+impl Upstream {
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
         format!("{:#?}", self.layouts[layout])
     }
@@ -924,15 +984,15 @@ mod tests {
         let mut system = StackLayoutSystem::default();
         let layout = system.create_layout();
         for window in [w(1), w(2), w(3)] {
-            system.add_window_after_selection(layout, window);
+            system.update(WindowChange::Add(layout, window, None));
         }
         assert!(system.focus(layout, Focus::Ascend).handled);
         assert_eq!(system.selected_window(layout), Some(w(3)));
-        assert_eq!(system.visible_windows_in_layout(layout), vec![w(1)]);
+        assert_eq!(system.windows(layout, WindowQuery::Visible), vec![w(1)]);
         assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(3)));
         assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
         assert!(system.focus(layout, Focus::Descend).handled);
-        assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
+        assert_eq!(system.windows(layout, WindowQuery::Visible), vec![w(3)]);
         assert!(
             system
                 .edit(layout, LayoutEdit::Move {
@@ -941,16 +1001,16 @@ mod tests {
                 })
                 .changed()
         );
-        assert_eq!(system.all_windows_in_layout(layout), vec![w(3), w(1), w(2)]);
+        assert_eq!(system.windows(layout, WindowQuery::All), vec![w(3), w(1), w(2)]);
         assert_eq!(
             system.container_tree(layout).layout_kind,
             Some(LayoutKind::HorizontalStack)
         );
         let survivor = WindowId::new(2, 1);
-        system.add_window_after_selection(layout, survivor);
-        system.select_window(layout, w(1));
+        system.update(WindowChange::Add(layout, survivor, None));
+        system.focus(layout, Focus::Select(w(1)));
         system.update(WindowChange::CloseApp(1));
-        assert_eq!(system.all_windows_in_layout(layout), vec![survivor]);
+        assert_eq!(system.windows(layout, WindowQuery::All), vec![survivor]);
         assert_eq!(system.selected_window(layout), Some(survivor));
     }
 
@@ -959,8 +1019,8 @@ mod tests {
         use objc2_core_foundation::{CGPoint, CGSize};
         let mut system = StackLayoutSystem::default();
         let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
+        system.update(WindowChange::Add(layout, w(1), None));
+        system.update(WindowChange::Add(layout, w(2), None));
         let constraints = HashMap::from_iter([(w(1), WindowLayoutConstraints {
             locked_width: 200.0,
             min_width: 300.0,
@@ -985,8 +1045,8 @@ mod tests {
         use objc2_core_foundation::{CGPoint, CGSize};
         let mut system = StackLayoutSystem::default();
         let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
+        system.update(WindowChange::Add(layout, w(1), None));
+        system.update(WindowChange::Add(layout, w(2), None));
         let line = StackLineReserve {
             thickness: 20.0,
             spacing: 4.0,
@@ -1011,24 +1071,203 @@ mod tests {
         ]);
     }
 
-    /// A stack system after random edits: windows added, removed, selected, made fullscreen,
-    /// left out of the layout, the stack's orientation turned, the root selected.
-    fn drawn_system(rng: &mut Rng) -> (StackLayoutSystem, LayoutId, Vec<WindowId>) {
-        let orientation = match rng.below(4) {
+    /// A system of two windows (the second selected), saved: the text the normalization tests
+    /// write a corrupt state into.
+    fn saved_two() -> (String, LayoutId) {
+        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
+        let layout = system.create_layout();
+        for window in [w(1), w(2)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        (ron::to_string(&system).unwrap(), layout)
+    }
+
+    /// `saved` with `from` written as `to` (exactly once).
+    fn corrupted(saved: &str, from: &str, to: &str) -> String {
+        assert_eq!(saved.matches(from).count(), 1, "{from} in {saved}");
+        saved.replacen(from, to, 1)
+    }
+
+    /// Loads a corrupt file: the loaded system saves the normalized text.
+    fn loads_as(file: &str, normalized: &str) -> StackLayoutSystem {
+        let system: StackLayoutSystem = ron::from_str(file).unwrap();
+        assert_eq!(ron::to_string(&system).unwrap(), normalized);
+        system
+    }
+
+    #[test]
+    fn a_saved_stack_of_a_tiled_kind_loads_as_a_stack_kind() {
+        let (saved, layout) = saved_two();
+        let file = corrupted(&saved, "kind:horizontal_stack", "kind:horizontal");
+        let system = loads_as(&file, &saved);
+        assert_eq!(
+            system.container_tree(layout).layout_kind,
+            Some(LayoutKind::HorizontalStack)
+        );
+    }
+
+    #[test]
+    fn a_saved_stack_with_both_fullscreen_flags_loads_fullscreen() {
+        let (saved, _) = saved_two();
+        let full = corrupted(
+            &saved,
+            "kind:horizontal_stack,fullscreen:false",
+            "kind:horizontal_stack,fullscreen:true",
+        );
+        let both = corrupted(
+            &full,
+            "kind:horizontal_stack,fullscreen:true,within_gaps:false",
+            "kind:horizontal_stack,fullscreen:true,within_gaps:true",
+        );
+        loads_as(&both, &full);
+    }
+
+    #[test]
+    fn a_saved_member_with_both_fullscreen_flags_loads_fullscreen() {
+        let (saved, layout) = saved_two();
+        let at = "window:(pid:1,idx:1),weight:1.0,fullscreen:";
+        let full = corrupted(&saved, &format!("{at}false"), &format!("{at}true"));
+        let both = corrupted(
+            &full,
+            &format!("{at}true,within_gaps:false"),
+            &format!("{at}true,within_gaps:true"),
+        );
+        let system = loads_as(&both, &full);
+        assert!(system.container_tree(layout).children[0].is_fullscreen);
+    }
+
+    #[test]
+    fn a_saved_selection_naming_no_member_loads_on_the_first_member() {
+        let (saved, layout) = saved_two();
+        let first = corrupted(
+            &saved,
+            "active:Some((idx:3,version:1))",
+            "active:Some((idx:2,version:1))",
+        );
+        for active in ["None", "Some((idx:9,version:1))"] {
+            let file = corrupted(
+                &saved,
+                "active:Some((idx:3,version:1))",
+                &format!("active:{active}"),
+            );
+            let system = loads_as(&file, &first);
+            assert_eq!(system.selected_window(layout), Some(w(1)));
+        }
+    }
+
+    #[test]
+    fn a_saved_empty_stack_loads_with_nothing_selected() {
+        let mut system = StackLayoutSystem::default();
+        system.create_layout();
+        let saved = ron::to_string(&system).unwrap();
+        let file = corrupted(
+            &saved,
+            "active:None,root_selected:false",
+            "active:Some((idx:7,version:1)),root_selected:true",
+        );
+        loads_as(&file, &saved);
+    }
+
+    fn drawn_orientation(rng: &mut Rng) -> StackDefaultOrientation {
+        match rng.below(4) {
             0 => StackDefaultOrientation::Perpendicular,
             1 => StackDefaultOrientation::Same,
             2 => StackDefaultOrientation::Horizontal,
             _ => StackDefaultOrientation::Vertical,
-        };
-        let mut system = StackLayoutSystem::new(orientation);
+        }
+    }
+
+    fn drawn_insertion(rng: &mut Rng) -> WindowInsertionPoint {
+        if rng.chance(50) {
+            WindowInsertionPoint::NextToSelection
+        } else {
+            WindowInsertionPoint::EndOfTree
+        }
+    }
+
+    /// A stack system after random operations, each held to the core's stacks by the twin:
+    /// windows added, removed, replaced and closed by app, selected, the stack selected and left,
+    /// made fullscreen, left out of the layout (windows in no layout too), moved, swapped,
+    /// reordered and dropped, the orientation turned, native resizes into and out of the screen
+    /// and the tiling area, layouts created, cloned and removed, the settings changed, every
+    /// query asked on a third of the steps, and reloads through serde.
+    fn drawn_system(rng: &mut Rng) -> (StackLayoutSystem, LayoutId, Vec<WindowId>) {
+        let (mut orientation, mut insertion) = (drawn_orientation(rng), drawn_insertion(rng));
+        let mut system = StackLayoutSystem::new_with_insertion_point(orientation, insertion);
         let layout = system.create_layout();
+        let mut others: Vec<LayoutId> = Vec::new();
         let mut windows: Vec<WindowId> = Vec::new();
         let mut next = 0;
-        for _ in 0..rng.below(32) {
+        for _ in 0..rng.below(40) {
             let pick = |rng: &mut Rng, windows: &[WindowId]| {
                 windows[rng.below(windows.len() as u64) as usize]
             };
-            match rng.below(11) {
+            // Most operations go to the layout drawn for frames, some to the others.
+            let layout = if !others.is_empty() && rng.chance(15) {
+                others[rng.below(others.len() as u64) as usize]
+            } else {
+                layout
+            };
+            if rng.chance(35) {
+                asked(rng, &system, layout, &windows);
+            }
+            if rng.chance(10) {
+                match rng.below(5) {
+                    0 => others.push(system.create_layout()),
+                    1 | 2 => others.push(system.clone_layout(layout)),
+                    3 if !others.is_empty() => {
+                        let removed = others.swap_remove(rng.below(others.len() as u64) as usize);
+                        system.remove_layout(removed);
+                    }
+                    3 => system.remove_layout(LayoutId::default()),
+                    _ => {
+                        (orientation, insertion) = (drawn_orientation(rng), drawn_insertion(rng));
+                        system.update_settings(orientation, insertion);
+                    }
+                }
+                continue;
+            }
+            if rng.chance(4) {
+                // Saved and loaded (the insertion point is not saved: rift sets it again).
+                system = ron::from_str(&ron::to_string(&system).unwrap()).unwrap();
+                system.update_settings(orientation, insertion);
+                continue;
+            }
+            if !windows.is_empty() && rng.chance(6) {
+                let from = pick(rng, &windows);
+                let to = if rng.chance(50) {
+                    pick(rng, &windows)
+                } else {
+                    next += 1;
+                    WindowId::new(from.pid, next)
+                };
+                windows.retain(|w| *w != from && *w != to);
+                windows.push(to);
+                system.update(WindowChange::Replace(from, to));
+                continue;
+            }
+            if !windows.is_empty() && rng.chance(8) {
+                let window = pick(rng, &windows);
+                let screen = drawn_screen(rng);
+                let gaps = drawn_gaps(rng);
+                let tiling = compute_tiling_area(screen, &gaps);
+                let frame = |rng: &mut Rng| match rng.below(4) {
+                    0 => screen,
+                    1 => tiling,
+                    _ => drawn_screen(rng),
+                };
+                let (old, new) = (frame(rng), frame(rng));
+                system.update(WindowChange::Resize {
+                    layout,
+                    window,
+                    old,
+                    new,
+                    screen,
+                    gaps: &gaps,
+                });
+                continue;
+            }
+            match rng.below(14) {
                 0..=3 => {
                     next += 1;
                     let window = WindowId::new(1 + rng.below(3) as i32, next);
@@ -1042,45 +1281,127 @@ mod tests {
                     system.update(WindowChange::Remove(window));
                 }
                 5 => {
-                    let window = pick(rng, &windows);
-                    system.focus(layout, Focus::Select(window));
-                }
-                6 => {
-                    let focus = if rng.chance(50) {
-                        Focus::Ascend
-                    } else {
-                        Focus::Descend
+                    let focus = match rng.below(5) {
+                        0 | 1 => Focus::Select(pick(rng, &windows)),
+                        2 => Focus::Ascend,
+                        3 => Focus::Descend,
+                        _ => Focus::Direction(drawn_direction(rng)),
                     };
                     system.focus(layout, focus);
                 }
-                7 => {
+                6 => {
+                    if rng.chance(30) {
+                        system.focus(layout, Focus::Ascend);
+                    }
                     let within_gaps = rng.chance(50);
                     system.edit(layout, LayoutEdit::Fullscreen { within_gaps });
                 }
-                8 => {
-                    let window = pick(rng, &windows);
-                    let participates = rng.chance(40);
-                    system.set_window_participation(window, participates);
-                }
-                9 => {
-                    system.edit(layout, LayoutEdit::ToggleOrientation);
-                }
-                _ => {
-                    let direction = match rng.below(4) {
-                        0 => Direction::Left,
-                        1 => Direction::Right,
-                        2 => Direction::Up,
-                        _ => Direction::Down,
+                7 => {
+                    let window = if rng.chance(15) {
+                        // A window in no layout (participation is the system's, not a layout's).
+                        next += 1;
+                        WindowId::new(1 + rng.below(3) as i32, next)
+                    } else {
+                        pick(rng, &windows)
                     };
-                    let has_display_neighbor = rng.chance(50);
+                    system.set_window_participation(window, rng.chance(40));
+                }
+                8 => {
+                    let direction = drawn_direction(rng);
+                    let has_display_neighbor = rng.chance(30);
                     system.edit(layout, LayoutEdit::Move {
                         direction,
                         has_display_neighbor,
                     });
                 }
+                9 => {
+                    let (a, b) = (pick(rng, &windows), pick(rng, &windows));
+                    let edit = match rng.below(3) {
+                        0 => LayoutEdit::Swap(a, b),
+                        1 => LayoutEdit::ReorderTab { window: a, target: b },
+                        _ => LayoutEdit::Drop {
+                            source: a,
+                            target: b,
+                            action: crate::layout_engine::WindowDropAction::Swap,
+                        },
+                    };
+                    if rng.chance(30) {
+                        // Past `edit`'s participation check, which the system makes again.
+                        system.edit_layout(layout, edit);
+                    } else {
+                        system.edit(layout, edit);
+                    }
+                }
+                10 => {
+                    let edit = match rng.below(4) {
+                        0 => LayoutEdit::ToggleOrientation,
+                        1 => LayoutEdit::Group(GroupEdit::Stack(drawn_orientation(rng))),
+                        // Edits upstream's stack system has no case for.
+                        2 => LayoutEdit::Rebalance,
+                        _ => LayoutEdit::Group(GroupEdit::Unjoin),
+                    };
+                    system.edit(layout, edit);
+                }
+                11 => {
+                    let window = pick(rng, &windows);
+                    system.update(WindowChange::CloseApp(window.pid));
+                    windows.retain(|w| w.pid != window.pid);
+                }
+                _ => {
+                    next += 1;
+                    let window = WindowId::new(1 + rng.below(3) as i32, next);
+                    windows.push(window);
+                    system.update(WindowChange::Add(layout, window, None));
+                }
             }
         }
         (system, layout, windows)
+    }
+
+    /// Every query, about drawn windows (some not in the layout).
+    fn asked(rng: &mut Rng, system: &StackLayoutSystem, layout: LayoutId, windows: &[WindowId]) {
+        let window = match windows {
+            [] => WindowId::new(1, 9999),
+            _ => windows[rng.below(windows.len() as u64) as usize],
+        };
+        let _ = system.selected_window(layout);
+        let _ = system.selection_contains_window(layout, window);
+        let _ = system.contains_window(layout, window);
+        let _ = system.has_any_fullscreen_node(layout);
+        let _ = system.has_windows_for_app(layout, window.pid);
+        let _ = system.window_participates(window);
+        let _ = system.contains_layout(layout);
+        let _ = system.contains_layout(LayoutId::default());
+        for query in [
+            WindowQuery::All,
+            WindowQuery::Visible,
+            WindowQuery::Selection,
+            WindowQuery::Stack(window),
+        ] {
+            let _ = system.windows(layout, query);
+        }
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            let _ = system.window_in_direction(layout, direction);
+        }
+        let _ = system.window_slot(layout, window);
+        let gaps = drawn_gaps(rng);
+        for selection_path_only in [false, true] {
+            let _ = system.collect_group_containers(
+                layout,
+                drawn_screen(rng),
+                0.0,
+                &gaps,
+                StackLineReserve::default(),
+                selection_path_only,
+            );
+        }
+        let _ = system.draw_tree(layout);
+        let _ = system.container_tree(layout);
     }
 
     /// The core's frames for a stack layout are the system's own (`shadow_frames`), bit for bit,
@@ -1096,7 +1417,18 @@ mod tests {
             let gaps = drawn_gaps(&mut rng);
             let offset = drawn_offset(&mut rng);
             let line = drawn_line(&mut rng);
+            // The pass also holds the core stacks' shape to upstream's.
+            let given = system.calculate_layout(
+                layout,
+                screen,
+                offset,
+                &constraints,
+                &gaps,
+                line,
+                crate::layout_engine::Shadow::Run,
+            );
             let upstream = system.shadow_frames(layout, screen, offset, &constraints, &gaps, line);
+            assert_eq!(bits(&given), bits(&upstream));
             let core = core_frames(system.shape(layout, screen, offset, &constraints, &gaps, line));
             assert_eq!(bits(&core), bits(&upstream), "{}", system.draw_tree(layout));
             cases += 1;
