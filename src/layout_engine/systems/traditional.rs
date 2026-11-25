@@ -101,8 +101,6 @@ impl TraditionalLayoutSystem {
     }
 
     fn find_direct_sibling_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
-        let _parent = from.parent(self.tiles.map())?;
-
         match direction {
             Direction::Right | Direction::Down => from.next_sibling(self.tiles.map()),
             Direction::Left | Direction::Up => from.prev_sibling(self.tiles.map()),
