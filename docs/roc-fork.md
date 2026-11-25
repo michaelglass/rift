@@ -193,11 +193,8 @@ master-stack and traditional; then scrolling's columns; then floating), on the l
 - **4b (done, above):** the shape in Roc; under `roc-core` the Roc tree and its shape decide, the
   Rust tree its shadow, re-seeded from the Roc tree's view.
 - **5 (done, above):** `Upstream` deleted; the load builds the core's tree.
-- **After the Roc nightly bump:** try removing the `BspFrames` wrapper (the checker quirk below is
-  likely roc#13363, fixed in 3ef41a6, in no nightly yet); only if it still fails, reduce it to a
-  minimal case and report it to the lead (do not file it).
-- The queued Roc nightly bump still waits: the newest nightly is still
-  nightly-2026-11-23-b5c77fc (checked 2026-11-24).
+- **The Roc nightly bump (done 2026-11-25, below):** pinned nightly-2026-11-24-ff5e544; every
+  workaround for roc#13363, #13348, #13349 and #13350 removed, one commit each.
 
 **Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
 -0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
@@ -299,7 +296,7 @@ question ruled `crash`, the lead's (b)).** The plan, from the patterns already i
   `bsp_tree_view : bsp_tree -> { model, layouts, nodes, left_out, settings }`, plus a release;
   `RocBspTree` in `rift-core-roc/src/lib.rs` beside `RocWorkspaces`, the conversions in
   `boundary.rs`. Avoid a one-tag union with several payloads (roc#13348) and a tag named
-  `Release` (roc#13350) until the nightly bump.
+  `Release` (roc#13350) until the nightly bump (both fixed at ff5e544).
 - *The differential:* `rift-core-roc/tests/`, drawn operation sequences (the platform fuzzer's
   mix: every edit, focus, layouts cloned and removed, replaces, resizes, participation,
   settings, queries) stepped on `rift_core::layout::bsp_tree::Tree` (keys as a plain `SlotKey`
@@ -345,7 +342,16 @@ Rulings for slice 2:
   Measure the per-operation cost at 1000 windows and put it here.
 - **The NoAxState arm** stays doing nothing, with its one-line reason (done).
 
-**Queued, between slices (the lead, 2026-11-24): the next Roc nightly bump.** roc#13363 (PR 13389,
+**The Roc nightly bump to nightly-2026-11-24-ff5e544 (done 2026-11-25).** Six commits after the
+slice 5 docs commit, each with full checks green: the pin; `LifecycleStepped` in the platform
+module on `Windows` (roc#13363); `bsp_tree_frames` answering its frames bare, `BspFrames` gone
+(roc#13363); the glue included as generated with no lint allowed (roc#13349); the build's
+one-tag-union scan gone (roc#13348; a probe union `[Probe(U64, U32)]` on a copy of the platform
+came out with both values, 16 bytes); the event tag `Release` again (roc#13350). Each removal
+confirms its issue's fix at that nightly. The local install's `current` and `safe` point at
+ff5e544, and `src` is checked out at ff5e544 for the glue spec.
+
+**Queued, between slices (the lead, 2026-11-24; done, above): the next Roc nightly bump.** roc#13363 (PR 13389,
 `LifecycleStepped`'s `S(m)`), roc#13348 (PR 13386, a one-tag union with several payloads described
 by its first payload only) and roc#13349 (PR 13393, RustGlue output not `include!`-able, edition
 2024 / clippy lints) are fixed on roc main; roc#13350 (a tag named `Release` colliding with the
@@ -1284,13 +1290,14 @@ A slice that needs a behaviour change stops and is reported.
    series is complete.
 3. The Roc nightly bump: done 2026-11-24 (Handoff). The core speaks the platform's types (green
    on f25da45 and b5c77fc), then the pin moved to nightly-2026-11-23-b5c77fc, then the `S(m)`
-   workaround went (all but `LifecycleStepped`: roc-lang/roc#13363).
+   workaround went (all but `LifecycleStepped`: roc-lang/roc#13363). The next bump, to
+   nightly-2026-11-24-ff5e544 (2026-11-25), removed the rest (Handoff).
 
 - The window store's single writer (the upstream PR plan's C1 step 2): done 2026-11-24, admission
   facts only; `invalidate_ax_identity` / `validate_ax_identity` answer `Invalidation` /
   `Revalidation` (Handoff).
-- `LifecycleStepped` moves into the platform module beside the other entries' results on the first
-  nightly with roc-lang/roc#13363's fix (3ef41a6).
+- `LifecycleStepped` moved into the platform module beside the other entries' results at
+  nightly-2026-11-24-ff5e544 (roc-lang/roc#13363's fix, 3ef41a6).
 
 No call site is in `layout_engine/`; keep it that way.
 
@@ -1702,7 +1709,7 @@ Build:
 | rift with `roc-core`, after touching `main.roc` (Roc build + relinking rift) | 32 s |
 | rift without it, after touching `rift-core` | 16 s |
 
-## Roc: the design we follow, and what is left (nightly-2026-11-23-b5c77fc)
+## Roc: the design we follow, and what is left (nightly-2026-11-24-ff5e544)
 
 Sources are the Roc checkout at the pinned commit (`b5c77fc`; written at `f25da45`, the bump's
 changes noted): `docs/langref/`, `design.md`,
@@ -1774,13 +1781,14 @@ notes called several of these friction; they are Roc's design, and the core foll
 
 ### Unknown (behaviour at this commit, not documented)
 
-- **A `List(Frame)` field in a `requires` entry's result record beside the model variable**
-  (`bsp_tree_frames : trees, Q -> { model : trees, frames : List(Frame) }`) made every other
-  entry answering `List(Frame)` (`bsp_for_host`, `traditional_for_host`, ...) fail as "a
-  polymorphic provided function". Workaround: the field is a nominal (`BspFrames := { frames :
-  List(Frame) }`). Likely roc#13363 ("roc glue refuses a concrete provided function as
-  polymorphic when the platform declares a nominal type wrapping an imported type"), fixed in
-  3ef41a6, in no nightly yet: try removing the wrapper at the bump.
+- **Fixed at nightly-2026-11-24-ff5e544, workarounds removed:** roc-lang/roc#13363 (a provided
+  function answering a bare type "polymorphic" when a platform-module type wraps it:
+  `LifecycleStepped` sat in `Boundary` generic in the model, and `bsp_tree_frames`'s frames sat
+  in a nominal `BspFrames`); #13348 (a one-tag union with several values described by its first
+  only: the build scanned for and refused such unions); #13349 (the glue not `include!`-able and
+  lint-dirty: the build rewrote its `//!`/`#![...]` lines and the crate allowed its lints);
+  #13350 (a tag named `Release` colliding with the glue's `<Type>Release` helper: the event's
+  tag was `Released`). The entries below describe them as they were at b5c77fc.
 - **`F64` rounding.** `round_to_*_try` rounds by `floor(x + 0.5)` (`Builtin.roc`,
   `f64_round_to_whole`), which differs from Rust's `f64::round` at `0.49999999999999994` and
   loses the sign of a zero; there is no `F64 -> F64` round or floor. The geometry writes Rust's
@@ -1789,10 +1797,10 @@ notes called several of these friction; they are Roc's design, and the core foll
   behaviour is not specified; the geometry writes out arm64's `fmaxnm`/`fminnm`.
 - **Glue and packaging.** The glue is generated at build time (`crates/rift-core-roc/build.rs`,
   into `OUT_DIR`, never committed) from `RustGlue.roc` in a roc-lang/roc checkout (`ROC_SRC`; the
-  nightly tarball has none). The generated file is a module (inner `//!` docs and `#![...]`
-  attributes), so the build script turns those lines into plain comments for `include!`, and
-  the crate allows the generator's lints (`unsafe_op_in_unsafe_fn`, `unexpected_cfgs`, ...) on
-  the module. The glue's default `make_roc_host` allocators prefix their own header, so the
+  nightly tarball has none). At b5c77fc the generated file was a module (inner `//!` docs and
+  `#![...]` attributes) that the build script rewrote for `include!`, with the generator's lints
+  allowed on the module; since ff5e544 (roc#13349) it is included as generated, no lint allowed.
+  The glue's default `make_roc_host` allocators prefix their own header, so the
   host keeps its own allocator hooks (mixing the two crashed in `free`).
 - **Glue names.** An anonymous record is named by hash (`AnonStruct<hex>`); an inline union by
   its tags (`NothingOrSome`), and a collision, or a generic nominal's instances (`Fact(a)`), by
@@ -1802,9 +1810,9 @@ notes called several of these friction; they are Roc's design, and the core foll
 - **Glue bug: a single-tag union with several values** (`[Stepped(Box(model), List(U64))]`) is
   described by its first value only: the glue declared `roc_step` as returning just the box.
   Cause: `src/glue/platform/TypeTable.roc:89`, `single_variant_payload`, keeps only
-  `List.first(tag.payload)`, and `RustGlue.roc:159` emits that. Unfixed on main and unreported
-  (2026-11-20). Workaround and guard: such values are a named record, and the build fails on a
-  platform union with one tag carrying several values.
+  `List.first(tag.payload)`, and `RustGlue.roc:159` emits that (reported as roc#13348, fixed by
+  PR 13386, in ff5e544). Such values are a named record; the build's guard against such unions
+  went with the bump.
 - **`roc check` hung** on a nominal type in a platform module that mentions the platform's
   `Model` variable (roc-lang/roc#13347, fixed in 8712e637, in nightly-2026-11-23-b5c77fc). The
   workaround, the entries' results declared in `Boundary` generic in the model (`Stepped(model)`
@@ -1814,7 +1822,7 @@ notes called several of these friction; they are Roc's design, and the core foll
   answering a bare type as "polymorphic" when a type declared in the platform module wraps that
   type (30-line repro: `S := { c : C }` with `C` from an imported module makes `net : U64 -> C`
   polymorphic; a type parameter on `S` does not help). `LifecycleStepped` wraps `Change`, which
-  `lifecycle_net` answers bare, so it stays in `Boundary`, generic; it moves on the next nightly.
+  `lifecycle_net` answers bare, so it stayed in `Boundary`, generic, until ff5e544, where it moved.
   Also check #13249 on a bump (an `--opt=dev` SIGTRAP when a platform closure captures a
   Model-typed callback; closed).
 - **`roc build` hung** (`roc check` passing) on an entry rebuilding tuples out of a nominal
@@ -1823,9 +1831,9 @@ notes called several of these friction; they are Roc's design, and the core foll
 - **A tag named after a Rust keyword** becomes a payload field of that name (`move`, `in`), which
   does not compile; such tags are renamed at the boundary (`Moved` for upstream's `Move` in
   `BspEdit` and `BspDropAction`, `Placed` for the floating slot).
-- **A tag named `Release`** gives a per-variant alias (`BoundaryEventRelease`) that collides
-  with the glue's own `<Type>Release` helper struct; the event's tag is `Released` at the
-  boundary.
+- **A tag named `Release`** gave a per-variant alias (`BoundaryEventRelease`) that collided
+  with the glue's own `<Type>Release` helper struct (roc#13350); the event's tag was `Released`
+  until ff5e544 (PR 13390), and is `Release` since.
 - **Nominal types have no `==`** (equality is a method a nominal type would define), so a
   value of a platform type that reaches a comparison (a window or button from an event, stored
   in the model) is compared by its fields or by matching.
