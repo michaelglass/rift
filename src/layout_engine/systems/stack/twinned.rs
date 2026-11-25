@@ -1,6 +1,7 @@
 //! The stack layout system: the core's stacks decide (layout trees, stack slice 3, the flip,
-//! policy (a)) and are saved in upstream's form, byte for byte; upstream's system
-//! ([`Upstream`]) is their shadow, stepped on every operation in every build and held to them:
+//! policy (a); under `roc-core` the Roc stacks decide, the Rust stacks their shadow, slice 4)
+//! and are saved in upstream's form, byte for byte; upstream's system ([`Upstream`]) is the Rust
+//! stacks' shadow, stepped on every operation in every build and held to them:
 //! each answer is compared on every operation, the whole system (the view) on every operation in
 //! tests and `roc-core` builds and every [`VIEW_EVERY`]th in a plain release build, and each
 //! pass's shape and frames on every pass. A difference is counted, fails a test, or in a running
@@ -21,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
 #[cfg(feature = "roc-core")]
-use super::roc_shadow::{self as roc, RocShadow};
+use super::roc_stacks::{self as roc, RocStacks};
 use super::{Member, Stack, Upstream};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -57,19 +58,22 @@ pub(crate) fn stack_tree_divergences() -> u64 { STACK_TREE_DIVERGENCES.load(Orde
 #[derive(Clone, Debug, Deserialize)]
 #[serde(from = "Upstream")]
 pub struct StackLayoutSystem {
+    /// Under `roc-core` the Roc stacks' shadow, else the deciding stacks; saved either way (under
+    /// `roc-core` it is re-seeded from the Roc stacks on any difference, compared on every
+    /// operation).
     core: CoreStacks,
+    /// Under `roc-core`, the deciding stacks.
+    #[cfg(feature = "roc-core")]
+    roc: RocStacks,
     /// Boxed: the system is one variant of `LayoutSystemKind`.
     shadow: Box<Shadow>,
 }
 
-/// Upstream's system and how many operations stepped it; under `roc-core` also the Roc stacks,
-/// a second shadow.
+/// Upstream's system and how many operations stepped it.
 #[derive(Clone, Debug)]
 struct Shadow {
     upstream: Upstream,
     steps: u64,
-    #[cfg(feature = "roc-core")]
-    roc: RocShadow,
 }
 
 /// The core's stacks as upstream saves its system (the field names and order of upstream's
@@ -97,12 +101,9 @@ impl From<Upstream> for StackLayoutSystem {
     fn from(upstream: Upstream) -> Self {
         let core = seed(&upstream);
         Self {
-            shadow: Box::new(Shadow {
-                #[cfg(feature = "roc-core")]
-                roc: RocShadow::seeded(&core),
-                upstream,
-                steps: 0,
-            }),
+            #[cfg(feature = "roc-core")]
+            roc: RocStacks::seeded(&core),
+            shadow: Box::new(Shadow { upstream, steps: 0 }),
             core,
         }
     }
@@ -131,13 +132,13 @@ impl StackLayoutSystem {
         let (orientation, insertion) =
             (default_orientation(orientation), insertion_point(insertion));
         self.core.update_settings(orientation, insertion);
-        self.stepped("update_settings", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "update_settings",
             Event::Settings(orientation, insertion),
             Answer::Done,
         );
+        self.stepped("update_settings", &(), &());
     }
 
     pub(crate) fn collect_group_containers(
@@ -157,32 +158,32 @@ impl StackLayoutSystem {
             line,
             selection_path_only,
         );
-        let core =
-            self.core
-                .group_container(layout, selection_path_only)
-                .map(|c| GroupContainerInfo {
-                    node_id: node_id(c.stack),
-                    container_kind: layout_kind(c.orientation),
-                    frame: crate::layout_engine::utils::compute_tiling_area(screen, gaps),
-                    total_count: c.windows.len(),
-                    selected_index: c.selected,
-                    window_ids: c.windows,
-                });
+        let core = self.core.group_container(layout, selection_path_only);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "collect_group_containers",
-            Event::GroupContainer(
-                roc::layout_key(layout),
-                if selection_path_only {
-                    Scope::SelectionPath
-                } else {
-                    Scope::Whole
-                },
+        let core = roc::decided(
+            self.roc_asked(
+                "collect_group_containers",
+                Event::GroupContainer(
+                    roc::layout_key(layout),
+                    if selection_path_only {
+                        Scope::SelectionPath
+                    } else {
+                        Scope::Whole
+                    },
+                ),
+                Answer::Group(roc::group(&core)),
             ),
-            Answer::Group(roc::group(
-                &self.core.group_container(layout, selection_path_only),
-            )),
+            roc::as_group,
+            core,
         );
+        let core = core.map(|c| GroupContainerInfo {
+            node_id: node_id(c.stack),
+            container_kind: layout_kind(c.orientation),
+            frame: crate::layout_engine::utils::compute_tiling_area(screen, gaps),
+            total_count: c.windows.len(),
+            selected_index: c.selected,
+            window_ids: c.windows,
+        });
         let core: Vec<GroupContainerInfo> = core.into_iter().collect();
         self.answered(
             "collect_group_containers",
@@ -214,10 +215,14 @@ impl StackLayoutSystem {
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         let core = self.core.window_slot(layout, window);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_slot",
-            Event::WindowSlot(roc::layout_key(layout), roc::window(window)),
-            Answer::WindowSlot(core),
+        let core = roc::decided(
+            self.roc_asked(
+                "window_slot",
+                Event::WindowSlot(roc::layout_key(layout), roc::window(window)),
+                Answer::WindowSlot(core),
+            ),
+            roc::as_slot,
+            core,
         );
         self.answered(
             "window_slot",
@@ -226,7 +231,8 @@ impl StackLayoutSystem {
         )
     }
 
-    /// An edit the core decides (under `roc-core` the Roc stacks take it too).
+    /// An edit the core decides (under `roc-core` the Roc stacks, the Rust stacks' answer held to
+    /// theirs).
     fn core_edit(
         &mut self,
         layout: LayoutId,
@@ -234,25 +240,31 @@ impl StackLayoutSystem {
     ) -> core::Edited<WindowId> {
         let edited = self.core.edit(layout, edit);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "edit_layout",
-            Event::Edit(roc::layout_key(layout), roc::edit(edit)),
-            Answer::Edited(roc::edited(&edited)),
+        let edited = roc::decided(
+            self.roc_stepped(
+                "edit_layout",
+                Event::Edit(roc::layout_key(layout), roc::edit(edit)),
+                Answer::Edited(roc::edited(&edited)),
+            ),
+            roc::as_edited,
+            edited,
         );
         edited
     }
 
-    /// Under `roc-core`, the Roc stacks take an operation the core decided (answering
-    /// `answer`); a difference re-seeds them from the core.
+    /// Under `roc-core`, an operation the Rust stacks took (answering `answer`): the Roc stacks
+    /// take it and decide (a difference re-seeds the Rust stacks from them); their answer is
+    /// rift's.
     #[cfg(feature = "roc-core")]
-    fn roc_stepped(&mut self, what: &str, event: Event, answer: Answer) {
-        self.shadow.roc.stepped(&self.core, what, event, answer);
+    fn roc_stepped(&mut self, what: &str, event: Event, answer: Answer) -> Answer {
+        self.roc.decided(&mut self.core, what, event, answer)
     }
 
-    /// Under `roc-core`, the Roc stacks answer a query the core answered (`answer`).
+    /// Under `roc-core`, a query the Rust stacks answered `answer`: the Roc stacks' answer is
+    /// rift's.
     #[cfg(feature = "roc-core")]
-    fn roc_asked(&self, what: &str, event: Event, answer: Answer) {
-        self.shadow.roc.asked(what, event, answer);
+    fn roc_asked(&self, what: &str, event: Event, answer: Answer) -> Answer {
+        self.roc.asked(what, event, answer)
     }
 
     #[cfg(test)]
@@ -298,13 +310,11 @@ impl StackLayoutSystem {
 
     /// Upstream's system re-seeded from the core, as after a divergence.
     #[cfg(test)]
-    pub(crate) fn reseed_shadow(&mut self) {
-        self.shadow.upstream = upstream_of(&self.core);
-        #[cfg(feature = "roc-core")]
-        {
-            self.shadow.roc = RocShadow::seeded(&self.core);
-        }
-    }
+    pub(crate) fn reseed_shadow(&mut self) { self.shadow.upstream = upstream_of(&self.core); }
+
+    /// The Rust stacks re-seeded from the deciding Roc stacks' view, as after a divergence.
+    #[cfg(all(test, feature = "roc-core"))]
+    pub(crate) fn reseed_rust_from_roc(&mut self) { self.core = roc::core_of(&self.roc.view()); }
 
     /// Upstream's system saved as upstream saves it (the core's save is held to it).
     #[cfg(test)]
@@ -360,13 +370,17 @@ impl LayoutSystem for StackLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         let core = self.core.has_windows_for_app(layout, |window| window.pid == pid);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "has_windows_for_app",
-            Event::HasWindowsForApp(
-                roc::layout_key(layout),
-                roc::app_windows(&self.core, |window| window.pid == pid),
+        let core = roc::decided(
+            self.roc_asked(
+                "has_windows_for_app",
+                Event::HasWindowsForApp(
+                    roc::layout_key(layout),
+                    roc::app_windows(&self.core, |window| window.pid == pid),
+                ),
+                Answer::Verdict(core),
             ),
-            Answer::Verdict(core),
+            roc::as_verdict,
+            core,
         );
         self.answered(
             "has_windows_for_app",
@@ -378,10 +392,14 @@ impl LayoutSystem for StackLayoutSystem {
     fn window_participates(&self, window: WindowId) -> bool {
         let core = self.core.window_participates(window);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_participates",
-            Event::WindowParticipates(roc::window(window)),
-            Answer::Verdict(core),
+        let core = roc::decided(
+            self.roc_asked(
+                "window_participates",
+                Event::WindowParticipates(roc::window(window)),
+                Answer::Verdict(core),
+            ),
+            roc::as_verdict,
+            core,
         );
         self.answered(
             "window_participates",
@@ -398,36 +416,48 @@ impl LayoutSystem for StackLayoutSystem {
             Participation::LeftOut
         };
         let core = self.core.set_window_participation(window, participation);
-        self.stepped("set_window_participation", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "set_window_participation",
-            Event::Participation(roc::window(window), participation),
-            Answer::Participated(core),
+        let core = roc::decided(
+            self.roc_stepped(
+                "set_window_participation",
+                Event::Participation(roc::window(window), participation),
+                Answer::Participated(core),
+            ),
+            roc::as_participated,
+            core,
         );
+        self.stepped("set_window_participation", &upstream, &core);
         core
     }
 
     fn create_layout(&mut self) -> LayoutId {
         let upstream = self.shadow.upstream.create_layout();
         let core = self.core.create_layout();
-        self.stepped("create_layout", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "create_layout",
-            Event::CreateLayout,
-            Answer::Layout(roc::layout_key(core)),
+        let core = roc::decided(
+            self.roc_stepped(
+                "create_layout",
+                Event::CreateLayout,
+                Answer::Layout(roc::layout_key(core)),
+            ),
+            roc::as_layout,
+            core,
         );
+        self.stepped("create_layout", &upstream, &core);
         core
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool {
         let core = self.core.contains_layout(layout);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "contains_layout",
-            Event::ContainsLayout(roc::layout_key(layout)),
-            Answer::Verdict(core),
+        let core = roc::decided(
+            self.roc_asked(
+                "contains_layout",
+                Event::ContainsLayout(roc::layout_key(layout)),
+                Answer::Verdict(core),
+            ),
+            roc::as_verdict,
+            core,
         );
         self.answered(
             "contains_layout",
@@ -439,30 +469,36 @@ impl LayoutSystem for StackLayoutSystem {
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let upstream = self.shadow.upstream.clone_layout(layout);
         let core = self.core.clone_layout(layout);
-        self.stepped("clone_layout", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "clone_layout",
-            Event::CloneLayout(roc::layout_key(layout)),
-            Answer::Layout(roc::layout_key(core)),
+        let core = roc::decided(
+            self.roc_stepped(
+                "clone_layout",
+                Event::CloneLayout(roc::layout_key(layout)),
+                Answer::Layout(roc::layout_key(core)),
+            ),
+            roc::as_layout,
+            core,
         );
+        self.stepped("clone_layout", &upstream, &core);
         core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
         self.shadow.upstream.remove_layout(layout);
         self.core.remove_layout(layout);
-        self.stepped("remove_layout", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "remove_layout",
             Event::RemoveLayout(roc::layout_key(layout)),
             Answer::Done,
         );
+        self.stepped("remove_layout", &(), &());
     }
 
-    /// The core geometry's frames for the core's shape (policy (a)): upstream's shape is held to
-    /// the core's on every pass, upstream's geometry is the frames' shadow.
+    /// The core's frames (policy (a)): under `roc-core` the Roc stacks' own shape through the Roc
+    /// geometry, else the Rust stacks' shape through the Rust geometry, with the Rust geometry's
+    /// frames for the Rust stacks' shape and upstream's geometry the shadows; upstream's shape is
+    /// held to the Rust stacks' on every pass.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -490,20 +526,52 @@ impl LayoutSystem for StackLayoutSystem {
                 &format!("shapes: upstream {upstream:?}, core {core:?}"),
             );
         }
-        crate::layout_engine::core_geometry::decide_traditional("stack", core, shadow, || {
+        let upstream_frames = || {
             self.shadow
                 .upstream
                 .shadow_frames(layout, screen, offset, constraints, gaps, line)
-        })
+        };
+        // Under `roc-core` the Roc stacks' own shape through the Roc geometry decides.
+        #[cfg(feature = "roc-core")]
+        return crate::layout_engine::core_geometry::decide_stack_tree(
+            core,
+            shadow,
+            upstream_frames,
+            || {
+                use crate::roc_path::Word;
+                let known: Vec<_> = constraints
+                    .iter()
+                    .map(|(&window, &held)| (window.word(), core_constraints(held)))
+                    .collect();
+                let pass = rift_core_roc::stack_tree::Pass {
+                    screen: core_rect(screen),
+                    gaps: core_gaps(gaps),
+                    stack_offset: offset,
+                    stack_line: core_stack_line(line),
+                };
+                self.roc.frames(layout, pass, &known)
+            },
+        );
+        #[cfg(not(feature = "roc-core"))]
+        crate::layout_engine::core_geometry::decide_traditional(
+            "stack",
+            core,
+            shadow,
+            upstream_frames,
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         let core = self.core.selected_window(layout);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "selected_window",
-            Event::SelectedWindow(roc::layout_key(layout)),
-            Answer::Window(core.map(roc::window)),
+        let core = roc::decided(
+            self.roc_asked(
+                "selected_window",
+                Event::SelectedWindow(roc::layout_key(layout)),
+                Answer::Window(core.map(roc::window)),
+            ),
+            roc::as_window,
+            core,
         );
         self.answered(
             "selected_window",
@@ -515,10 +583,14 @@ impl LayoutSystem for StackLayoutSystem {
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
         let core = self.core.selection_contains_window(layout, window);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "selection_contains_window",
-            Event::SelectionContainsWindow(roc::layout_key(layout), roc::window(window)),
-            Answer::Verdict(core),
+        let core = roc::decided(
+            self.roc_asked(
+                "selection_contains_window",
+                Event::SelectionContainsWindow(roc::layout_key(layout), roc::window(window)),
+                Answer::Verdict(core),
+            ),
+            roc::as_verdict,
+            core,
         );
         self.answered(
             "selection_contains_window",
@@ -530,10 +602,14 @@ impl LayoutSystem for StackLayoutSystem {
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let core = self.core.window_in_direction(layout, core_direction(direction));
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_in_direction",
-            Event::WindowInDirection(roc::layout_key(layout), core_direction(direction)),
-            Answer::Window(core.map(roc::window)),
+        let core = roc::decided(
+            self.roc_asked(
+                "window_in_direction",
+                Event::WindowInDirection(roc::layout_key(layout), core_direction(direction)),
+                Answer::Window(core.map(roc::window)),
+            ),
+            roc::as_window,
+            core,
         );
         self.answered(
             "window_in_direction",
@@ -545,10 +621,14 @@ impl LayoutSystem for StackLayoutSystem {
     fn contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
         let core = self.core.contains_window(layout, window);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "contains_window",
-            Event::ContainsWindow(roc::layout_key(layout), roc::window(window)),
-            Answer::Verdict(core),
+        let core = roc::decided(
+            self.roc_asked(
+                "contains_window",
+                Event::ContainsWindow(roc::layout_key(layout), roc::window(window)),
+                Answer::Verdict(core),
+            ),
+            roc::as_verdict,
+            core,
         );
         self.answered(
             "contains_window",
@@ -560,10 +640,14 @@ impl LayoutSystem for StackLayoutSystem {
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         let core = self.core.has_any_fullscreen_node(layout);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "has_any_fullscreen_node",
-            Event::HasAnyFullscreenNode(roc::layout_key(layout)),
-            Answer::Verdict(core),
+        let core = roc::decided(
+            self.roc_asked(
+                "has_any_fullscreen_node",
+                Event::HasAnyFullscreenNode(roc::layout_key(layout)),
+                Answer::Verdict(core),
+            ),
+            roc::as_verdict,
+            core,
         );
         self.answered(
             "has_any_fullscreen_node",
@@ -585,10 +669,14 @@ impl LayoutSystem for StackLayoutSystem {
         };
         let core = self.core.windows(layout, core_query);
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "windows",
-            Event::Windows(roc::layout_key(layout), roc::query(core_query)),
-            Answer::Windows(roc::windows(&core)),
+        let core = roc::decided(
+            self.roc_asked(
+                "windows",
+                Event::Windows(roc::layout_key(layout), roc::query(core_query)),
+                Answer::Windows(roc::windows(&core)),
+            ),
+            roc::as_windows,
+            core,
         );
         self.answered("windows", self.shadow.upstream.windows(layout, query), core)
     }
@@ -603,10 +691,14 @@ impl LayoutSystem for StackLayoutSystem {
         };
         let focused = self.core.focus(layout, core_focus);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "focus",
-            Event::Focus(roc::layout_key(layout), roc::focus(core_focus)),
-            Answer::Focused(roc::focused(&focused)),
+        let focused = roc::decided(
+            self.roc_stepped(
+                "focus",
+                Event::Focus(roc::layout_key(layout), roc::focus(core_focus)),
+                Answer::Focused(roc::focused(&focused)),
+            ),
+            roc::as_focused,
+            focused,
         );
         let core = match focused {
             core::Focused::Selection { handled } => FocusResult::selection(handled),
@@ -622,10 +714,10 @@ impl LayoutSystem for StackLayoutSystem {
         #[cfg(feature = "roc-core")]
         let event = applied.event(&self.core);
         applied.apply(&mut self.core);
-        self.shadow.upstream.update(change);
-        self.stepped("update", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped("update", event, Answer::Done);
+        self.shadow.upstream.update(change);
+        self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {

@@ -155,10 +155,10 @@ impl Stack {
 }
 
 #[cfg(feature = "roc-core")]
-mod roc_shadow;
+mod roc_stacks;
 mod twinned;
 #[cfg(feature = "roc-core")]
-pub(crate) use roc_shadow::stack_tree_reseeds;
+pub(crate) use roc_stacks::stack_tree_reseeds;
 pub use twinned::StackLayoutSystem;
 pub(crate) use twinned::stack_tree_divergences;
 
@@ -1189,7 +1189,8 @@ mod tests {
         }
     }
 
-    /// A stack system after random operations, each held to the core's stacks by the twin:
+    /// A stack system after random operations, each held to the core's stacks by the twin (under
+    /// `roc-core`, the Rust stacks held to the deciding Roc stacks, and upstream's to the Rust):
     /// windows added, removed, replaced and closed by app, selected, the stack selected and left,
     /// made fullscreen, left out of the layout (windows in no layout too), moved, swapped,
     /// reordered and dropped, the orientation turned, native resizes into and out of the screen
@@ -1235,6 +1236,12 @@ mod tests {
                 // Upstream's system re-seeded from the core (as after a divergence): the two go
                 // on alike.
                 system.reseed_shadow();
+            }
+            #[cfg(feature = "roc-core")]
+            if rng.chance(4) {
+                // The Rust stacks re-seeded from the deciding Roc stacks (as after a
+                // divergence): the two go on alike.
+                system.reseed_rust_from_roc();
             }
             if rng.chance(4) {
                 // Saved and loaded (the insertion point is not saved: rift sets it again). The

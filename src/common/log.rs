@@ -100,7 +100,7 @@ fn show_roc_core() {
         let reseeds = crate::layout_engine::systems::bsp_tree_reseeds();
         println!("roc-core: bsp tree re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: bsp tree re-seeds");
-        // The Roc stacks, the core's second shadow (re-seeded from the core).
+        // The Rust stacks, the deciding Roc stacks' shadow (re-seeded from them).
         let reseeds = crate::layout_engine::systems::stack_tree_reseeds();
         println!("roc-core: stack tree re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: stack tree re-seeds");
