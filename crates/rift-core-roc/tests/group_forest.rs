@@ -984,3 +984,58 @@ fn a_focus_move_into_a_stack_whose_selection_stops_there_takes_its_first_window(
         "the stack's first window, revealed"
     );
 }
+
+/// A join moving Down from the last window of a horizontal container (`[w1, w3]`) whose next
+/// sibling is a vertical one (`[w2, w4]`): no sibling, no lift and no traversal reach a target,
+/// so the hierarchical join takes the vertical container's child nearest the move (its first,
+/// w2: the move's opposite, Up, runs along it). Drawn runs never reach this; scripted here.
+#[test]
+fn a_hierarchical_join_down_into_a_vertical_container_takes_its_first_child() {
+    let (w1, w2, w3, w4) = (WINDOWS[0], WINDOWS[1], WINDOWS[2], WINDOWS[3]);
+    let mut twin = TraditionalTwin {
+        rust: Traditional::new(InsertionPoint::NextToSelection, NewSibling::AverageWeight),
+        roc: RocTraditional::new(InsertionPoint::NextToSelection, NewSibling::AverageWeight),
+    };
+    let (layout, _) = twin.step(TraditionalEvent::CreateLayout);
+    let Answer::Layout(layout) = layout else {
+        panic!("a layout")
+    };
+    let select =
+        |window| TraditionalEvent::Forest(ForestEvent::Focus(layout, Focus::Select(window)));
+    let script = [
+        TraditionalEvent::AddWindow(layout, w1, None),
+        TraditionalEvent::AddWindow(layout, w2, None),
+        select(w1),
+        TraditionalEvent::Edit(layout, Edit::Split(Kind::Split(Orientation::Horizontal))),
+        TraditionalEvent::AddWindow(layout, w3, None),
+        select(w2),
+        TraditionalEvent::Edit(layout, Edit::Split(Kind::Split(Orientation::Vertical))),
+        TraditionalEvent::AddWindow(layout, w4, None),
+        select(w3),
+        TraditionalEvent::Edit(layout, Edit::Join(Direction::Down)),
+    ];
+    for (step, event) in script.into_iter().enumerate() {
+        let (expected, got) = twin.step(event);
+        assert_eq!(got, expected, "step {step}");
+        let (rust, roc) = twin.views();
+        assert!(same(&roc, &rust), "step {step}: Rust {rust:#?}\nRoc {roc:#?}");
+    }
+    let drawn: Vec<String> = twin
+        .roc
+        .rows(layout)
+        .iter()
+        .map(|row| format!("{} {:?}", row.branches.len(), row.held))
+        .collect();
+    assert_eq!(
+        drawn,
+        [
+            "0 Container { kind: Split(Horizontal), total: 3.0 }".to_string(),
+            format!("1 Window({w1})"),
+            format!("1 Window({w4})"),
+            "1 Container { kind: Split(Vertical), total: 2.0 }".to_string(),
+            format!("2 Window({w3})"),
+            format!("2 Window({w2})"),
+        ],
+        "w3 joined with w2, the vertical container's first child"
+    );
+}
