@@ -1,11 +1,10 @@
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
 use rift_core::layout::traditional::{self, Fill, Traditional};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
 
 use super::constraints::{constrain_frame, traditional_leaf_axis_constraints};
-use super::groups::LayoutRoot;
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -17,85 +16,9 @@ use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, core_gaps, core_rect};
-use crate::model::tree::{NodeId, Tree};
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct Member {
-    id: NodeId,
-    window: WindowId,
-    #[serde(default = "unit_weight")]
-    weight: f64,
-    #[serde(default)]
-    fullscreen: bool,
-    #[serde(default)]
-    within_gaps: bool,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct Stack {
-    id: NodeId,
-    members: Vec<Member>,
-    active: Option<NodeId>,
-    root_selected: bool,
-    kind: LayoutKind,
-    fullscreen: bool,
-    within_gaps: bool,
-}
-
-fn unit_weight() -> f64 { 1.0 }
+use crate::model::tree::NodeId;
 
 impl Stack {
-    /// A saved stack as an operation leaves one (one `stack-load:` warn per state fixed; upstream's
-    /// load keeps them all, an upstream candidate): a stack layout kind (`stack_kind`, as the
-    /// legacy load maps one), never both fullscreen flags (fullscreen wins, as the projection reads
-    /// them), and a selection naming a member exactly when there are members (the first when it
-    /// names none; nothing selected, the stack included, when there are none).
-    fn normalize(&mut self, layout: LayoutId) {
-        let kind = Upstream::stack_kind(self.kind);
-        if kind != self.kind {
-            tracing::warn!(?layout, saved = ?self.kind, ?kind, "stack-load: normalized the stack's layout kind");
-            self.kind = kind;
-        }
-        if self.fullscreen && self.within_gaps {
-            tracing::warn!(
-                ?layout,
-                "stack-load: normalized a stack with both fullscreen flags to fullscreen"
-            );
-            self.within_gaps = false;
-        }
-        for member in &mut self.members {
-            if member.fullscreen && member.within_gaps {
-                tracing::warn!(
-                    ?layout,
-                    member = ?member.id,
-                    "stack-load: normalized a member with both fullscreen flags to fullscreen"
-                );
-                member.within_gaps = false;
-            }
-        }
-        let names_a_member = self.members.iter().any(|m| Some(m.id) == self.active);
-        match self.members.first() {
-            Some(first) if !names_a_member => {
-                tracing::warn!(
-                    ?layout,
-                    active = ?self.active,
-                    "stack-load: normalized a selection naming no member to the first member"
-                );
-                self.active = Some(first.id);
-            }
-            None if self.active.is_some() || self.root_selected => {
-                tracing::warn!(
-                    ?layout,
-                    active = ?self.active,
-                    root_selected = self.root_selected,
-                    "stack-load: normalized an empty stack's selection away"
-                );
-                (self.active, self.root_selected) = (None, false);
-            }
-            _ => {}
-        }
-    }
-
     fn active_index(&self, inactive: &HashSet<WindowId>) -> Option<usize> {
         self.members
             .iter()
@@ -156,16 +79,19 @@ impl Stack {
 
 #[cfg(feature = "roc-core")]
 mod roc_stacks;
+mod stored;
 mod twinned;
 #[cfg(feature = "roc-core")]
 pub(crate) use roc_stacks::stack_tree_reseeds;
+use stored::{Loaded, Member, Stack, StoredStackSystem, stack_kind};
 pub use twinned::StackLayoutSystem;
 pub(crate) use twinned::stack_tree_divergences;
 
 /// Upstream's stack system (#688): a stack owns an ordered list; selection and fullscreen never
 /// require rebuilding it. Since layout trees' stack slice 1 the core's stacks are stepped beside
 /// it ([`StackLayoutSystem`]).
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(try_from = "StoredStackSystem")]
 pub struct Upstream {
     layouts: SlotMap<LayoutId, Stack>,
     next_node: u32,
@@ -176,95 +102,15 @@ pub struct Upstream {
     window_insertion_point: WindowInsertionPoint,
 }
 
-#[derive(Deserialize)]
-struct LegacyStackForest {
-    #[serde(deserialize_with = "super::groups::deserialize_tile_tree")]
-    tree: Tree,
-    layout_roots: Vec<super::SavedSlot<LayoutRoot>>,
-}
+impl TryFrom<StoredStackSystem> for Upstream {
+    type Error = String;
 
-impl LegacyStackForest {
-    fn migrate(self) -> Result<(SlotMap<LayoutId, Stack>, u32), ron::Error> {
-        let map = self.tree.map;
-        let mut next_node = 1;
-        let slots: Vec<_> = self
-            .layout_roots
-            .into_iter()
-            .map(|slot| {
-                let value = slot.value.map(|root| {
-                    let root = root.0;
-                    let selected = map.current_selection(root);
-                    let active = map
-                        .focus_target(selected, &|_| true)
-                        .or_else(|| map.focus_target(root, &|_| true))
-                        .map(|(node, _)| node);
-                    let members: Vec<_> = root
-                        .traverse_preorder(&map)
-                        .filter_map(|id| {
-                            next_node =
-                                next_node.max((id.data().as_ffi() as u32).saturating_add(1));
-                            let window = map.window(id)?;
-                            let info = &map[id].layout;
-                            Some(Member {
-                                id,
-                                window,
-                                weight: f64::from(info.size),
-                                fullscreen: info.is_fullscreen,
-                                within_gaps: info.is_fullscreen_within_gaps,
-                            })
-                        })
-                        .collect();
-                    let info = &map[root].layout;
-                    Stack {
-                        id: root,
-                        active,
-                        members,
-                        root_selected: selected == root,
-                        kind: Upstream::stack_kind(info.kind),
-                        fullscreen: info.is_fullscreen,
-                        within_gaps: info.is_fullscreen_within_gaps,
-                    }
-                });
-                super::SavedSlot { value, version: slot.version }
-            })
-            .collect();
-        let layouts = ron::from_str(&ron::to_string(&slots)?).map_err(|error| error.code)?;
-        Ok((layouts, next_node))
-    }
-}
-
-impl<'de> Deserialize<'de> for Upstream {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Wire {
-            #[serde(default)]
-            layouts: SlotMap<LayoutId, Stack>,
-            #[serde(default = "first_node")]
-            next_node: u32,
-            #[serde(default = "default_stack_orientation")]
-            default_orientation: StackDefaultOrientation,
-            #[serde(default, deserialize_with = "super::present")]
-            inner: Option<LegacyStackForest>,
-        }
-        fn first_node() -> u32 { 1 }
-        let Wire {
-            layouts,
-            next_node,
-            default_orientation,
-            inner,
-        } = Wire::deserialize(deserializer)?;
-        let (mut layouts, next_node) = if let Some(inner) = inner {
-            inner.migrate().map_err(serde::de::Error::custom)?
-        } else {
-            (layouts, next_node)
-        };
-        for (layout, stack) in &mut layouts {
-            stack.normalize(layout);
-        }
+    fn try_from(stored: StoredStackSystem) -> Result<Self, String> {
+        let loaded = Loaded::try_from(stored)?;
         Ok(Self {
-            layouts,
-            next_node,
-            default_orientation,
+            layouts: loaded.layouts,
+            next_node: loaded.next_node,
+            default_orientation: loaded.default_orientation,
             inactive: Default::default(),
             window_insertion_point: Default::default(),
         })
@@ -306,13 +152,6 @@ impl Upstream {
         let index = self.next_node;
         self.next_node = index.checked_add(1).expect("stack node identity exhausted");
         NodeId::from(KeyData::from_ffi((1u64 << 32) | u64::from(index)))
-    }
-
-    fn stack_kind(kind: LayoutKind) -> LayoutKind {
-        match kind {
-            LayoutKind::Horizontal | LayoutKind::HorizontalStack => LayoutKind::HorizontalStack,
-            _ => LayoutKind::VerticalStack,
-        }
     }
 
     fn toggle_orientation(&mut self, layout: LayoutId) {
@@ -590,7 +429,7 @@ impl LayoutSystem for Upstream {
                 } else {
                     // Leaving the stack axis places the member at the corresponding outer
                     // edge and turns the whole stack onto that axis.
-                    s.kind = Self::stack_kind(LayoutKind::from(direction.orientation()));
+                    s.kind = stack_kind(LayoutKind::from(direction.orientation()));
                     match direction {
                         Direction::Left | Direction::Up => 0,
                         _ => s.members.len() - 1,
@@ -951,21 +790,46 @@ mod tests {
         let removed = inner.create_layout();
         let layout = inner.create_layout();
         inner.remove_layout(removed);
-        inner.tiles.set_layout(inner.tiles.root(layout), LayoutKind::HorizontalStack);
         for window in [w(1), w(2), w(3)] {
             inner.update(WindowChange::Add(layout, window, None));
         }
         inner.focus(layout, Focus::Select(w(2))).handled;
+        // A share other than 1 (resized while the root was tiled), which the load keeps as the
+        // member's weight.
+        inner
+            .edit(layout, LayoutEdit::Resize {
+                amount: 0.2,
+                orientation: crate::layout_engine::ResizeOrientation::Horizontal,
+            })
+            .discard();
+        inner.tiles.set_layout(inner.tiles.root(layout), LayoutKind::HorizontalStack);
         inner.edit(layout, LayoutEdit::Fullscreen { within_gaps: true }).into_windows();
         let expected = inner.tiles.container_tree(layout);
+        assert!(
+            expected.children.iter().any(|child| child.weight != Some(1.0)),
+            "{expected:?}"
+        );
         let legacy = Legacy {
             inner: &inner,
             default_orientation: StackDefaultOrientation::Horizontal,
         };
-        let mut restored =
-            ron::from_str::<StackLayoutSystem>(&ron::to_string(&legacy).unwrap()).unwrap();
+        // The legacy form as the old tree wrote it, frozen in `stack_legacy.ron` (the live text
+        // is held to it while the traditional system still writes that form).
+        let file = include_str!("stack/stack_legacy.ron").trim_end();
+        assert_eq!(ron::to_string(&legacy).unwrap(), file);
+        let mut restored = ron::from_str::<StackLayoutSystem>(file).unwrap();
         {
             assert_eq!(restored.container_tree(layout), expected);
+            // The counter resumes past every node the legacy forest saved for the layout.
+            let highest = std::iter::once(expected.node_id)
+                .chain(expected.children.iter().map(|child| child.node_id))
+                .map(|id| id as u32)
+                .max()
+                .unwrap();
+            let probe = restored.clone_layout(layout);
+            let minted = restored.container_tree(probe).node_id;
+            assert_eq!(minted, (1 << 32) | u64::from(highest + 1));
+            restored.remove_layout(probe);
             assert_eq!(restored.selected_window(layout), Some(w(2)));
             let clone = restored.clone_layout(layout);
             assert_eq!(restored.selected_window(clone), Some(w(2)));

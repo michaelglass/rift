@@ -23,6 +23,7 @@ use slotmap::Key;
 
 #[cfg(feature = "roc-core")]
 use super::roc_stacks::{self as roc, RocStacks};
+use super::stored::{Loaded, StoredStackSystem};
 use super::{Member, Stack, Upstream};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -56,7 +57,7 @@ pub(crate) fn stack_tree_divergences() -> u64 { STACK_TREE_DIVERGENCES.load(Orde
 /// them. Loaded through upstream's load (which parses the legacy form and normalizes what only a
 /// file holds), saved from the core in the same form.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(from = "Upstream")]
+#[serde(try_from = "StoredStackSystem")]
 pub struct StackLayoutSystem {
     /// Under `roc-core` the Roc stacks' shadow, else the deciding stacks; saved either way (under
     /// `roc-core` it is re-seeded from the Roc stacks on any difference, compared on every
@@ -97,9 +98,25 @@ impl Serialize for StackLayoutSystem {
     }
 }
 
+impl TryFrom<StoredStackSystem> for StackLayoutSystem {
+    type Error = String;
+
+    /// A saved system, parsed (`Loaded`), made into the core's stacks; upstream's system, the
+    /// shadow, re-seeded from them.
+    fn try_from(stored: StoredStackSystem) -> Result<Self, String> {
+        let loaded = Loaded::try_from(stored)?;
+        Ok(Self::holding(core_of_loaded(&loaded)))
+    }
+}
+
 impl From<Upstream> for StackLayoutSystem {
-    fn from(upstream: Upstream) -> Self {
-        let core = seed(&upstream);
+    fn from(upstream: Upstream) -> Self { Self::holding(seed(&upstream)) }
+}
+
+impl StackLayoutSystem {
+    /// The system deciding with `core`, its shadows seeded from it.
+    fn holding(core: CoreStacks) -> Self {
+        let upstream = upstream_of(&core);
         Self {
             #[cfg(feature = "roc-core")]
             roc: RocStacks::seeded(&core),
@@ -966,9 +983,9 @@ fn core_stack(stack: &Stack) -> CoreStack<WindowId> {
     }
 }
 
-/// Upstream's system as the core holds it.
-fn seed(upstream: &Upstream) -> CoreStacks {
-    let dummy = Stack {
+/// The saved stack a vacant slot holds while a table is read (never read itself).
+fn vacant_stack() -> Stack {
+    Stack {
         id: NodeId::default(),
         members: Vec::new(),
         active: None,
@@ -976,9 +993,25 @@ fn seed(upstream: &Upstream) -> CoreStacks {
         kind: LayoutKind::VerticalStack,
         fullscreen: false,
         within_gaps: false,
-    };
+    }
+}
+
+/// A saved system, loaded, as the core holds it (no window left out and the default insertion
+/// point: neither is saved, and rift sets the insertion point again).
+fn core_of_loaded(loaded: &Loaded) -> CoreStacks {
     CoreStacks::from_parts(
-        of_slotmap(&upstream.layouts, dummy, core_stack),
+        of_slotmap(&loaded.layouts, vacant_stack(), core_stack),
+        loaded.next_node,
+        default_orientation(loaded.default_orientation),
+        BTreeSet::new(),
+        insertion_point(WindowInsertionPoint::default()),
+    )
+}
+
+/// Upstream's system as the core holds it.
+fn seed(upstream: &Upstream) -> CoreStacks {
+    CoreStacks::from_parts(
+        of_slotmap(&upstream.layouts, vacant_stack(), core_stack),
         upstream.next_node,
         default_orientation(upstream.default_orientation),
         upstream.inactive.iter().copied().collect::<BTreeSet<_>>(),
@@ -1093,6 +1126,66 @@ mod tests {
     use super::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    /// A system as the operations leave it, saved in `stack_saved.ron`: vacant slots of several
+    /// versions (the free list), a stack of three with a member filling the tiling area, a stack
+    /// selected itself (remembering its member), a turned stack, an empty stack, a window left
+    /// out (not saved).
+    fn saved_fixture_system() -> StackLayoutSystem {
+        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
+        let first = system.create_layout();
+        let gone = system.create_layout();
+        let selected = system.create_layout();
+        let _empty = system.create_layout();
+        system.remove_layout(gone);
+        let again = system.create_layout();
+        system.remove_layout(again);
+        let twice = system.create_layout();
+        system.remove_layout(twice);
+        let (x, y) = (system.create_layout(), system.create_layout());
+        system.remove_layout(x);
+        system.remove_layout(y);
+        for window in [w(1), w(2), w(3)] {
+            system.update(WindowChange::Add(first, window, None));
+        }
+        system.focus(first, Focus::Select(w(2)));
+        system.edit_layout(first, LayoutEdit::Fullscreen { within_gaps: true });
+        for window in [w(4), w(5)] {
+            system.update(WindowChange::Add(selected, window, None));
+        }
+        system.focus(selected, Focus::Ascend);
+        system.edit_layout(selected, LayoutEdit::ToggleOrientation);
+        system.set_window_participation(w(6), false);
+        system
+    }
+
+    /// A system as rift saves it today (`stack_saved.ron`, written while upstream's system still
+    /// stood beside the core and the core's bytes were held to upstream's): the operations save
+    /// to exactly those bytes, and the file loads and saves back byte for byte.
+    #[test]
+    fn a_saved_system_loads_and_saves_byte_for_byte() {
+        let file = include_str!("stack_saved.ron").trim_end();
+        let made = saved_fixture_system();
+        assert_eq!(ron::to_string(&made).unwrap(), file);
+        assert_eq!(made.upstream_saved(), file);
+        let mut loaded: StackLayoutSystem = ron::from_str(file).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), file);
+        // A weight other than 1 (only the legacy forest writes one) loads and saves back too.
+        let weighted = file.replacen("weight:1.0", "weight:2.5", 1);
+        let reloaded: StackLayoutSystem = ron::from_str(&weighted).unwrap();
+        assert_eq!(ron::to_string(&reloaded).unwrap(), weighted);
+        // The loaded stacks take their vacant slots as the saved form's slotmap does once loaded
+        // (the highest first), and mint the next member from the saved counter.
+        let stored: StoredStackSystem = ron::from_str(file).unwrap();
+        let mut loaded_form = Loaded::try_from(stored).unwrap();
+        let made = loaded.create_layout();
+        let expected = loaded_form.layouts.insert(vacant_stack());
+        assert_eq!(made, expected);
+        loaded.update(WindowChange::Add(made, w(7), None));
+        let member = loaded.container_tree(made).children[0].node_id;
+        // The stack took the counter's next id, its member the one after.
+        assert_eq!(member, (1 << 32) | u64::from(loaded_form.next_node + 1));
+    }
 
     /// The core's stacks seeded from a system take its free list as the system's slotmap holds
     /// it, not as a load would rebuild it (the highest vacant slot first): the next ids match.
