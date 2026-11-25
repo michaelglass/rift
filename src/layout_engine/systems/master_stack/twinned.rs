@@ -27,7 +27,7 @@ use crate::layout_engine::engine::GroupContainerInfo;
 use crate::layout_engine::systems::bsp::roc_tree as bsp_roc;
 #[cfg(feature = "roc-core")]
 use crate::layout_engine::systems::group_roc::{self as roc, RocForest};
-use crate::layout_engine::systems::group_stored::{Saved, upstream_tiles};
+use crate::layout_engine::systems::group_stored::{Saved, StoredMasterStack, upstream_tiles};
 use crate::layout_engine::systems::group_twin::{
     VIEW_ALWAYS, VIEW_EVERY, container_node, core_edit, core_focus, core_query, edit_result,
     edit_words, focus_result, focus_words, participation, pass, project_groups, report, resize,
@@ -46,10 +46,10 @@ pub(in crate::layout_engine::systems) type CoreMasterStack =
 const SYSTEM: &str = "master-stack";
 
 /// The master-stack layout system: the core's forest decides, and upstream's system is stepped
-/// beside it. Loaded through upstream's load (which parses the legacy forms and normalizes what
-/// only a file holds), saved from the core in the same form.
+/// beside it. Loaded into the core (`group_stored`: the saved forest parsed, the legacy forms'
+/// regions made, what only a file holds normalized), saved from the core in the same form.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(from = "Upstream")]
+#[serde(from = "StoredMasterStack")]
 pub struct MasterStackLayoutSystem {
     core: CoreMasterStack,
     /// Under `roc-core`, the deciding forest (the core's is then its shadow).
@@ -163,9 +163,32 @@ fn upstream_of(core: &CoreMasterStack, old: &Upstream) -> Upstream {
     }
 }
 
+impl From<StoredMasterStack> for MasterStackLayoutSystem {
+    /// A saved system: the core built from the loaded forest, with the settings a load starts
+    /// with (none are saved: the default, until rift applies its config); upstream's system,
+    /// the shadow, re-seeded from the core.
+    fn from(stored: StoredMasterStack) -> Self {
+        let settings = MasterStackSettings::default();
+        let core = CoreMasterStack::from_parts(
+            stored.migrated(&settings).normalized(SYSTEM).forest(),
+            core_settings(&settings),
+        );
+        let upstream = Upstream {
+            tiles: upstream_tiles(core.forest()),
+            settings,
+        };
+        Self {
+            #[cfg(feature = "roc-core")]
+            roc: RocForest::seeded(&core),
+            shadow: Box::new(Shadow { upstream, steps: 0 }),
+            core,
+        }
+    }
+}
+
 impl From<Upstream> for MasterStackLayoutSystem {
-    fn from(mut upstream: Upstream) -> Self {
-        upstream.tiles.normalize_load(SYSTEM);
+    /// A new system (upstream's, empty, with its settings).
+    fn from(upstream: Upstream) -> Self {
         let core = core_of(&upstream);
         Self {
             #[cfg(feature = "roc-core")]
@@ -996,6 +1019,121 @@ mod tests {
         let mut loaded: MasterStackLayoutSystem = ron::from_str(&corrupt).unwrap();
         assert_eq!(ron::to_string(&loaded).unwrap(), normalized);
         loaded.create_layout();
+    }
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    /// A system made by operations as rift saves it: a group in the stack region, the master
+    /// resized, a window filling the gaps, a cloned layout, a vacant layout slot, a freed leaf.
+    fn saved_system() -> (MasterStackLayoutSystem, LayoutId) {
+        use crate::layout_engine::{ResizeOrientation, WindowDropAction};
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4), w(5)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        system
+            .edit_layout(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Stack,
+            })
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(5))).handled);
+        system
+            .edit_layout(layout, LayoutEdit::Resize {
+                amount: 0.1,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(4))).handled);
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: true })
+            .discard();
+        system.clone_layout(layout);
+        let removed = system.create_layout();
+        system.remove_layout(removed);
+        system.update(WindowChange::Remove(w(1)));
+        (system, layout)
+    }
+
+    /// `master_stack_saved.ron`, written by the core while its bytes were held to upstream's:
+    /// the operations save to it, it loads and saves back byte for byte, and the loaded forest
+    /// allocates its next layout and node where the saved slotmaps do.
+    #[test]
+    fn the_saved_fixture_is_what_the_operations_write_and_loads_back() {
+        use slotmap::Key;
+        let file = include_str!("master_stack_saved.ron").trim_end();
+        let (system, layout) = saved_system();
+        assert_eq!(ron::to_string(&system).unwrap(), file);
+        assert_eq!(system.upstream_saved(), file);
+        let mut loaded: MasterStackLayoutSystem = ron::from_str(file).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), file);
+        assert_eq!(loaded.draw_tree(layout), system.draw_tree(layout));
+        // The vacant slots are taken as the saved slotmaps' free lists give them (upstream's
+        // load, while it exists, allocating alike).
+        let mut upstream: Upstream = ron::from_str(file).unwrap();
+        // No settings are saved: a load starts with the default ones.
+        assert_eq!(loaded.core.settings(), core_settings(&upstream.settings));
+        assert_eq!(
+            loaded.core.settings(),
+            core_settings(&MasterStackSettings::default())
+        );
+        let next = loaded.create_layout();
+        assert_eq!(next, upstream.create_layout());
+        loaded.update(WindowChange::Add(next, w(9), None));
+        upstream.update(WindowChange::Add(next, w(9), None));
+        assert_eq!(loaded.container_tree(next), upstream.container_tree(next));
+        assert_eq!(next.data().as_ffi(), (3 << 32) | 3, "the vacant layout slot");
+        let tree = loaded.container_tree(next);
+        let ids = (
+            tree.node_id,
+            tree.children[0].node_id,
+            tree.children[0].children[0].node_id,
+        );
+        assert_eq!(
+            ids,
+            ((3 << 32) | 21, (3 << 32) | 20, (3 << 32) | 18),
+            "the root, the master region and the leaf in vacant node slots, freed last first"
+        );
+    }
+
+    /// The previous forms (upstream's load, while it exists, loading each alike): the regions
+    /// saved beside the forest, or not at all, the root holding two containers (taken as master
+    /// and stack) or anything else (moved into new region containers by the master count, the
+    /// ratio applied, the selected window selected again). Settings are not saved: each loads
+    /// with the default ones.
+    #[test]
+    fn the_previous_forms_load_into_regions() {
+        let saved = include_str!("master_stack_saved.ron").trim_end();
+        let forms = [
+            (
+                "regions beside the forest",
+                include_str!("master_stack_legacy_regions.ron").trim_end(),
+                include_str!("master_stack_legacy_regions_loaded.ron").trim_end(),
+            ),
+            (
+                "two containers",
+                include_str!("master_stack_legacy_containers.ron").trim_end(),
+                saved,
+            ),
+            (
+                "a traditional forest",
+                include_str!("master_stack_legacy_tiles.ron").trim_end(),
+                include_str!("master_stack_legacy_tiles_loaded.ron").trim_end(),
+            ),
+        ];
+        for (form, file, expected) in forms {
+            let loaded: MasterStackLayoutSystem = ron::from_str(file).unwrap();
+            let upstream: Upstream = ron::from_str(file).unwrap();
+            let upstream = ron::to_string(&upstream).unwrap();
+            assert_eq!(
+                ron::to_string(&loaded).unwrap(),
+                upstream,
+                "{form}: as upstream's load"
+            );
+            assert_eq!(ron::to_string(&loaded).unwrap(), expected, "{form}");
+        }
     }
 
     fn drawn_direction_of(rng: &mut Rng) -> Direction {

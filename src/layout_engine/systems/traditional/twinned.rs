@@ -21,7 +21,7 @@ use crate::layout_engine::engine::GroupContainerInfo;
 use crate::layout_engine::systems::bsp::roc_tree as bsp_roc;
 #[cfg(feature = "roc-core")]
 use crate::layout_engine::systems::group_roc::{self as roc, RocForest};
-use crate::layout_engine::systems::group_stored::{Saved, upstream_tiles};
+use crate::layout_engine::systems::group_stored::{Saved, StoredForest, upstream_tiles};
 use crate::layout_engine::systems::group_twin::{
     VIEW_ALWAYS, VIEW_EVERY, container_node, core_edit, core_focus, core_query, edit_result,
     edit_words, focus_result, focus_words, participation, pass, project_groups, report, resize,
@@ -40,10 +40,10 @@ pub(in crate::layout_engine::systems) type CoreTraditional =
 const SYSTEM: &str = "traditional";
 
 /// The traditional layout system: the core's forest decides, and upstream's system is stepped
-/// beside it. Loaded through upstream's load (which parses the legacy forms and normalizes what
-/// only a file holds), saved from the core in the same form.
+/// beside it. Loaded into the core (`group_stored`: the saved forest parsed, what only a file
+/// holds normalized), saved from the core in the same form.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(from = "Upstream")]
+#[serde(from = "StoredForest")]
 pub struct TraditionalLayoutSystem {
     core: CoreTraditional,
     /// Under `roc-core`, the deciding forest (the core's is then its shadow).
@@ -95,13 +95,36 @@ fn upstream_of(core: &CoreTraditional) -> Upstream {
 }
 
 impl From<Upstream> for TraditionalLayoutSystem {
-    fn from(mut upstream: Upstream) -> Self {
-        upstream.tiles.normalize_load(SYSTEM);
+    /// A new system (upstream's, empty, with its settings).
+    fn from(upstream: Upstream) -> Self {
         let core = core_of(&upstream);
         Self {
             #[cfg(feature = "roc-core")]
             roc: RocForest::seeded(&core),
             shadow: Box::new(Shadow { upstream, steps: 0 }),
+            core,
+        }
+    }
+}
+
+impl From<StoredForest> for TraditionalLayoutSystem {
+    /// A saved system: the core built from the loaded forest, with the settings a load starts
+    /// with (none are saved; upstream's load leaves the default insertion point, and halving
+    /// the selection, as its skipped `equalize_nodes` reads false, until rift applies its
+    /// config); upstream's system, the shadow, re-seeded from the core.
+    fn from(stored: StoredForest) -> Self {
+        let core = CoreTraditional::from_parts(
+            stored.normalized(SYSTEM).forest(),
+            insertion_point(WindowInsertionPoint::default()),
+            new_sibling(false),
+        );
+        Self {
+            #[cfg(feature = "roc-core")]
+            roc: RocForest::seeded(&core),
+            shadow: Box::new(Shadow {
+                upstream: upstream_of(&core),
+                steps: 0,
+            }),
             core,
         }
     }
@@ -979,6 +1002,36 @@ mod tests {
         }
     }
 
+    /// A window in two layouts: a leaf listed again keeps its first place, an entry naming no
+    /// leaf of its layout is dropped, and leaves the index misses are stamped in layout and
+    /// tree order.
+    #[test]
+    fn a_saved_window_index_keeps_first_entries_and_appends_in_layout_order() {
+        use rift_core::slot_table::SlotKey;
+        let mut system = TraditionalLayoutSystem::default();
+        let source = system.create_layout();
+        system.update(WindowChange::Add(source, w(1), None));
+        let clone = system.clone_layout(source);
+        let file = ron::to_string(&system).unwrap();
+        let index = system.core.forest().index();
+        let (source_leaf, clone_leaf) = (index[0].2, index[1].2);
+        let entry = |layout: LayoutId, node: NodeId| {
+            let ((l, lv), (n, nv)) = (layout.parts(), node.parts());
+            format!("(layout:(idx:{l},version:{lv}),node:(idx:{n},version:{nv}))")
+        };
+        let (s, c) = (entry(source, source_leaf), entry(clone, clone_leaf));
+        let saved = format!("[{s},{c}]");
+        loads_normalized(&written_as(&file, &saved, "[]"), &file);
+        loads_normalized(
+            &written_as(&file, &saved, &format!("[{c},{s},{c}]")),
+            &written_as(&file, &saved, &format!("[{c},{s}]")),
+        );
+        // An entry naming the clone's leaf under the source layout names no leaf of its
+        // layout: dropped, so it stamps nothing ahead of the source's leaf.
+        let stray = entry(source, clone_leaf);
+        loads_normalized(&written_as(&file, &saved, &format!("[{stray},{s},{c}]")), &file);
+    }
+
     /// A window's leaves keep the index's saved order (the load stamps them in it): listed
     /// clone first, the source's leaf is freed last and the next leaf takes its slot.
     #[test]
@@ -1010,6 +1063,88 @@ mod tests {
             source_leaf.parts().0,
             "the source's leaf, freed last"
         );
+    }
+
+    /// A system made by operations as rift saves it: windows resized, one filling the gaps, a
+    /// split made a stack, a cloned layout, a vacant layout slot, a freed leaf.
+    fn saved_system() -> (TraditionalLayoutSystem, LayoutId) {
+        use crate::common::config::StackDefaultOrientation;
+        use crate::layout_engine::systems::GroupEdit;
+        use crate::layout_engine::{LayoutKind, ResizeOrientation};
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        assert!(system.focus(layout, Focus::Select(w(2))).handled);
+        system.edit_layout(layout, LayoutEdit::Split(LayoutKind::Vertical)).discard();
+        system.update(WindowChange::Add(layout, w(5), None));
+        assert!(system.focus(layout, Focus::Select(w(3))).handled);
+        system
+            .edit_layout(layout, LayoutEdit::Resize {
+                amount: 0.15,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(4))).handled);
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: true })
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(5))).handled);
+        system
+            .edit_layout(
+                layout,
+                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Horizontal)),
+            )
+            .discard();
+        system.clone_layout(layout);
+        let removed = system.create_layout();
+        system.remove_layout(removed);
+        system.update(WindowChange::Remove(w(1)));
+        (system, layout)
+    }
+
+    /// `traditional_saved.ron`, written by the core while its bytes were held to upstream's: the
+    /// operations save to it, it loads and saves back byte for byte, and the loaded forest
+    /// allocates its next layout and node where the saved slotmaps do.
+    #[test]
+    fn the_saved_fixture_is_what_the_operations_write_and_loads_back() {
+        use slotmap::Key;
+        let file = include_str!("traditional_saved.ron").trim_end();
+        let (system, layout) = saved_system();
+        assert_eq!(ron::to_string(&system).unwrap(), file);
+        assert_eq!(system.upstream_saved(), file);
+        let mut loaded: TraditionalLayoutSystem = ron::from_str(file).unwrap();
+        assert_eq!(ron::to_string(&loaded).unwrap(), file);
+        assert_eq!(loaded.draw_tree(layout), system.draw_tree(layout));
+        // The vacant slots are taken as the saved slotmaps' free lists give them (upstream's
+        // load, while it exists, allocating alike).
+        let mut upstream: Upstream = ron::from_str(file).unwrap();
+        // No settings are saved: a load starts with upstream's (the default insertion point,
+        // and halving the selection: its skipped `equalize_nodes` reads false).
+        let settings = (loaded.core.insertion(), loaded.core.new_sibling());
+        assert_eq!(
+            settings,
+            (
+                insertion_point(upstream.window_insertion_point),
+                new_sibling(upstream.equalize_nodes)
+            )
+        );
+        assert_eq!(
+            settings,
+            (
+                insertion_point(WindowInsertionPoint::default()),
+                NewSibling::HalvesSelection
+            )
+        );
+        let next = loaded.create_layout();
+        assert_eq!(next, upstream.create_layout());
+        assert_eq!(next.data().as_ffi(), (3 << 32) | 3, "the vacant layout slot");
+        loaded.update(WindowChange::Add(next, w(9), None));
+        upstream.update(WindowChange::Add(next, w(9), None));
+        assert_eq!(loaded.container_tree(next), upstream.tiles.container_tree(next));
+        let leaf = loaded.container_tree(next).children[0].node_id;
+        assert_eq!(leaf, (3 << 32) | 9, "the vacant node slot freed last");
     }
 
     /// A query upstream's system answers otherwise than the core is counted and fails a test.

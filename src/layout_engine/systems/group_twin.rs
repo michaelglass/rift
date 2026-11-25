@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::CGRect;
 use rift_core::layout::group_forest::{
-    self as core, Bars, Body, Container, DropAction, Fill, Forest, Kind, Members, Memory, Node,
-    Participation, Pass, Place, Resize, Side,
+    self as core, Bars, Body, DropAction, Fill, Forest, Kind, Node, Participation, Pass, Resize,
 };
 
-use super::groups::{GroupLayouts, LayoutRoot};
+use super::group_stored::{core_node, forest_of, stamps};
+use super::groups::GroupLayouts;
 use super::{
     EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowLayoutConstraints, WindowQuery,
     core_direction,
@@ -27,9 +27,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackDefaultOrientation, StackLineReserve};
 use crate::layout_engine::engine::GroupContainerInfo;
 use crate::layout_engine::{LayoutId, LayoutKind, ResizeOrientation, WindowDropAction};
-use crate::model::selection::SelectionInfo;
-use crate::model::slot_table::{SlotTable, of_slotmap};
-use crate::model::tree::{self, Held, NodeId};
+use crate::model::tree::NodeId;
 
 /// The core's forest over rift's ids.
 pub(super) type CoreForest = Forest<LayoutId, NodeId, WindowId>;
@@ -69,93 +67,15 @@ pub(super) fn core_kind(kind: LayoutKind) -> Kind {
     }
 }
 
-/// Upstream's two fullscreen flags as one fill (`fullscreen` first, as its projection reads
-/// them; the load leaves no saved state holding both).
-fn core_fill(fullscreen: bool, within_gaps: bool) -> Fill {
-    match (fullscreen, within_gaps) {
-        (true, _) => Fill::Screen,
-        (false, true) => Fill::WithinGaps,
-        (false, false) => Fill::Tiled,
-    }
-}
-
-fn core_memory(selection: Option<SelectionInfo>) -> Memory<NodeId> {
-    match selection.map(SelectionInfo::parts) {
-        None => Memory::Unset,
-        Some((child, false)) => Memory::Toward(child),
-        Some((child, true)) => Memory::Stops(child),
-    }
-}
-
-/// Each indexed leaf's stamp, in the index's order: a window's leaves by when they entered.
-fn stamps(tiles: &GroupLayouts) -> HashMap<NodeId, u64> {
-    let mut stamps = HashMap::default();
-    let entries = tiles.tree.window.window_nodes.values().flat_map(|nodes| nodes.0.iter());
-    for (stamp, info) in (0u64..).zip(entries) {
-        stamps.insert(info.node, stamp);
-    }
-    stamps
-}
-
-/// An upstream node as the core holds it (a leaf no layout reaches is not indexed: the load
-/// leaves every other one indexed; it takes the stamp after every indexed one).
-fn core_node(
-    tiles: &GroupLayouts,
-    stamps: &HashMap<NodeId, u64>,
-    key: NodeId,
-    node: &tree::Node,
-) -> Node<NodeId, WindowId> {
-    let (parent, held) = tiles.tree.map.held(key);
-    let info = node.layout;
-    let place = match parent {
-        None => Place::Root,
-        Some(parent) => Place::Child { parent, size: info.size },
-    };
-    let body = match held {
-        Held::Window(window) => Body::Window {
-            window,
-            stamp: stamps.get(&key).copied().unwrap_or(stamps.len() as u64),
-        },
-        Held::Container { children, selection } => Body::Container(Container {
-            kind: core_kind(info.kind),
-            members: Members::Children(children),
-            memory: core_memory(selection),
-        }),
-        Held::RegionPair {
-            regions,
-            primary_first,
-            selection,
-        } => Body::Container(Container {
-            kind: core_kind(info.kind),
-            members: Members::Regions {
-                order: regions,
-                primary: if primary_first {
-                    Side::First
-                } else {
-                    Side::Second
-                },
-            },
-            memory: core_memory(selection),
-        }),
-    };
-    Node {
-        place,
-        fill: core_fill(info.is_fullscreen, info.is_fullscreen_within_gaps),
-        body,
-    }
-}
-
 /// Upstream's forest as the core holds it: both slot tables as upstream's slotmaps hold them
 /// (free lists included), each leaf stamped in the index's order.
 pub(super) fn seed(tiles: &GroupLayouts) -> CoreForest {
-    let layouts = of_slotmap(&tiles.layout_roots, LayoutRoot(NodeId::default()), |root| root.0);
-    let stamps = stamps(tiles);
-    let nodes: SlotTable<NodeId, tree::Node> =
-        of_slotmap(tiles.tree.map.slots(), tree::Node::default(), Clone::clone);
-    let nodes = nodes
-        .map(|key, node| Ok::<_, std::convert::Infallible>(core_node(tiles, &stamps, key, &node)))
-        .unwrap_or_else(|never| match never {});
-    CoreForest::from_leaves(layouts, nodes, tiles.inactive.iter().copied().collect())
+    forest_of(
+        &tiles.tree,
+        &tiles.layout_roots,
+        &stamps(&tiles.tree.window),
+        tiles.inactive.iter().copied(),
+    )
 }
 
 /// A forest as the twins compare it: layouts and nodes by id (a leaf's stamp left out: only its
@@ -211,7 +131,7 @@ fn upstream_view(tiles: &GroupLayouts) -> View {
             .map
             .slots()
             .iter()
-            .map(|(key, node)| (key, unstamped(core_node(tiles, &stamps, key, node))))
+            .map(|(key, node)| (key, unstamped(core_node(&tiles.tree.map, &stamps, key, node))))
             .collect(),
         tiles.inactive.iter().copied().collect(),
         upstream_index(tiles),
