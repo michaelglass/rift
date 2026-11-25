@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 3): read this first
+## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 3, slice 4 begun): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
 BSP and for the stack, slices 1-3 for the group forest (traditional and master-stack).
@@ -21,6 +21,43 @@ ignored), `cargo test -p rift-core-roc --features roc` 55 (9 ignored), `cargo te
 --all-targets --features roc-core` compiles with no errors and 331 warnings, counted as `cargo
 clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated |
 wc -l` (the bound: at most 336).
+
+**The group forest, slice 4, in progress (2026-11-25): under `roc-core` the Roc forest decides.**
+The lead's rulings on slice 3 (2026-11-25):
+- **The stamp counter is state:** carried in `ForestView` and the Roc seed, stamps compared by
+  value. Done: the first commit of slice 4 (`Forest::from_parts` takes it, `Forest::from_leaves`
+  derives it for upstream's counter-less form). Plants 7/7.
+- **The group bar and both rift-cli views move to Roc with `Forest::shape`**, so Roc decides them
+  under `roc-core` and the Rust forest is their shadow too.
+- **The test-only frames-with-groups path stays as upstream has it** (an upstream candidate,
+  listed below).
+- **The Roc step's cost at 1000 windows in one layout (101 us an operation) is known; revisit it
+  after slice 5, not before.**
+
+The plan for the rest of slice 4 (not started; each its own commit with plants, checks, costs):
+1. **`GroupForest.shape` in Roc** (`Forest::shape` one for one: the nodes taking part, the start
+   at the master region when the stack region takes none, words become `WindowId`s at the
+   boundary, sizes as they are) and **one layout entry per system**:
+   `traditional_tree_layout` / `master_stack_layout : model, ForestLayoutQuestion -> { model,
+   answer : ForestLayoutAnswer }`, the question a union of `Frames(StackFramesQuestion)` (it
+   already carries the pass and every known window's constraints), `Project(question, Bars)`,
+   `Container(layout)`, `Draw(layout)`. Rust: `RocTraditional::layout`, `RocMasterStack::layout`.
+   The rift-core-roc differential gains layout passes (frames held bit for bit to the Rust shape
+   through the Rust geometry), as the stack's slice 4 did.
+2. **The group bar and the views in Roc.** The Roc geometry places stacks too: a `placed` beside
+   `frames` answering each stack's frame in the order it places them; `GroupForest.shape_from`
+   lists its stacks' keys in that same order and the two are zipped (the Rust side labels the
+   shape instead; the differential holds the pairing). `GroupForest.project` walks as
+   `Forest::project` does (`Bars`). The container view answers a recursive nominal
+   (`GroupContainerView`); the drawing answers rows (the branch glyphs per depth, the
+   selection glyph, the node, its window or kind and children's total, its size, its role),
+   and the platform only writes ids and numbers as text (rift's `{:?}` and `f32` display), the
+   decisions all Roc's. The differential compares each against the Rust forest's.
+3. **The decision:** under `roc-core` every answer, frame, bar and view is the Roc forest's
+   (`systems/group_roc.rs` turns from shadow to decider, as `stack/roc_stacks.rs`), the Rust
+   forest the Roc forest's shadow re-seeded from the Roc view (`core_of`: `ForestView::forest`
+   on rift's keys), upstream staying the Rust forest's shadow. Saving stays from the Rust forest
+   (equal after every operation).
 
 **The group forest, slice 3, done (2026-11-25): the flip (policy (a)).** Five commits after the
 slice 2 docs commit; each message has its plants, checks and costs.
@@ -70,7 +107,8 @@ slice 2 docs commit; each message has its plants, checks and costs.
   operation; master-stack 0.35 / 1.0 / 8.6 us) and upstream as the shadow (83 ns / 0.24 / 1.9
   us; 86 ns / 0.22 / 1.4 us), the view 1 in 32, a shadow re-seed 58 us / 0.55 / 5.6 ms.
   `roc-core` adds the Roc step (0.76 / 6.4 / 101 us at 10 / 100 / 1000 windows in one layout),
-  a view comparison (0.46 / 2.9 / 25 us) on every operation.
+  a view comparison (0.46 / 2.9 / 25 us) on every operation. **The 101 us is a known cost to
+  revisit after slice 5** (the lead).
 - **Next: slice 4, under `roc-core` the Roc forest decides:** `Forest::shape` in Roc (words to
   `WindowId` at the boundary) with a frames entry and a differential; then the Roc forest's
   answers and frames are rift's under `roc-core`, the Rust forest its shadow re-seeded from the
@@ -601,6 +639,11 @@ frame; no operation writes it.
 **Upstream candidate (fix pending upstream, fork branch `pr/layout-ghost-windows`):** master-stack
 counts windows left out of layout (away) toward `master_count`, so a master window that is away
 empties the master area. The fork matches upstream main and keeps the behaviour until it lands.
+
+**Upstream candidate:** the layout pass that also returns group bars with its frames
+(`project_groups` with frames asked for, from `calculate_layout_with_groups`) is reached only by
+tests: rift's one caller passes no group output, and the bar comes through
+`collect_group_containers`. The fork keeps it as upstream has it (the lead's ruling).
 
 **Upstream candidate:** `rift-cli`'s help example `rift-cli execute window resize-by --amount
 -0.10` fails: clap reads `-0.10` as a flag; `--amount=-0.10` works. Not fixed in the fork.
