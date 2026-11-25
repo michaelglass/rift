@@ -9,7 +9,7 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slices 1 and 2 done): read this first
+## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slices 1-3 done): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
 BSP (all five). `rearch/roc-next@fork` carries everything through this docs commit once it is published
@@ -20,6 +20,48 @@ rift-core` 106, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both 
 `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
+
+**Layout trees, the stack, slice 3, done: the flip (policy (a)).** Four commits after the slice 2
+docs commit; each message has its plants, checks and costs. At the tip: workspace tests 1038
+(5 ignored), the lib with `roc-core` 916 (7 ignored), rift-core-roc 52, rift-core 107, the
+fuzzer 2000 x 40 both ways, clippy 331.
+- **rift-cli's views read the core first** (`Stacks::container`, `Stacks::draw`: upstream's
+  stack written by `{:#?}`, ids as slotmap's `new_key_type` writes a key; upstream's views held
+  to them on every call). Plants 5/5.
+- **A core geometry fix found on the way:** the traditional geometry's stack frames added a
+  `0.0` shift on the axis a stack does not run along, so a container at x = -0.0 gave 0.0 where
+  upstream's frames keep -0.0 (a bit-level `layout-divergence:`, no position moved). Rust
+  `stack_frames` and Roc `Traditional.stack_frame` now leave that coordinate as the
+  container's. Test `a_stack_keeps_a_negative_zero_origin_across_its_axis`; plants 2/2 (the
+  Rust test, the Roc layout differential).
+- **The flip** (`systems/stack/twinned.rs`): `StackLayoutSystem { core, shadow: Box<Shadow {
+  upstream, steps, roc (roc-core only) }> }`. Every operation's and query's answer is the
+  core's; upstream steps in every build, compared as before; a difference re-seeds the shadow
+  from the core (`upstream_of`, through `model::slot_table::to_slotmap`, BSP's former
+  `slot_map`). `calculate_layout`: the core geometry's frames for the core's shape, upstream's
+  geometry the shadow. **Saving is the core's** (`Saved`, under upstream's original name
+  `StackLayoutSystem`), byte-compatible by construction and held to upstream's bytes at every
+  drawn reload. Loads still go through upstream's load (legacy forest, the slice 1
+  normalizations). Plants 8/8.
+- **Under `roc-core`, the Roc stacks are a second shadow** (`systems/stack/roc_shadow.rs`,
+  `RocShadow`): seeded from the core, stepped with every operation and query, answer and whole
+  view compared; a difference counted (`roc-core: stack tree re-seeds`), panicking in tests, or
+  warned `roc-divergence:` and re-seeded from the core. A window change is read once into
+  `Applied` (core step and Roc event from it). Plants 6/7 (the weight's conversion is equivalent
+  until the Roc shape reads weights). The drawn fuzzer's reloads now write saved weights other
+  than 1.
+- **Cost (release):** a plain build pays the core (52 ns / 0.22 us / 0.97 us an operation at 10 /
+  100 / 1000 windows) and upstream (58 ns / 0.20 us / 0.86 us), the view 87 ns an operation at
+  1000 windows (1 in 32), a shadow re-seed 43 us / 0.15 ms / 1.5 ms. `roc-core` adds the Roc
+  step (0.52 / 1.8 / 13.6 us) and a view comparison (0.61 / 0.81 / 2.3 us) on every operation.
+- **Next: slice 4, under `roc-core` the Roc stacks decide** (BSP's 4b): `Stacks::shape` in Roc
+  (`StackTree.shape`, the question carrying screen, gaps, stack offset, the stack line and every
+  known window's constraints by word; `stack_tree_frames` through the Roc traditional geometry;
+  the rift-core-roc differential gains layout passes); then the Roc stacks' answers and frames
+  are rift's under `roc-core`, the Rust core their shadow re-seeded from the Roc view (`core_of`),
+  upstream staying the Rust core's shadow; saving stays from the Rust core (equal after every
+  operation). Then slice 5 deletes `Upstream` (the legacy load and the normalizations move to a
+  `stored.rs` building the core first, as BSP's).
 
 **Layout trees, the stack, slice 2, done: the Roc mirror.** Three commits after the slice 1
 docs commit (the lead's slice 1 rulings first); each message has its plants and checks.
