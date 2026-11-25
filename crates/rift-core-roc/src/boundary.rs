@@ -4175,7 +4175,7 @@ impl BspTreeBox {
         // SAFETY: as in `step`; the question's list is allocated through the host and consumed
         // by Roc; the frames are Roc's answer, read in full and released by `frames`.
         let framed = unsafe { abi::roc_bsp_tree_frames(self.into_raw(), question) };
-        (BspTreeBox(framed.model), frames(framed.framed.frames, host))
+        (BspTreeBox(framed.model), frames(framed.frames, host))
     }
 
     /// Each table's slots and free list, the windows left out in order, the settings.

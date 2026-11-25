@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, BspFrames]
+import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion]
 import Geometry
 import Bsp
 import Traditional
@@ -424,7 +424,7 @@ bsp_tree_step = |trees, event| {
 
 ## A layout's frames: the trees' shape for it (`Tree::shape`) through the BSP geometry; none
 ## when the layout is unknown or no window takes part.
-bsp_tree_frames : Trees, BspFramesQuestion -> { model : Trees, framed : BspFrames }
+bsp_tree_frames : Trees, BspFramesQuestion -> { model : Trees, frames : List(Frame) }
 bsp_tree_frames = |trees, question| {
 	frames : List(Frame)
 	frames =
@@ -432,7 +432,7 @@ bsp_tree_frames = |trees, question| {
 			Shaped(shape) => Bsp.frames(shape).map(|(window, frame)| { window, frame })
 			Unshaped => []
 		}
-	{ model: trees, framed: { frames } }
+	{ model: trees, frames }
 }
 
 ## Each table's slots and free list, the windows left out in order, and the settings.
