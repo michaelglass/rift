@@ -449,9 +449,15 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
         }
     }
 
-    /// The subtree in preorder.
+    /// The subtree in preorder (children read from their lists, not stepped through sibling by
+    /// sibling: a sibling step searches its parent's list).
     fn preorder(&self, root: N) -> impl Iterator<Item = N> + '_ {
-        std::iter::successors(Some(root), move |&node| self.next_in_subtree(node, root))
+        let mut pending = vec![root];
+        std::iter::from_fn(move || {
+            let node = pending.pop()?;
+            pending.extend(self.children(node).iter().rev());
+            Some(node)
+        })
     }
 
     /// The subtree in postorder (children before their parent).
