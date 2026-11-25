@@ -1278,11 +1278,26 @@ pub mod group_forest {
         /// The Rust forest this view holds, its tables parsed as slotmap reads them (refused as
         /// slotmap refuses them, or when a free list is not the table's vacant slots).
         pub fn forest(&self) -> Result<Forest, SlotsError> {
+            self.forest_on(|key| key, |word| word)
+        }
+
+        /// The forest this view holds on other keys (`node`; layouts are keyed by slot) and
+        /// windows (`window`), refused as [`ForestView::forest`] refuses.
+        pub fn forest_on<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord>(
+            &self,
+            node: impl Fn(NodeKey) -> N,
+            window: impl Fn(u64) -> W,
+        ) -> Result<rift_core::layout::group_forest::Forest<L, N, W>, SlotsError> {
             let taking = |free: &[u32]| free.iter().rev().copied().collect::<Vec<u32>>();
-            Ok(Forest::from_parts(
-                SlotTable::parse(self.layouts.clone())?.resumed(&taking(&self.layout_free))?,
-                SlotTable::parse(self.nodes.clone())?.resumed(&taking(&self.node_free))?,
-                self.left_out.iter().copied().collect(),
+            let layouts = self.layouts.iter().map(|&(root, version)| (root.map(&node), version));
+            let nodes = self
+                .nodes
+                .iter()
+                .map(|(held, version)| (held.as_ref().map(|n| n.map(&node, &window)), *version));
+            Ok(rift_core::layout::group_forest::Forest::from_parts(
+                SlotTable::parse(layouts.collect())?.resumed(&taking(&self.layout_free))?,
+                SlotTable::parse(nodes.collect())?.resumed(&taking(&self.node_free))?,
+                self.left_out.iter().map(|&word| window(word)).collect(),
                 self.next_stamp,
             ))
         }

@@ -318,9 +318,14 @@ pub(super) fn project_groups(
     line: StackLineReserve,
     emit_frames: bool,
     selection_path_only: bool,
+    #[cfg(feature = "roc-core")] roc: impl FnOnce(
+        Pass,
+        Bars,
+        &[core::GroupBar<NodeId, WindowId>],
+    ) -> super::group_roc::Projected,
 ) -> (Vec<(WindowId, CGRect)>, Vec<GroupContainerInfo>) {
     use crate::layout_engine::Shadow;
-    use crate::layout_engine::core_geometry::{cg_rect, core_constraints, decide_traditional};
+    use crate::layout_engine::core_geometry::{cg_rect, core_constraints};
     let constrained = |window: WindowId| constraints.get(&window).copied().map(core_constraints);
     let bars = if selection_path_only {
         Bars::SelectionPath
@@ -328,19 +333,19 @@ pub(super) fn project_groups(
         Bars::Every
     };
     let pass = pass(screen, gaps, offset, line);
-    let ours: Vec<GroupContainerInfo> = forest
-        .project(layout, pass, &constrained, bars)
-        .bars
-        .into_iter()
-        .map(|bar| GroupContainerInfo {
-            node_id: bar.stack,
-            container_kind: layout_kind(Kind::Stack(bar.orientation)),
-            frame: cg_rect(bar.frame),
-            total_count: bar.windows.len(),
-            selected_index: bar.selected,
-            window_ids: bar.windows,
-        })
-        .collect();
+    let rust = forest.project(layout, pass, &constrained, bars).bars;
+    let info = |bars: &[core::GroupBar<NodeId, WindowId>]| -> Vec<GroupContainerInfo> {
+        bars.iter()
+            .map(|bar| GroupContainerInfo {
+                node_id: bar.stack,
+                container_kind: layout_kind(Kind::Stack(bar.orientation)),
+                frame: cg_rect(bar.frame),
+                total_count: bar.windows.len(),
+                selected_index: bar.selected,
+                window_ids: bar.windows.clone(),
+            })
+            .collect()
+    };
     let root = tiles.root(layout);
     let mut theirs = Vec::new();
     let upstream_frames = super::tiles::project(
@@ -360,7 +365,7 @@ pub(super) fn project_groups(
     );
     let (upstream, core): (Vec<BarWords>, Vec<BarWords>) = (
         theirs.iter().map(bar_words).collect(),
-        ours.iter().map(bar_words).collect(),
+        info(&rust).iter().map(bar_words).collect(),
     );
     if upstream != core {
         report(
@@ -369,17 +374,38 @@ pub(super) fn project_groups(
             &format!("bars: upstream {upstream:?}, core {core:?}"),
         );
     }
-    let frames = if emit_frames {
-        decide_traditional(
-            system,
-            forest.shape(layout, pass, &constrained),
-            Shadow::Run,
-            || upstream_frames,
-        )
-    } else {
-        Vec::new()
-    };
-    (frames, ours)
+    let shape = || forest.shape(layout, pass, &constrained);
+    // Under `roc-core` the Roc forest's pass decides, bars and frames.
+    #[cfg(feature = "roc-core")]
+    {
+        let (frames, decided) = roc(pass, bars, &rust);
+        let frames = if emit_frames {
+            crate::layout_engine::core_geometry::decide_group_tree(
+                system,
+                shape(),
+                Shadow::Run,
+                || upstream_frames,
+                || frames,
+            )
+        } else {
+            Vec::new()
+        };
+        (frames, info(&decided))
+    }
+    #[cfg(not(feature = "roc-core"))]
+    {
+        let frames = if emit_frames {
+            crate::layout_engine::core_geometry::decide_traditional(
+                system,
+                shape(),
+                Shadow::Run,
+                || upstream_frames,
+            )
+        } else {
+            Vec::new()
+        };
+        (frames, info(&rust))
+    }
 }
 
 pub(super) fn default_orientation(

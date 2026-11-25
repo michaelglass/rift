@@ -12,9 +12,7 @@ use rift_core::layout::group_forest::{
 #[cfg(feature = "roc-core")]
 use rift_core_roc::RocMasterStack;
 #[cfg(feature = "roc-core")]
-use rift_core_roc::group_forest::{
-    Answer, ForestEvent as F, MasterStackEvent as E, MasterStackView,
-};
+use rift_core_roc::group_forest::{Answer, ForestEvent as F, MasterStackEvent as E};
 use serde::{Deserialize, Serialize};
 
 use super::Upstream;
@@ -26,7 +24,9 @@ use crate::common::config::{
 };
 use crate::layout_engine::engine::GroupContainerInfo;
 #[cfg(feature = "roc-core")]
-use crate::layout_engine::systems::group_roc::{self as roc, RocShadow};
+use crate::layout_engine::systems::bsp::roc_tree as bsp_roc;
+#[cfg(feature = "roc-core")]
+use crate::layout_engine::systems::group_roc::{self as roc, RocForest};
 use crate::layout_engine::systems::group_stored::{Saved, upstream_tiles};
 use crate::layout_engine::systems::group_twin::{
     VIEW_ALWAYS, VIEW_EVERY, container_node, core_edit, core_focus, core_query, edit_result,
@@ -40,7 +40,8 @@ use crate::layout_engine::systems::{
 use crate::layout_engine::{Direction, LayoutId, Orientation};
 use crate::model::tree::NodeId;
 
-type CoreMasterStack = MasterStack<LayoutId, NodeId, WindowId>;
+pub(in crate::layout_engine::systems) type CoreMasterStack =
+    MasterStack<LayoutId, NodeId, WindowId>;
 
 const SYSTEM: &str = "master-stack";
 
@@ -51,6 +52,9 @@ const SYSTEM: &str = "master-stack";
 #[serde(from = "Upstream")]
 pub struct MasterStackLayoutSystem {
     core: CoreMasterStack,
+    /// Under `roc-core`, the deciding forest (the core's is then its shadow).
+    #[cfg(feature = "roc-core")]
+    roc: RocForest<RocMasterStack>,
     /// Boxed: the system is one variant of `LayoutSystemKind`.
     shadow: Box<Shadow>,
 }
@@ -60,9 +64,6 @@ pub struct MasterStackLayoutSystem {
 struct Shadow {
     upstream: Upstream,
     steps: u64,
-    /// Under `roc-core`, the Roc forest: the core's second shadow.
-    #[cfg(feature = "roc-core")]
-    roc: RocShadow<RocMasterStack>,
 }
 
 /// The core's forest as upstream's master-stack system saves itself (its forest as `inner`).
@@ -162,26 +163,14 @@ fn upstream_of(core: &CoreMasterStack, old: &Upstream) -> Upstream {
     }
 }
 
-/// The core's system as the Roc forest's view gives it.
-#[cfg(feature = "roc-core")]
-fn master_stack_view(core: &CoreMasterStack) -> MasterStackView {
-    MasterStackView {
-        forest: roc::forest_view(core.forest()),
-        settings: core.settings(),
-    }
-}
-
 impl From<Upstream> for MasterStackLayoutSystem {
     fn from(mut upstream: Upstream) -> Self {
         upstream.tiles.normalize_load(SYSTEM);
         let core = core_of(&upstream);
         Self {
-            shadow: Box::new(Shadow {
-                #[cfg(feature = "roc-core")]
-                roc: RocShadow::seeded(&master_stack_view(&core)),
-                upstream,
-                steps: 0,
-            }),
+            #[cfg(feature = "roc-core")]
+            roc: RocForest::seeded(&core),
+            shadow: Box::new(Shadow { upstream, steps: 0 }),
             core,
         }
     }
@@ -197,53 +186,53 @@ impl MasterStackLayoutSystem {
     pub fn update_settings(&mut self, settings: MasterStackSettings) {
         self.core.update_settings(core_settings(&settings));
         self.shadow.upstream.update_settings(settings);
-        self.stepped("update_settings", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "update_settings",
             E::Settings(self.core.settings()),
             Answer::Done,
         );
+        self.stepped("update_settings", &(), &());
     }
 
     pub fn adjust_master_ratio(&mut self, layout: LayoutId, delta: f64) {
         self.shadow.upstream.adjust_master_ratio(layout, delta);
         self.core.adjust_master_ratio(delta);
-        self.stepped("adjust_master_ratio", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped("adjust_master_ratio", E::AdjustRatio(delta), Answer::Done);
+        self.stepped("adjust_master_ratio", &(), &());
     }
 
     pub fn adjust_master_count(&mut self, layout: LayoutId, delta: i32) {
         self.shadow.upstream.adjust_master_count(layout, delta);
         self.core.adjust_master_count(delta);
-        self.stepped("adjust_master_count", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped("adjust_master_count", E::AdjustCount(delta), Answer::Done);
+        self.stepped("adjust_master_count", &(), &());
     }
 
     pub fn promote_to_master(&mut self, layout: LayoutId) {
         self.shadow.upstream.promote_to_master(layout);
         self.core.promote_to_master(layout);
-        self.stepped("promote_to_master", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "promote_to_master",
             E::Promote(roc::layout_key(layout)),
             Answer::Done,
         );
+        self.stepped("promote_to_master", &(), &());
     }
 
     pub fn swap_master_stack(&mut self, layout: LayoutId) {
         self.shadow.upstream.swap_master_stack(layout);
         self.core.swap_master_stack(layout);
-        self.stepped("swap_master_stack", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "swap_master_stack",
             E::SwapMasterStack(roc::layout_key(layout)),
             Answer::Done,
         );
+        self.stepped("swap_master_stack", &(), &());
     }
 
     /// A layout pass with its group bars, the core's (upstream's projection held to them).
@@ -274,19 +263,30 @@ impl MasterStackLayoutSystem {
             line,
             emit_frames,
             selection_path_only,
+            #[cfg(feature = "roc-core")]
+            |pass, bars, rust| self.roc.project(layout, pass, constraints, bars, rust),
         )
     }
 
     /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
         let core = self.core.forest().draw(layout);
-        self.viewed("draw_tree", self.shadow.upstream.draw_tree(layout), core)
+        let core = self.viewed("draw_tree", self.shadow.upstream.draw_tree(layout), core);
+        #[cfg(feature = "roc-core")]
+        let core = {
+            let _ = core;
+            self.roc.draw(layout, self.core.forest().rows(layout))
+        };
+        core
     }
 
     /// rift-cli's container view of the layout: the core's (upstream's held to it on every
     /// call).
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let core = container_node(self.core.forest().container_view(layout));
+        let view = self.core.forest().container_view(layout);
+        #[cfg(feature = "roc-core")]
+        let view = self.roc.container_view(layout, view);
+        let core = container_node(view);
         self.viewed(
             "container_tree",
             self.shadow.upstream.container_tree(layout),
@@ -301,10 +301,14 @@ impl MasterStackLayoutSystem {
             self.core.forest().window_slot(layout, window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_slot",
-            E::Forest(F::WindowSlot(roc::layout_key(layout), roc::window(window))),
-            Answer::WindowSlot(core.clone()),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "window_slot",
+                E::Forest(F::WindowSlot(roc::layout_key(layout), roc::window(window))),
+                Answer::WindowSlot(core.clone()),
+            ),
+            bsp_roc::as_slot,
+            core,
         );
         core
     }
@@ -321,27 +325,33 @@ impl MasterStackLayoutSystem {
             self.core.can_move_window(layout, window, core_direction(direction)),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "can_move_window",
-            E::CanMoveWindow(
-                roc::layout_key(layout),
-                roc::window(window),
-                core_direction(direction),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "can_move_window",
+                E::CanMoveWindow(
+                    roc::layout_key(layout),
+                    roc::window(window),
+                    core_direction(direction),
+                ),
+                Answer::Verdict(core),
             ),
-            Answer::Verdict(core),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
 
-    /// Upstream's system (and under `roc-core` the Roc forest) re-seeded from the core, as
-    /// after a divergence.
+    /// Upstream's system re-seeded from the core, as after a divergence.
     #[cfg(test)]
     fn reseed_shadow(&mut self) {
         self.shadow.upstream = upstream_of(&self.core, &self.shadow.upstream);
-        #[cfg(feature = "roc-core")]
-        {
-            self.shadow.roc = RocShadow::seeded(&master_stack_view(&self.core));
-        }
+    }
+
+    /// The Rust forest re-seeded from the deciding Roc forest's view, as after a divergence.
+    #[cfg(all(test, feature = "roc-core"))]
+    fn reseed_rust_from_roc(&mut self) {
+        use crate::layout_engine::systems::group_roc::Machine;
+        self.core = rift_core_roc::RocMasterStack::core_of(&self.roc.view());
     }
 
     /// Upstream's system saved as upstream saves it (the core's save is held to it).
@@ -353,16 +363,15 @@ impl MasterStackLayoutSystem {
     /// Under `roc-core`, an operation the core decided (answering `rust`): the Roc forest takes
     /// it too, and is held to the core's answer and whole system.
     #[cfg(feature = "roc-core")]
-    fn roc_stepped(&mut self, what: &str, event: E, rust: Answer) {
-        let Self { core, shadow } = self;
-        shadow.roc.stepped(what, event, rust, || master_stack_view(core));
+    fn roc_stepped(&mut self, what: &str, event: E, rust: Answer) -> Answer {
+        self.roc.decided(&mut self.core, what, event, rust)
     }
 
     /// Under `roc-core`, a query the core answered (`rust`): the Roc forest's answer is held to
     /// it.
     #[cfg(feature = "roc-core")]
-    fn roc_asked(&self, what: &str, event: E, rust: Answer) {
-        self.shadow.roc.asked(what, event, rust);
+    fn roc_asked(&self, what: &str, event: E, rust: Answer) -> Answer {
+        self.roc.asked(what, event, rust)
     }
 
     /// After an operation both took: their answers compared, and the forests when due; a
@@ -432,13 +441,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().has_windows_for_app(layout, |window| window.pid == pid),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "has_windows_for_app",
-            E::Forest(F::HasWindowsForApp(
-                roc::layout_key(layout),
-                roc::app_windows(self.core.forest(), |w| w.pid == pid),
-            )),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "has_windows_for_app",
+                E::Forest(F::HasWindowsForApp(
+                    roc::layout_key(layout),
+                    roc::app_windows(self.core.forest(), |w| w.pid == pid),
+                )),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -450,10 +463,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().window_participates(window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_participates",
-            E::Forest(F::WindowParticipates(roc::window(window))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "window_participates",
+                E::Forest(F::WindowParticipates(roc::window(window))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -461,29 +478,37 @@ impl LayoutSystem for MasterStackLayoutSystem {
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
         let upstream = self.shadow.upstream.set_window_participation(window, participates);
         let core = self.core.set_window_participation(window, participation(participates));
-        self.stepped("set_window_participation", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "set_window_participation",
-            E::Forest(F::Participation(
-                roc::window(window),
-                participation(participates),
-            )),
-            Answer::Participated(core),
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "set_window_participation",
+                E::Forest(F::Participation(
+                    roc::window(window),
+                    participation(participates),
+                )),
+                Answer::Participated(core),
+            ),
+            bsp_roc::as_participated,
+            core,
         );
+        self.stepped("set_window_participation", &upstream, &core);
         core
     }
 
     fn create_layout(&mut self) -> LayoutId {
         let upstream = self.shadow.upstream.create_layout();
         let core = self.core.create_layout();
-        self.stepped("create_layout", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "create_layout",
-            E::CreateLayout,
-            Answer::Layout(roc::layout_key(core)),
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "create_layout",
+                E::CreateLayout,
+                Answer::Layout(roc::layout_key(core)),
+            ),
+            bsp_roc::as_layout,
+            core,
         );
+        self.stepped("create_layout", &upstream, &core);
         core
     }
 
@@ -494,10 +519,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().contains_layout(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "contains_layout",
-            E::Forest(F::ContainsLayout(roc::layout_key(layout))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "contains_layout",
+                E::Forest(F::ContainsLayout(roc::layout_key(layout))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -505,26 +534,30 @@ impl LayoutSystem for MasterStackLayoutSystem {
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let upstream = self.shadow.upstream.clone_layout(layout);
         let core = self.core.clone_layout(layout);
-        self.stepped("clone_layout", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "clone_layout",
-            E::Forest(F::CloneLayout(roc::layout_key(layout))),
-            Answer::Layout(roc::layout_key(core)),
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "clone_layout",
+                E::Forest(F::CloneLayout(roc::layout_key(layout))),
+                Answer::Layout(roc::layout_key(core)),
+            ),
+            bsp_roc::as_layout,
+            core,
         );
+        self.stepped("clone_layout", &upstream, &core);
         core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
         self.shadow.upstream.remove_layout(layout);
         self.core.remove_layout(layout);
-        self.stepped("remove_layout", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "remove_layout",
             E::Forest(F::RemoveLayout(roc::layout_key(layout))),
             Answer::Done,
         );
+        self.stepped("remove_layout", &(), &());
     }
 
     /// The core's frames for the core's shape (under `roc-core`, the Roc geometry's), upstream's
@@ -553,11 +586,27 @@ impl LayoutSystem for MasterStackLayoutSystem {
                 &format!("shapes: upstream {upstream:?}, core {core:?}"),
             );
         }
-        crate::layout_engine::core_geometry::decide_traditional(SYSTEM, core, shadow, || {
+        let upstream_frames = || {
             self.shadow
                 .upstream
                 .shadow_frames(layout, screen, offset, constraints, gaps, line)
-        })
+        };
+        // Under `roc-core` the Roc forest's own shape through the Roc geometry decides.
+        #[cfg(feature = "roc-core")]
+        return crate::layout_engine::core_geometry::decide_group_tree(
+            SYSTEM,
+            core,
+            shadow,
+            upstream_frames,
+            || self.roc.frames(layout, pass(screen, gaps, offset, line), constraints),
+        );
+        #[cfg(not(feature = "roc-core"))]
+        crate::layout_engine::core_geometry::decide_traditional(
+            SYSTEM,
+            core,
+            shadow,
+            upstream_frames,
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -567,10 +616,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().selected_window(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "selected_window",
-            E::Forest(F::SelectedWindow(roc::layout_key(layout))),
-            Answer::Window(core.map(roc::window)),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "selected_window",
+                E::Forest(F::SelectedWindow(roc::layout_key(layout))),
+                Answer::Window(core.map(roc::window)),
+            ),
+            bsp_roc::as_window,
+            core,
         );
         core
     }
@@ -582,13 +635,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().selection_contains_window(layout, window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "selection_contains_window",
-            E::Forest(F::SelectionContainsWindow(
-                roc::layout_key(layout),
-                roc::window(window),
-            )),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "selection_contains_window",
+                E::Forest(F::SelectionContainsWindow(
+                    roc::layout_key(layout),
+                    roc::window(window),
+                )),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -600,13 +657,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().window_in_direction(layout, core_direction(direction)),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_in_direction",
-            E::Forest(F::WindowInDirection(
-                roc::layout_key(layout),
-                core_direction(direction),
-            )),
-            Answer::Window(core.map(roc::window)),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "window_in_direction",
+                E::Forest(F::WindowInDirection(
+                    roc::layout_key(layout),
+                    core_direction(direction),
+                )),
+                Answer::Window(core.map(roc::window)),
+            ),
+            bsp_roc::as_window,
+            core,
         );
         core
     }
@@ -618,10 +679,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().contains_window(layout, window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "contains_window",
-            E::Forest(F::ContainsWindow(roc::layout_key(layout), roc::window(window))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "contains_window",
+                E::Forest(F::ContainsWindow(roc::layout_key(layout), roc::window(window))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -633,10 +698,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().has_any_fullscreen_node(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "has_any_fullscreen_node",
-            E::Forest(F::HasAnyFullscreenNode(roc::layout_key(layout))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "has_any_fullscreen_node",
+                E::Forest(F::HasAnyFullscreenNode(roc::layout_key(layout))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -648,10 +717,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().parent_of_selection_is_stacked(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "parent_of_selection_is_stacked",
-            E::Forest(F::ParentOfSelectionIsStacked(roc::layout_key(layout))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "parent_of_selection_is_stacked",
+                E::Forest(F::ParentOfSelectionIsStacked(roc::layout_key(layout))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -663,13 +736,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
             self.core.forest().windows(layout, core_query(query)),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "windows",
-            E::Forest(F::Windows(
-                roc::layout_key(layout),
-                roc::query(core_query(query)),
-            )),
-            Answer::Windows(roc::windows(&core)),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "windows",
+                E::Forest(F::Windows(
+                    roc::layout_key(layout),
+                    roc::query(core_query(query)),
+                )),
+                Answer::Windows(roc::windows(&core)),
+            ),
+            bsp_roc::as_windows,
+            core,
         );
         core
     }
@@ -678,15 +755,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
         let upstream = self.shadow.upstream.focus(layout, focus);
         let focused = self.core.focus(layout, core_focus(focus));
         #[cfg(feature = "roc-core")]
-        let answer = roc::focused(&focused);
+        let focused = bsp_roc::decided(
+            self.roc_stepped(
+                "focus",
+                E::Forest(F::Focus(roc::layout_key(layout), roc::focus(core_focus(focus)))),
+                roc::focused(&focused),
+            ),
+            bsp_roc::as_focused,
+            focused,
+        );
         let core = focus_result(focused);
         self.stepped("focus", &focus_words(&upstream), &focus_words(&core));
-        #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "focus",
-            E::Forest(F::Focus(roc::layout_key(layout), roc::focus(core_focus(focus)))),
-            answer,
-        );
         core
     }
 
@@ -737,25 +816,30 @@ impl LayoutSystem for MasterStackLayoutSystem {
             } => core.resize_window(layout, window, resize(old, new, screen, gaps)),
         }
         self.shadow.upstream.update(change);
-        self.stepped("update", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped("update", event, Answer::Done);
+        self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         let upstream = self.shadow.upstream.edit_layout(layout, edit);
         let edit = core_edit(edit);
-        let edited = edit.map(|edit| self.core.edit(layout, edit));
-        let core = edited.clone().map_or(EditResult::Unchanged, edit_result);
-        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
-        #[cfg(feature = "roc-core")]
-        if let (Some(edit), Some(edited)) = (edit, &edited) {
-            self.roc_stepped(
-                "edit_layout",
-                E::Edit(roc::layout_key(layout), roc::edit(edit)),
-                roc::edited(edited),
+        let edited = edit.map(|edit| {
+            let edited = self.core.edit(layout, edit);
+            #[cfg(feature = "roc-core")]
+            let edited = bsp_roc::decided(
+                self.roc_stepped(
+                    "edit_layout",
+                    E::Edit(roc::layout_key(layout), roc::edit(edit)),
+                    roc::edited(&edited),
+                ),
+                bsp_roc::as_edited,
+                edited,
             );
-        }
+            edited
+        });
+        let core = edited.map_or(EditResult::Unchanged, edit_result);
+        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
         core
     }
 }
@@ -858,6 +942,10 @@ mod tests {
                     }
                     if rng.chance(10) {
                         system.reseed_shadow();
+                    }
+                    #[cfg(feature = "roc-core")]
+                    if rng.chance(4) {
+                        system.reseed_rust_from_roc();
                     }
                     if rng.chance(30) {
                         let window = drawn.window(rng);

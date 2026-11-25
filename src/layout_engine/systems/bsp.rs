@@ -3,7 +3,7 @@
 //! saved form and its load (`stored`).
 
 #[cfg(feature = "roc-core")]
-mod roc_tree;
+pub(super) mod roc_tree;
 mod stored;
 mod system;
 #[cfg(feature = "roc-core")]

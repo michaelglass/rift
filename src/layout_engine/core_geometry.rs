@@ -168,6 +168,23 @@ pub(crate) fn decide_traditional(
     decide(what, &shape, shadow, upstream, rust, roc)
 }
 
+/// The frames rift gives a group forest layout under `roc-core` (master-stack, traditional): the
+/// Roc forest's own (`roc`: its shape through the Roc traditional geometry), with the Rust
+/// core's frames for the Rust forest's `shape` and the layout system's (`upstream`) the shadows.
+#[cfg(feature = "roc-core")]
+pub(crate) fn decide_group_tree(
+    what: &str,
+    shape: Option<Traditional<WindowId>>,
+    shadow: Shadow,
+    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
+    roc: impl FnOnce() -> Vec<(rift_core::plain::WindowId, Rect)>,
+) -> Vec<(WindowId, CGRect)> {
+    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
+    decide(what, &shape, shadow, upstream, rust, || {
+        Ok::<_, std::convert::Infallible>(roc())
+    })
+}
+
 /// The frames rift gives a stack layout without `roc-core`: the core's for its stacks' `shape`
 /// (none: no member takes part). The stack system has no geometry of its own to shadow.
 #[cfg(not(feature = "roc-core"))]

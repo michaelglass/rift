@@ -166,6 +166,42 @@ enum BranchLimit {
     FirstVisible,
 }
 
+impl<N: Copy, W: Copy> Node<N, W> {
+    /// The node on other keys (`node`) and windows (`window`).
+    pub fn map<M, V>(&self, node: impl Fn(N) -> M, window: impl Fn(W) -> V) -> Node<M, V> {
+        Node {
+            place: match self.place {
+                Place::Root => Place::Root,
+                Place::Child { parent, size } => Place::Child { parent: node(parent), size },
+            },
+            fill: self.fill,
+            body: match &self.body {
+                Body::Window { window: held, stamp } => Body::Window {
+                    window: window(*held),
+                    stamp: *stamp,
+                },
+                Body::Container(container) => Body::Container(Container {
+                    kind: container.kind,
+                    members: match &container.members {
+                        Members::Children(children) => {
+                            Members::Children(children.iter().map(|&child| node(child)).collect())
+                        }
+                        Members::Regions { order, primary } => Members::Regions {
+                            order: order.map(&node),
+                            primary: *primary,
+                        },
+                    },
+                    memory: match container.memory {
+                        Memory::Unset => Memory::Unset,
+                        Memory::Toward(child) => Memory::Toward(node(child)),
+                        Memory::Stops(child) => Memory::Stops(node(child)),
+                    },
+                }),
+            },
+        }
+    }
+}
+
 /// What a window dropped onto another does, of the actions that reach the forest (upstream's
 /// `WindowDropAction` without `Move` and `ConsumeOrExpel`, which `LayoutSystem::edit` turns into
 /// their edits first).

@@ -11,6 +11,8 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 use crate::model::tree::{NodeId, Placement};
 
 mod twinned;
+#[cfg(feature = "roc-core")]
+pub(super) use twinned::CoreTraditional;
 pub use twinned::TraditionalLayoutSystem;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]

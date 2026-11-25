@@ -133,61 +133,66 @@ impl std::fmt::Debug for RocTree {
 
 /// What the Roc tree answered, as rift takes it (`parse`); an answer of another kind than
 /// the operation's was a difference already reported (the Rust tree's answered the operation's
-/// kind), and rift takes the Rust tree's answer.
-pub(super) fn decided<T>(answer: Answer, parse: impl FnOnce(Answer) -> Option<T>, rust: T) -> T {
+/// kind), and rift takes the Rust tree's answer. The group forest's Roc systems answer the same
+/// `Answer`, and their systems parse it here too.
+pub(in crate::layout_engine::systems) fn decided<T>(
+    answer: Answer,
+    parse: impl FnOnce(Answer) -> Option<T>,
+    rust: T,
+) -> T {
     parse(answer).unwrap_or(rust)
 }
 
-pub(super) fn as_verdict(answer: Answer) -> Option<bool> {
+pub(in crate::layout_engine::systems) fn as_verdict(answer: Answer) -> Option<bool> {
     match answer {
         Answer::Verdict(yes) => Some(yes),
         _ => None,
     }
 }
 
-pub(super) fn as_participated(answer: Answer) -> Option<bool> {
+pub(in crate::layout_engine::systems) fn as_participated(answer: Answer) -> Option<bool> {
     match answer {
         Answer::Participated(changed) => Some(changed),
         _ => None,
     }
 }
 
-pub(super) fn as_layout(answer: Answer) -> Option<LayoutId> {
+pub(in crate::layout_engine::systems) fn as_layout(answer: Answer) -> Option<LayoutId> {
     match answer {
         Answer::Layout(key) => Some(layout_id(key)),
         _ => None,
     }
 }
 
-pub(super) fn as_slot(answer: Answer) -> Option<Option<Vec<usize>>> {
+pub(in crate::layout_engine::systems) fn as_slot(answer: Answer) -> Option<Option<Vec<usize>>> {
     match answer {
         Answer::WindowSlot(slot) => Some(slot),
         _ => None,
     }
 }
 
-pub(super) fn as_window(answer: Answer) -> Option<Option<WindowId>> {
+pub(in crate::layout_engine::systems) fn as_window(answer: Answer) -> Option<Option<WindowId>> {
     match answer {
         Answer::Window(word) => Some(word.map(window_id)),
         _ => None,
     }
 }
 
-pub(super) fn as_windows(answer: Answer) -> Option<Vec<WindowId>> {
+pub(in crate::layout_engine::systems) fn as_windows(answer: Answer) -> Option<Vec<WindowId>> {
     match answer {
         Answer::Windows(words) => Some(window_ids(&words)),
         _ => None,
     }
 }
 
-pub(super) fn as_focused(answer: Answer) -> Option<Focused<WindowId>> {
+pub(in crate::layout_engine::systems) fn as_focused(answer: Answer) -> Option<Focused<WindowId>> {
     match answer {
         Answer::Focused(focused) => Some(rift_focused(focused)),
         _ => None,
     }
 }
 
-pub(super) fn as_edited(answer: Answer) -> Option<Edited<WindowId>> {
+pub(in crate::layout_engine::systems) fn as_edited(answer: Answer) -> Option<Edited<WindowId>> {
     match answer {
         Answer::Edited(edited) => Some(rift_edited(edited)),
         _ => None,

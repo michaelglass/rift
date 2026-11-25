@@ -9,9 +9,7 @@ use rift_core::layout::group_forest::{InsertionPoint, NewSibling, Traditional};
 #[cfg(feature = "roc-core")]
 use rift_core_roc::RocTraditional;
 #[cfg(feature = "roc-core")]
-use rift_core_roc::group_forest::{
-    Answer, ForestEvent as F, TraditionalEvent as E, TraditionalView,
-};
+use rift_core_roc::group_forest::{Answer, ForestEvent as F, TraditionalEvent as E};
 use serde::{Deserialize, Serialize};
 
 use super::Upstream;
@@ -20,7 +18,9 @@ use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackLineReserve, WindowInsertionPoint};
 use crate::layout_engine::engine::GroupContainerInfo;
 #[cfg(feature = "roc-core")]
-use crate::layout_engine::systems::group_roc::{self as roc, RocShadow};
+use crate::layout_engine::systems::bsp::roc_tree as bsp_roc;
+#[cfg(feature = "roc-core")]
+use crate::layout_engine::systems::group_roc::{self as roc, RocForest};
 use crate::layout_engine::systems::group_stored::{Saved, upstream_tiles};
 use crate::layout_engine::systems::group_twin::{
     VIEW_ALWAYS, VIEW_EVERY, container_node, core_edit, core_focus, core_query, edit_result,
@@ -34,7 +34,8 @@ use crate::layout_engine::systems::{
 use crate::layout_engine::{Direction, LayoutId};
 use crate::model::tree::NodeId;
 
-type CoreTraditional = Traditional<LayoutId, NodeId, WindowId>;
+pub(in crate::layout_engine::systems) type CoreTraditional =
+    Traditional<LayoutId, NodeId, WindowId>;
 
 const SYSTEM: &str = "traditional";
 
@@ -45,6 +46,9 @@ const SYSTEM: &str = "traditional";
 #[serde(from = "Upstream")]
 pub struct TraditionalLayoutSystem {
     core: CoreTraditional,
+    /// Under `roc-core`, the deciding forest (the core's is then its shadow).
+    #[cfg(feature = "roc-core")]
+    roc: RocForest<RocTraditional>,
     /// Boxed: the system is one variant of `LayoutSystemKind`.
     shadow: Box<Shadow>,
 }
@@ -54,9 +58,6 @@ pub struct TraditionalLayoutSystem {
 struct Shadow {
     upstream: Upstream,
     steps: u64,
-    /// Under `roc-core`, the Roc forest: the core's second shadow.
-    #[cfg(feature = "roc-core")]
-    roc: RocShadow<RocTraditional>,
 }
 
 impl Serialize for TraditionalLayoutSystem {
@@ -93,27 +94,14 @@ fn upstream_of(core: &CoreTraditional) -> Upstream {
     }
 }
 
-/// The core's system as the Roc forest's view gives it.
-#[cfg(feature = "roc-core")]
-fn traditional_view(core: &CoreTraditional) -> TraditionalView {
-    TraditionalView {
-        forest: roc::forest_view(core.forest()),
-        insertion: core.insertion(),
-        new_sibling: core.new_sibling(),
-    }
-}
-
 impl From<Upstream> for TraditionalLayoutSystem {
     fn from(mut upstream: Upstream) -> Self {
         upstream.tiles.normalize_load(SYSTEM);
         let core = core_of(&upstream);
         Self {
-            shadow: Box::new(Shadow {
-                #[cfg(feature = "roc-core")]
-                roc: RocShadow::seeded(&traditional_view(&core)),
-                upstream,
-                steps: 0,
-            }),
+            #[cfg(feature = "roc-core")]
+            roc: RocForest::seeded(&core),
+            shadow: Box::new(Shadow { upstream, steps: 0 }),
             core,
         }
     }
@@ -131,25 +119,25 @@ impl TraditionalLayoutSystem {
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
         self.shadow.upstream.set_window_insertion_point(value);
         self.core.set_window_insertion_point(insertion_point(value));
-        self.stepped("set_window_insertion_point", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "set_window_insertion_point",
             E::Settings(self.core.insertion(), self.core.new_sibling()),
             Answer::Done,
         );
+        self.stepped("set_window_insertion_point", &(), &());
     }
 
     pub fn set_equalize_nodes(&mut self, value: bool) {
         self.shadow.upstream.set_equalize_nodes(value);
         self.core.set_new_sibling(new_sibling(value));
-        self.stepped("set_equalize_nodes", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "set_equalize_nodes",
             E::Settings(self.core.insertion(), self.core.new_sibling()),
             Answer::Done,
         );
+        self.stepped("set_equalize_nodes", &(), &());
     }
 
     /// A layout pass with its group bars, the core's (upstream's projection held to them).
@@ -177,23 +165,34 @@ impl TraditionalLayoutSystem {
             line,
             emit_frames,
             selection_path_only,
+            #[cfg(feature = "roc-core")]
+            |pass, bars, rust| self.roc.project(layout, pass, constraints, bars, rust),
         )
     }
 
     /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
         let core = self.core.forest().draw(layout);
-        self.viewed(
+        let core = self.viewed(
             "draw_tree",
             self.shadow.upstream.tiles.draw_tree(layout, &[]),
             core,
-        )
+        );
+        #[cfg(feature = "roc-core")]
+        let core = {
+            let _ = core;
+            self.roc.draw(layout, self.core.forest().rows(layout))
+        };
+        core
     }
 
     /// rift-cli's container view of the layout: the core's (upstream's held to it on every
     /// call).
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let core = container_node(self.core.forest().container_view(layout));
+        let view = self.core.forest().container_view(layout);
+        #[cfg(feature = "roc-core")]
+        let view = self.roc.container_view(layout, view);
+        let core = container_node(view);
         self.viewed(
             "container_tree",
             self.shadow.upstream.tiles.container_tree(layout),
@@ -208,10 +207,14 @@ impl TraditionalLayoutSystem {
             self.core.forest().window_slot(layout, window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_slot",
-            E::Forest(F::WindowSlot(roc::layout_key(layout), roc::window(window))),
-            Answer::WindowSlot(core.clone()),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "window_slot",
+                E::Forest(F::WindowSlot(roc::layout_key(layout), roc::window(window))),
+                Answer::WindowSlot(core.clone()),
+            ),
+            bsp_roc::as_slot,
+            core,
         );
         core
     }
@@ -228,27 +231,31 @@ impl TraditionalLayoutSystem {
             self.core.can_move_window(layout, window, core_direction(direction)),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "can_move_window",
-            E::CanMoveWindow(
-                roc::layout_key(layout),
-                roc::window(window),
-                core_direction(direction),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "can_move_window",
+                E::CanMoveWindow(
+                    roc::layout_key(layout),
+                    roc::window(window),
+                    core_direction(direction),
+                ),
+                Answer::Verdict(core),
             ),
-            Answer::Verdict(core),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
 
-    /// Upstream's system (and under `roc-core` the Roc forest) re-seeded from the core, as
-    /// after a divergence.
+    /// Upstream's system re-seeded from the core, as after a divergence.
     #[cfg(test)]
-    fn reseed_shadow(&mut self) {
-        self.shadow.upstream = upstream_of(&self.core);
-        #[cfg(feature = "roc-core")]
-        {
-            self.shadow.roc = RocShadow::seeded(&traditional_view(&self.core));
-        }
+    fn reseed_shadow(&mut self) { self.shadow.upstream = upstream_of(&self.core); }
+
+    /// The Rust forest re-seeded from the deciding Roc forest's view, as after a divergence.
+    #[cfg(all(test, feature = "roc-core"))]
+    fn reseed_rust_from_roc(&mut self) {
+        use crate::layout_engine::systems::group_roc::Machine;
+        self.core = rift_core_roc::RocTraditional::core_of(&self.roc.view());
     }
 
     /// Upstream's system saved as upstream saves it (the core's save is held to it).
@@ -260,16 +267,15 @@ impl TraditionalLayoutSystem {
     /// Under `roc-core`, an operation the core decided (answering `rust`): the Roc forest takes
     /// it too, and is held to the core's answer and whole system.
     #[cfg(feature = "roc-core")]
-    fn roc_stepped(&mut self, what: &str, event: E, rust: Answer) {
-        let Self { core, shadow } = self;
-        shadow.roc.stepped(what, event, rust, || traditional_view(core));
+    fn roc_stepped(&mut self, what: &str, event: E, rust: Answer) -> Answer {
+        self.roc.decided(&mut self.core, what, event, rust)
     }
 
     /// Under `roc-core`, a query the core answered (`rust`): the Roc forest's answer is held to
     /// it.
     #[cfg(feature = "roc-core")]
-    fn roc_asked(&self, what: &str, event: E, rust: Answer) {
-        self.shadow.roc.asked(what, event, rust);
+    fn roc_asked(&self, what: &str, event: E, rust: Answer) -> Answer {
+        self.roc.asked(what, event, rust)
     }
 
     /// After an operation both took: their answers compared, and the forests when due; a
@@ -342,13 +348,17 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().has_windows_for_app(layout, |window| window.pid == pid),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "has_windows_for_app",
-            E::Forest(F::HasWindowsForApp(
-                roc::layout_key(layout),
-                roc::app_windows(self.core.forest(), |w| w.pid == pid),
-            )),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "has_windows_for_app",
+                E::Forest(F::HasWindowsForApp(
+                    roc::layout_key(layout),
+                    roc::app_windows(self.core.forest(), |w| w.pid == pid),
+                )),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -360,10 +370,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().window_participates(window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_participates",
-            E::Forest(F::WindowParticipates(roc::window(window))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "window_participates",
+                E::Forest(F::WindowParticipates(roc::window(window))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -371,29 +385,37 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
         let upstream = self.shadow.upstream.set_window_participation(window, participates);
         let core = self.core.set_window_participation(window, participation(participates));
-        self.stepped("set_window_participation", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "set_window_participation",
-            E::Forest(F::Participation(
-                roc::window(window),
-                participation(participates),
-            )),
-            Answer::Participated(core),
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "set_window_participation",
+                E::Forest(F::Participation(
+                    roc::window(window),
+                    participation(participates),
+                )),
+                Answer::Participated(core),
+            ),
+            bsp_roc::as_participated,
+            core,
         );
+        self.stepped("set_window_participation", &upstream, &core);
         core
     }
 
     fn create_layout(&mut self) -> LayoutId {
         let upstream = self.shadow.upstream.create_layout();
         let core = self.core.create_layout();
-        self.stepped("create_layout", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "create_layout",
-            E::CreateLayout,
-            Answer::Layout(roc::layout_key(core)),
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "create_layout",
+                E::CreateLayout,
+                Answer::Layout(roc::layout_key(core)),
+            ),
+            bsp_roc::as_layout,
+            core,
         );
+        self.stepped("create_layout", &upstream, &core);
         core
     }
 
@@ -404,10 +426,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().contains_layout(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "contains_layout",
-            E::Forest(F::ContainsLayout(roc::layout_key(layout))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "contains_layout",
+                E::Forest(F::ContainsLayout(roc::layout_key(layout))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -415,26 +441,30 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let upstream = self.shadow.upstream.clone_layout(layout);
         let core = self.core.clone_layout(layout);
-        self.stepped("clone_layout", &upstream, &core);
         #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "clone_layout",
-            E::Forest(F::CloneLayout(roc::layout_key(layout))),
-            Answer::Layout(roc::layout_key(core)),
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "clone_layout",
+                E::Forest(F::CloneLayout(roc::layout_key(layout))),
+                Answer::Layout(roc::layout_key(core)),
+            ),
+            bsp_roc::as_layout,
+            core,
         );
+        self.stepped("clone_layout", &upstream, &core);
         core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
         self.shadow.upstream.remove_layout(layout);
         self.core.remove_layout(layout);
-        self.stepped("remove_layout", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "remove_layout",
             E::Forest(F::RemoveLayout(roc::layout_key(layout))),
             Answer::Done,
         );
+        self.stepped("remove_layout", &(), &());
     }
 
     /// The core's frames for the core's shape (under `roc-core`, the Roc geometry's), upstream's
@@ -473,11 +503,27 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 &format!("shapes: upstream {upstream:?}, core {core:?}"),
             );
         }
-        crate::layout_engine::core_geometry::decide_traditional(SYSTEM, core, shadow, || {
+        let upstream_frames = || {
             self.shadow
                 .upstream
                 .shadow_frames(layout, screen, offset, constraints, gaps, line)
-        })
+        };
+        // Under `roc-core` the Roc forest's own shape through the Roc geometry decides.
+        #[cfg(feature = "roc-core")]
+        return crate::layout_engine::core_geometry::decide_group_tree(
+            SYSTEM,
+            core,
+            shadow,
+            upstream_frames,
+            || self.roc.frames(layout, pass(screen, gaps, offset, line), constraints),
+        );
+        #[cfg(not(feature = "roc-core"))]
+        crate::layout_engine::core_geometry::decide_traditional(
+            SYSTEM,
+            core,
+            shadow,
+            upstream_frames,
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -487,10 +533,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().selected_window(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "selected_window",
-            E::Forest(F::SelectedWindow(roc::layout_key(layout))),
-            Answer::Window(core.map(roc::window)),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "selected_window",
+                E::Forest(F::SelectedWindow(roc::layout_key(layout))),
+                Answer::Window(core.map(roc::window)),
+            ),
+            bsp_roc::as_window,
+            core,
         );
         core
     }
@@ -502,13 +552,17 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().selection_contains_window(layout, window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "selection_contains_window",
-            E::Forest(F::SelectionContainsWindow(
-                roc::layout_key(layout),
-                roc::window(window),
-            )),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "selection_contains_window",
+                E::Forest(F::SelectionContainsWindow(
+                    roc::layout_key(layout),
+                    roc::window(window),
+                )),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -520,13 +574,17 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().window_in_direction(layout, core_direction(direction)),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "window_in_direction",
-            E::Forest(F::WindowInDirection(
-                roc::layout_key(layout),
-                core_direction(direction),
-            )),
-            Answer::Window(core.map(roc::window)),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "window_in_direction",
+                E::Forest(F::WindowInDirection(
+                    roc::layout_key(layout),
+                    core_direction(direction),
+                )),
+                Answer::Window(core.map(roc::window)),
+            ),
+            bsp_roc::as_window,
+            core,
         );
         core
     }
@@ -538,10 +596,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().contains_window(layout, window),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "contains_window",
-            E::Forest(F::ContainsWindow(roc::layout_key(layout), roc::window(window))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "contains_window",
+                E::Forest(F::ContainsWindow(roc::layout_key(layout), roc::window(window))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -553,10 +615,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().has_any_fullscreen_node(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "has_any_fullscreen_node",
-            E::Forest(F::HasAnyFullscreenNode(roc::layout_key(layout))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "has_any_fullscreen_node",
+                E::Forest(F::HasAnyFullscreenNode(roc::layout_key(layout))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -568,10 +634,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().parent_of_selection_is_stacked(layout),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "parent_of_selection_is_stacked",
-            E::Forest(F::ParentOfSelectionIsStacked(roc::layout_key(layout))),
-            Answer::Verdict(core),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "parent_of_selection_is_stacked",
+                E::Forest(F::ParentOfSelectionIsStacked(roc::layout_key(layout))),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
         );
         core
     }
@@ -583,13 +653,17 @@ impl LayoutSystem for TraditionalLayoutSystem {
             self.core.forest().windows(layout, core_query(query)),
         );
         #[cfg(feature = "roc-core")]
-        self.roc_asked(
-            "windows",
-            E::Forest(F::Windows(
-                roc::layout_key(layout),
-                roc::query(core_query(query)),
-            )),
-            Answer::Windows(roc::windows(&core)),
+        let core = bsp_roc::decided(
+            self.roc_asked(
+                "windows",
+                E::Forest(F::Windows(
+                    roc::layout_key(layout),
+                    roc::query(core_query(query)),
+                )),
+                Answer::Windows(roc::windows(&core)),
+            ),
+            bsp_roc::as_windows,
+            core,
         );
         core
     }
@@ -598,15 +672,17 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let upstream = self.shadow.upstream.focus(layout, focus);
         let focused = self.core.focus(layout, core_focus(focus));
         #[cfg(feature = "roc-core")]
-        let answer = roc::focused(&focused);
+        let focused = bsp_roc::decided(
+            self.roc_stepped(
+                "focus",
+                E::Forest(F::Focus(roc::layout_key(layout), roc::focus(core_focus(focus)))),
+                roc::focused(&focused),
+            ),
+            bsp_roc::as_focused,
+            focused,
+        );
         let core = focus_result(focused);
         self.stepped("focus", &focus_words(&upstream), &focus_words(&core));
-        #[cfg(feature = "roc-core")]
-        self.roc_stepped(
-            "focus",
-            E::Forest(F::Focus(roc::layout_key(layout), roc::focus(core_focus(focus)))),
-            answer,
-        );
         core
     }
 
@@ -659,25 +735,30 @@ impl LayoutSystem for TraditionalLayoutSystem {
             } => core.resize_window(layout, window, resize(old, new, screen, gaps)),
         }
         self.shadow.upstream.update(change);
-        self.stepped("update", &(), &());
         #[cfg(feature = "roc-core")]
         self.roc_stepped("update", event, Answer::Done);
+        self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         let upstream = self.shadow.upstream.edit_layout(layout, edit);
         let edit = core_edit(edit);
-        let edited = edit.map(|edit| self.core.edit(layout, edit));
-        let core = edited.clone().map_or(EditResult::Unchanged, edit_result);
-        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
-        #[cfg(feature = "roc-core")]
-        if let (Some(edit), Some(edited)) = (edit, &edited) {
-            self.roc_stepped(
-                "edit_layout",
-                E::Edit(roc::layout_key(layout), roc::edit(edit)),
-                roc::edited(edited),
+        let edited = edit.map(|edit| {
+            let edited = self.core.edit(layout, edit);
+            #[cfg(feature = "roc-core")]
+            let edited = bsp_roc::decided(
+                self.roc_stepped(
+                    "edit_layout",
+                    E::Edit(roc::layout_key(layout), roc::edit(edit)),
+                    roc::edited(&edited),
+                ),
+                bsp_roc::as_edited,
+                edited,
             );
-        }
+            edited
+        });
+        let core = edited.map_or(EditResult::Unchanged, edit_result);
+        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
         core
     }
 }
@@ -735,6 +816,10 @@ mod tests {
                 &mut |rng, system, drawn| {
                     if rng.chance(10) {
                         system.reseed_shadow();
+                    }
+                    #[cfg(feature = "roc-core")]
+                    if rng.chance(4) {
+                        system.reseed_rust_from_roc();
                     }
                     if rng.chance(30) {
                         let (insertion, equalize) = drawn_settings(rng);
@@ -1078,14 +1163,14 @@ mod tests {
         }
     }
 
-    /// A Roc forest that differs from the core is counted and fails a test (a running Rift warns
-    /// and re-seeds it from the core).
+    /// A Rust forest that differs from the deciding Roc forest is counted and fails a test (a
+    /// running Rift warns and re-seeds it from the Roc forest).
     #[cfg(feature = "roc-core")]
     #[test]
-    fn a_roc_group_forest_divergence_is_counted_and_fails_tests() {
+    fn a_rust_forest_differing_from_the_roc_forest_is_counted_and_fails_tests() {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
-        system.shadow.roc.machine().step(E::CreateLayout);
+        system.roc.machine().step(E::CreateLayout);
         let before = crate::layout_engine::systems::group_forest_reseeds();
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             system.update(WindowChange::Add(layout, w(1), None));
@@ -1094,28 +1179,52 @@ mod tests {
         assert!(crate::layout_engine::systems::group_forest_reseeds() > before);
     }
 
-    /// The Roc shadow's cost at 10, 100 and 1000 windows (release, roc-core: `cargo test
-    /// --release --lib --features roc-core measure_traditional_roc_shadow -- --ignored
-    /// --nocapture`): the Roc step, the view comparison, a re-seed.
+    /// The Rust forest re-seeded from the Roc forest's view holds what the Rust forest held, and
+    /// allocates and stamps alike after it.
+    #[cfg(feature = "roc-core")]
+    #[test]
+    fn the_rust_forest_reseeded_from_the_roc_view_holds_and_allocates_alike() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=6 {
+            system.update(WindowChange::Add(layout, w(idx), None));
+        }
+        system.update(WindowChange::Remove(w(3)));
+        let other = system.create_layout();
+        system.remove_layout(other);
+        let held = system.core.clone();
+        system.reseed_rust_from_roc();
+        assert_eq!(system.core, held);
+        system.update(WindowChange::Add(layout, w(9), None));
+        assert_eq!(system.create_layout(), {
+            let mut again = held.clone();
+            again.add_window(layout, w(9), None);
+            again.create_layout()
+        });
+    }
+
+    /// The Roc forest's cost at 10, 100 and 1000 windows (release, roc-core: `cargo test
+    /// --release --lib --features roc-core measure_traditional_roc_forest -- --ignored
+    /// --nocapture`): the Roc step, the view comparison, a Rust re-seed from the Roc view, a Roc
+    /// layout pass against the Rust forest's shape and geometry.
     #[cfg(feature = "roc-core")]
     #[test]
     #[ignore]
-    fn measure_traditional_roc_shadow() {
+    fn measure_traditional_roc_forest() {
         use std::hint::black_box;
         use std::time::Instant;
 
         use rift_core::layout::group_forest::{
             Direction as CoreDirection, Edit, Focus as CoreFocus,
         };
+
+        use crate::layout_engine::systems::group_roc::Machine as _;
         for count in [10_u32, 100, 1000] {
             let mut system = TraditionalLayoutSystem::default();
             let layout = system.create_layout();
             for idx in 1..=count {
                 system.update(WindowChange::Add(layout, w(idx), None));
             }
-            let core = system.core.clone();
-            let held = traditional_view(&core);
-            let mut shadow = RocShadow::<rift_core_roc::RocTraditional>::seeded(&held);
             let key = roc::layout_key(layout);
             let ops = 2000_u32;
             let started = Instant::now();
@@ -1136,23 +1245,47 @@ mod tests {
                     ),
                     _ => E::Forest(F::SelectedWindow(key)),
                 };
-                black_box(shadow.machine().step(event));
+                black_box(system.roc.machine().step(event));
             }
             let step_each = started.elapsed() / ops;
+            let held = system.roc.view();
             let rounds = 100;
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(shadow.machine().view() == traditional_view(&core));
+                black_box(system.roc.view() == held);
             }
             let view_each = started.elapsed() / rounds;
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(RocShadow::<rift_core_roc::RocTraditional>::seeded(&held));
+                black_box(rift_core_roc::RocTraditional::core_of(&held));
             }
             let seed_each = started.elapsed() / rounds;
+            let core = rift_core_roc::RocTraditional::core_of(&held);
+            let screen = CGRect::new(
+                objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                objc2_core_foundation::CGSize::new(1000.0, 800.0),
+            );
+            let pass = pass(
+                screen,
+                &GapSettings::default(),
+                40.0,
+                StackLineReserve::default(),
+            );
+            let constraints = HashMap::default();
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(system.roc.frames(layout, pass, &constraints));
+            }
+            let roc_pass = started.elapsed() / rounds;
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(core.forest().shape(layout, pass, &|_| None).map(|shape| shape.frames()));
+            }
+            let rust_pass = started.elapsed() / rounds;
             eprintln!(
-                "traditional roc shadow {count} windows: step {step_each:?}/op, view comparison \
-                 {view_each:?}, re-seed {seed_each:?}"
+                "traditional roc forest {count} windows: step {step_each:?}/op, view comparison \
+                 {view_each:?}, rust re-seed {seed_each:?}, pass roc {roc_pass:?} rust \
+                 {rust_pass:?}"
             );
         }
     }
