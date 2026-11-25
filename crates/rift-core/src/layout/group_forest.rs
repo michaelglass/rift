@@ -26,7 +26,7 @@ pub use super::traditional::Fill;
 use super::traditional::{self as geometry, StackLine};
 use super::{Gaps, WindowConstraints};
 use crate::plain::Rect;
-use crate::slot_table::{SlotKey, SlotTable};
+use crate::slot_table::{SlotKey, SlotSet, SlotTable};
 
 mod views;
 pub use views::{ContainerView, Held, Role};
@@ -1702,11 +1702,11 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
 
     /// What a layout pass lays out: the nodes that take part, and the node laid out from (none
     /// when it takes no part).
-    fn laid_out(&self, layout: L) -> Option<(BTreeSet<N>, N)> {
+    fn laid_out(&self, layout: L) -> Option<(SlotSet<N>, N)> {
         let node = self.root(layout);
-        let mut active = BTreeSet::new();
+        let mut active = SlotSet::default();
         for child in self.postorder(node) {
-            if self.subtree_participates(child, |n| active.contains(n)) {
+            if self.subtree_participates(child, |&n| active.contains(n)) {
                 active.insert(child);
             }
         }
@@ -1714,17 +1714,17 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
             node
         } else {
             self.regions(node)
-                .filter(|&(_, stack)| !active.contains(&stack))
+                .filter(|&(_, stack)| !active.contains(stack))
                 .map_or(node, |(master, _)| master)
         };
-        active.contains(&start).then_some((active, start))
+        active.contains(start).then_some((active, start))
     }
 
     /// The shape laid out from `start`, each stack labelled by `label`.
     fn shape_from<S>(
         &self,
         start: N,
-        active: &BTreeSet<N>,
+        active: &SlotSet<N>,
         pass: Pass,
         constraints: &impl Fn(W) -> Option<WindowConstraints>,
         label: &impl Fn(N) -> S,
@@ -1772,7 +1772,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
     fn bars_from(
         &self,
         node: N,
-        active: &BTreeSet<N>,
+        active: &SlotSet<N>,
         stacks: &BTreeMap<N, Rect>,
         bars: Bars,
         out: &mut Vec<GroupBar<N, W>>,
@@ -1786,7 +1786,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
         let Body::Container(container) = &self.nodes[node].body else {
             return;
         };
-        let taking_part = |child: N| active.contains(&child);
+        let taking_part = |child: N| active.contains(child);
         let children: Vec<N> =
             container.members.list().iter().copied().filter(|&c| taking_part(c)).collect();
         let chosen = match container.kind {
@@ -1841,7 +1841,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
     fn shape_node<S>(
         &self,
         node: N,
-        active: &BTreeSet<N>,
+        active: &SlotSet<N>,
         constraints: &impl Fn(W) -> Option<WindowConstraints>,
         label: &impl Fn(N) -> S,
     ) -> geometry::Node<W, S> {
@@ -1861,11 +1861,11 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
             node: self.shape_node(child, active, constraints, label),
         };
         let mut children: Vec<N> =
-            self.children(node).iter().copied().filter(|c| active.contains(c)).collect();
+            self.children(node).iter().copied().filter(|&c| active.contains(c)).collect();
         match kind {
             Kind::Stack(orientation) => {
                 let focused = self
-                    .participating_child(node, false, |c| active.contains(&c))
+                    .participating_child(node, false, |c| active.contains(c))
                     .expect("a participating stack has a participating child");
                 let at = children.iter().position(|&c| c == focused).expect("one of its children");
                 let after = children.split_off(at + 1);

@@ -62,6 +62,39 @@ fn free_list<V>(slots: &[Slot<V>]) -> Vec<u32> {
         .collect()
 }
 
+/// A set of one table's keys, held by slot (slotmap's `SecondaryMap` of units): adding a key and
+/// asking for one each cost a slot's lookup, where a tree set costs a search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlotSet<K> {
+    /// Each slot's version while its key is in the set.
+    held: Vec<Option<u32>>,
+    _key: std::marker::PhantomData<K>,
+}
+
+impl<K: SlotKey> Default for SlotSet<K> {
+    fn default() -> Self {
+        SlotSet {
+            held: Vec::new(),
+            _key: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<K: SlotKey> SlotSet<K> {
+    pub fn insert(&mut self, key: K) {
+        let (index, version) = parts(key);
+        if index >= self.held.len() {
+            self.held.resize(index + 1, None);
+        }
+        self.held[index] = Some(version);
+    }
+
+    pub fn contains(&self, key: K) -> bool {
+        let (index, version) = parts(key);
+        self.held.get(index) == Some(&Some(version))
+    }
+}
+
 /// Values by key, in slots. Slot 0 is slotmap's sentinel: always vacant, never handed out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotTable<K, V> {
@@ -249,5 +282,32 @@ impl<K: SlotKey, V> std::ops::Index<K> for SlotTable<K, V> {
 impl<K: SlotKey, V> std::ops::IndexMut<K> for SlotTable<K, V> {
     fn index_mut(&mut self, key: K) -> &mut V {
         self.get_mut(key).expect("invalid SlotMap key used")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Key(u32, u32);
+
+    impl SlotKey for Key {
+        fn from_parts(index: u32, version: u32) -> Self { Key(index, version) }
+
+        fn parts(self) -> (u32, u32) { (self.0, self.1) }
+    }
+
+    /// A set holds the keys added, by slot and version: a slot's other version (a key removed
+    /// and its slot reused) and slots never added are not in it.
+    #[test]
+    fn a_slot_set_holds_its_keys_by_slot_and_version() {
+        let mut set = SlotSet::default();
+        set.insert(Key(3, 1));
+        set.insert(Key(1, 5));
+        assert!(set.contains(Key(3, 1)) && set.contains(Key(1, 5)));
+        assert!(!set.contains(Key(3, 3)), "the slot under another version");
+        assert!(!set.contains(Key(2, 1)), "a lower slot never added");
+        assert!(!set.contains(Key(9, 1)), "a slot past the set's end");
     }
 }
