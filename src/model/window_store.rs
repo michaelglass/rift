@@ -34,6 +34,23 @@ pub struct PendingWindowTransfer {
     pub status: TransferStatus,
 }
 
+/// Whether the layout shows a window. Only [`WindowStore::settle_participation`]
+/// writes it: a window starts away and enters the layout when the engine admits it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Participation {
+    #[default]
+    Away,
+    Shown,
+}
+
+/// A real change in whether the layout shows a window. Repeated observations of the
+/// same state settle to no change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParticipationChange {
+    Suspended,
+    Resumed,
+}
+
 /// The complete reactor-owned state for one AX window identity.
 #[derive(Debug, Default)]
 pub struct WindowRecord {
@@ -43,6 +60,7 @@ pub struct WindowRecord {
     visibility: WindowVisibility,
     // AX invalidation retains ownership until fresh AX evidence or confirmed retirement.
     ax_invalidated: bool,
+    participation: Participation,
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
@@ -328,6 +346,28 @@ impl WindowStore {
         let assignment = self.windows.get_mut(&wid)?.workspace.take()?;
         self.remove_window_from_workspace_index(wid, assignment);
         Some(assignment)
+    }
+
+    /// The only writer of a window's participation. Reports a change only when it
+    /// actually flips, so the layout reacts once per transition, not per observation.
+    pub(crate) fn settle_participation(
+        &mut self,
+        wid: WindowId,
+        shown: bool,
+    ) -> Option<ParticipationChange> {
+        let record = self.windows.get_mut(&wid)?;
+        let (next, change) = if shown {
+            (Participation::Shown, ParticipationChange::Resumed)
+        } else {
+            (Participation::Away, ParticipationChange::Suspended)
+        };
+        (std::mem::replace(&mut record.participation, next) != next).then_some(change)
+    }
+
+    /// Whether the layout shows a window; a window the store doesn't know is away.
+    pub(crate) fn participates(&self, wid: WindowId) -> bool {
+        self.record(wid)
+            .is_some_and(|record| record.participation == Participation::Shown)
     }
 
     pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) -> bool {
@@ -1363,6 +1403,7 @@ impl WindowStore {
         };
 
         let ax_invalidated = self.windows[&from].ax_invalidated;
+        let participation = self.windows[&from].participation;
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -1379,6 +1420,7 @@ impl WindowStore {
             target.workspace = workspace;
         }
         target.ax_invalidated |= ax_invalidated;
+        target.participation = participation;
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
         target.pending_transfer = pending;
@@ -1388,6 +1430,7 @@ impl WindowStore {
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
             source.ax_invalidated = false;
+            source.participation = Participation::Away;
             source.rule_floating = false;
             source.pending_transfer = None;
             source.floating_display_geometry = None;
@@ -2176,6 +2219,31 @@ mod tests {
             user_space,
             true
         ));
+    }
+
+    #[test]
+    fn participation_reports_only_real_transitions() {
+        let mut store = WindowStore::default();
+        let wid = WindowId::new(1, 1);
+        assert_eq!(
+            store.settle_participation(wid, true),
+            None,
+            "unknown windows have none"
+        );
+        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
+        assert!(!store.participates(wid), "a window starts away");
+        assert_eq!(
+            store.settle_participation(wid, true),
+            Some(ParticipationChange::Resumed)
+        );
+        assert_eq!(store.settle_participation(wid, true), None);
+        assert!(store.participates(wid));
+        assert_eq!(
+            store.settle_participation(wid, false),
+            Some(ParticipationChange::Suspended)
+        );
+        assert_eq!(store.settle_participation(wid, false), None);
+        assert!(!store.participates(wid));
     }
 
     #[test]

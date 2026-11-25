@@ -641,7 +641,7 @@ impl LayoutEngine {
 
         for wid in window_order {
             workspace.layout_system.update(WindowChange::Add(new_layout, wid, None));
-            if window_store.is_temporarily_unavailable(wid) {
+            if !window_store.participates(wid) {
                 workspace.layout_system.set_window_participation(wid, false);
             }
         }
@@ -1456,7 +1456,7 @@ impl LayoutEngine {
         }
         // Display recovery restores topology, never historical eligibility.
         for &window in &ordered {
-            system.set_window_participation(window, !windows.is_temporarily_unavailable(window));
+            system.set_window_participation(window, windows.participates(window));
         }
         state.ensure_active(size, &mut system);
         if let Some(focused) = self.focused_window.filter(|window| desired.contains(window))
@@ -1472,16 +1472,17 @@ impl LayoutEngine {
         }
     }
 
-    fn suspend_window(&mut self, window_store: &WindowStore, wid: WindowId) -> bool {
+    fn suspend_window(&mut self, window_store: &mut WindowStore, wid: WindowId) -> bool {
+        // The store's transition decides; repeated suspensions of an away window change nothing.
+        let suspended = window_store.settle_participation(wid, false).is_some();
         if let Some(assignment) = window_store.workspace_for_window(wid)
             && let Some(workspace) = self.workspaces.workspaces.get_mut(assignment)
         {
             let projected = workspace
                 .active_layout()
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
-            let changed = (workspace.layout_system.set_window_participation(wid, false)
-                && projected)
-                || self.floating.is_active(workspace.space, wid);
+            workspace.layout_system.set_window_participation(wid, false);
+            let changed = (suspended && projected) || self.floating.is_active(workspace.space, wid);
             self.floating.remove_active_for_window(wid);
             if self.focused_window == Some(wid) {
                 self.focused_window = None;
@@ -1553,7 +1554,7 @@ impl LayoutEngine {
 
     fn add_window_to_layout(
         &mut self,
-        window_store: &WindowStore,
+        window_store: &mut WindowStore,
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
@@ -1577,7 +1578,8 @@ impl LayoutEngine {
             self.floating.remove_floating(wid);
         }
         let should_be_floating = self.floating.is_floating(wid);
-        let resumed = self.workspaces[assigned_workspace]
+        let resumed = window_store.settle_participation(wid, true).is_some();
+        self.workspaces[assigned_workspace]
             .layout_system
             .set_window_participation(wid, true);
 
@@ -3686,6 +3688,7 @@ impl LayoutEngine {
         if suspended {
             self.suspend_window(windows, window);
         } else if observed {
+            windows.settle_participation(window, true);
             self.workspaces[destination]
                 .layout_system
                 .set_window_participation(window, true);

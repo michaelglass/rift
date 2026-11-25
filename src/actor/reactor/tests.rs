@@ -13781,3 +13781,33 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+/// The layout reacts to a change in whether a window is shown, not to each observation:
+/// the store's participation transition decides, so repeats settle to nothing.
+#[test]
+fn repeated_observations_of_an_away_window_do_not_relayout() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let window = WindowId::new(1, 1);
+
+    let before = reactor.layout_calculations.len();
+    reactor.handle_event(Event::WindowMinimized(window));
+    assert_eq!(
+        reactor.layout_calculations.len() - before,
+        1,
+        "a real flip relayouts once"
+    );
+    assert!(!reactor.state.windows.participates(window));
+
+    let settled = reactor.layout_calculations.len();
+    for _ in 0..3 {
+        reactor.handle_event(Event::WindowMinimized(window));
+    }
+    assert_eq!(
+        reactor.layout_calculations.len(),
+        settled,
+        "repeats change nothing"
+    );
+}
