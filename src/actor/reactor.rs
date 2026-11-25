@@ -60,7 +60,7 @@ use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::Config;
-use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
+use crate::layout_engine::{self as layout, Away, Direction, LayoutEngine, LayoutEvent};
 use crate::model::RiftState;
 use crate::model::app_rules::{AppRuleFrame, AppRulePlacement, AppRuleResize};
 use crate::model::broadcast::{
@@ -2966,7 +2966,11 @@ impl Reactor {
             // Land at the same spot within the newly focused window that the cursor
             // held in the old one, or the display itself when the workspace is empty.
             let to = focused
-                .or_else(|| self.layout_manager.layout_engine.selected_window(space))
+                .or_else(|| {
+                    self.layout_manager
+                        .layout_engine
+                        .selected_window(space, Away::from_store(&self.state.windows))
+                })
                 .and_then(|wid| self.window_frame_on_known_screen(wid))
                 .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
             let from = self
@@ -4403,7 +4407,13 @@ impl Reactor {
     }
 
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {
-        interaction_workflow::build_drag_scene(&self.state, &self.layout_manager, source, space)
+        interaction_workflow::build_drag_scene(
+            &self.state,
+            &self.layout_manager,
+            source,
+            space,
+            Away::from_store(&self.state.windows),
+        )
     }
 
     fn resolve_drag_preview(&mut self) {
@@ -4427,6 +4437,7 @@ impl Reactor {
                         screen.frame,
                         screen.display_uuid_opt(),
                         &self.config.settings.ui.stack_line,
+                        Away::from_store(&self.state.windows),
                     )
                 });
                 let Some(result) = preview else { break None };
@@ -4997,6 +5008,7 @@ impl Reactor {
             new_frame,
             screen.frame,
             screen.display_uuid_opt(),
+            Away::from_store(&self.state.windows),
         );
         true
     }
@@ -5452,7 +5464,9 @@ impl Reactor {
                 self.refocus_manager.refocus_state = RefocusState::None;
                 (
                     space,
-                    self.layout_manager.layout_engine.selected_window(space),
+                    self.layout_manager
+                        .layout_engine
+                        .selected_window(space, Away::from_store(&self.state.windows)),
                     false,
                 )
             } else {

@@ -16,8 +16,8 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
-use crate::layout_engine::LayoutEngine;
 use crate::layout_engine::engine::GroupContainerInfo;
+use crate::layout_engine::{Away, LayoutEngine};
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::geometry::Round;
 use crate::sys::screen::SpaceId;
@@ -289,10 +289,11 @@ impl LayoutManager {
             &gaps,
             reactor.config.settings.ui.stack_line.reserve(),
         );
-        let fullscreen = reactor
-            .layout_manager
-            .layout_engine
-            .active_workspace_for_space_has_fullscreen(space);
+        let fullscreen =
+            reactor.layout_manager.layout_engine.active_workspace_for_space_has_fullscreen(
+                space,
+                Away::from_store(&reactor.state.windows),
+            );
         Self::publish_stack_tabs(reactor, tx, space, &groups, fullscreen, true);
     }
 
@@ -476,10 +477,10 @@ impl LayoutManager {
             let stack_line =
                 reactor.communication_manager.stack_line_tx.as_ref().filter(|_| tabs_enabled);
             let stack_has_fullscreen = (stack_line.is_some() || !groups.is_empty())
-                && reactor
-                    .layout_manager
-                    .layout_engine
-                    .active_workspace_for_space_has_fullscreen(space);
+                && reactor.layout_manager.layout_engine.active_workspace_for_space_has_fullscreen(
+                    space,
+                    Away::from_store(&reactor.state.windows),
+                );
             let active_workspace_for_space_has_fullscreen =
                 active_space == Some(space) && stack_has_fullscreen;
             if let Some(tx) = stack_line {

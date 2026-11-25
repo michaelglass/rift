@@ -6,6 +6,7 @@ use rift_protocol::WindowClaimFlags;
 
 use super::{Changes, LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
+use crate::layout_engine::Away;
 use crate::layout_engine::systems::{LayoutSystem, WindowChange};
 use crate::model::window_store::ClaimOwner;
 
@@ -98,7 +99,9 @@ impl Reactor {
             // at release; an ordinary return keeps its canonical slot untouched.
             for (id, current) in engine.workspaces_mut().workspaces.iter_mut() {
                 if id != workspace {
-                    current.layout_system.update(WindowChange::Remove(wid));
+                    current
+                        .layout_system
+                        .update(WindowChange::Remove(wid), Away::from_store(&self.state.windows));
                 }
             }
             // Like any external move of a floating window, the owner's geometry is authoritative.

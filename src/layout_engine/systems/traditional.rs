@@ -2,7 +2,9 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use super::groups::GroupLayouts;
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
+use super::{
+    Away, EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery,
+};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
@@ -237,6 +239,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        _away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let root = self.tiles.root(layout);
         super::tiles::project(
@@ -253,15 +256,25 @@ impl LayoutSystem for TraditionalLayoutSystem {
         )
     }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
         self.tiles.selected_window(layout)
     }
 
-    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+    fn selection_contains_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        _away: Away<'_>,
+    ) -> bool {
         self.tiles.selection_contains_window(layout, window)
     }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        _away: Away<'_>,
+    ) -> Option<WindowId> {
         self.tiles.window_in_direction(layout, direction)
     }
 
@@ -269,23 +282,27 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.tiles.contains_window(layout, wid)
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    fn has_any_fullscreen_node(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.tiles.has_any_fullscreen_node(layout)
     }
 
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.tiles.parent_of_selection_is_stacked(layout)
     }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.tiles.all_windows(layout) }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
         self.tiles.windows(layout, query)
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, _away: Away<'_>) -> FocusResult {
         self.tiles.focus(layout, focus)
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn forget_window(&mut self, window: WindowId) { self.tiles.remove_window(window); }
+
+    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
         match change {
             WindowChange::Add(layout, window, direction) => {
                 if self.tiles.contains_window(layout, window) {
@@ -341,7 +358,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, _away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move {
                 direction,
@@ -737,15 +754,19 @@ mod tests {
         let mut system = TraditionalLayoutSystem::new(WindowInsertionPoint::NextToSelection, false);
         let layout = system.create_layout();
         for window in [w(1), w(2)] {
-            system.update(WindowChange::Add(layout, window, None));
+            system.update(WindowChange::Add(layout, window, None), Away::nothing());
         }
         for amount in [-0.25, -0.9] {
             assert!(
                 system
-                    .edit(layout, LayoutEdit::Resize {
-                        amount,
-                        orientation: crate::layout_engine::ResizeOrientation::Horizontal,
-                    })
+                    .edit(
+                        layout,
+                        LayoutEdit::Resize {
+                            amount,
+                            orientation: crate::layout_engine::ResizeOrientation::Horizontal,
+                        },
+                        Away::nothing()
+                    )
                     .changed()
             );
         }
@@ -759,6 +780,7 @@ mod tests {
                     &Default::default(),
                     &Default::default(),
                     Default::default(),
+                    Away::nothing(),
                 )
                 .into_iter()
                 .map(|(window, frame)| (window, frame.size.width))
@@ -766,7 +788,7 @@ mod tests {
         };
         let before = widths(&system);
         assert_eq!(before[&w(2)], 100.);
-        system.update(WindowChange::Add(layout, w(3), None));
+        system.update(WindowChange::Add(layout, w(3), None), Away::nothing());
         let after = widths(&system);
         assert_eq!(after[&w(1)], before[&w(1)]);
         assert_eq!(after[&w(2)], 50.);
@@ -778,14 +800,18 @@ mod tests {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         for window in [w(1), w(2), w(3)] {
-            system.update(WindowChange::Add(layout, window, None));
+            system.update(WindowChange::Add(layout, window, None), Away::nothing());
         }
         assert!(
             system
-                .edit(layout, LayoutEdit::Resize {
-                    amount: 0.2,
-                    orientation: crate::layout_engine::ResizeOrientation::Horizontal,
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Resize {
+                        amount: 0.2,
+                        orientation: crate::layout_engine::ResizeOrientation::Horizontal,
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
         let frame = |system: &TraditionalLayoutSystem| {
@@ -797,6 +823,7 @@ mod tests {
                     &Default::default(),
                     &Default::default(),
                     Default::default(),
+                    Away::nothing(),
                 )
                 .into_iter()
                 .find(|(window, _)| *window == w(3))
@@ -804,10 +831,14 @@ mod tests {
                 .1
         };
         let before = frame(&system);
-        assert!(system.focus(layout, Focus::Select(w(1))).handled);
+        assert!(system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled);
         assert!(
             system
-                .edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)))
+                .edit(
+                    layout,
+                    LayoutEdit::Group(GroupEdit::Join(Direction::Right)),
+                    Away::nothing()
+                )
                 .changed()
         );
         assert_eq!(frame(&system), before);
@@ -930,6 +961,7 @@ mod tests {
                 &HashMap::default(),
                 &Default::default(),
                 reserve,
+                Away::nothing(),
             );
             for (_, frame) in frames {
                 assert_eq!(frame, expected, "{kind:?} {horiz:?} {vert:?}");

@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout_engine::Away;
 use crate::layout_engine::systems::WindowChange;
 
 /// Which saved destinations a live window may adopt.
@@ -98,7 +99,7 @@ impl LayoutEngine {
             })
             .map(|(candidate, _)| *candidate)
             .collect();
-        self.discard_saved_windows(stale);
+        self.discard_saved_windows(stale, Away::from_store(window_store));
         let Some(selected) = selected else {
             return false;
         };
@@ -107,7 +108,7 @@ impl LayoutEngine {
             self.adopt_saved_window(window_store, selected, window, saved);
             return true;
         }
-        self.discard_saved_window(selected, saved);
+        self.discard_saved_window(selected, saved, Away::from_store(window_store));
         false
     }
 
@@ -121,14 +122,16 @@ impl LayoutEngine {
         if let Some(previous) =
             window_store.workspace_for_window(live).filter(|id| *id != saved.workspace)
         {
-            self.workspaces[previous].layout_system.update(WindowChange::Remove(live));
+            self.workspaces[previous]
+                .layout_system
+                .update(WindowChange::Remove(live), Away::from_store(window_store));
             self.floating_positions.remove_workspace_window(previous, live);
         }
-        self.transfer_persistent_window_identity(old, live);
+        self.transfer_persistent_window_identity(old, live, Away::from_store(window_store));
         if let Some(frame) = saved.frame {
             self.workspaces[saved.workspace]
                 .layout_system
-                .update(WindowChange::Remove(live));
+                .update(WindowChange::Remove(live), Away::from_store(window_store));
             self.floating.add_floating(live);
             self.floating_positions.store(saved.workspace, live, frame);
         } else {
@@ -141,10 +144,15 @@ impl LayoutEngine {
                 .assign_window_to_workspace(window_store, space, live, saved.workspace);
     }
 
-    pub(super) fn discard_saved_window(&mut self, window: WindowId, saved: SavedWindow) {
+    pub(super) fn discard_saved_window(
+        &mut self,
+        window: WindowId,
+        saved: SavedWindow,
+        away: Away<'_>,
+    ) {
         let workspace = &mut self.workspaces[saved.workspace];
         if saved.frame.is_none() {
-            workspace.layout_system.update(WindowChange::Remove(window));
+            workspace.layout_system.update(WindowChange::Remove(window), away);
         }
         if workspace.last_focused() == Some(window) {
             workspace.set_last_focused(None);
@@ -154,10 +162,14 @@ impl LayoutEngine {
         }
     }
 
-    pub(super) fn discard_saved_windows(&mut self, windows: Vec<WindowId>) -> usize {
+    pub(super) fn discard_saved_windows(
+        &mut self,
+        windows: Vec<WindowId>,
+        away: Away<'_>,
+    ) -> usize {
         let count = windows.len();
         for window in windows {
-            self.forget_persisted_window(window);
+            self.forget_persisted_window(window, away);
         }
         count
     }
@@ -167,6 +179,7 @@ impl LayoutEngine {
         pid: pid_t,
         app_id: Option<&str>,
         discovered_spaces: &[SpaceId],
+        away: Away<'_>,
     ) -> usize {
         if self.persistence.awaiting_topology && !self.persistence.pending.is_empty() {
             let discovery = (pid, app_id.map(str::to_owned), discovered_spaces.to_vec());
@@ -186,7 +199,7 @@ impl LayoutEngine {
             })
             .map(|(window, _)| *window)
             .collect();
-        self.discard_saved_windows(finished)
+        self.discard_saved_windows(finished, away)
     }
 
     /// Catch up on what happened while the topology was unknown: windows assigned then, in
@@ -208,7 +221,12 @@ impl LayoutEngine {
             }
         }
         for (pid, app_id, spaces) in std::mem::take(&mut self.persistence.awaited_discoveries) {
-            self.discard_unmatched_candidates_for_app(pid, app_id.as_deref(), &spaces);
+            self.discard_unmatched_candidates_for_app(
+                pid,
+                app_id.as_deref(),
+                &spaces,
+                Away::from_store(window_store),
+            );
         }
     }
 
@@ -220,6 +238,7 @@ impl LayoutEngine {
         &mut self,
         mut window_server_identity_exists: impl FnMut(WindowId, u32) -> bool,
         mut application_identity_exists: impl FnMut(&str) -> bool,
+        away: Away<'_>,
     ) -> usize {
         let mut running: HashMap<&str, bool> = HashMap::default();
         let unmatchable = self
@@ -241,6 +260,6 @@ impl LayoutEngine {
             })
             .map(|(window, _)| *window)
             .collect();
-        self.discard_saved_windows(unmatchable)
+        self.discard_saved_windows(unmatchable, away)
     }
 }

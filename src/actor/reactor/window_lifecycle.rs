@@ -2,7 +2,7 @@ use tracing::{debug, warn};
 
 use super::{Changes, Presentation, Reactor, RefocusState, utils};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
-use crate::layout_engine::LayoutEvent;
+use crate::layout_engine::{Away, LayoutEvent};
 use crate::model::virtual_workspace::WorkspaceContext;
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
@@ -121,9 +121,11 @@ impl Reactor {
         {
             self.transaction_manager.clear_target_for_window(id);
         }
-        self.layout_manager
-            .layout_engine
-            .transfer_persistent_window_identity(old, replacement);
+        self.layout_manager.layout_engine.transfer_persistent_window_identity(
+            old,
+            replacement,
+            Away::from_store(&self.state.windows),
+        );
         self.replace_window_references(old, Some(replacement));
     }
 

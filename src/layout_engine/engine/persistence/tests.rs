@@ -164,7 +164,7 @@ fn restore_on(
 fn tree(engine: &LayoutEngine, id: VirtualWorkspaceId) -> Vec<WindowId> {
     let entry = &engine.workspaces[id];
     (entry.layout_state.all_layouts())
-        .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
+        .flat_map(|layout| entry.layout_system.all_windows(layout))
         .collect()
 }
 
@@ -260,7 +260,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
             assert!(
                 loaded.workspaces[id]
                     .layout_system
-                    .windows(layout, WindowQuery::Visible)
+                    .windows(layout, WindowQuery::Visible, Away::everything())
                     .is_empty()
             );
         }
@@ -449,17 +449,23 @@ fn checkpoint_keeps_unavailable_tile_dormant_until_readmission() {
     open(&mut engine, &mut store, workspace, ardia);
     open(&mut engine, &mut store, workspace, mail);
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1920.0, 1080.0));
-    let frames = |engine: &mut LayoutEngine| {
-        engine.calculate_layout(space, screen, &Default::default(), Default::default())
+    let frames = |engine: &mut LayoutEngine, store: &WindowStore| {
+        engine.calculate_layout(
+            space,
+            screen,
+            &Default::default(),
+            Default::default(),
+            Away::from_store(store),
+        )
     };
-    let split = frames(&mut engine);
+    let split = frames(&mut engine, &store);
     assert_eq!(split.len(), 2);
     assert!(split.iter().all(|(_, frame)| frame.size.width == 960.0));
     let checkpoint = engine.serialize_to_string(&store);
 
     store.window_mut(mail).unwrap().info.is_minimized = true;
     let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(mail));
-    assert_eq!(frames(&mut engine), [(ardia, screen)]);
+    assert_eq!(frames(&mut engine, &store), [(ardia, screen)]);
     for _ in 0..2 {
         let report = restore(
             &mut engine,
@@ -471,14 +477,14 @@ fn checkpoint_keeps_unavailable_tile_dormant_until_readmission() {
         )
         .unwrap();
         assert_eq!(report.matched, 2);
-        assert_eq!(frames(&mut engine), [(ardia, screen)]);
+        assert_eq!(frames(&mut engine, &store), [(ardia, screen)]);
         assert_eq!(tree(&engine, workspace), [ardia, mail]);
-        assert!(!engine.workspaces[workspace].layout_system.window_participates(mail));
+        assert!(!Away::from_store(&store).participates(mail));
     }
 
     store.window_mut(mail).unwrap().info.is_minimized = false;
     let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, mail));
-    assert_eq!(frames(&mut engine), split);
+    assert_eq!(frames(&mut engine, &store), split);
 }
 
 #[test]
@@ -508,10 +514,16 @@ fn startup_slots_stay_dormant_until_matched_and_admitted() {
         let displays = [(space, "display")];
         resolve(&mut engine, &mut store, &displays, &[("display", &[space])]);
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
-        let frames = |engine: &mut LayoutEngine| {
-            engine.calculate_layout(space, screen, &Default::default(), Default::default())
+        let frames = |engine: &mut LayoutEngine, store: &WindowStore| {
+            engine.calculate_layout(
+                space,
+                screen,
+                &Default::default(),
+                Default::default(),
+                Away::from_store(store),
+            )
         };
-        assert!(frames(&mut engine).is_empty(), "{mode:?}");
+        assert!(frames(&mut engine, &store).is_empty(), "{mode:?}");
 
         let mut live = live_state(saved);
         live.info.sys_id = live_state(restarted).info.sys_id;
@@ -521,19 +533,24 @@ fn startup_slots_stay_dormant_until_matched_and_admitted() {
         assert!(observe(&mut engine, &mut store, space, restarted, &fingerprint));
         let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, restarted));
         assert_eq!(tree(&engine, workspace), expected, "{mode:?}");
-        assert!(frames(&mut engine).is_empty(), "{mode:?}");
-        assert!(!engine.workspaces[workspace].layout_system.window_participates(restarted));
+        assert!(frames(&mut engine, &store).is_empty(), "{mode:?}");
+        assert!(!Away::from_store(&store).participates(restarted));
 
         assert_eq!(
-            engine.discard_unmatched_candidates_for_app(first.pid, None, &[space]),
+            engine.discard_unmatched_candidates_for_app(
+                first.pid,
+                None,
+                &[space],
+                Away::from_store(&store)
+            ),
             1
         );
         assert_eq!(tree(&engine, workspace), [restarted], "{mode:?}");
 
         store.window_mut(restarted).unwrap().info.is_minimized = false;
         let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, restarted));
-        assert!(engine.workspaces[workspace].layout_system.window_participates(restarted));
-        assert_eq!(frames(&mut engine)[0].0, restarted, "{mode:?}");
+        assert!(Away::from_store(&store).participates(restarted));
+        assert_eq!(frames(&mut engine, &store)[0].0, restarted, "{mode:?}");
     }
 }
 
@@ -551,15 +568,21 @@ fn scrolling_checkpoint_preserves_selection_and_viewport_through_readmission() {
     }
     let layout = engine.workspaces[workspace].active_layout().unwrap();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
-    let frames = |engine: &mut LayoutEngine| {
-        engine.calculate_layout(space, screen, &Default::default(), Default::default())
+    let frames = |engine: &mut LayoutEngine, store: &WindowStore| {
+        engine.calculate_layout(
+            space,
+            screen,
+            &Default::default(),
+            Default::default(),
+            Away::from_store(store),
+        )
     };
-    let _ = frames(&mut engine);
+    let _ = frames(&mut engine, &store);
     engine.workspaces[workspace]
         .layout_system
-        .focus(layout, Focus::Select(selected))
+        .focus(layout, Focus::Select(selected), Away::from_store(&store))
         .handled;
-    let expected = frames(&mut engine);
+    let expected = frames(&mut engine, &store);
     assert_ne!(expected[0].1.origin.x, screen.origin.x);
     let checkpoint = engine.serialize_to_string(&store);
 
@@ -576,7 +599,7 @@ fn scrolling_checkpoint_preserves_selection_and_viewport_through_readmission() {
         .unwrap();
         assert_eq!(tree(&engine, workspace), windows);
         if minimize_selection {
-            let visible = frames(&mut engine);
+            let visible = frames(&mut engine, &store);
             assert_eq!(
                 visible.iter().map(|&(window, _)| window).collect::<Vec<_>>(),
                 windows[..2]
@@ -587,9 +610,11 @@ fn scrolling_checkpoint_preserves_selection_and_viewport_through_readmission() {
             let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, selected));
         }
         assert_eq!(
-            engine.workspaces[workspace].layout_system.selected_window(layout),
+            engine.workspaces[workspace]
+                .layout_system
+                .selected_window(layout, Away::from_store(&store)),
             Some(selected)
         );
-        assert_eq!(frames(&mut engine), expected);
+        assert_eq!(frames(&mut engine, &store), expected);
     }
 }

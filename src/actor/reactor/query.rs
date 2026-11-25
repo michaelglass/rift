@@ -10,6 +10,7 @@ use crate::actor::app::WindowId;
 use crate::actor::menu_bar;
 use crate::actor::reactor::{Event, Reactor, Sender};
 use crate::common::collections::{HashMap, HashSet};
+use crate::layout_engine::Away;
 use crate::layout_engine::systems::LayoutSystem;
 use crate::model::server::{
     RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData, protocol_rect,
@@ -382,8 +383,12 @@ impl Reactor {
                             .is_some_and(|window| window.is_admitted())
                 });
                 let window_count = windows.len();
-                let has_fullscreen =
-                    self.layout_manager.layout_engine.workspace_has_fullscreen(space, id, &windows);
+                let has_fullscreen = self.layout_manager.layout_engine.workspace_has_fullscreen(
+                    space,
+                    id,
+                    &windows,
+                    Away::from_store(&self.state.windows),
+                );
                 let mut frames = Vec::new();
                 if show_layout && (!active_only || is_active) && !windows.is_empty() {
                     // Preserve scrolling visual order without rich per-window snapshots
@@ -567,7 +572,10 @@ impl Reactor {
                 .or_else(|| workspace.last_focused().filter(belongs))
                 .or_else(|| {
                     workspace.active_layout().and_then(|layout| {
-                        workspace.layout_system.selected_window(layout).filter(belongs)
+                        workspace
+                            .layout_system
+                            .selected_window(layout, Away::from_store(&self.state.windows))
+                            .filter(belongs)
                     })
                 })
                 .or_else(|| windows.first().map(|w| w.id));
@@ -704,7 +712,11 @@ impl Reactor {
     ) -> HashMap<WindowId, WindowLayoutPosition> {
         space_id
             .and_then(|space| self.resolve_query_workspace(space, workspace_index))
-            .and_then(|target| self.layout_manager.layout_engine.query_workspace_layout(target))
+            .and_then(|target| {
+                self.layout_manager
+                    .layout_engine
+                    .query_workspace_layout(target, Away::from_store(&self.state.windows))
+            })
             .map(|snapshot| logical_window_positions(&snapshot.container_tree))
             .unwrap_or_default()
     }
@@ -829,7 +841,10 @@ impl Reactor {
         if !self.space_state.iter_known_spaces().any(|space| space == space_id) {
             return None;
         }
-        let mut snapshot = self.layout_manager.layout_engine.query_workspace_layout(target)?;
+        let mut snapshot = self
+            .layout_manager
+            .layout_engine
+            .query_workspace_layout(target, Away::from_store(&self.state.windows))?;
         let screen = self.space_state.screen_by_space(space_id)?;
         let display_uuid = screen.display_uuid_owned();
         let gaps = self.config.settings.layout.gaps.effective_for_display(display_uuid.as_deref());
@@ -843,6 +858,7 @@ impl Reactor {
                 screen.frame,
                 &gaps,
                 self.config.settings.ui.stack_line.reserve(),
+                Away::from_store(&self.state.windows),
             );
             &calculated
         };

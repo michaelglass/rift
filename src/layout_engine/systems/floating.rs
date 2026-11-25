@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::groups::GroupLayouts;
 use super::{
-    EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
+    Away, EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
     WindowLayoutConstraints, WindowQuery,
 };
 use crate::actor::app::{WindowId, pid_t};
@@ -413,11 +413,16 @@ impl LayoutSystem for FloatingLayoutSystem {
 
     fn contains_layout(&self, layout: LayoutId) -> bool { self.groups.contains_layout(layout) }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
         self.groups.selected_window(layout)
     }
 
-    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+    fn selection_contains_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        _away: Away<'_>,
+    ) -> bool {
         self.groups.selection_contains_window(layout, window)
     }
 
@@ -425,7 +430,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         self.groups.contains_window(layout, wid)
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    fn has_any_fullscreen_node(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.groups.has_any_fullscreen_node(layout)
     }
 
@@ -434,7 +439,7 @@ impl LayoutSystem for FloatingLayoutSystem {
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId { self.groups.clone_layout(layout) }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        let windows = self.groups.windows(layout, WindowQuery::All);
+        let windows = self.groups.all_windows(layout);
         self.groups.remove_layout(layout);
         for wid in windows {
             if !self.groups.contains_any_window(wid) {
@@ -451,6 +456,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
+        _away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let count = if self.spread_on_initialization {
             self.groups.windows_with_nodes(layout).count()
@@ -480,7 +486,12 @@ impl LayoutSystem for FloatingLayoutSystem {
             .collect()
     }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        _away: Away<'_>,
+    ) -> Option<WindowId> {
         self.focus_target(layout, direction)
     }
 
@@ -488,15 +499,17 @@ impl LayoutSystem for FloatingLayoutSystem {
         self.groups.has_windows_for_app(layout, pid)
     }
 
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.groups.parent_of_selection_is_stacked(layout)
     }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.groups.all_windows(layout) }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
         self.groups.windows(layout, query)
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, _away: Away<'_>) -> FocusResult {
         match focus {
             Focus::Direction(direction) => {
                 FocusResult::movement(self.move_focus(layout, direction))
@@ -505,7 +518,9 @@ impl LayoutSystem for FloatingLayoutSystem {
         }
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn forget_window(&mut self, window: WindowId) { self.remove_window(window) }
+
+    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
@@ -530,7 +545,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, _away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move { .. } => EditResult::Unchanged,
 
@@ -714,7 +729,7 @@ mod tests {
             system.add_window_after_selection(layout, w(index));
             system.store_frame(w(index), rect(20. + (index - 1) as f64 * 250., 40.));
         }
-        system.focus(layout, Focus::Select(w(1))).handled;
+        system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         (system, layout)
     }
     fn stack(system: &mut FloatingLayoutSystem, layout: LayoutId) {
@@ -724,6 +739,7 @@ mod tests {
                 LayoutEdit::Group(GroupEdit::Stack(
                     crate::common::config::default_stack_orientation(),
                 )),
+                Away::nothing(),
             )
             .into_windows();
     }
@@ -734,7 +750,7 @@ mod tests {
         system.join_selection_with_direction(layout, Direction::Right);
         stack(&mut system, layout);
         system.set_window_participation(w(1), false);
-        assert!(system.windows(layout, WindowQuery::Visible).contains(&w(2)));
+        assert!(system.windows(layout, WindowQuery::Visible, Away::nothing()).contains(&w(2)));
 
         let moved = rect(100., 80.);
         system.store_frame(w(2), moved);
@@ -750,16 +766,22 @@ mod tests {
     fn explicit_stacks_share_geometry_and_restore_only_their_members() {
         let (mut system, layout) = fixture();
         stack(&mut system, layout);
-        assert_eq!(system.windows(layout, WindowQuery::Visible).len(), 4);
+        assert_eq!(
+            system.windows(layout, WindowQuery::Visible, Away::nothing()).len(),
+            4
+        );
         system.join_selection_with_direction(layout, Direction::Right);
         assert_ne!(system.frame(w(1)), system.frame(w(2)));
         stack(&mut system, layout);
         system.join_selection_with_direction(layout, Direction::Right);
         assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
         system.add_window_after_selection(layout, w(5));
-        system.update(WindowChange::Add(layout, w(6), None));
-        assert_eq!(system.windows(layout, WindowQuery::Visible).len(), 4);
-        system.focus(layout, Focus::Select(w(2))).handled;
+        system.update(WindowChange::Add(layout, w(6), None), Away::nothing());
+        assert_eq!(
+            system.windows(layout, WindowQuery::Visible, Away::nothing()).len(),
+            4
+        );
+        system.focus(layout, Focus::Select(w(2)), Away::nothing()).handled;
         system.store_frame(w(2), rect(100., 80.));
         system.store_frame(w(1), rect(999., 999.));
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
@@ -767,7 +789,7 @@ mod tests {
         system.unjoin_selection(layout);
         assert_eq!(system.frame(w(2)), Some(rect(270., 40.)));
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
-        system.focus(layout, Focus::Select(w(1))).handled;
+        system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         system.unstack_parent_of_selection(
             layout,
             crate::common::config::default_stack_orientation(),
@@ -780,9 +802,9 @@ mod tests {
     fn directional_focus_reaches_hidden_members_and_neighboring_windows() {
         let (mut system, layout) = fixture();
         system.join_selection_with_direction(layout, Direction::Right);
-        assert!(system.focus(layout, Focus::Ascend).handled);
+        assert!(system.focus(layout, Focus::Ascend, Away::nothing()).handled);
         stack(&mut system, layout);
-        assert_eq!(system.selected_window(layout), Some(w(1)));
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(1)));
         system.store_frame(w(3), rect(20., 400.));
         for (direction, expected) in [
             (Direction::Down, w(2)),
@@ -797,8 +819,8 @@ mod tests {
         assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(2)));
         assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(1)));
         system.unjoin_selection(layout);
-        assert_eq!(system.windows(layout, WindowQuery::All).len(), 2);
-        assert!(!system.parent_of_selection_is_stacked(layout));
+        assert_eq!(system.all_windows(layout).len(), 2);
+        assert!(!system.parent_of_selection_is_stacked(layout, Away::nothing()));
     }
 
     #[test]
@@ -806,17 +828,17 @@ mod tests {
         let (mut system, layout) = fixture();
         system.join_selection_with_direction(layout, Direction::Right);
         stack(&mut system, layout);
-        system.focus(layout, Focus::Select(w(3))).handled;
+        system.focus(layout, Focus::Select(w(3)), Away::nothing()).handled;
         system.join_selection_with_direction(layout, Direction::Right);
         stack(&mut system, layout);
-        system.focus(layout, Focus::Select(w(1))).handled;
+        system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         system.join_selection_with_direction(layout, Direction::Right);
         assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         let bytes = ron::to_string(&system).unwrap();
         let mut restored: FloatingLayoutSystem = ron::from_str(&bytes).unwrap();
         assert_eq!(restored.geometry, system.geometry);
-        restored.update(WindowChange::Replace(w(2), w(9)));
+        restored.update(WindowChange::Replace(w(2), w(9)), Away::nothing());
         assert_eq!(restored.frame(w(9)), system.frame(w(2)));
         assert_eq!(restored.geometry[&w(9)].restore, Some(rect(270., 40.)));
         let clone = restored.clone_layout(layout);

@@ -137,7 +137,7 @@ mod tests {
     use super::super::testing::{Apps, make_windows, space_state_event};
     use super::super::{Event, Quiet, Reactor, SpaceId, WindowId};
     use super::{AppState, MainWindowTracker};
-    use crate::layout_engine::LayoutEngine;
+    use crate::layout_engine::{Away, LayoutEngine};
 
     #[test]
     fn window_server_focus_supersedes_ax_focus_events() {
@@ -204,7 +204,10 @@ mod tests {
         reactor.handle_events(apps.make_app_with_opts(2, make_windows(2), None, false, true));
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(1, 1))
         );
 
@@ -220,7 +223,10 @@ mod tests {
         ));
         assert_eq!(Some(WindowId::new(2, 2)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(2, 2))
         );
         reactor.handle_event(ApplicationMainWindowChanged(
@@ -246,7 +252,10 @@ mod tests {
         ));
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(3, 1))
         );
     }
@@ -274,7 +283,10 @@ mod tests {
         reactor.handle_events(apps.make_app_with_opts(2, make_windows(2), None, false, true));
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(1, 1))
         );
 
@@ -290,13 +302,19 @@ mod tests {
         ));
         assert_eq!(Some(WindowId::new(2, 2)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(1, 1))
         );
 
         reactor.handle_event(ApplicationActivated(2, Quiet::No));
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(2, 2))
         );
 
@@ -307,7 +325,10 @@ mod tests {
         ));
         assert_eq!(Some(WindowId::new(2, 1)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(2, 2))
         );
 
@@ -315,7 +336,10 @@ mod tests {
         reactor.handle_event(ApplicationGloballyActivated(1));
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(2, 2))
         );
 
@@ -326,7 +350,10 @@ mod tests {
         ));
         assert_eq!(Some(WindowId::new(1, 2)), reactor.main_window());
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(1, 2))
         );
     }
@@ -361,7 +388,10 @@ mod tests {
 
         reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)]));
         assert_eq!(
-            reactor.layout_manager.layout_engine.selected_window(space),
+            reactor
+                .layout_manager
+                .layout_engine
+                .selected_window(space, Away::from_store(&reactor.state.windows)),
             Some(WindowId::new(3, 1))
         );
     }

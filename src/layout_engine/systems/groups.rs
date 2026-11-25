@@ -904,9 +904,12 @@ impl GroupLayouts {
         self.stacked_selection_container(layout).is_some()
     }
 
+    pub(super) fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.windows_with_nodes(layout).map(|(_, window)| window).collect()
+    }
+
     pub(super) fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
         match query {
-            WindowQuery::All => self.windows_with_nodes(layout).map(|(_, window)| window).collect(),
             WindowQuery::Visible => {
                 let root = self.root(layout);
                 self.visible_windows_under_internal(root)

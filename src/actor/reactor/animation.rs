@@ -1628,6 +1628,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
+    use crate::layout_engine::Away;
 
     fn rect(origin_x: f64, origin_y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))
@@ -1894,20 +1895,27 @@ mod tests {
             ..Default::default()
         });
         let layout = system.create_layout();
-        system.update(crate::layout_engine::systems::WindowChange::Add(
-            layout, hidden, None,
-        ));
-        system.update(crate::layout_engine::systems::WindowChange::Add(
-            layout, visible, None,
-        ));
+        system.update(
+            crate::layout_engine::systems::WindowChange::Add(layout, hidden, None),
+            Away::nothing(),
+        );
+        system.update(
+            crate::layout_engine::systems::WindowChange::Add(layout, visible, None),
+            Away::nothing(),
+        );
         system
-            .focus(layout, crate::layout_engine::systems::Focus::Select(hidden))
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(hidden),
+                Away::nothing(),
+            )
             .handled;
         system.prepare_layout(
             layout,
             rect(0.0, 0.0, 1000.0, 800.0),
             &Default::default(),
             &Default::default(),
+            Away::nothing(),
         );
         let make_camera = |system: &ScrollingLayoutSystem,
                            native: &[(WindowId, CGRect)],
@@ -1965,7 +1973,11 @@ mod tests {
             (visible, rect(1000.0, 0.0, 1000.0, 800.0)),
         ];
         system
-            .focus(layout, crate::layout_engine::systems::Focus::Select(visible))
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(visible),
+                Away::nothing(),
+            )
             .handled;
         let mut manager = AnimationManager::new();
         let camera = make_camera(&system, &native, &control);
@@ -1993,7 +2005,11 @@ mod tests {
             (visible, rect(0.0, 0.0, 1000.0, 800.0)),
         ];
         system
-            .focus(layout, crate::layout_engine::systems::Focus::Select(visible))
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(visible),
+                Away::nothing(),
+            )
             .handled;
         manager.handle_message(Message::Camera(Box::new(make_camera(
             &system, &native, &control,
@@ -2021,10 +2037,14 @@ mod tests {
             let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
             assert!(
                 system
-                    .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
-                        direction: direction,
-                        has_display_neighbor: false
-                    })
+                    .edit(
+                        layout,
+                        crate::layout_engine::systems::LayoutEdit::Move {
+                            direction: direction,
+                            has_display_neighbor: false
+                        },
+                        Away::nothing()
+                    )
                     .changed()
             );
             let (_, targets) = system.presentation(layout).unwrap();
@@ -2069,10 +2089,14 @@ mod tests {
             control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
         assert!(
             system
-                .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
-                    direction: Direction::Left,
-                    has_display_neighbor: false
-                })
+                .edit(
+                    layout,
+                    crate::layout_engine::systems::LayoutEdit::Move {
+                        direction: Direction::Left,
+                        has_display_neighbor: false
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
         let started = Instant::now();
@@ -2090,18 +2114,25 @@ mod tests {
         next.sample(Instant::now() + Duration::from_secs(2));
         system.commit_presented_viewport(layout, &next.state.lock().viewport);
         system
-            .edit(layout, crate::layout_engine::systems::LayoutEdit::Resize {
-                amount: -0.4,
-                orientation: ResizeOrientation::Horizontal,
-            })
+            .edit(
+                layout,
+                crate::layout_engine::systems::LayoutEdit::Resize {
+                    amount: -0.4,
+                    orientation: ResizeOrientation::Horizontal,
+                },
+                Away::nothing(),
+            )
             .discard();
-        system.update(crate::layout_engine::systems::WindowChange::Add(
-            layout,
-            WindowId::new(1, 3),
-            None,
-        ));
+        system.update(
+            crate::layout_engine::systems::WindowChange::Add(layout, WindowId::new(1, 3), None),
+            Away::nothing(),
+        );
         system
-            .focus(layout, crate::layout_engine::systems::Focus::Select(visible))
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(visible),
+                Away::nothing(),
+            )
             .handled;
         let before: Vec<_> =
             crate::layout_engine::systems::scrolling::tests::presented_frames(&system, layout)
@@ -2113,10 +2144,14 @@ mod tests {
         let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
         assert!(
             system
-                .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
-                    direction: Direction::Right,
-                    has_display_neighbor: false
-                })
+                .edit(
+                    layout,
+                    crate::layout_engine::systems::LayoutEdit::Move {
+                        direction: Direction::Right,
+                        has_display_neighbor: false
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
         assert_eq!(system.window_slot(layout, visible), Some(vec![1, 0]));
@@ -2140,9 +2175,10 @@ mod tests {
         // Removing a preceding column rebases an in-flight camera. Preserve
         // both its position in the new coordinates and its ongoing velocity.
         system.commit_presented_viewport(layout, &next.state.lock().viewport);
-        system.update(crate::layout_engine::systems::WindowChange::Remove(
-            WindowId::new(1, 3),
-        ));
+        system.update(
+            crate::layout_engine::systems::WindowChange::Remove(WindowId::new(1, 3)),
+            Away::nothing(),
+        );
         system.scroll_by_delta(layout, 0.1);
         let mut replacement = make_camera(&system, &before, &PresenterControl::default());
         assert!(!replacement.presentation.animated());
@@ -2176,14 +2212,16 @@ mod tests {
         };
         let mut system = ScrollingLayoutSystem::new(&Default::default());
         let layout = system.create_layout();
-        system.update(crate::layout_engine::systems::WindowChange::Add(
-            layout, wid, None,
-        ));
+        system.update(
+            crate::layout_engine::systems::WindowChange::Add(layout, wid, None),
+            Away::nothing(),
+        );
         system.prepare_layout(
             layout,
             rect(0.0, 0.0, 1000.0, 800.0),
             &Default::default(),
             &Default::default(),
+            Away::nothing(),
         );
         system.begin_viewport_gesture(layout, now);
         let store = WindowTxStore::new();
@@ -2508,6 +2546,7 @@ mod tests {
                     screens[index],
                     &gaps,
                     Default::default(),
+                    Away::from_store(&reactor.state.windows),
                 );
                 assert_eq!(layout.iter().any(|(id, _)| *id == wid), index == target);
             }

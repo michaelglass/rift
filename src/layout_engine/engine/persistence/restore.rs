@@ -1,6 +1,7 @@
 use super::matcher::MatchScope;
 use super::snapshot::PersistedLayout;
 use super::*;
+use crate::layout_engine::Away;
 
 impl PersistedLayout {
     /// The file's entry for a live Space. The disk master can still contain the previous launch's
@@ -214,7 +215,7 @@ impl LayoutEngine {
             scoped += 1;
             // A process-local id can collide with a candidate that startup left pending elsewhere.
             if let Some(previous) = self.persistence.pending.insert(window, saved) {
-                self.discard_saved_window(window, previous);
+                self.discard_saved_window(window, previous, Away::from_store(window_store));
             }
         }
 
@@ -258,7 +259,7 @@ impl LayoutEngine {
             .filter(|(_, saved)| targets.contains(&saved.workspace))
             .map(|(window, _)| *window)
             .collect();
-        self.discard_saved_windows(unmatched);
+        self.discard_saved_windows(unmatched, Away::from_store(window_store));
         report.unmatched = scoped.saturating_sub(report.matched);
         tracing::info!(path = %path.display(), ?report, "Persisted layout restore completed");
         Ok(report)

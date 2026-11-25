@@ -100,6 +100,63 @@ impl WindowLayoutConstraints {
     }
 }
 
+/// Which windows are away: they keep their slots but take no space, selection or
+/// focus. A layout system reads it from the window store each time it is called and
+/// keeps no copy, so a read can't see a stale or missing set.
+#[derive(Clone, Copy)]
+pub struct Away<'a>(AwaySource<'a>);
+
+#[derive(Clone, Copy)]
+enum AwaySource<'a> {
+    Store(&'a crate::model::window_store::WindowStore),
+    #[cfg(test)]
+    Only(&'a HashSet<WindowId>),
+    /// No saved window is live yet: every window is away.
+    Everything,
+    #[cfg(test)]
+    Nothing,
+}
+
+impl<'a> Away<'a> {
+    /// The store's participation, settled only by its transitions. A window the
+    /// store doesn't know, such as one restored from a saved layout and not yet
+    /// seen, is away.
+    pub fn from_store(windows: &'a crate::model::window_store::WindowStore) -> Self {
+        Self(AwaySource::Store(windows))
+    }
+
+    /// Before any saved window has matched a live one, at startup.
+    pub fn everything() -> Away<'static> { Away(AwaySource::Everything) }
+
+    #[cfg(test)]
+    pub fn only(windows: &'a HashSet<WindowId>) -> Self { Self(AwaySource::Only(windows)) }
+
+    #[cfg(test)]
+    pub fn nothing() -> Away<'static> { Away(AwaySource::Nothing) }
+
+    pub fn contains(self, window: WindowId) -> bool {
+        match self.0 {
+            AwaySource::Store(windows) => !windows.participates(window),
+            AwaySource::Everything => true,
+            #[cfg(test)]
+            AwaySource::Only(windows) => windows.contains(&window),
+            #[cfg(test)]
+            AwaySource::Nothing => false,
+        }
+    }
+
+    pub fn participates(self, window: WindowId) -> bool { !self.contains(window) }
+}
+
+/// Which windows a selection repair may land on.
+#[derive(Clone, Copy)]
+pub(super) enum Candidates<'a> {
+    /// Structure alone: pruning a saved layout before any of its windows is live.
+    Any,
+    /// Windows that aren't away.
+    Shown(Away<'a>),
+}
+
 /// Which nodes of one layout take part in it.
 pub(super) enum Participating {
     /// Nothing in the layout is away: every node takes part, empty placeholders included.
@@ -137,7 +194,6 @@ fn replace_participation(inactive: &mut HashSet<WindowId>, from: WindowId, to: W
 
 #[derive(Clone, Copy, Debug)]
 pub enum WindowQuery {
-    All,
     Visible,
     Selection,
     Stack(WindowId),
@@ -324,9 +380,11 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         _screen: CGRect,
         _constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         _gaps: &crate::common::config::GapSettings,
+        _away: Away<'_>,
     ) {
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -335,34 +393,50 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)>;
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;
+    fn selected_window(&self, layout: LayoutId, away: Away<'_>) -> Option<WindowId>;
 
-    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
-        self.selected_window(layout) == Some(window)
+    fn selection_contains_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        away: Away<'_>,
+    ) -> bool {
+        self.selected_window(layout, away) == Some(window)
     }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId>;
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<WindowId>;
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool;
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool;
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool;
+    fn has_any_fullscreen_node(&self, layout: LayoutId, away: Away<'_>) -> bool;
 
-    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId, _away: Away<'_>) -> bool { false }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId>;
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult;
-    fn update(&mut self, change: WindowChange<'_>);
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult;
+    /// Every window the layout holds, away or not.
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId>;
+    fn windows(&self, layout: LayoutId, query: WindowQuery, away: Away<'_>) -> Vec<WindowId>;
+    fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult;
+    fn update(&mut self, change: WindowChange<'_>, away: Away<'_>);
+    /// Drop a window from a saved layout before any window is live: structural, so
+    /// selection is repaired by structure alone.
+    fn forget_window(&mut self, window: WindowId);
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, away: Away<'_>) -> EditResult;
 
-    fn edit(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit(&mut self, layout: LayoutId, edit: LayoutEdit, away: Away<'_>) -> EditResult {
         let LayoutEdit::Drop { source, target, action } = edit else {
-            return self.edit_layout(layout, edit);
+            return self.edit_layout(layout, edit, away);
         };
-        if !self.window_participates(source) || !self.window_participates(target) {
+        if away.contains(source) || away.contains(target) {
             return EditResult::Unchanged;
         }
         let translated = match action {
@@ -373,12 +447,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
             WindowDropAction::ConsumeOrExpel(direction) => {
                 LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction))
             }
-            _ => return self.edit_layout(layout, edit),
+            _ => return self.edit_layout(layout, edit, away),
         };
-        if !self.focus(layout, Focus::Select(source)).handled {
+        if !self.focus(layout, Focus::Select(source), away).handled {
             return EditResult::Unchanged;
         }
-        self.edit_layout(layout, translated)
+        self.edit_layout(layout, translated, away)
     }
 }
 
@@ -417,7 +491,8 @@ mod tests {
     };
     use crate::actor::app::WindowId;
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
-    use crate::layout_engine::systems::{Focus, WindowChange, WindowQuery};
+    use crate::layout_engine::Away;
+    use crate::layout_engine::systems::{Focus, WindowChange};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -425,11 +500,22 @@ mod tests {
     fn common_insertion_point_controls_tree_and_linear_layouts() {
         let mut traditional = TraditionalLayoutSystem::new(WindowInsertionPoint::EndOfTree, false);
         let traditional_layout = traditional.create_layout();
-        traditional.update(WindowChange::Add(traditional_layout, w(1), None));
-        traditional.update(WindowChange::Add(traditional_layout, w(2), None));
-        traditional.focus(traditional_layout, Focus::Select(w(1))).handled;
-        traditional.update(WindowChange::Add(traditional_layout, w(3), None));
-        assert_eq!(traditional.windows(traditional_layout, WindowQuery::All), vec![
+        traditional.update(
+            WindowChange::Add(traditional_layout, w(1), None),
+            Away::nothing(),
+        );
+        traditional.update(
+            WindowChange::Add(traditional_layout, w(2), None),
+            Away::nothing(),
+        );
+        traditional
+            .focus(traditional_layout, Focus::Select(w(1)), Away::nothing())
+            .handled;
+        traditional.update(
+            WindowChange::Add(traditional_layout, w(3), None),
+            Away::nothing(),
+        );
+        assert_eq!(traditional.all_windows(traditional_layout), vec![
             w(1),
             w(2),
             w(3)
@@ -439,15 +525,11 @@ mod tests {
         scrolling_settings.base.window_insertion_point = Some(WindowInsertionPoint::EndOfTree);
         let mut scrolling = ScrollingLayoutSystem::new(&scrolling_settings);
         let scrolling_layout = scrolling.create_layout();
-        scrolling.update(WindowChange::Add(scrolling_layout, w(1), None));
-        scrolling.update(WindowChange::Add(scrolling_layout, w(2), None));
-        scrolling.focus(scrolling_layout, Focus::Select(w(1))).handled;
-        scrolling.update(WindowChange::Add(scrolling_layout, w(3), None));
-        assert_eq!(scrolling.windows(scrolling_layout, WindowQuery::All), vec![
-            w(1),
-            w(2),
-            w(3)
-        ]);
+        scrolling.update(WindowChange::Add(scrolling_layout, w(1), None), Away::nothing());
+        scrolling.update(WindowChange::Add(scrolling_layout, w(2), None), Away::nothing());
+        scrolling.focus(scrolling_layout, Focus::Select(w(1)), Away::nothing()).handled;
+        scrolling.update(WindowChange::Add(scrolling_layout, w(3), None), Away::nothing());
+        assert_eq!(scrolling.all_windows(scrolling_layout), vec![w(1), w(2), w(3)]);
     }
 
     fn window_nodes(
@@ -486,8 +568,8 @@ mod tests {
     fn normalized_container_trees_expose_layout_topology() {
         let mut traditional = TraditionalLayoutSystem::default();
         let layout = traditional.create_layout();
-        traditional.update(WindowChange::Add(layout, w(1), None));
-        traditional.update(WindowChange::Add(layout, w(2), None));
+        traditional.update(WindowChange::Add(layout, w(1), None), Away::nothing());
+        traditional.update(WindowChange::Add(layout, w(2), None), Away::nothing());
         let tree = traditional.tiles.container_tree(layout);
         assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Container);
         assert_eq!(window_nodes(&tree).len(), 2);
@@ -495,24 +577,24 @@ mod tests {
             window_nodes(&tree).iter().filter(|node| node.is_selected).count(),
             1
         );
-        traditional.focus(layout, Focus::Select(w(1))).handled;
+        traditional.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         assert_stable_unique_ids(&tree, &traditional.tiles.container_tree(layout));
 
         let mut bsp = BspLayoutSystem::default();
         let layout = bsp.create_layout();
-        bsp.update(WindowChange::Add(layout, w(1), None));
-        bsp.update(WindowChange::Add(layout, w(2), None));
+        bsp.update(WindowChange::Add(layout, w(1), None), Away::nothing());
+        bsp.update(WindowChange::Add(layout, w(2), None), Away::nothing());
         let tree = bsp.container_tree(layout);
         assert_eq!(tree.children.len(), 2);
         let total_weight: f64 = tree.children.iter().filter_map(|node| node.weight).sum();
         assert!((total_weight - 1.0).abs() < f64::EPSILON);
-        bsp.focus(layout, Focus::Select(w(1))).handled;
+        bsp.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         assert_stable_unique_ids(&tree, &bsp.container_tree(layout));
 
         let mut master_stack = MasterStackLayoutSystem::default();
         let layout = master_stack.create_layout();
-        master_stack.update(WindowChange::Add(layout, w(1), None));
-        master_stack.update(WindowChange::Add(layout, w(2), None));
+        master_stack.update(WindowChange::Add(layout, w(1), None), Away::nothing());
+        master_stack.update(WindowChange::Add(layout, w(2), None), Away::nothing());
         let tree = master_stack.container_tree(layout);
         let roles: Vec<_> = tree.children.iter().filter_map(|node| node.role.as_deref()).collect();
         assert!(roles.contains(&"master"), "{tree:#?}");
@@ -520,12 +602,12 @@ mod tests {
 
         let mut scrolling = ScrollingLayoutSystem::default();
         let layout = scrolling.create_layout();
-        scrolling.update(WindowChange::Add(layout, w(1), None));
-        scrolling.update(WindowChange::Add(layout, w(2), None));
+        scrolling.update(WindowChange::Add(layout, w(1), None), Away::nothing());
+        scrolling.update(WindowChange::Add(layout, w(2), None), Away::nothing());
         let tree = scrolling.container_tree(layout);
         assert!(tree.children.iter().all(|node| node.role.as_deref() == Some("column")));
         assert_eq!(window_nodes(&tree).len(), 2);
-        scrolling.focus(layout, Focus::Select(w(1))).handled;
+        scrolling.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
     }
 }
@@ -576,7 +658,23 @@ mod participation_tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
-    use crate::layout_engine::systems::{Focus, LayoutEdit, WindowChange, WindowQuery};
+    use crate::layout_engine::Away;
+    use crate::layout_engine::systems::{Focus, LayoutEdit, WindowChange};
+
+    /// What the engine reads from the window store: marks `window` away or back.
+    fn set_away(
+        system: &mut LayoutSystemKind,
+        away: &mut HashSet<WindowId>,
+        window: WindowId,
+        is_away: bool,
+    ) {
+        if is_away {
+            away.insert(window);
+        } else {
+            away.remove(&window);
+        }
+        system.set_window_participation(window, !is_away);
+    }
 
     #[test]
     fn suspended_members_preserve_slots_and_geometry_in_every_backend() {
@@ -602,8 +700,9 @@ mod participation_tests {
             "floating",
         ]) {
             let layout = system.create_layout();
-            let frames = |system: &mut LayoutSystemKind| {
-                system.prepare_layout(layout, screen, &constraints, &gaps);
+            let mut away = HashSet::default();
+            let frames = |system: &mut LayoutSystemKind, away: &HashSet<WindowId>| {
+                system.prepare_layout(layout, screen, &constraints, &gaps, Away::only(away));
                 system.calculate_layout(
                     layout,
                     screen,
@@ -611,29 +710,40 @@ mod participation_tests {
                     &constraints,
                     &gaps,
                     Default::default(),
+                    Away::only(away),
                 )
             };
             let windows = [1, 2, 3, 4].map(|i| WindowId::new(1, i));
             for (index, &window) in windows.iter().enumerate() {
                 if index == 2 {
-                    system.edit(layout, LayoutEdit::Split(LayoutKind::Vertical)).discard();
+                    system
+                        .edit(
+                            layout,
+                            LayoutEdit::Split(LayoutKind::Vertical),
+                            Away::only(&away),
+                        )
+                        .discard();
                 }
-                system.update(WindowChange::Add(layout, window, None));
+                system.update(WindowChange::Add(layout, window, None), Away::only(&away));
             }
-            system.focus(layout, Focus::Select(windows[1])).handled;
+            system.focus(layout, Focus::Select(windows[1]), Away::only(&away)).handled;
             system
-                .edit(layout, LayoutEdit::Resize {
-                    amount: 0.13,
-                    orientation: ResizeOrientation::Horizontal,
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Resize {
+                        amount: 0.13,
+                        orientation: ResizeOrientation::Horizontal,
+                    },
+                    Away::only(&away),
+                )
                 .discard();
-            system.focus(layout, Focus::Select(windows[0])).handled;
+            system.focus(layout, Focus::Select(windows[0]), Away::only(&away)).handled;
             let slots: Vec<_> = windows.iter().map(|&w| system.window_slot(layout, w)).collect();
-            let original = frames(system);
+            let original = frames(system, &away);
             for &window in &windows[1..] {
-                system.set_window_participation(window, false);
+                set_away(system, &mut away, window, true);
             }
-            let projected = frames(system);
+            let projected = frames(system, &away);
             assert_eq!(
                 projected.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
                 vec![windows[0]],
@@ -647,43 +757,52 @@ mod participation_tests {
                 );
             }
             for index in [2, 1, 3] {
-                system.set_window_participation(windows[index], true);
+                set_away(system, &mut away, windows[index], false);
             }
-            assert_eq!(frames(system), original, "{mode}");
+            assert_eq!(frames(system, &away), original, "{mode}");
             assert_eq!(
                 windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
                 slots
             );
 
             for &window in &windows {
-                system.set_window_participation(window, false);
+                set_away(system, &mut away, window, true);
             }
-            assert!(frames(system).is_empty());
+            assert!(frames(system, &away).is_empty());
             for &window in windows.iter().rev() {
-                system.set_window_participation(window, true);
+                set_away(system, &mut away, window, false);
             }
             assert_eq!(
                 windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
                 slots
             );
 
-            let returned = frames(system);
+            let returned = frames(system, &away);
             assert_eq!(
                 returned.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
                 original.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
                 "{mode}"
             );
 
-            system.set_window_participation(windows[1], false);
-            assert!(!system.focus(layout, Focus::Select(windows[1])).handled);
-            assert!(!system.edit(layout, LayoutEdit::Swap(windows[0], windows[1])).changed());
+            set_away(system, &mut away, windows[1], true);
+            assert!(!system.focus(layout, Focus::Select(windows[1]), Away::only(&away)).handled);
+            assert!(
+                !system
+                    .edit(
+                        layout,
+                        LayoutEdit::Swap(windows[0], windows[1]),
+                        Away::only(&away)
+                    )
+                    .changed()
+            );
             let replacement = WindowId::new(1, 20);
-            system.update(WindowChange::Replace(windows[1], replacement));
+            system.update(WindowChange::Replace(windows[1], replacement), Away::only(&away));
+            set_away(system, &mut away, windows[1], false);
+            set_away(system, &mut away, replacement, true);
             assert_eq!(system.window_slot(layout, replacement), slots[1]);
-            assert!(!system.window_participates(replacement));
-            system.update(WindowChange::Remove(windows[2]));
+            system.update(WindowChange::Remove(windows[2]), Away::only(&away));
             let inserted = WindowId::new(1, 5);
-            system.update(WindowChange::Add(layout, inserted, None));
+            system.update(WindowChange::Add(layout, inserted, None), Away::only(&away));
             assert!(
                 system.contains_window(layout, replacement),
                 "inventory must retain suspended members"
@@ -693,23 +812,24 @@ mod participation_tests {
             let mut restarted: LayoutSystemKind = ron::de::from_str(&serialized).unwrap();
             assert!(restarted.contains_window(layout, replacement));
             assert!(!restarted.contains_window(layout, windows[1]));
-            restarted.update(WindowChange::CloseApp(1));
-            assert!(restarted.windows(layout, WindowQuery::All).is_empty());
-            system.set_window_participation(replacement, true);
-            system.update(WindowChange::Remove(replacement));
+            restarted.update(WindowChange::CloseApp(1), Away::only(&away));
+            assert!(restarted.all_windows(layout).is_empty());
+            set_away(system, &mut away, replacement, false);
+            system.update(WindowChange::Remove(replacement), Away::only(&away));
             assert!(!system.contains_window(layout, replacement));
             assert!(system.contains_window(layout, inserted));
-            let retained = system.windows(layout, WindowQuery::All);
+            let retained = system.all_windows(layout);
             for &window in &retained {
-                system.set_window_participation(window, false);
+                set_away(system, &mut away, window, true);
             }
             let newcomer = WindowId::new(1, 6);
-            system.update(WindowChange::Add(layout, newcomer, None));
-            assert_eq!(frames(system).iter().map(|(w, _)| *w).collect::<Vec<_>>(), vec![
-                newcomer
-            ]);
+            system.update(WindowChange::Add(layout, newcomer, None), Away::only(&away));
+            assert_eq!(
+                frames(system, &away).iter().map(|(w, _)| *w).collect::<Vec<_>>(),
+                vec![newcomer]
+            );
             for &window in &retained {
-                system.set_window_participation(window, true);
+                set_away(system, &mut away, window, false);
                 assert!(system.contains_window(layout, window));
             }
         }

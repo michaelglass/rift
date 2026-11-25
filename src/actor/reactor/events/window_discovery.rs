@@ -4,6 +4,7 @@ use super::super::{Changes, Presentation, Reactor};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::reactor::LayoutEvent;
 use crate::common::collections::{HashMap, HashSet};
+use crate::layout_engine::Away;
 use crate::sys::screen::SpaceId;
 
 pub(crate) struct EmitLayoutPayload<'a> {
@@ -110,6 +111,7 @@ impl Reactor {
             pid,
             app_info.as_ref().and_then(|info| info.bundle_id.as_deref()),
             &active_spaces,
+            Away::from_store(&self.state.windows),
         );
         if ignored > 0 {
             debug!(

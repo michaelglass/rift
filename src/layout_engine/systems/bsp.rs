@@ -2,7 +2,9 @@ use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
 
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
+use super::{
+    Away, EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery,
+};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowInsertionPoint;
@@ -10,7 +12,9 @@ use crate::layout_engine::systems::constraints::{
     AxisConstraints, ConstraintCache, axis_slot, constrain_frame, container_axis_constraints,
     solve_axis_lengths,
 };
-use crate::layout_engine::systems::{LayoutSystem, Participating, WindowLayoutConstraints};
+use crate::layout_engine::systems::{
+    Candidates, LayoutSystem, Participating, WindowLayoutConstraints,
+};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
@@ -201,8 +205,6 @@ impl Serialize for Node {
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 #[serde(try_from = "StoredBspSystem")]
 pub struct BspLayoutSystem {
-    #[serde(skip)]
-    inactive: HashSet<WindowId>,
     layouts: SlotMap<LayoutId, LayoutState>,
     nodes: SlotMap<NodeId, Node>,
     #[serde(skip)]
@@ -528,39 +530,44 @@ impl BspLayoutSystem {
         }
     }
 
-    fn participating_window(&self, node: NodeId) -> Option<WindowId> {
-        self.participating_member(self.members(node)?)
+    fn participating_window(&self, node: NodeId, away: Away<'_>) -> Option<WindowId> {
+        self.participating_member(self.members(node)?, away)
     }
 
-    fn participating_member(&self, members: &LeafMembers) -> Option<WindowId> {
+    fn participating_member(&self, members: &LeafMembers, away: Away<'_>) -> Option<WindowId> {
         members
             .active()
-            .filter(|w| self.window_participates(*w))
-            .or_else(|| members.windows().iter().copied().find(|w| self.window_participates(*w)))
+            .filter(|w| away.participates(*w))
+            .or_else(|| members.windows().iter().copied().find(|w| away.participates(*w)))
     }
 
     /// The leaves of the layout under `root` that take part: those holding a shown
     /// window, or every leaf, placeholders included, while nothing in it is away.
-    fn participating(&self, root: NodeId) -> Participating {
-        let away = |node| {
+    fn participating(&self, root: NodeId, away: Away<'_>) -> Participating {
+        let is_away = |node| {
             self.members(node).is_some_and(|members| {
-                members.windows().iter().any(|&window| !self.window_participates(window))
+                members.windows().iter().any(|&window| away.contains(window))
             })
         };
-        if self.inactive.is_empty() || !self.preorder(root).any(away) {
+        if !self.preorder(root).any(is_away) {
             return Participating::All;
         }
         Participating::Only(
             self.preorder(root)
-                .filter(|&node| self.participating_window(node).is_some())
+                .filter(|&node| self.participating_window(node, away).is_some())
                 .collect(),
         )
     }
 
     fn root_of(&self, node: NodeId) -> NodeId { self.ancestors(node).last().unwrap_or(node) }
 
-    fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
-        let participating = self.participating(self.root_of(from_leaf));
+    fn find_neighbor_leaf(
+        &self,
+        from_leaf: NodeId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<NodeId> {
+        let participating = self.participating(self.root_of(from_leaf), away);
         let mut current = from_leaf;
         while let Some(next) = self.find_structural_neighbor_leaf(current, direction) {
             if participating.contains(next) {
@@ -622,23 +629,28 @@ impl BspLayoutSystem {
         None
     }
 
-    fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction_from(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<WindowId> {
         let Some(mut children) = self.children(node) else {
-            return self.participating_window(node);
+            return self.participating_window(node, away);
         };
         if matches!(direction, Direction::Left | Direction::Up) {
             children.swap(0, 1);
         }
         children
             .into_iter()
-            .find_map(|child| self.window_in_direction_from(child, direction))
+            .find_map(|child| self.window_in_direction_from(child, direction, away))
     }
 
-    fn smart_insert_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
-        let Some(selection) = self.selection_of_layout(layout) else {
+    fn smart_insert_window(&mut self, layout: LayoutId, window: WindowId, away: Away<'_>) -> bool {
+        let Some(selection) = self.selection_of_layout(layout, away) else {
             return false;
         };
-        let leaf = self.descend_to_leaf(selection);
+        let leaf = self.descend_to_leaf(selection, away);
         let &NodeKind::Leaf {
             preselected: Some(direction), ..
         } = self.kind(leaf)
@@ -717,12 +729,16 @@ impl BspLayoutSystem {
         })
     }
 
-    fn descend_to_leaf(&self, mut node: NodeId) -> NodeId {
-        if let Participating::Only(shown) = self.participating(self.root_of(node))
+    fn descend_to_leaf(&self, node: NodeId, away: Away<'_>) -> NodeId {
+        if let Participating::Only(shown) = self.participating(self.root_of(node), away)
             && let Some(active) = self.preorder(node).find(|candidate| shown.contains(candidate))
         {
             return active;
         }
+        self.first_leaf(node)
+    }
+
+    fn first_leaf(&self, mut node: NodeId) -> NodeId {
         while let Some(child) = self.first_child(node) {
             node = child;
         }
@@ -743,18 +759,18 @@ impl BspLayoutSystem {
             .flat_map(|members| members.windows().iter().copied())
     }
 
-    fn has_fullscreen_in_subtree(&self, node: NodeId) -> bool {
+    fn has_fullscreen_in_subtree(&self, node: NodeId, away: Away<'_>) -> bool {
         match self.kind(node) {
             NodeKind::Leaf {
                 fullscreen,
                 fullscreen_within_gaps,
                 ..
             } => {
-                self.participating_window(node).is_some()
+                self.participating_window(node, away).is_some()
                     && (*fullscreen || *fullscreen_within_gaps)
             }
             NodeKind::Split { .. } => {
-                self.child_iter(node).any(|child| self.has_fullscreen_in_subtree(child))
+                self.child_iter(node).any(|child| self.has_fullscreen_in_subtree(child, away))
             }
         }
     }
@@ -800,14 +816,15 @@ impl BspLayoutSystem {
         }
     }
 
-    fn selection_of_layout(&self, layout: LayoutId) -> Option<NodeId> {
+    fn selection_of_layout(&self, layout: LayoutId, away: Away<'_>) -> Option<NodeId> {
         let root = self.layouts.get(layout)?.root;
         let selected = self.current_selection(root);
-        if self.participating(root).contains(selected) {
+        if self.participating(root, away).contains(selected) {
             return Some(selected);
         }
-        let first_active =
-            self.preorder(root).find(|&node| self.participating_window(node).is_some())?;
+        let first_active = self
+            .preorder(root)
+            .find(|&node| self.participating_window(node, away).is_some())?;
         if self.members(selected).and_then(LeafMembers::active).is_some() {
             Some(first_active)
         } else {
@@ -819,14 +836,15 @@ impl BspLayoutSystem {
         &mut self,
         layout: crate::layout_engine::LayoutId,
         wid: WindowId,
+        away: Away<'_>,
     ) {
         let Some(state) = self.layouts.get(layout).copied() else {
             return;
         };
         let sel = self
-            .selection_of_layout(layout)
+            .selection_of_layout(layout, away)
             .unwrap_or_else(|| self.current_selection(state.root));
-        let leaf = self.descend_to_leaf(sel);
+        let leaf = self.descend_to_leaf(sel, away);
         if leaf != sel {
             self.select(leaf);
         }
@@ -849,15 +867,26 @@ impl BspLayoutSystem {
     }
 
     /// Remove an occurrence and report progress so callers can clear legacy duplicates.
-    fn remove_window_internal(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+    fn remove_window_internal(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        candidates: Candidates<'_>,
+    ) -> bool {
         let Some(node) = self.node_for_window_in_layout(layout, wid) else {
             return false;
         };
-        self.remove_member(layout, node, wid);
+        self.remove_member(layout, node, wid, candidates);
         true
     }
 
-    fn remove_member(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
+    fn remove_member(
+        &mut self,
+        layout: LayoutId,
+        node: NodeId,
+        wid: WindowId,
+        candidates: Candidates<'_>,
+    ) {
         let members = self.leaf_members_mut(node);
         members.remove(wid);
         if members.active().is_some() {
@@ -878,7 +907,10 @@ impl BspLayoutSystem {
             self.nodes.remove(node);
         }
         let selection = self.current_selection(self.layouts[layout].root);
-        let leaf = self.descend_to_leaf(selection);
+        let leaf = match candidates {
+            Candidates::Any => self.first_leaf(selection),
+            Candidates::Shown(away) => self.descend_to_leaf(selection, away),
+        };
         self.select(leaf);
     }
 
@@ -887,16 +919,17 @@ impl BspLayoutSystem {
         root: NodeId,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
+        away: Away<'_>,
     ) -> ConstraintCache {
         let mut prepared = ConstraintCache::default();
-        let participating = self.participating(root);
+        let participating = self.participating(root, away);
         for node in self.postorder(root) {
             let axes = match self.kind(node) {
                 NodeKind::Leaf { members, .. } => {
                     if !participating.contains(node) {
                         continue;
                     }
-                    let active = self.participating_member(members);
+                    let active = self.participating_member(members, away);
                     let limits = active
                         .and_then(|window| constraints.get(&window).copied())
                         .map(WindowLayoutConstraints::normalized);
@@ -938,9 +971,9 @@ impl BspLayoutSystem {
         prepared
     }
 
-    fn selection_window(&self, state: &LayoutState) -> Option<WindowId> {
+    fn selection_window(&self, state: &LayoutState, away: Away<'_>) -> Option<WindowId> {
         let sel = self.current_selection(state.root);
-        self.participating_window(sel)
+        self.participating_window(sel, away)
     }
 }
 
@@ -954,7 +987,7 @@ struct BspProjection<'a> {
 }
 
 impl BspProjection<'_> {
-    fn apply(&self, node: NodeId, slot: CGRect, out: &mut Vec<(WindowId, CGRect)>) {
+    fn apply(&self, node: NodeId, slot: CGRect, out: &mut Vec<(WindowId, CGRect)>, away: Away<'_>) {
         let Some(axes) = self.prepared.get(&node) else { return };
         match &self.system.nodes[node].kind {
             NodeKind::Leaf {
@@ -963,7 +996,7 @@ impl BspProjection<'_> {
                 fullscreen_within_gaps,
                 ..
             } => {
-                let Some(window) = self.system.participating_member(members) else {
+                let Some(window) = self.system.participating_member(members, away) else {
                     return;
                 };
                 let frame = if *fullscreen {
@@ -986,8 +1019,8 @@ impl BspProjection<'_> {
                 let (Some(first_axes), Some(second_axes)) =
                     (self.prepared.get(first), self.prepared.get(second))
                 else {
-                    self.apply(*first, slot, out);
-                    self.apply(*second, slot, out);
+                    self.apply(*first, slot, out, away);
+                    self.apply(*second, slot, out, away);
                     return;
                 };
                 let horizontal = *orientation == Orientation::Horizontal;
@@ -1009,11 +1042,17 @@ impl BspProjection<'_> {
                         }
                     });
                 let lengths = solve_axis_lengths(items, (total - gap).max(0.0));
-                self.apply(*first, axis_slot(slot, horizontal, origin, lengths[0]), out);
+                self.apply(
+                    *first,
+                    axis_slot(slot, horizontal, origin, lengths[0]),
+                    out,
+                    away,
+                );
                 self.apply(
                     *second,
                     axis_slot(slot, horizontal, origin + (lengths[0] + gap), lengths[1]),
                     out,
+                    away,
                 );
             }
         }
@@ -1032,7 +1071,7 @@ mod tests {
         let mut system = BspLayoutSystem::default();
         let layout = system.create_layout();
         for &window in windows {
-            system.add_window_after_selection(layout, w(window));
+            system.add_window_after_selection(layout, w(window), Away::nothing());
         }
         (system, layout)
     }
@@ -1051,6 +1090,7 @@ mod tests {
                 constraints,
                 &Default::default(),
                 Default::default(),
+                Away::nothing(),
             )
             .into_iter()
             .collect()
@@ -1059,28 +1099,36 @@ mod tests {
     #[test]
     fn clone_preserves_arrangement_and_selection() {
         let (mut system, original) = tiled(&[1, 2, 3, 4]);
-        system.focus(original, Focus::Select(w(1))).handled;
+        system.focus(original, Focus::Select(w(1)), Away::nothing()).handled;
         system
-            .edit(original, LayoutEdit::Resize {
-                amount: 0.2,
-                orientation: ResizeOrientation::Horizontal,
-            })
+            .edit(
+                original,
+                LayoutEdit::Resize {
+                    amount: 0.2,
+                    orientation: ResizeOrientation::Horizontal,
+                },
+                Away::nothing(),
+            )
             .discard();
         system
-            .edit(original, LayoutEdit::Resize {
-                amount: -0.1,
-                orientation: ResizeOrientation::Vertical,
-            })
+            .edit(
+                original,
+                LayoutEdit::Resize {
+                    amount: -0.1,
+                    orientation: ResizeOrientation::Vertical,
+                },
+                Away::nothing(),
+            )
             .discard();
         let size = CGSize::new(1400.0, 900.0);
         let frames = calculate_frames(&system, original, size, &Default::default());
         let cloned = system.clone_layout(original);
-        assert_eq!(system.selected_window(cloned), Some(w(1)));
+        assert_eq!(system.selected_window(cloned, Away::nothing()), Some(w(1)));
         assert_eq!(
             calculate_frames(&system, cloned, size, &Default::default()),
             frames
         );
-        system.toggle_fullscreen(original, true);
+        system.toggle_fullscreen(original, true, Away::nothing());
         let fullscreen_clone = system.clone_layout(original);
         assert_eq!(
             calculate_frames(&system, fullscreen_clone, size, &Default::default()),
@@ -1097,39 +1145,63 @@ mod tests {
     #[test]
     fn a_placeholder_ignores_windows_away_in_another_layout() {
         let (mut system, layout) = tiled(&[1, 2]);
-        system.edit(layout, LayoutEdit::Split(LayoutKind::Horizontal)).discard();
+        system
+            .edit(
+                layout,
+                LayoutEdit::Split(LayoutKind::Horizontal),
+                Away::nothing(),
+            )
+            .discard();
         let other = system.create_layout();
-        system.add_window_after_selection(other, w(9));
+        system.add_window_after_selection(other, w(9), Away::nothing());
         let size = CGSize::new(1000.0, 1000.0);
         let before = calculate_frames(&system, layout, size, &Default::default());
 
-        system.set_window_participation(w(9), false);
-
-        assert_eq!(
-            calculate_frames(&system, layout, size, &Default::default()),
-            before
-        );
+        let away = [w(9)].into_iter().collect();
+        let after: HashMap<_, _> = system
+            .calculate_layout(
+                layout,
+                CGRect::new(CGPoint::new(0.0, 0.0), size),
+                0.0,
+                &Default::default(),
+                &Default::default(),
+                Default::default(),
+                Away::only(&away),
+            )
+            .into_iter()
+            .collect();
+        assert_eq!(after, before);
     }
 
     #[test]
     fn moving_into_a_placeholder_promotes_the_old_sibling() {
         let (mut system, layout) = tiled(&[1, 2, 3]);
-        assert!(system.focus(layout, Focus::Select(w(1))).handled);
-        system.edit(layout, LayoutEdit::Split(LayoutKind::Horizontal)).discard();
-        assert!(system.focus(layout, Focus::Select(w(3))).handled);
+        assert!(system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled);
+        system
+            .edit(
+                layout,
+                LayoutEdit::Split(LayoutKind::Horizontal),
+                Away::nothing(),
+            )
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(3)), Away::nothing()).handled);
 
         assert!(
             system
-                .edit(layout, LayoutEdit::Move {
-                    direction: Direction::Left,
-                    has_display_neighbor: false,
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Move {
+                        direction: Direction::Left,
+                        has_display_neighbor: false,
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
 
         let frames =
             calculate_frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
-        assert_eq!(system.selected_window(layout), Some(w(3)));
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(3)));
         assert_eq!(frames.len(), 3);
         for (window, x, width) in [
             (w(1), 0.0, 250.0),
@@ -1150,11 +1222,15 @@ mod tests {
         let (mut system, original) = tiled(&[1, 2, 3]);
         assert!(
             system
-                .edit(original, LayoutEdit::Drop {
-                    source: w(2),
-                    target: w(1),
-                    action: Stack
-                })
+                .edit(
+                    original,
+                    LayoutEdit::Drop {
+                        source: w(2),
+                        target: w(1),
+                        action: Stack
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
         // Snapshot of the former separate topology and stack maps.
@@ -1162,43 +1238,52 @@ mod tests {
         let saved = include_str!("bsp_legacy.ron");
         system = ron::from_str(saved).unwrap();
         assert_eq!(system.container_tree(original), expected);
-        assert!(!system.edit(original, LayoutEdit::Swap(w(2), w(2))).changed());
+        assert!(!system.edit(original, LayoutEdit::Swap(w(2), w(2)), Away::nothing()).changed());
         assert_eq!(system.container_tree(original), expected);
         let cloned = system.clone_layout(original);
-        system.update(WindowChange::Replace(w(1), w(4)));
-        system.update(WindowChange::Replace(w(2), w(5)));
+        system.update(WindowChange::Replace(w(1), w(4)), Away::nothing());
+        system.update(WindowChange::Replace(w(2), w(5)), Away::nothing());
         for layout in [original, cloned] {
-            assert_eq!(system.windows(layout, WindowQuery::Stack(w(4))), vec![
-                w(4),
-                w(5)
+            assert_eq!(
+                system.windows(layout, WindowQuery::Stack(w(4)), Away::nothing()),
+                vec![w(4), w(5)]
+            );
+            assert_eq!(system.visible_windows_in_layout(layout, Away::nothing()), vec![
+                w(5),
+                w(3)
             ]);
-            assert_eq!(system.visible_windows_in_layout(layout), vec![w(5), w(3)]);
         }
-        system.remove_window(w(5));
+        system.remove_window(w(5), Candidates::Shown(Away::nothing()));
         for layout in [original, cloned] {
-            assert_eq!(system.windows(layout, WindowQuery::Stack(w(4))), vec![w(4)]);
-            assert_eq!(system.visible_windows_in_layout(layout), vec![w(4), w(3)]);
+            assert_eq!(
+                system.windows(layout, WindowQuery::Stack(w(4)), Away::nothing()),
+                vec![w(4)]
+            );
+            assert_eq!(system.visible_windows_in_layout(layout, Away::nothing()), vec![
+                w(4),
+                w(3)
+            ]);
         }
-        system.update(WindowChange::Replace(w(4), w(3)));
+        system.update(WindowChange::Replace(w(4), w(3)), Away::nothing());
         for layout in [original, cloned] {
             assert_eq!(system.all_windows_in_layout(layout), vec![w(3)]);
         }
-        system.update(WindowChange::CloseApp(1));
+        system.update(WindowChange::CloseApp(1), Away::nothing());
         for layout in [original, cloned] {
             assert!(system.all_windows_in_layout(layout).is_empty());
-            assert!(system.visible_windows_in_layout(layout).is_empty());
-            assert_eq!(system.selected_window(layout), None);
+            assert!(system.visible_windows_in_layout(layout, Away::nothing()).is_empty());
+            assert_eq!(system.selected_window(layout, Away::nothing()), None);
         }
     }
 
     #[test]
     fn closing_the_last_fullscreen_window_clears_the_tile() {
         let (mut system, layout) = tiled(&[1]);
-        system.toggle_fullscreen(layout, false);
+        system.toggle_fullscreen(layout, false, Away::nothing());
         assert!(system.container_tree(layout).is_fullscreen);
-        system.remove_window(w(1));
+        system.remove_window(w(1), Candidates::Shown(Away::nothing()));
         assert!(!system.container_tree(layout).is_fullscreen);
-        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(2), Away::nothing());
         assert!(!system.container_tree(layout).is_fullscreen);
     }
 
@@ -1209,12 +1294,15 @@ mod tests {
             layout,
             w(2),
             w(1),
-            crate::layout_engine::WindowDropAction::Stack
+            crate::layout_engine::WindowDropAction::Stack,
+            Away::nothing()
         ));
-        assert!(system.focus(layout, Focus::Select(w(3))).handled);
-        system.join_selection_with_direction(layout, Direction::Left);
+        assert!(system.focus(layout, Focus::Select(w(3)), Away::nothing()).handled);
+        system.join_selection_with_direction(layout, Direction::Left, Away::nothing());
         assert_eq!(system.all_windows_in_layout(layout), vec![w(1), w(2), w(3)]);
-        assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
+        assert_eq!(system.visible_windows_in_layout(layout, Away::nothing()), vec![
+            w(3)
+        ]);
     }
 }
 
@@ -1223,12 +1311,6 @@ impl LayoutSystem for BspLayoutSystem {
         self.layouts
             .get(layout)
             .is_some_and(|state| self.windows_under(state.root).any(|window| window.pid == pid))
-    }
-
-    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
-
-    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        super::update_participation(&mut self.inactive, window, participates)
     }
 
     fn create_layout(&mut self) -> LayoutId {
@@ -1261,11 +1343,12 @@ impl LayoutSystem for BspLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
+        away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = compute_tiling_area(screen, gaps);
-            let prepared = self.prepare_geometry(state.root, constraints, gaps);
+            let prepared = self.prepare_geometry(state.root, constraints, gaps, away);
             BspProjection {
                 system: self,
                 prepared: &prepared,
@@ -1274,7 +1357,7 @@ impl LayoutSystem for BspLayoutSystem {
                 constraints,
                 gaps,
             }
-            .apply(state.root, rect, &mut out);
+            .apply(state.root, rect, &mut out, away);
             if let (Some(ratio), [(_, frame)]) =
                 (self.single_window_aspect_ratio, out.as_mut_slice())
                 && matches!(self.kind(state.root), NodeKind::Leaf {
@@ -1297,35 +1380,41 @@ impl LayoutSystem for BspLayoutSystem {
         out
     }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.layouts.get(layout).and_then(|s| self.selection_window(s))
+    fn selected_window(&self, layout: LayoutId, away: Away<'_>) -> Option<WindowId> {
+        self.layouts.get(layout).and_then(|s| self.selection_window(s, away))
     }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> Option<WindowId> {
         self.layouts
             .get(layout)
-            .and_then(|state| self.window_in_direction_from(state.root, direction))
+            .and_then(|state| self.window_in_direction_from(state.root, direction, away))
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         self.node_for_window_in_layout(layout, wid).is_some()
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    fn has_any_fullscreen_node(&self, layout: LayoutId, away: Away<'_>) -> bool {
         if let Some(state) = self.layouts.get(layout).copied() {
-            self.has_fullscreen_in_subtree(state.root)
+            self.has_fullscreen_in_subtree(state.root, away)
         } else {
             false
         }
     }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.all_windows_in_layout(layout) }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery, away: Away<'_>) -> Vec<WindowId> {
         match query {
-            WindowQuery::All => self.all_windows_in_layout(layout),
-            WindowQuery::Visible => self.visible_windows_in_layout(layout),
+            WindowQuery::Visible => self.visible_windows_in_layout(layout, away),
             WindowQuery::Selection => self
-                .selection_of_layout(layout)
-                .and_then(|node| self.participating_window(self.descend_to_leaf(node)))
+                .selection_of_layout(layout, away)
+                .and_then(|node| self.participating_window(self.descend_to_leaf(node, away), away))
                 .into_iter()
                 .collect(),
             WindowQuery::Stack(window) => self
@@ -1336,12 +1425,12 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult {
         match focus {
             Focus::Select(window) => FocusResult::selection({
                 let wid = window;
 
-                if self.inactive.contains(&wid) {
+                if away.contains(wid) {
                     return FocusResult::selection(false);
                 }
                 let Some(node) = self.node_for_window_in_layout(layout, wid) else {
@@ -1352,10 +1441,10 @@ impl LayoutSystem for BspLayoutSystem {
                 true
             }),
             Focus::Ascend => FocusResult::selection({
-                if let Some(sel) = self.selection_of_layout(layout) {
+                if let Some(sel) = self.selection_of_layout(layout, away) {
                     let parent_opt = self.parent(sel);
                     if let Some(parent) = parent_opt {
-                        let new_sel = self.descend_to_leaf(parent);
+                        let new_sel = self.descend_to_leaf(parent, away);
                         self.select(new_sel);
                         return FocusResult::selection(true);
                     }
@@ -1363,8 +1452,8 @@ impl LayoutSystem for BspLayoutSystem {
                 false
             }),
             Focus::Descend => FocusResult::selection({
-                if let Some(sel) = self.selection_of_layout(layout) {
-                    let new_sel = self.descend_to_leaf(sel);
+                if let Some(sel) = self.selection_of_layout(layout, away) {
+                    let new_sel = self.descend_to_leaf(sel, away);
                     if new_sel != sel {
                         self.select(new_sel);
                         return FocusResult::selection(true);
@@ -1373,19 +1462,22 @@ impl LayoutSystem for BspLayoutSystem {
                 false
             }),
             Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
+                FocusResult::movement(self.move_focus(layout, direction, away))
             }
         }
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn forget_window(&mut self, window: WindowId) { self.remove_window(window, Candidates::Any) }
+
+    fn update(&mut self, change: WindowChange<'_>, away: Away<'_>) {
         match change {
-            WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
+            WindowChange::Add(layout, window, _) => {
+                self.add_window_after_selection(layout, window, away)
+            }
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                self.remove_window(window)
+                self.remove_window(window, Candidates::Shown(away))
             }
             WindowChange::Replace(from, to) => {
-                super::replace_participation(&mut self.inactive, from, to);
                 if from == to {
                     return;
                 }
@@ -1395,7 +1487,7 @@ impl LayoutSystem for BspLayoutSystem {
                         continue;
                     }
                     // A replacement may already be present after restore matching.
-                    while self.remove_window_internal(layout, to) {}
+                    while self.remove_window_internal(layout, to, Candidates::Shown(away)) {}
                 }
                 for node in self.nodes.values_mut() {
                     if let NodeKind::Leaf { members, .. } = &mut node.kind {
@@ -1408,7 +1500,6 @@ impl LayoutSystem for BspLayoutSystem {
                 }
             }
             WindowChange::CloseApp(pid) => {
-                self.inactive.retain(|window| window.pid != pid);
                 let mut windows: Vec<_> = self
                     .layouts
                     .values()
@@ -1418,7 +1509,7 @@ impl LayoutSystem for BspLayoutSystem {
                 windows.sort_unstable();
                 windows.dedup();
                 for window in windows {
-                    self.remove_window(window);
+                    self.remove_window(window, Candidates::Shown(away));
                 }
             }
             WindowChange::Resize {
@@ -1433,7 +1524,7 @@ impl LayoutSystem for BspLayoutSystem {
                 let old_frame = old;
                 let new_frame = new;
 
-                if !self.window_participates(wid) {
+                if !away.participates(wid) {
                     return;
                 }
                 if let Some(node) = self.node_for_window_in_layout(layout, wid) {
@@ -1512,49 +1603,51 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move {
                 direction,
                 has_display_neighbor: _,
-            } => EditResult::from(self.move_selection(layout, direction)),
+            } => EditResult::from(self.move_selection(layout, direction, away)),
             LayoutEdit::Split(kind) => {
                 if kind.is_stacked() {
                     return EditResult::Unsupported;
                 }
-                let Some(selection) = self.selection_of_layout(layout) else {
+                let Some(selection) = self.selection_of_layout(layout, away) else {
                     return EditResult::Unchanged;
                 };
-                let leaf = self.descend_to_leaf(selection);
+                let leaf = self.descend_to_leaf(selection, away);
                 self.split_leaf(leaf, kind.orientation(), None, false);
                 EditResult::Changed
             }
             LayoutEdit::Fullscreen { within_gaps } => {
-                EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
+                EditResult::Raise(self.toggle_fullscreen(layout, within_gaps, away))
             }
-            LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
+            LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b, away)),
             LayoutEdit::Drop { source, target, action } => {
-                EditResult::from(self.apply_target_drop(layout, source, target, action))
+                EditResult::from(self.apply_target_drop(layout, source, target, action, away))
             }
             LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                EditResult::from(self.join_selection_with_direction(layout, direction))
+                EditResult::from(self.join_selection_with_direction(layout, direction, away))
             }
             LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
                 let is_joined = self
-                    .selection_of_layout(layout)
-                    .map(|selection| self.descend_to_leaf(selection))
+                    .selection_of_layout(layout, away)
+                    .map(|selection| self.descend_to_leaf(selection, away))
                     .and_then(|leaf| self.stack(leaf))
                     .is_some_and(|members| members.len() > 1);
 
                 if is_joined {
-                    EditResult::from(self.unjoin_selection(layout))
+                    EditResult::from(self.unjoin_selection(layout, away))
                 } else {
-                    EditResult::from(self.join_selection_with_direction(layout, direction))
+                    EditResult::from(self.join_selection_with_direction(layout, direction, away))
                 }
             }
-            LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(self.unjoin_selection(layout)),
+            LayoutEdit::Group(GroupEdit::Unjoin) => {
+                EditResult::from(self.unjoin_selection(layout, away))
+            }
             LayoutEdit::Resize { amount, orientation } => {
-                let sel_snapshot = self.selection_of_layout(layout);
+                let sel_snapshot = self.selection_of_layout(layout, away);
                 let Some(mut node) = sel_snapshot else {
                     return EditResult::Unchanged;
                 };
@@ -1591,7 +1684,7 @@ impl LayoutSystem for BspLayoutSystem {
                 EditResult::Changed
             }
             LayoutEdit::ToggleOrientation => {
-                let Some(start) = self.selection_of_layout(layout) else {
+                let Some(start) = self.selection_of_layout(layout, away) else {
                     return EditResult::Unchanged;
                 };
                 let split = self.ancestors(start).find(|&node| self.children(node).is_some());
@@ -1617,22 +1710,23 @@ impl BspLayoutSystem {
         layout: LayoutId,
         window: WindowId,
         direction: Direction,
+        away: Away<'_>,
     ) -> bool {
-        self.window_participates(window)
+        away.participates(window)
             && self
                 .node_for_window_in_layout(layout, window)
-                .is_some_and(|node| self.find_neighbor_leaf(node, direction).is_some())
+                .is_some_and(|node| self.find_neighbor_leaf(node, direction, away).is_some())
     }
 
-    fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
+    fn move_selection(&mut self, layout: LayoutId, direction: Direction, away: Away<'_>) -> bool {
+        let Some(sel) = self.selection_of_layout(layout, away) else {
             return false;
         };
-        let moving = self.descend_to_leaf(sel);
+        let moving = self.descend_to_leaf(sel, away);
         if self.members(moving).and_then(LeafMembers::active).is_none() {
             return false;
         }
-        let Some(target) = self.find_neighbor_leaf(moving, direction) else {
+        let Some(target) = self.find_neighbor_leaf(moving, direction, away) else {
             return false;
         };
         let Some(old_parent) = self.parent(moving) else {
@@ -1678,12 +1772,12 @@ impl BspLayoutSystem {
             .collect()
     }
 
-    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+    fn visible_windows_in_layout(&self, layout: LayoutId, away: Away<'_>) -> Vec<WindowId> {
         self.layouts
             .get(layout)
             .into_iter()
             .flat_map(|state| self.preorder(state.root))
-            .filter_map(|node| self.participating_window(node))
+            .filter_map(|node| self.participating_window(node, away))
             .collect()
     }
 
@@ -1691,17 +1785,18 @@ impl BspLayoutSystem {
         &mut self,
         layout: LayoutId,
         direction: Direction,
+        away: Away<'_>,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let sel_snapshot = self.selection_of_layout(layout);
+        let sel_snapshot = self.selection_of_layout(layout, away);
         let Some(current_sel) = sel_snapshot else {
             return (None, vec![]);
         };
-        let current_leaf = self.descend_to_leaf(current_sel);
-        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
+        let current_leaf = self.descend_to_leaf(current_sel, away);
+        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction, away) else {
             return (None, vec![]);
         };
         self.select(next_leaf);
-        let focus = self.participating_window(next_leaf);
+        let focus = self.participating_window(next_leaf, away);
         // Tiled BSP windows never overlap, so only the focus target needs to be
         // raised. Raising every visible window makes the raise manager front
         // each app in turn (via make_key_window) before the target, which
@@ -1710,7 +1805,7 @@ impl BspLayoutSystem {
         (focus, focus.into_iter().collect())
     }
 
-    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
+    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId, away: Away<'_>) {
         if self.contains_window(layout, wid) {
             return;
         }
@@ -1721,27 +1816,26 @@ impl BspLayoutSystem {
                     leaf = right;
                 }
                 self.select(leaf);
-                self.insert_window_at_selection(layout, wid);
+                self.insert_window_at_selection(layout, wid, away);
                 return;
             }
             // Try smart insertion first (with preselection support)
-            if !self.smart_insert_window(layout, wid) {
+            if !self.smart_insert_window(layout, wid, away) {
                 // Fall back to default insertion
-                self.insert_window_at_selection(layout, wid);
+                self.insert_window_at_selection(layout, wid, away);
             }
         }
     }
 
-    fn remove_window(&mut self, wid: WindowId) {
-        self.inactive.remove(&wid);
+    fn remove_window(&mut self, wid: WindowId, candidates: Candidates<'_>) {
         let layouts: Vec<_> = self.layouts.keys().collect();
         for layout in layouts {
-            while self.remove_window_internal(layout, wid) {}
+            while self.remove_window_internal(layout, wid, candidates) {}
         }
     }
 
-    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        if a == b || !self.window_participates(a) || !self.window_participates(b) {
+    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId, away: Away<'_>) -> bool {
+        if a == b || !away.participates(a) || !away.participates(b) {
             return false;
         }
         let Some(node_a) = self.node_for_window_in_layout(layout, a) else {
@@ -1777,8 +1871,9 @@ impl BspLayoutSystem {
         source: WindowId,
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
+        away: Away<'_>,
     ) -> bool {
-        if !self.window_participates(source) || !self.window_participates(target) {
+        if !away.participates(source) || !away.participates(target) {
             return false;
         }
         if source == target
@@ -1789,12 +1884,12 @@ impl BspLayoutSystem {
         }
         use crate::layout_engine::WindowDropAction::*;
         match action {
-            Swap => return self.swap_windows(layout, source, target),
+            Swap => return self.swap_windows(layout, source, target, away),
             Move(_) | ConsumeOrExpel(_) => return false,
             Stack | Insert(_) => {}
         }
 
-        while self.remove_window_internal(layout, source) {}
+        while self.remove_window_internal(layout, source, Candidates::Shown(away)) {}
         // Removal can promote the target into a different arena slot.
         let target_node = self
             .node_for_window_in_layout(layout, target)
@@ -1822,12 +1917,17 @@ impl BspLayoutSystem {
         }
     }
 
-    fn toggle_fullscreen(&mut self, layout: LayoutId, within_gaps: bool) -> Vec<WindowId> {
-        let Some(selection) = self.selection_of_layout(layout) else {
+    fn toggle_fullscreen(
+        &mut self,
+        layout: LayoutId,
+        within_gaps: bool,
+        away: Away<'_>,
+    ) -> Vec<WindowId> {
+        let Some(selection) = self.selection_of_layout(layout, away) else {
             return Vec::new();
         };
-        let leaf = self.descend_to_leaf(selection);
-        let active = self.participating_window(leaf);
+        let leaf = self.descend_to_leaf(selection, away);
+        let active = self.participating_window(leaf, away);
         let NodeKind::Leaf {
             members,
             fullscreen,
@@ -1844,26 +1944,32 @@ impl BspLayoutSystem {
         active.into_iter().collect()
     }
 
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
+    fn join_selection_with_direction(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> bool {
+        let Some(sel) = self.selection_of_layout(layout, away) else {
             return false;
         };
-        let sel_leaf = self.descend_to_leaf(sel);
+        let sel_leaf = self.descend_to_leaf(sel, away);
 
-        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
+        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction, away) else {
             return false;
         };
 
         if self.stack(neighbor).is_some()
             && self.stack(sel_leaf).is_none()
-            && let Some(source) = self.participating_window(sel_leaf)
-            && let Some(target) = self.participating_window(neighbor)
+            && let Some(source) = self.participating_window(sel_leaf, away)
+            && let Some(target) = self.participating_window(neighbor, away)
         {
             return self.apply_target_drop(
                 layout,
                 source,
                 target,
                 crate::layout_engine::WindowDropAction::Stack,
+                away,
             );
         }
 
@@ -1874,7 +1980,7 @@ impl BspLayoutSystem {
                     let mut windows: Vec<_> = self.windows_under(parent).collect();
 
                     // The last member is the visible one, so keep the selected window there.
-                    let selected = self.selected_window(layout);
+                    let selected = self.selected_window(layout, away);
 
                     if let Some(index) = windows.iter().position(|window| Some(*window) == selected)
                     {
@@ -1898,12 +2004,12 @@ impl BspLayoutSystem {
         false
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) -> bool {
-        let Some(sel) = self.selection_of_layout(layout) else {
+    fn unjoin_selection(&mut self, layout: LayoutId, away: Away<'_>) -> bool {
+        let Some(sel) = self.selection_of_layout(layout, away) else {
             return false;
         };
 
-        let leaf = self.descend_to_leaf(sel);
+        let leaf = self.descend_to_leaf(sel, away);
         let NodeKind::Leaf {
             members,
             fullscreen,
@@ -1921,11 +2027,11 @@ impl BspLayoutSystem {
         self.select(leaf);
 
         for member in windows {
-            self.insert_window_at_selection(layout, member);
+            self.insert_window_at_selection(layout, member, away);
         }
 
         // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
-        if let Some(visible) = self.selection_of_layout(layout)
+        if let Some(visible) = self.selection_of_layout(layout, away)
             && let NodeKind::Leaf {
                 fullscreen,
                 fullscreen_within_gaps,

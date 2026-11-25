@@ -348,6 +348,7 @@ mod tests {
 
     use super::*;
     use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId};
+    use crate::layout_engine::Away;
     use crate::sys::geometry::SameAs;
 
     impl Reactor {
@@ -438,6 +439,7 @@ mod tests {
                 crate::layout_engine::systems::Focus::Select(crate::actor::app::WindowId::new(
                     1, 1,
                 )),
+                Away::nothing(),
             )
             .handled;
         system.prepare_layout(
@@ -445,6 +447,7 @@ mod tests {
             CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),
             &Default::default(),
             &Default::default(),
+            Away::nothing(),
         );
         let mut cfg = Config::default();
         cfg.settings.layout.scrolling.gestures.enabled = true;
@@ -752,7 +755,7 @@ mod tests {
             .unwrap();
         let initial = r.layout_manager.layout_engine.workspaces()[workspace]
             .layout_system
-            .selected_window(layout);
+            .selected_window(layout, Away::nothing());
         for (total, time) in [(4.0, 10), (9.0, 20), (15.0, 30)] {
             m.publish(sample(1, total, time));
         }
@@ -761,7 +764,7 @@ mod tests {
         assert_eq!(
             r.layout_manager.layout_engine.workspaces()[workspace]
                 .layout_system
-                .selected_window(layout),
+                .selected_window(layout, Away::nothing()),
             initial
         );
         m.publish(sample(99, 9000.0, 40));
@@ -774,7 +777,7 @@ mod tests {
         assert!(r.viewport_gesture.is_none());
         let selected = r.layout_manager.layout_engine.workspaces()[workspace]
             .layout_system
-            .selected_window(layout);
+            .selected_window(layout, Away::nothing());
         assert_ne!(selected, initial);
         r.gesture_event(Lifecycle::End {
             sample: sample(1, 5000.0, 60),
@@ -783,7 +786,7 @@ mod tests {
         assert_eq!(
             r.layout_manager.layout_engine.workspaces()[workspace]
                 .layout_system
-                .selected_window(layout),
+                .selected_window(layout, Away::nothing()),
             selected
         );
     }

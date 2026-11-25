@@ -2,6 +2,7 @@ use tracing::trace;
 
 use super::super::{Changes, Presentation, Reactor};
 use crate::actor::reactor::managers::LayoutManager;
+use crate::layout_engine::Away;
 use crate::model::RiftState;
 use crate::sys::screen::SpaceId;
 
@@ -10,13 +11,14 @@ pub fn build_drag_scene(
     layout: &LayoutManager,
     source: crate::actor::app::WindowId,
     space: SpaceId,
+    away: Away<'_>,
 ) -> crate::actor::drag::DragScene {
     crate::actor::drag::DragScene {
         action_override: layout.layout_engine.drop_action_override(space),
-        source_neighbors: layout.layout_engine.source_move_neighbors(space, source),
+        source_neighbors: layout.layout_engine.source_move_neighbors(space, source, away),
         targets: layout
             .layout_engine
-            .drop_scene_windows(space, source)
+            .drop_scene_windows(space, source, away)
             .into_iter()
             .filter(|window| *window != source)
             .filter_map(|window| {
@@ -130,6 +132,7 @@ impl Reactor {
                         space,
                         action: target.intent.action,
                     },
+                    Away::from_store(&self.state.windows),
                 ) {
                     changes.space(space).layout_changed = true;
                     changes.drop_haptic = self.drag_manager.haptics_enabled;

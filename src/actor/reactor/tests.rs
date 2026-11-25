@@ -3542,9 +3542,10 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     // logically unavailable windows instead of manufacturing this ghost.
     let engine = &mut reactor.layout_manager.layout_engine;
     let layout = engine.workspaces().active_layout(user_space, active_workspace).unwrap();
-    engine.workspaces_mut()[active_workspace]
-        .layout_system
-        .update(WindowChange::Add(layout, duplicate_wid, None));
+    engine.workspaces_mut()[active_workspace].layout_system.update(
+        WindowChange::Add(layout, duplicate_wid, None),
+        Away::from_store(&reactor.state.windows),
+    );
     assert!(has_window_in_layout(
         &mut reactor,
         user_space,
@@ -5796,7 +5797,13 @@ fn title_change_reapply_does_not_rebalance_unchanged_layout() {
 
     make_active_app_with_count(&mut apps, &mut reactor, 1, 3, Some(WindowId::new(1, 1)));
 
-    assert!(reactor.layout_manager.layout_engine.selected_window(space).is_some());
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .selected_window(space, Away::from_store(&reactor.state.windows))
+            .is_some()
+    );
     reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -5821,7 +5828,13 @@ fn title_change_reapply_does_not_rebalance_when_window_stays_floating() {
 
     make_active_app_with_count(&mut apps, &mut reactor, 1, 3, Some(WindowId::new(1, 1)));
 
-    assert!(reactor.layout_manager.layout_engine.selected_window(space).is_some());
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .selected_window(space, Away::from_store(&reactor.state.windows))
+            .is_some()
+    );
     reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -6824,10 +6837,13 @@ fn has_window_in_layout(
 
 fn test_layout(reactor: &mut Reactor, space: SpaceId, screen: CGRect) -> Vec<(WindowId, CGRect)> {
     let gaps = reactor.config.settings.layout.gaps.clone();
-    reactor
-        .layout_manager
-        .layout_engine
-        .calculate_layout(space, screen, &gaps, Default::default())
+    reactor.layout_manager.layout_engine.calculate_layout(
+        space,
+        screen,
+        &gaps,
+        Default::default(),
+        Away::from_store(&reactor.state.windows),
+    )
 }
 
 fn make_active_app(
@@ -10428,7 +10444,10 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
                     _ => Direction::Down,
                 }));
                 apps.simulate_until_quiet(&mut reactor);
-                survivor_focus = reactor.layout_manager.layout_engine.selected_window(origin);
+                survivor_focus = reactor
+                    .layout_manager
+                    .layout_engine
+                    .selected_window(origin, Away::from_store(&reactor.state.windows));
                 assert_eq!(
                     survivor_focus,
                     Some(windows[1]),
@@ -10463,7 +10482,10 @@ fn authoritative_display_membership_round_trip_preserves_ordered_stack() {
         let tree = active_container_tree(&reactor, origin);
         if case == "survivor focus" {
             assert_eq!(
-                reactor.layout_manager.layout_engine.selected_window(origin),
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .selected_window(origin, Away::from_store(&reactor.state.windows)),
                 survivor_focus,
                 "real returns must preserve the user's surviving selection"
             );

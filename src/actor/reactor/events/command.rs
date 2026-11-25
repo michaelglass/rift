@@ -3,7 +3,7 @@ use tracing::{info, warn};
 use super::super::*;
 use crate::actor::wm_controller::{WmCmd, WmCommand};
 use crate::common::config::LayoutMode;
-use crate::layout_engine::LayoutCommand;
+use crate::layout_engine::{Away, LayoutCommand};
 use crate::model::space_activation::ToggleSpaceContext;
 
 impl Reactor {
@@ -175,7 +175,11 @@ impl Reactor {
             if let Some(space) = focus_space.or(edit_space)
                 && response.changed
             {
-                if self.layout_manager.layout_engine.focus_changes_geometry(space) {
+                if self
+                    .layout_manager
+                    .layout_engine
+                    .focus_changes_geometry(space, Away::from_store(&self.state.windows))
+                {
                     changes.arrange(Some(space), Presentation::Animated).layout_changed = true;
                 } else {
                     changes.space(space).tabs_changed = true;

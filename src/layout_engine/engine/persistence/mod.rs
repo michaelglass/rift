@@ -12,7 +12,7 @@ use super::{FloatingManager, LayoutEngine};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings, WorkspaceMode};
-use crate::layout_engine::LayoutSystem;
+use crate::layout_engine::{Away, LayoutSystem};
 use crate::model::reactor::WindowState;
 use crate::model::{
     AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WindowStore, WorkspaceStore,
@@ -169,9 +169,9 @@ impl LayoutEngine {
         self.reconcile_saved_window(window_store, window, &live, matcher::MatchScope::Space(space))
     }
 
-    pub(super) fn forget_persisted_window(&mut self, window: WindowId) {
+    pub(super) fn forget_persisted_window(&mut self, window: WindowId, away: Away<'_>) {
         if let Some(saved) = self.persistence.pending.remove(&window) {
-            self.discard_saved_window(window, saved);
+            self.discard_saved_window(window, saved, away);
         }
     }
 

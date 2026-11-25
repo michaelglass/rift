@@ -3,7 +3,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use super::groups::GroupLayouts;
-use super::{EditResult, Focus, FocusResult, LayoutEdit, WindowChange, WindowQuery};
+use super::{Away, EditResult, Focus, FocusResult, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::WindowId;
 use crate::common::config::{
     MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide, WindowInsertionPoint,
@@ -449,11 +449,16 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn contains_layout(&self, layout: LayoutId) -> bool { self.tiles.contains_layout(layout) }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
         self.tiles.selected_window(layout)
     }
 
-    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+    fn selection_contains_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        _away: Away<'_>,
+    ) -> bool {
         self.tiles.selection_contains_window(layout, window)
     }
 
@@ -461,13 +466,18 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.tiles.contains_window(layout, wid)
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    fn has_any_fullscreen_node(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.tiles.has_any_fullscreen_node(layout)
     }
 
     fn remove_layout(&mut self, layout: LayoutId) { self.tiles.remove_layout(layout); }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        _away: Away<'_>,
+    ) -> Option<WindowId> {
         self.tiles.window_in_direction(layout, direction)
     }
 
@@ -490,6 +500,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        _away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let (root, master, stack) = self.region_roots(layout);
         super::tiles::project(
@@ -506,19 +517,27 @@ impl LayoutSystem for MasterStackLayoutSystem {
         )
     }
 
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.tiles.parent_of_selection_is_stacked(layout)
     }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.tiles.all_windows(layout) }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
         self.tiles.windows(layout, query)
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, _away: Away<'_>) -> FocusResult {
         self.tiles.focus(layout, focus)
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn forget_window(&mut self, window: WindowId) {
+        for info in self.tiles.remove_window(window) {
+            self.distribute_regions(info.layout);
+        }
+    }
+
+    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
@@ -560,7 +579,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, _away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move {
                 direction,
@@ -730,19 +749,27 @@ mod tests {
         }
         assert!(
             system
-                .edit(layout, LayoutEdit::Drop {
-                    source: w(3),
-                    target: w(2),
-                    action: WindowDropAction::Stack
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Drop {
+                        source: w(3),
+                        target: w(2),
+                        action: WindowDropAction::Stack
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
-        system.focus(layout, Focus::Select(w(1))).handled;
+        system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled;
         system
-            .edit(layout, LayoutEdit::Resize {
-                amount: 0.1,
-                orientation: ResizeOrientation::Horizontal,
-            })
+            .edit(
+                layout,
+                LayoutEdit::Resize {
+                    amount: 0.1,
+                    orientation: ResizeOrientation::Horizontal,
+                },
+                Away::nothing(),
+            )
             .discard();
         let before = system.container_tree(layout);
         let master_weight = before.children[0].weight;
@@ -769,8 +796,8 @@ mod tests {
         assert_eq!(after.children[1].weight, master_weight);
         assert!(after.children[1].children[0].is_selected);
         assert_eq!(after.children[0].children[0].node_id, group);
-        system.update(WindowChange::Remove(w(3)));
-        system.update(WindowChange::Remove(w(2)));
+        system.update(WindowChange::Remove(w(3)), Away::nothing());
+        system.update(WindowChange::Remove(w(2)), Away::nothing());
         let after = system.container_tree(layout);
         assert_eq!(after.children[0].node_id, stack);
         assert_eq!(after.children[1].node_id, master);
@@ -805,17 +832,23 @@ mod tests {
         let mut system = MasterStackLayoutSystem::default();
         let layout = system.create_layout();
         for window in [w(1), w(2), w(3), w(4)] {
-            system.update(WindowChange::Add(layout, window, None));
+            system.update(WindowChange::Add(layout, window, None), Away::nothing());
         }
         for (source, action) in [
             (w(3), WindowDropAction::Stack),
             (w(4), WindowDropAction::Insert(Direction::Right)),
         ] {
             assert!(
-                system.edit(layout, LayoutEdit::Drop { source, target: w(2), action }).changed()
+                system
+                    .edit(
+                        layout,
+                        LayoutEdit::Drop { source, target: w(2), action },
+                        Away::nothing()
+                    )
+                    .changed()
             );
         }
-        system.focus(layout, Focus::Select(w(2))).handled;
+        system.focus(layout, Focus::Select(w(2)), Away::nothing()).handled;
         let before = system.container_tree(layout);
         let group = &before.children[1].children[0];
         assert!(group.children.iter().any(|child| child.children.len() == 2));
@@ -832,7 +865,7 @@ mod tests {
             .find(|child| child.node_id == group.node_id)
             .expect("the complete group moved into the master region");
         assert_eq!(moved.children, group.children);
-        assert_eq!(system.selected_window(layout), Some(w(2)));
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(2)));
     }
 
     #[test]
@@ -846,16 +879,20 @@ mod tests {
         let mut system = MasterStackLayoutSystem::new(settings);
         let layout = system.create_layout();
         for index in 1..=5 {
-            system.update(WindowChange::Add(layout, w(index), None));
+            system.update(WindowChange::Add(layout, w(index), None), Away::nothing());
         }
         for source in [w(2), w(1)] {
             assert!(
                 system
-                    .edit(layout, LayoutEdit::Drop {
-                        source,
-                        target: w(3),
-                        action: WindowDropAction::Stack,
-                    })
+                    .edit(
+                        layout,
+                        LayoutEdit::Drop {
+                            source,
+                            target: w(3),
+                            action: WindowDropAction::Stack,
+                        },
+                        Away::nothing()
+                    )
                     .changed()
             );
         }
@@ -865,14 +902,14 @@ mod tests {
         };
         assert_eq!(group.children.len(), 3);
 
-        assert!(system.focus(layout, Focus::Select(w(4))).handled);
+        assert!(system.focus(layout, Focus::Select(w(4)), Away::nothing()).handled);
         system.promote_to_master(layout);
 
         let in_master =
             |window| system.tiles.window_slot(layout, window).unwrap().first() == Some(&0);
         assert_eq!((1..=5).map(w).filter(|&window| in_master(window)).count(), 3);
         assert_eq!(system.tiles.window_slot(layout, w(4)), Some(vec![0, 0]));
-        assert_eq!(system.selected_window(layout), Some(w(4)));
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(4)));
         let after = system.container_tree(layout);
         assert_eq!(after.children[0].children[1].node_id, group.node_id);
         assert_eq!(after.children[0].children[1].children.len(), 2);
@@ -893,18 +930,22 @@ mod tests {
             let mut system = MasterStackLayoutSystem::new(settings);
             let layout = system.create_layout();
             for window in [w(1), w(2), w(3)] {
-                system.update(WindowChange::Add(layout, window, None));
+                system.update(WindowChange::Add(layout, window, None), Away::nothing());
             }
-            assert!(system.focus(layout, Focus::Select(w(1))).handled);
+            assert!(system.focus(layout, Focus::Select(w(1)), Away::nothing()).handled);
             let target_slot = system.tiles.window_slot(layout, target);
             let edge_slot = system.tiles.window_slot(layout, edge);
             system.set_window_participation(edge, false);
             assert!(
                 system
-                    .edit(layout, LayoutEdit::Move {
-                        direction,
-                        has_display_neighbor: false
-                    })
+                    .edit(
+                        layout,
+                        LayoutEdit::Move {
+                            direction,
+                            has_display_neighbor: false
+                        },
+                        Away::nothing()
+                    )
                     .changed(),
                 "{master_side:?}"
             );
@@ -919,29 +960,37 @@ mod tests {
         let mut system = MasterStackLayoutSystem::default();
         let layout = system.create_layout();
         for window in [w(1), w(2), w(3)] {
-            system.update(WindowChange::Add(layout, window, None));
+            system.update(WindowChange::Add(layout, window, None), Away::nothing());
         }
         assert!(
             system
-                .edit(layout, LayoutEdit::Drop {
-                    source: w(2),
-                    target: w(3),
-                    action: WindowDropAction::Stack,
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Drop {
+                        source: w(2),
+                        target: w(3),
+                        action: WindowDropAction::Stack,
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
         assert!(
             system
-                .edit(layout, LayoutEdit::Move {
-                    direction: Direction::Up,
-                    has_display_neighbor: false,
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Move {
+                        direction: Direction::Up,
+                        has_display_neighbor: false,
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
-        assert_eq!(system.windows(layout, WindowQuery::Stack(w(2))), vec![
-            w(2),
-            w(3)
-        ]);
-        assert_eq!(system.selected_window(layout), Some(w(2)));
+        assert_eq!(
+            system.windows(layout, WindowQuery::Stack(w(2)), Away::nothing()),
+            vec![w(2), w(3)]
+        );
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(2)));
     }
 }

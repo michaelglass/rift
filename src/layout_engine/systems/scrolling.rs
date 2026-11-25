@@ -9,7 +9,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
+use super::{
+    Away, EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery,
+};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
@@ -1920,6 +1922,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         screen: CGRect,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
+        _away: Away<'_>,
     ) {
         self.prepare(layout, screen, constraints, None, gaps);
     }
@@ -1932,15 +1935,21 @@ impl LayoutSystem for ScrollingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
+        _away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         self.calculate_frames(layout, screen, constraints, None, gaps, true)
     }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
         self.layouts.get(layout)?.arrangement.selected(&self.inactive)
     }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        _away: Away<'_>,
+    ) -> Option<WindowId> {
         let state = self.layouts.get(layout)?;
         let (col, row) = state.arrangement.selected_location(&self.inactive)?;
         let selected = |column: &Column| {
@@ -1972,51 +1981,63 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .is_some_and(|state| state.arrangement.locate(wid).is_some())
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    fn has_any_fullscreen_node(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.layouts
             .get(layout)
             .is_some_and(|s| s.arrangement.fullscreen.keys().any(|w| !self.inactive.contains(w)))
     }
 
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId, _away: Away<'_>) -> bool {
         self.layouts
             .get(layout)
             .and_then(|s| s.arrangement.columns.get(s.arrangement.active_column))
             .is_some_and(|c| c.rows.len() > 1)
     }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.layouts
+            .get(layout)
+            .into_iter()
+            .flat_map(|state| state.arrangement.windows())
+            .collect()
+    }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
         match query {
-            WindowQuery::All | WindowQuery::Visible => self
+            WindowQuery::Visible => self
                 .layouts
                 .get(layout)
                 .into_iter()
                 .flat_map(|state| state.arrangement.windows())
-                .filter(|&window| {
-                    matches!(query, WindowQuery::All) || self.window_participates(window)
-                })
+                .filter(|&window| self.window_participates(window))
                 .collect(),
             WindowQuery::Selection => self.visible_windows_under_selection(layout),
             WindowQuery::Stack(_) => Vec::new(),
         }
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult {
         match focus {
             Focus::Select(window) => FocusResult::selection(self.select_window(layout, window)),
             Focus::Ascend => {
-                FocusResult::selection({ self.move_focus(layout, Direction::Up).0.is_some() })
+                FocusResult::selection({ self.move_focus(layout, Direction::Up, away).0.is_some() })
             }
-            Focus::Descend => {
-                FocusResult::selection({ self.move_focus(layout, Direction::Down).0.is_some() })
-            }
+            Focus::Descend => FocusResult::selection({
+                self.move_focus(layout, Direction::Down, away).0.is_some()
+            }),
             Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
+                FocusResult::movement(self.move_focus(layout, direction, away))
             }
         }
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn forget_window(&mut self, window: WindowId) {
+        for state in self.layouts.values_mut() {
+            Self::remove_from_state(state, &self.settings, window, &HashSet::default());
+        }
+    }
+
+    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
         match change {
             WindowChange::Add(layout, window, _) => self.insert(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
@@ -2114,7 +2135,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move {
                 direction,
@@ -2128,16 +2149,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 EditResult::from(self.apply_target_drop(layout, source, target, action))
             }
             LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                EditResult::from(self.join_selection_with_direction(layout, direction))
+                EditResult::from(self.join_selection_with_direction(layout, direction, away))
             }
             LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
                 if !matches!(direction, Direction::Left | Direction::Right) {
                     return EditResult::Unchanged;
                 }
-                EditResult::from(if self.parent_of_selection_is_stacked(layout) {
+                EditResult::from(if self.parent_of_selection_is_stacked(layout, away) {
                     self.move_selection(layout, direction)
                 } else {
-                    self.join_selection_with_direction(layout, direction)
+                    self.join_selection_with_direction(layout, direction, away)
                 })
             }
             LayoutEdit::Group(GroupEdit::Stack(orientation)) => EditResult::Raise({
@@ -2193,7 +2214,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 moved
             }),
             LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(
-                self.parent_of_selection_is_stacked(layout)
+                self.parent_of_selection_is_stacked(layout, away)
                     && self.move_selection(layout, Direction::Right),
             ),
             LayoutEdit::Resize { amount, orientation } => {
@@ -2261,8 +2282,9 @@ impl ScrollingLayoutSystem {
         &mut self,
         layout: LayoutId,
         direction: Direction,
+        away: Away<'_>,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let Some(wid) = self.window_in_direction(layout, direction) else {
+        let Some(wid) = self.window_in_direction(layout, direction, away) else {
             return (None, Vec::new());
         };
         self.select_window(layout, wid);
@@ -2399,14 +2421,19 @@ impl ScrollingLayoutSystem {
         true
     }
 
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
+    fn join_selection_with_direction(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+        away: Away<'_>,
+    ) -> bool {
         if !matches!(direction, Direction::Left | Direction::Right) {
             return false;
         }
-        let Some(target) = self.window_in_direction(layout, direction) else {
+        let Some(target) = self.window_in_direction(layout, direction, away) else {
             return false;
         };
-        let Some(source) = self.selected_window(layout) else {
+        let Some(source) = self.selected_window(layout, away) else {
             return false;
         };
         self.apply_target_drop(layout, source, target, WindowDropAction::Stack)
@@ -2523,6 +2550,32 @@ pub(crate) mod tests {
 
     fn wid(index: u32) -> WindowId { WindowId::new(1, index) }
 
+    /// Loading a saved layout prunes windows that can't be matched before any window
+    /// is live. That pruning (`forget_window`) must leave the saved layout exactly as
+    /// it did when it was a removal with nothing away: same selection, same viewport.
+    #[test]
+    fn forgetting_a_saved_window_restores_what_removing_it_did() {
+        for selected in 1..=4 {
+            let mut fixture = Fixture::new(4);
+            fixture.select(selected);
+            let saved = ron::ser::to_string(&fixture.system).unwrap();
+            let mut forgot: ScrollingLayoutSystem = ron::de::from_str(&saved).unwrap();
+            let mut removed: ScrollingLayoutSystem = ron::de::from_str(&saved).unwrap();
+            forgot.forget_window(wid(selected));
+            removed.update(WindowChange::Remove(wid(selected)), Away::nothing());
+            assert_eq!(
+                forgot.selected_window(fixture.layout, Away::nothing()),
+                removed.selected_window(fixture.layout, Away::nothing()),
+                "selected {selected}"
+            );
+            assert_eq!(
+                ron::ser::to_string(&forgot).unwrap(),
+                ron::ser::to_string(&removed).unwrap(),
+                "selected {selected}"
+            );
+        }
+    }
+
     struct Fixture {
         system: ScrollingLayoutSystem,
         layout: LayoutId,
@@ -2543,7 +2596,7 @@ pub(crate) mod tests {
             let mut system = ScrollingLayoutSystem::new(&settings);
             let layout = system.create_layout();
             for index in 1..=count {
-                system.update(WindowChange::Add(layout, wid(index), None));
+                system.update(WindowChange::Add(layout, wid(index), None), Away::nothing());
             }
             if count > 0 {
                 system.select_window(layout, wid(1));
@@ -2560,8 +2613,13 @@ pub(crate) mod tests {
         }
 
         fn prepare(&mut self) {
-            self.system
-                .prepare_layout(self.layout, self.screen, &self.constraints, &self.gaps);
+            self.system.prepare_layout(
+                self.layout,
+                self.screen,
+                &self.constraints,
+                &self.gaps,
+                Away::nothing(),
+            );
         }
 
         fn frames(&mut self) -> Vec<(WindowId, CGRect)> {
@@ -2584,16 +2642,22 @@ pub(crate) mod tests {
             assert!(self.system.select_window(self.layout, wid(index)));
         }
 
-        fn selected(&self) -> Option<WindowId> { self.system.selected_window(self.layout) }
+        fn selected(&self) -> Option<WindowId> {
+            self.system.selected_window(self.layout, Away::nothing())
+        }
 
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
             assert!(
                 self.system
-                    .edit(self.layout, LayoutEdit::Drop {
-                        source: wid(source),
-                        target: wid(target),
-                        action: action
-                    })
+                    .edit(
+                        self.layout,
+                        LayoutEdit::Drop {
+                            source: wid(source),
+                            target: wid(target),
+                            action: action
+                        },
+                        Away::nothing()
+                    )
                     .changed()
             );
         }
@@ -2605,10 +2669,14 @@ pub(crate) mod tests {
             let mut f = Fixture::new(2);
             f.select(1);
             f.system
-                .edit(f.layout, LayoutEdit::Resize {
-                    amount: -0.1,
-                    orientation: ResizeOrientation::Horizontal,
-                })
+                .edit(
+                    f.layout,
+                    LayoutEdit::Resize {
+                        amount: -0.1,
+                        orientation: ResizeOrientation::Horizontal,
+                    },
+                    Away::nothing(),
+                )
                 .discard();
             let destination_id = f.system.container_tree(f.layout).children[0].node_id;
             f.select(2);
@@ -2616,6 +2684,7 @@ pub(crate) mod tests {
                 .edit(
                     f.layout,
                     LayoutEdit::Group(GroupEdit::ConsumeOrExpel(Direction::Left)),
+                    Away::nothing(),
                 )
                 .discard();
             assert_eq!(f.selected(), Some(wid(2)));
@@ -2625,14 +2694,22 @@ pub(crate) mod tests {
                 destination_id
             );
             f.system
-                .edit(f.layout, LayoutEdit::Resize {
-                    amount: 0.2,
-                    orientation: ResizeOrientation::Vertical,
-                })
+                .edit(
+                    f.layout,
+                    LayoutEdit::Resize {
+                        amount: 0.2,
+                        orientation: ResizeOrientation::Vertical,
+                    },
+                    Away::nothing(),
+                )
                 .discard();
             let offset = f.system.layouts[f.layout].camera.viewport.start_offset();
             f.system
-                .edit(f.layout, LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)))
+                .edit(
+                    f.layout,
+                    LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)),
+                    Away::nothing(),
+                )
                 .discard();
             assert_eq!(f.selected(), Some(wid(2)));
             assert_eq!(f.system.layouts[f.layout].camera.viewport.start_offset(), offset);
@@ -2651,6 +2728,7 @@ pub(crate) mod tests {
                 } else {
                     Direction::Left
                 },
+                Away::nothing(),
             );
             assert_eq!(f.selected(), Some(wid(2)));
             assert_eq!(f.frame(2).size.height, 560.0);
@@ -2669,7 +2747,7 @@ pub(crate) mod tests {
         f.select(3);
         f.system.set_window_participation(wid(2), false);
 
-        f.system.update(WindowChange::Remove(wid(3)));
+        f.system.update(WindowChange::Remove(wid(3)), Away::nothing());
 
         assert_eq!(f.selected(), Some(wid(1)));
         assert_eq!(f.frame(1).origin.x, f.screen.origin.x);
@@ -2682,7 +2760,7 @@ pub(crate) mod tests {
         f.system.begin_viewport_gesture(f.layout, Instant::now());
         f.system.update_viewport_gesture(f.layout, 30.0, Duration::from_millis(10));
         let x = f.frame(3).origin.x;
-        f.system.update(WindowChange::Remove(wid(1)));
+        f.system.update(WindowChange::Remove(wid(1)), Away::nothing());
         assert_eq!(f.frame(3).origin.x, x);
         assert_eq!(f.selected(), Some(wid(3)));
         f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
@@ -2712,7 +2790,7 @@ pub(crate) mod tests {
         let text = ron::to_string(&f.system).unwrap();
         let mut restored: ScrollingLayoutSystem = ron::from_str(&text).unwrap();
         restored.update_settings(&f.system.settings);
-        restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps);
+        restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps, Away::nothing());
         assert_eq!(restored.container_tree(f.layout), tree);
         assert_eq!(presented_frames(&restored, f.layout).collect::<Vec<_>>(), frames);
         f.system.select_window(clone, wid(3));
@@ -2730,7 +2808,7 @@ pub(crate) mod tests {
             ron::from_str(&ron::to_string(&f.system).unwrap()).unwrap();
         resized_restore.update_settings(&f.system.settings);
         let wider = CGRect::new(CGPoint::ZERO, CGSize::new(1600.0, 800.0));
-        resized_restore.prepare_layout(clone, wider, &f.constraints, &f.gaps);
+        resized_restore.prepare_layout(clone, wider, &f.constraints, &f.gaps, Away::nothing());
         let new_x = resized_restore
             .calculate_frames(clone, wider, &f.constraints, None, &f.gaps, false)
             .into_iter()
@@ -2741,7 +2819,7 @@ pub(crate) mod tests {
             .x;
         assert_eq!(new_x, old_x);
 
-        f.system.update(WindowChange::Add(f.layout, wid(4), None));
+        f.system.update(WindowChange::Add(f.layout, wid(4), None), Away::nothing());
         let ids: Vec<_> =
             f.system.container_tree(f.layout).children.iter().map(|c| c.node_id).collect();
         assert_ne!(ids[0], ids[1]);
@@ -2758,14 +2836,20 @@ pub(crate) mod tests {
         let mut system = ScrollingLayoutSystem::default();
         let layout = system.layouts.insert(state);
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
-        system.prepare_layout(layout, screen, &HashMap::default(), &GapSettings::default());
-        assert_eq!(system.selected_window(layout), Some(wid(2)));
+        system.prepare_layout(
+            layout,
+            screen,
+            &HashMap::default(),
+            &GapSettings::default(),
+            Away::nothing(),
+        );
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(wid(2)));
         assert_eq!(system.container_tree(layout).children[0].node_id, 42);
         assert_eq!(
             presented_frames(&system, layout).next().unwrap().1.size.width,
             600.0
         );
-        system.update(WindowChange::Add(layout, wid(3), None));
+        system.update(WindowChange::Add(layout, wid(3), None), Away::nothing());
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
 }

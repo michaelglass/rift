@@ -5,7 +5,9 @@ use slotmap::{Key, KeyData, SlotMap};
 
 use super::constraints::{constrain_frame, traditional_leaf_axis_constraints};
 use super::groups::LayoutRoot;
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
+use super::{
+    Away, EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery,
+};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
@@ -258,8 +260,13 @@ impl StackLayoutSystem {
         };
     }
 
-    fn toggle_fullscreen(&mut self, layout: LayoutId, within: bool) -> Vec<WindowId> {
-        if self.selected_window(layout).is_none() {
+    fn toggle_fullscreen(
+        &mut self,
+        layout: LayoutId,
+        within: bool,
+        away: Away<'_>,
+    ) -> Vec<WindowId> {
+        if self.selected_window(layout, away).is_none() {
             return Vec::new();
         }
         let stack = &mut self.layouts[layout];
@@ -376,6 +383,7 @@ impl LayoutSystem for StackLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         line: StackLineReserve,
+        _away: Away<'_>,
     ) -> Vec<(WindowId, CGRect)> {
         let stack = &self.layouts[layout];
         let count = stack.members.iter().filter(|m| self.window_participates(m.window)).count();
@@ -420,12 +428,17 @@ impl LayoutSystem for StackLayoutSystem {
             .collect()
     }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId, _away: Away<'_>) -> Option<WindowId> {
         let s = &self.layouts[layout];
         s.active_index(&self.inactive).map(|i| s.members[i].window)
     }
 
-    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+    fn selection_contains_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        _away: Away<'_>,
+    ) -> bool {
         let s = &self.layouts[layout];
         if s.root_selected {
             s.members.iter().any(|m| m.window == window)
@@ -434,7 +447,12 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+    fn window_in_direction(
+        &self,
+        layout: LayoutId,
+        direction: Direction,
+        _away: Away<'_>,
+    ) -> Option<WindowId> {
         let stack = &self.layouts[layout];
         if !stack.root_selected
             && let Some(member) = stack
@@ -457,9 +475,9 @@ impl LayoutSystem for StackLayoutSystem {
         self.layouts[layout].members.iter().any(|m| m.window == window)
     }
 
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+    fn has_any_fullscreen_node(&self, layout: LayoutId, away: Away<'_>) -> bool {
         let s = &self.layouts[layout];
-        self.selected_window(layout).is_some()
+        self.selected_window(layout, away).is_some()
             && (s.fullscreen
                 || s.within_gaps
                 || s.members
@@ -467,11 +485,12 @@ impl LayoutSystem for StackLayoutSystem {
                     .any(|m| self.window_participates(m.window) && (m.fullscreen || m.within_gaps)))
     }
 
-    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { true }
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId, _away: Away<'_>) -> bool { true }
 
-    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+    fn all_windows(&self, layout: LayoutId) -> Vec<WindowId> { self.all_windows_in_layout(layout) }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery, _away: Away<'_>) -> Vec<WindowId> {
         match query {
-            WindowQuery::All => self.all_windows_in_layout(layout),
             WindowQuery::Visible | WindowQuery::Selection => self.visible_windows_in_layout(layout),
             WindowQuery::Stack(window) => {
                 if self.contains_window(layout, window) {
@@ -483,11 +502,11 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
-    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+    fn focus(&mut self, layout: LayoutId, focus: Focus, away: Away<'_>) -> FocusResult {
         match focus {
             Focus::Select(window) => FocusResult::selection(self.select_window(layout, window)),
             Focus::Ascend | Focus::Descend => FocusResult::selection({
-                if self.selected_window(layout).is_none() {
+                if self.selected_window(layout, away).is_none() {
                     return FocusResult::selection(false);
                 }
                 let select_root = matches!(focus, Focus::Ascend);
@@ -500,7 +519,13 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn forget_window(&mut self, window: WindowId) {
+        for s in self.layouts.values_mut() {
+            s.remove(window);
+        }
+    }
+
+    fn update(&mut self, change: WindowChange<'_>, _away: Away<'_>) {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
@@ -536,7 +561,7 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit, away: Away<'_>) -> EditResult {
         match edit {
             LayoutEdit::Move {
                 direction,
@@ -569,7 +594,7 @@ impl LayoutSystem for StackLayoutSystem {
             }),
 
             LayoutEdit::Fullscreen { within_gaps } => {
-                EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
+                EditResult::Raise(self.toggle_fullscreen(layout, within_gaps, away))
             }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::ReorderTab { window, target } => {
@@ -776,21 +801,25 @@ mod tests {
         let first = WindowId::new(1, 1);
         let last = WindowId::new(1, 2);
         for window in [first, last] {
-            system.update(WindowChange::Add(layout, window, None));
+            system.update(WindowChange::Add(layout, window, None), Away::nothing());
         }
         for (direction, has_display_neighbor) in [(Direction::Right, false), (Direction::Up, true)]
         {
             assert!(
                 !system
-                    .edit(layout, LayoutEdit::Move {
-                        direction,
-                        has_display_neighbor
-                    })
+                    .edit(
+                        layout,
+                        LayoutEdit::Move {
+                            direction,
+                            has_display_neighbor
+                        },
+                        Away::nothing()
+                    )
                     .changed()
             );
         }
-        assert_eq!(system.windows(layout, WindowQuery::All), [first, last]);
-        assert_eq!(system.selected_window(layout), Some(last));
+        assert_eq!(system.all_windows(layout), [first, last]);
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(last));
     }
 
     #[test]
@@ -806,10 +835,16 @@ mod tests {
         inner.remove_layout(removed);
         inner.tiles.set_layout(inner.tiles.root(layout), LayoutKind::HorizontalStack);
         for window in [w(1), w(2), w(3)] {
-            inner.update(WindowChange::Add(layout, window, None));
+            inner.update(WindowChange::Add(layout, window, None), Away::nothing());
         }
-        inner.focus(layout, Focus::Select(w(2))).handled;
-        inner.edit(layout, LayoutEdit::Fullscreen { within_gaps: true }).into_windows();
+        inner.focus(layout, Focus::Select(w(2)), Away::nothing()).handled;
+        inner
+            .edit(
+                layout,
+                LayoutEdit::Fullscreen { within_gaps: true },
+                Away::nothing(),
+            )
+            .into_windows();
         let expected = inner.tiles.container_tree(layout);
         let legacy = Legacy {
             inner: &inner,
@@ -819,12 +854,12 @@ mod tests {
             ron::from_str::<StackLayoutSystem>(&ron::to_string(&legacy).unwrap()).unwrap();
         {
             assert_eq!(restored.container_tree(layout), expected);
-            assert_eq!(restored.selected_window(layout), Some(w(2)));
+            assert_eq!(restored.selected_window(layout, Away::nothing()), Some(w(2)));
             let clone = restored.clone_layout(layout);
-            assert_eq!(restored.selected_window(clone), Some(w(2)));
-            assert!(restored.has_any_fullscreen_node(clone));
-            restored.update(WindowChange::Remove(w(2)));
-            assert_eq!(restored.selected_window(layout), Some(w(3)));
+            assert_eq!(restored.selected_window(clone, Away::nothing()), Some(w(2)));
+            assert!(restored.has_any_fullscreen_node(clone, Away::nothing()));
+            restored.update(WindowChange::Remove(w(2)), Away::nothing());
+            assert_eq!(restored.selected_window(layout, Away::nothing()), Some(w(3)));
             let new_layout = restored.create_layout();
             assert!(!restored.contains_layout(removed));
             let reused = [clone, new_layout]
@@ -843,19 +878,29 @@ mod tests {
         for window in [w(1), w(2), w(3)] {
             system.add_window_after_selection(layout, window);
         }
-        assert!(system.focus(layout, Focus::Ascend).handled);
-        assert_eq!(system.selected_window(layout), Some(w(3)));
+        assert!(system.focus(layout, Focus::Ascend, Away::nothing()).handled);
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(w(3)));
         assert_eq!(system.visible_windows_in_layout(layout), vec![w(1)]);
-        assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(3)));
-        assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
-        assert!(system.focus(layout, Focus::Descend).handled);
+        assert_eq!(
+            system.window_in_direction(layout, Direction::Left, Away::nothing()),
+            Some(w(3))
+        );
+        assert_eq!(
+            system.window_in_direction(layout, Direction::Right, Away::nothing()),
+            Some(w(1))
+        );
+        assert!(system.focus(layout, Focus::Descend, Away::nothing()).handled);
         assert_eq!(system.visible_windows_in_layout(layout), vec![w(3)]);
         assert!(
             system
-                .edit(layout, LayoutEdit::Move {
-                    direction: Direction::Left,
-                    has_display_neighbor: false
-                })
+                .edit(
+                    layout,
+                    LayoutEdit::Move {
+                        direction: Direction::Left,
+                        has_display_neighbor: false
+                    },
+                    Away::nothing()
+                )
                 .changed()
         );
         assert_eq!(system.all_windows_in_layout(layout), vec![w(3), w(1), w(2)]);
@@ -866,9 +911,9 @@ mod tests {
         let survivor = WindowId::new(2, 1);
         system.add_window_after_selection(layout, survivor);
         system.select_window(layout, w(1));
-        system.update(WindowChange::CloseApp(1));
+        system.update(WindowChange::CloseApp(1), Away::nothing());
         assert_eq!(system.all_windows_in_layout(layout), vec![survivor]);
-        assert_eq!(system.selected_window(layout), Some(survivor));
+        assert_eq!(system.selected_window(layout, Away::nothing()), Some(survivor));
     }
 
     #[test]
@@ -890,6 +935,7 @@ mod tests {
             &constraints,
             &GapSettings::default(),
             StackLineReserve::default(),
+            Away::nothing(),
         );
         assert_eq!(frames[0].1.size.width, 200.0);
     }
