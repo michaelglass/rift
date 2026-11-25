@@ -4,7 +4,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
-use super::{EditResult, Focus, FocusResult, WindowQuery};
+use super::{EditResult, Focus, FocusResult, Participating, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashSet;
 use crate::layout_engine::utils::compute_tiling_area;
@@ -468,7 +468,7 @@ impl GroupLayouts {
             current,
             !map.kind(current).is_stacked()
                 && matches!(direction, Direction::Right | Direction::Down),
-            |child| self.inactive.is_empty() || active.contains(&child),
+            |child| active.contains(child),
         ) {
             current = child;
         }
@@ -965,17 +965,22 @@ impl GroupLayouts {
         }
     }
 
-    fn participating_nodes(&self, root: NodeId) -> HashSet<NodeId> {
-        let mut active = HashSet::default();
-        if self.inactive.is_empty() {
-            return active;
+    /// The nodes under `root` that take part: those holding a shown window, or every
+    /// node while nothing in `root`'s layout is away.
+    fn participating_nodes(&self, root: NodeId) -> Participating {
+        let map = self.map();
+        let layout_root = root.ancestors(map).last().unwrap_or(root);
+        let away = |node| self.window_at(node).is_some_and(|w| !self.window_participates(w));
+        if self.inactive.is_empty() || !layout_root.traverse_preorder(map).any(away) {
+            return Participating::All;
         }
-        for node in root.traverse_postorder(self.map()) {
+        let mut active = HashSet::default();
+        for node in root.traverse_postorder(map) {
             if self.subtree_participates(node, |child| active.contains(&child)) {
                 active.insert(node);
             }
         }
-        active
+        Participating::Only(active)
     }
 
     pub(super) fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {

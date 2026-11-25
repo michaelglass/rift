@@ -10,7 +10,7 @@ use crate::layout_engine::systems::constraints::{
     AxisConstraints, ConstraintCache, axis_slot, constrain_frame, container_axis_constraints,
     solve_axis_lengths,
 };
-use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
+use crate::layout_engine::systems::{LayoutSystem, Participating, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
@@ -539,10 +539,31 @@ impl BspLayoutSystem {
             .or_else(|| members.windows().iter().copied().find(|w| self.window_participates(*w)))
     }
 
+    /// The leaves of the layout under `root` that take part: those holding a shown
+    /// window, or every leaf, placeholders included, while nothing in it is away.
+    fn participating(&self, root: NodeId) -> Participating {
+        let away = |node| {
+            self.members(node).is_some_and(|members| {
+                members.windows().iter().any(|&window| !self.window_participates(window))
+            })
+        };
+        if self.inactive.is_empty() || !self.preorder(root).any(away) {
+            return Participating::All;
+        }
+        Participating::Only(
+            self.preorder(root)
+                .filter(|&node| self.participating_window(node).is_some())
+                .collect(),
+        )
+    }
+
+    fn root_of(&self, node: NodeId) -> NodeId { self.ancestors(node).last().unwrap_or(node) }
+
     fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
+        let participating = self.participating(self.root_of(from_leaf));
         let mut current = from_leaf;
         while let Some(next) = self.find_structural_neighbor_leaf(current, direction) {
-            if self.inactive.is_empty() || self.participating_window(next).is_some() {
+            if participating.contains(next) {
                 return Some(next);
             }
             current = next;
@@ -697,10 +718,8 @@ impl BspLayoutSystem {
     }
 
     fn descend_to_leaf(&self, mut node: NodeId) -> NodeId {
-        if !self.inactive.is_empty()
-            && let Some(active) = self
-                .preorder(node)
-                .find(|&candidate| self.participating_window(candidate).is_some())
+        if let Participating::Only(shown) = self.participating(self.root_of(node))
+            && let Some(active) = self.preorder(node).find(|candidate| shown.contains(candidate))
         {
             return active;
         }
@@ -784,7 +803,7 @@ impl BspLayoutSystem {
     fn selection_of_layout(&self, layout: LayoutId) -> Option<NodeId> {
         let root = self.layouts.get(layout)?.root;
         let selected = self.current_selection(root);
-        if self.inactive.is_empty() || self.participating_window(selected).is_some() {
+        if self.participating(root).contains(selected) {
             return Some(selected);
         }
         let first_active =
@@ -870,15 +889,14 @@ impl BspLayoutSystem {
         gaps: &crate::common::config::GapSettings,
     ) -> ConstraintCache {
         let mut prepared = ConstraintCache::default();
+        let participating = self.participating(root);
         for node in self.postorder(root) {
             let axes = match self.kind(node) {
                 NodeKind::Leaf { members, .. } => {
-                    let active = self.participating_member(members);
-                    if active.is_none()
-                        && !(self.inactive.is_empty() && matches!(members, LeafMembers::Empty))
-                    {
+                    if !participating.contains(node) {
                         continue;
                     }
+                    let active = self.participating_member(members);
                     let limits = active
                         .and_then(|window| constraints.get(&window).copied())
                         .map(WindowLayoutConstraints::normalized);
@@ -1071,6 +1089,25 @@ mod tests {
         assert_eq!(
             calculate_frames(&system, cloned, size, &Default::default()),
             frames
+        );
+    }
+
+    /// A placeholder from a split holds its space whatever is away in another layout
+    /// of the same system (each display size of a workspace has its own layout).
+    #[test]
+    fn a_placeholder_ignores_windows_away_in_another_layout() {
+        let (mut system, layout) = tiled(&[1, 2]);
+        system.edit(layout, LayoutEdit::Split(LayoutKind::Horizontal)).discard();
+        let other = system.create_layout();
+        system.add_window_after_selection(other, w(9));
+        let size = CGSize::new(1000.0, 1000.0);
+        let before = calculate_frames(&system, layout, size, &Default::default());
+
+        system.set_window_participation(w(9), false);
+
+        assert_eq!(
+            calculate_frames(&system, layout, size, &Default::default()),
+            before
         );
     }
 

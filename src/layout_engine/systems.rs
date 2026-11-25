@@ -100,6 +100,23 @@ impl WindowLayoutConstraints {
     }
 }
 
+/// Which nodes of one layout take part in it.
+pub(super) enum Participating {
+    /// Nothing in the layout is away: every node takes part, empty placeholders included.
+    All,
+    /// Something in the layout is away: only these nodes take part.
+    Only(HashSet<crate::model::tree::NodeId>),
+}
+
+impl Participating {
+    pub(super) fn contains(&self, node: crate::model::tree::NodeId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(nodes) => nodes.contains(&node),
+        }
+    }
+}
+
 fn update_participation(
     inactive: &mut HashSet<WindowId>,
     window: WindowId,
