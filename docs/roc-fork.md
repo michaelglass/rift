@@ -185,7 +185,25 @@ message has its plants and checks.
   floating slot's `Placed` was for `in`.
 
 **Next: layout trees, the traditional family (the lead's go, 2026-11-25), same five slices as
-BSP. The plan below waits for the lead's rulings on its questions.**
+BSP. The lead ruled on the plan's three questions (2026-11-25):**
+1. **Order: as proposed.** The stack goes alone, through all five slices. Then the group forest
+   once, as one core tree serving both traditional and master-stack, each system a thin shim
+   over it.
+2. **A saved window index that disagrees with its tree:** keep every refusal upstream's load
+   makes; normalize everything else to the tree, with one `*-load:` warn (the W2b rule). The
+   index is derived in the core, still written for byte-compatibility, and checked on load.
+3. **Stack member ids:** keep the saved `next_node` counter as the id source (byte-compatible).
+   Don't mint from a slot table.
+
+The QA lessons apply as planned: `Selection = Root | Member(id) | Nothing` instead of `active`
+plus `root_selected`; each fullscreen bool pair a `Fill`; the forest's children an ordered id
+list; a container's selection memory a child id; `primary_first` read from the children's order;
+nothing stored that can be derived. The stack's slices, BSP's pattern: (1) a core tree beside
+the system, with an operation shadow and the drawn fuzzer; (2) a Roc mirror with a differential
+and a seed entry; (3) the flip (policy (a), byte-compatible save, divergence counted, warned,
+panicking in tests, the shadow re-seeded from the core; rift-cli's views moved to the core
+early); (4) under `roc-core` the Roc tree decides, the Rust tree its shadow; (5) the old stack
+system deleted, the legacy load moved to the core side first.
 
 *What the code shows (2026-11-25).* The three systems already hand the core's traditional
 geometry (`rift_core::layout::traditional`, mirrored in `Traditional.roc`) a `Traditional` shape
