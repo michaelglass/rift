@@ -9,17 +9,54 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP done through slice 5; the stack, slices 1-4 done): read this first
+## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
-BSP (all five), slices 1-4 for the stack. `rearch/roc-next@fork` carries everything through this
-docs commit once it is published (publish procedure: "Rulings that bind", Public-clean; the
-published tip's id is in the slice report). All checks green at the tip: workspace tests 1038 (5
-ignored), the lib with `roc-core` 917 (7 ignored), `cargo test -p rift-core-roc --features roc`
-52 (9 ignored), `cargo test -p rift-core` 107, the fuzzer at 2000 × 40 both ways, `cargo check
---locked` both ways, fmt, and `cargo clippy --all-targets --features roc-core` compiles with no
-errors and 331 warnings, counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep
--E '^(warning|error)' | grep -v generated | wc -l` (the bound: at most 336).
+BSP and for the stack. `rearch/roc-next@fork` carries everything through this docs commit once it
+is published (publish procedure: "Rulings that bind", Public-clean; the published tip's id is in
+the slice report). All checks green at the tip: workspace tests 1038 (5 ignored), the lib with
+`roc-core` 917 (7 ignored), `cargo test -p rift-core-roc --features roc` 52 (9 ignored), `cargo
+test -p rift-core` 107, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt,
+and `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
+counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
+grep -v generated | wc -l` (the bound: at most 336).
+
+**Next: the group forest** (traditional and master-stack, one core tree; the lead's plan above
+the stack's slices) **waits for the lead's go.**
+
+**Layout trees, the stack, slice 5, done: upstream's stack system deleted.** Three commits after
+the slice 4 docs commit; each message has its plants, checks and costs.
+- **The load builds the core's stacks** (`systems/stack/stored.rs`): the saved form (upstream's,
+  byte for byte: `Stack`, `Member`) and its load (the current form, the legacy forest, the slice
+  1 normalizations) answer the parsed layouts (`Loaded`), made into the core's stacks
+  (`core_of_loaded`). Saving is `Saved`, from the core (`saved_stack`). Three normalizations
+  (both fullscreen flags on a stack or a member, an empty stack's selection) are now only their
+  `stack-load:` warn: the core's types cannot hold those states.
+- **Fixtures:** `stack/stack_saved.ron` (written by the core while its bytes were still held to
+  upstream's): the operations save to it, it loads and saves back byte for byte (a weight other
+  than 1 too), the loaded stacks allocate their next layout where the saved slotmap does and
+  mint from the saved counter. `stack/stack_legacy.ron`: the legacy forest as the traditional
+  system writes it (the live text held to it while it does), with shares other than 1.
+- **What the shadow held is held literally:** rift-cli's drawing (`stack/stack_drawn.txt`) and
+  container view, the group bar (windows taking part, the selected index among them, a window
+  left out before the selection, none while the shown member or the stack fills), each fill's
+  frames. Upstream's unit tests already drove the system.
+- **Deleted:** `Upstream` and its geometry, the shadow plumbing (answers and views compared,
+  `upstream_of`, `seed`, `model::slot_table::to_slotmap`, `view_difference`, the
+  `stack-tree-divergence:` counter and its `rift-cli metrics show-timing` line), the twin's
+  tests. `systems/stack/twinned.rs` is now `systems/stack/system.rs`; `stack.rs` is 775 lines
+  (from 1498). A stack pass has no system geometry to shadow (`decide_stack`,
+  `decide_stack_tree`, both through `decide_unshadowed`).
+- **What the core's stacks are held by now:** the rift-core-roc differential (the Rust stacks
+  against the Roc stacks, operations and layout passes), the lib's stack tests and the drawn
+  fuzzer (under `roc-core` every operation held to the Roc stacks), the fixtures and literal
+  tests.
+- **Cost (release, `measure_stack_system`, 10 / 100 / 1000 windows):** a plain build pays only
+  the core: 32 ns / 0.12 / 1.0 us an operation, 1.1 / 3.8 / 32 us a pass (before: the core and
+  upstream's step, about 0.11 / 0.42 / 1.8 us an operation, plus the sampled view). `roc-core`
+  pays the Roc stacks, the Rust stacks as their shadow and the view comparison on every
+  operation, and both geometries on a pass: 1.9 / 2.2 / 16 us an operation, 6.8 / 18 / 172 us a
+  pass.
 
 **Layout trees, the stack, slice 4, done: under `roc-core` the Roc stacks decide** (BSP's 4b).
 Two commits after the slice 3 docs commit; each message has its plants, checks and costs.
