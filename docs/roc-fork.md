@@ -21,6 +21,45 @@ and `cargo clippy --all-targets --features roc-core` compiles with no errors and
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
 
+**The group forest, slice 1, in progress (2026-11-25).** The core tree is written but not
+checked yet. It is parked in its own unpublished change, described "WIP (unpublished, unchecked):
+group forest slice 1", a sibling of this docs commit; put it on top of the line before going on.
+The file is `crates/rift-core/src/layout/group_forest.rs`, about 1300 lines, and it compiles.
+What it holds:
+- `Forest<L, N, W>`: a `SlotTable` of layout roots and one of nodes, the windows left out, and a
+  stamp counter. `Node { place: Root | Child { parent, size }, fill, body: Window { window,
+  stamp } | Container { kind: Split(o) | Stack(o), members: Children(Vec) | Regions { order,
+  primary: Side }, memory: Unset | Toward(c) | Stops(c) } }`.
+- Ported one for one from `model/tree.rs`, `groups.rs` and `tiles.rs`: the tree edits, the
+  selection, the walks, the derived window index, every query, focus, nest, stack and unstack,
+  tab reorder, swap, fullscreen, orientation, split, resize (native and by amount), rebalance,
+  drops (`DropAction` has no `Move` or `ConsumeOrExpel`: `LayoutSystem::edit` turns those into
+  their edits first), and the shape. Slot allocation and free order follow upstream's: preorder
+  delete and clone, bottom-up prune.
+- Not written yet:
+  - traditional's own operations (adding with and without a direction, smart insertion, the
+    joins, unjoin, the move and its destination, `can_move_window`);
+  - master-stack's own operations (creating and cloning a layout's regions, settings changes,
+    master ratio and count, `enforce_master_count`, adding a window, promote, swapping master
+    and stack, the move target);
+  - the twin (`systems/traditional` and `systems/master_stack` as `Upstream` plus a boxed core;
+    the seed from `GroupLayouts`; the view comparison, with the index compared by window and
+    stamp order);
+  - the load's normalizations (both fill flags, a window's non-default kind, a root size other
+    than 0);
+  - the drawn fuzzers (`traditional.rs` and `master_stack.rs` already draw systems; add clones
+    and reloads, and pass every case through the twin);
+  - plants and cost.
+- Not in the core yet: the group bar (`project_groups` through upstream's projection),
+  `draw_tree`, `container_tree`.
+- Questions sent to the lead (2026-11-25), not answered yet:
+  - **The window index's order:** upstream orders a window's entries by when the window entered
+    each layout. That order decides node removal order, so it decides later slot ids. It cannot
+    be derived, so the core keeps it as a stamp on each window leaf.
+  - **Floating** uses `GroupLayouts` too. The proposal is to leave it out of scope and keep
+    `GroupLayouts` for floating at slice 5.
+  - **The shape above.**
+
 **Next: the group forest** (traditional and master-stack as one core tree, each system a thin
 shim over it; the lead's go, 2026-11-25): the same five slices and rules as the stack's, the QA
 lessons as in the plan above the stack's slices; report at each slice end, stop on design
