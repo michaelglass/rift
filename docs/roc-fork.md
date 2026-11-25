@@ -52,13 +52,22 @@ What it holds:
   - plants and cost.
 - Not in the core yet: the group bar (`project_groups` through upstream's projection),
   `draw_tree`, `container_tree`.
-- Questions sent to the lead (2026-11-25), not answered yet:
-  - **The window index's order:** upstream orders a window's entries by when the window entered
-    each layout. That order decides node removal order, so it decides later slot ids. It cannot
-    be derived, so the core keeps it as a stamp on each window leaf.
-  - **Floating** uses `GroupLayouts` too. The proposal is to leave it out of scope and keep
-    `GroupLayouts` for floating at slice 5.
-  - **The shape above.**
+- The lead's rulings (2026-11-25):
+  - **The window index's order: an entry stamp on each window leaf.** The order is behaviour:
+    it decides node removal order, so it decides later slot ids, and ids must match upstream's.
+    - A leaf takes its stamp when its window enters the layout: on add, on clone, and on
+      replace, where from's entries are appended after to's.
+    - Swap moves the stamp with the window.
+    - The index is derived and ordered by stamp. The save writes it in that order, and the load
+      stamps the leaves in the saved order.
+    - Slice 3 compares saved bytes exactly.
+    - Add a test where a clone reuses a lower freed layout slot, so a plant that orders the index
+      by slot is caught.
+  - **Floating is out of scope for now.** Slice 5 deletes only what traditional and
+    master-stack use. When floating's own turn comes (last in the order), it moves onto the core
+    forest and `GroupLayouts` goes away entirely.
+  - **The shape is approved as described above**, with the load's root-size and window-kind
+    normalizations, each with a warning.
 
 **Next: the group forest** (traditional and master-stack as one core tree, each system a thin
 shim over it; the lead's go, 2026-11-25): the same five slices and rules as the stack's, the QA
