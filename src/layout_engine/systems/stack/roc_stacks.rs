@@ -5,7 +5,7 @@
 //! Roc stacks' on every operation. A difference is counted ([`stack_tree_reseeds`]), fails a
 //! test, or in a running Rift warns `roc-divergence:` and re-seeds the Rust stacks from the Roc
 //! stacks' view (a query's difference is only reported: the Rust stacks are not changed by one,
-//! and the next operation compares the views). Upstream's system stays the Rust stacks' shadow.
+//! and the next operation compares the views).
 //!
 //! The Roc stacks hold the core's ids as words: layouts by slotmap's ffi form, stack and member
 //! ids as their words, windows as [`Word`] makes them, which order as `WindowId` does (pid, then
@@ -23,7 +23,7 @@ use rift_core::slot_table::SlotTable;
 use rift_core_roc::RocStackTree;
 use rift_core_roc::stack_tree::{Answer, Event, LayoutKey, Pass, StacksView};
 
-use super::twinned::CoreStacks;
+use super::system::CoreStacks;
 use crate::actor::app::WindowId;
 use crate::layout_engine::LayoutId;
 use crate::roc_path::{Word, window_of_word};

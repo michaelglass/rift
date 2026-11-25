@@ -572,7 +572,6 @@ pub use floating::FloatingLayoutSystem;
 pub(crate) mod drawn;
 mod stack;
 pub use stack::StackLayoutSystem;
-pub(crate) use stack::stack_tree_divergences;
 #[cfg(feature = "roc-core")]
 pub(crate) use stack::stack_tree_reseeds;
 

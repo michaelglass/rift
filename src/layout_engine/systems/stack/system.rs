@@ -1,15 +1,9 @@
-//! The stack layout system: the core's stacks decide (layout trees, stack slice 3, the flip,
-//! policy (a); under `roc-core` the Roc stacks decide, the Rust stacks their shadow, slice 4)
-//! and are saved in upstream's form, byte for byte; upstream's system ([`Upstream`]) is the Rust
-//! stacks' shadow, stepped on every operation in every build and held to them:
-//! each answer is compared on every operation, the whole system (the view) on every operation in
-//! tests and `roc-core` builds and every [`VIEW_EVERY`]th in a plain release build, and each
-//! pass's shape and frames on every pass. A difference is counted, fails a test, or in a running
-//! Rift is warned and the shadow re-seeded from the core (the deciding side stands).
+//! The stack layout system: the core's stacks decide (layout trees, stack slices 3 and 5; under
+//! `roc-core` the Roc stacks decide, the Rust stacks their shadow, slice 4) and are saved in
+//! upstream's form, byte for byte. Loaded through the saved form's parse (`stored`), which reads
+//! the legacy forest and normalizes the states only a file holds.
 
 use std::collections::BTreeSet;
-use std::fmt::Debug;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::CGRect;
 use rift_core::layout::stack_tree::{
@@ -23,8 +17,7 @@ use slotmap::Key;
 
 #[cfg(feature = "roc-core")]
 use super::roc_stacks::{self as roc, RocStacks};
-use super::stored::{Loaded, StoredStackSystem};
-use super::{Member, Stack, Upstream};
+use super::stored::{Loaded, Member, Stack, StoredStackSystem};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::{
@@ -36,26 +29,14 @@ use crate::layout_engine::systems::{
     WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
 };
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
-use crate::model::slot_table::{SavedSlot, of_slotmap, saved, to_slotmap};
+use crate::model::slot_table::{SavedSlot, of_slotmap, saved};
 use crate::model::tree::NodeId;
 
 /// The core's stacks over rift's ids.
 pub(crate) type CoreStacks = Stacks<LayoutId, WindowId>;
 
-/// How often a plain release build compares the whole system (the twins' sampling).
-const VIEW_EVERY: u64 = 32;
-
-/// Whether every operation compares the whole system.
-const VIEW_ALWAYS: bool = cfg!(any(test, feature = "roc-core"));
-
-static STACK_TREE_DIVERGENCES: AtomicU64 = AtomicU64::new(0);
-
-/// Differences between the core's stacks and upstream's stack system, counted process-wide.
-pub(crate) fn stack_tree_divergences() -> u64 { STACK_TREE_DIVERGENCES.load(Ordering::Relaxed) }
-
-/// The stack layout system: the core's stacks decide, and upstream's system is stepped beside
-/// them. Loaded through upstream's load (which parses the legacy form and normalizes what only a
-/// file holds), saved from the core in the same form.
+/// The stack layout system: the core's stacks decide (under `roc-core` the Roc stacks, the Rust
+/// stacks their shadow), saved from the Rust stacks in upstream's form.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "StoredStackSystem")]
 pub struct StackLayoutSystem {
@@ -66,15 +47,6 @@ pub struct StackLayoutSystem {
     /// Under `roc-core`, the deciding stacks.
     #[cfg(feature = "roc-core")]
     roc: RocStacks,
-    /// Boxed: the system is one variant of `LayoutSystemKind`.
-    shadow: Box<Shadow>,
-}
-
-/// Upstream's system and how many operations stepped it.
-#[derive(Clone, Debug)]
-struct Shadow {
-    upstream: Upstream,
-    steps: u64,
 }
 
 /// The core's stacks as upstream saves its system (the field names and order of upstream's
@@ -90,7 +62,7 @@ struct Saved {
 impl Serialize for StackLayoutSystem {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         Saved {
-            layouts: saved(self.core.layouts(), |_, stack| upstream_stack(stack)).collect(),
+            layouts: saved(self.core.layouts(), |_, stack| saved_stack(stack)).collect(),
             next_node: self.core.next_node(),
             default_orientation: stack_default_orientation(self.core.orientation()),
         }
@@ -101,43 +73,41 @@ impl Serialize for StackLayoutSystem {
 impl TryFrom<StoredStackSystem> for StackLayoutSystem {
     type Error = String;
 
-    /// A saved system, parsed (`Loaded`), made into the core's stacks; upstream's system, the
-    /// shadow, re-seeded from them.
+    /// A saved system, parsed (`Loaded`), made into the core's stacks.
     fn try_from(stored: StoredStackSystem) -> Result<Self, String> {
         let loaded = Loaded::try_from(stored)?;
         Ok(Self::holding(core_of_loaded(&loaded)))
     }
 }
 
-impl From<Upstream> for StackLayoutSystem {
-    fn from(upstream: Upstream) -> Self { Self::holding(seed(&upstream)) }
-}
-
 impl StackLayoutSystem {
-    /// The system deciding with `core`, its shadows seeded from it.
+    /// The system deciding with `core` (under `roc-core` the Roc stacks seeded from it).
     fn holding(core: CoreStacks) -> Self {
-        let upstream = upstream_of(&core);
         Self {
             #[cfg(feature = "roc-core")]
             roc: RocStacks::seeded(&core),
-            shadow: Box::new(Shadow { upstream, steps: 0 }),
             core,
         }
     }
 }
 
 impl Default for StackLayoutSystem {
-    fn default() -> Self { Upstream::default().into() }
+    fn default() -> Self { Self::new(crate::common::config::default_stack_orientation()) }
 }
 
 impl StackLayoutSystem {
-    pub fn new(orientation: StackDefaultOrientation) -> Self { Upstream::new(orientation).into() }
+    pub fn new(orientation: StackDefaultOrientation) -> Self {
+        Self::new_with_insertion_point(orientation, WindowInsertionPoint::default())
+    }
 
     pub fn new_with_insertion_point(
         orientation: StackDefaultOrientation,
         insertion: WindowInsertionPoint,
     ) -> Self {
-        Upstream::new_with_insertion_point(orientation, insertion).into()
+        Self::holding(CoreStacks::new(
+            default_orientation(orientation),
+            insertion_point(insertion),
+        ))
     }
 
     pub fn update_settings(
@@ -145,7 +115,6 @@ impl StackLayoutSystem {
         orientation: StackDefaultOrientation,
         insertion: WindowInsertionPoint,
     ) {
-        self.shadow.upstream.update_settings(orientation, insertion);
         let (orientation, insertion) =
             (default_orientation(orientation), insertion_point(insertion));
         self.core.update_settings(orientation, insertion);
@@ -155,26 +124,17 @@ impl StackLayoutSystem {
             Event::Settings(orientation, insertion),
             Answer::Done,
         );
-        self.stepped("update_settings", &(), &());
     }
 
     pub(crate) fn collect_group_containers(
         &self,
         layout: LayoutId,
         screen: CGRect,
-        offset: f64,
+        _offset: f64,
         gaps: &GapSettings,
-        line: StackLineReserve,
+        _line: StackLineReserve,
         selection_path_only: bool,
     ) -> Vec<GroupContainerInfo> {
-        let upstream = self.shadow.upstream.collect_group_containers(
-            layout,
-            screen,
-            offset,
-            gaps,
-            line,
-            selection_path_only,
-        );
         let core = self.core.group_container(layout, selection_path_only);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
@@ -201,32 +161,15 @@ impl StackLayoutSystem {
             selected_index: c.selected,
             window_ids: c.windows,
         });
-        let core: Vec<GroupContainerInfo> = core.into_iter().collect();
-        self.answered(
-            "collect_group_containers",
-            upstream.iter().map(container_words).collect::<Vec<_>>(),
-            core.iter().map(container_words).collect(),
-        );
-        core
+        core.into_iter().collect()
     }
 
-    /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        let core = self.core.draw(layout);
-        self.answered("draw_tree", self.shadow.upstream.draw_tree(layout), core.clone());
-        core
-    }
+    /// rift-cli's drawing of the layout: the core's.
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String { self.core.draw(layout) }
 
-    /// rift-cli's container view of the layout: the core's (upstream's held to it on every
-    /// call).
+    /// rift-cli's container view of the layout: the core's.
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let core = container_node(self.core.container(layout));
-        self.answered(
-            "container_tree",
-            self.shadow.upstream.container_tree(layout),
-            core.clone(),
-        );
-        core
+        container_node(self.core.container(layout))
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
@@ -241,11 +184,7 @@ impl StackLayoutSystem {
             roc::as_slot,
             core,
         );
-        self.answered(
-            "window_slot",
-            self.shadow.upstream.window_slot(layout, window),
-            core.map(|i| vec![i]),
-        )
+        core.map(|i| vec![i])
     }
 
     /// An edit the core decides (under `roc-core` the Roc stacks, the Rust stacks' answer held to
@@ -285,21 +224,6 @@ impl StackLayoutSystem {
     }
 
     #[cfg(test)]
-    pub(crate) fn shadow_frames(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        offset: f64,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &GapSettings,
-        line: StackLineReserve,
-    ) -> Vec<(WindowId, CGRect)> {
-        self.shadow
-            .upstream
-            .shadow_frames(layout, screen, offset, constraints, gaps, line)
-    }
-
-    #[cfg(test)]
     pub(crate) fn shape(
         &self,
         layout: LayoutId,
@@ -321,66 +245,13 @@ impl StackLayoutSystem {
         )
     }
 
-    /// The deciding core, for tests that reach past the system.
-    #[cfg(test)]
+    /// The Rust stacks, for the Roc stacks' tests.
+    #[cfg(all(test, feature = "roc-core"))]
     pub(crate) fn core_for_tests(&self) -> &CoreStacks { &self.core }
-
-    /// Upstream's system re-seeded from the core, as after a divergence.
-    #[cfg(test)]
-    pub(crate) fn reseed_shadow(&mut self) { self.shadow.upstream = upstream_of(&self.core); }
 
     /// The Rust stacks re-seeded from the deciding Roc stacks' view, as after a divergence.
     #[cfg(all(test, feature = "roc-core"))]
     pub(crate) fn reseed_rust_from_roc(&mut self) { self.core = roc::core_of(&self.roc.view()); }
-
-    /// Upstream's system saved as upstream saves it (the core's save is held to it).
-    #[cfg(test)]
-    pub(crate) fn upstream_saved(&self) -> String {
-        ron::to_string(&self.shadow.upstream).expect("upstream's system is written")
-    }
-
-    /// After an operation the core and upstream's system both took: their answers compared,
-    /// and the systems when due; a difference is reported and the shadow re-seeded from the
-    /// core.
-    fn stepped<A: PartialEq + Debug>(&mut self, what: &str, upstream: &A, core: &A) {
-        self.shadow.steps += 1;
-        let answers_differ = upstream != core;
-        if answers_differ {
-            report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
-        }
-        let view_due = VIEW_ALWAYS || self.shadow.steps.is_multiple_of(VIEW_EVERY);
-        let view = (answers_differ || view_due)
-            .then(|| view_difference(&self.core, &self.shadow.upstream));
-        if let Some(Some(difference)) = &view {
-            report(what, difference);
-        }
-        if answers_differ || matches!(view, Some(Some(_))) {
-            self.shadow.upstream = upstream_of(&self.core);
-        }
-    }
-
-    /// A query both answered, the core's answer given: a difference is reported (the next
-    /// step's view re-seeds the shadow).
-    fn answered<A: PartialEq + Debug>(&self, what: &str, upstream: A, core: A) -> A {
-        if upstream != core {
-            report(what, &format!("answers: upstream {upstream:?}, core {core:?}"));
-        }
-        core
-    }
-}
-
-/// Counts a difference, then fails the test, or in a running Rift warns it.
-fn report(what: &str, difference: &str) {
-    let divergences = STACK_TREE_DIVERGENCES.fetch_add(1, Ordering::Relaxed) + 1;
-    #[cfg(test)]
-    panic!("stack-tree-divergence ({divergences} so far) after {what}: {difference}");
-    #[cfg(not(test))]
-    tracing::warn!(
-        what,
-        divergences,
-        difference,
-        "stack-tree-divergence: upstream's stack system differs from the core's stacks; re-seeded from the core"
-    );
 }
 
 impl LayoutSystem for StackLayoutSystem {
@@ -399,11 +270,7 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_verdict,
             core,
         );
-        self.answered(
-            "has_windows_for_app",
-            self.shadow.upstream.has_windows_for_app(layout, pid),
-            core,
-        )
+        core
     }
 
     fn window_participates(&self, window: WindowId) -> bool {
@@ -418,15 +285,10 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_verdict,
             core,
         );
-        self.answered(
-            "window_participates",
-            self.shadow.upstream.window_participates(window),
-            core,
-        )
+        core
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        let upstream = self.shadow.upstream.set_window_participation(window, participates);
         let participation = if participates {
             Participation::TakesPart
         } else {
@@ -443,12 +305,10 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_participated,
             core,
         );
-        self.stepped("set_window_participation", &upstream, &core);
         core
     }
 
     fn create_layout(&mut self) -> LayoutId {
-        let upstream = self.shadow.upstream.create_layout();
         let core = self.core.create_layout();
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
@@ -460,7 +320,6 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_layout,
             core,
         );
-        self.stepped("create_layout", &upstream, &core);
         core
     }
 
@@ -476,15 +335,10 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_verdict,
             core,
         );
-        self.answered(
-            "contains_layout",
-            self.shadow.upstream.contains_layout(layout),
-            core,
-        )
+        core
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let upstream = self.shadow.upstream.clone_layout(layout);
         let core = self.core.clone_layout(layout);
         #[cfg(feature = "roc-core")]
         let core = roc::decided(
@@ -496,12 +350,10 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_layout,
             core,
         );
-        self.stepped("clone_layout", &upstream, &core);
         core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        self.shadow.upstream.remove_layout(layout);
         self.core.remove_layout(layout);
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
@@ -509,13 +361,11 @@ impl LayoutSystem for StackLayoutSystem {
             Event::RemoveLayout(roc::layout_key(layout)),
             Answer::Done,
         );
-        self.stepped("remove_layout", &(), &());
     }
 
-    /// The core's frames (policy (a)): under `roc-core` the Roc stacks' own shape through the Roc
-    /// geometry, else the Rust stacks' shape through the Rust geometry, with the Rust geometry's
-    /// frames for the Rust stacks' shape and upstream's geometry the shadows; upstream's shape is
-    /// held to the Rust stacks' on every pass.
+    /// The core's frames: under `roc-core` the Roc stacks' own shape through the Roc geometry,
+    /// with the Rust geometry's frames for the Rust stacks' shape the shadow; else the Rust
+    /// stacks' shape through the Rust geometry.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -524,11 +374,10 @@ impl LayoutSystem for StackLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         line: StackLineReserve,
-        shadow: crate::layout_engine::Shadow,
+        _shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
         use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
         use crate::layout_engine::{core_gaps, core_rect};
-        let upstream = self.shadow.upstream.shape(layout, screen, offset, constraints, gaps, line);
         let core = self.core.shape(
             layout,
             core_rect(screen),
@@ -537,45 +386,24 @@ impl LayoutSystem for StackLayoutSystem {
             core_stack_line(line),
             |window| constraints.get(&window).copied().map(core_constraints),
         );
-        if upstream != core {
-            report(
-                "calculate_layout",
-                &format!("shapes: upstream {upstream:?}, core {core:?}"),
-            );
-        }
-        let upstream_frames = || {
-            self.shadow
-                .upstream
-                .shadow_frames(layout, screen, offset, constraints, gaps, line)
-        };
         // Under `roc-core` the Roc stacks' own shape through the Roc geometry decides.
         #[cfg(feature = "roc-core")]
-        return crate::layout_engine::core_geometry::decide_stack_tree(
-            core,
-            shadow,
-            upstream_frames,
-            || {
-                use crate::roc_path::Word;
-                let known: Vec<_> = constraints
-                    .iter()
-                    .map(|(&window, &held)| (window.word(), core_constraints(held)))
-                    .collect();
-                let pass = rift_core_roc::stack_tree::Pass {
-                    screen: core_rect(screen),
-                    gaps: core_gaps(gaps),
-                    stack_offset: offset,
-                    stack_line: core_stack_line(line),
-                };
-                self.roc.frames(layout, pass, &known)
-            },
-        );
+        return crate::layout_engine::core_geometry::decide_stack_tree(core, || {
+            use crate::roc_path::Word;
+            let known: Vec<_> = constraints
+                .iter()
+                .map(|(&window, &held)| (window.word(), core_constraints(held)))
+                .collect();
+            let pass = rift_core_roc::stack_tree::Pass {
+                screen: core_rect(screen),
+                gaps: core_gaps(gaps),
+                stack_offset: offset,
+                stack_line: core_stack_line(line),
+            };
+            self.roc.frames(layout, pass, &known)
+        });
         #[cfg(not(feature = "roc-core"))]
-        crate::layout_engine::core_geometry::decide_traditional(
-            "stack",
-            core,
-            shadow,
-            upstream_frames,
-        )
+        crate::layout_engine::core_geometry::decide_stack(core)
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -590,11 +418,7 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_window,
             core,
         );
-        self.answered(
-            "selected_window",
-            self.shadow.upstream.selected_window(layout),
-            core,
-        )
+        core
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
@@ -609,11 +433,7 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_verdict,
             core,
         );
-        self.answered(
-            "selection_contains_window",
-            self.shadow.upstream.selection_contains_window(layout, window),
-            core,
-        )
+        core
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -628,11 +448,7 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_window,
             core,
         );
-        self.answered(
-            "window_in_direction",
-            self.shadow.upstream.window_in_direction(layout, direction),
-            core,
-        )
+        core
     }
 
     fn contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
@@ -647,11 +463,7 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_verdict,
             core,
         );
-        self.answered(
-            "contains_window",
-            self.shadow.upstream.contains_window(layout, window),
-            core,
-        )
+        core
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
@@ -666,16 +478,11 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_verdict,
             core,
         );
-        self.answered(
-            "has_any_fullscreen_node",
-            self.shadow.upstream.has_any_fullscreen_node(layout),
-            core,
-        )
+        core
     }
 
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
-        self.shadow.upstream.parent_of_selection_is_stacked(layout)
-    }
+    /// A stack layout's selection is always in its stack (upstream's answer).
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { true }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
         let core_query = match query {
@@ -695,11 +502,10 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_windows,
             core,
         );
-        self.answered("windows", self.shadow.upstream.windows(layout, query), core)
+        core
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        let upstream = self.shadow.upstream.focus(layout, focus);
         let core_focus = match focus {
             Focus::Select(window) => core::Focus::Select(window),
             Focus::Ascend => core::Focus::Ascend,
@@ -717,12 +523,10 @@ impl LayoutSystem for StackLayoutSystem {
             roc::as_focused,
             focused,
         );
-        let core = match focused {
+        match focused {
             core::Focused::Selection { handled } => FocusResult::selection(handled),
             core::Focused::Movement { window, raise } => FocusResult::movement((window, raise)),
-        };
-        self.stepped("focus", &focus_words(&upstream), &focus_words(&core));
-        core
+        }
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
@@ -733,13 +537,10 @@ impl LayoutSystem for StackLayoutSystem {
         applied.apply(&mut self.core);
         #[cfg(feature = "roc-core")]
         self.roc_stepped("update", event, Answer::Done);
-        self.shadow.upstream.update(change);
-        self.stepped("update", &(), &());
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        let upstream = self.shadow.upstream.edit_layout(layout, edit);
-        let core = match core_edit(edit) {
+        match core_edit(edit) {
             Some(edit) => match self.core_edit(layout, edit) {
                 core::Edited::Unsupported => EditResult::Unsupported,
                 core::Edited::Unchanged => EditResult::Unchanged,
@@ -748,9 +549,7 @@ impl LayoutSystem for StackLayoutSystem {
             },
             // An edit upstream's stack system has no case for.
             None => EditResult::Unsupported,
-        };
-        self.stepped("edit_layout", &edit_words(&upstream), &edit_words(&core));
-        core
+        }
     }
 }
 
@@ -820,35 +619,6 @@ impl Applied {
             }
         }
     }
-}
-
-/// A focus's answer, comparable.
-fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
-    (result.handled, result.window, result.raise.clone())
-}
-
-/// An edit's answer, comparable.
-fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
-    match result {
-        EditResult::Unsupported => ("unsupported", Vec::new()),
-        EditResult::Unchanged => ("unchanged", Vec::new()),
-        EditResult::Changed => ("changed", Vec::new()),
-        EditResult::Raise(windows) => ("raise", windows.clone()),
-    }
-}
-
-/// A group bar's container, comparable.
-fn container_words(
-    info: &GroupContainerInfo,
-) -> (NodeId, LayoutKind, CGRect, usize, usize, Vec<WindowId>) {
-    (
-        info.node_id,
-        info.container_kind,
-        info.frame,
-        info.total_count,
-        info.selected_index,
-        info.window_ids.clone(),
-    )
 }
 
 /// An edit as the core takes it; none for those upstream's stack system has no case for.
@@ -935,8 +705,8 @@ fn layout_kind(orientation: Orientation) -> LayoutKind {
     }
 }
 
-/// Upstream's two fullscreen flags as one fill (`fullscreen` first, as its projection reads
-/// them; the load leaves no saved state holding both).
+/// The saved form's two fullscreen flags as one fill (`fullscreen` first, as upstream's
+/// projection read them; the load warns of a stack or member holding both).
 fn core_fill(fullscreen: bool, within_gaps: bool) -> Fill {
     match (fullscreen, within_gaps) {
         (true, _) => Fill::Screen,
@@ -945,8 +715,8 @@ fn core_fill(fullscreen: bool, within_gaps: bool) -> Fill {
     }
 }
 
-/// An upstream stack as the core holds it (its load leaves a stack kind, and a selection naming
-/// a member exactly when there are members, as its operations keep it).
+/// A saved stack as the core holds it (the load leaves a stack kind, and a selection naming a
+/// member whenever there are members).
 fn core_stack(stack: &Stack) -> CoreStack<WindowId> {
     let members = stack
         .members
@@ -971,7 +741,7 @@ fn core_stack(stack: &Stack) -> CoreStack<WindowId> {
                 },
             },
             (Some(_), None) => {
-                unreachable!("upstream's load and operations select a member of a populated stack")
+                unreachable!("the load selects a member of a populated stack")
             }
         },
         orientation: if stack.kind == LayoutKind::HorizontalStack {
@@ -1008,39 +778,9 @@ fn core_of_loaded(loaded: &Loaded) -> CoreStacks {
     )
 }
 
-/// Upstream's system as the core holds it.
-fn seed(upstream: &Upstream) -> CoreStacks {
-    CoreStacks::from_parts(
-        of_slotmap(&upstream.layouts, vacant_stack(), core_stack),
-        upstream.next_node,
-        default_orientation(upstream.default_orientation),
-        upstream.inactive.iter().copied().collect::<BTreeSet<_>>(),
-        insertion_point(upstream.window_insertion_point),
-    )
-}
-
-/// The core's stacks as upstream's system: the shadow re-seeded from the core. The table keeps
-/// the core's slots and versions and takes its vacant slots in the core's order, so both
-/// allocate the same layouts next.
-fn upstream_of(core: &CoreStacks) -> Upstream {
-    let dummy = upstream_stack(&CoreStack {
-        id: Id::from_word(0),
-        members: Members::Empty,
-        orientation: Orientation::Vertical,
-        fill: Fill::Tiled,
-    });
-    Upstream {
-        layouts: to_slotmap(core.layouts(), upstream_stack, dummy),
-        next_node: core.next_node(),
-        default_orientation: stack_default_orientation(core.orientation()),
-        inactive: core.left_out().iter().copied().collect(),
-        window_insertion_point: window_insertion_point(core.insertion()),
-    }
-}
-
-/// A core stack as upstream's: the selection as `active` and `root_selected`, each fill as two
-/// flags, the orientation as a stack layout kind.
-fn upstream_stack(stack: &CoreStack<WindowId>) -> Stack {
+/// A core stack as upstream saved one: the selection as `active` and `root_selected`, each fill as
+/// two flags, the orientation as a stack layout kind.
+fn saved_stack(stack: &CoreStack<WindowId>) -> Stack {
     let flags = |fill: Fill| (fill == Fill::Screen, fill == Fill::WithinGaps);
     let (fullscreen, within_gaps) = flags(stack.fill);
     let selection = stack.selection();
@@ -1075,50 +815,6 @@ fn stack_default_orientation(orientation: DefaultOrientation) -> StackDefaultOri
         DefaultOrientation::Horizontal => StackDefaultOrientation::Horizontal,
         DefaultOrientation::Vertical => StackDefaultOrientation::Vertical,
     }
-}
-
-fn window_insertion_point(value: core::InsertionPoint) -> WindowInsertionPoint {
-    match value {
-        core::InsertionPoint::NextToSelection => WindowInsertionPoint::NextToSelection,
-        core::InsertionPoint::EndOfTree => WindowInsertionPoint::EndOfTree,
-    }
-}
-
-/// Where the core's stacks differ from upstream's system, if they do: layouts (ids compared
-/// directly), the member counter, the windows left out, the settings.
-fn view_difference(core: &CoreStacks, upstream: &Upstream) -> Option<String> {
-    let layouts: Vec<_> =
-        upstream.layouts.iter().map(|(id, stack)| (id, core_stack(stack))).collect();
-    let core_layouts: Vec<_> =
-        core.layouts().iter().map(|(id, stack)| (id, stack.clone())).collect();
-    if layouts != core_layouts {
-        return Some(format!("layouts: upstream {layouts:?}, core {core_layouts:?}"));
-    }
-    if upstream.next_node != core.next_node() {
-        return Some(format!(
-            "next node: upstream {}, core {}",
-            upstream.next_node,
-            core.next_node()
-        ));
-    }
-    let left_out: BTreeSet<_> = upstream.inactive.iter().copied().collect();
-    if &left_out != core.left_out() {
-        return Some(format!(
-            "left out: upstream {left_out:?}, core {:?}",
-            core.left_out()
-        ));
-    }
-    let settings = (
-        default_orientation(upstream.default_orientation),
-        insertion_point(upstream.window_insertion_point),
-    );
-    if settings != (core.orientation(), core.insertion()) {
-        return Some(format!(
-            "settings: upstream {settings:?}, core {:?}",
-            (core.orientation(), core.insertion())
-        ));
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1165,9 +861,7 @@ mod tests {
     #[test]
     fn a_saved_system_loads_and_saves_byte_for_byte() {
         let file = include_str!("stack_saved.ron").trim_end();
-        let made = saved_fixture_system();
-        assert_eq!(ron::to_string(&made).unwrap(), file);
-        assert_eq!(made.upstream_saved(), file);
+        assert_eq!(ron::to_string(&saved_fixture_system()).unwrap(), file);
         let mut loaded: StackLayoutSystem = ron::from_str(file).unwrap();
         assert_eq!(ron::to_string(&loaded).unwrap(), file);
         // A weight other than 1 (only the legacy forest writes one) loads and saves back too.
@@ -1187,86 +881,18 @@ mod tests {
         assert_eq!(member, (1 << 32) | u64::from(loaded_form.next_node + 1));
     }
 
-    /// The core's stacks seeded from a system take its free list as the system's slotmap holds
-    /// it, not as a load would rebuild it (the highest vacant slot first): the next ids match.
-    #[test]
-    fn a_seeded_core_allocates_the_ids_upstream_would() {
-        let mut system = StackLayoutSystem::default();
-        let layouts: Vec<_> = (0..4).map(|_| system.create_layout()).collect();
-        // Vacate slots 1 and 3, the lower last: upstream hands slot 1 out next, a load would
-        // hand out slot 3.
-        system.remove_layout(layouts[2]);
-        system.remove_layout(layouts[0]);
-        system.core = seed(&system.shadow.upstream);
-        let upstream = system.shadow.upstream.create_layout();
-        let core = system.core.create_layout();
-        assert_eq!(core, upstream);
-        assert_eq!(
-            system.core.layouts()[core].id,
-            core_id(system.shadow.upstream.layouts[upstream].id)
-        );
-    }
-
-    /// Upstream's system re-seeded from the core (after a divergence) takes the core's free list,
-    /// so both hand out the same layouts next.
-    #[test]
-    fn a_shadow_reseeded_from_the_core_allocates_the_ids_the_core_would() {
-        let mut system = StackLayoutSystem::default();
-        let layouts: Vec<_> = (0..5).map(|_| system.create_layout()).collect();
-        for layout in [layouts[3], layouts[0], layouts[2]] {
-            system.remove_layout(layout);
-        }
-        system.shadow.upstream = upstream_of(&system.core);
-        for _ in 0..4 {
-            let upstream = system.shadow.upstream.create_layout();
-            let core = system.core.create_layout();
-            assert_eq!(upstream, core);
-        }
-        assert_eq!(view_difference(&system.core, &system.shadow.upstream), None);
-    }
-
-    /// A query the core answers otherwise than upstream's system is counted and fails a test.
-    #[test]
-    fn a_query_answered_otherwise_is_counted_and_fails_tests() {
-        let mut system = StackLayoutSystem::default();
-        system.create_layout();
-        system.shadow.upstream.set_window_participation(w(1), false);
-        let before = stack_tree_divergences();
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            system.window_participates(w(1));
-        }));
-        assert!(failed.is_err());
-        assert!(stack_tree_divergences() > before);
-    }
-
-    /// A core that differs from upstream's system is counted and fails a test (a running Rift
-    /// warns and re-seeds it).
-    #[test]
-    fn a_stack_tree_divergence_is_counted_and_fails_tests() {
-        let mut system = StackLayoutSystem::default();
-        let layout = system.create_layout();
-        system.shadow.upstream.set_window_participation(w(1), false);
-        let before = stack_tree_divergences();
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            system.clone_layout(layout);
-        }));
-        assert!(failed.is_err());
-        assert!(stack_tree_divergences() > before);
-    }
-
-    /// The twin's cost per operation at 10, 100 and 1000 windows (release:
-    /// `cargo test --release --lib measure_stack_twin -- --ignored --nocapture`): upstream's
-    /// operation alone, the core's step alone, the whole-system comparison, a re-seed, and a
-    /// pass's shape built by each. A plain release build pays the step on every operation and
-    /// the comparison on every 32nd.
+    /// What rift pays per stack operation and layout pass at 10, 100 and 1000 windows (release:
+    /// `cargo test --release --lib measure_stack_system -- --ignored --nocapture`, and again with
+    /// `--features roc-core`): everyday operations (focus moves, swaps, fullscreen, a window added
+    /// and removed) through the system, and a layout pass. A plain build pays the core's stacks
+    /// alone; a `roc-core` build pays the deciding Roc stacks, the Rust stacks as their shadow and
+    /// the view comparison on every operation, and both geometries on a pass.
     #[test]
     #[ignore]
-    fn measure_stack_twin() {
+    fn measure_stack_system() {
         use std::hint::black_box;
         use std::time::Instant;
 
-        use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
-        use crate::layout_engine::{core_gaps, core_rect};
         let directions = [
             Direction::Left,
             Direction::Up,
@@ -1274,108 +900,58 @@ mod tests {
             Direction::Down,
         ];
         let ops = 4000_u32;
-        let each = |started: Instant, n: u32| started.elapsed() / n;
         for count in [10_u32, 100, 1000] {
             let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
             let layout = system.create_layout();
             for idx in 1..=count {
                 system.update(WindowChange::Add(layout, w(idx), None));
             }
-            // A mix of everyday operations: focus moves, swaps, fullscreen, a window coming and
-            // going.
-            let mut upstream = system.shadow.upstream.clone();
             let started = Instant::now();
             for i in 0..ops {
                 match i % 4 {
                     0 => drop(black_box(
-                        upstream.focus(layout, Focus::Direction(directions[(i / 4 % 4) as usize])),
+                        system.focus(layout, Focus::Direction(directions[(i / 4 % 4) as usize])),
                     )),
-                    1 => drop(black_box(upstream.edit_layout(
+                    1 => drop(black_box(system.edit_layout(
                         layout,
                         LayoutEdit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
                     ))),
                     2 => {
-                        drop(black_box(upstream.edit_layout(layout, LayoutEdit::Fullscreen {
+                        drop(black_box(system.edit_layout(layout, LayoutEdit::Fullscreen {
                             within_gaps: false,
                         })))
                     }
                     _ => {
-                        upstream.update(WindowChange::Add(layout, w(count + 1), None));
-                        upstream.update(WindowChange::Remove(w(count + 1)));
+                        system.update(WindowChange::Add(layout, w(count + 1), None));
+                        system.update(WindowChange::Remove(w(count + 1)));
                     }
                 }
             }
-            let upstream_each = each(started, ops);
-            let mut core = system.core.clone();
-            let started = Instant::now();
-            for i in 0..ops {
-                match i % 4 {
-                    0 => drop(black_box(core.focus(
-                        layout,
-                        core::Focus::Direction(core_direction(directions[(i / 4 % 4) as usize])),
-                    ))),
-                    1 => drop(black_box(core.edit(
-                        layout,
-                        core::Edit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
-                    ))),
-                    2 => drop(black_box(
-                        core.edit(layout, core::Edit::Fullscreen { within_gaps: false }),
-                    )),
-                    _ => {
-                        core.add_window(layout, w(count + 1));
-                        core.remove_window(w(count + 1));
-                    }
-                }
-            }
-            let core_each = each(started, ops);
-            let rounds = 200;
-            let started = Instant::now();
-            for _ in 0..rounds {
-                black_box(view_difference(&system.core, &system.shadow.upstream));
-            }
-            let view_each = each(started, rounds);
-            let started = Instant::now();
-            for _ in 0..rounds {
-                black_box(upstream_of(&system.core));
-            }
-            let seed_each = each(started, rounds);
+            let op_each = started.elapsed() / ops;
             let screen = CGRect::new(
                 objc2_core_foundation::CGPoint::ZERO,
                 objc2_core_foundation::CGSize::new(1600.0, 1000.0),
             );
-            let gaps = GapSettings::default();
-            let constraints = HashMap::default();
-            let line = StackLineReserve::default();
+            let (gaps, constraints, line) = (
+                GapSettings::default(),
+                HashMap::default(),
+                StackLineReserve::default(),
+            );
+            let rounds = 200;
             let started = Instant::now();
             for _ in 0..rounds {
-                black_box(system.shadow.upstream.shape(
+                black_box(system.calculate_layout(
                     layout,
                     screen,
                     12.0,
                     &constraints,
                     &gaps,
                     line,
+                    crate::layout_engine::Shadow::Run,
                 ));
             }
-            let upstream_shape = each(started, rounds);
-            let started = Instant::now();
-            for _ in 0..rounds {
-                black_box(system.core.shape(
-                    layout,
-                    core_rect(screen),
-                    core_gaps(&gaps),
-                    12.0,
-                    core_stack_line(line),
-                    |window| constraints.get(&window).copied().map(core_constraints),
-                ));
-            }
-            let core_shape = each(started, rounds);
-            let per_op = view_each / VIEW_EVERY as u32;
-            eprintln!(
-                "{count} windows: upstream {upstream_each:?}/op, core {core_each:?}/op, view \
-                 {view_each:?} ({per_op:?}/op 1 in {VIEW_EVERY}), re-seed {seed_each:?}, \
-                 shape upstream {upstream_shape:?} core {core_shape:?}"
-            );
+            let pass_each = started.elapsed() / rounds;
+            eprintln!("{count} windows: {op_each:?} an operation, {pass_each:?} a layout pass");
         }
     }
 }

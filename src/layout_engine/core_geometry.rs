@@ -168,20 +168,29 @@ pub(crate) fn decide_traditional(
     decide(what, &shape, shadow, upstream, rust, roc)
 }
 
-/// The frames rift gives a stack layout whose stacks the Roc core decides (`roc-core`): the Roc
-/// stacks' own (`roc`: their shape through the Roc traditional geometry), with the Rust core's
-/// frames for the Rust stacks' `shape` and the stack system's (`upstream`) the shadows.
+/// The frames rift gives a stack layout without `roc-core`: the core's for its stacks' `shape`
+/// (none: no member takes part). The stack system has no geometry of its own to shadow.
+#[cfg(not(feature = "roc-core"))]
+pub(crate) fn decide_stack(shape: Option<Traditional<WindowId>>) -> Vec<(WindowId, CGRect)> {
+    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
+    decide_unshadowed("stack", &shape, rust, no_roc)
+}
+
+/// The frames rift gives a stack layout under `roc-core`: the Roc stacks' own (`roc`: their
+/// shape through the Roc traditional geometry), with the Rust core's frames for the Rust stacks'
+/// `shape` the shadow.
 #[cfg(feature = "roc-core")]
 pub(crate) fn decide_stack_tree(
     shape: Option<Traditional<WindowId>>,
-    shadow: Shadow,
-    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
     roc: impl FnOnce() -> Vec<(rift_core::plain::WindowId, Rect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
-    decide("stack", &shape, shadow, upstream, rust, || {
-        Ok::<_, std::convert::Infallible>(roc())
-    })
+    decide_unshadowed(
+        "stack",
+        &shape,
+        rust,
+        || Ok::<_, std::convert::Infallible>(roc()),
+    )
 }
 
 /// A shadow (frames, or a placement) that differed from the deciding core, or the Roc core

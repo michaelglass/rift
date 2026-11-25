@@ -76,45 +76,6 @@ pub(crate) fn of_slotmap<K: slotmap::Key + SlotKey, V: Clone + Serialize + Deser
         .expect("a slotmap's free list is its vacant slots")
 }
 
-/// A core table as a slotmap with the same slots, versions and free list (a shadow re-seeded
-/// from the core). A slotmap is only built through its saved form, whose load rebuilds the free
-/// list (the highest vacant slot first), so each vacant slot is written two versions back, then
-/// taken (`| 1`) and freed (`+ 1`) again in the core's order: the last freed is taken first, as
-/// the core's last.
-pub(crate) fn to_slotmap<K: slotmap::Key + SlotKey, C, V: Clone + Serialize + DeserializeOwned>(
-    table: &SlotTable<K, C>,
-    convert: impl Fn(&C) -> V,
-    dummy: V,
-) -> SlotMap<K, V> {
-    let slots: Vec<SavedSlot<V>> = table
-        .saved()
-        .enumerate()
-        .map(|(index, (occupant, version))| SavedSlot {
-            version: match occupant {
-                Some(_) => version,
-                // The sentinel, never taken.
-                None if index == 0 => version,
-                None => version.wrapping_sub(2),
-            },
-            value: occupant.map(|(_, value)| convert(value)),
-        })
-        .collect();
-    let written = ron::to_string(&slots).expect("a slot sequence is written");
-    let mut map: SlotMap<K, V> = ron::from_str(&written).expect("a core table is a slot sequence");
-    let taken: std::collections::HashMap<u32, K> = table
-        .free()
-        .iter()
-        .map(|_| {
-            let key = map.insert(dummy.clone());
-            (key.parts().0, key)
-        })
-        .collect();
-    for index in table.free() {
-        map.remove(taken[index]);
-    }
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use slotmap::SlotMap;
