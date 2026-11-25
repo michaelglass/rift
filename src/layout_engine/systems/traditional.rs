@@ -539,7 +539,7 @@ impl TraditionalLayoutSystem {
         let parent_size = map.size(parent).max(0.0);
         // Save weights before detach events normalize the remaining siblings.
         let children: Vec<_> =
-            parent.children(map).map(|child| (child, map.size(child).max(0.0))).collect();
+            map.sized_children(parent).map(|(child, size)| (child, size.max(0.0))).collect();
         let total: f32 = children.iter().map(|(_, weight)| weight).sum();
         let count = children.len() as f32;
         for (child, weight) in children {

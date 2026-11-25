@@ -11,8 +11,7 @@ use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{
-    NodeId, NodeMap, Place, Placement, StoredLayout, Tree, WindowIndex, WindowNodeInfo,
-    WindowNodeInfoVec,
+    NodeId, NodeMap, Placement, StoredLayout, Tree, WindowIndex, WindowNodeInfo, WindowNodeInfoVec,
 };
 
 fn perpendicular(orientation: Orientation) -> Orientation {
@@ -249,9 +248,9 @@ impl NodeMap {
 
     fn debug(&self, node: NodeId, is_container: bool) -> String {
         let info = &self[node].layout;
-        let size = match self.place(node) {
-            Place::Child { size, .. } => format!("size {size}"),
-            Place::Root => "root".to_owned(),
+        let size = match self.size_in_parent(node) {
+            Some(size) => format!("size {size}"),
+            None => "root".to_owned(),
         };
         if is_container {
             format!("{:?} [{size} total={}]", info.kind, self.children_total(node))
@@ -425,10 +424,7 @@ impl GroupLayouts {
                 },
                 frame: Default::default(),
                 layout_kind: window.is_none().then_some(info.kind),
-                weight: match system.tree.map.place(node) {
-                    Place::Child { size, .. } => Some(f64::from(size)),
-                    Place::Root => None,
-                },
+                weight: system.tree.map.size_in_parent(node).map(f64::from),
                 window_id: window.map(Into::into),
                 is_selected: node == selected,
                 is_fullscreen: info.is_fullscreen,

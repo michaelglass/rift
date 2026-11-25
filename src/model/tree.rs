@@ -33,7 +33,7 @@ impl Placement {
     fn link(self, node: NodeId, parent: NodeId, size: f32, map: &mut NodeMap) {
         let position = |sibling| map.position(sibling).expect("a sibling has a parent");
         let index = match self {
-            Self::Back(_) => map.child_list(parent).len(),
+            Self::Back(_) => map.members(parent).len(),
             Self::Before(sibling) => position(sibling),
             Self::After(sibling) => position(sibling) + 1,
         };
@@ -114,8 +114,8 @@ impl Tree {
         }
 
         if !self.map.normalize_weights(parent) {
-            for node in self.map.child_list(parent).to_vec() {
-                *self.map.size_mut(node) = 1.0;
+            for size in self.map.sizes_mut(parent) {
+                *size = 1.0;
             }
         }
     }
@@ -126,7 +126,7 @@ impl Tree {
                 break;
             }
             if let Some(child) = node.first_child(&self.map) {
-                if self.map.child_list(node).len() > 1 {
+                if self.map.members(node).len() > 1 {
                     break;
                 }
                 let size = self.map.size(node);
@@ -145,26 +145,20 @@ impl Tree {
         if let Some(window) = node.window() {
             self.window.remove_node(window, root);
         }
-        for &child in node.child_list() {
-            self.delete_subtree(child);
+        for member in node.members() {
+            self.delete_subtree(member.node);
         }
     }
 
     pub(crate) fn clone_branch(&mut self, source: NodeId, layout: LayoutId) -> NodeId {
         let root = self.copy_tile(source, layout);
-        let mut stack = vec![(source.first_child(&self.map), source, root)];
-        while let Some((next, original_parent, new_parent)) = stack.last_mut() {
-            let Some(old) = *next else {
-                stack.pop();
-                continue;
-            };
-            *next = old.next_sibling(&self.map);
-            let new = self.copy_tile(old, layout);
-            let size = self.map.size(old);
-            Placement::Back(*new_parent).link(new, *new_parent, size, &mut self.map);
-            self.map.remap_child_selection(*original_parent, *new_parent, old, new);
-            if let Some(child) = old.first_child(&self.map) {
-                stack.push((Some(child), old, new));
+        let mut stack = vec![(source, root)];
+        while let Some((original, copy)) = stack.pop() {
+            for member in self.map.members(original).to_vec() {
+                let new = self.copy_tile(member.node, layout);
+                Placement::Back(copy).link(new, copy, member.size, &mut self.map);
+                self.map.remap_child_selection(original, copy, member.node, new);
+                stack.push((member.node, new));
             }
         }
         if let Contents::RegionPair { primary_first, .. } = self.map[source].contents {
@@ -204,16 +198,21 @@ impl NodeMap {
         let Contents::Container(children) = &self[root].contents else {
             panic!("expected an arrangement container");
         };
-        let (&[first, last], selection) = (children.nodes.as_slice(), children.selection) else {
+        let (&[first, last], selection) = (children.members.as_slice(), children.selection) else {
             panic!("expected two region containers");
         };
         assert!(root.parent(self).is_none());
-        assert!(first != last && self.window(first).is_none() && self.window(last).is_none());
-        assert!([first, last] == [primary, secondary] || [first, last] == [secondary, primary]);
+        let [first_node, last_node] = [first.node, last.node];
+        assert!(first_node != last_node);
+        assert!(self.window(first_node).is_none() && self.window(last_node).is_none());
+        assert!(
+            [first_node, last_node] == [primary, secondary]
+                || [first_node, last_node] == [secondary, primary]
+        );
         self[root].contents = Contents::RegionPair {
             regions: [first, last],
             selection,
-            primary_first: first == primary,
+            primary_first: first_node == primary,
         };
     }
 
@@ -227,9 +226,9 @@ impl NodeMap {
             return None;
         };
         Some(if primary_first {
-            (first, last)
+            (first.node, last.node)
         } else {
-            (last, first)
+            (last.node, first.node)
         })
     }
 
@@ -243,51 +242,73 @@ impl NodeMap {
         }
     }
 
-    /// Where `node` sits: a layout root, or a container's child with its size.
-    pub(crate) fn place(&self, node: NodeId) -> Place { self[node].place }
+    /// A container's children with their sizes, in order.
+    pub(crate) fn sized_children(
+        &self,
+        parent: NodeId,
+    ) -> impl Iterator<Item = (NodeId, f32)> + '_ {
+        self.members(parent).iter().map(|member| (member.node, member.size))
+    }
 
-    /// A child's share among its siblings. Panics on a root, which has no size.
+    /// A container's children's sizes, to change.
+    pub(crate) fn sizes_mut(&mut self, parent: NodeId) -> impl Iterator<Item = &mut f32> {
+        self[parent].members_mut().iter_mut().map(|member| &mut member.size)
+    }
+
+    /// `node`'s size among its siblings, or `None` for a root, which has none.
+    pub(crate) fn size_in_parent(&self, node: NodeId) -> Option<f32> {
+        let parent = node.parent(self)?;
+        self.members(parent)
+            .iter()
+            .find(|member| member.node == node)
+            .map(|member| member.size)
+    }
+
+    /// The size of a node the caller knows is a child (one it just placed, or whose parent it
+    /// holds). A size is stored with the parent's entry for its child, so a root has none and
+    /// this panics on one; `size_in_parent` is for a node that may be a root.
     #[track_caller]
     pub(crate) fn size(&self, node: NodeId) -> f32 {
-        match self[node].place {
-            Place::Child { size, .. } => size,
-            Place::Root => panic!("a root has no size"),
-        }
+        self.size_in_parent(node).expect("a root has no size")
     }
 
-    /// A child's share among its siblings, to change. Panics on a root, which has no size.
+    /// The size of a node the caller knows is a child, to change. Panics on a root.
     #[track_caller]
     pub(crate) fn size_mut(&mut self, node: NodeId) -> &mut f32 {
-        match &mut self[node].place {
-            Place::Child { size, .. } => size,
-            Place::Root => panic!("a root has no size"),
-        }
+        let parent = node.parent(self).expect("a root has no size");
+        self[parent]
+            .members_mut()
+            .iter_mut()
+            .find(|member| member.node == node)
+            .map(|member| &mut member.size)
+            .expect("a child is listed by its parent")
     }
 
-    /// Restores a node's saved layout: a root's saved size never meant anything and is dropped.
+    /// Restores a node's saved layout. A root's saved size never meant anything and is dropped.
     pub(crate) fn restore_layout(&mut self, node: NodeId, stored: StoredLayout) {
         let (info, size) = stored.split();
         self[node].layout = info;
-        if let Place::Child { size: stored_size, .. } = &mut self[node].place {
-            *stored_size = size;
+        if node.parent(self).is_some() {
+            *self.size_mut(node) = size;
         }
     }
 
     pub(crate) fn children_total(&self, parent: NodeId) -> f32 {
-        parent.children(self).map(|child| self.size(child).max(0.0)).sum()
+        self.sized_children(parent).map(|(_, size)| size.max(0.0)).sum()
     }
 
     /// Preserve sibling proportions with a mean weight of one.
     pub(crate) fn normalize_weights(&mut self, parent: NodeId) -> bool {
-        let (count, total) = parent.children(self).fold((0, 0.0_f32), |(count, total), child| {
-            (count + 1, total + self.size(child).max(0.0))
-        });
+        let (count, total) =
+            self.sized_children(parent).fold((0, 0.0_f32), |(count, total), (_, size)| {
+                (count + 1, total + size.max(0.0))
+            });
         if !total.is_finite() || total <= f32::EPSILON {
             return false;
         }
         let scale = count as f32 / total;
-        for node in self.child_list(parent).to_vec() {
-            *self.size_mut(node) *= scale;
+        for size in self.sizes_mut(parent) {
+            *size *= scale;
         }
         true
     }
@@ -302,15 +323,13 @@ impl NodeMap {
         self.map.get(node)?.selection()
     }
 
-    /// A node's children, in order: none for a window.
-    fn child_list(&self, node: NodeId) -> &[NodeId] {
-        self.map.get(node).map_or(&[], Node::child_list)
-    }
+    /// A node's children with their sizes, in order: none for a window.
+    fn members(&self, node: NodeId) -> &[Member] { self.map.get(node).map_or(&[], Node::members) }
 
     /// Where a child sits among its siblings.
     fn position(&self, node: NodeId) -> Option<usize> {
         let parent = node.parent(self)?;
-        self.child_list(parent).iter().position(|&child| child == node)
+        self.members(parent).iter().position(|member| member.node == node)
     }
 
     pub fn contains(&self, id: NodeId) -> bool { self.map.contains_key(id) }
@@ -333,18 +352,16 @@ slotmap::new_key_type! {
 
 impl NodeId {
     #[track_caller]
-    pub fn parent(self, map: &NodeMap) -> Option<NodeId> {
-        map.map.get(self).and_then(|n| n.place.parent())
-    }
+    pub fn parent(self, map: &NodeMap) -> Option<NodeId> { map.map.get(self)?.parent }
 
     #[track_caller]
     pub fn children(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        map.child_list(self).iter().copied()
+        map.members(self).iter().map(|member| member.node)
     }
 
     #[track_caller]
     pub fn children_rev(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        map.child_list(self).iter().rev().copied()
+        map.members(self).iter().rev().map(|member| member.node)
     }
 
     #[track_caller]
@@ -409,7 +426,7 @@ impl NodeId {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
-            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.place.parent()));
+            next = node.and_then(|n| map.map.get(n)?.parent);
             node
         })
     }
@@ -435,38 +452,38 @@ impl NodeId {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
-            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.place.parent()));
+            next = node.and_then(|n| map.map.get(n)?.parent);
             node.map(|n| (n, next))
         })
     }
 
     #[track_caller]
     pub fn next_sibling(self, map: &NodeMap) -> Option<NodeId> {
-        let siblings = map.child_list(self.parent(map)?);
-        siblings.get(map.position(self)? + 1).copied()
+        let siblings = map.members(self.parent(map)?);
+        Some(siblings.get(map.position(self)? + 1)?.node)
     }
 
     #[track_caller]
     pub fn prev_sibling(self, map: &NodeMap) -> Option<NodeId> {
-        let siblings = map.child_list(self.parent(map)?);
-        siblings.get(map.position(self)?.checked_sub(1)?).copied()
+        let siblings = map.members(self.parent(map)?);
+        Some(siblings.get(map.position(self)?.checked_sub(1)?)?.node)
     }
 
     #[track_caller]
     pub fn first_child(self, map: &NodeMap) -> Option<NodeId> {
-        map.child_list(self).first().copied()
+        Some(map.members(self).first()?.node)
     }
 
     #[track_caller]
     pub fn last_child(self, map: &NodeMap) -> Option<NodeId> {
-        map.child_list(self).last().copied()
+        Some(map.members(self).last()?.node)
     }
 
     #[track_caller]
     pub fn is_empty(self, map: &NodeMap) -> bool { self.first_child(map).is_none() }
 }
 
-/// What a node knows about how it is laid out. A child's size lives in its `Place`.
+/// What a node knows about how it is laid out. A child's size lives in its parent's entry for it.
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutInfo {
     pub(crate) kind: LayoutKind,
@@ -474,10 +491,12 @@ pub(crate) struct LayoutInfo {
     pub(crate) is_fullscreen_within_gaps: bool,
 }
 
-/// A node's layout as saved, with a size on every node.
+/// A node's layout as saved. Files saved before containers listed their children also kept
+/// each node's size here; it is read from those, never written.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) struct StoredLayout {
+    #[serde(default, skip_serializing)]
     size: f32,
     kind: LayoutKind,
     #[serde(default)]
@@ -487,9 +506,9 @@ pub(crate) struct StoredLayout {
 }
 
 impl StoredLayout {
-    fn new(info: LayoutInfo, size: f32) -> Self {
+    fn new(info: LayoutInfo) -> Self {
         Self {
-            size,
+            size: 0.0,
             kind: info.kind,
             is_fullscreen: info.is_fullscreen,
             is_fullscreen_within_gaps: info.is_fullscreen_within_gaps,
@@ -506,31 +525,10 @@ impl StoredLayout {
     }
 }
 
-/// Where a node sits: a layout root (or a node not placed yet), or a container's child with its
-/// share of the container among its siblings. A root has no size.
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-pub(crate) enum Place {
-    #[default]
-    Root,
-    Child {
-        parent: NodeId,
-        size: f32,
-    },
-}
-
-impl Place {
-    fn parent(self) -> Option<NodeId> {
-        match self {
-            Place::Child { parent, .. } => Some(parent),
-            Place::Root => None,
-        }
-    }
-}
-
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(from = "StoredNode", into = "StoredNode")]
 pub struct Node {
-    place: Place,
+    parent: Option<NodeId>,
     pub(crate) layout: LayoutInfo,
     contents: Contents,
 }
@@ -539,7 +537,7 @@ pub struct Node {
 enum Contents {
     Container(Children),
     RegionPair {
-        regions: [NodeId; 2],
+        regions: [Member; 2],
         selection: Option<SelectionInfo>,
         primary_first: bool,
     },
@@ -553,17 +551,26 @@ impl Default for Contents {
 /// A container's children, in order, and the one its selection remembers.
 #[derive(Clone, Default, PartialEq, Debug)]
 struct Children {
-    nodes: Vec<NodeId>,
+    members: Vec<Member>,
     selection: Option<SelectionInfo>,
 }
 
-/// A node as saved. A container lists its children in order; files saved before that linked
-/// each child to its siblings instead, and those links are read, never written.
+/// A child as its parent lists it, with its share of the parent among its siblings. A size is
+/// a fact about this entry, so a root, which no parent lists, has none.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub(crate) struct Member {
+    node: NodeId,
+    size: f32,
+}
+
+/// A node as saved. A container lists its children in order, each with its size. Files saved
+/// before that linked each child to its siblings and kept its size in its own layout; those
+/// links and sizes are read, never written.
 #[derive(Serialize, Deserialize)]
 struct StoredNode {
     parent: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    children: Vec<NodeId>,
+    children: Vec<Member>,
     #[serde(default, skip_serializing)]
     next_sibling: Option<NodeId>,
     #[serde(default, skip_serializing)]
@@ -588,33 +595,27 @@ impl From<StoredNode> for Node {
                 primary_first,
             },
             _ => Contents::Container(Children {
-                nodes: stored.children,
+                members: stored.children,
                 selection: stored.selection,
             }),
         };
-        let (layout, size) = stored.layout.split();
-        let place = match stored.parent {
-            Some(parent) => Place::Child { parent, size },
-            // A root's saved size never meant anything.
-            None => Place::Root,
-        };
-        Self { place, layout, contents }
+        let (layout, _) = stored.layout.split();
+        Self {
+            parent: stored.parent,
+            layout,
+            contents,
+        }
     }
 }
 
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
-        // A root is saved with size 0, the size every new root had.
-        let (parent, size) = match node.place {
-            Place::Child { parent, size } => (Some(parent), size),
-            Place::Root => (None, 0.0),
-        };
         Self {
-            parent,
-            children: node.child_list().to_vec(),
+            parent: node.parent,
+            children: node.members().to_vec(),
             next_sibling: None,
             first_child: None,
-            layout: StoredLayout::new(node.layout, size),
+            layout: StoredLayout::new(node.layout),
             selection: node.selection(),
             window: node.window(),
             master_first: match node.contents {
@@ -635,16 +636,20 @@ impl<'de> Deserialize<'de> for NodeMap {
         }
         let Stored { mut map } = Stored::deserialize(deserializer)?;
         // A file saved before containers listed their children links them instead: follow each
-        // container's first child along the sibling links. A broken chain stops at the map's
-        // size rather than looping.
-        let linked: Vec<(NodeId, Vec<NodeId>)> = map
+        // container's first child along the sibling links, taking each child's size from its
+        // own layout. A broken chain stops at the map's size rather than looping.
+        let linked: Vec<(NodeId, Vec<Member>)> = map
             .iter()
             .filter(|(_, node)| node.children.is_empty())
             .filter_map(|(id, node)| Some((id, node.first_child?)))
             .map(|(id, first)| {
                 let chain =
                     std::iter::successors(Some(first), |&child| map.get(child)?.next_sibling);
-                (id, chain.take(map.len()).collect())
+                let members = chain.take(map.len()).filter_map(|node| {
+                    let size = map.get(node)?.layout.size;
+                    Some(Member { node, size })
+                });
+                (id, members.collect())
             })
             .collect();
         for (id, children) in linked {
@@ -658,11 +663,19 @@ impl<'de> Deserialize<'de> for NodeMap {
 impl Node {
     fn is_region_pair(&self) -> bool { matches!(self.contents, Contents::RegionPair { .. }) }
 
-    fn child_list(&self) -> &[NodeId] {
+    fn members(&self) -> &[Member] {
         match &self.contents {
-            Contents::Container(children) => &children.nodes,
+            Contents::Container(children) => &children.members,
             Contents::RegionPair { regions, .. } => regions,
             Contents::Window(_) => &[],
+        }
+    }
+
+    fn members_mut(&mut self) -> &mut [Member] {
+        match &mut self.contents {
+            Contents::Container(children) => &mut children.members,
+            Contents::RegionPair { regions, .. } => regions,
+            Contents::Window(_) => &mut [],
         }
     }
 
@@ -674,9 +687,9 @@ impl Node {
         }
     }
 
-    fn children_mut(&mut self) -> &mut Vec<NodeId> {
+    fn children_mut(&mut self) -> &mut Vec<Member> {
         match &mut self.contents {
-            Contents::Container(children) => &mut children.nodes,
+            Contents::Container(children) => &mut children.members,
             _ => unreachable!("only regular containers accept structural edits"),
         }
     }
@@ -689,7 +702,7 @@ impl Node {
     }
 
     pub(crate) fn set_window(&mut self, window: WindowId) {
-        assert!(self.child_list().is_empty());
+        assert!(self.members().is_empty());
         self.contents = Contents::Window(window);
     }
 
@@ -703,21 +716,20 @@ impl Node {
 }
 
 impl NodeMap {
-    fn link_child(&mut self, id: NodeId, parent: NodeId, size: f32, index: usize) {
-        let Some(node) = self.map.get_mut(id) else { return };
-        debug_assert_eq!(node.place, Place::Root);
-        node.place = Place::Child { parent, size };
-        self[parent].children_mut().insert(index, id);
+    fn link_child(&mut self, node: NodeId, parent: NodeId, size: f32, index: usize) {
+        let Some(child) = self.map.get_mut(node) else { return };
+        debug_assert_eq!(child.parent, None);
+        child.parent = Some(parent);
+        self[parent].children_mut().insert(index, Member { node, size });
     }
 
     /// Takes a child out of its parent, making it a root, and returns the size it had.
     #[track_caller]
-    fn unlink(&mut self, id: NodeId) -> f32 {
-        let Place::Child { parent, size } = std::mem::take(&mut self[id].place) else {
-            panic!("a root has no parent to leave");
-        };
-        self[parent].children_mut().retain(|&child| child != id);
-        size
+    fn unlink(&mut self, node: NodeId) -> f32 {
+        let parent = self[node].parent.take().expect("a root has no parent to leave");
+        let children = self[parent].children_mut();
+        let index = children.iter().position(|member| member.node == node);
+        children.remove(index.expect("a child is listed by its parent")).size
     }
 }
 
@@ -1075,26 +1087,19 @@ mod tests {
     }
 
     #[test]
-    fn a_root_has_no_size_and_a_saved_one_is_dropped() {
+    fn a_size_belongs_to_its_parents_entry_so_a_root_has_none() {
         let t = TestTree::new();
-        assert_eq!(t.tree.map.place(t.root), Place::Root);
-        assert_eq!(t.tree.map.place(t.child1), Place::Child {
-            parent: t.root,
-            size: 1.0
-        });
-
-        let mut saved: Vec<StoredNode> = [t.root, t.child1]
-            .into_iter()
-            .map(|node| StoredNode::from(t.tree.map[node].clone()))
-            .collect();
-        assert_eq!(saved[0].layout.size, 0.0);
-        saved[0].layout.size = 7.0;
-        let root = Node::from(saved.remove(0));
-        assert_eq!(root.place, Place::Root);
+        assert_eq!(t.tree.map.size_in_parent(t.root), None);
+        assert_eq!(t.tree.map.size_in_parent(t.child1), Some(1.0));
+        assert_eq!(t.tree.map.sized_children(t.root).collect::<Vec<_>>(), [
+            (t.child1, 1.0),
+            (t.child2, 1.0),
+            (t.child3, 1.0)
+        ]);
     }
 
-    /// `TestTree` as saved now: each container lists its children in order.
-    const LISTED: &str = "(map:[(value:None,version:0),(value:Some((parent:None,children:[(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],layout:(size:0.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),children:[(idx:5,version:1)],layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:3,version:1)),layout:(size:1.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:None,layout:(size:0.0,kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1)])";
+    /// `TestTree` as saved now: each container lists its children in order, with their sizes.
+    const LISTED: &str = "(map:[(value:None,version:0),(value:Some((parent:None,children:[(node:(idx:2,version:1),size:1.0),(node:(idx:3,version:1),size:1.0),(node:(idx:4,version:1),size:1.0)],layout:(kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),layout:(kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),children:[(node:(idx:5,version:1),size:1.0)],layout:(kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:1,version:1)),layout:(kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:Some((idx:3,version:1)),layout:(kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1),(value:Some((parent:None,layout:(kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false),selection:None,window:None)),version:1)])";
 
     /// `TestTree` as saved before containers listed their children: each child linked to its
     /// siblings, and the middle child is reachable only through those links.

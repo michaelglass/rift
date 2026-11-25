@@ -57,10 +57,10 @@ impl StackLayoutResult {
 
 impl NodeMap {
     fn proportion(&self, node: NodeId) -> Option<f64> {
-        let Some(parent) = node.parent(self) else { return None };
-        let total = self.children_total(parent);
+        let size = self.size_in_parent(node)?;
+        let total = self.children_total(node.parent(self)?);
         (total.is_finite() && total > f32::EPSILON)
-            .then(|| f64::from(self.size(node).max(0.0)) / f64::from(total))
+            .then(|| f64::from(size.max(0.0)) / f64::from(total))
     }
 
     fn take_share(&mut self, node: NodeId, from: NodeId, share: f32) {
@@ -248,8 +248,10 @@ impl Projection<'_> {
         collect: bool,
     ) {
         let (prepared, map, gaps) = (self.prepared, self.map, self.gaps);
-        let children: Vec<_> =
-            node.children(map).filter(|child| prepared.contains_key(child)).collect();
+        let children: Vec<_> = map
+            .sized_children(node)
+            .filter(|(child, _)| prepared.contains_key(child))
+            .collect();
         if children.is_empty() {
             return;
         }
@@ -259,9 +261,9 @@ impl Projection<'_> {
             axis_span(rect, horizontal, gaps, children.len());
         let mut axis_constraints: Vec<AxisConstraints> = children
             .iter()
-            .map(|&child| {
+            .map(|&(child, size)| {
                 let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
-                let weight = f64::from(map.size(child));
+                let weight = f64::from(size);
                 total += weight;
                 invalid |= !weight.is_finite() || weight < 0.0;
                 AxisConstraints {
@@ -286,7 +288,7 @@ impl Projection<'_> {
         } else {
             None
         };
-        for (child, seg_len) in children.into_iter().zip(seg_lens) {
+        for ((child, _), seg_len) in children.into_iter().zip(seg_lens) {
             self.apply(
                 child,
                 axis_slot(rect, horizontal, offset, seg_len).round(),
@@ -370,11 +372,11 @@ pub(super) fn remove_and_rebalance(tiles: &mut GroupLayouts, window: WindowId) {
 
 pub(super) fn rebalance(map: &mut NodeMap, root: NodeId) -> bool {
     let mut changed = false;
-    let mut child = root.first_child(map);
-    while let Some(node) = child {
-        changed |= std::mem::replace(map.size_mut(node), 1.0) != 1.0;
-        changed |= rebalance(map, node);
-        child = node.next_sibling(map);
+    for size in map.sizes_mut(root) {
+        changed |= std::mem::replace(size, 1.0) != 1.0;
+    }
+    for child in root.children(map).collect::<Vec<_>>() {
+        changed |= rebalance(map, child);
     }
     changed
 }
