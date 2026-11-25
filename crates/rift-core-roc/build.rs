@@ -57,10 +57,9 @@ fn main() {
     println!("cargo:rustc-link-lib=static=rift_core_roc");
 }
 
-/// Generates the platform's glue into `out/roc_platform_abi.rs`, ready for `include!`: the
-/// generator writes a file meant to be a module (inner doc comments and attributes), which
-/// `include!` rejects, so those lines become plain comments (the crate puts the attributes
-/// it needs on the module). Fails on a boundary type the generator had to name itself: an
+/// Generates the platform's glue into `out/roc_platform_abi.rs`, which the crate `include!`s as
+/// written (the generator's output is includable and lint-clean since roc-lang/roc#13349). Fails
+/// on a boundary type the generator had to name itself: an
 /// anonymous record (`AnonStruct<hash>`) or a structural union it numbered (`…Type<n>`), whose
 /// names change as other types come and go. Every boundary type is a named Roc type.
 fn glue(roc: &str, roc_src: &Path, roc_dir: &Path, out: &Path) {
@@ -97,15 +96,7 @@ fn glue(roc: &str, roc_src: &Path, roc_dir: &Path, out: &Path) {
         "the platform's boundary has types without a name of their own (give each a named Roc \
          type): {unnamed:?}"
     );
-    let includable: String = text
-        .lines()
-        .map(|line| match line.strip_prefix("//!") {
-            Some(doc) => format!("//{doc}\n"),
-            None if line.starts_with("#![") => format!("// {line}\n"),
-            None => format!("{line}\n"),
-        })
-        .collect();
-    std::fs::write(out.join("roc_platform_abi.rs"), includable).expect("glue written");
+    std::fs::write(out.join("roc_platform_abi.rs"), text).expect("glue written");
 }
 
 /// The generator's own names in `text`: `AnonStruct` followed by hex digits, and identifiers
