@@ -432,7 +432,11 @@ pub(super) fn node_slot(
     Some(path)
 }
 
+#[cfg(feature = "roc-core")]
+mod group_roc;
 mod group_stored;
+#[cfg(feature = "roc-core")]
+pub(crate) use group_roc::group_forest_reseeds;
 mod group_twin;
 pub(crate) use group_twin::group_forest_divergences;
 mod groups;

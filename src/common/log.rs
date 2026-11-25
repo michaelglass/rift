@@ -104,6 +104,10 @@ fn show_roc_core() {
         let reseeds = crate::layout_engine::systems::stack_tree_reseeds();
         println!("roc-core: stack tree re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: stack tree re-seeds");
+        // The Roc group forest, the core's second shadow (re-seeded from the core).
+        let reseeds = crate::layout_engine::systems::group_forest_reseeds();
+        println!("roc-core: group forest re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: group forest re-seeds");
     }
 }
 
