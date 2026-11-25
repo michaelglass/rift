@@ -4,18 +4,20 @@
 
 use std::mem::ManuallyDrop;
 
+use rift_core::layout::WindowConstraints;
 use rift_core::layout::stack_tree::{
     Beyond, DefaultOrientation, Edit, Edited, Fill, Focused, GroupContainer, Id, InsertionPoint,
     Member, Members, NonEmpty, Participation, Resize, Selection, Stack,
 };
+use rift_core::plain::{Rect, WindowId};
 
 use super::{
-    from_maybe_word, from_orientation, insertion, list, rect, traditional_fill, tree_direction,
-    tree_focus, tree_orientation, tree_query,
+    frames, from_maybe_word, from_orientation, gaps, insertion, list, rect, stack_line,
+    traditional_fill, tree_direction, tree_focus, tree_orientation, tree_query, window_constraints,
 };
 use crate::abi;
 use crate::bsp_tree::LayoutKey;
-use crate::stack_tree::{Answer, Event, Scope, StacksView};
+use crate::stack_tree::{Answer, Event, Pass, Scope, StacksView};
 
 fn default_orientation(orientation: DefaultOrientation) -> abi::BoundaryStackDefault {
     match orientation {
@@ -486,6 +488,37 @@ impl StackTreeBox {
         let answer = from_answer(&stepped.answer);
         unsafe { stepped.answer.decref(host) };
         (StackTreeBox(stepped.model), answer)
+    }
+
+    /// A layout's frames, as the traditional geometry gives them for the stacks' own shape: the
+    /// pass's screen, gaps, stack offset and line, and every window's constraints the caller
+    /// knows (by the window's word).
+    pub(crate) fn frames(
+        self,
+        layout: LayoutKey,
+        pass: Pass,
+        known: &[(u64, WindowConstraints)],
+        host: &abi::RocHost,
+    ) -> (StackTreeBox, Vec<(WindowId, Rect)>) {
+        let known: Vec<abi::BoundaryBspKnown> = known
+            .iter()
+            .map(|&(window, held)| abi::BoundaryBspKnown {
+                window,
+                constraints: window_constraints(held),
+            })
+            .collect();
+        let question = abi::BoundaryStackFramesQuestion {
+            layout: layout.0,
+            screen: rect(pass.screen),
+            gaps: gaps(pass.gaps),
+            stack_offset: pass.stack_offset,
+            stack_line: stack_line(pass.stack_line),
+            known: list(&known, host),
+        };
+        // SAFETY: as in `step`; the question's list is allocated through the host and consumed
+        // by Roc; the frames are Roc's answer, read in full and released by `frames`.
+        let framed = unsafe { abi::roc_stack_tree_frames(self.into_raw(), question) };
+        (StackTreeBox(framed.model), frames(framed.frames, host))
     }
 
     /// The table's slots and free list, the counter, the settings, the windows left out.

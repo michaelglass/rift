@@ -998,6 +998,11 @@ Boundary := [].{
 	## (in taking order: the last first), the id counter, the settings, the windows left out.
 	StackTreeSeed := { layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) }
 
+	## A layout's frames (`Stacks::shape`, then the traditional geometry): the layout, the
+	## screen, the gaps, the stack offset and line, and every window's constraints the host knows
+	## (by the window's word).
+	StackFramesQuestion := { layout : U64, screen : Rect, gaps : Gaps, stack_offset : F64, stack_line : StackLine, known : List(BspKnown) }
+
 	## Where a move past the stack's end would go, beyond the layout.
 	StackBeyond := [AnotherDisplay, Nothing]
 

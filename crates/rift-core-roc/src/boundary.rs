@@ -412,13 +412,17 @@ pub(crate) fn traditional_shape(
         area: rect(shape.area),
         gaps: gaps(shape.gaps),
         stack_offset: shape.stack_offset,
-        stack_line: abi::BoundaryStackLine {
-            thickness: line.thickness,
-            spacing: line.spacing,
-            top: line.top,
-            left: line.left,
-        },
+        stack_line: stack_line(line),
         root: traditional_node(shape.root, host),
+    }
+}
+
+fn stack_line(line: traditional::StackLine) -> abi::BoundaryStackLine {
+    abi::BoundaryStackLine {
+        thickness: line.thickness,
+        spacing: line.spacing,
+        top: line.top,
+        left: line.left,
     }
 }
 

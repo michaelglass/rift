@@ -5,14 +5,18 @@
 //! other operation indexes the layout, which upstream's `Index` refuses with a panic), so slots
 //! are reused and stale keys meet the slot versions. Every operation must answer alike and leave
 //! the same whole system: the table's slots, versions and free list, the id counter, the
-//! settings, the windows left out.
+//! settings, the windows left out. On 40% of steps a layout pass of a live layout: the Roc
+//! stacks' own shape through the Roc traditional geometry against the Rust stacks' shape through
+//! the Rust geometry, bit for bit.
 
 use rift_core::layout::stack_tree::{
     Beyond, DefaultOrientation, Direction, Edit, Fill, Focus, Focused, InsertionPoint, Members,
     Participation, Query, Resize, Selection,
 };
-use rift_core::plain::Rect;
-use rift_core_roc::stack_tree::{self, Answer, Event, LayoutKey, Scope, Stacks, StacksView};
+use rift_core::layout::traditional::StackLine;
+use rift_core::layout::{Gaps, Size, Sizing, WindowConstraints};
+use rift_core::plain::{Rect, WindowId};
+use rift_core_roc::stack_tree::{self, Answer, Event, LayoutKey, Pass, Scope, Stacks, StacksView};
 use rift_core_roc::{AllocationCount, RocStackTree};
 
 /// xorshift64*: deterministic, no dependency.
@@ -63,6 +67,82 @@ impl Rng {
                 w: 980.4,
                 h: 780.0,
             },
+        }
+    }
+
+    fn length(&mut self, low: f64, high: f64) -> f64 {
+        low + (high - low) * (self.below(1 << 20) as f64 / f64::from(1 << 20))
+    }
+
+    /// A layout pass's surroundings: the run's screen or one drawn anywhere (narrow and empty
+    /// too), gaps, a stack offset and a stack line (often none).
+    fn pass(&mut self) -> Pass {
+        let screen = if self.chance(50) {
+            SCREEN
+        } else {
+            Rect {
+                x: self.length(-2000.0, 3000.0),
+                y: self.length(-500.0, 1500.0),
+                w: self.length(0.0, 3500.0),
+                h: self.length(0.0, 2200.0),
+            }
+        };
+        let mut gap = |rng: &mut Self| {
+            if rng.chance(40) {
+                0.0
+            } else {
+                rng.length(0.0, 40.0)
+            }
+        };
+        let gaps = Gaps {
+            top: gap(self),
+            left: gap(self),
+            bottom: gap(self),
+            right: gap(self),
+            horizontal: gap(self),
+            vertical: gap(self),
+        };
+        let stack_offset = if self.chance(30) {
+            0.0
+        } else {
+            self.length(0.0, 60.0)
+        };
+        let stack_line = StackLine {
+            thickness: if self.chance(50) {
+                0.0
+            } else {
+                self.length(0.0, 12.0)
+            },
+            spacing: self.length(0.0, 8.0),
+            top: self.chance(50),
+            left: self.chance(50),
+        };
+        Pass {
+            screen,
+            gaps,
+            stack_offset,
+            stack_line,
+        }
+    }
+
+    /// A window's constraints, as the layout differential draws them.
+    fn constraints(&mut self) -> WindowConstraints {
+        let mut maybe = |high: f64| {
+            if self.chance(50) {
+                0.0
+            } else {
+                self.length(1.0, high)
+            }
+        };
+        let (locked_width, locked_height) = (maybe(1500.0), maybe(1000.0));
+        let min = Size::reported(maybe(900.0), maybe(700.0));
+        let (max_width, max_height) = (maybe(1800.0), maybe(1200.0));
+        WindowConstraints {
+            sizing: Sizing::new(self.chance(70), self.chance(50), min),
+            locked_width,
+            locked_height,
+            max_width,
+            max_height,
         }
     }
 
@@ -255,6 +335,7 @@ fn the_roc_stack_tree_answers_and_keeps_the_system_as_the_rust_stacks_do() {
     let before = AllocationCount::now();
     let (mut steps, mut reused, mut resized, mut largest) = (0, 0, 0, 0);
     let (mut queries, mut told, mut reached, mut rooted, mut moved) = (0, 0, 0, 0, 0);
+    let (mut passes, mut framed, mut constrained, mut several, mut weighed) = (0, 0, 0, 0, 0);
     for run in 0..runs {
         let (orientation, insertion) = (rng.orientation(), rng.insertion());
         let mut rust = Stacks::new(orientation, insertion);
@@ -327,6 +408,47 @@ fn the_roc_stack_tree_answers_and_keeps_the_system_as_the_rust_stacks_do() {
                     "run {run} step {step}: the seed (reloads at {reloads:?}) after {history:#?}"
                 );
             }
+            let live: Vec<LayoutKey> = rust.layouts().keys().collect();
+            if rng.chance(40)
+                && let Some(layout) = rng.pick(&live)
+            {
+                // A layout pass of a live layout (upstream's shape indexes the layout): the Roc
+                // stacks' own shape through the Roc geometry, against the Rust stacks' shape
+                // through the Rust geometry, bit for bit.
+                let pass = rng.pass();
+                let mut known: Vec<(u64, WindowConstraints)> = Vec::new();
+                for window in WINDOWS {
+                    if rng.chance(40) {
+                        known.push((window, rng.constraints()));
+                    }
+                }
+                let shape = rust.shape(
+                    layout,
+                    pass.screen,
+                    pass.gaps,
+                    pass.stack_offset,
+                    pass.stack_line,
+                    |window| known.iter().find(|(held, _)| *held == window).map(|&(_, c)| c),
+                );
+                let expected = shape.map_or_else(Vec::new, |shape| shape.map(&window_id).frames());
+                let got = roc.frames(layout, pass, &known);
+                assert_eq!(
+                    frame_bits(&got),
+                    frame_bits(&expected),
+                    "run {run} step {step}: frames of {layout:?} in {pass:?}, {known:?} after {history:#?}"
+                );
+                passes += 1;
+                framed += expected.len();
+                several += usize::from(expected.len() >= 2);
+                constrained += expected
+                    .iter()
+                    .filter(|(window, _)| known.iter().any(|(held, _)| window_id(*held) == *window))
+                    .count();
+                weighed += usize::from(
+                    expected.len() >= 2
+                        && rust.layouts()[layout].list().iter().any(|m| m.weight != 1.0),
+                );
+            }
             if rng.chance(50)
                 && let Some(query) = made.query(&mut rng, &rust)
             {
@@ -367,7 +489,38 @@ fn the_roc_stack_tree_answers_and_keeps_the_system_as_the_rust_stacks_do() {
         rooted > 0 && moved > 0,
         "no stack selected ({rooted}) or member moved ({moved})"
     );
+    assert!(
+        constrained * 10 > framed && several * 10 > passes && weighed * 50 > passes,
+        "{passes} layout passes placed {framed} windows ({several} passes two or more, {weighed} with saved weights), {constrained} constrained"
+    );
+    eprintln!(
+        "stack_tree: {passes} layout passes identical ({framed} windows placed, {several} passes placing two or more, {weighed} of them with saved weights, {constrained} constrained)"
+    );
     eprintln!(
         "stack_tree: {steps} operations identical ({reused} reused a slot, {resized} native resizes changed a system, stacks of up to {largest} members; {queries} queries, {told} telling something; {reached} focus moves reaching a window; {moved} moves; {rooted} operations leaving a stack selected), the system compared after each"
     );
+}
+
+/// The window a system's word names (its pid in the high half, its index in the low half).
+fn window_id(word: u64) -> WindowId {
+    WindowId {
+        pid: (word >> 32) as u32 as i32,
+        idx: word as u32,
+    }
+}
+
+/// Frames as words: each window's pid and index, each coordinate's bits.
+fn frame_bits(frames: &[(WindowId, Rect)]) -> Vec<u64> {
+    frames
+        .iter()
+        .flat_map(|(window, r)| {
+            [
+                u64::from(window.pid as u32) << 32 | u64::from(window.idx),
+                r.x.to_bits(),
+                r.y.to_bits(),
+                r.w.to_bits(),
+                r.h.to_bits(),
+            ]
+        })
+        .collect()
 }

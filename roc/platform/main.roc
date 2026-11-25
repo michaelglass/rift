@@ -71,6 +71,7 @@ platform ""
 			stack_tree_seed : StackTreeSeed -> stacks,
 			stack_tree_step : stacks, StackTreeEvent -> { model : stacks, answer : StackTreeAnswer },
 			stack_tree_view : stacks -> { model : stacks, layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) },
+			stack_tree_frames : stacks, StackFramesQuestion -> { model : stacks, frames : List(Frame) },
 		}
 	}
 	exposes [Boundary]
@@ -102,6 +103,7 @@ platform ""
 		"roc_stack_tree_seed": stack_tree_seed_for_host,
 		"roc_stack_tree_step": stack_tree_step_for_host,
 		"roc_stack_tree_view": stack_tree_view_for_host,
+		"roc_stack_tree_frames": stack_tree_frames_for_host,
 		"roc_stack_tree_release": stack_tree_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
@@ -155,7 +157,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -205,6 +207,9 @@ StackTreeStepped := { model : Box(Stacks), answer : StackTreeAnswer }
 ## A stack layout system's stacks, unchanged: the table's slots and free list, the id counter,
 ## the settings, the windows left out in order.
 StackTreeViewed := { model : Box(Stacks), layouts : List(StackLayoutSlot), layout_free : List(U32), next_node : U32, settings : StackSettings, left_out : List(U64) }
+
+## A stack layout system's stacks, unchanged, and a layout's frames.
+StackTreeFramed := { model : Box(Stacks), frames : List(Frame) }
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -535,6 +540,14 @@ stack_tree_view_for_host : Box(Stacks) -> StackTreeViewed
 stack_tree_view_for_host = |boxed| {
 	viewed = (core.stack_tree_view)(Box.unbox(boxed))
 	{ model: Box.box(viewed.model), layouts: viewed.layouts, layout_free: viewed.layout_free, next_node: viewed.next_node, settings: viewed.settings, left_out: viewed.left_out }
+}
+
+## A layout's frames, from the stacks' own shape (`Stacks::shape`) through the traditional
+## geometry, and the stacks back unchanged.
+stack_tree_frames_for_host : Box(Stacks), StackFramesQuestion -> StackTreeFramed
+stack_tree_frames_for_host = |boxed, question| {
+	framed = (core.stack_tree_frames)(Box.unbox(boxed), question)
+	{ model: Box.box(framed.model), frames: framed.frames }
 }
 
 ## The host cannot release a `Box(Stacks)`: only Roc knows its layout.

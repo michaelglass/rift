@@ -618,6 +618,22 @@ impl RocStackTree {
         boundary::in_place(&mut self.stacks, |stacks| stacks.step(event, &host))
     }
 
+    /// A layout's frames: the stacks' own shape for it (as `Stacks::shape` builds it, with the
+    /// constraints in `known`, by window word) through the Roc traditional geometry (as
+    /// `Traditional::frames`); none when no window takes part. A layout the system does not
+    /// hold is a broken system (Roc crashes, as `Stacks::shape` panics).
+    pub fn frames(
+        &mut self,
+        layout: stack_tree::LayoutKey,
+        pass: stack_tree::Pass,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+    ) -> Vec<(WindowId, Rect)> {
+        let host = host();
+        boundary::in_place(&mut self.stacks, |stacks| {
+            stacks.frames(layout, pass, known, &host)
+        })
+    }
+
     /// The whole system, as [`stack_tree::StacksView::from`] reads a `Stacks`.
     pub fn view(&mut self) -> stack_tree::StacksView {
         let host = host();
@@ -638,6 +654,16 @@ pub mod stack_tree {
 
     /// The Rust system, on plain keys and windows as words.
     pub type Stacks = rift_core::layout::stack_tree::Stacks<LayoutKey, u64>;
+
+    /// A layout pass's surroundings: the screen, the gaps, the stack offset and the stack line
+    /// (`Stacks::shape`'s other arguments).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct Pass {
+        pub screen: rift_core::plain::Rect,
+        pub gaps: rift_core::layout::Gaps,
+        pub stack_offset: f64,
+        pub stack_line: rift_core::layout::traditional::StackLine,
+    }
 
     /// How much of the selection the group bar's question covers (`group_container`'s
     /// `selection_path_only`).

@@ -6,8 +6,9 @@
 ## A stack is looked up only by a key the system holds: a missing one is a broken system, as it
 ## is in Rust (whose `Index` panics), so the lookup crashes, naming what looked and the key.
 
+import Geometry
 import Slots
-import pf.Boundary exposing [BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspNativeResize, BspOrientation, BspPair, BspParticipation, BspReplacement, BspWindowIn, BspWindowsQuery, Fill, MaybeWord, Rect, StackEditIn, StackGroupAnswer, StackGroupIn, StackLayoutSlot, StackMember, StackMembers, StackMove, StackSelection, StackSettings, StackSlot, StackTab, StackTreeAnswer, StackTreeEvent, StackTreeSeed, StackTreeStack]
+import pf.Boundary exposing [Child, Constraints, StackFramesQuestion, TraditionalNode, TraditionalShape, WindowConstraints, WindowId, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspNativeResize, BspOrientation, BspPair, BspParticipation, BspReplacement, BspWindowIn, BspWindowsQuery, Fill, MaybeWord, Rect, StackEditIn, StackGroupAnswer, StackGroupIn, StackLayoutSlot, StackMember, StackMembers, StackMove, StackSelection, StackSettings, StackSlot, StackTab, StackTreeAnswer, StackTreeEvent, StackTreeSeed, StackTreeStack]
 
 ## A stack layout system: every layout's stack, the id counter, the settings, the windows left
 ## out of layout.
@@ -391,6 +392,68 @@ StackTree := [].{
 			}
 		}
 	}
+
+	# The shape (`Stacks::shape`): the traditional geometry's input.
+
+	## A layout's shape for the traditional geometry: its stack, with the shown member focused
+	## and the other members taking part before and after it, each with the constraints the host
+	## knows; none when no member takes part. The stack's words become the geometry's
+	## `WindowId`s here, and a member's weight its share (Rust's `as f32`).
+	shape : Stacks, StackFramesQuestion -> [Shaped(TraditionalShape), Unshaped]
+	shape = |stacks, question| {
+		held = stack_at(stacks, question.layout, "shape")
+		match visible(stacks, held) {
+			NotFound => Unshaped
+			Found(at) => {
+				known = Dict.from_list(question.known.map(|k| (k.window, k.constraints)))
+				child = |member| Child.{
+					size: Geometry.narrow(member.weight),
+					node: TraditionalNode.Window({ window: window_id(member.window), constraints: known_constraints(known, member.window), fill: member.fill }),
+				}
+				taking_part = |members| members.keep_if(|m| takes_part(stacks, m.window)).map(child)
+				fill =
+					match held.fill {
+						Screen => Screen
+						_ => Tiled
+					}
+				horizontal =
+					match held.orientation {
+						Horizontal => True
+						Vertical => False
+					}
+				Shaped(
+					{
+						screen: question.screen,
+						area: Geometry.tiling_area(question.screen, question.gaps),
+						gaps: question.gaps,
+						stack_offset: question.stack_offset,
+						stack_line: question.stack_line,
+						root: TraditionalNode.Stack(
+							{
+								horizontal,
+								fill,
+								before: taking_part(at.before),
+								focused: child(at.member),
+								after: taking_part(at.after),
+							},
+						),
+					},
+				)
+			}
+		}
+	}
+
+	## A window's constraints, if the host knows them.
+	known_constraints : Dict(U64, WindowConstraints), U64 -> Constraints
+	known_constraints = |known, word|
+		match known.get(word) {
+			Ok(constraints) => Constrained(constraints)
+			Err(KeyNotFound) => Unconstrained
+		}
+
+	## The window a word names: its pid in the high half, its index in the low half.
+	window_id : U64 -> WindowId
+	window_id = |word| WindowId.{ pid: word.shr_zf_wrap(32).to_u32_wrap().to_i32_wrap(), idx: word.to_u32_wrap() }
 
 	# Focus.
 
