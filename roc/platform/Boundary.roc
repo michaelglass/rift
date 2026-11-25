@@ -1103,8 +1103,9 @@ Boundary := [].{
 	GroupNodeSlot := [Occupied(GroupNodeHeld), Vacant(U32)]
 
 	## A forest as the platform holds it (`Forest::from_parts`): each table's slots and free list
-	## (in taking order: the last first), the windows left out. The next stamp is derived.
-	GroupForestSeed := { layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(GroupNodeSlot), node_free : List(U32), left_out : List(U64) }
+	## (in taking order: the last first), the windows left out, and the stamp the next window to
+	## enter a layout takes.
+	GroupForestSeed := { layouts : List(BspLayoutSlot), layout_free : List(U32), nodes : List(GroupNodeSlot), node_free : List(U32), left_out : List(U64), next_stamp : U64 }
 
 	## The weight a window added next to the selection takes (`NewSibling`).
 	GroupNewSibling := [AverageWeight, HalvesSelection]

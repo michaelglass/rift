@@ -372,7 +372,12 @@ fn forest_query(rng: &mut Rng, made: &Made, layout: LayoutKey, held: &[u64]) -> 
 /// A view's states only a saved file holds: some containers' memory cleared while they have
 /// children, some children's weights other than the operations write; and some containers'
 /// selection stopping at them (reachable, but rarely where a walk into the container decides).
+/// The stamp counter is sometimes ahead of the leaves by more than the operations here leave it
+/// (leaves removed after many entered).
 fn with_saved_only_states(rng: &mut Rng, view: &mut ForestView) {
+    if rng.chance(30) {
+        view.next_stamp += 1 + rng.below(40);
+    }
     for (node, _) in &mut view.nodes {
         let Some(node) = node.as_mut() else { continue };
         if let Place::Child { size, .. } = &mut node.place

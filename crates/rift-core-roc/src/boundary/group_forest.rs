@@ -355,6 +355,7 @@ fn forest_seed(view: &ForestView, host: &abi::RocHost) -> abi::BoundaryGroupFore
         nodes: list(&nodes, host),
         node_free: list(&view.node_free, host),
         left_out: list(&view.left_out, host),
+        next_stamp: view.next_stamp,
     }
 }
 
@@ -398,6 +399,7 @@ fn from_forest_seed(seed: &abi::BoundaryGroupForestSeed) -> ForestView {
         nodes,
         node_free: seed.node_free.as_slice().to_vec(),
         left_out: seed.left_out.as_slice().to_vec(),
+        next_stamp: seed.next_stamp,
     }
 }
 

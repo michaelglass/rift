@@ -1143,7 +1143,7 @@ pub mod group_forest {
     }
 
     /// A whole forest, comparable: each table's slots and free list, the windows left out in
-    /// order (stamps are on the leaves; the next stamp is derived from them).
+    /// order, and the stamp the next window to enter a layout takes.
     #[derive(Debug, Clone, PartialEq)]
     pub struct ForestView {
         pub layouts: Vec<Saved<NodeKey>>,
@@ -1151,6 +1151,7 @@ pub mod group_forest {
         pub nodes: Vec<Saved<Node<NodeKey, u64>>>,
         pub node_free: Vec<u32>,
         pub left_out: Vec<u64>,
+        pub next_stamp: u64,
     }
 
     impl ForestView {
@@ -1162,6 +1163,7 @@ pub mod group_forest {
                 SlotTable::parse(self.layouts.clone())?.resumed(&taking(&self.layout_free))?,
                 SlotTable::parse(self.nodes.clone())?.resumed(&taking(&self.node_free))?,
                 self.left_out.iter().copied().collect(),
+                self.next_stamp,
             ))
         }
     }
@@ -1174,6 +1176,7 @@ pub mod group_forest {
                 nodes: saved(forest.nodes()),
                 node_free: forest.nodes().free().to_vec(),
                 left_out: forest.left_out().iter().copied().collect(),
+                next_stamp: forest.next_stamp(),
             }
         }
     }

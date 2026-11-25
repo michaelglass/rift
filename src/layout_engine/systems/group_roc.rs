@@ -37,12 +37,10 @@ pub(crate) fn group_forest_reseeds() -> u64 { RESEEDS.load(Ordering::Relaxed) }
 /// A system's Roc machine: seeded from a view, stepped by its events, read back as a view.
 pub(super) trait Machine: Sized {
     type Event: Debug;
-    type View: PartialEq + Debug + Clone;
+    type View: PartialEq + Debug;
     fn seeded(view: &Self::View) -> Self;
     fn step(&mut self, event: Self::Event) -> Answer;
     fn view(&mut self) -> Self::View;
-    /// A view's forest.
-    fn forest(view: &mut Self::View) -> &mut ForestView;
 }
 
 impl Machine for RocTraditional {
@@ -54,8 +52,6 @@ impl Machine for RocTraditional {
     fn step(&mut self, event: Self::Event) -> Answer { RocTraditional::step(self, event) }
 
     fn view(&mut self) -> TraditionalView { RocTraditional::view(self) }
-
-    fn forest(view: &mut TraditionalView) -> &mut ForestView { &mut view.forest }
 }
 
 impl Machine for RocMasterStack {
@@ -67,8 +63,6 @@ impl Machine for RocMasterStack {
     fn step(&mut self, event: Self::Event) -> Answer { RocMasterStack::step(self, event) }
 
     fn view(&mut self) -> MasterStackView { RocMasterStack::view(self) }
-
-    fn forest(view: &mut MasterStackView) -> &mut ForestView { &mut view.forest }
 }
 
 /// The Roc forest of one system, the core's second shadow. Queries step it too, so it sits in a
@@ -97,13 +91,12 @@ impl<M: Machine> RocShadow<M> {
     ) {
         let machine = self.machine.get_mut();
         let answer = machine.step(event);
-        let roc = ranked::<M>(machine.view());
+        let roc = machine.view();
         let held = held();
         let difference = if answer != rust {
             Some(format!("answers: rust {rust:?}, roc {answer:?}"))
         } else {
-            let ranked_held = ranked::<M>(held.clone());
-            (roc != ranked_held).then(|| format!("views: rust {ranked_held:?}, roc {roc:?}"))
+            (roc != held).then(|| format!("views: rust {held:?}, roc {roc:?}"))
         };
         if let Some(difference) = difference {
             report(what, &difference);
@@ -121,34 +114,6 @@ impl<M: Machine> RocShadow<M> {
 
     #[cfg(test)]
     pub(super) fn machine(&mut self) -> &mut M { self.machine.get_mut() }
-}
-
-/// A view with each leaf's stamp written as its rank among the leaves' stamps. Only the stamps'
-/// order is behaviour (it orders each window's leaves); their values are not: a forest seeded
-/// from a view derives its next stamp from the leaves, while a live one keeps counting past
-/// leaves since removed, so a Roc forest seeded from the core stamps lower from then on.
-fn ranked<M: Machine>(mut view: M::View) -> M::View {
-    let forest = M::forest(&mut view);
-    let stamp = |node: &Node<NodeKey, u64>| match node.body {
-        Body::Window { stamp, .. } => Some(stamp),
-        Body::Container(_) => None,
-    };
-    let mut stamps: Vec<u64> = forest
-        .nodes
-        .iter()
-        .filter_map(|(node, _)| node.as_ref().and_then(stamp))
-        .collect();
-    stamps.sort_unstable();
-    for (node, _) in &mut forest.nodes {
-        if let Some(Node {
-            body: Body::Window { stamp, .. },
-            ..
-        }) = node
-        {
-            *stamp = stamps.partition_point(|&held| held < *stamp) as u64;
-        }
-    }
-    view
 }
 
 /// Counts a difference, then fails the test, or in a running Rift warns it.
@@ -317,5 +282,6 @@ pub(super) fn forest_view(forest: &CoreForest) -> ForestView {
             .collect(),
         node_free: forest.nodes().free().to_vec(),
         left_out: windows(&forest.left_out().iter().copied().collect::<Vec<_>>()),
+        next_stamp: forest.next_stamp(),
     }
 }

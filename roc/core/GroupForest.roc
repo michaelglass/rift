@@ -64,8 +64,7 @@ GroupForest := [].{
 	empty_forest : {} -> Forest
 	empty_forest = |{}| { layouts: Slots.empty({}), nodes: Slots.empty({}), left_out: Set.empty(), next_stamp: 0 }
 
-	## A forest as the platform holds it (`Forest::from_parts`): the next stamp follows the
-	## highest a window holds.
+	## A forest as the platform holds it (`Forest::from_parts`), its stamp counter included.
 	seeded_forest : GroupForestSeed -> Forest
 	seeded_forest = |seed| {
 		slots = seed.nodes.map(
@@ -73,18 +72,6 @@ GroupForest := [].{
 				match slot {
 					Occupied({ version, node: held }) => Occupied({ version, value: held })
 					Vacant(version) => Vacant(version)
-				},
-		)
-		next_stamp = slots.fold(
-			0,
-			|next, slot|
-				match slot {
-					Occupied({ value, .. }) =>
-						match value.body {
-							Window({ stamp, .. }) => if stamp + 1 > next stamp + 1 else next
-							Container(_) => next
-						}
-					Vacant(_) => next
 				},
 		)
 		{
@@ -100,7 +87,7 @@ GroupForest := [].{
 			},
 			nodes: { slots, free: seed.node_free },
 			left_out: Set.from_list(seed.left_out),
-			next_stamp,
+			next_stamp: seed.next_stamp,
 		}
 	}
 
@@ -123,6 +110,7 @@ GroupForest := [].{
 		),
 		node_free: forest.nodes.free,
 		left_out: forest.left_out.to_list().sort_with(|a, b| a.order_relative_to(b)),
+		next_stamp: forest.next_stamp,
 	}
 
 	## One operation of the traditional system, and what it answers.

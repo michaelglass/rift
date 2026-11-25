@@ -308,8 +308,26 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
 
     pub fn left_out(&self) -> &BTreeSet<W> { &self.left_out }
 
-    /// A forest as the platform holds it.
+    /// A forest as the platform holds it, the stamp the next window to enter a layout takes
+    /// included (it counts past leaves since removed, so the leaves cannot tell it).
     pub fn from_parts(
+        layouts: SlotTable<L, N>,
+        nodes: SlotTable<N, Node<N, W>>,
+        left_out: BTreeSet<W>,
+        next_stamp: u64,
+    ) -> Self {
+        Self {
+            layouts,
+            nodes,
+            left_out,
+            next_stamp,
+        }
+    }
+
+    /// A forest read from a form that keeps no stamp counter (upstream's saved form, whose load
+    /// stamps the leaves in the index's order): the next stamp follows the highest a window
+    /// holds.
+    pub fn from_leaves(
         layouts: SlotTable<L, N>,
         nodes: SlotTable<N, Node<N, W>>,
         left_out: BTreeSet<W>,
@@ -322,13 +340,11 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
             })
             .max()
             .unwrap_or(0);
-        Self {
-            layouts,
-            nodes,
-            left_out,
-            next_stamp,
-        }
+        Self::from_parts(layouts, nodes, left_out, next_stamp)
     }
+
+    /// The stamp the next window to enter a layout takes.
+    pub fn next_stamp(&self) -> u64 { self.next_stamp }
 
     pub fn root(&self, layout: L) -> N { self.layouts[layout] }
 

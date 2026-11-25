@@ -155,7 +155,7 @@ pub(super) fn seed(tiles: &GroupLayouts) -> CoreForest {
     let nodes = nodes
         .map(|key, node| Ok::<_, std::convert::Infallible>(core_node(tiles, &stamps, key, &node)))
         .unwrap_or_else(|never| match never {});
-    CoreForest::from_parts(layouts, nodes, tiles.inactive.iter().copied().collect())
+    CoreForest::from_leaves(layouts, nodes, tiles.inactive.iter().copied().collect())
 }
 
 /// A forest as the twins compare it: layouts and nodes by id (a leaf's stamp left out: only its
