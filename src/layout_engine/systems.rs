@@ -432,6 +432,7 @@ pub(super) fn node_slot(
     Some(path)
 }
 
+mod group_stored;
 mod group_twin;
 pub(crate) use group_twin::group_forest_divergences;
 mod groups;
