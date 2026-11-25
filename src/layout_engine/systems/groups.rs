@@ -978,6 +978,12 @@ impl GroupLayouts {
         active
     }
 
+    /// Whether `node` holds a window that takes part in layout. A window that is away (left
+    /// out of layout) does not, nor does a container holding only such windows.
+    pub(super) fn node_participates(&self, node: NodeId) -> bool {
+        self.inactive.is_empty() || self.find_best_focus_target(node).is_some()
+    }
+
     pub(super) fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
         self.tree.map.focus_target(node, &|window| self.window_participates(window))
     }

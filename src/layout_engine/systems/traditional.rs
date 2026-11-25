@@ -71,7 +71,7 @@ impl TraditionalLayoutSystem {
         if let (Some(p1), Some(p2)) = (parent1, parent2) {
             if p1 == p2 {
                 let parent_layout = self.tiles.layout(p1);
-                let sibling_count = p1.children(self.tiles.map()).count();
+                let sibling_count = self.participating_children(p1).count();
 
                 if parent_layout.orientation() == direction.orientation()
                     && !parent_layout.is_group()
@@ -91,7 +91,7 @@ impl TraditionalLayoutSystem {
             let kind = self.tiles.layout(parent);
             if !kind.is_group()
                 && kind.orientation() == direction.orientation()
-                && (sibling.is_none() || parent.children(self.tiles.map()).count() == 2)
+                && (sibling.is_none() || self.participating_children(parent).count() == 2)
                 && let Some(neighbor) = self.find_direct_sibling_target(parent, direction)
             {
                 return Some(neighbor);
@@ -111,13 +111,23 @@ impl TraditionalLayoutSystem {
             .or_else(|| self.find_hierarchical_join_target(from, direction))
     }
 
+    /// The nearest sibling in `direction` that takes part in layout. A join never targets an
+    /// away window it cannot show.
     fn find_direct_sibling_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
-        let _parent = from.parent(self.tiles.map())?;
+        let map = self.tiles.map();
+        let step = |node: NodeId| match direction {
+            Direction::Right | Direction::Down => node.next_sibling(map),
+            Direction::Left | Direction::Up => node.prev_sibling(map),
+        };
+        std::iter::successors(step(from), |&node| step(node))
+            .find(|&node| self.tiles.node_participates(node))
+    }
 
-        match direction {
-            Direction::Right | Direction::Down => from.next_sibling(self.tiles.map()),
-            Direction::Left | Direction::Up => from.prev_sibling(self.tiles.map()),
-        }
+    /// The children of `parent` that take part in layout, in order.
+    fn participating_children(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        parent
+            .children(self.tiles.map())
+            .filter(|&child| self.tiles.node_participates(child))
     }
 
     fn find_best_container_child_for_joining(
@@ -125,13 +135,14 @@ impl TraditionalLayoutSystem {
         container: NodeId,
         direction: Direction,
     ) -> Option<NodeId> {
-        let first = container.first_child(self.tiles.map())?;
+        let mut children = self.participating_children(container);
+        let first = children.next()?;
         if self.tiles.layout(container).orientation() != direction.orientation() {
             return self.tiles.local_selection(container).or(Some(first));
         }
         match direction {
             Direction::Left | Direction::Up => Some(first),
-            Direction::Right | Direction::Down => container.last_child(self.tiles.map()),
+            Direction::Right | Direction::Down => Some(children.last().unwrap_or(first)),
         }
     }
 
@@ -479,14 +490,11 @@ impl TraditionalLayoutSystem {
         // lift the selection to that container so we can merge whole groups.
         if let Some(parent) = selection.parent(map) {
             let parent_layout = self.tiles.layout(parent);
-            let is_edge = match direction {
-                Direction::Right | Direction::Down => selection.next_sibling(map).is_none(),
-                Direction::Left | Direction::Up => selection.prev_sibling(map).is_none(),
-            };
+            let is_edge = self.find_direct_sibling_target(selection, direction).is_none();
 
             if parent_layout.orientation() == direction.orientation()
                 && !parent_layout.is_group()
-                && (is_edge || parent.children(map).count() == 2)
+                && (is_edge || self.participating_children(parent).count() == 2)
                 && target.parent(map) != Some(parent)
                 && !target.ancestors(map).any(|a| a == parent)
             {
@@ -961,6 +969,7 @@ mod tests {
             assert_eq!(system.tiles.tree.map.kind(root), kind);
         }
     }
+
     /// The windows taking part in layout, left to right, with their widths.
     fn shown_left_to_right(system: &TraditionalLayoutSystem, layout: LayoutId) -> Vec<(u32, i64)> {
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(3000., 800.));
@@ -1023,6 +1032,23 @@ mod tests {
         let before = shown_left_to_right(&system, layout);
         join(&mut system, layout, w(4), Direction::Right);
         join(&mut system, layout, w(2), Direction::Left);
+        assert_eq!(shown_left_to_right(&system, layout), before);
+    }
+
+    #[test]
+    fn a_join_never_takes_an_away_window_or_resizes_what_is_shown() {
+        let (mut system, layout) =
+            side_by_side_with_away(&[w(4), away()[0], away()[1], w(1), w(2)]);
+        let parent = |system: &TraditionalLayoutSystem, window| {
+            system
+                .tiles
+                .window_node(layout, window)
+                .and_then(|n| n.parent(system.tiles.map()))
+        };
+        let away_parents = away().map(|window| parent(&system, window));
+        let before = shown_left_to_right(&system, layout);
+        join(&mut system, layout, w(4), Direction::Right);
+        assert_eq!(away().map(|window| parent(&system, window)), away_parents);
         assert_eq!(shown_left_to_right(&system, layout), before);
     }
 }
