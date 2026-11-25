@@ -4,10 +4,11 @@
 //! for the same operations), and member ids minted from one saved counter (`next_node`, the
 //! lead's ruling: byte-compatible, so ids are upstream's words).
 //!
-//! Upstream's rules are the spec; where this module's types differ from upstream's (the
-//! selection as one [`Selection`] instead of `active` and `root_selected`, each pair of
-//! fullscreen flags as one [`Fill`], a stack's orientation as an [`Orientation`] instead of a
-//! layout kind), they hold the states upstream's operations reach.
+//! Upstream's rules are the spec; where this module's types differ from upstream's (a stack's
+//! members as [`Members`], empty or a [`NonEmpty`] list with its [`Selection`], instead of a
+//! list beside `active` and `root_selected`; each pair of fullscreen flags as one [`Fill`]; a
+//! stack's orientation as an [`Orientation`] instead of a layout kind), they hold the states
+//! upstream's operations reach.
 
 use std::collections::BTreeSet;
 
@@ -44,14 +45,59 @@ pub enum DefaultOrientation {
     Vertical,
 }
 
-/// What a stack's selection is: nothing (an empty stack), a member, or the stack itself, which
-/// remembers the member it was selected from (that member is still the selected window, and
-/// descending returns to it).
+/// What a populated stack's selection is: a member, or the stack itself, which remembers the
+/// member it was selected from (that member is still the selected window, and descending returns
+/// to it). Either names one of the stack's members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
-    Nothing,
     Member(Id),
     Root(Id),
+}
+
+impl Selection {
+    /// The member the selection rests on (the stack's memory while the stack is selected).
+    pub fn member(self) -> Id {
+        match self {
+            Selection::Member(id) | Selection::Root(id) => id,
+        }
+    }
+}
+
+/// A list with at least one element. Its length changes only through operations that keep one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NonEmpty<T>(Vec<T>);
+
+impl<T> NonEmpty<T> {
+    pub fn new(items: Vec<T>) -> Option<Self> { (!items.is_empty()).then_some(NonEmpty(items)) }
+
+    pub fn one(item: T) -> Self { NonEmpty(vec![item]) }
+
+    pub fn as_slice(&self) -> &[T] { &self.0 }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] { &mut self.0 }
+
+    pub fn into_vec(self) -> Vec<T> { self.0 }
+
+    pub fn last(&self) -> &T { self.0.last().expect("a non-empty list has a last element") }
+
+    /// `item` put at `index` (at most the length).
+    pub fn insert(&mut self, index: usize, item: T) { self.0.insert(index, item); }
+
+    /// The element at `from` taken out and put back at `to` (an index among the others).
+    pub fn relocate(&mut self, from: usize, to: usize) {
+        let item = self.0.remove(from);
+        self.0.insert(to, item);
+    }
+}
+
+/// A stack's windows: none, or at least one with the selection resting on one of them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Members<W> {
+    Empty,
+    Populated {
+        members: NonEmpty<Member<W>>,
+        selection: Selection,
+    },
 }
 
 /// A window in a stack: its id, its weight (a saved share; no operation changes it), and how it
@@ -64,13 +110,11 @@ pub struct Member<W> {
     pub fill: Fill,
 }
 
-/// One layout's stack. The selection is [`Selection::Nothing`] exactly when there are no
-/// members, and otherwise names one of them.
+/// One layout's stack.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stack<W> {
     pub id: Id,
-    pub members: Vec<Member<W>>,
-    pub selection: Selection,
+    pub members: Members<W>,
     pub orientation: Orientation,
     pub fill: Fill,
 }
@@ -128,34 +172,49 @@ pub struct Stacks<L, W> {
 }
 
 impl<W: Copy + Ord> Stack<W> {
-    fn active(&self) -> Option<Id> {
-        match self.selection {
-            Selection::Nothing => None,
-            Selection::Member(id) | Selection::Root(id) => Some(id),
+    /// The members in order (none for an empty stack).
+    pub fn list(&self) -> &[Member<W>] {
+        match &self.members {
+            Members::Empty => &[],
+            Members::Populated { members, .. } => members.as_slice(),
         }
     }
 
-    fn root_selected(&self) -> bool { matches!(self.selection, Selection::Root(_)) }
+    fn list_mut(&mut self) -> &mut [Member<W>] {
+        match &mut self.members {
+            Members::Empty => &mut [],
+            Members::Populated { members, .. } => members.as_mut_slice(),
+        }
+    }
 
-    fn position(&self, id: Id) -> Option<usize> { self.members.iter().position(|m| m.id == id) }
+    pub fn selection(&self) -> Option<Selection> {
+        match &self.members {
+            Members::Empty => None,
+            Members::Populated { selection, .. } => Some(*selection),
+        }
+    }
+
+    fn active(&self) -> Option<Id> { self.selection().map(Selection::member) }
+
+    fn root_selected(&self) -> bool { matches!(self.selection(), Some(Selection::Root(_))) }
 
     fn window_position(&self, window: W) -> Option<usize> {
-        self.members.iter().position(|m| m.window == window)
+        self.list().iter().position(|m| m.window == window)
     }
 
     /// The selected member, or the first taking part when it does not.
     fn active_index(&self, left_out: &BTreeSet<W>) -> Option<usize> {
         let active = self.active();
-        self.members
+        self.list()
             .iter()
             .position(|m| Some(m.id) == active && !left_out.contains(&m.window))
-            .or_else(|| self.members.iter().position(|m| !left_out.contains(&m.window)))
+            .or_else(|| self.list().iter().position(|m| !left_out.contains(&m.window)))
     }
 
     /// The member shown: the first taking part while the stack itself is selected.
     fn visible_index(&self, left_out: &BTreeSet<W>) -> Option<usize> {
         if self.root_selected() {
-            self.members.iter().position(|m| !left_out.contains(&m.window))
+            self.list().iter().position(|m| !left_out.contains(&m.window))
         } else {
             self.active_index(left_out)
         }
@@ -164,28 +223,55 @@ impl<W: Copy + Ord> Stack<W> {
     /// Keeps the members `keep` keeps; a selected member that goes passes the selection to the
     /// next kept member, else the previous one (the stack itself is no longer selected).
     fn retain(&mut self, keep: impl Fn(&Member<W>) -> bool) {
-        if let Some(index) = self.active().and_then(|id| self.position(id))
-            && !keep(&self.members[index])
-        {
-            self.selection = self.members[index + 1..]
-                .iter()
-                .find(|m| keep(m))
-                .or_else(|| self.members[..index].iter().rev().find(|m| keep(m)))
-                .map_or(Selection::Nothing, |m| Selection::Member(m.id));
-        }
-        self.members.retain(keep);
+        let Members::Populated { members, selection } =
+            std::mem::replace(&mut self.members, Members::Empty)
+        else {
+            return;
+        };
+        let list = members.into_vec();
+        // The selected member going: how many kept members came before it (the next kept one
+        // takes its place, else the last kept before it).
+        let kept_before = list
+            .iter()
+            .position(|m| m.id == selection.member())
+            .filter(|&i| !keep(&list[i]))
+            .map(|i| list[..i].iter().filter(|m| keep(m)).count());
+        let Some(members) = NonEmpty::new(list.into_iter().filter(|m| keep(m)).collect()) else {
+            return;
+        };
+        let selection = match kept_before {
+            None => selection,
+            Some(before) => {
+                let kept = members.as_slice();
+                Selection::Member(kept.get(before).unwrap_or(members.last()).id)
+            }
+        };
+        self.members = Members::Populated { members, selection };
     }
 
     fn insert(&mut self, member: Member<W>, insertion: InsertionPoint) {
-        let index = match insertion {
-            InsertionPoint::NextToSelection => {
-                self.active().and_then(|id| self.position(id)).map(|i| i + 1)
+        let selection = Selection::Member(member.id);
+        match &mut self.members {
+            Members::Empty => {
+                self.members = Members::Populated {
+                    members: NonEmpty::one(member),
+                    selection,
+                }
             }
-            InsertionPoint::EndOfTree => None,
+            Members::Populated { members, selection: selected } => {
+                let index = match insertion {
+                    InsertionPoint::NextToSelection => members
+                        .as_slice()
+                        .iter()
+                        .position(|m| m.id == selected.member())
+                        .map(|i| i + 1),
+                    InsertionPoint::EndOfTree => None,
+                }
+                .unwrap_or(members.as_slice().len());
+                members.insert(index, member);
+                *selected = selection;
+            }
         }
-        .unwrap_or(self.members.len());
-        self.selection = Selection::Member(member.id);
-        self.members.insert(index, member);
     }
 
     /// The member taking part next to the selected one along `direction`, if the stack runs
@@ -195,10 +281,10 @@ impl<W: Copy + Ord> Stack<W> {
             return None;
         }
         let index = self.active_index(left_out)?;
-        let takes_part = |i: &usize| !left_out.contains(&self.members[*i].window);
+        let takes_part = |i: &usize| !left_out.contains(&self.list()[*i].window);
         match direction {
             Direction::Left | Direction::Up => (0..index).rev().find(takes_part),
-            Direction::Right | Direction::Down => (index + 1..self.members.len()).find(takes_part),
+            Direction::Right | Direction::Down => (index + 1..self.list().len()).find(takes_part),
         }
     }
 }
@@ -265,8 +351,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         };
         self.layouts.insert(Stack {
             id,
-            members: Vec::new(),
-            selection: Selection::Nothing,
+            members: Members::Empty,
             orientation,
             fill: Fill::Tiled,
         })
@@ -278,14 +363,16 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
     pub fn clone_layout(&mut self, layout: L) -> L {
         let mut stack = self.layouts[layout].clone();
         stack.id = self.node_id();
-        for i in 0..stack.members.len() {
-            let id = self.node_id();
-            stack.selection = match stack.selection {
-                Selection::Member(old) if old == stack.members[i].id => Selection::Member(id),
-                Selection::Root(old) if old == stack.members[i].id => Selection::Root(id),
-                selection => selection,
-            };
-            stack.members[i].id = id;
+        if let Members::Populated { members, selection } = &mut stack.members {
+            for member in members.as_mut_slice() {
+                let id = self.node_id();
+                *selection = match *selection {
+                    Selection::Member(old) if old == member.id => Selection::Member(id),
+                    Selection::Root(old) if old == member.id => Selection::Root(id),
+                    selection => selection,
+                };
+                member.id = id;
+            }
         }
         self.layouts.insert(stack)
     }
@@ -293,32 +380,34 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
     pub fn remove_layout(&mut self, layout: L) { self.layouts.remove(layout); }
 
     pub fn has_windows_for_app(&self, layout: L, of_app: impl Fn(W) -> bool) -> bool {
-        self.layouts[layout].members.iter().any(|m| of_app(m.window))
+        self.layouts[layout].list().iter().any(|m| of_app(m.window))
     }
 
     pub fn selected_window(&self, layout: L) -> Option<W> {
         let stack = &self.layouts[layout];
-        stack.active_index(&self.left_out).map(|i| stack.members[i].window)
+        stack.active_index(&self.left_out).map(|i| stack.list()[i].window)
     }
 
     pub fn selection_contains_window(&self, layout: L, window: W) -> bool {
         let stack = &self.layouts[layout];
-        match stack.selection {
-            Selection::Nothing => false,
-            Selection::Root(_) => stack.members.iter().any(|m| m.window == window),
-            Selection::Member(id) => stack.members.iter().any(|m| m.id == id && m.window == window),
+        match stack.selection() {
+            None => false,
+            Some(Selection::Root(_)) => stack.list().iter().any(|m| m.window == window),
+            Some(Selection::Member(id)) => {
+                stack.list().iter().any(|m| m.id == id && m.window == window)
+            }
         }
     }
 
     pub fn window_in_direction(&self, layout: L, direction: Direction) -> Option<W> {
         let stack = &self.layouts[layout];
-        if let Selection::Member(id) = stack.selection
+        if let Some(Selection::Member(id)) = stack.selection()
             && let Some(member) =
-                stack.members.iter().find(|m| m.id == id && self.window_participates(m.window))
+                stack.list().iter().find(|m| m.id == id && self.window_participates(m.window))
         {
             return Some(member.window);
         }
-        let mut taking_part = stack.members.iter().filter(|m| self.window_participates(m.window));
+        let mut taking_part = stack.list().iter().filter(|m| self.window_participates(m.window));
         match direction {
             Direction::Left | Direction::Up => taking_part.next_back(),
             Direction::Right | Direction::Down => taking_part.next(),
@@ -327,7 +416,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
     }
 
     pub fn contains_window(&self, layout: L, window: W) -> bool {
-        self.layouts[layout].members.iter().any(|m| m.window == window)
+        self.layouts[layout].list().iter().any(|m| m.window == window)
     }
 
     pub fn has_any_fullscreen_node(&self, layout: L) -> bool {
@@ -335,7 +424,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         self.selected_window(layout).is_some()
             && (stack.fill != Fill::Tiled
                 || stack
-                    .members
+                    .list()
                     .iter()
                     .any(|m| self.window_participates(m.window) && m.fill != Fill::Tiled))
     }
@@ -355,14 +444,14 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
     }
 
     fn all_windows(&self, layout: L) -> Vec<W> {
-        self.layouts[layout].members.iter().map(|m| m.window).collect()
+        self.layouts[layout].list().iter().map(|m| m.window).collect()
     }
 
     fn visible_windows(&self, layout: L) -> Vec<W> {
         let stack = &self.layouts[layout];
         stack
             .visible_index(&self.left_out)
-            .map(|i| stack.members[i].window)
+            .map(|i| stack.list()[i].window)
             .into_iter()
             .collect()
     }
@@ -378,33 +467,34 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
                 handled: self.select_window(layout, window),
             },
             Focus::Ascend | Focus::Descend => {
-                if self.selected_window(layout).is_none() {
+                let shown = self.selected_window(layout).is_some();
+                let Members::Populated { selection, .. } = &mut self.layouts[layout].members else {
+                    return Focused::Selection { handled: false };
+                };
+                if !shown {
                     return Focused::Selection { handled: false };
                 }
-                let stack = &mut self.layouts[layout];
-                let (Selection::Member(active) | Selection::Root(active)) = stack.selection else {
-                    unreachable!("a stack with a selected window has a selection")
+                let selected = match focus {
+                    Focus::Ascend => Selection::Root(selection.member()),
+                    _ => Selection::Member(selection.member()),
                 };
-                let selection = match focus {
-                    Focus::Ascend => Selection::Root(active),
-                    _ => Selection::Member(active),
-                };
-                let handled = stack.selection != selection;
-                stack.selection = selection;
+                let handled = *selection != selected;
+                *selection = selected;
                 Focused::Selection { handled }
             }
             Focus::Direction(direction) => {
                 let stack = &mut self.layouts[layout];
-                match stack.neighbor(direction, &self.left_out) {
-                    Some(i) => {
-                        let member = &stack.members[i];
-                        stack.selection = Selection::Member(member.id);
+                let neighbor = stack.neighbor(direction, &self.left_out);
+                match (neighbor, &mut stack.members) {
+                    (Some(i), Members::Populated { members, selection }) => {
+                        let member = &members.as_slice()[i];
+                        *selection = Selection::Member(member.id);
                         Focused::Movement {
                             window: Some(member.window),
                             raise: vec![member.window],
                         }
                     }
-                    None => Focused::Movement {
+                    _ => Focused::Movement {
                         window: None,
                         raise: Vec::new(),
                     },
@@ -417,11 +507,13 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         if !self.window_participates(window) {
             return false;
         }
-        let stack = &mut self.layouts[layout];
-        let Some(member) = stack.members.iter().find(|m| m.window == window) else {
+        let Members::Populated { members, selection } = &mut self.layouts[layout].members else {
             return false;
         };
-        stack.selection = Selection::Member(member.id);
+        let Some(member) = members.as_slice().iter().find(|m| m.window == window) else {
+            return false;
+        };
+        *selection = Selection::Member(member.id);
         true
     }
 
@@ -455,7 +547,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
             self.left_out.insert(to);
         }
         for (_, stack) in self.layouts.iter_mut() {
-            for member in &mut stack.members {
+            for member in stack.list_mut() {
                 if member.window == from {
                     member.window = to;
                 }
@@ -474,7 +566,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         if !self.window_participates(window) {
             return;
         }
-        let Some(member) = self.layouts[layout].members.iter_mut().find(|m| m.window == window)
+        let Some(member) = self.layouts[layout].list_mut().iter_mut().find(|m| m.window == window)
         else {
             return;
         };
@@ -518,22 +610,26 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         let Some(i) = stack.active_index(&self.left_out) else {
             return false;
         };
-        let target = if let Some(target) = stack.neighbor(direction, &self.left_out) {
-            target
-        } else if beyond == Beyond::AnotherDisplay || stack.orientation == direction.orientation() {
-            return false;
-        } else {
+        let neighbor = stack.neighbor(direction, &self.left_out);
+        let leaves_axis = neighbor.is_none()
+            && beyond == Beyond::Nothing
+            && stack.orientation != direction.orientation();
+        if leaves_axis {
             // Leaving the stack's axis places the member at the matching outer edge and turns
             // the whole stack onto that axis.
             stack.orientation = direction.orientation();
-            match direction {
-                Direction::Left | Direction::Up => 0,
-                Direction::Right | Direction::Down => stack.members.len() - 1,
-            }
+        }
+        let Members::Populated { members, selection } = &mut stack.members else {
+            return false;
         };
-        let member = stack.members.remove(i);
-        stack.selection = Selection::Member(member.id);
-        stack.members.insert(target, member);
+        let target = match (neighbor, direction) {
+            (Some(target), _) => target,
+            (None, _) if !leaves_axis => return false,
+            (None, Direction::Left | Direction::Up) => 0,
+            (None, Direction::Right | Direction::Down) => members.as_slice().len() - 1,
+        };
+        *selection = Selection::Member(members.as_slice()[i].id);
+        members.relocate(i, target);
         true
     }
 
@@ -556,7 +652,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
             &mut stack.fill
         } else {
             let index = stack.active_index(&self.left_out).expect("a selected window has a member");
-            &mut stack.members[index].fill
+            &mut stack.list_mut()[index].fill
         };
         *fill = toggled(*fill, within_gaps);
         if *fill == Fill::Tiled {
@@ -577,15 +673,19 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         if i == j {
             return false;
         }
-        if let Selection::Member(id) = stack.selection {
-            if id == stack.members[i].id {
-                stack.selection = Selection::Member(stack.members[j].id);
-            } else if id == stack.members[j].id {
-                stack.selection = Selection::Member(stack.members[i].id);
+        let Members::Populated { members, selection } = &mut stack.members else {
+            return false;
+        };
+        let list = members.as_mut_slice();
+        if let Selection::Member(id) = *selection {
+            if id == list[i].id {
+                *selection = Selection::Member(list[j].id);
+            } else if id == list[j].id {
+                *selection = Selection::Member(list[i].id);
             }
         }
-        stack.members[i].window = b;
-        stack.members[j].window = a;
+        list[i].window = b;
+        list[j].window = a;
         true
     }
 
@@ -601,8 +701,10 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         if i == j {
             return false;
         }
-        let member = stack.members.remove(i);
-        stack.members.insert(j, member);
+        let Members::Populated { members, .. } = &mut stack.members else {
+            return false;
+        };
+        members.relocate(i, j);
         true
     }
 
@@ -648,9 +750,9 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
                 } else {
                     Fill::Tiled
                 },
-                before: taking_part(&stack.members[..visible]),
-                focused: Box::new(child(&stack.members[visible])),
-                after: taking_part(&stack.members[visible + 1..]),
+                before: taking_part(&stack.list()[..visible]),
+                focused: Box::new(child(&stack.list()[visible])),
+                after: taking_part(&stack.list()[visible + 1..]),
             },
         })
     }
@@ -665,7 +767,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         let stack = &self.layouts[layout];
         let shown = stack.visible_index(&self.left_out)?;
         if stack.fill != Fill::Tiled
-            || (selection_path_only && stack.members[shown].fill != Fill::Tiled)
+            || (selection_path_only && stack.list()[shown].fill != Fill::Tiled)
         {
             return None;
         }
@@ -673,8 +775,8 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
         Some(GroupContainer {
             stack: stack.id,
             orientation: stack.orientation,
-            windows: stack.members.iter().filter(taking_part).map(|m| m.window).collect(),
-            selected: stack.members[..shown].iter().filter(taking_part).count(),
+            windows: stack.list().iter().filter(taking_part).map(|m| m.window).collect(),
+            selected: stack.list()[..shown].iter().filter(taking_part).count(),
         })
     }
 }

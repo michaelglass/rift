@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::CGRect;
 use rift_core::layout::stack_tree::{
-    self as core, Beyond, DefaultOrientation, Fill, Id, Member as CoreMember, Orientation,
-    Participation, Query, Resize, Selection, Stack as CoreStack, Stacks,
+    self as core, Beyond, DefaultOrientation, Fill, Id, Member as CoreMember, Members, NonEmpty,
+    Orientation, Participation, Query, Resize, Selection, Stack as CoreStack, Stacks,
 };
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
@@ -524,24 +524,33 @@ fn core_fill(fullscreen: bool, within_gaps: bool) -> Fill {
 }
 
 /// An upstream stack as the core holds it (its load leaves a stack kind, and a selection naming
-/// a member exactly when there are members).
+/// a member exactly when there are members, as its operations keep it).
 fn core_stack(stack: &Stack) -> CoreStack<WindowId> {
+    let members = stack
+        .members
+        .iter()
+        .map(|m: &Member| CoreMember {
+            id: core_id(m.id),
+            window: m.window,
+            weight: m.weight,
+            fill: core_fill(m.fullscreen, m.within_gaps),
+        })
+        .collect();
     CoreStack {
         id: core_id(stack.id),
-        members: stack
-            .members
-            .iter()
-            .map(|m: &Member| CoreMember {
-                id: core_id(m.id),
-                window: m.window,
-                weight: m.weight,
-                fill: core_fill(m.fullscreen, m.within_gaps),
-            })
-            .collect(),
-        selection: match (stack.active, stack.root_selected) {
-            (None, _) => Selection::Nothing,
-            (Some(id), false) => Selection::Member(core_id(id)),
-            (Some(id), true) => Selection::Root(core_id(id)),
+        members: match (NonEmpty::new(members), stack.active) {
+            (None, _) => Members::Empty,
+            (Some(members), Some(id)) => Members::Populated {
+                members,
+                selection: if stack.root_selected {
+                    Selection::Root(core_id(id))
+                } else {
+                    Selection::Member(core_id(id))
+                },
+            },
+            (Some(_), None) => {
+                unreachable!("upstream's load and operations select a member of a populated stack")
+            }
         },
         orientation: if stack.kind == LayoutKind::HorizontalStack {
             Orientation::Horizontal
