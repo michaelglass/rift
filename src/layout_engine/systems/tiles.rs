@@ -734,6 +734,7 @@ fn shape_node(
             let after = children.split_off(at + 1);
             children.pop();
             Node::Stack {
+                label: (),
                 horizontal: info.kind == LayoutKind::HorizontalStack,
                 fill,
                 before: children.into_iter().map(child).collect(),

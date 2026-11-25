@@ -270,6 +270,12 @@ impl Upstream {
         self.tiles.tree.map[stack].layout.size = stack_size;
     }
 
+    /// A layout's (master, stack) regions.
+    pub(super) fn regions(&self, layout: LayoutId) -> (NodeId, NodeId) {
+        let (_, master, stack) = self.region_roots(layout);
+        (master, stack)
+    }
+
     pub(super) fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
         let root = self.tiles.root(layout);
         let (master, stack) = self.tiles.map().region_pair(root).expect("master stack region pair");

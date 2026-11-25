@@ -183,6 +183,7 @@ fn tnode(rng: &mut Rng, depth: u32, next_window: &mut u32) -> traditional::Node<
         let after = children.split_off(on_top + 1);
         let focused = Box::new(children.pop().expect("count >= 1"));
         traditional::Node::Stack {
+            label: (),
             horizontal,
             fill,
             before: children,

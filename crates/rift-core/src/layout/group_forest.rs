@@ -14,7 +14,7 @@
 //! window index is derived from the leaves, ordered by when each window entered its layout
 //! ([`Body::Window`]'s stamp, the one fact the index holds that the tree does not).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
 
 pub use super::bsp_tree::{
@@ -174,6 +174,32 @@ pub enum DropAction {
     Swap,
     Stack,
     Insert(Direction),
+}
+
+/// Which stacks a layout pass gives a group bar: every one, or those along the selection path
+/// (upstream's `selection_path_only`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bars {
+    Every,
+    SelectionPath,
+}
+
+/// A stack's group bar (upstream's `GroupContainerInfo`): the stack, its orientation, its frame,
+/// a window for each child holding one that takes part, and which of them is the focused child's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupBar<N, W> {
+    pub stack: N,
+    pub orientation: Orientation,
+    pub frame: Rect,
+    pub windows: Vec<W>,
+    pub selected: usize,
+}
+
+/// A layout pass with its group bars: each window's frame and each bar, in tree order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projected<N, W> {
+    pub frames: Vec<(W, Rect)>,
+    pub bars: Vec<GroupBar<N, W>>,
 }
 
 /// What a tiled layout is laid out with besides its tree.
@@ -1670,6 +1696,13 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
         pass: Pass,
         constraints: &impl Fn(W) -> Option<WindowConstraints>,
     ) -> Option<geometry::Traditional<W>> {
+        let (active, start) = self.laid_out(layout)?;
+        Some(self.shape_from(start, &active, pass, constraints, &|_| ()))
+    }
+
+    /// What a layout pass lays out: the nodes that take part, and the node laid out from (none
+    /// when it takes no part).
+    fn laid_out(&self, layout: L) -> Option<(BTreeSet<N>, N)> {
         let node = self.root(layout);
         let mut active = BTreeSet::new();
         for child in self.postorder(node) {
@@ -1684,25 +1717,134 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
                 .filter(|&(_, stack)| !active.contains(&stack))
                 .map_or(node, |(master, _)| master)
         };
-        if !active.contains(&start) {
-            return None;
-        }
-        Some(geometry::Traditional {
+        active.contains(&start).then_some((active, start))
+    }
+
+    /// The shape laid out from `start`, each stack labelled by `label`.
+    fn shape_from<S>(
+        &self,
+        start: N,
+        active: &BTreeSet<N>,
+        pass: Pass,
+        constraints: &impl Fn(W) -> Option<WindowConstraints>,
+        label: &impl Fn(N) -> S,
+    ) -> geometry::Traditional<W, S> {
+        geometry::Traditional {
             screen: pass.screen,
             area: super::tiling_area(pass.screen, pass.gaps),
             gaps: pass.gaps,
             stack_offset: pass.stack_offset,
             stack_line: pass.stack_line,
-            root: self.shape_node(start, &active, constraints),
-        })
+            root: self.shape_node(start, active, constraints, label),
+        }
     }
 
-    fn shape_node(
+    /// A layout pass with its group bars (upstream's `project` with a group output): each
+    /// window's frame and the bar of each stack `bars` asks for, none while the layout's root
+    /// fills.
+    pub fn project(
+        &self,
+        layout: L,
+        pass: Pass,
+        constraints: &impl Fn(W) -> Option<WindowConstraints>,
+        bars: Bars,
+    ) -> Projected<N, W> {
+        let Some((active, start)) = self.laid_out(layout) else {
+            return Projected {
+                frames: Vec::new(),
+                bars: Vec::new(),
+            };
+        };
+        let placed = self.shape_from(start, &active, pass, constraints, &|n| n).placed();
+        let stacks: BTreeMap<N, Rect> = placed.stacks.into_iter().collect();
+        let mut out = Vec::new();
+        if self.nodes[self.root(layout)].fill == Fill::Tiled {
+            self.bars_from(start, &active, &stacks, bars, &mut out);
+        }
+        Projected {
+            frames: placed.frames,
+            bars: out,
+        }
+    }
+
+    /// The bars under `node` (taking part), each stack's frame as the pass placed it: a node
+    /// that fills ends the walk below it (and along the selection path, drops the bars found).
+    fn bars_from(
+        &self,
+        node: N,
+        active: &BTreeSet<N>,
+        stacks: &BTreeMap<N, Rect>,
+        bars: Bars,
+        out: &mut Vec<GroupBar<N, W>>,
+    ) {
+        if self.nodes[node].fill != Fill::Tiled {
+            if bars == Bars::SelectionPath {
+                out.clear();
+            }
+            return;
+        }
+        let Body::Container(container) = &self.nodes[node].body else {
+            return;
+        };
+        let taking_part = |child: N| active.contains(&child);
+        let children: Vec<N> =
+            container.members.list().iter().copied().filter(|&c| taking_part(c)).collect();
+        let chosen = match container.kind {
+            Kind::Stack(orientation) => {
+                let focused = self
+                    .participating_child(node, false, taking_part)
+                    .expect("a participating stack has a participating child");
+                out.push(self.group_bar(node, orientation, stacks[&node], &children, focused));
+                Some(focused)
+            }
+            Kind::Split(_) => match bars {
+                Bars::SelectionPath => self.participating_child(node, false, taking_part),
+                Bars::Every => None,
+            },
+        };
+        for child in children {
+            if bars == Bars::Every || Some(child) == chosen {
+                self.bars_from(child, active, stacks, bars, out);
+            }
+        }
+    }
+
+    /// A stack's bar: one window per child holding one that takes part (the child's focus
+    /// target), and which of them stands for the focused child.
+    fn group_bar(
+        &self,
+        stack: N,
+        orientation: Orientation,
+        frame: Rect,
+        children: &[N],
+        focused: N,
+    ) -> GroupBar<N, W> {
+        let mut windows = Vec::with_capacity(children.len());
+        let mut selected = 0;
+        for &child in children {
+            if let Some((_, window)) = self.find_best_focus_target(child) {
+                if child == focused {
+                    selected = windows.len();
+                }
+                windows.push(window);
+            }
+        }
+        GroupBar {
+            stack,
+            orientation,
+            frame,
+            windows,
+            selected,
+        }
+    }
+
+    fn shape_node<S>(
         &self,
         node: N,
         active: &BTreeSet<N>,
         constraints: &impl Fn(W) -> Option<WindowConstraints>,
-    ) -> geometry::Node<W> {
+        label: &impl Fn(N) -> S,
+    ) -> geometry::Node<W, S> {
         let fill = self.nodes[node].fill;
         let kind = match &self.nodes[node].body {
             Body::Window { window, .. } => {
@@ -1716,7 +1858,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
         };
         let child = |child: N| geometry::Child {
             size: self.size(child),
-            node: self.shape_node(child, active, constraints),
+            node: self.shape_node(child, active, constraints, label),
         };
         let mut children: Vec<N> =
             self.children(node).iter().copied().filter(|c| active.contains(c)).collect();
@@ -1729,6 +1871,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
                 let after = children.split_off(at + 1);
                 children.pop();
                 geometry::Node::Stack {
+                    label: label(node),
                     horizontal: orientation == Orientation::Horizontal,
                     fill,
                     before: children.into_iter().map(child).collect(),

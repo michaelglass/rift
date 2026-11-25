@@ -749,6 +749,7 @@ impl<L: SlotKey + Eq, W: Copy + Ord> Stacks<L, W> {
             stack_offset,
             stack_line,
             root: traditional::Node::Stack {
+                label: (),
                 horizontal: stack.orientation == Orientation::Horizontal,
                 fill: if stack.fill == Fill::Screen {
                     Fill::Screen

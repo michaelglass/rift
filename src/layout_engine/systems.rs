@@ -804,26 +804,31 @@ impl LayoutSystemKind {
         groups: &mut Vec<crate::layout_engine::engine::GroupContainerInfo>,
         selection_path_only: bool,
     ) -> Option<Vec<(WindowId, CGRect)>> {
-        let (forest, root, regions) = match self {
-            Self::Traditional(system) => (system.tiles(), system.tiles().root(layout), None),
-            Self::MasterStack(system) => {
-                let (root, master, stack) = system.region_roots(layout);
-                (system.tiles(), root, Some((master, stack)))
-            }
+        let (frames, bars) = match self {
+            Self::Traditional(system) => system.project_groups(
+                layout,
+                screen,
+                stack_offset,
+                constraints,
+                gaps,
+                stack_line,
+                emit_frames,
+                selection_path_only,
+            ),
+            Self::MasterStack(system) => system.project_groups(
+                layout,
+                screen,
+                stack_offset,
+                constraints,
+                gaps,
+                stack_line,
+                emit_frames,
+                selection_path_only,
+            ),
             _ => return None,
         };
-        Some(tiles::project(
-            forest,
-            root,
-            |active| tiles::project_root(root, regions, active),
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-            emit_frames,
-            Some(tiles::GroupOutput { groups, selection_path_only }),
-        ))
+        groups.extend(bars);
+        Some(frames)
     }
 
     pub(crate) fn collect_group_containers(

@@ -13,15 +13,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::CGRect;
 use rift_core::layout::group_forest::{
-    self as core, Body, Container, DropAction, Fill, Forest, Kind, Members, Memory, Node,
+    self as core, Bars, Body, Container, DropAction, Fill, Forest, Kind, Members, Memory, Node,
     Participation, Pass, Place, Resize, Side,
 };
 
 use super::groups::{GroupLayouts, LayoutRoot};
-use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowQuery, core_direction};
+use super::{
+    EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowLayoutConstraints, WindowQuery,
+    core_direction,
+};
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackDefaultOrientation, StackLineReserve};
+use crate::layout_engine::engine::GroupContainerInfo;
 use crate::layout_engine::{LayoutId, LayoutKind, ResizeOrientation, WindowDropAction};
 use crate::model::selection::SelectionInfo;
 use crate::model::slot_table::{SlotTable, of_slotmap};
@@ -276,6 +280,108 @@ pub(super) fn container_node(
     }
 }
 
+/// A group bar, comparable (its frame by bits).
+type BarWords = (NodeId, LayoutKind, [u64; 4], usize, usize, Vec<WindowId>);
+
+fn bar_words(bar: &GroupContainerInfo) -> BarWords {
+    let frame = bar.frame;
+    (
+        bar.node_id,
+        bar.container_kind,
+        [
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        ]
+        .map(f64::to_bits),
+        bar.total_count,
+        bar.selected_index,
+        bar.window_ids.clone(),
+    )
+}
+
+/// A layout pass with its group bars (upstream's `project` with a group output, which the
+/// group bar reads): the bars the core's forest gives, and the frames (when `emit_frames`) as
+/// `calculate_layout` decides them; upstream's projection (`tiles` laid out from its root or
+/// the master region of `regions`) is held to both.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn project_groups(
+    system: &str,
+    forest: &CoreForest,
+    (tiles, regions): (&GroupLayouts, Option<(NodeId, NodeId)>),
+    layout: LayoutId,
+    screen: CGRect,
+    offset: f64,
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    gaps: &GapSettings,
+    line: StackLineReserve,
+    emit_frames: bool,
+    selection_path_only: bool,
+) -> (Vec<(WindowId, CGRect)>, Vec<GroupContainerInfo>) {
+    use crate::layout_engine::Shadow;
+    use crate::layout_engine::core_geometry::{cg_rect, core_constraints, decide_traditional};
+    let constrained = |window: WindowId| constraints.get(&window).copied().map(core_constraints);
+    let bars = if selection_path_only {
+        Bars::SelectionPath
+    } else {
+        Bars::Every
+    };
+    let pass = pass(screen, gaps, offset, line);
+    let ours: Vec<GroupContainerInfo> = forest
+        .project(layout, pass, &constrained, bars)
+        .bars
+        .into_iter()
+        .map(|bar| GroupContainerInfo {
+            node_id: bar.stack,
+            container_kind: layout_kind(Kind::Stack(bar.orientation)),
+            frame: cg_rect(bar.frame),
+            total_count: bar.windows.len(),
+            selected_index: bar.selected,
+            window_ids: bar.windows,
+        })
+        .collect();
+    let root = tiles.root(layout);
+    let mut theirs = Vec::new();
+    let upstream_frames = super::tiles::project(
+        tiles,
+        root,
+        |active| super::tiles::project_root(root, regions, active),
+        screen,
+        offset,
+        constraints,
+        gaps,
+        line,
+        emit_frames,
+        Some(super::tiles::GroupOutput {
+            groups: &mut theirs,
+            selection_path_only,
+        }),
+    );
+    let (upstream, core): (Vec<BarWords>, Vec<BarWords>) = (
+        theirs.iter().map(bar_words).collect(),
+        ours.iter().map(bar_words).collect(),
+    );
+    if upstream != core {
+        report(
+            system,
+            "project_groups",
+            &format!("bars: upstream {upstream:?}, core {core:?}"),
+        );
+    }
+    let frames = if emit_frames {
+        decide_traditional(
+            system,
+            forest.shape(layout, pass, &constrained),
+            Shadow::Run,
+            || upstream_frames,
+        )
+    } else {
+        Vec::new()
+    };
+    (frames, ours)
+}
+
 pub(super) fn default_orientation(
     orientation: StackDefaultOrientation,
 ) -> core::DefaultOrientation {
@@ -489,6 +595,34 @@ pub(super) mod drawn {
         format!("{}-{}", &text[..at], &text[at..])
     }
 
+    /// A drawn group bar pass's arguments: a screen, constraints for `windows`, gaps, a stack
+    /// offset and line, whether frames are asked for and whether only the selection path is.
+    pub(in crate::layout_engine::systems) fn bar_pass(
+        rng: &mut Rng,
+        windows: &[WindowId],
+    ) -> (
+        CGRect,
+        crate::common::collections::HashMap<
+            WindowId,
+            crate::layout_engine::systems::WindowLayoutConstraints,
+        >,
+        crate::common::config::GapSettings,
+        f64,
+        crate::common::config::StackLineReserve,
+        bool,
+        bool,
+    ) {
+        (
+            drawn_screen(rng),
+            drawn_constraints_for(rng, windows),
+            drawn_gaps(rng),
+            drawn_offset(rng),
+            drawn_line(rng),
+            rng.chance(50),
+            rng.chance(50),
+        )
+    }
+
     /// What a run has made so far.
     pub(in crate::layout_engine::systems) struct Drawn {
         pub(in crate::layout_engine::systems) layouts: Vec<LayoutId>,
@@ -652,15 +786,16 @@ pub(super) mod drawn {
     }
 
     /// Every query, answered by both sides (the twin compares them), the system's own views
-    /// (rift-cli's) through `views`.
+    /// (rift-cli's, the group bar's) through `views`.
     fn query<S: LayoutSystem>(
         rng: &mut Rng,
         system: &S,
         drawn: &mut Drawn,
-        views: &impl Fn(&S, LayoutId),
+        views: &impl Fn(&mut Rng, &S, LayoutId, &[WindowId]),
     ) {
         let layout = drawn.layout(rng);
-        views(system, layout);
+        let windows = drawn.windows.clone();
+        views(rng, system, layout, &windows);
         let window = drawn.window(rng);
         system.contains_layout(layout);
         system.selected_window(layout);
@@ -700,7 +835,7 @@ pub(super) mod drawn {
         steps: u64,
         own: &mut impl FnMut(&mut Rng, &mut S, &mut Drawn),
         reload: &impl Fn(&mut Rng, &S) -> S,
-        views: &impl Fn(&S, LayoutId),
+        views: &impl Fn(&mut Rng, &S, LayoutId, &[WindowId]),
     ) -> Drawn {
         let mut drawn = Drawn {
             layouts: vec![system.create_layout()],

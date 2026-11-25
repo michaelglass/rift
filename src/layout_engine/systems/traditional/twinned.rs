@@ -10,12 +10,12 @@ use super::Upstream;
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackLineReserve, WindowInsertionPoint};
+use crate::layout_engine::engine::GroupContainerInfo;
 use crate::layout_engine::systems::group_twin::{
     VIEW_ALWAYS, VIEW_EVERY, container_node, core_edit, core_focus, core_query, edit_result,
-    edit_words, focus_result, focus_words, participation, pass, report, resize, seed,
-    view_difference,
+    edit_words, focus_result, focus_words, participation, pass, project_groups, report, resize,
+    seed, view_difference,
 };
-use crate::layout_engine::systems::groups::GroupLayouts;
 use crate::layout_engine::systems::{
     EditResult, Focus, FocusResult, LayoutEdit, LayoutSystem, WindowChange,
     WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
@@ -97,8 +97,33 @@ impl TraditionalLayoutSystem {
         self.stepped("set_equalize_nodes", &(), &());
     }
 
-    /// Upstream's forest (the group bar's projection and rift-cli's views read it).
-    pub(in crate::layout_engine::systems) fn tiles(&self) -> &GroupLayouts { &self.upstream.tiles }
+    /// A layout pass with its group bars, the core's (upstream's projection held to them).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn project_groups(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+        line: StackLineReserve,
+        emit_frames: bool,
+        selection_path_only: bool,
+    ) -> (Vec<(WindowId, CGRect)>, Vec<GroupContainerInfo>) {
+        project_groups(
+            SYSTEM,
+            self.twin.core.forest(),
+            (&self.upstream.tiles, None),
+            layout,
+            screen,
+            offset,
+            constraints,
+            gaps,
+            line,
+            emit_frames,
+            selection_path_only,
+        )
+    }
 
     /// rift-cli's drawing of the layout: the core's (upstream's held to it on every call).
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
@@ -445,9 +470,21 @@ mod tests {
                     system.window_slot(layout, window);
                 },
                 &reloaded,
-                &|system, layout| {
+                &|rng, system, layout, windows| {
                     system.draw_tree(layout);
                     system.container_tree(layout);
+                    let (screen, constraints, gaps, offset, line, frames, path) =
+                        drawn::bar_pass(rng, windows);
+                    system.project_groups(
+                        layout,
+                        screen,
+                        offset,
+                        &constraints,
+                        &gaps,
+                        line,
+                        frames,
+                        path,
+                    );
                 },
             );
             windows += drawn.windows.len();

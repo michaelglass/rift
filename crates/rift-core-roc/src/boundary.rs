@@ -383,6 +383,7 @@ fn traditional_node(
             Tag::Axis
         ),
         traditional::Node::Stack {
+            label: (),
             horizontal,
             fill,
             before,
