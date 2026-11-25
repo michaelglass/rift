@@ -9,71 +9,74 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5): read this first
+## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 1): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
 BSP and for the stack. `rearch/roc-next@fork` carries everything through this docs commit once it
 is published (publish procedure: "Rulings that bind", Public-clean; the published tip's id is in
-the slice report). All checks green at the tip: workspace tests 1038 (5 ignored), the lib with
-`roc-core` 917 (7 ignored), `cargo test -p rift-core-roc --features roc` 52 (9 ignored), `cargo
+the slice report). All checks green at the tip: workspace tests 1049 (7 ignored), the lib with
+`roc-core` 928 (9 ignored), `cargo test -p rift-core-roc --features roc` 52 (9 ignored), `cargo
 test -p rift-core` 107, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt,
 and `cargo clippy --all-targets --features roc-core` compiles with no errors and 331 warnings,
 counted as `cargo clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' |
 grep -v generated | wc -l` (the bound: at most 336).
 
-**The group forest, slice 1, in progress (2026-11-25).** The core tree is written but not
-checked yet. It is parked in its own unpublished change, described "WIP (unpublished, unchecked):
-group forest slice 1", a sibling of this docs commit; put it on top of the line before going on.
-The file is `crates/rift-core/src/layout/group_forest.rs`, about 1300 lines, and it compiles.
-What it holds:
-- `Forest<L, N, W>`: a `SlotTable` of layout roots and one of nodes, the windows left out, and a
-  stamp counter. `Node { place: Root | Child { parent, size }, fill, body: Window { window,
-  stamp } | Container { kind: Split(o) | Stack(o), members: Children(Vec) | Regions { order,
-  primary: Side }, memory: Unset | Toward(c) | Stops(c) } }`.
-- Ported one for one from `model/tree.rs`, `groups.rs` and `tiles.rs`: the tree edits, the
-  selection, the walks, the derived window index, every query, focus, nest, stack and unstack,
-  tab reorder, swap, fullscreen, orientation, split, resize (native and by amount), rebalance,
-  drops (`DropAction` has no `Move` or `ConsumeOrExpel`: `LayoutSystem::edit` turns those into
-  their edits first), and the shape. Slot allocation and free order follow upstream's: preorder
-  delete and clone, bottom-up prune.
-- Not written yet:
-  - traditional's own operations (adding with and without a direction, smart insertion, the
-    joins, unjoin, the move and its destination, `can_move_window`);
-  - master-stack's own operations (creating and cloning a layout's regions, settings changes,
-    master ratio and count, `enforce_master_count`, adding a window, promote, swapping master
-    and stack, the move target);
-  - the twin (`systems/traditional` and `systems/master_stack` as `Upstream` plus a boxed core;
-    the seed from `GroupLayouts`; the view comparison, with the index compared by window and
-    stamp order);
-  - the load's normalizations (both fill flags, a window's non-default kind, a root size other
-    than 0);
-  - the drawn fuzzers (`traditional.rs` and `master_stack.rs` already draw systems; add clones
-    and reloads, and pass every case through the twin);
-  - plants and cost.
-- Not in the core yet: the group bar (`project_groups` through upstream's projection),
-  `draw_tree`, `container_tree`.
-- The lead's rulings (2026-11-25):
-  - **The window index's order: an entry stamp on each window leaf.** The order is behaviour:
-    it decides node removal order, so it decides later slot ids, and ids must match upstream's.
-    - A leaf takes its stamp when its window enters the layout: on add, on clone, and on
-      replace, where from's entries are appended after to's.
-    - Swap moves the stamp with the window.
-    - The index is derived and ordered by stamp. The save writes it in that order, and the load
-      stamps the leaves in the saved order.
-    - Slice 3 compares saved bytes exactly.
-    - Add a test where a clone reuses a lower freed layout slot, so a plant that orders the index
-      by slot is caught.
+**The group forest, slice 1, done (2026-11-25): the core's forest beside upstream's traditional
+and master-stack systems.** Four commits after the rulings' docs commit; each message has its
+plants, checks and costs. The parked WIP (`qkxqunyv`) was reviewed against upstream and taken
+over (no behaviour difference found in it); it can be abandoned.
+- **The core** (`rift_core::layout::group_forest`): `Forest<L, N, W>` (a `SlotTable` of layout
+  roots and one of nodes, the windows left out, a stamp counter), `Node { place: Root | Child {
+  parent, size }, fill, body: Window { window, stamp } | Container { kind: Split(o) | Stack(o),
+  members: Children(Vec) | Regions { order, primary: Side }, memory: Unset | Toward(c) |
+  Stops(c) } }`. The window index is derived (`Forest::index`, by window, then stamp). Every
+  tree edit, walk, query, focus and shared edit ported from `model/tree.rs`, `groups.rs`,
+  `tiles.rs`; `Traditional` (adds with and without a direction, smart insertion, `NewSibling`,
+  the joins, unjoin, consume-or-expel, the move and `can_move_window`) and `MasterStack`
+  (`MasterSettings` with `RegionInsertion`, `Arrangement`, `MasterSide`, `NewWindowPlacement`;
+  regions, settings changes, ratio and count, `enforce_master_count`, add, remove and close by
+  app with redistribution, promote, swap master and stack, the move target) over it.
+- **The twins** (`systems/traditional/twinned.rs`, `systems/master_stack/twinned.rs`, shared
+  `systems/group_twin.rs`): upstream's structs are each module's `Upstream`, held by
+  `TraditionalLayoutSystem` / `MasterStackLayoutSystem { upstream, twin: Box<Twinned> }`.
+  Answers compared on every operation (queries, `can_move_window`, `window_slot` too), the view
+  (layouts and nodes by id with stamps left out, left out, the index in order, the settings) on
+  every operation in tests and `roc-core` and every 32nd in a plain release build, each pass's
+  shape. A difference is counted (`core: group forest divergences`), fails a test, or warns
+  `group-forest-divergence:` and re-seeds the core (`group_twin::seed`: stamps in the index's
+  order). Saving is upstream's. The group bar's projection and rift-cli's views still read
+  upstream (`tiles()`, `draw_tree`, `container_tree`): slice 3 moves them first.
+- **The load normalizes** (`GroupLayouts::normalize_load`, each twin's load; `traditional-load:`
+  / `master-stack-load:`): both fill flags, a window's non-default kind, a root size other than 0
+  (bitwise), and an index disagreeing with the tree (entries for no leaf of theirs and duplicates
+  dropped, missed leaves appended, the saved order otherwise kept). Floating's load is untouched.
+- **The drawn fuzzer** (`group_twin::drawn`, 3000 systems of up to 120 steps per system): layouts
+  made, cloned and removed, windows in one or two layouts, every change, focus and edit, the
+  systems' own operations and settings, every query and a pass on a third of steps, reloads
+  (some with a selection cleared, a saved-only state). `RIFT_FOREST_CASES` sets the count.
+- **Plants:** core 28/28 (shared and traditional) and 23/25 (master-stack; two equivalent: the
+  kept window in promote and in an add to the stack region is never reached by the trim), the
+  clone test 1/1, the shadow's seed and conversions 9/9, the normalizations 8/8.
+- **Cost (release, `measure_traditional_twin` / `measure_master_stack_twin`, 10 / 100 / 1000
+  windows):** upstream 74 ns / 0.24 / 1.9 us an operation (master-stack 97 ns / 0.24 / 1.3 us),
+  the core 0.24 / 1.0 / 10.7 us (0.36 / 1.3 / 8.4 us); the view 1.0 / 5.8 / 45 us (1 in 32: 30 ns
+  / 0.18 / 1.4 us an operation); a re-seed 54 us / 0.53 / 6.5 ms; a pass's shape upstream 0.64 /
+  5.5 / 54 us, the core 0.86 / 9.0 / 167 us. A sibling step searches its parent's list (no
+  sibling links), so walks read child lists directly (preorder): before that fix a flat
+  1000-window region cost 370 us an operation.
+- The lead's rulings (2026-11-25), held by the code and tests:
+  - **The window index's order: an entry stamp on each window leaf** (add, clone, replace
+    appending from's after to's; swap moves it; the save writes it in order; the load stamps in
+    saved order). Slice 3 compares saved bytes exactly. Tests
+    `a_clone_in_a_lower_freed_slot_is_indexed_after_its_source`,
+    `a_saved_window_index_keeps_its_order`.
   - **Floating is out of scope for now.** Slice 5 deletes only what traditional and
-    master-stack use. When floating's own turn comes (last in the order), it moves onto the core
-    forest and `GroupLayouts` goes away entirely.
-  - **The shape is approved as described above**, with the load's root-size and window-kind
-    normalizations, each with a warning.
-
-**Next: the group forest** (traditional and master-stack as one core tree, each system a thin
-shim over it; the lead's go, 2026-11-25): the same five slices and rules as the stack's, the QA
-lessons as in the plan above the stack's slices; report at each slice end, stop on design
-questions. Start from "What the code shows" there (`groups.rs`, `tiles.rs`, `model/tree.rs`,
-the saved window index ruling).
+    master-stack use; floating moves onto the core forest last and `GroupLayouts` goes then.
+  - **The shape is approved as above**, with the root-size and window-kind normalizations.
+  - **A saved index disagreeing with the tree:** every refusal upstream's load makes kept,
+    everything else normalized with one warn.
+- **Next: slice 2, the Roc mirror** (`roc/core/GroupForest.roc` over `Slots.roc`, a
+  differential in `crates/rift-core-roc/tests/group_forest.rs`, a seed entry), as the stack's.
 
 **A stack member's weight (the lead asked for its readers, 2026-11-25): kept on the core's
 members.** Readers beyond the saved form: rift-cli's drawing (`draw_tree`) and container view
