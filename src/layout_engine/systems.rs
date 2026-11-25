@@ -432,6 +432,8 @@ pub(super) fn node_slot(
     Some(path)
 }
 
+mod group_twin;
+pub(crate) use group_twin::group_forest_divergences;
 mod groups;
 mod tiles;
 mod traditional;
@@ -525,7 +527,7 @@ mod tests {
         let layout = traditional.create_layout();
         traditional.update(WindowChange::Add(layout, w(1), None));
         traditional.update(WindowChange::Add(layout, w(2), None));
-        let tree = traditional.tiles.container_tree(layout);
+        let tree = traditional.tiles().container_tree(layout);
         assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Container);
         assert_eq!(window_nodes(&tree).len(), 2);
         assert_eq!(
@@ -533,7 +535,7 @@ mod tests {
             1
         );
         traditional.focus(layout, Focus::Select(w(1))).handled;
-        assert_stable_unique_ids(&tree, &traditional.tiles.container_tree(layout));
+        assert_stable_unique_ids(&tree, &traditional.tiles().container_tree(layout));
 
         let mut bsp = BspLayoutSystem::default();
         let layout = bsp.create_layout();
@@ -757,7 +759,7 @@ mod participation_tests {
 impl LayoutSystemKind {
     pub fn draw_tree(&self, layout: LayoutId) -> String {
         match self {
-            Self::Traditional(system) => system.tiles.draw_tree(layout, &[]),
+            Self::Traditional(system) => system.tiles().draw_tree(layout, &[]),
             Self::Bsp(system) => system.draw_tree(layout),
             Self::Stack(system) => system.draw_tree(layout),
             Self::MasterStack(system) => system.draw_tree(layout),
@@ -768,7 +770,7 @@ impl LayoutSystemKind {
 
     pub fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         match self {
-            Self::Traditional(system) => system.tiles.container_tree(layout),
+            Self::Traditional(system) => system.tiles().container_tree(layout),
             Self::Bsp(system) => system.container_tree(layout),
             Self::Stack(system) => system.container_tree(layout),
             Self::MasterStack(system) => system.container_tree(layout),
@@ -779,7 +781,7 @@ impl LayoutSystemKind {
 
     pub fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         match self {
-            Self::Traditional(system) => system.tiles.window_slot(layout, window),
+            Self::Traditional(system) => system.window_slot(layout, window),
             Self::Bsp(system) => system.window_slot(layout, window),
             Self::Stack(system) => system.window_slot(layout, window),
             Self::MasterStack(system) => system.tiles.window_slot(layout, window),
@@ -803,7 +805,7 @@ impl LayoutSystemKind {
         selection_path_only: bool,
     ) -> Option<Vec<(WindowId, CGRect)>> {
         let (forest, root, regions) = match self {
-            Self::Traditional(system) => (&system.tiles, system.tiles.root(layout), None),
+            Self::Traditional(system) => (system.tiles(), system.tiles().root(layout), None),
             Self::MasterStack(system) => {
                 let (root, master, stack) = system.region_roots(layout);
                 (&system.tiles, root, Some((master, stack)))

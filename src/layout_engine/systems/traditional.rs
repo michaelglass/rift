@@ -10,9 +10,12 @@ use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 use crate::model::tree::{NodeId, Placement};
 
+mod twinned;
+pub use twinned::TraditionalLayoutSystem;
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
-pub struct TraditionalLayoutSystem {
+pub struct Upstream {
     pub(super) tiles: GroupLayouts,
     #[serde(skip)]
     window_insertion_point: WindowInsertionPoint,
@@ -20,11 +23,11 @@ pub struct TraditionalLayoutSystem {
     equalize_nodes: bool,
 }
 
-impl Default for TraditionalLayoutSystem {
+impl Default for Upstream {
     fn default() -> Self { Self::new(WindowInsertionPoint::default(), true) }
 }
 
-impl TraditionalLayoutSystem {
+impl Upstream {
     /// The frames the traditional system computes itself: since the core decides (policy (a)),
     /// the shadow `calculate_layout` holds the core's to.
     pub(crate) fn shadow_frames(
@@ -234,7 +237,7 @@ impl TraditionalLayoutSystem {
     }
 }
 
-impl LayoutSystem for TraditionalLayoutSystem {
+impl LayoutSystem for Upstream {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.tiles.has_windows_for_app(layout, pid)
     }
@@ -435,7 +438,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 }
 
-impl TraditionalLayoutSystem {
+impl Upstream {
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
             let root = self.tiles.root(layout);
@@ -627,7 +630,7 @@ impl TraditionalLayoutSystem {
     }
 }
 
-impl TraditionalLayoutSystem {
+impl Upstream {
     pub(in crate::layout_engine) fn can_move_window(
         &self,
         layout: LayoutId,
@@ -758,7 +761,7 @@ impl TraditionalLayoutSystem {
 mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
-    use super::*;
+    use super::{Upstream as TraditionalLayoutSystem, *};
     use crate::layout_engine::{Direction, LayoutKind};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }

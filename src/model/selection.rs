@@ -13,6 +13,11 @@ pub(crate) struct SelectionInfo {
     stop_here: bool,
 }
 
+impl SelectionInfo {
+    /// The child remembered, and whether the selection stops at its container.
+    pub(crate) fn parts(self) -> (NodeId, bool) { (self.selected_child, self.stop_here) }
+}
+
 impl Selection {
     pub fn current_selection(&self, root: NodeId) -> NodeId {
         let mut node = root;

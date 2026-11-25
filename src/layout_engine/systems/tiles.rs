@@ -816,8 +816,8 @@ pub(super) fn project(
 mod tests {
     use super::*;
     use crate::common::config::{GapSettings, StackLineReserve};
-    use crate::layout_engine::TraditionalLayoutSystem;
     use crate::layout_engine::systems::drawn::*;
+    use crate::layout_engine::systems::traditional::Upstream as TraditionalLayoutSystem;
     use crate::layout_engine::systems::{LayoutSystem, WindowChange};
 
     /// A traditional layout of `sizes.len()` windows side by side, each child's weight set.

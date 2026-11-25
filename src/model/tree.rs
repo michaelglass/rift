@@ -640,6 +640,48 @@ impl NodeMap {
     }
 }
 
+/// A node's contents as the group forest's core reads them (the twins' seed and view).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Held {
+    Window(WindowId),
+    Container {
+        children: Vec<NodeId>,
+        selection: Option<SelectionInfo>,
+    },
+    RegionPair {
+        regions: [NodeId; 2],
+        primary_first: bool,
+        selection: Option<SelectionInfo>,
+    },
+}
+
+impl NodeMap {
+    /// The slots themselves (the twins' seed reads their versions and free list).
+    pub(crate) fn slots(&self) -> &SlotMap<NodeId, Node> { &self.map }
+
+    /// A node's parent and contents, its children listed in order.
+    pub(crate) fn held(&self, node: NodeId) -> (Option<NodeId>, Held) {
+        let entry = &self.map[node];
+        let held = match entry.contents {
+            Contents::Window(window) => Held::Window(window),
+            Contents::Container(children) => Held::Container {
+                children: node.children(self).collect(),
+                selection: children.selection,
+            },
+            Contents::RegionPair {
+                regions,
+                selection,
+                primary_first,
+            } => Held::RegionPair {
+                regions,
+                primary_first,
+                selection,
+            },
+        };
+        (entry.parent, held)
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct WindowIndex {
     pub(crate) window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,

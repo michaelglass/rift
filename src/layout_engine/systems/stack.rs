@@ -24,12 +24,13 @@ mod tests {
     };
     use crate::layout_engine::engine::GroupContainerInfo;
     use crate::layout_engine::systems::drawn::*;
+    use crate::layout_engine::systems::traditional::Upstream as TraditionalLayoutSystem;
     use crate::layout_engine::systems::{
         Focus, GroupEdit, LayoutEdit, LayoutSystem, WindowChange, WindowLayoutConstraints,
         WindowQuery,
     };
     use crate::layout_engine::utils::compute_tiling_area;
-    use crate::layout_engine::{Direction, LayoutId, LayoutKind, TraditionalLayoutSystem};
+    use crate::layout_engine::{Direction, LayoutId, LayoutKind};
     use crate::model::tree::NodeId;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
