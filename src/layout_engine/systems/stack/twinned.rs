@@ -663,4 +663,122 @@ mod tests {
         assert!(failed.is_err());
         assert!(stack_tree_divergences() > before);
     }
+
+    /// The twin's cost per operation at 10, 100 and 1000 windows (release:
+    /// `cargo test --release --lib measure_stack_twin -- --ignored --nocapture`): upstream's
+    /// operation alone, the core's step alone, the whole-system comparison, a re-seed, and a
+    /// pass's shape built by each. A plain release build pays the step on every operation and
+    /// the comparison on every 32nd.
+    #[test]
+    #[ignore]
+    fn measure_stack_twin() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        use crate::layout_engine::core_geometry::{core_constraints, core_stack_line};
+        use crate::layout_engine::{core_gaps, core_rect};
+        let directions = [
+            Direction::Left,
+            Direction::Up,
+            Direction::Right,
+            Direction::Down,
+        ];
+        let ops = 4000_u32;
+        let each = |started: Instant, n: u32| started.elapsed() / n;
+        for count in [10_u32, 100, 1000] {
+            let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
+            let layout = system.create_layout();
+            for idx in 1..=count {
+                system.update(WindowChange::Add(layout, w(idx), None));
+            }
+            // A mix of everyday operations: focus moves, swaps, fullscreen, a window coming and
+            // going.
+            let mut upstream = system.upstream.clone();
+            let started = Instant::now();
+            for i in 0..ops {
+                match i % 4 {
+                    0 => drop(black_box(
+                        upstream.focus(layout, Focus::Direction(directions[(i / 4 % 4) as usize])),
+                    )),
+                    1 => drop(black_box(upstream.edit_layout(
+                        layout,
+                        LayoutEdit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
+                    ))),
+                    2 => {
+                        drop(black_box(upstream.edit_layout(layout, LayoutEdit::Fullscreen {
+                            within_gaps: false,
+                        })))
+                    }
+                    _ => {
+                        upstream.update(WindowChange::Add(layout, w(count + 1), None));
+                        upstream.update(WindowChange::Remove(w(count + 1)));
+                    }
+                }
+            }
+            let upstream_each = each(started, ops);
+            let mut core = system.twin.core.clone();
+            let started = Instant::now();
+            for i in 0..ops {
+                match i % 4 {
+                    0 => drop(black_box(core.focus(
+                        layout,
+                        core::Focus::Direction(core_direction(directions[(i / 4 % 4) as usize])),
+                    ))),
+                    1 => drop(black_box(core.edit(
+                        layout,
+                        core::Edit::Swap(w(1 + i % count), w(1 + (i * 7) % count)),
+                    ))),
+                    2 => drop(black_box(
+                        core.edit(layout, core::Edit::Fullscreen { within_gaps: false }),
+                    )),
+                    _ => {
+                        core.add_window(layout, w(count + 1));
+                        core.remove_window(w(count + 1));
+                    }
+                }
+            }
+            let core_each = each(started, ops);
+            let rounds = 200;
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(view_difference(&system.twin.core, &system.upstream));
+            }
+            let view_each = each(started, rounds);
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(seed(&system.upstream));
+            }
+            let seed_each = each(started, rounds);
+            let screen = CGRect::new(
+                objc2_core_foundation::CGPoint::ZERO,
+                objc2_core_foundation::CGSize::new(1600.0, 1000.0),
+            );
+            let gaps = GapSettings::default();
+            let constraints = HashMap::default();
+            let line = StackLineReserve::default();
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(system.upstream.shape(layout, screen, 12.0, &constraints, &gaps, line));
+            }
+            let upstream_shape = each(started, rounds);
+            let started = Instant::now();
+            for _ in 0..rounds {
+                black_box(system.twin.core.shape(
+                    layout,
+                    core_rect(screen),
+                    core_gaps(&gaps),
+                    12.0,
+                    core_stack_line(line),
+                    |window| constraints.get(&window).copied().map(core_constraints),
+                ));
+            }
+            let core_shape = each(started, rounds);
+            let per_op = view_each / VIEW_EVERY as u32;
+            eprintln!(
+                "{count} windows: upstream {upstream_each:?}/op, core {core_each:?}/op, view \
+                 {view_each:?} ({per_op:?}/op 1 in {VIEW_EVERY}), re-seed {seed_each:?}, \
+                 shape upstream {upstream_shape:?} core {core_shape:?}"
+            );
+        }
+    }
 }
