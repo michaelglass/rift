@@ -35,6 +35,10 @@ Master : { forest : Forest, settings : MasterSettings }
 ## Where a node goes among a container's children (`Placement`).
 Placement : [Back(U64), Before(U64), After(U64)]
 
+## A resolved place among a container's children: the container, and the index a child put there
+## takes. `position` answers one for a placed node (`At`); `back_of` is a container's end.
+Place : { above : U64, index : U64 }
+
 ## How far a walk over a container's children goes (`BranchLimit`).
 Limit : [All, First, FirstVisible]
 
@@ -844,9 +848,20 @@ GroupForest := [].{
 		set_node(forest, key, { ..at, place: placed }, "set_place")
 	}
 
-	## `key` (unplaced) put into `above` where `placement` says, with `held` as its size.
-	link : Forest, U64, U64, Placement, F32 -> Forest
-	link = |forest, key, above, placement, held| {
+	## The place at the back of `above`'s children.
+	back_of : Forest, U64 -> Place
+	back_of = |forest, above| { above, index: children(forest, above).len() }
+
+	## The place just after a placed node's.
+	after_place : Place -> Place
+	after_place = |at| { ..at, index: at.index + 1 }
+
+	## Where `placement` puts a child of `above`, resolved after the moving node is taken out (the
+	## move's resolution; inserts take a `Place`). The crash for an unplaced sibling stays here:
+	## `move_node` found the sibling's parent before taking the node out, and the type cannot carry
+	## that.
+	placement_place : Forest, U64, Placement -> Place
+	placement_place = |forest, above, placement| {
 		index =
 			match placement {
 				Back(_) => children(forest, above).len()
@@ -865,6 +880,15 @@ GroupForest := [].{
 						}
 					}
 			}
+		{ above, index }
+	}
+
+	## `key` (unplaced) put at `place`, with `held` as its size. Two crashes stay, both about a
+	## key read just before: `listed_children`'s for a container that is a region pair (or not a
+	## container), and the list insert's for an index past the children (every place is read from
+	## them); neither is expressible as a type here.
+	link : Forest, U64, Place, F32 -> Forest
+	link = |forest, key, { above, index }, held| {
 		listed = listed_children(forest, above, "link")
 		inserted =
 			match listed.insert(index, key) {
@@ -887,20 +911,12 @@ GroupForest := [].{
 			Unplaced => forest
 		}
 
-	insert : Forest, Placement -> (Forest, U64)
-	insert = |forest, placement|
-		match placement_parent(forest, placement) {
-			Some(above) =>
-				if is_region_pair(forest, above) {
-					crash "GroupForest.insert: node ${above.to_str()} is a region pair"
-				} else {
-					(created, key) = create_root(forest)
-					(link(created, key, above, placement, 1.0), key)
-				}
-			Nothing => {
-				crash "GroupForest.insert: invalid tile insertion"
-			}
-		}
+	## A new container at `place` (the caller resolved it from what it knows).
+	insert : Forest, Place -> (Forest, U64)
+	insert = |forest, place| {
+		(created, key) = create_root(forest)
+		(link(created, key, place, 1.0), key)
+	}
 
 	move_node : Forest, U64, Placement -> (Forest, Bool)
 	move_node = |forest, key, placement|
@@ -943,7 +959,7 @@ GroupForest := [].{
 									Some(old) if changed_parent => detach(forest, key, old)
 									_ => unlink(forest, key)
 								}
-							linked = link(taken, key, above, placement, if changed_parent 1.0 else held)
+							linked = link(taken, key, placement_place(taken, above, placement), if changed_parent 1.0 else held)
 							pruned =
 								match old_parent {
 									Some(old) if changed_parent => prune_container(linked, old)
@@ -992,10 +1008,10 @@ GroupForest := [].{
 
 	prune_container : Forest, U64 -> Forest
 	prune_container = |forest, key|
-		match parent(forest, key) {
-			Nothing => forest
-			Some(above) =>
-				if is_region_pair(forest, above) {
+		match position(forest, key) {
+			Unplaced => forest
+			At(at) =>
+				if is_region_pair(forest, at.above) {
 					forest
 				} else {
 					listed = children(forest, key)
@@ -1007,13 +1023,13 @@ GroupForest := [].{
 								Some(child) => {
 									unlinked = unlink(forest, child)
 									held = size(unlinked, key)
-									link(unlinked, child, above, After(key), held)
+									link(unlinked, child, after_place(at), held)
 								}
 								Nothing => forest
 							}
 						removed = unlink(detach_selection(lifted, key), key)
 						(nodes, _) = Slots.remove(removed.nodes, key)
-						prune_container({ ..removed, nodes }, above)
+						prune_container({ ..removed, nodes }, at.above)
 					}
 				}
 		}
@@ -1079,7 +1095,7 @@ GroupForest := [].{
 			|at, old| {
 				(copied, new) = copy_tile(at, old)
 				held = size(copied, old)
-				linked = link(copied, new, copy, Back(copy), held)
+				linked = link(copied, new, back_of(copied, copy), held)
 				remembered = memory_at(linked, original)
 				with_memory =
 					if memory_last(remembered) == Some(old) {
@@ -2052,17 +2068,17 @@ GroupForest := [].{
 	nest_in_container : Forest, U64, U64, GroupKind -> (Forest, U64)
 	nest_in_container = |forest, layout, key, made| {
 		(nested, container_key) =
-			match parent(forest, key) {
-				Some(above) if children(forest, above).len() == 1 => (forest, above)
-				Some(old_parent) => {
-					is_chosen = local_selection_of(forest, old_parent) == Some(key)
-					(inserted, new_parent) = insert(forest, Before(key))
+			match position(forest, key) {
+				At({ above, .. }) if children(forest, above).len() == 1 => (forest, above)
+				At(at) => {
+					is_chosen = local_selection_of(forest, at.above) == Some(key)
+					(inserted, new_parent) = insert(forest, at)
 					sized = assume_size_of(inserted, new_parent, key)
 					shifted = moved(sized, key, Back(new_parent))
 					reselected = if is_chosen selected_locally(shifted, new_parent) else shifted
 					(selected_locally(reselected, key), new_parent)
 				}
-				Nothing => {
+				Unplaced => {
 					(created, new_root) = create_root(forest)
 					rooted = set_root(created, layout, new_root, "nest_in_container")
 					shifted = moved(rooted, key, Back(new_root))
@@ -2495,27 +2511,25 @@ GroupForest := [].{
 		}
 
 	drop_stacking : Forest, U64, U64 -> Forest
-	drop_stacking = |forest, source_node, target_node| {
-		target_parent = parent(forest, target_node)
-		parent_stacked =
-			match target_parent {
-				Some(above) => is_stacked(forest, above)
-				Nothing => False
-			}
-		if parent_stacked {
-			select_node(moved(forest, source_node, After(target_node)), source_node)
-		} else {
-			orientation =
-				match target_parent {
-					Some(above) => kind_orientation(container_kind(forest, above, "drop_window"))
-					Nothing => Horizontal
+	drop_stacking = |forest, source_node, target_node|
+		match position(forest, target_node) {
+			At(at) =>
+				if is_stacked(forest, at.above) {
+					select_node(moved(forest, source_node, After(target_node)), source_node)
+				} else {
+					orientation = kind_orientation(container_kind(forest, at.above, "drop_window"))
+					(inserted, made) = insert(forest, at)
+					sized = assume_size_of(inserted, made, target_node)
+					gathered = moved(moved(sized, target_node, Back(made)), source_node, Back(made))
+					select_node(set_kind(gathered, made, Stack(orientation)), source_node)
 				}
-			(inserted, made) = insert(forest, Before(target_node))
-			sized = assume_size_of(inserted, made, target_node)
-			gathered = moved(moved(sized, target_node, Back(made)), source_node, Back(made))
-			select_node(set_kind(gathered, made, Stack(orientation)), source_node)
+
+			# Rust panics here too (`insert`'s "invalid tile insertion"): the target is a window's
+			# leaf, and a layout's root is always a container.
+			Unplaced => {
+				crash "GroupForest.drop_stacking: window leaf ${target_node.to_str()} is a root"
+			}
 		}
-	}
 
 	drop_inserting : Forest, U64, U64, U64, BspDirection -> (Forest, Bool)
 	drop_inserting = |forest, layout, source_node, target_node, direction| {
@@ -2540,10 +2554,10 @@ GroupForest := [].{
 				} else {
 					made = Split(orientation_of(direction))
 					(nested, made_key) =
-						match anchor_parent {
-							Nothing => nest_in_container(forest, layout, target_anchor, made)
-							Some(_) => {
-								(inserted, key) = insert(forest, Before(target_anchor))
+						match position(forest, target_anchor) {
+							Unplaced => nest_in_container(forest, layout, target_anchor, made)
+							At(at) => {
+								(inserted, key) = insert(forest, at)
 								sized = assume_size_of(inserted, key, target_anchor)
 								(set_kind(sized, key, made), key)
 							}
@@ -2560,7 +2574,7 @@ GroupForest := [].{
 	## A new leaf holding the window at the back of `above` (`add_window_under`).
 	add_window_under : Forest, U64, U64 -> (Forest, U64)
 	add_window_under = |forest, above, window_word| {
-		(inserted, key) = insert(forest, Back(above))
+		(inserted, key) = insert(forest, back_of(forest, above))
 		(set_window(inserted, key, window_word), key)
 	}
 
@@ -2657,20 +2671,25 @@ GroupForest := [].{
 	smart_window_insertion : Traditionals, U64, U64, U64 -> (Forest, U64)
 	smart_window_insertion = |system, layout, chosen, window_word| {
 		forest = system.forest
-		(nested, placement) =
-			match parent(forest, chosen) {
-				Some(above) => {
-					made = container_kind(forest, above, "smart_window_insertion")
-					if !kind_is_stacked(made) and children(forest, above).len() > 3 {
+		(nested, place) =
+			match position(forest, chosen) {
+				At(at) => {
+					made = container_kind(forest, at.above, "smart_window_insertion")
+					if !kind_is_stacked(made) and children(forest, at.above).len() > 3 {
 						(after, container_key) = nest_in_container(forest, layout, chosen, made)
-						(after, Back(container_key))
+						(after, back_of(after, container_key))
 					} else {
-						(forest, After(chosen))
+						(forest, after_place(at))
 					}
 				}
-				Nothing => (forest, After(chosen))
+
+				# Rust panics here too (`insert(After(selection))` of a root): both callers pass a
+				# node with a parent (the selection when it has one, else the root's chosen child).
+				Unplaced => {
+					crash "GroupForest.smart_window_insertion: ${chosen.to_str()} is a root"
+				}
 			}
-		(inserted, key) = insert(nested, placement)
+		(inserted, key) = insert(nested, place)
 		split = split_new_sibling_from_selection(inserted, system.settings.new_sibling, chosen, key)
 		(set_window(split, key, window_word), key)
 	}
@@ -3058,19 +3077,25 @@ GroupForest := [].{
 			Some(ancestor) =>
 				if ancestor == a or ancestor == b {
 					(forest, ancestor)
-				} else if parent(forest, a) == Some(ancestor) and parent(forest, b) == Some(ancestor) {
-					size_a = max32(size(forest, a), 0.0)
-					size_b = max32(size(forest, b), 0.0)
-					(inserted, made) = insert(forest, Before(a))
+				} else {
+					match (position(forest, a), parent(forest, b)) {
+						(At(at), Some(b_parent)) if at.above == ancestor and b_parent == ancestor => {
+							size_a = max32(size(forest, a), 0.0)
+							size_b = max32(size(forest, b), 0.0)
+							(inserted, made) = insert(forest, at)
 					# Both shares go to the replacement before the moves normalize the siblings
 					# left, so every surviving weight scales together.
-					emptied = set_size(set_size(set_size(inserted, made, size_a + size_b), a, 0.0), b, 0.0)
-					gathered = moved(moved(emptied, a, Back(made)), b, Back(made))
-					(set_size(set_size(gathered, a, size_a), b, size_b), made)
-				} else {
-					(inserted, made) = insert(forest, Back(ancestor))
-					kinded = set_kind(inserted, made, Split(Horizontal))
-					(moved(moved(kinded, a, Back(made)), b, Back(made)), made)
+							emptied = set_size(set_size(set_size(inserted, made, size_a + size_b), a, 0.0), b, 0.0)
+							gathered = moved(moved(emptied, a, Back(made)), b, Back(made))
+							(set_size(set_size(gathered, a, size_a), b, size_b), made)
+						}
+
+						_ => {
+							(inserted, made) = insert(forest, back_of(forest, ancestor))
+							kinded = set_kind(inserted, made, Split(Horizontal))
+							(moved(moved(kinded, a, Back(made)), b, Back(made)), made)
+						}
+					}
 				}
 		}
 
@@ -3222,8 +3247,8 @@ GroupForest := [].{
 		(created, layout) = create_layout(system.forest)
 		top = root(created, layout, "create_layout")
 		kinded = set_kind(created, top, Split(root_orientation(settings)))
-		(first_added, first) = insert(kinded, Back(top))
-		(second_added, second) = insert(first_added, Back(top))
+		(first_added, first) = insert(kinded, back_of(kinded, top))
+		(second_added, second) = insert(first_added, back_of(first_added, top))
 		(master, stack) = if master_first(settings) (first, second) else (second, first)
 		regioned = set_kind(set_kind(second_added, master, Split(master_orientation(settings))), stack, Split(stack_orientation(settings)))
 		ratioed = apply_master_ratio(regioned, settings, master, stack)
@@ -3405,25 +3430,18 @@ GroupForest := [].{
 	insert_window_in_container : Master, U64, U64, U64 -> (Forest, U64)
 	insert_window_in_container = |system, layout, region, window_word| {
 		forest = system.forest
-		relative =
+		place =
 			match system.settings.insertion {
-				NextToSelection => {
-					chosen = selection(forest, layout)
-					if parent(forest, chosen) == Some(region) Placed(After(chosen)) else Unplaced
-				}
-				EndOfTree => Unplaced
-				Front =>
-					match first_child(forest, region) {
-						Some(first) => Placed(Before(first))
-						Nothing => Unplaced
+				NextToSelection =>
+					match position(forest, selection(forest, layout)) {
+						At(at) if at.above == region => after_place(at)
+						_ => back_of(forest, region)
 					}
+				EndOfTree => back_of(forest, region)
+				# The front of the region: before its first child, or its back when it has none.
+				Front => { above: region, index: 0 }
 			}
-		placement =
-			match relative {
-				Placed(at) => at
-				Unplaced => Back(region)
-			}
-		(inserted, key) = insert(forest, placement)
+		(inserted, key) = insert(forest, place)
 		(set_window(inserted, key, window_word), key)
 	}
 
