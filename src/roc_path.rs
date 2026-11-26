@@ -3,7 +3,7 @@
 //! data, and the two answers must be the same words. A checked decision ([`check`]): equal, the
 //! Rust answer stands, the Roc core's decision bit for bit; different (or no answer), tests
 //! fail, and a running Rift logs `roc-divergence:` and goes on with the Rust answer. A decided
-//! family ([`decided`]: focus) flips that: the Roc answer is rift's, the Rust answer its shadow,
+//! family ([`decided`]: focus, the mode gate) flips that: the Roc answer is rift's, the Rust answer its shadow,
 //! and a running Rift counts each difference ([`Family`]) and goes on with the Roc answer.
 //!
 //! A question carries only the facts the Rust decision asked: a call site asks each fact
@@ -220,6 +220,10 @@ impl Family {
 /// The focus decisions (`rift_core::focus`, `Focus.roc`).
 #[cfg(feature = "roc-core")]
 pub(crate) static FOCUS: Family = Family::new();
+
+/// The mode gate (`rift_core::modes`, `Modes.roc`): the verdict on each initiative.
+#[cfg(feature = "roc-core")]
+pub(crate) static MODE_GATE: Family = Family::new();
 
 /// The Roc core decides (policy (a)): its answer to `question` is rift's, and the Rust answer
 /// (`rust`, as words: `words`) is its shadow. Equal, the Rust value is the Roc answer's own.

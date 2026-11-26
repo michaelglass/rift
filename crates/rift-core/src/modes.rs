@@ -154,6 +154,25 @@ impl<W> Verdict<W> {
             }),
         }
     }
+
+    /// The same verdict, a refusing pointer's window named by `f`, if `f` names it.
+    pub fn try_map<V>(self, f: impl FnOnce(W) -> Option<V>) -> Option<Verdict<V>> {
+        Some(match self {
+            Verdict::Admitted => Verdict::Admitted,
+            Verdict::Refused(axis) => Verdict::Refused(match axis {
+                Axis::Pointer(pointer) => Axis::Pointer(pointer.try_map(f)?),
+                Axis::Menu => Axis::Menu,
+                Axis::MissionControl => Axis::MissionControl,
+                Axis::Modal => Axis::Modal,
+                Axis::Viewport => Axis::Viewport,
+                Axis::FocusClaim => Axis::FocusClaim,
+                Axis::UserSpaces => Axis::UserSpaces,
+                Axis::Wake => Axis::Wake,
+                Axis::WorkspaceSwitch => Axis::WorkspaceSwitch,
+                Axis::Topology => Axis::Topology,
+            }),
+        })
+    }
 }
 
 impl<W: Copy> Modes<W> {
@@ -353,6 +372,32 @@ mod tests {
             workspace_switch: WorkspaceSwitch::Idle,
             topology: Topology::Settled,
         }
+    }
+
+    /// A verdict read back from words: the refusing pointer's window named, or none when its
+    /// word names nothing; the other verdicts as they are.
+    #[test]
+    fn a_verdict_reads_back_its_pointers_window_or_nothing() {
+        let named = |word: u64| (word < 10).then_some(word * 2);
+        let pressing = Verdict::Refused(Axis::Pointer(Pointer::Pressing(3)));
+        let dragging = Verdict::Refused(Axis::Pointer(Pointer::Dragging(4)));
+        assert_eq!(
+            pressing.try_map(named),
+            Some(Verdict::Refused(Axis::Pointer(Pointer::Pressing(6))))
+        );
+        assert_eq!(
+            dragging.try_map(named),
+            Some(Verdict::Refused(Axis::Pointer(Pointer::Dragging(8))))
+        );
+        assert_eq!(
+            Verdict::Refused(Axis::Pointer(Pointer::Dragging(40))).try_map(named),
+            None
+        );
+        assert_eq!(Verdict::<u64>::Admitted.try_map(named), Some(Verdict::Admitted));
+        assert_eq!(
+            Verdict::<u64>::Refused(Axis::Modal).try_map(named),
+            Some(Verdict::Refused(Axis::Modal))
+        );
     }
 
     #[test]

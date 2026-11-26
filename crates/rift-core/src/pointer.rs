@@ -107,6 +107,15 @@ impl<W> Pointer<W> {
             Pointer::Dragging(window) => Pointer::Dragging(f(window)),
         }
     }
+
+    /// The same pointer, its window named by `f`, if `f` names it.
+    pub fn try_map<V>(self, f: impl FnOnce(W) -> Option<V>) -> Option<Pointer<V>> {
+        Some(match self {
+            Pointer::Idle => Pointer::Idle,
+            Pointer::Pressing(window) => Pointer::Pressing(f(window)?),
+            Pointer::Dragging(window) => Pointer::Dragging(f(window)?),
+        })
+    }
 }
 
 impl<W: PartialEq + Copy> Pointer<W> {

@@ -86,6 +86,10 @@ fn show_roc_core() {
         let divergences = crate::roc_path::FOCUS.divergences();
         println!("roc-core: focus divergences: {divergences}");
         tracing::info!(divergences, "roc-core: focus divergences");
+        // The mode gate, the Roc core's (the Rust verdict its shadow).
+        let divergences = crate::roc_path::MODE_GATE.divergences();
+        println!("roc-core: mode-gate divergences: {divergences}");
+        tracing::info!(divergences, "roc-core: mode-gate divergences");
         let reseeds = crate::roc_twin::lifecycle_reseeds();
         println!("roc-core: lifecycle re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: lifecycle re-seeds");

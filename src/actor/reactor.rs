@@ -1174,19 +1174,27 @@ impl Reactor {
         self.verdict(initiative) == modes::Verdict::Admitted
     }
 
-    /// The mode table's verdict on `initiative` now. Under `roc-core` the Roc core is asked the
-    /// same question and must give the same verdict (the Rust one stands).
+    /// The mode table's verdict on `initiative` now. Under `roc-core` the Roc core decides it
+    /// (the mode gate's family; the Rust verdict its shadow).
     fn verdict(&self, initiative: Initiative) -> modes::Verdict<WindowId> {
         let now = self.modes();
         let verdict = now.verdict(initiative);
         #[cfg(feature = "roc-core")]
-        {
+        let verdict = {
             use crate::roc_path::Word;
             let question = now.map(Word::word);
             let roc = Ok(rift_core_roc::modes::verdict(question, initiative));
-            let rust = verdict.map(Word::word);
-            crate::roc_path::check("mode verdict", &[], &(question, initiative), &rust, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::MODE_GATE,
+                "mode verdict",
+                &[],
+                &(question, initiative),
+                verdict,
+                &verdict.map(Word::word),
+                roc,
+                |roc| roc.try_map(crate::roc_path::window_of_word),
+            )
+        };
         verdict
     }
 
