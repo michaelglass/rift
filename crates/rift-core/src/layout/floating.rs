@@ -132,19 +132,24 @@ impl Floating {
     /// The first frame of each window, in the layout's order: its live frame, no larger than
     /// the default (recentred if it had to shrink), or the default; cascaded when spreading.
     pub fn first_frames(&self, windows: &[Newcomer]) -> Vec<Rect> {
-        let slots = windows.len().saturating_sub(1) as f64;
         windows
             .iter()
             .enumerate()
-            .map(|(position, window)| {
-                let frame = self.initial_frame(*window);
-                if self.spread && windows.len() > 1 {
-                    self.cascade(frame, position as f64 / slots, slots)
-                } else {
-                    frame
-                }
-            })
+            .map(|(position, window)| self.first_frame(*window, position, windows.len()))
             .collect()
+    }
+
+    /// The first frame of the window at `position` among `count` placed together: its live
+    /// frame, no larger than the default (recentred if it had to shrink), or the default;
+    /// cascaded by its position when spreading.
+    pub fn first_frame(&self, window: Newcomer, position: usize, count: usize) -> Rect {
+        let frame = self.initial_frame(window);
+        if self.spread && count > 1 {
+            let slots = (count - 1) as f64;
+            self.cascade(frame, position as f64 / slots, slots)
+        } else {
+            frame
+        }
     }
 
     fn initial_frame(&self, window: Newcomer) -> Rect {

@@ -28,7 +28,9 @@ use super::{Gaps, WindowConstraints};
 use crate::plain::Rect;
 use crate::slot_table::{SlotKey, SlotSet, SlotTable};
 
+mod floating_system;
 mod views;
+pub use floating_system::{FloatingSystem, Geometry};
 pub use views::{Branch, ContainerView, Drawn, Held, Mark, Role, Row, render};
 
 /// What a container does with its children: lays them out side by side along an axis, or
