@@ -114,6 +114,25 @@ forest), for whoever picks up the repro (the lead's option (b)):
   - `listed_children`'s region pair: the same as `insert`'s (a regular container's key).
   - `create_root`: none. `delete_subtree`: none (its `NotHeld` returns the forest since fix 2).
 
+**The 1000-window perf track, closed (2026-11-26, the lead's ruling).** At real sizes (10-30
+windows) a Roc step or pass costs a few microseconds; the track's job was removing shapes that
+allocate O(n) per event, and it stops here. Done: the walk without materialising, the sampled
+view comparison, Rebalance's read-then-write, the axis solver's folds, participation marked by
+slot, the walk reading each node once (each commit has its table). Kept as regression guards:
+the tripwire (`the_roc_*_system_steps_without_copying_a_table`) and its ignored known-copy tests.
+Open leads, not pursued:
+- **Rebalance at 10 windows** measured 0.97 -> 1.73 us across its read-then-write commit, then
+  1.05-1.09 us in two later runs of the same harness (100 and 1000 windows improved); not
+  re-measured with more iterations. If real, the extra walk for the answer is the suspect.
+- **`reveal` in a directional focus move:** 62% of a 36 us move at 1000 windows (Rust 2.1 us),
+  with no table copied (largest allocation 192 bytes); the sample flattens Roc's frames, so
+  nothing inside `reveal` is attributed yet. Next step: an instrumented look (allocation trap or
+  a split of `reveal` into named steps) before any fix.
+- **The scan for a window** (`window_node`, used by swap, contains and focus) costs about 22 ns a
+  node against Rust's 4: the copy of the node record out of its slot on every read.
+- **The node-table copies** still open (above): directional add, master-stack `CreateLayout`,
+  `RemoveLayout`, `ReplaceWindow`, `Drop`, `Move`, `Join`, `ConsumeOrExpel`.
+
 **The group forest, slice 5, done (2026-11-26): upstream's traditional and master-stack systems
 deleted.** Three commits after the two of the lead's tasks below; each message has its plants,
 checks and costs.
