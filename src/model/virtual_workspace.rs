@@ -1378,7 +1378,7 @@ impl<'a> Workspaces<'a> {
                 on.ask(|| self.workspace_space(id))
             });
         #[cfg(feature = "roc-core")]
-        {
+        let previous = {
             use rift_core::workspaces::plain::PreviousQuestion;
             let question = PreviousQuestion {
                 mode: self.core_mode(),
@@ -1389,8 +1389,23 @@ impl<'a> Workspaces<'a> {
             };
             let roc = rift_core_roc::workspaces::previous(question.clone());
             let rust = previous.map(|(id, space)| (id.word(), space.word()));
-            crate::roc_path::check("previous", PreviousQuestion::FACTS, &question, &rust, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::WORKSPACES,
+                "previous",
+                PreviousQuestion::FACTS,
+                &question,
+                previous,
+                &rust,
+                roc,
+                |roc| match roc {
+                    Some((id, space)) => {
+                        use crate::roc_path::FromWord;
+                        Some(Some((FromWord::from_word(id)?, FromWord::from_word(space)?)))
+                    }
+                    None => Some(None),
+                },
+            )
+        };
         previous.map(|(id, space)| WorkspaceTarget { id, space })
     }
 
@@ -1419,7 +1434,7 @@ impl<'a> Workspaces<'a> {
             &selector,
         );
         #[cfg(feature = "roc-core")]
-        {
+        let resolved = {
             use rift_core::workspaces::Selector;
             use rift_core::workspaces::plain::ResolveQuestion;
             // A name is the place it first appears in this question: the answer names no
@@ -1449,8 +1464,23 @@ impl<'a> Workspaces<'a> {
             };
             let roc = Ok(rift_core_roc::workspaces::resolve(question.clone()));
             let rust = resolved.map(|(id, space)| (id.word(), space.word()));
-            crate::roc_path::check("resolve", ResolveQuestion::FACTS, &question, &rust, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::WORKSPACES,
+                "resolve",
+                ResolveQuestion::FACTS,
+                &question,
+                resolved,
+                &rust,
+                roc,
+                |roc| match roc {
+                    Some((id, space)) => {
+                        use crate::roc_path::FromWord;
+                        Some(Some((FromWord::from_word(id)?, FromWord::from_word(space)?)))
+                    }
+                    None => Some(None),
+                },
+            )
+        };
         resolved.map(|(id, space)| WorkspaceTarget { id, space })
     }
 
@@ -1460,7 +1490,7 @@ impl<'a> Workspaces<'a> {
         };
         let eligible = rift_core::workspaces::eligible(self.core_mode(), core_context(context), on);
         #[cfg(feature = "roc-core")]
-        {
+        let eligible = {
             use rift_core::workspaces::plain::EligibleQuestion;
             let question = EligibleQuestion {
                 mode: self.core_mode(),
@@ -1469,8 +1499,17 @@ impl<'a> Workspaces<'a> {
                 on: on.word(),
             };
             let roc = Ok(rift_core_roc::workspaces::eligible(question.clone()));
-            crate::roc_path::check("eligible", EligibleQuestion::FACTS, &question, &eligible, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::WORKSPACES,
+                "eligible",
+                EligibleQuestion::FACTS,
+                &question,
+                eligible,
+                &eligible,
+                roc,
+                Some,
+            )
+        };
         eligible
     }
 
@@ -1749,7 +1788,7 @@ impl<'a> Workspaces<'a> {
             |id| has_windows.ask(id, |id| window_store.workspace_window_count(id) != 0),
         );
         #[cfg(feature = "roc-core")]
-        {
+        let stepped = {
             use rift_core::workspaces::plain::StepQuestion;
             let question = StepQuestion {
                 mode: self.core_mode(),
@@ -1764,8 +1803,20 @@ impl<'a> Workspaces<'a> {
             };
             let roc = rift_core_roc::workspaces::step(question.clone());
             let rust = stepped.map(Word::word);
-            crate::roc_path::check("step", StepQuestion::FACTS, &question, &rust, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::WORKSPACES,
+                "step",
+                StepQuestion::FACTS,
+                &question,
+                stepped,
+                &rust,
+                roc,
+                |roc| match roc {
+                    Some(word) => crate::roc_path::FromWord::from_word(word).map(Some),
+                    None => Some(None),
+                },
+            )
+        };
         stepped
     }
 

@@ -98,6 +98,10 @@ fn show_roc_core() {
         let divergences = crate::roc_path::LIFECYCLE.divergences();
         println!("roc-core: lifecycle divergences: {divergences}");
         tracing::info!(divergences, "roc-core: lifecycle divergences");
+        // The workspace questions, the Roc core's (the Rust answers their shadow).
+        let divergences = crate::roc_path::WORKSPACES.divergences();
+        println!("roc-core: workspace divergences: {divergences}");
+        tracing::info!(divergences, "roc-core: workspace divergences");
         let reseeds = crate::roc_twin::lifecycle_reseeds();
         println!("roc-core: lifecycle re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: lifecycle re-seeds");

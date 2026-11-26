@@ -127,7 +127,7 @@ fn should_emit_window_for_space(
         active.ask(|| workspaces.reading(state.windows()).active_workspace(space))
     });
     #[cfg(feature = "roc-core")]
-    {
+    let emits = {
         use rift_core::workspaces::plain::EmitsQuestion;
 
         use crate::roc_path::Word;
@@ -136,8 +136,17 @@ fn should_emit_window_for_space(
             active: active.fact(|active| active.map(Word::word)),
         };
         let roc = rift_core_roc::workspaces::emits_window(question);
-        crate::roc_path::check("emits_window", EmitsQuestion::FACTS, &question, &emits, roc);
-    }
+        crate::roc_path::decided(
+            &crate::roc_path::WORKSPACES,
+            "emits_window",
+            EmitsQuestion::FACTS,
+            &question,
+            emits,
+            &emits,
+            roc,
+            Some,
+        )
+    };
     emits
 }
 

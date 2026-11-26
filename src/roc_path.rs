@@ -1,10 +1,9 @@
 //! The Roc core on rift's path for the pure decisions that take no model (the `roc-core`
 //! feature): each call site asks the Roc core the question it just answered in Rust, on plain
-//! data, and the two answers must be the same words. A checked decision ([`check`]): equal, the
-//! Rust answer stands, the Roc core's decision bit for bit; different (or no answer), tests
-//! fail, and a running Rift logs `roc-divergence:` and goes on with the Rust answer. A decided
-//! family ([`decided`]: focus, the mode gate, the topology and lifecycle questions) flips that: the Roc answer is rift's, the Rust answer its shadow,
-//! and a running Rift counts each difference ([`Family`]) and goes on with the Roc answer.
+//! data, in families ([`decided`]: focus, the mode gate, the topology, lifecycle and workspace
+//! questions): the Roc answer is rift's and the Rust answer its shadow. Equal, nothing more;
+//! different (or no answer), tests fail, and a running Rift logs `roc-divergence:`, counts it
+//! ([`Family`]) and goes on with the Roc answer.
 //!
 //! A question carries only the facts the Rust decision asked: a call site asks each fact
 //! through an [`Asked`] (or, about a key, an [`AskedAbout`]), which remembers the answer under
@@ -231,6 +230,12 @@ pub(crate) static MODE_GATE: Family = Family::new();
 #[cfg(feature = "roc-core")]
 pub(crate) static LIFECYCLE: Family = Family::new();
 
+/// The workspace questions (`rift_core::workspaces`, `Workspaces.roc`): the previous workspace,
+/// a selector's workspace, eligibility, the next or previous workspace, whether a window is
+/// emitted.
+#[cfg(feature = "roc-core")]
+pub(crate) static WORKSPACES: Family = Family::new();
+
 /// The topology questions (`rift_core::topology`, `Topology.roc`): which events wait out an
 /// unsettled topology, a Space snapshot's admission, a discovered window's Space, a display to
 /// move to, the windows an app's rules apply to.
@@ -395,28 +400,6 @@ pub(crate) fn window(window: crate::actor::app::WindowId) -> rift_core::plain::W
     }
 }
 
-/// Holds the Roc core's answer to `question`, asked through its typed entry, to the Rust
-/// answer, and reports a disagreement. `what` names the decision and `facts` its question's
-/// facts (the question type's `FACTS`): the question carries only the facts the Rust decision
-/// asked, so a Roc decision reading any other is a divergence too.
-#[cfg(feature = "roc-core")]
-pub(crate) fn check<Q: std::fmt::Debug, A: PartialEq + std::fmt::Debug>(
-    what: &str,
-    facts: &[&str],
-    question: &Q,
-    rust: &A,
-    roc: Result<A, rift_core::plain::Unasked>,
-) {
-    match roc {
-        Ok(roc) if roc == *rust => {}
-        Err(rift_core::plain::Unasked { fact }) => {
-            let fact = usize::try_from(fact).ok().and_then(|fact| facts.get(fact));
-            unasked(what, fact.copied().unwrap_or("(not one of its facts)"), question)
-        }
-        Ok(roc) => diverged(what, question, rust, &roc),
-    }
-}
-
 /// The Roc core read a fact the Rust decision did not ask: they decide in different orders.
 #[cfg(feature = "roc-core")]
 fn unasked(what: &str, fact: &str, question: &impl std::fmt::Debug) {
@@ -513,7 +496,7 @@ mod tests {
     use rift_core::plain::Fact;
     use rift_core::workspaces::plain::PreviousQuestion;
 
-    use super::check;
+    use super::decided;
 
     fn question() -> PreviousQuestion {
         PreviousQuestion {
@@ -530,7 +513,18 @@ mod tests {
         let question = question();
         let roc = rift_core_roc::workspaces::previous(question.clone());
         let rust = question.answer().expect("the facts it asks");
-        check("previous", PreviousQuestion::FACTS, &question, &rust, roc);
+        let family = Family::new();
+        let answer = decided(
+            &family,
+            "previous",
+            PreviousQuestion::FACTS,
+            &question,
+            rust,
+            &rust,
+            roc,
+            Some,
+        );
+        assert_eq!((answer, family.divergences()), (rust, 0));
     }
 
     #[test]
@@ -538,7 +532,16 @@ mod tests {
     fn a_different_answer_is_a_divergence() {
         let question = question();
         let roc = rift_core_roc::workspaces::previous(question.clone());
-        check("previous", PreviousQuestion::FACTS, &question, &None, roc);
+        decided(
+            &Family::new(),
+            "previous",
+            PreviousQuestion::FACTS,
+            &question,
+            None,
+            &None,
+            roc,
+            Some,
+        );
     }
 
     #[test]
@@ -553,6 +556,15 @@ mod tests {
             workspace_empty: Fact::Unasked,
         };
         let roc = rift_core_roc::focus::focuses_desktop(question);
-        check("focuses_desktop", Desktop::FACTS, &question, &false, roc);
+        decided(
+            &Family::new(),
+            "focuses_desktop",
+            Desktop::FACTS,
+            &question,
+            false,
+            &false,
+            roc,
+            Some,
+        );
     }
 }
