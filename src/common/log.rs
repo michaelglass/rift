@@ -82,6 +82,10 @@ fn show_layout_core() {
 fn show_roc_core() {
     #[cfg(feature = "roc-core")]
     {
+        // The focus decisions, the Roc core's (the Rust answer its shadow).
+        let divergences = crate::roc_path::FOCUS.divergences();
+        println!("roc-core: focus divergences: {divergences}");
+        tracing::info!(divergences, "roc-core: focus divergences");
         let reseeds = crate::roc_twin::lifecycle_reseeds();
         println!("roc-core: lifecycle re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: lifecycle re-seeds");

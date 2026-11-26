@@ -5854,12 +5854,21 @@ impl Reactor {
         let facts = AskedRaise::new(RaiseQuery { reactor: self, window: wid });
         let raise = rift_core::focus::mouse_raise(window, space, &facts);
         #[cfg(feature = "roc-core")]
-        {
+        let raise = {
             use rift_core::focus::plain::Raise;
             let question = facts.plain(window, space);
             let roc = rift_core_roc::focus::mouse_raise(question.clone());
-            crate::roc_path::check("mouse_raise", Raise::FACTS, &question, &raise, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
+                "mouse_raise",
+                Raise::FACTS,
+                &question,
+                raise,
+                &raise,
+                roc,
+                Some,
+            )
+        };
         match raise {
             MouseRaise::Raise => true,
             MouseRaise::Skip(why) => {
@@ -6062,7 +6071,7 @@ impl Reactor {
         let facts = AskedActivation::new(ActivationQuery { reactor: self, window });
         let follow = rift_core::focus::activation_follow(&facts);
         #[cfg(feature = "roc-core")]
-        {
+        let follow = {
             use rift_core::focus::plain::Activation;
             let question = facts.plain();
             let answer = match &follow {
@@ -6082,8 +6091,41 @@ impl Reactor {
                 }),
             };
             let roc = rift_core_roc::focus::activation_follow(question.clone());
-            crate::roc_path::check("activation_follow", Activation::FACTS, &question, &answer, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
+                "activation_follow",
+                Activation::FACTS,
+                &question,
+                follow,
+                &answer,
+                roc,
+                |roc| {
+                    use crate::roc_path::FromWord;
+                    Some(match roc {
+                        Follow::To(space, workspace) => {
+                            Follow::To(FromWord::from_word(space)?, FromWord::from_word(workspace)?)
+                        }
+                        Follow::Stay(why) => Follow::Stay(match why {
+                            Stay::NotStandard => Stay::NotStandard,
+                            Stay::Unavailable => Stay::Unavailable,
+                            Stay::NoSpace => Stay::NoSpace,
+                            Stay::NoWorkspace => Stay::NoWorkspace,
+                            Stay::AlreadyActive => Stay::AlreadyActive,
+                            Stay::PendingWindow => Stay::PendingWindow,
+                            // The question names no mode, only that one refuses: which one is
+                            // the Rust answer's alone.
+                            Stay::Mode(_) => return None,
+                            Stay::FullscreenActive => Stay::FullscreenActive,
+                            Stay::Unmanageable(wsid) => {
+                                Stay::Unmanageable(FromWord::from_word(wsid)?)
+                            }
+                            Stay::NoBundleId => Stay::NoBundleId,
+                            Stay::Blacklisted => Stay::Blacklisted,
+                        }),
+                    })
+                },
+            )
+        };
         match follow {
             Follow::To(space, workspace) => Some((space, workspace)),
             Follow::Stay(why) => {
@@ -6404,7 +6446,7 @@ impl Reactor {
             },
         );
         #[cfg(feature = "roc-core")]
-        {
+        let decision = {
             use rift_core::focus::plain::Untracked;
             let question = Untracked {
                 under_cursor: under_cursor.map(Word::word),
@@ -6421,8 +6463,32 @@ impl Reactor {
                 }
             };
             let roc = rift_core_roc::focus::untracked_focus(question.clone());
-            crate::roc_path::check("untracked_focus", Untracked::FACTS, &question, &answer, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
+                "untracked_focus",
+                Untracked::FACTS,
+                &question,
+                decision,
+                &answer,
+                roc,
+                |roc| {
+                    use crate::roc_path::FromWord;
+                    Some(match roc {
+                        UntrackedFocus::Nothing => UntrackedFocus::Nothing,
+                        UntrackedFocus::SystemSurface { layer, window } => {
+                            UntrackedFocus::SystemSurface {
+                                layer,
+                                window: FromWord::from_word(window)?,
+                            }
+                        }
+                        UntrackedFocus::MakeKey(pid, window) => UntrackedFocus::MakeKey(
+                            FromWord::from_word(pid)?,
+                            FromWord::from_word(window)?,
+                        ),
+                    })
+                },
+            )
+        };
         match decision {
             UntrackedFocus::Nothing => false,
             UntrackedFocus::SystemSurface { layer, window: wsid } => {
@@ -6448,15 +6514,24 @@ impl Reactor {
             })
         });
         #[cfg(feature = "roc-core")]
-        {
+        let focuses = {
             use rift_core::focus::plain::Desktop;
             let question = Desktop {
                 active,
                 workspace_empty: workspace_empty.fact(|empty| empty),
             };
             let roc = rift_core_roc::focus::focuses_desktop(question.clone());
-            crate::roc_path::check("focuses_desktop", Desktop::FACTS, &question, &focuses, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
+                "focuses_desktop",
+                Desktop::FACTS,
+                &question,
+                focuses,
+                &focuses,
+                roc,
+                Some,
+            )
+        };
         if !focuses {
             return false;
         }
@@ -6543,7 +6618,7 @@ impl Reactor {
             |wid| visible.ask(wid, is_visible_in_space),
         );
         #[cfg(feature = "roc-core")]
-        {
+        let candidate = {
             use rift_core::focus::plain::Candidate;
             let question = Candidate {
                 preferred: preferred.map(Word::word),
@@ -6553,14 +6628,20 @@ impl Reactor {
                 visible: visible.answers(Word::word, |shown| shown),
             };
             let roc = rift_core_roc::focus::focus_candidate(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
                 "focus_candidate",
                 Candidate::FACTS,
                 &question,
+                candidate,
                 &candidate.map(Word::word),
                 roc,
-            );
-        }
+                |roc| match roc {
+                    Some(word) => crate::roc_path::FromWord::from_word(word).map(Some),
+                    None => Some(None),
+                },
+            )
+        };
         candidate
     }
 
@@ -6577,7 +6658,7 @@ impl Reactor {
             in_inactive_workspace.ask(|| self.window_in_non_active_workspace(space, window_id))
         });
         #[cfg(feature = "roc-core")]
-        {
+        let hides = {
             use rift_core::focus::plain::Hides;
             let question = Hides {
                 window: window_id.word(),
@@ -6586,8 +6667,17 @@ impl Reactor {
                 in_inactive_workspace: in_inactive_workspace.fact(|inactive| inactive),
             };
             let roc = rift_core_roc::focus::hides_focus(question.clone());
-            crate::roc_path::check("hides_focus", Hides::FACTS, &question, &hides, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
+                "hides_focus",
+                Hides::FACTS,
+                &question,
+                hides,
+                &hides,
+                roc,
+                Some,
+            )
+        };
         if hides {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
@@ -6665,7 +6755,7 @@ impl Reactor {
             },
         );
         #[cfg(feature = "roc-core")]
-        {
+        let decision = {
             use rift_core::focus::plain::RemovalQuestion;
 
             use crate::roc_path::window;
@@ -6686,14 +6776,27 @@ impl Reactor {
                 RemovalFocus::Refocus(space) => RemovalFocus::Refocus(space.word()),
             };
             let roc = rift_core_roc::focus::removal_focus(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
                 "removal_focus",
                 RemovalQuestion::FACTS,
                 &question,
+                decision,
                 &answer,
                 roc,
-            );
-        }
+                |roc| {
+                    Some(match roc {
+                        RemovalFocus::Unaffected => RemovalFocus::Unaffected,
+                        RemovalFocus::KeepNative(successor) => {
+                            RemovalFocus::KeepNative(crate::roc_path::window_of_plain(successor)?)
+                        }
+                        RemovalFocus::Refocus(space) => {
+                            RemovalFocus::Refocus(crate::roc_path::FromWord::from_word(space)?)
+                        }
+                    })
+                },
+            )
+        };
         match decision {
             RemovalFocus::Unaffected => {}
             RemovalFocus::KeepNative(successor) => {
@@ -7226,7 +7329,7 @@ impl Reactor {
             },
         );
         #[cfg(feature = "roc-core")]
-        {
+        let follow = {
             use rift_core::focus::plain::DisplayFollow;
             let question = DisplayFollow {
                 focused_space: focused_space.map(Word::word),
@@ -7235,14 +7338,20 @@ impl Reactor {
                 on_known_display: on_known_display.answers(Word::word, |known| known),
             };
             let roc = rift_core_roc::focus::display_to_follow(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::FOCUS,
                 "display_to_follow",
                 DisplayFollow::FACTS,
                 &question,
+                follow,
                 &follow.map(Word::word),
                 roc,
-            );
-        }
+                |roc| match roc {
+                    Some(word) => crate::roc_path::FromWord::from_word(word).map(Some),
+                    None => Some(None),
+                },
+            )
+        };
         let Some(space) = follow else {
             return;
         };
