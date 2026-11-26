@@ -25,13 +25,16 @@ ignored), `cargo test -p rift-core-roc --features roc` 61 (14 ignored), `cargo t
 clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated |
 wc -l` (the bound: at most 336).
 
-**Next (proposed to the lead, 2026-11-26):** (1) a window's place by type in the group forest
-(a window node always has a parent: the node type's place split so a window carries its parent,
-deleting `drop_stacking`'s and `smart_window_insertion`'s named crashes and every "window is a
-root" branch, in Rust and Roc); (2) the Roc known copies, which need the compiler's ownership
-decisions (a dev-diagnostics build's `ROC_LIR_DUMP`; the owner's call whether to ask upstream);
-(3) the open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
+**Next:** (1) a window's place by type: done 2026-11-26 (below, "A window's place by type").
+(2) The Roc known copies need the compiler's ownership decisions (a dev-diagnostics build's
+`ROC_LIR_DUMP`), and `--opt=dev` for test builds (below, "Build times"): both the owner's call.
+(3) The open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
 below ("Roc issue drafts") wait for the owner.
+
+**Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
+stale `target/roc-build` keys (all but the current sources', which the build script's line
+names), plant and bisect variant builds, scratch outputs. Keep `target/debug/incremental` (it
+serves the next build); a full `cargo clean` only when disk is tight.
 
 **Build times (2026-11-26).** An optimized Roc build (`--opt=speed`) takes about 50 s every
 time: Roc caches its front end (every module a cache hit) but runs LLVM on the whole program,
@@ -132,6 +135,24 @@ forest), for whoever picks up the repro (the lead's option (b)):
     `Placement` it resolves and may fail to.
   - `listed_children`'s region pair: the same as `insert`'s (a regular container's key).
   - `create_root`: none. `delete_subtree`: none (its `NotHeld` returns the forest since fix 2).
+
+**A window's place by type (2026-11-26, the lead's go).** A window node is always a container's
+child, by type: `Body::Window { at: Child, window, stamp }` and `Body::Container { place, container
+}`, `Place` (`Root | Child(Child)`) now only a container's (`GroupLeaf`, `GroupContainerNode` at
+the boundary, alike in Roc). A leaf is created where it goes (`insert_window`, Rust and Roc),
+never as a root then filled in; `unlink` no longer makes a node a root (every caller links the
+node again or removes it, so its place is not rewritten in between). Deleted: the crashes in Roc's
+`drop_stacking` (the target leaf's place now comes with it from `window_leaf`) and
+`smart_window_insertion` (it takes the chosen node's place: the selection's own, or, for a root
+selected, its chosen child's from `chosen_child`), and Rust's "no parent" defaults on the same
+paths (the drop's `map_or(Horizontal, ..)`, smart insertion's `After(root)`). The load: a window
+saved as a layout's root is wrapped in a new root container of the default kind that selects it
+(`{system}-load: a window as a layout's root; wrapped in a container`; upstream kept it and
+crashed at the next insert beside it), and a parentless window no layout reaches is dropped, its
+slot freed (`{system}-load: a window no layout reaches; dropped`); both pinned by fixtures in
+the traditional system's tests. Plants 9/9, among them one that survived until a test of
+upstream's nesting beside a crowded split's selection was added (it had none outside the
+differentials).
 
 **Floating onto the core forest (2026-11-26, the lead's go; steps 1-2 of 5).** Step 1 put the
 floating system in the core (`group_forest::FloatingSystem`, its frames a `Geometry` union);
