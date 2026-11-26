@@ -124,6 +124,24 @@ and `groups.rs` (5). Rulings and notes so far:
   order of the frames, which the core writes by window (upstream's `FxHashMap` iterates in an
   order its history decides); both orders load the same. The core's saves are deterministic,
   an improvement (the lead's ruling). Frozen: `systems/floating/*.loaded.ron`.
+- **Step 4, the Roc port (2026-11-26):** floating is a third system in `GroupForest.roc`
+  (`Floats { forest, geometry : Dict(U64, FloatingGeometry) }`, its own `FloatingEvent` and
+  `FloatingAnswer`, `roc_floating_tree_*`, `RocFloating`), held to the Rust core by
+  `rift-core-roc/tests/floating.rs` (300 runs of 120 drawn steps: answers and the whole view,
+  frames included, every step; the shape, bars, container view and rows on 40%; reloads; queries).
+  **Known copy, open:** the floating step copies the node table on nearly every write to the
+  forest (adds, removes, replaces, closing an app, layouts made, cloned or removed, selections,
+  frames stored, every edit; participation, which writes only the windows left out, stays in
+  place; queries allocate nothing table-sized). The same forest functions run in place under the traditional system (a probe: 400
+  adds and clones at 192 bytes, against 67-135 KB here), so the sharing comes from the floating
+  step's context, not the forest's code. The tripwire
+  (`the_roc_floating_system_steps_without_copying_a_table_or_its_frames`, 64 bytes a node slot,
+  32 bytes a window for the frame map once it is large) exempts those steps (`known_copy`) and
+  holds queries and participation; the
+  ignored `..._even_on_known_copies` checks them. Tried without effect: taking the system apart
+  in the step, the traditional step's exact shape, no closure holding the forest, the add taking
+  only the forest, taking the table apart before `Slots.insert`'s append, and `create_root`
+  taking the forest apart.
 - **For deletion in step 5, with upstream:** `model/slot_table::to_slotmap`,
   `NodeMap::of_slots` and `group_stored::upstream_tiles` (restored only to re-seed the floating
   shadow from the core with the same slots, versions and free lists).
