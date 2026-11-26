@@ -213,7 +213,9 @@ impl Family {
         self.divergences.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn count(&self) { self.divergences.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    pub(crate) fn count(&self) {
+        self.divergences.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The focus decisions (`rift_core::focus`, `Focus.roc`).
@@ -235,6 +237,10 @@ pub(crate) static LIFECYCLE: Family = Family::new();
 /// emitted.
 #[cfg(feature = "roc-core")]
 pub(crate) static WORKSPACES: Family = Family::new();
+
+/// The reconciler (`rift_core::RustCore` and the Roc core's `step`): every effect it decides.
+#[cfg(feature = "roc-core")]
+pub(crate) static RECONCILER: Family = Family::new();
 
 /// The topology questions (`rift_core::topology`, `Topology.roc`): which events wait out an
 /// unsettled topology, a Space snapshot's admission, a discovered window's Space, a display to

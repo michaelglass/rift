@@ -168,14 +168,25 @@ impl rift_core::plain::Translate<rift_core::plain::Plain, Rift> for Plainly {
     }
 }
 
-/// The Roc core deciding, with the Rust core stepped beside it on the same events: every step,
-/// the two must decide the same effects, or Rift stops (a disagreement is a bug in one of them,
-/// and acting on either would hide it).
+/// The Roc core deciding (policy (a)), with the Rust core stepped beside it on the same events
+/// as its shadow: every step the two must decide the same effects. A difference is counted
+/// (`roc_path::RECONCILER`) and fails tests; a running Rift warns, goes on with the Roc core's
+/// effects, and retires the shadow (nothing can re-seed it: the Roc core's model does not cross
+/// the boundary, so every later step would differ too).
 #[cfg(feature = "roc-core")]
 pub(crate) struct Shadowed {
     roc: rift_core_roc::RocCore,
-    rust: rift_core::RustCore<Rift>,
+    rust: Shadow,
     plain: Plainly,
+}
+
+/// The Rust core beside the deciding Roc core: compared every step, or (in a running Rift, after
+/// a difference) retired.
+#[cfg(feature = "roc-core")]
+enum Shadow {
+    Comparing(rift_core::RustCore<Rift>),
+    #[cfg(not(test))]
+    Retired,
 }
 
 #[cfg(feature = "roc-core")]
@@ -186,7 +197,7 @@ impl Default for Shadowed {
         let epoch = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
         Shadowed {
             roc: rift_core_roc::RocCore::default(),
-            rust: rift_core::RustCore::default(),
+            rust: Shadow::Comparing(rift_core::RustCore::default()),
             plain: Plainly { epoch },
         }
     }
@@ -195,7 +206,13 @@ impl Default for Shadowed {
 #[cfg(feature = "roc-core")]
 impl std::fmt::Debug for Shadowed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Shadowed").field("rust", &self.rust).finish_non_exhaustive()
+        let mut out = f.debug_struct("Shadowed");
+        match &self.rust {
+            Shadow::Comparing(rust) => out.field("rust", rust),
+            #[cfg(not(test))]
+            Shadow::Retired => out.field("rust", &"retired"),
+        };
+        out.finish_non_exhaustive()
     }
 }
 
@@ -208,22 +225,49 @@ impl Shadowed {
             .into_iter()
             .map(|effect| effect.translate(&self.plain))
             .collect();
-        let shadow = self.rust.step(event.clone());
-        assert_eq!(
-            decided, shadow,
-            "the Roc core and its Rust shadow disagree on {event:?}"
-        );
+        let differs = match &mut self.rust {
+            Shadow::Comparing(rust) => {
+                let shadow = rust.step(event.clone());
+                let differs = decided != shadow;
+                if differs {
+                    crate::roc_path::RECONCILER.count();
+                    crate::roc_path::diverged("the reconciler", &event, &shadow, &decided);
+                }
+                differs
+            }
+            #[cfg(not(test))]
+            Shadow::Retired => false,
+        };
+        #[cfg(not(test))]
+        if differs {
+            tracing::warn!("roc-divergence: the reconciler's Rust shadow is retired");
+            self.rust = Shadow::Retired;
+        }
+        #[cfg(test)]
+        let _ = differs;
         decided
     }
 
-    /// The shadow's pointer: the Roc core's, which decides the same effects.
-    fn pointer(&self) -> rift_core::Pointer<WindowId> { self.rust.pointer() }
+    /// The shadow's pointer (none once retired), for the store's cross-check.
+    fn pointer(&self) -> Option<rift_core::Pointer<WindowId>> {
+        match &self.rust {
+            Shadow::Comparing(rust) => Some(rust.pointer()),
+            #[cfg(not(test))]
+            Shadow::Retired => None,
+        }
+    }
 
     #[cfg(test)]
-    fn reconciler(&self) -> &rift_core::Reconciler<Rift> { self.rust.reconciler() }
+    fn reconciler(&self) -> &rift_core::Reconciler<Rift> {
+        let Shadow::Comparing(rust) = &self.rust;
+        rust.reconciler()
+    }
 
     #[cfg(test)]
-    fn seen(&self, window: WindowId) -> Option<CGRect> { self.rust.seen(window) }
+    fn seen(&self, window: WindowId) -> Option<CGRect> {
+        let Shadow::Comparing(rust) = &self.rust;
+        rust.seen(window)
+    }
 }
 
 /// One step through the core, as the reactor took it: what went in and what came out.
@@ -289,6 +333,15 @@ impl Reconciler {
     /// checks the store's `frame_monotonic` agrees).
     #[cfg(test)]
     pub(crate) fn seen(&self, window: WindowId) -> Option<CGRect> { self.core.seen(window) }
+
+    /// The core's pointer, for the store's cross-check (under `roc-core` the Rust shadow's, none
+    /// once a running Rift retired it).
+    pub(crate) fn pointer(&self) -> Option<rift_core::Pointer<WindowId>> {
+        #[cfg(not(feature = "roc-core"))]
+        return Some(self.core.pointer());
+        #[cfg(feature = "roc-core")]
+        return self.core.pointer();
+    }
 
     /// When the run loop's timer should fire: the deadline the core last asked for.
     pub(crate) fn next_deadline(&self) -> Option<Instant> { self.armed }
@@ -627,11 +680,9 @@ impl RiftState {
         if let Some(Ungripped { window, .. }) = &ungripped {
             self.windows_mut().prune_ungripped(*window);
         }
-        debug_assert_eq!(
-            self.windows.pointer(),
-            self.core.core.pointer(),
-            "store and core disagree"
-        );
+        if let Some(core) = self.core.pointer() {
+            debug_assert_eq!(self.windows.pointer(), core, "store and core disagree");
+        }
         ungripped
     }
 
