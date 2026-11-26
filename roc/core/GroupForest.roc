@@ -474,10 +474,14 @@ GroupForest := [].{
 
 	## A node's size among its siblings (a root's reads as 0).
 	size : Forest, U64 -> F32
-	size = |forest, key|
-		match node(forest, key, "size").place {
+	size = |forest, key| size_of(node(forest, key, "size"))
+
+	## A node's size, read from the node itself.
+	size_of : GroupTreeNode -> F32
+	size_of = |held|
+		match held.place {
 			Root => 0.0
-			Child({ size: held, .. }) => held
+			Child({ size: share, .. }) => share
 		}
 
 	set_size : Forest, U64, F32 -> Forest
@@ -599,13 +603,22 @@ GroupForest := [].{
 
 	children : Forest, U64 -> List(U64)
 	children = |forest, key|
-		match container(forest, key) {
-			Is(holding) =>
+		match Slots.get(forest.nodes, key) {
+			Held(held) => children_of(held)
+			NotHeld => []
+		}
+
+	## A node's children, read from the node itself: a container's members (a region pair's two
+	## regions), none for a window.
+	children_of : GroupTreeNode -> List(U64)
+	children_of = |held|
+		match held.body {
+			Container(holding) =>
 				match holding.members {
 					Children(listed) => listed
 					Regions({ first, second, .. }) => [first, second]
 				}
-			NotContainer => []
+			Window(_) => []
 		}
 
 	position : Forest, U64 -> Position
@@ -740,25 +753,27 @@ GroupForest := [].{
 	## Folds `step` over the subtree at `key`, each node once, children in order: in
 	## `Preorder` a node before its children, in `Postorder` after them. `step` answering
 	## `Break` ends the walk with that state. The one walk the traversals share: nothing is
-	## materialised (as Rust's `preorder` and `postorder` iterate).
-	walk : Forest, U64, WalkOrder, s, (s, U64 -> Visit(s)) -> s
+	## materialised (as Rust's `preorder` and `postorder` iterate). Each node is read once:
+	## `step` gets it with its key, and its children come from that same read.
+	walk : Forest, U64, WalkOrder, s, (s, U64, GroupTreeNode -> Visit(s)) -> s
 	walk = |forest, key, order, state, step|
 		match walk_node(forest, key, order, state, step) {
 			Continue(walked) => walked
 			Break(walked) => walked
 		}
 
-	walk_node : Forest, U64, WalkOrder, s, (s, U64 -> Visit(s)) -> Visit(s)
+	walk_node : Forest, U64, WalkOrder, s, (s, U64, GroupTreeNode -> Visit(s)) -> Visit(s)
 	walk_node = |forest, key, order, state, step| {
+		held = node(forest, key, "walk")
 		entered =
 			match order {
-				Preorder => step(state, key)
+				Preorder => step(state, key, held)
 				Postorder => Continue(state)
 			}
 		match entered {
 			Break(stopped) => Break(stopped)
 			Continue(going) => {
-				through = children(forest, key).fold_until(
+				through = children_of(held).fold_until(
 					Continue(going),
 					|visited, child|
 						match visited {
@@ -771,7 +786,7 @@ GroupForest := [].{
 						},
 				)
 				match (through, order) {
-					(Continue(below), Postorder) => step(below, key)
+					(Continue(below), Postorder) => step(below, key, held)
 					_ => through
 				}
 			}
@@ -1316,11 +1331,12 @@ GroupForest := [].{
 		windows
 	}
 
-	subtree_participates : Forest, U64, (U64 -> Bool) -> Bool
-	subtree_participates = |forest, key, child_participates|
-		match window_at(forest, key) {
-			Some(leaf) => takes_part(forest, leaf)
-			Nothing => children(forest, key).any(child_participates)
+	## Whether a node takes part: a window when it is not left out, a container when a child does.
+	node_participates : Forest, GroupTreeNode, (U64 -> Bool) -> Bool
+	node_participates = |forest, held, child_participates|
+		match held.body {
+			Window({ window: leaf, .. }) => takes_part(forest, leaf)
+			Container(_) => children_of(held).any(child_participates)
 		}
 
 	## The nodes under `top` taking part: every one while no window is left out, else those marked.
@@ -1341,7 +1357,7 @@ GroupForest := [].{
 			top,
 			Postorder,
 			Slots.unmarked(forest.nodes),
-			|marks, key| Continue(if subtree_participates(forest, key, |child| Slots.marked(marks, child)) Slots.mark(marks, key) else marks),
+			|marks, key, held| Continue(if node_participates(forest, held, |child| Slots.marked(marks, child)) Slots.mark(marks, key) else marks),
 		)
 
 	# The shape (`Forest::shape`): the traditional geometry's input.
@@ -1616,8 +1632,8 @@ GroupForest := [].{
 					top,
 					Preorder,
 					gathered,
-					|held, key|
-						match node(forest, key, "indexed_where").body {
+					|held, key, at|
+						match at.body {
 							Window({ window: leaf, stamp }) if keep(leaf) => Continue(held.append((leaf, stamp, layout, key)))
 							_ => Continue(held)
 						},
@@ -1651,8 +1667,8 @@ GroupForest := [].{
 			root(forest, layout, "window_node"),
 			Preorder,
 			NoLeaf,
-			|chosen, key|
-				match node(forest, key, "window_node").body {
+			|chosen, key, at|
+				match at.body {
 					Window({ window: leaf, stamp }) if leaf == window_word =>
 						match chosen {
 							Leaf(_, held) if held <= stamp => Continue(chosen)
@@ -1674,10 +1690,10 @@ GroupForest := [].{
 			root(forest, layout, "windows_with_nodes"),
 			Preorder,
 			[],
-			|held, key|
-				match window_at(forest, key) {
-					Some(leaf) => Continue(held.append(leaf))
-					Nothing => Continue(held)
+			|held, _, at|
+				match at.body {
+					Window({ window: leaf, .. }) => Continue(held.append(leaf))
+					Container(_) => Continue(held)
 				},
 		)
 
@@ -1824,7 +1840,7 @@ GroupForest := [].{
 			root(forest, layout, "has_any_fullscreen_node"),
 			Preorder,
 			False,
-			|_, key| if !is_tiled(node(forest, key, "has_any_fullscreen_node").fill) and (forest.left_out.is_empty() or has_focus_target(forest, key)) Break(True) else Continue(False),
+			|_, key, at| if !is_tiled(at.fill) and (forest.left_out.is_empty() or has_focus_target(forest, key)) Break(True) else Continue(False),
 		)
 
 	stacked_selection_container : Forest, U64 -> MaybeWord
@@ -2243,7 +2259,7 @@ GroupForest := [].{
 	## question read first, then the sizes written.
 	rebalance : Forest, U64 -> (Forest, Bool)
 	rebalance = |forest, top| {
-		changed = walk(forest, top, Preorder, False, |_, key| if key != top and size(forest, key) != 1.0 Break(True) else Continue(False))
+		changed = walk(forest, top, Preorder, False, |_, key, at| if key != top and size_of(at) != 1.0 Break(True) else Continue(False))
 		(balance_sizes(forest, top), changed)
 	}
 
@@ -3507,7 +3523,17 @@ GroupForest := [].{
 	focused_window_in_container = |forest, region|
 		match or_else(local_selection(forest, region), |{}| first_child(forest, region)) {
 			Some(candidate) =>
-				walk(forest, candidate, Preorder, Nothing, |_, key| if is_window(forest, key) Break(window_at(forest, key)) else Continue(Nothing))
+				walk(
+					forest,
+					candidate,
+					Preorder,
+					Nothing,
+					|_, _, at|
+						match at.body {
+							Window({ window: leaf, .. }) => Break(Some(leaf))
+							Container(_) => Continue(Nothing)
+						},
+				)
 			Nothing => Nothing
 		}
 
