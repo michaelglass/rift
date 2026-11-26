@@ -63,7 +63,9 @@ checks and costs.
   core-against-literal test in `traditional.rs` (same widths); `tiles.rs`'s
   `the_core_weighs_an_axis_as_upstream_does` (5000 drawn axes of zero, negative, NaN, infinite and
   huge weights, core against upstream) by `degenerate_weights_share_the_axis_as_upstream_read_them`
-  (literal widths for each kind) and, Rust against Roc, rift-core-roc's
+  (literal widths for each kind; the same scene run through upstream's projection at the
+  revision before upstream was deleted, with throwaway code, gives the same widths for each
+  kind, and for the small weights) and, Rust against Roc, rift-core-roc's
   `the_roc_core_tiles_traditional_layouts_as_the_rust_core_does` (the same weight draws);
   both systems' `a_query_answered_otherwise_is_counted_and_fails_tests` and
   `a_group_forest_divergence_is_counted_and_fails_tests` held the shadow's counter and report,
