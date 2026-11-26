@@ -9,18 +9,75 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-25, layout trees: BSP and the stack done through slice 5, the group forest through slice 4): read this first
+## Handoff (2026-11-26, layout trees: BSP, the stack and the group forest done through slice 5): read this first
 
 **State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
-BSP and for the stack, slices 1-4 for the group forest (traditional and master-stack).
+BSP, the stack and the group forest (traditional and master-stack); floating is the one layout
+system still on upstream's code (`GroupLayouts`), by the lead's ruling, for its own turn.
 `rearch/roc-next@fork` carries everything through this docs commit once it is published (publish
 procedure: "Rulings that bind", Public-clean; the published tip's id is in the slice report). All
-checks green at the tip: workspace tests 1050 (7 ignored), the lib with `roc-core` 930 (10
-ignored), `cargo test -p rift-core-roc --features roc` 55 (9 ignored), `cargo test -p rift-core`
+checks green at the tip: workspace tests 1056 (7 ignored), the lib with `roc-core` 936 (10
+ignored), `cargo test -p rift-core-roc --features roc` 56 (9 ignored), `cargo test -p rift-core`
 108, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and `cargo clippy
---all-targets --features roc-core` compiles with no errors and 331 warnings, counted as `cargo
+--all-targets --features roc-core` compiles with no errors and 323 warnings, counted as `cargo
 clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated |
 wc -l` (the bound: at most 336).
+
+**Next (the lead's):** the known costs set aside until after slice 5, the Roc step (about 105 us
+an operation at 1000 windows in one traditional layout) and the Roc layout pass (624 us), then
+floating's turn (it goes onto the core forest and `GroupLayouts` goes with it). The two Roc
+issue drafts below ("Roc issue drafts") wait for the owner.
+
+**The group forest, slice 5, done (2026-11-26): upstream's traditional and master-stack systems
+deleted.** Three commits after the two of the lead's tasks below; each message has its plants,
+checks and costs.
+- **The loads build the core's forest** (`systems/group_stored.rs`, as the stack's `stored.rs`):
+  the saved forest (upstream's `GroupLayouts` form, read through the old tree's deserializer) is
+  normalized and made into the core's forest; master-stack's previous forms (regions saved beside
+  the forest, a root of two containers, a plain traditional forest) are migrated on the parsed
+  tree step for step as upstream's load did, with the default settings (none are saved; a
+  traditional load starts with the default insertion point and halving the selection, as
+  upstream's did). Three normalizations are now only their warn (both fullscreen flags, a
+  window's kind, a root's size: the core cannot hold them); the window index is normalized as
+  the leaves are stamped (saved order, stray entries dropped, a repeated leaf keeps its first
+  place, missed leaves after in layout and tree order). Fixtures: `traditional_saved.ron`,
+  `master_stack_saved.ron` (bytes, settings, literal allocations), the three previous master-stack
+  forms with their loaded bytes frozen as upstream's load gave them. Plants 13/13.
+- **What the shadow held is held literally:** rift-cli's drawing (`traditional_drawn.txt`,
+  `master_stack_drawn.txt`, each ending with its own newline) and container view, the group bar
+  (every bar and the selection path's; none on the path while the selected window fills), each
+  fill's frames. (A first cut of this commit held recording prints, not assertions; it was
+  amended before publishing.)
+- **Deleted:** both `Upstream`s with their geometry and legacy loads, `tiles.rs`, the
+  `GroupLayouts` methods and `constraints.rs` / `model::tree` helpers only they used,
+  `to_slotmap`, the shadow plumbing and the `group-forest-divergence:` counter with its `rift-cli
+  metrics show-timing` line. `traditional/twinned.rs` and `master_stack/twinned.rs` are
+  `system.rs`; `group_twin.rs` is `group_system.rs`. The three trees share one decision:
+  `decide_tree` (plain) and `decide_roc_tree` (`roc-core`), replacing `decide_stack(_tree)`,
+  `decide_group_tree` and `decide_traditional` (whose last user, `core_geometry`'s divergence
+  test, holds the shared `decide`). Upstream's unit tests are retargeted to the systems (sizes set
+  on the core's forest with `with_sizes`); `stack_legacy.ron` is written by the traditional
+  system and its tripwire passes. Plants 11/13, two equivalent (in the commit).
+- **What the forest is held by now:** the rift-core-roc differential (Rust against Roc), the lib's
+  traditional and master-stack tests and drawn fuzzers (under `roc-core` every operation held to
+  the Roc forest), the fixtures and literal tests.
+- **Cost (release, `measure_traditional_system` / `measure_master_stack_system`, 10 / 100 / 1000
+  windows):** a plain build pays only the core: traditional 0.28 / 1.1 / 11.8 us an operation,
+  1.9 / 15 / 126 us a pass; master-stack 0.36 / 1.7 / 11.2 us, 2.3 / 14 / 59 us. `roc-core`:
+  traditional 2.8 / 15 / 208 us an operation, 7.8 / 67 / 739 us a pass; master-stack 4.5 / 11 / 82
+  us, 13 / 46 / 382 us.
+
+**The lead's tasks before slice 5 (2026-11-25):**
+- **The reach gap closed:** a scripted case in the rift-core-roc group forest differential
+  reaches a hierarchical join moving Down into a vertical container
+  (`a_hierarchical_join_down_into_a_vertical_container_takes_its_first_child`); Roc's
+  `opposite(Down)` planted as `Down` is caught, and the same plant in `rift_core`. Drawn runs
+  stay blind to it.
+- **Two Roc glue problems from slice 4, investigated** (drafts in "Roc issue drafts" under the Roc
+  section): (a) a new bug, not roc-lang/roc#13348 returning: a one-tag union's generated type
+  alias names the element of its `List` or `Box` payload; (b) `RocList<T>::decref` being shallow
+  is documented, deliberate behaviour (the deep `decref_list_of_…` helper exists), drafted as a
+  sharp edge only. Both checked at the pinned and the newest nightly (`nightly-2026-11-25-d5a4f1e`).
 
 **The group forest, slice 4, done (2026-11-25): under `roc-core` the Roc forest decides.** Three
 commits after the slice 3 rulings' docs commit (the first, the stamp counter carried, is below);
@@ -51,9 +108,9 @@ and content, the platform writes ids and floats as text).
   answer parsers are the BSP tree's (`bsp::roc_tree`, the same `Answer`). `decide_group_tree`
   beside `decide_traditional` (which upstream's own systems and a test still use). Plants 13/14.
 - **A reach gap found (slice 2's differential):** Roc's `opposite(Down)` planted as `Down`
-  survives the lib and the rift-core-roc differential: only a hierarchical join moving Down into
-  an aligned container reads it, and neither drawn run reaches one. A scripted case would close
-  it.
+  survived the lib and the rift-core-roc differential: only a hierarchical join moving Down into
+  an aligned container reads it, and neither drawn run reaches one. Closed since by a scripted
+  case (above).
 - **Cost (release, `roc-core`, `measure_traditional_roc_forest`, 10 / 100 / 1000 windows):** the
   Roc step 0.78 / 6.4 / 105 us, the view comparison 0.36 / 2.3 / 22 us, a Rust re-seed 0.37 / 1.7
   / 14 us; a Roc layout pass 7.6 / 55 / 624 us against the Rust shape and geometry 2.7 / 15 / 134
