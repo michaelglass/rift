@@ -6105,6 +6105,51 @@ fn hover_refused_by_a_mode_is_discarded_and_not_replayed() {
     assert!(!asked(&mut app_rx), "discarded during Mission Control");
 }
 
+/// A hover is refused while the button is pressed on a window (the pointer's row of the mode
+/// table), discarded, and nothing replays at the release: only the next sample acts. The probe
+/// is a hit on a window missing from the inventory, which asks its owner for an inventory.
+#[test]
+fn a_hover_while_the_button_is_pressed_on_a_window_is_discarded_and_not_replayed() {
+    let (mut reactor, wid, _, _, _, frame) = reactor_with_window_on_space1();
+    let pid = 91;
+    let probe = WindowServerId::new(910);
+    let (app_tx, mut app_rx) = actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.hover-mid-press".into()),
+            localized_name: Some("Hover Mid Press".into()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+    reactor.stores.state.windows.track_window_server_info(WindowServerInfo {
+        id: probe,
+        pid,
+        layer: 0,
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    });
+    let asked = |rx: &mut actor::Receiver<Request>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|(_, request)| matches!(request, Request::RefreshWindowInventory(_)))
+    };
+    let hover = Initiative::UserInput(InputClass::Hover);
+
+    reactor.handle_event(Event::PointerPressed { point: frame.mid() });
+    assert_eq!(
+        reactor.stores.state.windows.pointer(),
+        crate::model::window_store::Pointer::Pressing(wid)
+    );
+    assert!(!reactor.may(hover), "the press refuses a hover");
+    reactor.handle_loop_event(Event::MouseMoved(probe));
+    assert!(!asked(&mut app_rx), "discarded during the press");
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    assert!(reactor.may(hover));
+    assert!(!asked(&mut app_rx), "nothing replays at the release");
+    reactor.handle_loop_event(Event::MouseMoved(probe));
+    assert!(asked(&mut app_rx), "the next sample acts");
+}
+
 #[test]
 fn same_app_focus_change_hides_mouse_and_window_server_confirmation_reasserts_it() {
     let (mut apps, mut reactor) = test_context();
