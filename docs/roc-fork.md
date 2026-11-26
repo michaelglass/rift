@@ -117,8 +117,16 @@ forest), for whoever picks up the repro (the lead's option (b)):
 **Floating onto the core forest (2026-11-26, the lead's go; steps 1-2 of 5).** Step 1 put the
 floating system in the core (`group_forest::FloatingSystem`, its frames a `Geometry` union);
 step 2 holds it to upstream's `FloatingLayoutSystem` as a shadow (`systems/floating_twin.rs`),
-upstream still deciding. Next: the flip (3), the Roc port (4), deleting upstream's tree and
-`groups.rs` (5). Rulings and notes so far:
+upstream still deciding; step 3 flipped it (the core decides and is saved, upstream's system
+in `systems/floating/upstream.rs` the shadow). Next: the Roc port (4), deleting upstream's tree
+and `groups.rs` (5). Rulings and notes so far:
+- **"Byte-compatible", precisely:** the core's save equals upstream's byte for byte except the
+  order of the frames, which the core writes by window (upstream's `FxHashMap` iterates in an
+  order its history decides); both orders load the same. The core's saves are deterministic,
+  an improvement (the lead's ruling). Frozen: `systems/floating/*.loaded.ron`.
+- **For deletion in step 5, with upstream:** `model/slot_table::to_slotmap`,
+  `NodeMap::of_slots` and `group_stored::upstream_tiles` (restored only to re-seed the floating
+  shadow from the core with the same slots, versions and free lists).
 - **`Geometry::Restorable` stays** (a frame to return to and none kept): upstream reaches it
   only by loading its older file form (`independent_frames` without `frames`), and saves stay
   byte-compatible. A candidate for normalizing at load (to `Kept` of the restore, or dropped)
