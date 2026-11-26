@@ -31,17 +31,24 @@ wc -l` (the bound: at most 336).
 (3) The open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
 below ("Roc issue drafts") wait for the owner.
 
-**Focus and the mode gate decided in Roc (2026-11-26, the lead's go).** Both were checked on
-rift's path (the Rust answer stood); now `roc_path::decided` makes the Roc answer rift's, the
-Rust answer its shadow, one family each (`roc_path::FOCUS`: the eight focus decisions;
-`roc_path::MODE_GATE`: the verdict), each counted and logged at exit (`roc-core: focus
-divergences`, `roc-core: mode-gate divergences`). A different Roc answer is read back to rift's
-ids (`FromWord`, `window_of_plain`, `Verdict::try_map`); one naming nothing rift holds, or
-`activation_follow`'s `Stay::Mode` (the question carries refusing modes as one word), leaves the
-Rust answer with a warn; a Roc decision that read an unasked fact leaves it too. Plants 6/6 and
-4/4. Still checked, not decided: the topology, lifecycle and workspace questions on `roc_path`
-(their machines are decided as twins), and the reconciler. On hold (the lead): scrolling slice 1
-until the owner confirms; the #713 merge when we get there.
+**Every pure decision decided in Roc (2026-11-26, the lead's go).** The decisions on
+`roc_path` were checked (the Rust answer stood); now `roc_path::decided` makes the Roc answer
+rift's, the Rust answer its shadow, in families, each counted and logged at exit (`roc-core:
+<family> divergences`): focus (8 sites), the mode gate (the verdict), topology (6), lifecycle
+(12), workspaces (5). `roc_path::check` is gone. A different Roc answer is read back to rift's
+values (`FromWord`, `window_of_plain`, `with_window`, `Verdict::try_map`, `Axis::try_map`, a
+screen by its id); in tests, equal answers are read back too and must give the Rust value, so
+every reading is exercised by the tests reaching its site. One naming nothing rift holds, or a
+Roc decision that read an unasked fact, leaves the Rust answer with a warn. An activation refused
+by a mode names the refusing axis across the boundary (`FactRefusal`, `Stay::Mode(RefusingAxis)`),
+so that answer is complete. The reconciler (whose effects were already Roc's) counts a difference
+instead of stopping Rift, and retires its Rust shadow in a running Rift (no view of the Roc model
+crosses the boundary to re-seed it). The machines kept between events (lifecycle, main window,
+workspaces) were decided already as twins. Plants per family in each commit; two meta-plants
+(removing the read-back check, removing the reconciler's report) survive by their nature.
+Gaps: no reactor test acks between 1.5 and 3 points (the ack tolerance is held by rift-core-roc's
+edge differential). On hold (the lead): scrolling slice 1 until the owner confirms; the #713
+merge when we get there.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
