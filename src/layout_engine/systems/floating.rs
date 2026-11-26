@@ -2,10 +2,14 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 
+use super::floating_twin::{Twin, held, seed};
+use super::group_system::{
+    core_edit, core_focus, core_query, edit_result, focus_result, layout_kind, participation,
+};
 use super::groups::GroupLayouts;
 use super::{
     EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
-    WindowLayoutConstraints, WindowQuery,
+    WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
 };
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -32,6 +36,9 @@ pub struct FloatingLayoutSystem {
     insertion: WindowInsertionPoint,
     geometry: HashMap<WindowId, FloatingGeometry>,
     spread_on_initialization: bool,
+    /// The core's floating system, held to this one on every operation (step 2).
+    #[serde(skip)]
+    twin: Twin,
 }
 
 #[serde_with::serde_as]
@@ -60,12 +67,15 @@ impl From<StoredFloating> for FloatingLayoutSystem {
         for (window, frame) in stored.independent_frames {
             geometry.entry(window).or_default().restore = Some(frame);
         }
-        Self {
+        let mut system = Self {
             groups: stored.groups,
             geometry,
             spread_on_initialization: stored.spread_on_initialization,
             insertion: WindowInsertionPoint::default(),
-        }
+            twin: Twin::default(),
+        };
+        system.reseed();
+        system
     }
 }
 
@@ -75,12 +85,66 @@ impl Default for FloatingLayoutSystem {
 
 impl FloatingLayoutSystem {
     pub fn new(point: WindowInsertionPoint) -> Self {
-        Self {
+        let mut system = Self {
             groups: GroupLayouts::default(),
             insertion: point,
             geometry: HashMap::default(),
             spread_on_initialization: false,
+            twin: Twin::default(),
+        };
+        system.reseed();
+        system
+    }
+
+    /// Each window's pair of frames, as the twin compares them.
+    fn frame_pairs(&self) -> Vec<(WindowId, Option<CGRect>, Option<CGRect>)> {
+        self.geometry
+            .iter()
+            .map(|(&window, geometry)| (window, geometry.frame, geometry.restore))
+            .collect()
+    }
+
+    /// The core's system made this one again.
+    fn reseed(&mut self) { self.twin = Twin::seeded(seed(&self.groups, self.frame_pairs())); }
+
+    /// After an operation both systems took: the whole systems compared when due.
+    fn settle(&mut self, what: &str) {
+        let pairs = self.frame_pairs();
+        self.twin.settle(what, &self.groups, || pairs.clone());
+    }
+
+    /// The screen and spread as the core's floating geometry takes them.
+    fn core_floating(&self, screen: CGRect) -> rift_core::layout::floating::Floating {
+        rift_core::layout::floating::Floating {
+            screen: crate::layout_engine::core_rect(screen),
+            spread: self.spread_on_initialization,
         }
+    }
+
+    /// rift-cli's drawing of the layout (upstream's, the core's held to it).
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
+        held(
+            "draw_tree",
+            self.groups.draw_tree(layout, &[]),
+            self.twin.core().forest().draw(layout),
+        )
+    }
+
+    /// rift-cli's container view (upstream's, the core's held to it).
+    pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        held(
+            "container_tree",
+            self.groups.container_tree(layout),
+            super::group_system::container_node(self.twin.core().forest().container_view(layout)),
+        )
+    }
+
+    pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        held(
+            "window_slot",
+            self.groups.window_slot(layout, window),
+            self.twin.core().forest().window_slot(layout, window),
+        )
     }
 
     pub fn set_window_insertion_point(&mut self, point: WindowInsertionPoint) {
@@ -88,6 +152,38 @@ impl FloatingLayoutSystem {
     }
 
     pub(crate) fn collect_group_containers(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        selection_path_only: bool,
+    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
+        let upstream = self.upstream_group_containers(layout, screen, gaps, selection_path_only);
+        let core =
+            self.twin
+                .core()
+                .group_bars(layout, self.core_floating(screen), selection_path_only);
+        held(
+            "collect_group_containers",
+            upstream.iter().map(bar_words).collect::<Vec<BarWords>>(),
+            core.into_iter()
+                .map(|bar| {
+                    let frame = crate::layout_engine::cg_rect(bar.frame);
+                    (
+                        bar.stack,
+                        layout_kind(rift_core::layout::group_forest::Kind::Stack(bar.orientation)),
+                        rect_bits(frame),
+                        bar.windows.len(),
+                        bar.selected,
+                        bar.windows,
+                    )
+                })
+                .collect(),
+        );
+        upstream
+    }
+
+    fn upstream_group_containers(
         &self,
         layout: LayoutId,
         screen: CGRect,
@@ -110,7 +206,7 @@ impl FloatingLayoutSystem {
                 if self.groups.fullscreen_frame(window, screen, gaps).is_some() {
                     return None;
                 }
-                let frame = self.frame(wid).unwrap_or_else(|| {
+                let frame = self.kept_frame(wid).unwrap_or_else(|| {
                     Self::default_frame(screen, WindowLayoutConstraints::default())
                 });
                 Some(self.groups.stack_group_container_info(
@@ -159,6 +255,14 @@ impl FloatingLayoutSystem {
     }
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        held(
+            "cycle_windows",
+            self.upstream_cycle_windows(layout),
+            self.twin.core().cycle_windows(layout),
+        )
+    }
+
+    fn upstream_cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
         if let Some((node, _)) = self.groups.focused_leaf(layout)
             && let Some(parent) = node.parent(self.groups.map())
             && self.groups.layout(parent).is_stacked()
@@ -179,7 +283,7 @@ impl FloatingLayoutSystem {
         direction: Direction,
         exclude: Option<NodeId>,
     ) -> Option<(NodeId, WindowId)> {
-        let source = self.frame(focused)?;
+        let source = self.kept_frame(focused)?;
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
         let mut best: Option<((NodeId, WindowId), bool, f64)> = None;
@@ -188,7 +292,7 @@ impl FloatingLayoutSystem {
                 && !exclude.is_some_and(|parent| {
                     node.ancestors(self.groups.map()).any(|ancestor| ancestor == parent)
                 })
-                && let Some(frame) = self.frame(wid)
+                && let Some(frame) = self.kept_frame(wid)
             {
                 let candidate = frame.mid();
                 let (across, overlaps) = if horizontal {
@@ -220,6 +324,14 @@ impl FloatingLayoutSystem {
     }
 
     fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+        held(
+            "window_in_direction",
+            self.upstream_focus_target(layout, direction),
+            self.twin.core().window_in_direction(layout, core_direction(direction)),
+        )
+    }
+
+    fn upstream_focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let (node, focused) = self.groups.focused_leaf(layout)?;
         let parent = node.parent(self.groups.map())?;
         let kind = self.groups.layout(parent);
@@ -303,7 +415,7 @@ impl FloatingLayoutSystem {
                 let frame = self
                     .groups
                     .fullscreen_frame(node, screen, gaps)
-                    .or_else(|| self.frame(wid))
+                    .or_else(|| self.kept_frame(wid))
                     .unwrap_or_else(|| {
                         self.initial_frame(
                             screen,
@@ -349,7 +461,7 @@ impl FloatingLayoutSystem {
                     }
                 });
                 let place = fullscreen
-                    .or_else(|| self.frame(window).map(|frame| Place::Kept(core_rect(frame))))
+                    .or_else(|| self.kept_frame(window).map(|frame| Place::Kept(core_rect(frame))))
                     .unwrap_or_else(|| {
                         Place::First(core_constraints(
                             constraints.get(&window).copied().unwrap_or_default(),
@@ -424,13 +536,24 @@ impl FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         get_frame: &impl Fn(WindowId) -> Option<CGRect>,
     ) {
+        let floating = self.core_floating(screen);
+        self.twin.core_mut().initialize_frames(
+            layout,
+            floating,
+            |window| {
+                crate::layout_engine::core_geometry::core_constraints(
+                    constraints.get(&window).copied().unwrap_or_default(),
+                )
+            },
+            |window| get_frame(window).map(crate::layout_engine::core_rect),
+        );
         let count = if self.spread_on_initialization {
             self.groups.windows_with_nodes(layout).count()
         } else {
             0
         };
         for (index, (_, wid)) in self.groups.windows_with_nodes(layout).enumerate() {
-            if self.frame(wid).is_some() {
+            if self.kept_frame(wid).is_some() {
                 continue;
             }
             let frame = self.initial_frame(
@@ -443,9 +566,21 @@ impl FloatingLayoutSystem {
             self.geometry.entry(wid).or_default().frame = Some(frame);
         }
         self.spread_on_initialization = false;
+        self.settle("initialize_frames");
     }
 
-    pub fn frame(&self, wid: WindowId) -> Option<CGRect> { self.geometry.get(&wid)?.frame }
+    /// Upstream's kept frame, as its own operations read it.
+    fn kept_frame(&self, wid: WindowId) -> Option<CGRect> { self.geometry.get(&wid)?.frame }
+
+    pub fn frame(&self, wid: WindowId) -> Option<CGRect> {
+        let upstream = self.geometry.get(&wid).and_then(|geometry| geometry.frame);
+        held(
+            "frame",
+            upstream.map(crate::layout_engine::core_rect),
+            self.twin.core().frame(wid),
+        );
+        upstream
+    }
 
     fn restore_frame(&mut self, window: WindowId) {
         if let Some(geometry) = self.geometry.get_mut(&window)
@@ -456,6 +591,12 @@ impl FloatingLayoutSystem {
     }
 
     pub fn store_frame(&mut self, wid: WindowId, frame: CGRect) {
+        self.upstream_store_frame(wid, frame);
+        self.twin.core_mut().store_frame(wid, crate::layout_engine::core_rect(frame));
+        self.settle("store_frame");
+    }
+
+    fn upstream_store_frame(&mut self, wid: WindowId, frame: CGRect) {
         let occurrences = self.groups.tree.window.occurrences(wid);
         if !occurrences.iter().any(|info| self.groups.node_is_visible(info.node)) {
             return;
@@ -477,7 +618,7 @@ impl FloatingLayoutSystem {
     }
 
     fn align_members(&mut self, members: &[WindowId], anchor: WindowId, save: bool) {
-        let frame = self.frame(anchor);
+        let frame = self.kept_frame(anchor);
         for &window in members {
             if frame.is_none() && !self.geometry.contains_key(&window) {
                 continue;
@@ -491,39 +632,88 @@ impl FloatingLayoutSystem {
     }
 
     pub fn contains_floating_window(&self, wid: WindowId) -> bool {
-        self.groups.contains_any_window(wid)
+        held(
+            "contains_floating_window",
+            self.groups.contains_any_window(wid),
+            self.twin.core().forest().index().iter().any(|&(window, ..)| window == wid),
+        )
     }
 }
 impl LayoutSystem for FloatingLayoutSystem {
     fn window_participates(&self, window: WindowId) -> bool {
-        self.groups.window_participates(window)
+        held(
+            "window_participates",
+            self.groups.window_participates(window),
+            self.twin.core().forest().window_participates(window),
+        )
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        self.groups.set_window_participation(window, participates)
+        let upstream = self.groups.set_window_participation(window, participates);
+        let core = self
+            .twin
+            .core_mut()
+            .set_window_participation(window, participation(participates));
+        held("set_window_participation", upstream, core);
+        self.settle("set_window_participation");
+        upstream
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.groups.contains_layout(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        held(
+            "contains_layout",
+            self.groups.contains_layout(layout),
+            self.twin.core().forest().contains_layout(layout),
+        )
+    }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.groups.selected_window(layout)
+        held(
+            "selected_window",
+            self.groups.selected_window(layout),
+            self.twin.core().forest().selected_window(layout),
+        )
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
-        self.groups.selection_contains_window(layout, window)
+        held(
+            "selection_contains_window",
+            self.groups.selection_contains_window(layout, window),
+            self.twin.core().forest().selection_contains_window(layout, window),
+        )
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.groups.contains_window(layout, wid)
+        held(
+            "contains_window",
+            self.groups.contains_window(layout, wid),
+            self.twin.core().forest().contains_window(layout, wid),
+        )
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        self.groups.has_any_fullscreen_node(layout)
+        held(
+            "has_any_fullscreen_node",
+            self.groups.has_any_fullscreen_node(layout),
+            self.twin.core().forest().has_any_fullscreen_node(layout),
+        )
     }
 
-    fn create_layout(&mut self) -> LayoutId { self.groups.create_layout() }
+    fn create_layout(&mut self) -> LayoutId {
+        let upstream = self.groups.create_layout();
+        let core = self.twin.core_mut().create_layout();
+        held("create_layout", upstream, core);
+        self.settle("create_layout");
+        upstream
+    }
 
-    fn clone_layout(&mut self, layout: LayoutId) -> LayoutId { self.groups.clone_layout(layout) }
+    fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
+        let upstream = self.groups.clone_layout(layout);
+        let core = self.twin.core_mut().clone_layout(layout);
+        held("clone_layout", upstream, core);
+        self.settle("clone_layout");
+        upstream
+    }
 
     fn remove_layout(&mut self, layout: LayoutId) {
         let windows = self.groups.windows(layout, WindowQuery::All);
@@ -533,10 +723,12 @@ impl LayoutSystem for FloatingLayoutSystem {
                 self.geometry.remove(&wid);
             }
         }
+        self.twin.core_mut().remove_layout(layout);
+        self.settle("remove_layout");
     }
 
     /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
-    /// shadow.
+    /// shadow; the core's floating system's shape is held to this system's.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -547,11 +739,23 @@ impl LayoutSystem for FloatingLayoutSystem {
         _stack_line: crate::common::config::StackLineReserve,
         shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
-        crate::layout_engine::core_geometry::decide_floating(
+        let shape = held(
+            "shape",
             self.shape(layout, screen, constraints, gaps),
-            shadow,
-            || self.shadow_frames(layout, screen, constraints, gaps),
-        )
+            self.twin.core().shape(
+                layout,
+                self.core_floating(screen),
+                crate::layout_engine::core_gaps(gaps),
+                |window| {
+                    crate::layout_engine::core_geometry::core_constraints(
+                        constraints.get(&window).copied().unwrap_or_default(),
+                    )
+                },
+            ),
+        );
+        crate::layout_engine::core_geometry::decide_floating(shape, shadow, || {
+            self.shadow_frames(layout, screen, constraints, gaps)
+        })
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -559,18 +763,112 @@ impl LayoutSystem for FloatingLayoutSystem {
     }
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.groups.has_windows_for_app(layout, pid)
+        held(
+            "has_windows_for_app",
+            self.groups.has_windows_for_app(layout, pid),
+            self.twin
+                .core()
+                .forest()
+                .has_windows_for_app(layout, |window| window.pid == pid),
+        )
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
-        self.groups.parent_of_selection_is_stacked(layout)
+        held(
+            "parent_of_selection_is_stacked",
+            self.groups.parent_of_selection_is_stacked(layout),
+            self.twin.core().forest().parent_of_selection_is_stacked(layout),
+        )
     }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
-        self.groups.windows(layout, query)
+        held(
+            "windows",
+            self.groups.windows(layout, query),
+            self.twin.core().forest().windows(layout, core_query(query)),
+        )
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+        let core = focus_result(self.twin.core_mut().focus(layout, core_focus(focus)));
+        let upstream = self.upstream_focus(layout, focus);
+        held("focus", focus_words(&upstream), focus_words(&core));
+        self.settle("focus");
+        upstream
+    }
+
+    fn update(&mut self, change: WindowChange<'_>) {
+        let core = self.twin.core_mut();
+        match &change {
+            WindowChange::Add(layout, window, _) => {
+                core.add_window(*layout, *window, insertion_point(self.insertion))
+            }
+            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
+                core.remove_window(*window)
+            }
+            WindowChange::Replace(from, to) => core.replace_window(*from, *to),
+            WindowChange::CloseApp(pid) => core.close_app(|window| window.pid == *pid),
+            WindowChange::Resize { window, new, .. } => {
+                core.store_frame(*window, crate::layout_engine::core_rect(*new))
+            }
+        }
+        self.upstream_update(change);
+        self.settle("update");
+    }
+
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+        let core = edit_result(match core_edit(edit) {
+            Some(edit) => self.twin.core_mut().edit(layout, edit),
+            None => rift_core::layout::group_forest::Edited::Unsupported,
+        });
+        let upstream = self.upstream_edit_layout(layout, edit);
+        held("edit_layout", edit_words(&upstream), edit_words(&core));
+        self.settle("edit_layout");
+        upstream
+    }
+}
+
+/// A focus answer, comparable.
+fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
+    (result.handled, result.window, result.raise.clone())
+}
+
+/// An edit answer, comparable.
+fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
+    match result {
+        EditResult::Unsupported => ("unsupported", Vec::new()),
+        EditResult::Unchanged => ("unchanged", Vec::new()),
+        EditResult::Changed => ("changed", Vec::new()),
+        EditResult::Raise(windows) => ("raise", windows.clone()),
+    }
+}
+
+/// A group bar, comparable (its frame by bits).
+type BarWords = (NodeId, LayoutKind, [u64; 4], usize, usize, Vec<WindowId>);
+
+fn bar_words(bar: &crate::layout_engine::engine::GroupContainerInfo) -> BarWords {
+    (
+        bar.node_id,
+        bar.container_kind,
+        rect_bits(bar.frame),
+        bar.total_count,
+        bar.selected_index,
+        bar.window_ids.clone(),
+    )
+}
+
+fn rect_bits(frame: CGRect) -> [u64; 4] {
+    [
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    ]
+    .map(f64::to_bits)
+}
+
+impl FloatingLayoutSystem {
+    fn upstream_focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
         match focus {
             Focus::Direction(direction) => {
                 FocusResult::movement(self.move_focus(layout, direction))
@@ -579,7 +877,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         }
     }
 
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn upstream_update(&mut self, change: WindowChange<'_>) {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
@@ -600,11 +898,11 @@ impl LayoutSystem for FloatingLayoutSystem {
                 self.geometry.retain(|wid, _| wid.pid != pid);
                 self.groups.close_app(pid)
             }
-            WindowChange::Resize { window, new, .. } => self.store_frame(window, new),
+            WindowChange::Resize { window, new, .. } => self.upstream_store_frame(window, new),
         }
     }
 
-    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+    fn upstream_edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         match edit {
             LayoutEdit::Move { .. } => EditResult::Unchanged,
 
@@ -658,7 +956,7 @@ impl FloatingLayoutSystem {
         layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let target = self.focus_target(layout, direction);
+        let target = self.upstream_focus_target(layout, direction);
         if let Some(wid) = target {
             self.groups.focus(layout, Focus::Select(wid)).handled;
         }
@@ -785,7 +1083,7 @@ mod tests {
         let mut system = FloatingLayoutSystem::default();
         let layout = system.create_layout();
         for index in 1..=4 {
-            system.add_window_after_selection(layout, w(index));
+            system.update(WindowChange::Add(layout, w(index), None));
             system.store_frame(w(index), rect(20. + (index - 1) as f64 * 250., 40.));
         }
         system.focus(layout, Focus::Select(w(1))).handled;
@@ -808,8 +1106,8 @@ mod tests {
     fn a_new_floating_window_takes_most_of_the_screen_centred() {
         let mut system = FloatingLayoutSystem::default();
         let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
+        system.update(WindowChange::Add(layout, w(1), None));
+        system.update(WindowChange::Add(layout, w(2), None));
         system.store_frame(w(2), rect(20., 40.));
         let frames = system.calculate_layout(
             layout,
@@ -832,7 +1130,7 @@ mod tests {
     #[test]
     fn suspended_stack_selection_leaves_the_visible_tab_interactive() {
         let (mut system, layout) = fixture();
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         stack(&mut system, layout);
         system.set_window_participation(w(1), false);
         assert!(system.windows(layout, WindowQuery::Visible).contains(&w(2)));
@@ -852,12 +1150,12 @@ mod tests {
         let (mut system, layout) = fixture();
         stack(&mut system, layout);
         assert_eq!(system.windows(layout, WindowQuery::Visible).len(), 4);
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         assert_ne!(system.frame(w(1)), system.frame(w(2)));
         stack(&mut system, layout);
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
-        system.add_window_after_selection(layout, w(5));
+        system.update(WindowChange::Add(layout, w(5), None));
         system.update(WindowChange::Add(layout, w(6), None));
         assert_eq!(system.windows(layout, WindowQuery::Visible).len(), 4);
         system.focus(layout, Focus::Select(w(2))).handled;
@@ -865,13 +1163,17 @@ mod tests {
         system.store_frame(w(1), rect(999., 999.));
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
         system.geometry.get_mut(&w(4)).unwrap().restore = Some(rect(999., 999.));
-        system.unjoin_selection(layout);
+        // A stale frame to return to, set by hand: the core's system takes it too.
+        system.reseed();
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin));
         assert_eq!(system.frame(w(2)), Some(rect(270., 40.)));
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         system.focus(layout, Focus::Select(w(1))).handled;
-        system.unstack_parent_of_selection(
+        system.edit(
             layout,
-            crate::common::config::default_stack_orientation(),
+            LayoutEdit::Group(GroupEdit::Unstack(
+                crate::common::config::default_stack_orientation(),
+            )),
         );
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
         assert_eq!(system.frame(w(3)), Some(rect(520., 40.)));
@@ -880,7 +1182,7 @@ mod tests {
     #[test]
     fn directional_focus_reaches_hidden_members_and_neighboring_windows() {
         let (mut system, layout) = fixture();
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         assert!(system.focus(layout, Focus::Ascend).handled);
         stack(&mut system, layout);
         assert_eq!(system.selected_window(layout), Some(w(1)));
@@ -891,13 +1193,22 @@ mod tests {
             (Direction::Up, w(2)),
             (Direction::Up, w(1)),
         ] {
-            assert_eq!(system.move_focus(layout, direction).0, Some(expected));
+            assert_eq!(
+                system.focus(layout, Focus::Direction(direction)).window,
+                Some(expected)
+            );
         }
-        system.remove_window(w(3));
-        system.remove_window(w(4));
-        assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(2)));
-        assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(1)));
-        system.unjoin_selection(layout);
+        system.update(WindowChange::Remove(w(3)));
+        system.update(WindowChange::Remove(w(4)));
+        assert_eq!(
+            system.focus(layout, Focus::Direction(Direction::Right)).window,
+            Some(w(2))
+        );
+        assert_eq!(
+            system.focus(layout, Focus::Direction(Direction::Right)).window,
+            Some(w(1))
+        );
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin));
         assert_eq!(system.windows(layout, WindowQuery::All).len(), 2);
         assert!(!system.parent_of_selection_is_stacked(layout));
     }
@@ -905,13 +1216,13 @@ mod tests {
     #[test]
     fn saved_stack_frames_survive_identity_changes_and_layout_clones() {
         let (mut system, layout) = fixture();
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         stack(&mut system, layout);
         system.focus(layout, Focus::Select(w(3))).handled;
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         stack(&mut system, layout);
         system.focus(layout, Focus::Select(w(1))).handled;
-        system.join_selection_with_direction(layout, Direction::Right);
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         let bytes = ron::to_string(&system).unwrap();
@@ -1060,5 +1371,162 @@ mod tests {
         }
         eprintln!("floating: {cases} layouts, {frames_seen} frames identical");
         assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
+    }
+
+    /// Every question the floating system answers, asked of `system` (each held to the core's).
+    fn ask_everything(system: &FloatingLayoutSystem, layouts: &[LayoutId], windows: &[WindowId]) {
+        use crate::layout_engine::systems::drawn::*;
+        let screen = CGRect::new(CGPoint::new(10., 20.), CGSize::new(1200., 900.));
+        let gaps = crate::common::config::GapSettings::default();
+        for &layout in layouts {
+            if !system.contains_layout(layout) {
+                continue;
+            }
+            system.selected_window(layout);
+            system.has_any_fullscreen_node(layout);
+            system.parent_of_selection_is_stacked(layout);
+            for query in [
+                WindowQuery::All,
+                WindowQuery::Visible,
+                WindowQuery::Selection,
+            ] {
+                system.windows(layout, query);
+            }
+            for direction in [
+                Direction::Left,
+                Direction::Right,
+                Direction::Up,
+                Direction::Down,
+            ] {
+                system.window_in_direction(layout, direction);
+            }
+            system.cycle_windows(layout);
+            system.draw_tree(layout);
+            system.container_tree(layout);
+            for only_path in [false, true] {
+                system.collect_group_containers(layout, screen, &gaps, only_path);
+            }
+            let _ = system.calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &HashMap::default(),
+                &gaps,
+                Default::default(),
+                crate::layout_engine::Shadow::Run,
+            );
+            for &window in windows {
+                system.contains_window(layout, window);
+                system.selection_contains_window(layout, window);
+                system.window_slot(layout, window);
+                system.windows(layout, WindowQuery::Stack(window));
+                system.has_windows_for_app(layout, window.pid);
+            }
+        }
+        for &window in windows {
+            system.window_participates(window);
+            system.frame(window);
+            system.contains_floating_window(window);
+        }
+        let _ = bits(&[]);
+    }
+
+    /// The core's floating system beside upstream's (step 2), over drawn systems: each drawn as
+    /// the frames test draws it, then layouts cloned and removed, windows replaced, closed by
+    /// app, removed (rebalancing or not) and resized through `update`, in two layouts; every
+    /// question asked along the way, and the system reloaded through serde. Any difference fails
+    /// the test (the twin panics in tests).
+    #[test]
+    fn the_core_floating_system_takes_every_operation_as_upstreams_does() {
+        use crate::layout_engine::systems::drawn::*;
+        let mut rng = Rng(0xf_10a7_7713);
+        let mut steps = 0;
+        for _ in 0..1500 {
+            let (mut system, first, mut windows) = drawn_system(&mut rng);
+            let mut layouts = vec![first];
+            ask_everything(&system, &layouts, &windows);
+            let mut next = 1000;
+            for _ in 0..rng.below(25) {
+                let layout = layouts[rng.below(layouts.len() as u64) as usize];
+                match rng.below(9) {
+                    0 => layouts.push(system.clone_layout(layout)),
+                    1 if layouts.len() > 1 => {
+                        system.remove_layout(layout);
+                        layouts.retain(|&l| l != layout);
+                    }
+                    2 => {
+                        next += 1;
+                        let window = WindowId::new(1 + rng.below(3) as i32, next);
+                        windows.push(window);
+                        let second = layouts[rng.below(layouts.len() as u64) as usize];
+                        system.update(WindowChange::Add(second, window, None));
+                    }
+                    3 if !windows.is_empty() => {
+                        let from = windows[rng.below(windows.len() as u64) as usize];
+                        next += 1;
+                        let to = if rng.chance(20) {
+                            windows[rng.below(windows.len() as u64) as usize]
+                        } else {
+                            WindowId::new(from.pid, next)
+                        };
+                        system.update(WindowChange::Replace(from, to));
+                        if from != to {
+                            windows.retain(|&w| w != from);
+                            if !windows.contains(&to) {
+                                windows.push(to);
+                            }
+                        }
+                    }
+                    4 => {
+                        let pid = 1 + rng.below(3) as i32;
+                        system.update(WindowChange::CloseApp(pid));
+                        windows.retain(|w| w.pid != pid);
+                    }
+                    5 if !windows.is_empty() => {
+                        let window = windows[rng.below(windows.len() as u64) as usize];
+                        windows.retain(|&w| w != window);
+                        system.update(if rng.chance(50) {
+                            WindowChange::RemoveAndRebalance(window)
+                        } else {
+                            WindowChange::Remove(window)
+                        });
+                    }
+                    6 if !windows.is_empty() => {
+                        let window = windows[rng.below(windows.len() as u64) as usize];
+                        let gaps = crate::common::config::GapSettings::default();
+                        system.update(WindowChange::Resize {
+                            layout,
+                            window,
+                            old: drawn_screen(&mut rng),
+                            new: drawn_screen(&mut rng),
+                            screen: drawn_screen(&mut rng),
+                            gaps: &gaps,
+                        });
+                    }
+                    7 => {
+                        let bytes = ron::to_string(&system).unwrap();
+                        let mut restored: FloatingLayoutSystem = ron::from_str(&bytes).unwrap();
+                        restored.set_window_insertion_point(system.insertion);
+                        system = restored;
+                    }
+                    _ if !windows.is_empty() => {
+                        let window = windows[rng.below(windows.len() as u64) as usize];
+                        system.focus(layout, Focus::Select(window));
+                        system.edit(
+                            layout,
+                            LayoutEdit::Group(GroupEdit::Join(drawn_direction(&mut rng))),
+                        );
+                    }
+                    _ => {}
+                }
+                steps += 1;
+                if rng.chance(30) {
+                    ask_everything(&system, &layouts, &windows);
+                }
+            }
+            ask_everything(&system, &layouts, &windows);
+        }
+        eprintln!("floating twin: {steps} steps past the drawn systems, no difference");
+        assert!(steps > 5000, "the draws reach steps ({steps})");
     }
 }

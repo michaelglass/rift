@@ -546,7 +546,9 @@ mod tests {
     }
 }
 mod floating;
+mod floating_twin;
 pub use floating::FloatingLayoutSystem;
+pub(crate) use floating_twin::floating_divergences;
 #[cfg(test)]
 pub(crate) mod drawn;
 mod stack;
@@ -741,7 +743,7 @@ impl LayoutSystemKind {
             Self::Stack(system) => system.draw_tree(layout),
             Self::MasterStack(system) => system.draw_tree(layout),
             Self::Scrolling(system) => system.draw_tree(layout),
-            Self::Floating(system) => system.groups.draw_tree(layout, &[]),
+            Self::Floating(system) => system.draw_tree(layout),
         }
     }
 
@@ -752,7 +754,7 @@ impl LayoutSystemKind {
             Self::Stack(system) => system.container_tree(layout),
             Self::MasterStack(system) => system.container_tree(layout),
             Self::Scrolling(system) => system.container_tree(layout),
-            Self::Floating(system) => system.groups.container_tree(layout),
+            Self::Floating(system) => system.container_tree(layout),
         }
     }
 
@@ -763,7 +765,7 @@ impl LayoutSystemKind {
             Self::Stack(system) => system.window_slot(layout, window),
             Self::MasterStack(system) => system.window_slot(layout, window),
             Self::Scrolling(system) => system.window_slot(layout, window),
-            Self::Floating(system) => system.groups.window_slot(layout, window),
+            Self::Floating(system) => system.window_slot(layout, window),
         }
     }
 }

@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 
 use super::{
     Direction, Edit, Edited, Focus, Focused, Forest, GroupBar, InsertionPoint, Kind, Orientation,
-    Placement, Query,
+    Participation, Placement, Query,
 };
 use crate::layout::floating::{self, Newcomer, Seen, Slot};
 use crate::layout::{Gaps, WindowConstraints};
@@ -197,6 +197,10 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> FloatingSystem<L, N,
 
     /// The frame the layout keeps for `window`, if any.
     pub fn frame(&self, window: W) -> Option<Rect> { self.geometry.get(&window)?.frame() }
+
+    pub fn set_window_participation(&mut self, window: W, participation: Participation) -> bool {
+        self.forest.set_window_participation(window, participation)
+    }
 
     pub fn create_layout(&mut self) -> L { self.forest.create_layout() }
 
@@ -780,7 +784,7 @@ mod tests {
         let (mut system, layout) = fixture();
         join(&mut system, layout, Direction::Right);
         stack(&mut system, layout);
-        system.forest.set_window_participation(1, super::super::Participation::LeftOut);
+        system.set_window_participation(1, Participation::LeftOut);
         assert!(system.forest.windows(layout, Query::Visible).contains(&2));
         let moved_to = rect(100., 80.);
         system.store_frame(2, moved_to);
