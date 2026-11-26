@@ -3832,7 +3832,7 @@ impl Reactor {
             },
         );
         #[cfg(feature = "roc-core")]
-        {
+        let reapplies = {
             use rift_core::lifecycle::plain::TitleChange;
             let question = TitleChange {
                 configured,
@@ -3841,14 +3841,17 @@ impl Reactor {
                 reconcilable: reconcilable.fact(|open| open),
             };
             let roc = rift_core_roc::lifecycle::reapplies_on_title_change(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::LIFECYCLE,
                 "reapplies_on_title_change",
                 TitleChange::FACTS,
                 &question,
+                reapplies,
                 &reapplies,
                 roc,
-            );
-        }
+                Some,
+            )
+        };
         if !reapplies {
             return;
         }
@@ -4994,15 +4997,24 @@ impl Reactor {
                 .and_then(|wsid| native_spaces[&wsid]);
             let misplaced = rift_core::lifecycle::misplaced(assigned, native);
             #[cfg(feature = "roc-core")]
-            {
+            let misplaced = {
                 use rift_core::lifecycle::plain::Misplaced;
                 let question = Misplaced {
                     assigned: assigned.map(Word::word),
                     native: native.map(Word::word),
                 };
                 let roc = Ok(rift_core_roc::lifecycle::misplaced(question));
-                crate::roc_path::check("misplaced", Misplaced::FACTS, &question, &misplaced, roc);
-            }
+                crate::roc_path::decided(
+                    &crate::roc_path::LIFECYCLE,
+                    "misplaced",
+                    Misplaced::FACTS,
+                    &question,
+                    misplaced,
+                    &misplaced,
+                    roc,
+                    Some,
+                )
+            };
             misplaced
         }) {
             self.request_space_snapshot();
@@ -5028,7 +5040,7 @@ impl Reactor {
                     || parked.ask(|| self.hidden_assigned_space_for_window_id(*wid).is_some()),
                 );
                 #[cfg(feature = "roc-core")]
-                {
+                let out_of_view = {
                     use rift_core::lifecycle::plain::OutOfView;
                     let question = OutOfView {
                         native: native.map(Word::word),
@@ -5037,14 +5049,17 @@ impl Reactor {
                         parked: parked.fact(|parked| parked),
                     };
                     let roc = rift_core_roc::lifecycle::out_of_inventory_view(question.clone());
-                    crate::roc_path::check(
+                    crate::roc_path::decided(
+                        &crate::roc_path::LIFECYCLE,
                         "out_of_inventory_view",
                         OutOfView::FACTS,
                         &question,
+                        out_of_view,
                         &out_of_view,
                         roc,
-                    );
-                }
+                        Some,
+                    )
+                };
                 out_of_view
             })
             .collect();
@@ -5842,7 +5857,7 @@ impl Reactor {
             exempt.ask(|| crate::sys::app::is_ibkr_desktop_dialog(&window.info))
         });
         #[cfg(feature = "roc-core")]
-        {
+        let transient = {
             use rift_core::lifecycle::plain::NativeTransient;
             let question = NativeTransient {
                 entry: entry.map(|(origin, pid)| (origin, pid.word())),
@@ -5850,14 +5865,17 @@ impl Reactor {
                 exempt: exempt.fact(|exempt| exempt),
             };
             let roc = rift_core_roc::lifecycle::is_native_transient(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::LIFECYCLE,
                 "is_native_transient",
                 NativeTransient::FACTS,
                 &question,
+                transient,
                 &transient,
                 roc,
-            );
-        }
+                Some,
+            )
+        };
         if let Some(Transition::Suspended(..)) =
             self.stores.state.windows.set_native_transient(wid, transient)
         {
@@ -5885,7 +5903,7 @@ impl Reactor {
             let origin = transient_origin(t.native);
             let keeps = rift_core::lifecycle::keeps_transient(departure, id, origin, t.pid);
             #[cfg(feature = "roc-core")]
-            {
+            let keeps = {
                 use rift_core::lifecycle::plain::KeepsTransient;
                 let question = KeepsTransient {
                     departure: match departure {
@@ -5898,14 +5916,17 @@ impl Reactor {
                     owner: t.pid.word(),
                 };
                 let roc = Ok(rift_core_roc::lifecycle::keeps_transient(question));
-                crate::roc_path::check(
+                crate::roc_path::decided(
+                    &crate::roc_path::LIFECYCLE,
                     "keeps_transient",
                     KeepsTransient::FACTS,
                     &question,
+                    keeps,
                     &keeps,
                     roc,
-                );
-            }
+                    Some,
+                )
+            };
             keeps
         });
     }
@@ -6011,7 +6032,7 @@ impl Reactor {
             |space| active.ask(space, |space| self.is_space_active(space)),
         );
         #[cfg(feature = "roc-core")]
-        {
+        let targets = {
             use rift_core::lifecycle::plain::RuleTargets;
             let question = RuleTargets {
                 windows: window_ids.iter().map(|&wid| wid.word()).collect(),
@@ -6025,8 +6046,25 @@ impl Reactor {
                 .map(|(space, wids)| (space.word(), wids.iter().map(|&wid| wid.word()).collect()))
                 .collect();
             let roc = rift_core_roc::lifecycle::rule_targets(question.clone());
-            crate::roc_path::check("rule_targets", RuleTargets::FACTS, &question, &answer, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::LIFECYCLE,
+                "rule_targets",
+                RuleTargets::FACTS,
+                &question,
+                targets,
+                &answer,
+                roc,
+                |roc| {
+                    use crate::roc_path::FromWord;
+                    roc.into_iter()
+                        .map(|(space, windows)| {
+                            let windows = windows.into_iter().map(FromWord::from_word);
+                            Some((FromWord::from_word(space)?, windows.collect::<Option<_>>()?))
+                        })
+                        .collect()
+                },
+            )
+        };
 
         let visible: Vec<_> = self.iter_active_spaces().collect();
         for (space, wids) in targets {
@@ -6068,7 +6106,7 @@ impl Reactor {
                     };
                     let refreshes = rift_core::lifecycle::rule_refreshes_layout(run, &outcome);
                     #[cfg(feature = "roc-core")]
-                    {
+                    let refreshes = {
                         use rift_core::lifecycle::RuleOutcome;
                         use rift_core::lifecycle::plain::RuleRefresh;
                         let question = RuleRefresh {
@@ -6083,14 +6121,17 @@ impl Reactor {
                             },
                         };
                         let roc = Ok(rift_core_roc::lifecycle::rule_refreshes_layout(question));
-                        crate::roc_path::check(
+                        crate::roc_path::decided(
+                            &crate::roc_path::LIFECYCLE,
                             "rule_refreshes_layout",
                             RuleRefresh::FACTS,
                             &question,
+                            refreshes,
                             &refreshes,
                             roc,
-                        );
-                    }
+                            Some,
+                        )
+                    };
                     if refreshes {
                         windows_needing_layout_refresh.push((*wid, assignment));
                     }
@@ -7305,7 +7346,7 @@ impl Reactor {
             },
         );
         #[cfg(feature = "roc-core")]
-        {
+        let target = {
             use rift_core::lifecycle::plain::PointerTarget;
             let question = PointerTarget {
                 mode,
@@ -7316,14 +7357,20 @@ impl Reactor {
                 rule_names_workspace: names_workspace.fact(|names| names),
             };
             let roc = rift_core_roc::lifecycle::pointer_display_target(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::LIFECYCLE,
                 "pointer_display_target",
                 PointerTarget::FACTS,
                 &question,
+                target,
                 &target.map(Word::word),
                 roc,
-            );
-        }
+                |roc| match roc {
+                    Some(word) => crate::roc_path::FromWord::from_word(word).map(Some),
+                    None => Some(None),
+                },
+            )
+        };
         let Some(target) = target else {
             return;
         };

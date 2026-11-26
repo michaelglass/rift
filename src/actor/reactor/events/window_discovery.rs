@@ -64,12 +64,21 @@ fn sync_existing_window_state(
             let heuristic = utils::refresh_heuristic(state, wid);
             let change = rift_core::lifecycle::net(reading, heuristic);
             #[cfg(feature = "roc-core")]
-            {
+            let change = {
                 use crate::roc_path::window_free;
                 let question = (window_free(reading), window_free(heuristic));
                 let roc = Ok(rift_core_roc::lifecycle::net(question.0, question.1));
-                crate::roc_path::check("net", &[], &question, &window_free(change), roc);
-            }
+                crate::roc_path::decided(
+                    &crate::roc_path::LIFECYCLE,
+                    "net",
+                    &[],
+                    &question,
+                    change,
+                    &window_free(change),
+                    roc,
+                    |roc| Some(crate::roc_path::with_window(roc, wid)),
+                )
+            };
             admission_changed = change.is_some();
             admitted_now = matches!(change, Some(rift_core::lifecycle::Transition::Admitted(_)));
             if let Some(rift_core::lifecycle::Transition::Suspended(..)) = change {

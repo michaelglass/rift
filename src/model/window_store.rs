@@ -1128,12 +1128,21 @@ impl WindowStore {
         let minimized = self.tell_lifecycle(window, FactChange::Minimize(minimize));
         let change = rift_core::lifecycle::net(roles, minimized);
         #[cfg(feature = "roc-core")]
-        {
+        let change = {
             use crate::roc_path::window_free;
             let question = (window_free(roles), window_free(minimized));
             let roc = Ok(rift_core_roc::lifecycle::net(question.0, question.1));
-            crate::roc_path::check("net", &[], &question, &window_free(change), roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::LIFECYCLE,
+                "net",
+                &[],
+                &question,
+                change,
+                &window_free(change),
+                roc,
+                |roc| Some(crate::roc_path::with_window(roc, window)),
+            )
+        };
         change
     }
 
@@ -1174,10 +1183,19 @@ impl WindowStore {
         let facts = AdmissionFacts { rule, ..facts };
         let admission = rift_core::lifecycle::admission(facts);
         #[cfg(feature = "roc-core")]
-        {
+        let admission = {
             let roc = Ok(rift_core_roc::lifecycle::admission(facts));
-            crate::roc_path::check("admission", &[], &facts, &admission, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::LIFECYCLE,
+                "admission",
+                &[],
+                &facts,
+                admission,
+                &admission,
+                roc,
+                Some,
+            )
+        };
         Some(admission == Admission::Admitted)
     }
 
@@ -2013,7 +2031,7 @@ impl<'a> Windows<'a> {
                     })
                 });
                 #[cfg(feature = "roc-core")]
-                {
+                let verdict = {
                     use crate::roc_path::Word;
                     let question = rift_core::lifecycle::plain::Inventory {
                         facts: InventoryFacts {
@@ -2030,14 +2048,17 @@ impl<'a> Windows<'a> {
                         evidence: asked.fact(|evidence| evidence),
                     };
                     let roc = rift_core_roc::lifecycle::retirement(question);
-                    crate::roc_path::check(
+                    crate::roc_path::decided(
+                        &crate::roc_path::LIFECYCLE,
                         "retirement",
                         rift_core::lifecycle::plain::Inventory::FACTS,
                         &question,
+                        verdict,
                         &verdict,
                         roc,
-                    );
-                }
+                        Some,
+                    )
+                };
                 (verdict == Retirement::Retire).then_some(wid)
             })
             .collect()

@@ -3,7 +3,7 @@
 //! data, and the two answers must be the same words. A checked decision ([`check`]): equal, the
 //! Rust answer stands, the Roc core's decision bit for bit; different (or no answer), tests
 //! fail, and a running Rift logs `roc-divergence:` and goes on with the Rust answer. A decided
-//! family ([`decided`]: focus, the mode gate, the topology questions) flips that: the Roc answer is rift's, the Rust answer its shadow,
+//! family ([`decided`]: focus, the mode gate, the topology and lifecycle questions) flips that: the Roc answer is rift's, the Rust answer its shadow,
 //! and a running Rift counts each difference ([`Family`]) and goes on with the Roc answer.
 //!
 //! A question carries only the facts the Rust decision asked: a call site asks each fact
@@ -225,6 +225,12 @@ pub(crate) static FOCUS: Family = Family::new();
 #[cfg(feature = "roc-core")]
 pub(crate) static MODE_GATE: Family = Family::new();
 
+/// The lifecycle questions (`rift_core::lifecycle`, `Lifecycle.roc`): admission and its changes,
+/// retirement, transients, misplaced and out-of-view windows, rules and their targets, a new
+/// window's display.
+#[cfg(feature = "roc-core")]
+pub(crate) static LIFECYCLE: Family = Family::new();
+
 /// The topology questions (`rift_core::topology`, `Topology.roc`): which events wait out an
 /// unsettled topology, a Space snapshot's admission, a discovered window's Space, a display to
 /// move to, the windows an app's rules apply to.
@@ -358,6 +364,19 @@ pub(crate) fn window_free(
     change.map(|change| match change {
         Transition::Admitted(_) => Change::Admitted,
         Transition::Suspended(_, why) => Change::Suspended(why),
+    })
+}
+
+/// An admission change for `window` (the inverse of [`window_free`] for a change about it).
+#[cfg(feature = "roc-core")]
+pub(crate) fn with_window(
+    change: Option<rift_core::lifecycle::Change>,
+    window: crate::actor::app::WindowId,
+) -> Option<rift_core::lifecycle::Transition<crate::actor::app::WindowId>> {
+    use rift_core::lifecycle::{Change, Transition};
+    change.map(|change| match change {
+        Change::Admitted => Transition::Admitted(window),
+        Change::Suspended(why) => Transition::Suspended(window, why),
     })
 }
 
