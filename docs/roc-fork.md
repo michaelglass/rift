@@ -142,6 +142,16 @@ and `groups.rs` (5). Rulings and notes so far:
   in the step, the traditional step's exact shape, no closure holding the forest, the add taking
   only the forest, taking the table apart before `Slots.insert`'s append, and `create_root`
   taking the forest apart.
+  The time-boxed hunt after it (1 hour, 6 builds) narrowed it without explaining it: at
+  `roc_floating_tree_step`'s entry the box and the node slot list are each held once (refcount
+  1), so the sharing starts inside the step; the frame map is not it (the `Dict` swapped for a
+  list, the same copies); and the traditional system's own `forest_step`, reached from
+  `floating_step`, copies on a selection where the same call under `traditional_step` stays in
+  place (a selection and a clone at 192 bytes and 3 KB there, 45 KB and 67 KB here). What decides
+  is the floating step's call context, not any function's code: the open traditional and
+  master-stack copies have the same signature (refcount 1 at entry, a copy inside, sensitive to
+  the caller). The next step is still the compiler's ownership decisions (a dev-diagnostics
+  build's `ROC_LIR_DUMP`, see above).
 - **For deletion in step 5, with upstream:** `model/slot_table::to_slotmap`,
   `NodeMap::of_slots` and `group_stored::upstream_tiles` (restored only to re-seed the floating
   shadow from the core with the same slots, versions and free lists).
