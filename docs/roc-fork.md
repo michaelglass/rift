@@ -39,8 +39,9 @@ checked; two scripted). Fixed: remove, remove-and-rebalance and close_app (our o
 `delete_subtree`'s `NotHeld` branch returned the original forest after its table went to
 `Slots.remove`). Still copying, on the pinned nightly and on nightly-2026-11-25-d5a4f1e:
 traditional `AddWindow` toward a direction; master-stack `CreateLayout`; the forest's
-`RemoveLayout` and `ReplaceWindow`; the edits `Drop`, `Move`, `Rebalance`, `Join`,
-`ConsumeOrExpel`. The bisect of the directional add (13 builds, each variant of
+`RemoveLayout` and `ReplaceWindow`; the edits `Drop`, `Move`, `Join`, `ConsumeOrExpel`
+(`Rebalance` fixed since: its sizes now read in one walk, then written in a fold whose state is
+the forest alone, where the change flag rode beside it). The bisect of the directional add (13 builds, each variant of
 `traditional_add_window` / `add_window_toward` probed for its largest allocation on a 400-window
 forest), for whoever picks up the repro (the lead's option (b)):
 - no copy: `add_window_under(forest, root(..), w)` then `select_node`; the same with the root
@@ -56,6 +57,62 @@ forest), for whoever picks up the repro (the lead's option (b)):
 - an earlier variant (the root bound, `add_window_under`, no select) copied where an otherwise
   equal one did not, so the cause looks like Roc's refcount and borrow inference rather than an
   ordering in the core; not reduced outside rift yet.
+
+**The copy hunt's second round (2026-11-26, time-boxed to 3 hours, the lead's option 1).**
+- **The host is not the cause.** Read from the host just before `roc_traditional_tree_step` on
+  a 400-window forest: the model box at refcount 1, the node and layout slot lists at 1, on
+  every probed step, the copying ones (the directional add, 90 KB; `Rebalance` and
+  `ReplaceWindow`, 60 KB) included. The sharing starts inside the Roc step.
+- **The copies are the first write to the shared table:** `Slots.put` under `Slots.insert`,
+  `remove` or `replace`, reached through `set_node`, `create_root` or `delete_subtree`.
+- **How to trace one** (no compiler support needed): build the Roc archive with
+  `roc build --debug`, have the host's `roc_alloc` print `std::backtrace::Backtrace::force_capture()`
+  for any allocation over a threshold (64 bytes a slot), and name the hashed `roc__p<hash>`
+  frames from `dwarfdump --debug-info` on the archive (`DW_AT_linkage_name` to `DW_AT_name`).
+- **One shape copies in a standalone app** (a boxed model, the host counting allocations):
+  a field bound to a local while its record stays live for a later update. `nodes =
+  forest.nodes` then `{ ..forest, nodes: { ..nodes, slots: put(nodes.slots, ..) } }` copies the
+  list on every step; the same update written inline through the records, or after taking the
+  records apart, does not. That is Roc's sharing as documented (the record still holds the
+  field), not a bug. rift's Roc has that shape only at the system level (`forest =
+  system.forest`, then `{ ..system, forest: .. }`: `traditional_add_window`,
+  `add_window_after_selection`, `smart_window_insertion`, `traditional_edit`,
+  `insert_window_in_container`, `promote_to_master`, `move_target`), and taking the system apart
+  instead (the parked refactor) left the copies where they were and made the plain add copy.
+  Not the forest helpers or `Slots`: they project a field straight into a call.
+- **Did not copy standalone**, each built to rift's shape: a crash branch before the forest is
+  consumed; a fold whose state is a tuple holding the forest; rift's recursive rebalance;
+  rift's `Slots` module verbatim, with tag-union slots holding records of lists; `Set` and
+  second-table fields beside the table; `set_size`'s branch returning the forest unchanged; a
+  step taking the system apart, then calling helpers that take the forest and the settings.
+- **Inside rift:** splitting the edit branch out of `traditional_step` changed nothing.
+  `Rebalance` stopped copying when its fold's state became the forest alone (fixed, above); the
+  same tuple-state fold does not copy standalone.
+- **Reading the compiler's decisions:** the compiler has `ROC_LIR_DUMP` (the final LIR of every
+  procedure whose name contains the value) and `ROC_VERIFY_ARC`, but only in a compiler built
+  with developer diagnostics (`-Ddev-diagnostics`, every Debug compiler); the nightly is a
+  release build and reads neither, and there is no Zig toolchain here (the source asks for
+  0.17.1). Next step for whoever picks this up: build a diagnostics compiler at the pinned
+  nightly's commit and dump `GroupForest`'s write path for `Rebalance`'s old shape and the
+  directional add. A question upstream, should one be wanted (the owner's call, not asked):
+  "A record update on a uniquely held model copies a list field in one call graph and not in
+  an otherwise equal smaller one; is there a supported way to see the inferred borrow and
+  ownership of each procedure in a release build, or should we build with dev diagnostics?"
+- **Crash branches on the write path**, as the lead asked (a defensive branch for a state meant
+  to be impossible; none was implicated by the bisect):
+  - `Slots.put`'s `OutOfBounds`: the index was just read from the same list. A type could
+    remove it only with a list update that cannot miss (none in the builtins); kept.
+  - `Slots.insert`'s free slot not vacant: the free list holds only vacated slots. A type can
+    remove it: the free list carrying each slot's next version (`List({ index, version })`)
+    makes the read, and the branch, unnecessary.
+  - `set_node` (and `node`, `set_root`, `root`): a key the table does not hold. Keys come from
+    the forest itself; a type tying a key to its table is not expressible here; kept.
+  - `insert`'s region-pair parent and its invalid placement (`placement_parent` finding no
+    parent), and `link`'s unplaced sibling and missing index: a type can remove them, by
+    `insert` taking a resolved place (a regular container's key and an index) instead of a
+    `Placement` it resolves and may fail to.
+  - `listed_children`'s region pair: the same as `insert`'s (a regular container's key).
+  - `create_root`: none. `delete_subtree`: none (its `NotHeld` returns the forest since fix 2).
 
 **The group forest, slice 5, done (2026-11-26): upstream's traditional and master-stack systems
 deleted.** Three commits after the two of the lead's tasks below; each message has its plants,
