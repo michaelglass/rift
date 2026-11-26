@@ -347,14 +347,15 @@ Geometry := [].{
 					{ low, high, weight: sanitize(item.weight), grows: item.can_grow, fixed }
 				},
 			)
-		fixed_sum = sum(
-			segments.join_map(
-				|segment|
-					match segment.fixed {
-						Fixed(v) => [v]
-						Free => []
-					},
-			),
+		# Sums as `sum` takes them (from -0, in order), over only the segments counted: no list of
+		# them built.
+		fixed_sum = segments.fold(
+			-0.0,
+			|total, segment|
+				match segment.fixed {
+					Fixed(v) => total + v
+					Free => total
+				},
 		)
 		if fixed_sum > usable {
 			scale = usable / fixed_sum
@@ -366,14 +367,13 @@ Geometry := [].{
 					},
 			)
 		} else {
-			min_sum = sum(
-				segments.join_map(
-					|segment|
-						match segment.fixed {
-							Free => [segment.low]
-							Fixed(_) => []
-						},
-				),
+			min_sum = segments.fold(
+				-0.0,
+				|total, segment|
+					match segment.fixed {
+						Free => total + segment.low
+						Fixed(_) => total
+					},
 			)
 			remaining_for_mins = max(usable - fixed_sum, 0.0)
 			scaled =
@@ -392,7 +392,7 @@ Geometry := [].{
 			# Fixed lengths first, in order; then the minima of what cannot grow.
 			(with_fixed, after_fixed) =
 				scaled.fold(
-					([], usable),
+					(List.with_capacity(scaled.len()), usable),
 					|(out, remaining), segment|
 						match segment.fixed {
 							Fixed(v) => {
@@ -405,7 +405,7 @@ Geometry := [].{
 				)
 			(settled, after_minima) =
 				with_fixed.fold(
-					([], after_fixed),
+					(List.with_capacity(with_fixed.len()), after_fixed),
 					|(out, remaining), placed|
 						match (placed.state, placed.segment.fixed, placed.segment.grows) {
 							(Growing, Free, False) => {
@@ -445,9 +445,8 @@ Geometry := [].{
 		var $remaining = remaining0
 		var $going = True
 		while $going and $remaining > epsilon and $placed.any(|p| is_growing(p.state)) {
-			weights = $placed.join_map(|p| if (is_growing(p.state)) [p.segment.weight] else [])
-			count = weights.len().to_f64()
-			total_weight = sum(weights)
+			(growing, total_weight) = $placed.fold((0, -0.0), |(n, total), p| if (is_growing(p.state)) (n + 1, total + p.segment.weight) else (n, total))
+			count = growing.to_f64()
 			remaining = $remaining
 			proposed = |segment| if (total_weight == 0.0) remaining / count else remaining * (segment.weight / total_weight)
 			bounded = |segment| {
@@ -458,7 +457,7 @@ Geometry := [].{
 					}
 				clamp(proposed(segment), segment.low, max(high, segment.low))
 			}
-			total = sum($placed.join_map(|p| if (is_growing(p.state)) [bounded(p.segment)] else []))
+			total = $placed.fold(-0.0, |sum_, p| if (is_growing(p.state)) sum_ + bounded(p.segment) else sum_)
 			tolerance = (remaining * epsilon) * count
 			settle_all = |placed|
 				placed.map(
@@ -485,19 +484,20 @@ Geometry := [].{
 								Set(_) => Keep
 							},
 					)
-				clamped = clamps.join_map(
-					|clamp_|
-						match clamp_ {
-							ClampTo(length) => [length]
-							Keep => []
-						},
-				)
-				if clamped.is_empty() {
+				# Rust adds the assigned lengths to a +0, not `sum`'s -0.
+				(clamped, assigned) =
+					clamps.fold(
+						(0, 0.0),
+						|(n, acc), clamp_|
+							match clamp_ {
+								ClampTo(length) => (n + 1, acc + length)
+								Keep => (n, acc)
+							},
+					)
+				if clamped == 0 {
 					$placed = settle_all($placed)
 					$going = False
 				} else {
-					# Rust adds the assigned lengths to a +0, not `sum`'s -0.
-					assigned = clamped.fold(0.0, |acc, length| acc + length)
 					$remaining = max(remaining - assigned, 0.0)
 					$placed = List.map2(
 						$placed,
