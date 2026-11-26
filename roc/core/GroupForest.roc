@@ -1012,7 +1012,7 @@ GroupForest := [].{
 					}
 					Window(_) => { ..forest, nodes }
 				}
-			NotHeld => forest
+			NotHeld => { ..forest, nodes }
 		}
 	}
 

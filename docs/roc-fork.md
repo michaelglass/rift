@@ -28,6 +28,35 @@ an operation at 1000 windows in one traditional layout) and the Roc layout pass 
 floating's turn (it goes onto the core forest and `GroupLayouts` goes with it). The two Roc
 issue drafts below ("Roc issue drafts") wait for the owner.
 
+**Roc uniqueness: the node-table copies still open (2026-11-26, fix 2 of the lead's three Roc
+cost fixes).** A step that copies the forest's node table pays O(n) per event (about 112 bytes
+a slot: 150 KB at 1000 windows). The rift-core-roc tripwire
+(`the_roc_*_system_steps_without_copying_a_table`: a 400-window forest through 3000 drawn
+steps, failing on a fresh allocation of 64 bytes a slot or more; `take_largest_allocation`, with
+`count-allocations`) holds every step but the known copies, which are stepped and exempt
+(`Twin::known_copy`) and checked by four ignored tests (`--ignored`: two drawn, every step
+checked; two scripted). Fixed: remove, remove-and-rebalance and close_app (our ordering:
+`delete_subtree`'s `NotHeld` branch returned the original forest after its table went to
+`Slots.remove`). Still copying, on the pinned nightly and on nightly-2026-11-25-d5a4f1e:
+traditional `AddWindow` toward a direction; master-stack `CreateLayout`; the forest's
+`RemoveLayout` and `ReplaceWindow`; the edits `Drop`, `Move`, `Rebalance`, `Join`,
+`ConsumeOrExpel`. The bisect of the directional add (13 builds, each variant of
+`traditional_add_window` / `add_window_toward` probed for its largest allocation on a 400-window
+forest), for whoever picks up the repro (the lead's option (b)):
+- no copy: `add_window_under(forest, root(..), w)` then `select_node`; the same with the root
+  bound first; with `(nested, at) = (forest, top)` before it; with a `children(..).is_empty()`
+  or `container_kind(..)` read before it; `set_kind` (or `set_fill`) on the root alone;
+  `set_fill` then `create_root`; `create_root` then `set_window`; the end-of-tree add
+  (`add_window_after_selection`, the same `add_window_under` to the root);
+- copy: `set_kind` or `set_fill` on the root, then `insert(_, Back(root))` (`placement_parent`,
+  `create_root`, `link`); the full directional body with any of `set_kind`, the nesting branch
+  or the final move removed; taking the forest as `system.forest` in the caller or as `system`
+  inside; reading the stamp before the record update in `set_window`; reading `Back`'s index
+  without the children; `Back(key) => Some(key)` without `holds_node`;
+- an earlier variant (the root bound, `add_window_under`, no select) copied where an otherwise
+  equal one did not, so the cause looks like Roc's refcount and borrow inference rather than an
+  ordering in the core; not reduced outside rift yet.
+
 **The group forest, slice 5, done (2026-11-26): upstream's traditional and master-stack systems
 deleted.** Three commits after the two of the lead's tasks below; each message has its plants,
 checks and costs.

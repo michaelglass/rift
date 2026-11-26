@@ -37,7 +37,13 @@ use rift_core::{Effect, Event};
 thread_local! {
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
     static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    static LARGEST: Cell<usize> = const { Cell::new(0) };
 }
+
+/// The largest allocation (or reallocation) Roc asked for on this thread since the last call,
+/// in bytes (with `count-allocations`): the tests' tripwire for a step copying a whole table.
+#[cfg(feature = "count-allocations")]
+pub fn take_largest_allocation() -> usize { LARGEST.with(|largest| largest.replace(0)) }
 
 /// Allocations Roc made and freed on this thread so far (with `count-allocations`, which the
 /// tests turn on).
@@ -71,6 +77,8 @@ pub extern "C" fn roc_alloc(length: usize, alignment: usize) -> NonNull<c_void> 
     debug_assert!(alignment <= 16);
     #[cfg(feature = "count-allocations")]
     ALLOCATIONS.with(|count| count.set(count.get() + 1));
+    #[cfg(feature = "count-allocations")]
+    LARGEST.with(|largest| largest.set(largest.get().max(length)));
     NonNull::new(unsafe { malloc(length) }).unwrap_or_else(|| out_of_memory())
 }
 

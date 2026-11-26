@@ -485,6 +485,11 @@ trait Twin {
     fn forest(&self) -> &Forest;
     /// One of the system's operations, given a live layout (none: the system makes one).
     fn change(&self, rng: &mut Rng, layout: Option<LayoutKey>) -> Self::Event;
+    /// `window` added to `layout`.
+    fn add(layout: LayoutKey, window: u64) -> Self::Event;
+    /// Whether the Roc system still copies a node table on `event` (see the Handoff: Roc
+    /// uniqueness): held by its own ignored test, stepped but not checked by the main one.
+    fn known_copy(event: &Self::Event) -> bool;
     /// A query, the forest's or the system's own.
     fn query(rng: &mut Rng, made: &Made, layout: LayoutKey, held: &[u64]) -> Self::Event;
     /// The Rust system's answer, then the Roc twin's.
@@ -591,6 +596,19 @@ impl Twin for TraditionalTwin {
         }
     }
 
+    fn add(layout: LayoutKey, window: u64) -> Self::Event {
+        TraditionalEvent::AddWindow(layout, window, None)
+    }
+
+    fn known_copy(event: &Self::Event) -> bool {
+        match event {
+            TraditionalEvent::AddWindow(_, _, toward) => toward.is_some(),
+            TraditionalEvent::Forest(forest) => known_forest_copy(forest),
+            TraditionalEvent::Edit(_, edit) => known_edit_copy(edit),
+            _ => false,
+        }
+    }
+
     fn query(rng: &mut Rng, made: &Made, layout: LayoutKey, held: &[u64]) -> Self::Event {
         if rng.chance(15) {
             TraditionalEvent::CanMoveWindow(layout, rng.held(held), rng.direction())
@@ -660,6 +678,19 @@ impl Twin for MasterStackTwin {
             19 => MasterStackEvent::SwapMasterStack(layout),
             20..=31 => MasterStackEvent::Edit(layout, rng.edit(&held)),
             _ => MasterStackEvent::Forest(forest_change(rng, layout, &held)),
+        }
+    }
+
+    fn add(layout: LayoutKey, window: u64) -> Self::Event {
+        MasterStackEvent::AddWindow(layout, window)
+    }
+
+    fn known_copy(event: &Self::Event) -> bool {
+        match event {
+            MasterStackEvent::CreateLayout => true,
+            MasterStackEvent::Forest(forest) => known_forest_copy(forest),
+            MasterStackEvent::Edit(_, edit) => known_edit_copy(edit),
+            _ => false,
         }
     }
 
@@ -934,6 +965,154 @@ fn the_roc_master_stack_system_answers_and_keeps_the_forest_as_the_rust_one_does
     let reached = run::<MasterStackTwin>(0x3A57_E125_0000_0001, runs(3_000), 80);
     println!("master-stack: {reached:?}");
     assert_reached(&reached);
+}
+
+/// The shared operations the Roc forest still copies a node table on (see the Handoff: Roc
+/// uniqueness).
+fn known_forest_copy(event: &ForestEvent) -> bool {
+    matches!(
+        event,
+        ForestEvent::RemoveLayout(_) | ForestEvent::ReplaceWindow { .. }
+    )
+}
+
+/// The edits the Roc forest still copies a node table on (see the Handoff: Roc uniqueness).
+fn known_edit_copy(edit: &Edit<u64>) -> bool {
+    matches!(
+        edit,
+        Edit::Drop { .. }
+            | Edit::Move { .. }
+            | Edit::Rebalance
+            | Edit::Join(_)
+            | Edit::ConsumeOrExpel(_)
+    )
+}
+
+/// A forest of several hundred windows stepped through drawn operations and queries: no step
+/// asks Roc for an allocation anywhere near a node table's size. A table copied because the
+/// forest holding it was still live (its uniqueness lost) makes every window event pay O(n).
+/// The bound, 64 bytes a slot (vacant ones too: a copy copies them), sits under a table copy
+/// (about 112 bytes a slot) and over every list a step builds (a container's children, a
+/// window list: 8 bytes an entry). The steps still known to copy (`Twin::known_copy`) are
+/// stepped but exempt here; the ignored tests below check them.
+fn steps_without_copying_a_table<T: Twin>(seed: u64, known: Known) {
+    let mut rng = Rng(seed);
+    let mut twin = T::new(&mut rng);
+    let (layout, _) = twin.step(twin.change(&mut rng, None));
+    let Answer::Layout(layout) = layout else {
+        panic!("a layout")
+    };
+    for idx in 1..=400 {
+        twin.step(T::add(layout, (7 << 32) | idx));
+    }
+    let mut made = Made::default();
+    for step in 0..3000 {
+        let Some(layout) = rng.pick(&live(twin.forest())) else {
+            let created = twin.change(&mut rng, None);
+            twin.step(created);
+            continue;
+        };
+        let event = if rng.chance(30) {
+            let held = twin.forest().windows(layout, Query::All);
+            T::query(&mut rng, &made, layout, &held)
+        } else {
+            twin.change(&mut rng, Some(layout))
+        };
+        let bound = 64 * twin.forest().nodes().saved().count();
+        rift_core_roc::take_largest_allocation();
+        let (expected, _) = twin.step(event.clone());
+        made.answered(&expected);
+        let largest = rift_core_roc::take_largest_allocation();
+        assert!(
+            (known == Known::Exempt && T::known_copy(&event)) || largest < bound,
+            "step {step}: {event:?} allocated {largest} bytes (bound {bound})"
+        );
+    }
+}
+
+/// Two of the steps the Roc systems still copy a node table on, scripted (a traditional window
+/// added toward a direction, a master-stack layout created): each, on a 400-window forest,
+/// held to the same bound. Fails until the cause (see the Handoff: Roc uniqueness) is found.
+fn known_copies_stay_under_the_bound<T: Twin>(
+    seed: u64,
+    known: impl Fn(LayoutKey) -> Vec<T::Event>,
+) {
+    let mut rng = Rng(seed);
+    let mut twin = T::new(&mut rng);
+    let (layout, _) = twin.step(twin.change(&mut rng, None));
+    let Answer::Layout(layout) = layout else {
+        panic!("a layout")
+    };
+    for idx in 1..=400 {
+        twin.step(T::add(layout, (7 << 32) | idx));
+    }
+    for event in known(layout) {
+        assert!(T::known_copy(&event));
+        let bound = 64 * twin.forest().nodes().saved().count();
+        rift_core_roc::take_largest_allocation();
+        twin.step(event.clone());
+        let largest = rift_core_roc::take_largest_allocation();
+        assert!(
+            largest < bound,
+            "{event:?} allocated {largest} bytes (bound {bound})"
+        );
+    }
+}
+
+#[test]
+#[ignore = "known copy, see Handoff: Roc uniqueness"]
+fn the_roc_traditional_system_adds_toward_a_direction_without_copying_a_table() {
+    known_copies_stay_under_the_bound::<TraditionalTwin>(0x7AB1_E000_0000_0002, |layout| {
+        [
+            Direction::Up,
+            Direction::Left,
+            Direction::Right,
+            Direction::Down,
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(direction, idx)| {
+            TraditionalEvent::AddWindow(layout, (8 << 32) | idx, Some(direction))
+        })
+        .collect()
+    });
+}
+
+#[test]
+#[ignore = "known copy, see Handoff: Roc uniqueness"]
+fn the_roc_master_stack_system_creates_a_layout_without_copying_a_table() {
+    known_copies_stay_under_the_bound::<MasterStackTwin>(0x3AB1_E000_0000_0002, |_| {
+        vec![MasterStackEvent::CreateLayout; 3]
+    });
+}
+
+/// Whether the steps a system still copies a table on are exempt from the bound.
+#[derive(Clone, Copy, PartialEq)]
+enum Known {
+    Exempt,
+    Checked,
+}
+
+#[test]
+fn the_roc_traditional_system_steps_without_copying_a_table() {
+    steps_without_copying_a_table::<TraditionalTwin>(0x7AB1_E000_0000_0001, Known::Exempt);
+}
+
+#[test]
+fn the_roc_master_stack_system_steps_without_copying_a_table() {
+    steps_without_copying_a_table::<MasterStackTwin>(0x3AB1_E000_0000_0001, Known::Exempt);
+}
+
+#[test]
+#[ignore = "known copy, see Handoff: Roc uniqueness"]
+fn the_roc_traditional_system_steps_without_copying_a_table_even_on_known_copies() {
+    steps_without_copying_a_table::<TraditionalTwin>(0x7AB1_E000_0000_0001, Known::Checked);
+}
+
+#[test]
+#[ignore = "known copy, see Handoff: Roc uniqueness"]
+fn the_roc_master_stack_system_steps_without_copying_a_table_even_on_known_copies() {
+    steps_without_copying_a_table::<MasterStackTwin>(0x3AB1_E000_0000_0001, Known::Checked);
 }
 
 /// A focus move entering a stack whose selection stops at it, through a container across the
