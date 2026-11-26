@@ -1529,4 +1529,60 @@ mod tests {
         eprintln!("floating twin: {steps} steps past the drawn systems, no difference");
         assert!(steps > 5000, "the draws reach steps ({steps})");
     }
+
+    /// States only a saved file builds (floating's own operations never make them), loaded and
+    /// stepped through the twin, so the core is held to upstream from each: a stack inside a
+    /// stack (a stored frame shared through the outermost), an aligned window in a group that is
+    /// not a stack (stacking it keeps its remembered frame), and a window at the root with a stale
+    /// frame to return to (joining it into a split forgets it). Written once by upstream's own
+    /// save from hand-built states; the follow-ups reach each state's rule.
+    #[test]
+    fn states_only_a_file_builds_step_through_the_twin() {
+        let load = |text: &str| -> (FloatingLayoutSystem, LayoutId) {
+            let system: FloatingLayoutSystem = ron::from_str(text).unwrap();
+            let layout = system.groups.layout_roots.keys().next().unwrap();
+            (system, layout)
+        };
+        let all = [w(1), w(2), w(3), w(4)];
+
+        let (mut system, layout) = load(include_str!("floating/stack_in_stack.ron"));
+        for (i, window) in all.into_iter().enumerate() {
+            system.store_frame(window, rect(5. + i as f64, 5.));
+            ask_everything(&system, &[layout], &all);
+        }
+        assert_eq!(
+            system.frame(w(3)),
+            system.frame(w(1)),
+            "the outer stack shares the frame"
+        );
+
+        let (mut system, layout) = load(include_str!("floating/aligned_in_split.ron"));
+        system.focus(layout, Focus::Select(w(1)));
+        stack(&mut system, layout);
+        ask_everything(&system, &[layout], &all);
+        assert_eq!(
+            system.geometry[&w(2)].restore,
+            Some(rect(900., 600.)),
+            "the remembered frame kept"
+        );
+        system.edit(
+            layout,
+            LayoutEdit::Group(GroupEdit::Unstack(
+                crate::common::config::default_stack_orientation(),
+            )),
+        );
+        ask_everything(&system, &[layout], &all);
+
+        let (mut system, layout) = load(include_str!("floating/stale_restore_at_root.ron"));
+        system.focus(layout, Focus::Select(w(2)));
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
+        ask_everything(&system, &[layout], &all);
+        assert_eq!(
+            system.geometry[&w(3)].restore,
+            None,
+            "joined into a split, the stale frame is forgotten"
+        );
+        system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin));
+        ask_everything(&system, &[layout], &all);
+    }
 }
