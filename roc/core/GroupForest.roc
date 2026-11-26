@@ -86,17 +86,17 @@ GroupForest := [].{
 				},
 		)
 		{
-			layouts: {
-				slots: seed.layouts.map(
+			layouts: Slots.from_parts(
+				seed.layouts.map(
 					|slot|
 						match slot {
 							Occupied({ version, root: held }) => Occupied({ version, value: held })
 							Vacant(version) => Vacant(version)
 						},
 				),
-				free: seed.layout_free,
-			},
-			nodes: { slots, free: seed.node_free },
+				seed.layout_free,
+			),
+			nodes: Slots.from_parts(slots, seed.node_free),
 			left_out: Set.from_list(seed.left_out),
 			next_stamp: seed.next_stamp,
 		}
@@ -104,22 +104,22 @@ GroupForest := [].{
 
 	forest_view : Forest -> GroupForestSeed
 	forest_view = |forest| {
-		layouts: forest.layouts.slots.map(
+		layouts: Slots.slot_list(forest.layouts).map(
 			|slot|
 				match slot {
 					Occupied({ version, value }) => Occupied({ version, root: value })
 					Vacant(version) => Vacant(version)
 				},
 		),
-		layout_free: forest.layouts.free,
-		nodes: forest.nodes.slots.map(
+		layout_free: Slots.free_indices(forest.layouts),
+		nodes: Slots.slot_list(forest.nodes).map(
 			|slot|
 				match slot {
 					Occupied({ version, value }) => Occupied({ version, node: value })
 					Vacant(version) => Vacant(version)
 				},
 		),
-		node_free: forest.nodes.free,
+		node_free: Slots.free_indices(forest.nodes),
 		left_out: forest.left_out.to_list().sort_with(|a, b| a.order_relative_to(b)),
 		next_stamp: forest.next_stamp,
 	}
@@ -395,6 +395,9 @@ GroupForest := [].{
 
 	# The tree: nodes, their places and contents (`Forest`'s tree section).
 
+	## The node at `key`. The crash on a key the table does not hold stays (here and in
+	## `set_node`, `root`, `set_root`): keys come from the forest itself, and a key type tied to
+	## the table that issued it is not expressible here.
 	node : Forest, U64, Str -> GroupTreeNode
 	node = |forest, key, who|
 		match Slots.get(forest.nodes, key) {

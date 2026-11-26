@@ -43,16 +43,16 @@ StackTree := [].{
 	## `Stacks::from_parts` takes it. The host parses it first.
 	seeded : StackTreeSeed -> Stacks
 	seeded = |seed| {
-		layouts: {
-			slots: seed.layouts.map(
+		layouts: Slots.from_parts(
+			seed.layouts.map(
 				|slot|
 					match slot {
 						Occupied({ version, stack: held }) => Occupied({ version, value: held })
 						Vacant(version) => Vacant(version)
 					},
 			),
-			free: seed.layout_free,
-		},
+			seed.layout_free,
+		),
 		next_node: seed.next_node,
 		settings: seed.settings,
 		left_out: Set.from_list(seed.left_out),
@@ -111,14 +111,14 @@ StackTree := [].{
 
 	view : Stacks -> View
 	view = |stacks| {
-		layouts: stacks.layouts.slots.map(
+		layouts: Slots.slot_list(stacks.layouts).map(
 			|slot|
 				match slot {
 					Occupied({ version, value }) => Occupied({ version, stack: value })
 					Vacant(version) => Vacant(version)
 				},
 		),
-		layout_free: stacks.layouts.free,
+		layout_free: Slots.free_indices(stacks.layouts),
 		next_node: stacks.next_node,
 		settings: stacks.settings,
 		left_out: stacks.left_out.to_list().sort_with(|a, b| a.order_relative_to(b)),

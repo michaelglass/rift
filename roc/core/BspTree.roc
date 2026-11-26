@@ -49,26 +49,26 @@ BspTree := [].{
 	## The host parses it first (slotmap's refusals, the free list naming the vacant slots).
 	seeded : BspTreeSeed -> Trees
 	seeded = |seed| {
-		layouts: {
-			slots: seed.layouts.map(
+		layouts: Slots.from_parts(
+			seed.layouts.map(
 				|slot|
 					match slot {
 						Occupied({ version, root }) => Occupied({ version, value: root })
 						Vacant(version) => Vacant(version)
 					},
 			),
-			free: seed.layout_free,
-		},
-		nodes: {
-			slots: seed.nodes.map(
+			seed.layout_free,
+		),
+		nodes: Slots.from_parts(
+			seed.nodes.map(
 				|slot|
 					match slot {
 						Occupied({ version, node: held }) => Occupied({ version, value: held })
 						Vacant(version) => Vacant(version)
 					},
 			),
-			free: seed.node_free,
-		},
+			seed.node_free,
+		),
 		left_out: Set.from_list(seed.left_out),
 		insertion: seed.insertion,
 		aspect: seed.aspect,
@@ -124,22 +124,22 @@ BspTree := [].{
 
 	view : Trees -> View
 	view = |trees| {
-		layouts: trees.layouts.slots.map(
+		layouts: Slots.slot_list(trees.layouts).map(
 			|slot|
 				match slot {
 					Occupied({ version, value }) => Occupied({ version, root: value })
 					Vacant(version) => Vacant(version)
 				},
 		),
-		layout_free: trees.layouts.free,
-		nodes: trees.nodes.slots.map(
+		layout_free: Slots.free_indices(trees.layouts),
+		nodes: Slots.slot_list(trees.nodes).map(
 			|slot|
 				match slot {
 					Occupied({ version, value }) => Occupied({ version, node: value })
 					Vacant(version) => Vacant(version)
 				},
 		),
-		node_free: trees.nodes.free,
+		node_free: Slots.free_indices(trees.nodes),
 		left_out: trees.left_out.to_list().sort_with(|a, b| a.order_relative_to(b)),
 		insertion: trees.insertion,
 		aspect: trees.aspect,
@@ -317,7 +317,7 @@ BspTree := [].{
 				renamed,
 				|acc, layout| if (contains_window(acc, layout, from)) remove_every(acc, layout, to) else acc,
 			)
-			slots = cleared.nodes.slots.map(
+			slots = Slots.slot_list(cleared.nodes).map(
 				|slot|
 					match slot {
 						Occupied({ version, value: { parent: placed, kind: Leaf({ content: Held(held), preselect }) } }) =>

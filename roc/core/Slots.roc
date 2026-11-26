@@ -6,10 +6,37 @@
 ## One slot: a value under an odd version, or vacant under an even one.
 Slot(v) : [Occupied({ version : U32, value : v }), Vacant(U32)]
 
-Slots(v) := { slots : List(Slot(v)), free : List(U32) }.{
+## A vacant slot on the free list, with the version its next value takes (odd, one past the
+## slot's vacant version): inserting never reads the slot.
+Free : { index : U32, version : U32 }
+
+Slots(v) := { slots : List(Slot(v)), free : List(Free) }.{
 
 	empty : {} -> Slots(v)
 	empty = |{}| { slots: [Vacant(0)], free: [] }
+
+	## A table as the host holds it, parsed once: each free slot's next version read from its
+	## vacant version. The host's table is slotmap's, whose free list names only vacant slots; a
+	## seed naming a held slot is not one, and is refused here, at the boundary.
+	from_parts : List(Slot(v)), List(U32) -> Slots(v)
+	from_parts = |slots, vacated| {
+		freed = |index|
+			match slots.get(index.to_u64()) {
+				Ok(Vacant(vacant)) => { index, version: vacant.bitwise_or(1) }
+				_ => {
+					crash "Slots.from_parts: free slot ${index.to_str()} is not vacant"
+				}
+			}
+		{ slots, free: vacated.map(freed) }
+	}
+
+	## The slots, as the host reads them back.
+	slot_list : Slots(v) -> List(Slot(v))
+	slot_list = |table| table.slots
+
+	## The free list as the host holds it: the vacant slots' indices, the next taken last.
+	free_indices : Slots(v) -> List(U32)
+	free_indices = |table| table.free.map(|freed| freed.index)
 
 	## The key of slot `index` under `version`.
 	key_of : U64, U32 -> U64
@@ -24,15 +51,8 @@ Slots(v) := { slots : List(Slot(v)), free : List(U32) }.{
 	insert : Slots(v), v -> (Slots(v), U64)
 	insert = |table, value|
 		match table.free.last() {
-			Ok(index) => {
+			Ok({ index, version }) => {
 				at = index.to_u64()
-				version =
-					match table.slots.get(at) {
-						Ok(Vacant(vacant)) => vacant.bitwise_or(1)
-						_ => {
-							crash "Slots.insert: free slot ${at.to_str()} is not vacant"
-						}
-					}
 				slots = put(table.slots, at, Occupied({ version, value }))
 				({ slots, free: table.free.drop_last(1) }, key_of(at, version))
 			}
@@ -48,8 +68,9 @@ Slots(v) := { slots : List(Slot(v)), free : List(U32) }.{
 		(index, version) = parts(key)
 		match table.slots.get(index) {
 			Ok(Occupied(held)) if held.version == version => {
-				slots = put(table.slots, index, Vacant(version.plus_wrap(1)))
-				({ slots, free: table.free.append(index.to_u32_wrap()) }, Took(held.value))
+				vacant = version.plus_wrap(1)
+				slots = put(table.slots, index, Vacant(vacant))
+				({ slots, free: table.free.append({ index: index.to_u32_wrap(), version: vacant.bitwise_or(1) }) }, Took(held.value))
 			}
 			_ => (table, NotHeld)
 		}
@@ -75,7 +96,9 @@ Slots(v) := { slots : List(Slot(v)), free : List(U32) }.{
 		}
 	}
 
-	## The slots with slot `index`, one just read, set.
+	## The slots with slot `index`, one just read, set. The out-of-bounds branch stays: every
+	## caller has just read `index` from these slots, but the builtins have no list update that
+	## cannot miss, so the type cannot say so.
 	put : List(Slot(v)), U64, Slot(v) -> List(Slot(v))
 	put = |slots, index, slot|
 		match slots.set(index, slot) {
