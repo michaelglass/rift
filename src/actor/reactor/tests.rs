@@ -2113,6 +2113,54 @@ fn a_suspended_fullscreen_identity_leaves_no_pending_target() {
     );
 }
 
+/// An app's answer to a write is accepted within the ack tolerance (1.5 points) and refused
+/// beyond it: an answer 1 point off clears the target; one 2 points off (between the
+/// tolerance and twice it) is a refusal, the target kept and nothing arranged.
+#[test]
+fn an_answer_two_points_off_a_write_is_a_refusal_and_one_point_off_an_ack() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let shifted = |dx: f64| CGRect::new(CGPoint::new(frame.origin.x + 40.0 + dx, 25.0), frame.size);
+
+    let target = shifted(0.0);
+    reactor.place_window(wid, target);
+    let txid = last_sent(&reactor, wsid);
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        shifted(1.0),
+        Some(txid),
+        Requested(true),
+    ));
+    assert_eq!(
+        reactor.stores.state.tx.target(wsid),
+        None,
+        "1 point off: the write is acked"
+    );
+
+    let target = shifted(60.0);
+    reactor.place_window(wid, target);
+    let txid = last_sent(&reactor, wsid);
+    let answer = shifted(62.0);
+    let outcome = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            answer,
+            Some(txid),
+            Requested(true),
+        ))
+        .unwrap();
+    assert_eq!(
+        reactor.stores.state.tx.target(wsid),
+        Some(target),
+        "2 points off: refused"
+    );
+    assert!(matches!(
+        reactor.stores.state.core.sync(wid),
+        Some(super::reconciler::Sync::Refused { wanted, got, .. })
+            if wanted == target && got == answer
+    ));
+    assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
+}
+
 #[test]
 fn matching_rift_frame_clears_pending_target() {
     let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
