@@ -77,7 +77,7 @@ fn main() {
             let _ = std::fs::remove_dir_all(&work);
         }
         println!(
-            "cargo:warning=rift-core-roc: roc build {:.1} s, roc glue {:.1} s",
+            "cargo:warning=rift-core-roc: roc build {:.1} s, roc glue {:.1} s ({key:016x})",
             built.as_secs_f64(),
             glued.as_secs_f64()
         );
