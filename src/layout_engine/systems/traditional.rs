@@ -250,6 +250,63 @@ mod tests {
         }
     }
 
+    /// `sizes.len()` windows side by side in one layout, each window's weight set, and their
+    /// widths on a 1040-point screen with no gaps.
+    fn widths_for(sizes: &[f32]) -> Vec<f64> {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let windows: Vec<WindowId> = (1..=sizes.len() as u32).map(w).collect();
+        for &window in &windows {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        let sized: Vec<_> = windows
+            .iter()
+            .zip(sizes)
+            .map(|(&window, &size)| (system.leaf(layout, window), size))
+            .collect();
+        system.with_sizes(&sized);
+        let frames = system.calculate_layout(
+            layout,
+            CGRect::new(CGPoint::ZERO, CGSize::new(1040., 800.)),
+            0.0,
+            &HashMap::default(),
+            &Default::default(),
+            Default::default(),
+            crate::layout_engine::Shadow::Run,
+        );
+        windows
+            .iter()
+            .map(|window| frames.iter().find(|(w, _)| w == window).unwrap().1.size.width)
+            .collect()
+    }
+
+    /// Small positive weights, which upstream's comment says splitting and promotion can leave,
+    /// stand: the axis is shared by them (the core once made them equal below 0.05). Was
+    /// `tiles.rs`'s test against upstream's projection; the widths are upstream's.
+    #[test]
+    fn small_positive_weights_stand_as_upstream_reads_them() {
+        assert_eq!(widths_for(&[0.01, 0.03, 1.0]), [10., 30., 1000.]);
+    }
+
+    /// Zero, negative, NaN and infinite weights, as upstream's `layout_axis` read them: a zero
+    /// weight takes nothing; a negative, NaN or infinite one makes the axis equal shares (the
+    /// widths recorded from the core, which `tiles.rs`'s drawn test held to upstream's
+    /// projection bit for bit over 5000 drawn axes of such weights until upstream went; the Roc
+    /// geometry is held to the Rust one on them by rift-core-roc's
+    /// `the_roc_core_tiles_traditional_layouts_as_the_rust_core_does`).
+    #[test]
+    fn degenerate_weights_share_the_axis_as_upstream_read_them() {
+        let equal = [347., 346., 347.];
+        for (sizes, widths) in [
+            ([0.0, 1.0, 1.0], [0., 520., 520.]),
+            ([-0.5, 1.0, 1.0], equal),
+            ([f32::NAN, 1.0, 1.0], equal),
+            ([f32::INFINITY, 1.0, 1.0], equal),
+        ] {
+            assert_eq!(widths_for(&sizes), widths, "weights {sizes:?}");
+        }
+    }
+
     /// A traditional system after random edits: windows added and removed, every focus, splits,
     /// joins, stacks and unstacks, consume-or-expel, moves, drops of every kind, resizes, swaps,
     /// rebalances, orientation toggles, fullscreen of a window or a container, participation.

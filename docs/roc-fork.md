@@ -58,6 +58,19 @@ checks and costs.
   test, holds the shared `decide`). Upstream's unit tests are retargeted to the systems (sizes set
   on the core's forest with `with_sizes`); `stack_legacy.ron` is written by the traditional
   system and its tripwire passes. Plants 11/13, two equivalent (in the commit).
+- **Upstream tests dropped rather than retargeted, and what holds their ground now** (the
+  lead's ask): `tiles.rs`'s `small_positive_weights_stand_as_upstream_reads_them` is kept as a
+  core-against-literal test in `traditional.rs` (same widths); `tiles.rs`'s
+  `the_core_weighs_an_axis_as_upstream_does` (5000 drawn axes of zero, negative, NaN, infinite and
+  huge weights, core against upstream) by `degenerate_weights_share_the_axis_as_upstream_read_them`
+  (literal widths for each kind) and, Rust against Roc, rift-core-roc's
+  `the_roc_core_tiles_traditional_layouts_as_the_rust_core_does` (the same weight draws);
+  both systems' `a_query_answered_otherwise_is_counted_and_fails_tests` and
+  `a_group_forest_divergence_is_counted_and_fails_tests` held the shadow's counter and report,
+  which are gone (nothing left to hold); `measure_*_twin` became `measure_*_system`; the legacy
+  half of master-stack's `region_identity_and_grouping_survive_removal_and_settings_reload` (the
+  regions saved beside the forest, master on the right) by `the_previous_forms_load_into_regions`.
+  Every other upstream test was retargeted, not dropped.
 - **What the forest is held by now:** the rift-core-roc differential (Rust against Roc), the lib's
   traditional and master-stack tests and drawn fuzzers (under `roc-core` every operation held to
   the Roc forest), the fixtures and literal tests.
