@@ -192,17 +192,30 @@ impl<M: Machine> RocForest<M> {
         event: M::Event,
         rust: Answer,
     ) -> Answer {
+        self.decided_under(ON_DIVERGENCE, core, what, event, rust)
+    }
+
+    /// [`Self::decided`], a divergence failing or warned as `policy` says (rift's own policy is
+    /// [`ON_DIVERGENCE`]; a test of the re-seed asks for a warning, so the re-seed is reached).
+    pub(super) fn decided_under(
+        &mut self,
+        policy: OnDivergence,
+        core: &mut M::Core,
+        what: &str,
+        event: M::Event,
+        rust: Answer,
+    ) -> Answer {
         self.steps += 1;
         let machine = self.machine.get_mut();
         let answer = machine.step(event);
         let view_due = view_due(VIEW_ALWAYS, self.steps);
         if answer != rust {
-            report(what, &format!("answers: rust {rust:?}, roc {answer:?}"));
+            report(policy, what, &format!("answers: rust {rust:?}, roc {answer:?}"));
             *core = M::core_of(&machine.view());
         } else if view_due {
             let (roc, held) = (machine.view(), M::view_of(core));
             if roc != held {
-                report(what, &format!("views: rust {held:?}, roc {roc:?}"));
+                report(policy, what, &format!("views: rust {held:?}, roc {roc:?}"));
                 *core = M::core_of(&roc);
             }
         }
@@ -214,7 +227,11 @@ impl<M: Machine> RocForest<M> {
     pub(super) fn asked(&self, what: &str, event: M::Event, rust: Answer) -> Answer {
         let answer = self.machine.borrow_mut().step(event);
         if answer != rust {
-            report(what, &format!("answers: rust {rust:?}, roc {answer:?}"));
+            report(
+                ON_DIVERGENCE,
+                what,
+                &format!("answers: rust {rust:?}, roc {answer:?}"),
+            );
         }
         answer
     }
@@ -304,24 +321,44 @@ impl<M: Machine> RocForest<M> {
 /// difference is reported (the next operation compares the systems).
 fn viewed<A: Debug, R: PartialEq<A> + Debug>(what: &str, rust: R, roc: A) -> A {
     if rust != roc {
-        report(what, &format!("views: rust {rust:?}, roc {roc:?}"));
+        report(
+            ON_DIVERGENCE,
+            what,
+            &format!("views: rust {rust:?}, roc {roc:?}"),
+        );
     }
     roc
 }
 
-/// Counts a difference, then fails the test, or in a running Rift warns it.
-fn report(what: &str, difference: &str) {
+/// What a divergence does: fail (a test) or warn, the caller then re-seeding (a running Rift).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum OnDivergence {
+    Fail,
+    Warn,
+}
+
+/// Rift's policy: a test fails on a divergence, a running Rift warns and re-seeds.
+pub(super) const ON_DIVERGENCE: OnDivergence = if cfg!(test) {
+    OnDivergence::Fail
+} else {
+    OnDivergence::Warn
+};
+
+/// Counts a difference, then fails or warns as `policy` says.
+fn report(policy: OnDivergence, what: &str, difference: &str) {
     let reseeds = RESEEDS.fetch_add(1, Ordering::Relaxed) + 1;
-    #[cfg(test)]
-    panic!("roc-divergence ({reseeds} so far): the group forest after {what}: {difference}");
-    #[cfg(not(test))]
-    tracing::warn!(
-        what,
-        reseeds,
-        difference,
-        "roc-divergence: the Rust group forest differs from the deciding Roc forest; re-seeded \
-         from it"
-    );
+    match policy {
+        OnDivergence::Fail => {
+            panic!("roc-divergence ({reseeds} so far): the group forest after {what}: {difference}")
+        }
+        OnDivergence::Warn => tracing::warn!(
+            what,
+            reseeds,
+            difference,
+            "roc-divergence: the Rust group forest differs from the deciding Roc forest; \
+             re-seeded from it"
+        ),
+    }
 }
 
 impl<M: Machine> Clone for RocForest<M> {

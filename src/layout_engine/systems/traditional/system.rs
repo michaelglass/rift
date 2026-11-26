@@ -1233,6 +1233,53 @@ mod tests {
         assert!(crate::layout_engine::systems::group_forest_reseeds() > before);
     }
 
+    /// Under the running Rift's policy (warn, then go on), an operation the Rust forest answers
+    /// otherwise than the Roc forest re-seeds the Rust forest from the Roc forest's view.
+    #[cfg(feature = "roc-core")]
+    #[test]
+    fn a_different_answer_re_seeds_the_rust_forest_from_the_roc_forest() {
+        use crate::layout_engine::systems::group_roc::{Machine, OnDivergence};
+        let mut system = TraditionalLayoutSystem::default();
+        system.create_layout();
+        // The Roc forest holds a layout more, so its next layout takes another slot.
+        system.roc.machine().step(E::CreateLayout);
+        let rust = system.core.create_layout();
+        let answer = system.roc.decided_under(
+            OnDivergence::Warn,
+            &mut system.core,
+            "create_layout",
+            E::CreateLayout,
+            Answer::Layout(roc::layout_key(rust)),
+        );
+        assert_ne!(answer, Answer::Layout(roc::layout_key(rust)));
+        assert_eq!(RocTraditional::view_of(&system.core), system.roc.view());
+    }
+
+    /// Under the running Rift's policy, an operation answered alike after which the whole
+    /// systems differ (compared on every operation in a test build) re-seeds the Rust forest.
+    #[cfg(feature = "roc-core")]
+    #[test]
+    fn a_different_whole_system_re_seeds_the_rust_forest_from_the_roc_forest() {
+        use crate::layout_engine::systems::group_roc::{Machine, OnDivergence};
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        // The Roc forest holds a window the Rust forest does not.
+        system
+            .roc
+            .machine()
+            .step(E::AddWindow(roc::layout_key(layout), roc::window(w(1)), None));
+        let settings = E::Settings(system.core.insertion(), system.core.new_sibling());
+        let answer = system.roc.decided_under(
+            OnDivergence::Warn,
+            &mut system.core,
+            "set_window_insertion_point",
+            settings,
+            Answer::Done,
+        );
+        assert_eq!(answer, Answer::Done);
+        assert_eq!(RocTraditional::view_of(&system.core), system.roc.view());
+    }
+
     /// The Rust forest re-seeded from the Roc forest's view holds what the Rust forest held, and
     /// allocates and stamps alike after it.
     #[cfg(feature = "roc-core")]
