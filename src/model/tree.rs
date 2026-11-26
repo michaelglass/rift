@@ -3,7 +3,7 @@ use std::ops::{Index, IndexMut};
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
-use crate::actor::app::{WindowId, pid_t};
+use crate::actor::app::WindowId;
 use crate::layout_engine::{LayoutId, LayoutKind};
 use crate::model::selection::SelectionInfo;
 
@@ -17,6 +17,12 @@ pub struct Tree {
 #[derive(Clone, Copy)]
 pub(crate) enum Placement {
     Back(NodeId),
+    /// Only the tree's own tests place before a sibling since upstream's systems were deleted
+    /// (the loads' migrations place at the back or after).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tree's tests place before a sibling")
+    )]
     Before(NodeId),
     After(NodeId),
 }
@@ -94,17 +100,6 @@ impl Tree {
         true
     }
 
-    pub(crate) fn remove(&mut self, node: NodeId) {
-        if let Some(parent) = node.parent(&self.map) {
-            if self.map[parent].is_region_pair() {
-                return;
-            }
-            self.detach(node, parent);
-            self.prune_container(parent);
-        }
-        self.delete_subtree(node);
-    }
-
     fn detach(&mut self, node: NodeId, parent: NodeId) {
         self.map.detach_selection(node);
         self.map.unlink(node);
@@ -139,56 +134,6 @@ impl Tree {
             self.map.map.remove(node);
             node = parent;
         }
-    }
-
-    fn delete_subtree(&mut self, root: NodeId) {
-        let Some(node) = self.map.map.remove(root) else { return };
-        if let Some(window) = node.window() {
-            self.window.remove_node(window, root);
-        }
-        let mut child = node.children().and_then(|children| children.first);
-        while let Some(node) = child {
-            child = node.next_sibling(&self.map);
-            self.delete_subtree(node);
-        }
-    }
-
-    pub(crate) fn clone_branch(&mut self, source: NodeId, layout: LayoutId) -> NodeId {
-        let root = self.copy_tile(source, layout);
-        let mut stack = vec![(source.first_child(&self.map), source, root)];
-        while let Some((next, original_parent, new_parent)) = stack.last_mut() {
-            let Some(old) = *next else {
-                stack.pop();
-                continue;
-            };
-            *next = old.next_sibling(&self.map);
-            let new = self.copy_tile(old, layout);
-            Placement::Back(*new_parent).link(new, *new_parent, &mut self.map);
-            self.map.remap_child_selection(*original_parent, *new_parent, old, new);
-            if let Some(child) = old.first_child(&self.map) {
-                stack.push((Some(child), old, new));
-            }
-        }
-        if let Contents::RegionPair { primary_first, .. } = self.map[source].contents {
-            let first = root.first_child(&self.map).unwrap();
-            let last = root.last_child(&self.map).unwrap();
-            let (primary, secondary) = if primary_first {
-                (first, last)
-            } else {
-                (last, first)
-            };
-            self.map.set_region_pair(root, primary, secondary);
-        }
-        root
-    }
-
-    fn copy_tile(&mut self, source: NodeId, layout: LayoutId) -> NodeId {
-        let node = self.create_root();
-        self.map[node].layout = self.map[source].layout;
-        if let Some(window) = self.map.window(source) {
-            self.window.set_window(&mut self.map, layout, node, window);
-        }
-        node
     }
 }
 
@@ -233,10 +178,6 @@ impl NodeMap {
         } else {
             (last, first)
         })
-    }
-
-    pub(crate) fn children_total(&self, parent: NodeId) -> f32 {
-        parent.children(self).map(|child| self[child].layout.size.max(0.0)).sum()
     }
 
     /// Preserve sibling proportions with a mean weight of one.
@@ -339,14 +280,6 @@ impl NodeId {
         self.prev_sibling(map)
             .map(|node| node.last_descendant(map))
             .or_else(|| self.parent(map))
-    }
-
-    pub(crate) fn step(self, root: NodeId, map: &NodeMap, forward: bool) -> Option<NodeId> {
-        if forward {
-            self.next_in_subtree(root, map)
-        } else {
-            self.prev_in_subtree(root, map)
-        }
     }
 
     pub fn last_descendant(mut self, map: &NodeMap) -> NodeId {
@@ -634,9 +567,6 @@ pub(crate) enum Held {
 
 impl NodeMap {
     /// The slots themselves (the twins' seed reads their versions and free list).
-    /// A map holding these slots (the floating shadow re-seeded from the core).
-    pub(crate) fn of_slots(map: SlotMap<NodeId, Node>) -> Self { Self { map } }
-
     pub(crate) fn slots(&self) -> &SlotMap<NodeId, Node> { &self.map }
 
     /// A node's parent and contents, its children listed in order.
@@ -687,65 +617,10 @@ impl WindowIndex {
             .find(|info| info.layout == layout)
             .map(|info| info.node)
     }
-
-    pub(crate) fn set_window(
-        &mut self,
-        map: &mut NodeMap,
-        layout: LayoutId,
-        node: NodeId,
-        wid: WindowId,
-    ) {
-        assert!(map.window(node).is_none(), "window already assigned to {node:?}");
-        map[node].set_window(wid);
-        self.window_nodes
-            .entry(wid)
-            .or_default()
-            .0
-            .push(WindowNodeInfo { layout, node });
-    }
-
-    pub(crate) fn replace_window(&mut self, map: &mut NodeMap, from: WindowId, to: WindowId) {
-        if from == to {
-            return;
-        }
-        let nodes = self.window_nodes.remove(&from).unwrap_or_default();
-        if nodes.0.is_empty() {
-            return;
-        }
-        for info in &nodes.0 {
-            map[info.node].set_window(to);
-        }
-        self.window_nodes.entry(to).or_default().0.extend(nodes.0);
-    }
-
-    pub(crate) fn take_window(&mut self, wid: WindowId) -> Vec<WindowNodeInfo> {
-        self.window_nodes.remove(&wid).unwrap_or_default().0
-    }
-
-    pub(crate) fn take_nodes_for_app(
-        &mut self,
-        pid: pid_t,
-    ) -> impl Iterator<Item = NodeId> + use<> {
-        use crate::common::collections::BTreeExt;
-        self.window_nodes
-            .remove_all_for_pid(pid)
-            .into_values()
-            .flat_map(|infos| infos.0.into_iter().map(|info| info.node))
-    }
-
-    pub(crate) fn remove_node(&mut self, wid: WindowId, node: NodeId) {
-        if let Some(nodes) = self.window_nodes.get_mut(&wid) {
-            nodes.0.retain(|info| info.node != node);
-            if nodes.0.is_empty() {
-                self.window_nodes.remove(&wid);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::iter;
 
     use super::*;
 
@@ -869,36 +744,6 @@ mod tests {
     }
 
     #[test]
-    fn deep_copy() {
-        let mut t = TestTree::new();
-        {
-            let copied_root = t.tree.clone_branch(t.root, LayoutId::default());
-            let orig_ids = t.root.traverse_preorder(&t.tree.map).collect::<Vec<_>>();
-            let copied_ids = copied_root.traverse_preorder(&t.tree.map).collect::<Vec<_>>();
-            assert_eq!(orig_ids.len(), copied_ids.len());
-            for (orig, copied) in iter::zip(orig_ids, copied_ids) {
-                assert_ne!(orig, copied, "deep_copy reused id {orig:?}");
-                assert_eq!(
-                    orig.parent(&t.tree.map).is_some(),
-                    copied.parent(&t.tree.map).is_some()
-                );
-                assert_eq!(
-                    orig.children(&t.tree.map).count(),
-                    copied.children(&t.tree.map).count()
-                );
-                assert_eq!(
-                    orig.ancestors(&t.tree.map).count(),
-                    copied.ancestors(&t.tree.map).count()
-                );
-            }
-        }
-        {
-            let copied = t.tree.clone_branch(t.child1, LayoutId::default());
-            assert_eq!(0, copied.children(&t.tree.map).count());
-        }
-    }
-
-    #[test]
     fn push_back() {
         let mut t = TestTree::new();
         let child4 = t.tree.insert(Placement::Back(t.root));
@@ -950,31 +795,6 @@ mod tests {
         t.assert_children_are([], t.child3);
         t.assert_children_are([], child4);
         t.assert_children_are([], t.other_root);
-    }
-
-    #[test]
-    fn remove() {
-        let mut t = TestTree::new();
-
-        t.tree.remove(t.child2);
-        t.assert_children_are([t.child1, t.child3], t.root);
-        assert!(!t.tree.map.map.contains_key(t.child2));
-        assert!(!t.tree.map.map.contains_key(t.gc1));
-
-        t.tree.remove(t.child3);
-        t.assert_children_are([t.child1], t.root);
-        assert!(!t.tree.map.map.contains_key(t.child3));
-
-        t.tree.remove(t.child1);
-        t.assert_children_are([], t.root);
-        assert!(!t.tree.map.map.contains_key(t.child1));
-
-        assert!(t.tree.map.map.contains_key(t.root));
-        assert!(t.tree.map.map.contains_key(t.other_root));
-        t.tree.remove(t.root);
-        assert!(!t.tree.map.map.contains_key(t.root));
-        t.tree.remove(t.other_root);
-        assert!(!t.tree.map.map.contains_key(t.other_root));
     }
 
     #[test]

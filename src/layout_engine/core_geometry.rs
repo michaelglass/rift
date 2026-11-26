@@ -463,19 +463,18 @@ pub(crate) fn decide_translation(
     decide("scrolling translation", &question, shadow, upstream, rust, roc)
 }
 
-/// The frames rift gives a floating layout: the core's (the Roc core's under `roc-core`, else the
-/// Rust core's), with the floating system's (`upstream`) the shadow, as [`decide`].
+/// The frames rift gives a floating layout: the core geometry's for the layout's shape (under
+/// `roc-core`, the Roc geometry's, the Rust core's the shadow). The floating system has no
+/// geometry of its own to shadow (upstream's is deleted).
 pub(crate) fn decide_floating(
     layout: rift_core::layout::floating::Layout<WindowId>,
-    shadow: Shadow,
-    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = layout.frames();
     #[cfg(feature = "roc-core")]
     let roc = || rift_core_roc::floating_frames(layout.clone().map(&to_plain));
     #[cfg(not(feature = "roc-core"))]
     let roc = no_roc;
-    decide("floating", &layout, shadow, upstream, rust, roc)
+    decide_unshadowed("floating", &layout, rust, roc)
 }
 
 /// Without `roc-core` there is no Roc core to ask.

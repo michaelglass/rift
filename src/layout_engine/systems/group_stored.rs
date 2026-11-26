@@ -10,16 +10,109 @@ use serde::{Deserialize, Serialize};
 use slotmap::{SecondaryMap, SlotMap};
 
 use super::group_system::{CoreForest, core_kind, layout_kind};
-use super::groups::{GroupLayouts, LayoutRoot, deserialize_tile_tree};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{MasterStackSettings, MasterStackSide};
 use crate::layout_engine::{LayoutId, LayoutKind, Orientation};
-use crate::model::selection::SelectionInfo;
-use crate::model::slot_table::{SavedSlot, SlotTable, of_slotmap, saved, to_slotmap};
+use crate::model::selection::{Selection, SelectionInfo};
+use crate::model::slot_table::{SavedSlot, SlotTable, of_slotmap, saved};
 use crate::model::tree::{
-    self, Held, NodeId, NodeMap, Placement, Tree, WindowIndex, WindowNodeInfo,
+    self, Held, LayoutInfo, NodeId, NodeMap, Placement, Tree, WindowIndex, WindowNodeInfoVec,
 };
+
+/// The forest owns roots. The saved tuple retains compatibility with named root guards.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(
+    try_from = "(Option<NodeId>, String)",
+    into = "(Option<NodeId>, &'static str)"
+)]
+pub(crate) struct LayoutRoot(pub(super) NodeId);
+
+impl TryFrom<(Option<NodeId>, String)> for LayoutRoot {
+    type Error = &'static str;
+
+    fn try_from((root, _): (Option<NodeId>, String)) -> Result<Self, Self::Error> {
+        root.map(Self).ok_or("saved layout has no root")
+    }
+}
+
+impl From<LayoutRoot> for (Option<NodeId>, &'static str) {
+    fn from(root: LayoutRoot) -> Self { (Some(root.0), "layout_root") }
+}
+
+/// The old tree in any form a saved file holds (upstream's `GroupLayouts` reader: the current
+/// form, and the legacy one with its layout, selection and window maps beside the nodes).
+pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Tree, D::Error> {
+    #[derive(Deserialize, Default)]
+    struct LegacyLayout {
+        info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
+    }
+    #[derive(Deserialize)]
+    struct StoredIndex {
+        #[serde(default)]
+        windows: slotmap::SecondaryMap<NodeId, WindowId>,
+        window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
+    }
+    #[derive(Deserialize)]
+    struct StoredData {
+        #[serde(default)]
+        selection: Selection,
+        #[serde(default)]
+        layout: LegacyLayout,
+        window: StoredIndex,
+    }
+    #[derive(Deserialize)]
+    struct StoredTree {
+        map: NodeMap,
+        #[serde(default, deserialize_with = "super::present")]
+        data: Option<StoredData>,
+        #[serde(default, deserialize_with = "super::present")]
+        window: Option<WindowIndex>,
+    }
+    let StoredTree { mut map, data, window } = StoredTree::deserialize(deserializer)?;
+    let Some(data) = data else {
+        return Ok(Tree {
+            map,
+            window: window.unwrap_or_default(),
+        });
+    };
+    for (node, layout) in data.layout.info {
+        if !map.contains(node) {
+            return Err(serde::de::Error::custom(
+                "layout metadata references a missing node",
+            ));
+        }
+        map[node].layout = layout;
+    }
+    for (node, selection) in &data.selection.nodes {
+        if !map.contains(node)
+            || map.window(node).is_some()
+            || data.selection.last_selection(node).and_then(|child| child.parent(&map))
+                != Some(node)
+        {
+            return Err(serde::de::Error::custom(
+                "layout selection references an invalid child",
+            ));
+        }
+        *map[node].selection_mut() = Some(*selection);
+    }
+    for (node, window) in data.window.windows {
+        if !map.contains(node) || node.first_child(&map).is_some() {
+            return Err(serde::de::Error::custom(
+                "layout window references an invalid leaf",
+            ));
+        }
+        map[node].set_window(window);
+    }
+    Ok(Tree {
+        map,
+        window: WindowIndex {
+            window_nodes: data.window.window_nodes,
+        },
+    })
+}
 
 /// The forest as upstream's `GroupLayouts` is saved (its derived form: the tree, then the layout
 /// roots).
@@ -193,38 +286,6 @@ impl Saved {
     }
 }
 
-/// Upstream's forest built from the core's (the floating shadow re-seeded): the same slots,
-/// versions and free lists, the index in the core's order, the windows left out.
-pub(super) fn upstream_tiles(forest: &CoreForest) -> GroupLayouts {
-    let siblings = siblings(forest);
-    let nodes: SlotMap<NodeId, tree::Node> = to_slotmap(
-        forest.nodes(),
-        |key, node| saved_node(node, siblings.get(&key).copied().unwrap_or_default()),
-        tree::Node::default(),
-    );
-    let mut window = WindowIndex::default();
-    for (id, layout, node) in forest.index() {
-        window
-            .window_nodes
-            .entry(id)
-            .or_default()
-            .0
-            .push(WindowNodeInfo { layout, node });
-    }
-    GroupLayouts {
-        inactive: forest.left_out().iter().copied().collect(),
-        tree: Tree {
-            map: NodeMap::of_slots(nodes),
-            window,
-        },
-        layout_roots: to_slotmap(
-            forest.layout_table(),
-            |_, &root| LayoutRoot(root),
-            LayoutRoot(NodeId::default()),
-        ),
-    }
-}
-
 /// The forest as rift saves it (upstream's `GroupLayouts`: the tree, in any form the old tree
 /// reads, then the layout roots), parsed.
 #[derive(Deserialize)]
@@ -390,8 +451,8 @@ impl StoredMasterStack {
 /// The window a layout's selection leads to (none taking part is left out at a load).
 fn focused_window(map: &NodeMap, root: NodeId) -> Option<WindowId> {
     let selection = map.current_selection(root);
-    map.focus_target(selection, &|_| true)
-        .or_else(|| (selection != root).then(|| map.focus_target(root, &|_| true)).flatten())
+    focus_target(map, selection)
+        .or_else(|| (selection != root).then(|| focus_target(map, root)).flatten())
         .map(|(_, window)| window)
 }
 
@@ -419,7 +480,7 @@ fn region_containers(
         Orientation::Horizontal => Orientation::Vertical,
         Orientation::Vertical => Orientation::Horizontal,
     };
-    tree.map.set_kind(root, LayoutKind::from(root_orientation));
+    set_kind(&mut tree.map, root, LayoutKind::from(root_orientation));
     let first = tree.insert(Placement::Back(root));
     let second = tree.insert(Placement::Back(root));
     let (master, stack) = if master_first {
@@ -427,11 +488,13 @@ fn region_containers(
     } else {
         (second, first)
     };
-    tree.map.set_kind(
+    set_kind(
+        &mut tree.map,
         master,
         LayoutKind::from(settings.master_arrangement.unwrap_or(across)),
     );
-    tree.map.set_kind(
+    set_kind(
+        &mut tree.map,
         stack,
         LayoutKind::from(settings.stack_arrangement.unwrap_or(across)),
     );
@@ -525,5 +588,47 @@ impl Loaded {
     /// The loaded forest as the core holds it (no window is left out at a load).
     pub(super) fn forest(&self) -> CoreForest {
         forest_of(&self.tree, &self.layout_roots, &self.stamps, [])
+    }
+}
+
+/// The first window under `node`, each container's last selection first (upstream's
+/// `focus_target` with every window taking part): a load's focused window.
+pub(in crate::layout_engine::systems) fn focus_target(
+    map: &NodeMap,
+    node: NodeId,
+) -> Option<(NodeId, WindowId)> {
+    if let Some(window) = map.window(node) {
+        return Some((node, window));
+    }
+    let preferred = map.last_selection(node);
+    let rest = std::iter::successors(node.first_child(map), |child| child.next_sibling(map))
+        .filter(|&child| Some(child) != preferred);
+    preferred.into_iter().chain(rest).find_map(|child| focus_target(map, child))
+}
+
+/// A node's layout kind set (a load migrating master-stack's older forms).
+fn set_kind(map: &mut NodeMap, node: NodeId, kind: LayoutKind) { map[node].layout.kind = kind; }
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use crate::model::tree::Placement;
+
+    /// A load's focused window: under a container, its last selection's first window, not
+    /// the first child's.
+    #[test]
+    fn a_loads_focus_goes_through_each_containers_last_selection() {
+        let mut tree = Tree::default();
+        let root = tree.create_root();
+        let first = tree.insert(Placement::Back(root));
+        let second = tree.insert(Placement::Back(root));
+        tree.map[first].set_window(WindowId::new(1, 1));
+        tree.map[second].set_window(WindowId::new(1, 2));
+        assert_eq!(focus_target(&tree.map, root), Some((first, WindowId::new(1, 1))));
+        tree.map.select(second);
+        assert_eq!(
+            focus_target(&tree.map, root),
+            Some((second, WindowId::new(1, 2)))
+        );
     }
 }

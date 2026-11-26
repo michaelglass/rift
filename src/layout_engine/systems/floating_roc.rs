@@ -7,7 +7,7 @@
 //! release build. A difference is counted ([`floating_roc_reseeds`]), fails a test, or in a
 //! running Rift warns `roc-divergence:`; an operation's re-seeds the core's system from the Roc
 //! system's view (a query's or a view's is only reported: the next operation compares the
-//! systems). Upstream's system stays the core's own shadow until it is deleted.
+//! systems).
 
 use std::cell::RefCell;
 use std::fmt::Debug;
@@ -19,7 +19,7 @@ use rift_core::layout::{Gaps, WindowConstraints};
 use rift_core_roc::RocFloating;
 use rift_core_roc::group_forest::{Answer, FloatingAnswer, FloatingEvent, FloatingView};
 
-use super::floating_twin::CoreFloating;
+use super::floating::CoreFloating;
 use super::group_roc::{forest_view, layout_key, node_id, rift_view, window, window_id, windows};
 use crate::actor::app::WindowId;
 use crate::layout_engine::LayoutId;

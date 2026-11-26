@@ -1,18 +1,23 @@
-//! The floating layout system: the core's floating system decides and is saved (layout trees,
-//! floating's step 3, policy (a)); under `roc-core` the Roc floating system decides and the
-//! core's is its shadow (`floating_roc`, step 4), saving still from the core. Upstream's system
-//! ([`upstream::Upstream`]) is the core's shadow,
-//! stepped on every operation, its answers held to the core's on every operation and its whole
-//! state on every operation in tests and debug builds and every 32nd otherwise. A difference is
-//! counted, fails a test, or warns `floating-divergence:` and re-seeds the shadow from the core
-//! (the deciding side stands). Saving writes the core in upstream's form; a load goes through
-//! upstream's load and seeds the core.
+//! The floating layout system: the core's floating system (`group_forest::FloatingSystem`)
+//! decides and is saved, in upstream's form (layout trees, floating's steps 3 and 5: upstream's
+//! system and its tree, `GroupLayouts`, are deleted). Under `roc-core` the Roc floating system
+//! decides and the core's is its shadow (`floating_roc`), saving still from the core. A load
+//! reads the forest as rift saves it (`group_stored::StoredForest`, normalized as the other
+//! group systems' loads are), and each window's frames in either form a file holds.
 
-mod upstream;
+use std::collections::BTreeMap;
 
+use objc2_core_foundation::CGRect;
+#[cfg(test)]
+use objc2_core_foundation::{CGPoint, CGSize};
+use rift_core::layout::floating::Floating;
+use rift_core::layout::group_forest::{FloatingSystem, Geometry};
 #[cfg(feature = "roc-core")]
 use rift_core_roc::group_forest::{Answer, FloatingAnswer as RocAnswer, FloatingEvent as RocEvent};
+use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use super::GroupEdit;
 #[cfg(feature = "roc-core")]
 use super::bsp::roc_tree::{
     as_edited, as_focused, as_layout, as_participated, as_slot, as_verdict, as_window, as_windows,
@@ -23,6 +28,26 @@ use super::floating_roc::{
 };
 #[cfg(feature = "roc-core")]
 use super::group_roc::known;
+use super::group_stored::{Saved, StoredForest};
+use super::group_system::{
+    container_node, core_edit, core_focus, core_query, edit_result, focus_result, layout_kind,
+    participation,
+};
+use super::{
+    EditResult, Focus, FocusResult, LayoutEdit, LayoutSystem, WindowChange,
+    WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
+};
+use crate::actor::app::{WindowId, pid_t};
+use crate::common::collections::HashMap;
+use crate::common::config::WindowInsertionPoint;
+use crate::layout_engine::core_geometry::{cg_rect, core_constraints, core_gaps, core_rect};
+use crate::layout_engine::{Direction, LayoutId};
+use crate::model::tree::NodeId;
+
+/// The core's floating system over rift's ids.
+pub(super) type CoreFloating = FloatingSystem<LayoutId, NodeId, WindowId>;
+
+const SYSTEM: &str = "floating";
 
 #[cfg(feature = "roc-core")]
 fn roc_layout(layout: LayoutId) -> rift_core_roc::group_forest::LayoutKey {
@@ -38,43 +63,54 @@ fn app_words(core: &CoreFloating, pid: pid_t) -> Vec<u64> {
     super::group_roc::app_windows(core.forest(), |window| window.pid == pid)
 }
 
-use std::collections::BTreeMap;
+/// A window's frames as a saved file holds them (upstream's `FloatingGeometry`): the frame the
+/// layout keeps, and the frame to return to.
+#[serde_with::serde_as]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+struct SavedFrames {
+    #[serde_as(as = "Option<crate::sys::geometry::CGRectDef>")]
+    frame: Option<CGRect>,
+    #[serde_as(as = "Option<crate::sys::geometry::CGRectDef>")]
+    restore: Option<CGRect>,
+}
 
-use objc2_core_foundation::CGRect;
-#[cfg(test)]
-use objc2_core_foundation::{CGPoint, CGSize};
-use rift_core::layout::floating::Floating;
-use serde::{Deserialize, Serialize};
-pub(super) use upstream::Upstream;
+/// A floating system as rift saves it (upstream's `FloatingLayoutSystem`: the forest as
+/// `inner`, each window's frames, whether first frames spread), or as older files do: the frames
+/// in two maps (`frames`, `independent_frames`, the frame to return to). Settings are not saved.
+#[serde_with::serde_as]
+#[derive(Deserialize)]
+struct StoredFloating {
+    inner: StoredForest,
+    #[serde(default)]
+    geometry: HashMap<WindowId, SavedFrames>,
+    #[serde(default)]
+    #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
+    frames: HashMap<WindowId, CGRect>,
+    #[serde(default)]
+    #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
+    independent_frames: HashMap<WindowId, CGRect>,
+    #[serde(default)]
+    spread_on_initialization: bool,
+}
 
-#[cfg(test)]
-use super::GroupEdit;
-use super::floating_twin::{CoreFloating, Shadow, held, seed};
-use super::group_stored::{Saved, upstream_tiles};
-use super::group_system::{
-    container_node, core_edit, core_focus, core_query, edit_result, focus_result, layout_kind,
-    participation,
-};
-use super::{
-    EditResult, Focus, FocusResult, LayoutEdit, LayoutSystem, WindowChange,
-    WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
-};
-use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashMap;
-use crate::common::config::WindowInsertionPoint;
-use crate::layout_engine::core_geometry::{cg_rect, core_constraints, core_gaps, core_rect};
-use crate::layout_engine::{Direction, LayoutId, LayoutKind};
-use crate::model::tree::NodeId;
+/// The core in upstream's saved form: the forest as `inner`, each window's frames (by window: a
+/// save is the same bytes for the same system), whether first frames spread.
+#[derive(Serialize)]
+#[serde(rename = "FloatingLayoutSystem")]
+struct SavedFloating {
+    inner: Saved,
+    geometry: BTreeMap<WindowId, SavedFrames>,
+    spread_on_initialization: bool,
+}
 
-/// The floating layout system: the core's, its settings, and upstream's beside it.
+/// The floating layout system: the core's, and its settings.
 #[derive(Debug)]
 pub struct FloatingLayoutSystem {
     core: CoreFloating,
     insertion: WindowInsertionPoint,
     /// Whether the next first frames of a layout spread out (cleared once they are placed).
     spread_on_initialization: bool,
-    shadow: Shadow,
-    /// Under `roc-core`, the Roc floating system beside the core's.
+    /// Under `roc-core`, the deciding Roc floating system (the core's is then its shadow).
     #[cfg(feature = "roc-core")]
     roc: FloatingRoc,
 }
@@ -83,52 +119,37 @@ impl Default for FloatingLayoutSystem {
     fn default() -> Self { Self::new(WindowInsertionPoint::default()) }
 }
 
-/// A load goes through upstream's (its forms and its legacy maps); the core is seeded from it.
 impl<'de> Deserialize<'de> for FloatingLayoutSystem {
+    /// A saved system: the core built from the loaded forest and frames (the older form's two
+    /// maps merged as upstream's load merged them), with the default insertion point until rift
+    /// applies its config.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let upstream = Upstream::deserialize(deserializer)?;
-        let core = seed(&upstream.groups, upstream.frame_pairs());
-        Ok(Self {
-            #[cfg(feature = "roc-core")]
-            roc: FloatingRoc::seeded(&core),
+        let stored = StoredFloating::deserialize(deserializer)?;
+        let mut frames = stored.geometry;
+        for (window, frame) in stored.frames {
+            frames.entry(window).or_default().frame = Some(frame);
+        }
+        for (window, frame) in stored.independent_frames {
+            frames.entry(window).or_default().restore = Some(frame);
+        }
+        let geometry = frames
+            .into_iter()
+            .filter_map(|(window, saved)| {
+                Geometry::from_pair(saved.frame.map(core_rect), saved.restore.map(core_rect))
+                    .map(|geometry| (window, geometry))
+            })
+            .collect();
+        let core = CoreFloating::from_parts(stored.inner.normalized(SYSTEM).forest(), geometry);
+        Ok(Self::of(
             core,
-            insertion: upstream.insertion,
-            spread_on_initialization: upstream.spread_on_initialization,
-            shadow: Shadow::of(upstream),
-        })
+            WindowInsertionPoint::default(),
+            stored.spread_on_initialization,
+        ))
     }
-}
-
-/// The core in upstream's saved form: the forest as `inner`, each window's frames (by window),
-/// whether first frames spread.
-#[derive(Serialize)]
-#[serde(rename = "FloatingLayoutSystem")]
-struct SavedFloating {
-    inner: Saved,
-    geometry: BTreeMap<WindowId, upstream::FloatingGeometry>,
-    spread_on_initialization: bool,
 }
 
 impl Serialize for FloatingLayoutSystem {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.saved().serialize(serializer)
-    }
-}
-
-impl FloatingLayoutSystem {
-    pub fn new(point: WindowInsertionPoint) -> Self {
-        let core = CoreFloating::default();
-        Self {
-            #[cfg(feature = "roc-core")]
-            roc: FloatingRoc::seeded(&core),
-            core,
-            insertion: point,
-            spread_on_initialization: false,
-            shadow: Shadow::of(Upstream::new(point)),
-        }
-    }
-
-    fn saved(&self) -> SavedFloating {
         SavedFloating {
             inner: Saved::of(self.core.forest()),
             geometry: self
@@ -136,7 +157,7 @@ impl FloatingLayoutSystem {
                 .geometry()
                 .iter()
                 .map(|(&window, geometry)| {
-                    (window, upstream::FloatingGeometry {
+                    (window, SavedFrames {
                         frame: geometry.frame().map(cg_rect),
                         restore: geometry.restore().map(cg_rect),
                     })
@@ -144,53 +165,46 @@ impl FloatingLayoutSystem {
                 .collect(),
             spread_on_initialization: self.spread_on_initialization,
         }
+        .serialize(serializer)
+    }
+}
+
+impl FloatingLayoutSystem {
+    pub fn new(point: WindowInsertionPoint) -> Self {
+        Self::of(CoreFloating::default(), point, false)
     }
 
-    /// The shadow made the core again: the forest with the same slots, versions and free lists
-    /// (so the ids each allocates next agree), the frames, the settings.
-    fn reseed_shadow(&mut self) {
-        let mut upstream = Upstream::new(self.insertion);
-        upstream.groups = upstream_tiles(self.core.forest());
-        upstream.geometry = self.saved().geometry.into_iter().collect();
-        upstream.spread_on_initialization = self.spread_on_initialization;
-        self.shadow = Shadow::of(upstream);
+    fn of(core: CoreFloating, insertion: WindowInsertionPoint, spread: bool) -> Self {
+        Self {
+            #[cfg(feature = "roc-core")]
+            roc: FloatingRoc::seeded(&core),
+            core,
+            insertion,
+            spread_on_initialization: spread,
+        }
+    }
+
+    /// The core's system set by hand (a test): the Roc system is seeded from it.
+    #[cfg(test)]
+    fn set_core(&mut self, core: CoreFloating) {
         #[cfg(feature = "roc-core")]
         {
-            self.roc = FloatingRoc::seeded(&self.core);
+            self.roc = FloatingRoc::seeded(&core);
         }
+        self.core = core;
     }
 
-    /// An operation the core took (answering `rust`): under `roc-core`, the Roc system takes it.
+    /// An operation the core took (answering `rust`): under `roc-core`, the Roc system takes it
+    /// and decides (a difference re-seeds the core).
     #[cfg(feature = "roc-core")]
     fn roc_stepped(&mut self, what: &str, event: RocEvent, rust: RocAnswer) -> RocAnswer {
-        let (answer, reseeded) = self.roc.decided(&mut self.core, what, event, rust);
-        if reseeded {
-            self.reseed_shadow();
-        }
-        answer
+        self.roc.decided(&mut self.core, what, event, rust).0
     }
 
-    /// A query the core answered (`rust`): under `roc-core`, the Roc system's answer held to it.
+    /// A query the core answered (`rust`): under `roc-core`, the Roc system answers.
     #[cfg(feature = "roc-core")]
     fn roc_asked(&self, what: &str, event: RocEvent, rust: RocAnswer) -> RocAnswer {
         self.roc.asked(what, event, rust)
-    }
-
-    /// After an operation both took: the whole systems compared when due; the shadow re-seeded
-    /// from the core on a difference.
-    fn settle(&mut self, what: &str) {
-        if self.shadow.differs(what, &self.core) {
-            self.reseed_shadow();
-        }
-    }
-
-    /// An answer: the core's, upstream's held to it (a difference re-seeds the shadow).
-    fn decided<T: PartialEq + std::fmt::Debug>(&mut self, what: &str, core: T, upstream: T) -> T {
-        if core != upstream {
-            super::floating_twin::report(what, &format!("core {core:?}, upstream {upstream:?}"));
-            self.reseed_shadow();
-        }
-        core
     }
 
     fn floating(&self, screen: CGRect) -> Floating {
@@ -202,51 +216,30 @@ impl FloatingLayoutSystem {
 
     pub fn set_window_insertion_point(&mut self, point: WindowInsertionPoint) {
         self.insertion = point;
-        self.shadow.upstream_mut().set_window_insertion_point(point);
     }
 
-    pub(crate) fn spread_initial_windows(&mut self) {
-        self.spread_on_initialization = true;
-        self.shadow.upstream_mut().spread_initial_windows();
-    }
+    pub(crate) fn spread_initial_windows(&mut self) { self.spread_on_initialization = true; }
 
-    /// rift-cli's drawing of the layout (the core's; upstream's held to it).
+    /// rift-cli's drawing of the layout.
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        let drawn = held(
-            "draw_tree",
-            self.core.forest().draw(layout),
-            self.shadow.upstream().groups.draw_tree(layout, &[]),
-        );
         #[cfg(feature = "roc-core")]
-        let drawn = {
-            let rows = self.roc.rows(layout, &self.core.forest().rows(layout));
-            held(
-                "draw_tree",
-                rift_core::layout::group_forest::render(&rows),
-                drawn,
-            )
-        };
-        drawn
+        return rift_core::layout::group_forest::render(
+            &self.roc.rows(layout, &self.core.forest().rows(layout)),
+        );
+        #[cfg(not(feature = "roc-core"))]
+        self.core.forest().draw(layout)
     }
 
+    /// rift-cli's container view of the layout.
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         let view = self.core.forest().container_view(layout);
-        held(
-            "container_tree",
-            container_node(view.clone()),
-            self.shadow.upstream().groups.container_tree(layout),
-        );
         #[cfg(feature = "roc-core")]
         let view = self.roc.container_view(layout, &view);
         container_node(view)
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        let core = held(
-            "window_slot",
-            self.core.forest().window_slot(layout, window),
-            self.shadow.upstream().groups.window_slot(layout, window),
-        );
+        let core = self.core.forest().window_slot(layout, window);
         #[cfg(feature = "roc-core")]
         let core = decided(
             self.roc_asked(
@@ -264,14 +257,13 @@ impl FloatingLayoutSystem {
         &self,
         layout: LayoutId,
         screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
+        _gaps: &crate::common::config::GapSettings,
         selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         let bars = self.core.group_bars(layout, self.floating(screen), selection_path_only);
         #[cfg(feature = "roc-core")]
         let bars = self.roc.group_bars(layout, self.floating(screen), selection_path_only, &bars);
-        let core: Vec<_> = bars
-            .into_iter()
+        bars.into_iter()
             .map(|bar| crate::layout_engine::engine::GroupContainerInfo {
                 node_id: bar.stack,
                 container_kind: layout_kind(rift_core::layout::group_forest::Kind::Stack(
@@ -282,19 +274,7 @@ impl FloatingLayoutSystem {
                 selected_index: bar.selected,
                 window_ids: bar.windows,
             })
-            .collect();
-        let upstream = self.shadow.upstream().collect_group_containers(
-            layout,
-            screen,
-            gaps,
-            selection_path_only,
-        );
-        held(
-            "collect_group_containers",
-            core.iter().map(bar_words).collect::<Vec<BarWords>>(),
-            upstream.iter().map(bar_words).collect(),
-        );
-        core
+            .collect()
     }
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -309,11 +289,7 @@ impl FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_windows),
             core,
         );
-        held(
-            "cycle_windows",
-            core,
-            self.shadow.upstream().cycle_windows(layout),
-        )
+        core
     }
 
     pub(crate) fn initialize_frames(
@@ -346,20 +322,12 @@ impl FloatingLayoutSystem {
             |window| get_frame(window).map(core_rect),
         );
         self.spread_on_initialization = false;
-        self.shadow
-            .upstream_mut()
-            .initialize_frames(layout, screen, constraints, get_frame);
-        self.settle("initialize_frames");
         #[cfg(feature = "roc-core")]
         self.roc_stepped("initialize_frames", asked, tree(Answer::Done));
     }
 
     pub fn frame(&self, wid: WindowId) -> Option<CGRect> {
-        let core = held(
-            "frame",
-            self.core.frame(wid),
-            self.shadow.upstream().frame(wid).map(core_rect),
-        );
+        let core = self.core.frame(wid);
         #[cfg(feature = "roc-core")]
         let core = decided(
             self.roc_asked(
@@ -375,8 +343,6 @@ impl FloatingLayoutSystem {
 
     pub fn store_frame(&mut self, wid: WindowId, frame: CGRect) {
         self.core.store_frame(wid, core_rect(frame));
-        self.shadow.upstream_mut().store_frame(wid, frame);
-        self.settle("store_frame");
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "store_frame",
@@ -397,14 +363,10 @@ impl FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "contains_floating_window",
-            core,
-            self.shadow.upstream().contains_floating_window(wid),
-        )
+        core
     }
 
-    /// A floating layout as the core's geometry takes it.
+    /// A floating layout as the floating geometry takes it.
     pub(crate) fn shape(
         &self,
         layout: LayoutId,
@@ -415,11 +377,6 @@ impl FloatingLayoutSystem {
         let core = self.core.shape(layout, self.floating(screen), core_gaps(gaps), |window| {
             core_constraints(constraints.get(&window).copied().unwrap_or_default())
         });
-        let core = held(
-            "shape",
-            core,
-            self.shadow.upstream().shape(layout, screen, constraints, gaps),
-        );
         #[cfg(feature = "roc-core")]
         let core = self.roc.shape(
             layout,
@@ -445,29 +402,22 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "window_participates",
-            core,
-            self.shadow.upstream().window_participates(window),
-        )
+        core
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
         let core = self.core.set_window_participation(window, participation(participates));
-        let upstream = self.shadow.upstream_mut().set_window_participation(window, participates);
-        let answer = self.decided("set_window_participation", core, upstream);
-        self.settle("set_window_participation");
         #[cfg(feature = "roc-core")]
-        let answer = decided(
+        let core = decided(
             self.roc_stepped(
                 "set_window_participation",
                 RocEvent::Participation(roc_window(window), participation(participates)),
-                tree(Answer::Participated(answer)),
+                tree(Answer::Participated(core)),
             ),
             |answer| as_tree(answer).and_then(as_participated),
-            answer,
+            core,
         );
-        answer
+        core
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool {
@@ -482,11 +432,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "contains_layout",
-            core,
-            self.shadow.upstream().contains_layout(layout),
-        )
+        core
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -501,11 +447,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_window),
             core,
         );
-        held(
-            "selected_window",
-            core,
-            self.shadow.upstream().selected_window(layout),
-        )
+        core
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
@@ -520,11 +462,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "selection_contains_window",
-            core,
-            self.shadow.upstream().selection_contains_window(layout, window),
-        )
+        core
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
@@ -539,11 +477,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "contains_window",
-            core,
-            self.shadow.upstream().contains_window(layout, wid),
-        )
+        core
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
@@ -558,53 +492,41 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "has_any_fullscreen_node",
-            core,
-            self.shadow.upstream().has_any_fullscreen_node(layout),
-        )
+        core
     }
 
     fn create_layout(&mut self) -> LayoutId {
         let core = self.core.create_layout();
-        let upstream = self.shadow.upstream_mut().create_layout();
-        let answer = self.decided("create_layout", core, upstream);
-        self.settle("create_layout");
         #[cfg(feature = "roc-core")]
-        let answer = decided(
+        let core = decided(
             self.roc_stepped(
                 "create_layout",
                 RocEvent::CreateLayout,
-                tree(Answer::Layout(roc_layout(answer))),
+                tree(Answer::Layout(roc_layout(core))),
             ),
             |answer| as_tree(answer).and_then(as_layout),
-            answer,
+            core,
         );
-        answer
+        core
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let core = self.core.clone_layout(layout);
-        let upstream = self.shadow.upstream_mut().clone_layout(layout);
-        let answer = self.decided("clone_layout", core, upstream);
-        self.settle("clone_layout");
         #[cfg(feature = "roc-core")]
-        let answer = decided(
+        let core = decided(
             self.roc_stepped(
                 "clone_layout",
                 RocEvent::CloneLayout(roc_layout(layout)),
-                tree(Answer::Layout(roc_layout(answer))),
+                tree(Answer::Layout(roc_layout(core))),
             ),
             |answer| as_tree(answer).and_then(as_layout),
-            answer,
+            core,
         );
-        answer
+        core
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
         self.core.remove_layout(layout);
-        self.shadow.upstream_mut().remove_layout(layout);
-        self.settle("remove_layout");
         #[cfg(feature = "roc-core")]
         self.roc_stepped(
             "remove_layout",
@@ -613,8 +535,8 @@ impl LayoutSystem for FloatingLayoutSystem {
         );
     }
 
-    /// The core geometry's frames for the core's shape (policy (a)); upstream's own frames
-    /// ([`Upstream::shadow_frames`]) are their shadow, upstream's shape held to the core's.
+    /// The frames of the layout's shape through the floating geometry (under `roc-core`, the
+    /// Roc system's shape through the Roc geometry, the Rust core's frames the shadow).
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -623,13 +545,14 @@ impl LayoutSystem for FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
-        shadow: crate::layout_engine::Shadow,
+        _shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
-        crate::layout_engine::core_geometry::decide_floating(
-            self.shape(layout, screen, constraints, gaps),
-            shadow,
-            || self.shadow.upstream().shadow_frames(layout, screen, constraints, gaps),
-        )
+        crate::layout_engine::core_geometry::decide_floating(self.shape(
+            layout,
+            screen,
+            constraints,
+            gaps,
+        ))
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -644,11 +567,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_window),
             core,
         );
-        held(
-            "window_in_direction",
-            core,
-            self.shadow.upstream().window_in_direction(layout, direction),
-        )
+        core
     }
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
@@ -663,11 +582,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "has_windows_for_app",
-            core,
-            self.shadow.upstream().has_windows_for_app(layout, pid),
-        )
+        core
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -682,11 +597,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_verdict),
             core,
         );
-        held(
-            "parent_of_selection_is_stacked",
-            core,
-            self.shadow.upstream().parent_of_selection_is_stacked(layout),
-        )
+        core
     }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
@@ -701,7 +612,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             |answer| as_tree(answer).and_then(as_windows),
             core,
         );
-        held("windows", core, self.shadow.upstream().windows(layout, query))
+        core
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
@@ -709,19 +620,6 @@ impl LayoutSystem for FloatingLayoutSystem {
         #[cfg(feature = "roc-core")]
         let held_focus = super::group_roc::focused(&focused);
         let core = focus_result(focused);
-        let upstream = self.shadow.upstream_mut().focus(layout, focus);
-        if focus_words(&core) != focus_words(&upstream) {
-            super::floating_twin::report(
-                "focus",
-                &format!(
-                    "core {:?}, upstream {:?}",
-                    focus_words(&core),
-                    focus_words(&upstream)
-                ),
-            );
-            self.reseed_shadow();
-        }
-        self.settle("focus");
         #[cfg(feature = "roc-core")]
         let core = decided(
             self.roc_stepped(
@@ -755,46 +653,32 @@ impl LayoutSystem for FloatingLayoutSystem {
                 RocEvent::StoreFrame(roc_window(*window), core_rect(*new))
             }
         };
-        match &change {
+        match change {
             WindowChange::Add(layout, window, _) => {
-                self.core.add_window(*layout, *window, insertion_point(self.insertion))
+                self.core.add_window(layout, window, insertion_point(self.insertion))
             }
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                self.core.remove_window(*window)
+                self.core.remove_window(window)
             }
-            WindowChange::Replace(from, to) => self.core.replace_window(*from, *to),
-            WindowChange::CloseApp(pid) => self.core.close_app(|window| window.pid == *pid),
+            WindowChange::Replace(from, to) => self.core.replace_window(from, to),
+            WindowChange::CloseApp(pid) => self.core.close_app(|window| window.pid == pid),
             WindowChange::Resize { window, new, .. } => {
-                self.core.store_frame(*window, core_rect(*new))
+                self.core.store_frame(window, core_rect(new))
             }
         }
-        self.shadow.upstream_mut().update(change);
-        self.settle("update");
         #[cfg(feature = "roc-core")]
         self.roc_stepped("update", asked, tree(Answer::Done));
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        let core = match core_edit(edit) {
-            Some(edit) => self.core.edit(layout, edit),
+        let edited = match core_edit(edit) {
+            Some(asked) => self.core.edit(layout, asked),
+            // A drop that moves or consumes reaches a system only through `edit`.
             None => rift_core::layout::group_forest::Edited::Unsupported,
         };
         #[cfg(feature = "roc-core")]
-        let held_edit = super::group_roc::edited(&core);
-        let core = edit_result(core);
-        let upstream = self.shadow.upstream_mut().edit_layout(layout, edit);
-        if edit_words(&core) != edit_words(&upstream) {
-            super::floating_twin::report(
-                "edit_layout",
-                &format!(
-                    "core {:?}, upstream {:?}",
-                    edit_words(&core),
-                    edit_words(&upstream)
-                ),
-            );
-            self.reseed_shadow();
-        }
-        self.settle("edit_layout");
+        let held_edit = super::group_roc::edited(&edited);
+        let core = edit_result(edited);
         #[cfg(feature = "roc-core")]
         let core = match core_edit(edit) {
             Some(asked) => decided(
@@ -810,42 +694,6 @@ impl LayoutSystem for FloatingLayoutSystem {
         };
         core
     }
-}
-
-/// A focus answer, comparable.
-fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
-    (result.handled, result.window, result.raise.clone())
-}
-
-/// An edit answer, comparable.
-fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
-    match result {
-        EditResult::Unsupported => ("unsupported", Vec::new()),
-        EditResult::Unchanged => ("unchanged", Vec::new()),
-        EditResult::Changed => ("changed", Vec::new()),
-        EditResult::Raise(windows) => ("raise", windows.clone()),
-    }
-}
-
-/// A group bar, comparable (its frame by bits).
-type BarWords = (NodeId, LayoutKind, [u64; 4], usize, usize, Vec<WindowId>);
-
-fn bar_words(bar: &crate::layout_engine::engine::GroupContainerInfo) -> BarWords {
-    let frame = bar.frame;
-    (
-        bar.node_id,
-        bar.container_kind,
-        [
-            frame.origin.x,
-            frame.origin.y,
-            frame.size.width,
-            frame.size.height,
-        ]
-        .map(f64::to_bits),
-        bar.total_count,
-        bar.selected_index,
-        bar.window_ids.clone(),
-    )
 }
 
 #[cfg(test)]
@@ -937,14 +785,13 @@ mod tests {
         system.store_frame(w(2), rect(100., 80.));
         system.store_frame(w(1), rect(999., 999.));
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
-        // A stale frame to return to, set by hand on the core; the shadow takes it too.
+        // A stale frame to return to, set by hand on the core.
         let mut geometry = system.core.geometry().clone();
         geometry.insert(w(4), rift_core::layout::group_forest::Geometry::Aligned {
             frame: core_rect(rect(770., 40.)),
             restore: core_rect(rect(999., 999.)),
         });
-        system.core = CoreFloating::from_parts(system.core.forest().clone(), geometry);
-        system.reseed_shadow();
+        system.set_core(CoreFloating::from_parts(system.core.forest().clone(), geometry));
         system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin));
         assert_eq!(system.frame(w(2)), Some(rect(270., 40.)));
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
@@ -1127,36 +974,6 @@ mod tests {
         (system, layout, windows)
     }
 
-    /// The core's frames for a floating layout are the system's own (`shadow_frames`), bit for bit,
-    /// over drawn systems, screens, gaps and window constraints.
-    #[test]
-    fn the_core_places_floating_layouts_as_the_floating_system_does() {
-        use crate::layout_engine::systems::drawn::*;
-        let mut rng = Rng(0x5eed_f10a);
-        let (mut cases, mut frames_seen) = (0, 0);
-        for _ in 0..3000 {
-            let (system, layout, windows) = drawn_system(&mut rng);
-            let screen = drawn_screen(&mut rng);
-            let constraints = drawn_constraints_for(&mut rng, &windows);
-            let gaps = drawn_gaps(&mut rng);
-            // Drawn but unused (a floating layout has no bar): the draws stay as they were.
-            let _ = drawn_line(&mut rng);
-            let upstream =
-                system.shadow.upstream().shadow_frames(layout, screen, &constraints, &gaps);
-            let core: Vec<(WindowId, CGRect)> = system
-                .shape(layout, screen, &constraints, &gaps)
-                .frames()
-                .into_iter()
-                .map(|(window, frame)| (window, crate::layout_engine::cg_rect(frame)))
-                .collect();
-            assert_eq!(bits(&core), bits(&upstream));
-            cases += 1;
-            frames_seen += upstream.len();
-        }
-        eprintln!("floating: {cases} layouts, {frames_seen} frames identical");
-        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
-    }
-
     /// Every question the floating system answers, asked of `system` (each held to the core's).
     fn ask_everything(system: &FloatingLayoutSystem, layouts: &[LayoutId], windows: &[WindowId]) {
         use crate::layout_engine::systems::drawn::*;
@@ -1215,21 +1032,18 @@ mod tests {
         let _ = bits(&[]);
     }
 
-    /// The core's floating system beside upstream's (step 2; since step 3 upstream's is the
-    /// shadow), over drawn systems: each drawn as the frames test draws it and the shadow
-    /// re-seeded from the core, then layouts cloned and removed, windows replaced, closed by
+    /// The floating system over drawn systems (under `roc-core` the Roc system deciding, the
+    /// core's held to it): each drawn, then layouts cloned and removed, windows replaced, closed by
     /// app, removed (rebalancing or not) and resized through `update`, in two layouts; every
     /// question asked along the way, and the system reloaded through serde. Any difference fails
     /// the test (the twin panics in tests).
     #[test]
-    fn the_core_floating_system_takes_every_operation_as_upstreams_does() {
+    fn the_floating_system_takes_drawn_operations_and_reloads() {
         use crate::layout_engine::systems::drawn::*;
         let mut rng = Rng(0xf_10a7_7713);
         let mut steps = 0;
         for _ in 0..1500 {
             let (mut system, first, mut windows) = drawn_system(&mut rng);
-            // The shadow re-seeded from the core (what a difference does), then held to it.
-            system.reseed_shadow();
             let mut layouts = vec![first];
             ask_everything(&system, &layouts, &windows);
             let mut next = 1000;
@@ -1292,12 +1106,12 @@ mod tests {
                     }
                     7 => {
                         let bytes = ron::to_string(&system).unwrap();
-                        assert_eq!(
-                            bytes,
-                            upstream_save(system.shadow.upstream()),
-                            "the core saves upstream's bytes"
-                        );
                         let mut restored: FloatingLayoutSystem = ron::from_str(&bytes).unwrap();
+                        assert_eq!(
+                            ron::to_string(&restored).unwrap(),
+                            bytes,
+                            "a load saves the bytes it read"
+                        );
                         restored.set_window_insertion_point(system.insertion);
                         system = restored;
                     }
@@ -1329,7 +1143,7 @@ mod tests {
     /// frame to return to (joining it into a split forgets it). Written once by upstream's own
     /// save from hand-built states; the follow-ups reach each state's rule.
     #[test]
-    fn states_only_a_file_builds_step_through_the_twin() {
+    fn states_only_a_file_builds_step_through_the_systems() {
         let load = |text: &str| -> (FloatingLayoutSystem, LayoutId) {
             let system: FloatingLayoutSystem = ron::from_str(text).unwrap();
             let (layout, _) = system.core.forest().layouts().next().unwrap();
@@ -1378,33 +1192,12 @@ mod tests {
         ask_everything(&system, &[layout], &all);
     }
 
-    /// Upstream's system as upstream saves it, its frames in window order (upstream's map
-    /// iterates in an order its history decides; the core writes them by window).
-    fn upstream_save(upstream: &Upstream) -> String {
-        #[derive(Serialize)]
-        struct Sorted<'a> {
-            inner: &'a super::super::groups::GroupLayouts,
-            geometry: BTreeMap<WindowId, &'a upstream::FloatingGeometry>,
-            spread_on_initialization: bool,
-        }
-        ron::to_string(&Sorted {
-            inner: &upstream.groups,
-            geometry: upstream
-                .geometry
-                .iter()
-                .map(|(&window, geometry)| (window, geometry))
-                .collect(),
-            spread_on_initialization: upstream.spread_on_initialization,
-        })
-        .unwrap()
-    }
-
     /// Each saved form a load reads (the three file-built states and the older form with its
-    /// `frames` and `independent_frames` maps, a frame to return to with no frame among them),
-    /// loaded by upstream and by the flipped system: the core saves upstream's load byte for
-    /// byte, and upstream's load is frozen as bytes (`*.loaded.ron`).
+    /// `frames` and `independent_frames` maps, a frame to return to with no frame among them):
+    /// the load saves the bytes upstream's load saved (frozen in `*.loaded.ron` while upstream
+    /// existed).
     #[test]
-    fn a_load_saves_upstreams_bytes_and_upstreams_loads_are_frozen() {
+    fn a_load_saves_upstreams_frozen_bytes() {
         for (name, text, frozen) in [
             (
                 "stack_in_stack",
@@ -1427,14 +1220,11 @@ mod tests {
                 include_str!("floating/legacy_frames.loaded.ron"),
             ),
         ] {
-            let upstream: Upstream = ron::from_str(text).unwrap();
-            let expected = upstream_save(&upstream);
-            assert_eq!(expected, frozen.trim_end(), "{name}: upstream's load as frozen");
             let system: FloatingLayoutSystem = ron::from_str(text).unwrap();
             assert_eq!(
                 ron::to_string(&system).unwrap(),
-                expected,
-                "{name}: the core saves upstream's load"
+                frozen.trim_end(),
+                "{name}: the load saves upstream's frozen bytes"
             );
         }
     }

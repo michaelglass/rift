@@ -295,20 +295,6 @@ impl EditResult {
     pub fn discard(self) {}
 }
 
-/// Toggle one fullscreen mode and clear the other when enabling it.
-fn toggle_fullscreen_mode(full: &mut bool, gaps: &mut bool, within_gaps: bool) -> bool {
-    let (target, other) = if within_gaps {
-        (gaps, full)
-    } else {
-        (full, gaps)
-    };
-    *target = !*target;
-    if *target {
-        *other = false;
-    }
-    *target
-}
-
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn window_participates(&self, _window: WindowId) -> bool { true }
@@ -391,28 +377,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     }
 }
 
-pub(super) fn node_slot(
-    mut node: crate::model::tree::NodeId,
-    root: crate::model::tree::NodeId,
-    map: &crate::model::tree::NodeMap,
-) -> Option<Vec<usize>> {
-    let mut path = Vec::new();
-    while node != root {
-        let parent = node.parent(map)?;
-        path.push(parent.children(map).position(|child| child == node)?);
-        node = parent;
-    }
-    path.reverse();
-    Some(path)
-}
-
 #[cfg(feature = "roc-core")]
 mod group_roc;
 mod group_stored;
 #[cfg(feature = "roc-core")]
 pub(crate) use group_roc::group_forest_reseeds;
 mod group_system;
-mod groups;
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
@@ -548,11 +518,9 @@ mod tests {
 mod floating;
 #[cfg(feature = "roc-core")]
 mod floating_roc;
-mod floating_twin;
 pub use floating::FloatingLayoutSystem;
 #[cfg(feature = "roc-core")]
 pub(crate) use floating_roc::floating_roc_reseeds;
-pub(crate) use floating_twin::floating_divergences;
 #[cfg(test)]
 pub(crate) mod drawn;
 mod stack;

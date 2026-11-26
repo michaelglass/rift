@@ -8,6 +8,7 @@ use slotmap::{Key, SlotMap};
 
 use crate::actor::app::WindowId;
 use crate::common::config::{StackDefaultOrientation, default_stack_orientation};
+use crate::layout_engine::systems::group_stored::{LayoutRoot, focus_target};
 use crate::layout_engine::{LayoutId, LayoutKind};
 use crate::model::tree::{NodeId, Tree};
 
@@ -96,11 +97,11 @@ pub(super) fn stack_kind(kind: LayoutKind) -> LayoutKind {
 
 #[derive(Deserialize)]
 struct LegacyStackForest {
-    #[serde(deserialize_with = "crate::layout_engine::systems::groups::deserialize_tile_tree")]
+    #[serde(
+        deserialize_with = "crate::layout_engine::systems::group_stored::deserialize_tile_tree"
+    )]
     tree: Tree,
-    layout_roots: Vec<
-        crate::layout_engine::systems::SavedSlot<crate::layout_engine::systems::groups::LayoutRoot>,
-    >,
+    layout_roots: Vec<crate::layout_engine::systems::SavedSlot<LayoutRoot>>,
 }
 
 impl LegacyStackForest {
@@ -114,9 +115,8 @@ impl LegacyStackForest {
                 let value = slot.value.map(|root| {
                     let root = root.0;
                     let selected = map.current_selection(root);
-                    let active = map
-                        .focus_target(selected, &|_| true)
-                        .or_else(|| map.focus_target(root, &|_| true))
+                    let active = focus_target(&map, selected)
+                        .or_else(|| focus_target(&map, root))
                         .map(|(node, _)| node);
                     let members: Vec<_> = root
                         .traverse_preorder(&map)

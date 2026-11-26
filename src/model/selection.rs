@@ -54,23 +54,6 @@ impl NodeMap {
         self.selection_info(node).map(|info| info.selected_child)
     }
 
-    pub(crate) fn local_selection(&self, node: NodeId) -> Option<NodeId> {
-        self.selection_info(node)
-            .filter(|info| !info.stop_here)
-            .map(|info| info.selected_child)
-    }
-
-    pub(crate) fn select_locally(&mut self, node: NodeId) -> bool {
-        let Some(parent) = node.parent(self) else { return false };
-        self[parent]
-            .selection_mut()
-            .replace(SelectionInfo {
-                selected_child: node,
-                stop_here: false,
-            })
-            .is_none_or(|info| info.selected_child != node)
-    }
-
     pub(crate) fn select(&mut self, selection: NodeId) {
         if self.selection_info(selection).is_some() {
             self[selection].selection_mut().as_mut().unwrap().stop_here = true;
@@ -82,23 +65,6 @@ impl NodeMap {
                 stop_here: false,
             });
             node = parent;
-        }
-    }
-
-    pub(crate) fn remap_child_selection(
-        &mut self,
-        source: NodeId,
-        destination: NodeId,
-        old_child: NodeId,
-        new_child: NodeId,
-    ) {
-        if let Some(info) =
-            self.selection_info(source).filter(|info| info.selected_child == old_child)
-        {
-            *self[destination].selection_mut() = Some(SelectionInfo {
-                selected_child: new_child,
-                ..info
-            });
         }
     }
 
