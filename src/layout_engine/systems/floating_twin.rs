@@ -1,10 +1,10 @@
-//! The core's floating system beside upstream's (layout trees, floating's step 2): upstream's
-//! `FloatingLayoutSystem` decides; the core's [`FloatingSystem`] is stepped on every operation
-//! and held to it. Each answer on every operation (queries, the pass's shape, the group bars and
-//! rift-cli's views too); the whole system (the forest's view and the frames kept) on every
-//! operation in tests and debug builds and every [`VIEW_EVERY`]th otherwise. A difference is
-//! counted ([`floating_divergences`]), fails a test, or in a running Rift is warned
-//! (`floating-divergence:`) and the core re-seeded from upstream's system.
+//! The core's floating system and upstream's beside it (layout trees, floating's steps 2-3):
+//! since the flip the core decides and upstream's system is its shadow, stepped on every
+//! operation; each answer is held to the core's on every operation (queries, the pass's shape,
+//! the group bars and rift-cli's views too), the whole systems (the forest's view and the frames
+//! kept) on every operation in tests and debug builds and every [`VIEW_EVERY`]th otherwise. A
+//! difference is counted ([`floating_divergences`]), fails a test, or in a running Rift is warned
+//! (`floating-divergence:`) and the shadow re-seeded from the core.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use objc2_core_foundation::CGRect;
 use rift_core::layout::group_forest::{Body, FloatingSystem, Geometry, Node};
 
+use super::floating::Upstream;
 use super::group_stored::{core_node, forest_of};
 use super::group_system::CoreForest;
 use super::groups::GroupLayouts;
@@ -47,16 +48,17 @@ pub(super) fn report(what: &str, difference: &str) {
         what,
         divergences,
         difference,
-        "floating-divergence: the core's floating system differs from upstream's; re-seeded"
+        "floating-divergence: upstream's floating system differs from the core's; re-seeded"
     );
 }
 
-/// An answer held to upstream's: reported when it differs.
-pub(super) fn held<T: PartialEq + Debug>(what: &str, upstream: T, core: T) -> T {
+/// A query's answer: the core's, upstream's held to it (reported when it differs; a query
+/// changes nothing, so the next operation compares the whole systems).
+pub(super) fn held<T: PartialEq + Debug>(what: &str, core: T, upstream: T) -> T {
     if upstream != core {
-        report(what, &format!("upstream {upstream:?}, core {core:?}"));
+        report(what, &format!("core {core:?}, upstream {upstream:?}"));
     }
-    upstream
+    core
 }
 
 /// Each leaf's stamp in upstream's index order (a window's leaves in their order).
@@ -204,37 +206,37 @@ fn view_difference(
         .map(|(what, upstream, core, _)| format!("{what}: upstream {upstream}, core {core}"))
 }
 
-/// The core's system and how many operations it has taken.
-#[derive(Debug, Default)]
-pub(super) struct Twin {
-    core: Box<CoreFloating>,
+/// Upstream's system beside the core's, and how many operations it has taken.
+#[derive(Debug)]
+pub(super) struct Shadow {
+    upstream: Box<Upstream>,
     steps: u64,
 }
 
-impl Twin {
-    pub(super) fn seeded(core: CoreFloating) -> Self { Self { core: Box::new(core), steps: 0 } }
+impl Shadow {
+    pub(super) fn of(upstream: Upstream) -> Self {
+        Self {
+            upstream: Box::new(upstream),
+            steps: 0,
+        }
+    }
 
-    pub(super) fn core(&self) -> &CoreFloating { &self.core }
+    pub(super) fn upstream(&self) -> &Upstream { &self.upstream }
 
-    pub(super) fn core_mut(&mut self) -> &mut CoreFloating { &mut self.core }
+    pub(super) fn upstream_mut(&mut self) -> &mut Upstream { &mut self.upstream }
 
-    /// After an operation: the whole system compared when due, and on a difference reported and
-    /// re-seeded from upstream's.
-    pub(super) fn settle<G>(
-        &mut self,
-        what: &str,
-        groups: &GroupLayouts,
-        geometry: impl Fn() -> G,
-    ) where
-        G: IntoIterator<Item = (WindowId, Option<CGRect>, Option<CGRect>)>,
-    {
+    /// After an operation: whether the whole systems, compared when due, differ (reported).
+    pub(super) fn differs(&mut self, what: &str, core: &CoreFloating) -> bool {
         self.steps += 1;
         if !(VIEW_ALWAYS || self.steps.is_multiple_of(VIEW_EVERY)) {
-            return;
+            return false;
         }
-        if let Some(difference) = view_difference(&self.core, groups, geometry()) {
-            report(what, &difference);
-            *self.core = seed(groups, geometry());
+        match view_difference(core, &self.upstream.groups, self.upstream.frame_pairs()) {
+            Some(difference) => {
+                report(what, &difference);
+                true
+            }
+            None => false,
         }
     }
 }

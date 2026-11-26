@@ -1,154 +1,180 @@
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use rift_protocol::DirectionalDistance;
-use serde::{Deserialize, Serialize};
+//! The floating layout system: the core's floating system decides and is saved (layout trees,
+//! floating's step 3, policy (a)); upstream's system ([`upstream::Upstream`]) is its shadow,
+//! stepped on every operation, its answers held to the core's on every operation and its whole
+//! state on every operation in tests and debug builds and every 32nd otherwise. A difference is
+//! counted, fails a test, or warns `floating-divergence:` and re-seeds the shadow from the core
+//! (the deciding side stands). Saving writes the core in upstream's form; a load goes through
+//! upstream's load and seeds the core.
 
-use super::floating_twin::{Twin, held, seed};
+mod upstream;
+
+use std::collections::BTreeMap;
+
+use objc2_core_foundation::CGRect;
+#[cfg(test)]
+use objc2_core_foundation::{CGPoint, CGSize};
+use rift_core::layout::floating::Floating;
+use serde::{Deserialize, Serialize};
+pub(super) use upstream::Upstream;
+
+#[cfg(test)]
+use super::GroupEdit;
+use super::floating_twin::{CoreFloating, Shadow, held, seed};
+use super::group_stored::{Saved, upstream_tiles};
 use super::group_system::{
-    core_edit, core_focus, core_query, edit_result, focus_result, layout_kind, participation,
+    container_node, core_edit, core_focus, core_query, edit_result, focus_result, layout_kind,
+    participation,
 };
-use super::groups::GroupLayouts;
 use super::{
-    EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
+    EditResult, Focus, FocusResult, LayoutEdit, LayoutSystem, WindowChange,
     WindowLayoutConstraints, WindowQuery, core_direction, insertion_point,
 };
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
+use crate::layout_engine::core_geometry::{cg_rect, core_constraints, core_gaps, core_rect};
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
-use crate::model::tree::{NodeId, Placement};
+use crate::model::tree::NodeId;
 
-/// Geometry is shared by all arrangements of a floating window.
-#[serde_with::serde_as]
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
-struct FloatingGeometry {
-    #[serde_as(as = "Option<crate::sys::geometry::CGRectDef>")]
-    frame: Option<CGRect>,
-    #[serde_as(as = "Option<crate::sys::geometry::CGRectDef>")]
-    restore: Option<CGRect>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(from = "StoredFloating")]
+/// The floating layout system: the core's, its settings, and upstream's beside it.
+#[derive(Debug)]
 pub struct FloatingLayoutSystem {
-    #[serde(rename = "inner")]
-    pub(super) groups: GroupLayouts,
-    #[serde(skip)]
+    core: CoreFloating,
     insertion: WindowInsertionPoint,
-    geometry: HashMap<WindowId, FloatingGeometry>,
+    /// Whether the next first frames of a layout spread out (cleared once they are placed).
     spread_on_initialization: bool,
-    /// The core's floating system, held to this one on every operation (step 2).
-    #[serde(skip)]
-    twin: Twin,
-}
-
-#[serde_with::serde_as]
-#[derive(Deserialize)]
-struct StoredFloating {
-    #[serde(rename = "inner")]
-    groups: GroupLayouts,
-    #[serde(default)]
-    geometry: HashMap<WindowId, FloatingGeometry>,
-    #[serde(default)]
-    #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
-    frames: HashMap<WindowId, CGRect>,
-    #[serde(default)]
-    #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
-    independent_frames: HashMap<WindowId, CGRect>,
-    #[serde(default)]
-    spread_on_initialization: bool,
-}
-
-impl From<StoredFloating> for FloatingLayoutSystem {
-    fn from(stored: StoredFloating) -> Self {
-        let mut geometry = stored.geometry;
-        for (window, frame) in stored.frames {
-            geometry.entry(window).or_default().frame = Some(frame);
-        }
-        for (window, frame) in stored.independent_frames {
-            geometry.entry(window).or_default().restore = Some(frame);
-        }
-        let mut system = Self {
-            groups: stored.groups,
-            geometry,
-            spread_on_initialization: stored.spread_on_initialization,
-            insertion: WindowInsertionPoint::default(),
-            twin: Twin::default(),
-        };
-        system.reseed();
-        system
-    }
+    shadow: Shadow,
 }
 
 impl Default for FloatingLayoutSystem {
     fn default() -> Self { Self::new(WindowInsertionPoint::default()) }
 }
 
+/// A load goes through upstream's (its forms and its legacy maps); the core is seeded from it.
+impl<'de> Deserialize<'de> for FloatingLayoutSystem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let upstream = Upstream::deserialize(deserializer)?;
+        let core = seed(&upstream.groups, upstream.frame_pairs());
+        Ok(Self {
+            core,
+            insertion: upstream.insertion,
+            spread_on_initialization: upstream.spread_on_initialization,
+            shadow: Shadow::of(upstream),
+        })
+    }
+}
+
+/// The core in upstream's saved form: the forest as `inner`, each window's frames (by window),
+/// whether first frames spread.
+#[derive(Serialize)]
+#[serde(rename = "FloatingLayoutSystem")]
+struct SavedFloating {
+    inner: Saved,
+    geometry: BTreeMap<WindowId, upstream::FloatingGeometry>,
+    spread_on_initialization: bool,
+}
+
+impl Serialize for FloatingLayoutSystem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.saved().serialize(serializer)
+    }
+}
+
 impl FloatingLayoutSystem {
     pub fn new(point: WindowInsertionPoint) -> Self {
-        let mut system = Self {
-            groups: GroupLayouts::default(),
+        Self {
+            core: CoreFloating::default(),
             insertion: point,
-            geometry: HashMap::default(),
             spread_on_initialization: false,
-            twin: Twin::default(),
-        };
-        system.reseed();
-        system
+            shadow: Shadow::of(Upstream::new(point)),
+        }
     }
 
-    /// Each window's pair of frames, as the twin compares them.
-    fn frame_pairs(&self) -> Vec<(WindowId, Option<CGRect>, Option<CGRect>)> {
-        self.geometry
-            .iter()
-            .map(|(&window, geometry)| (window, geometry.frame, geometry.restore))
-            .collect()
+    fn saved(&self) -> SavedFloating {
+        SavedFloating {
+            inner: Saved::of(self.core.forest()),
+            geometry: self
+                .core
+                .geometry()
+                .iter()
+                .map(|(&window, geometry)| {
+                    (window, upstream::FloatingGeometry {
+                        frame: geometry.frame().map(cg_rect),
+                        restore: geometry.restore().map(cg_rect),
+                    })
+                })
+                .collect(),
+            spread_on_initialization: self.spread_on_initialization,
+        }
     }
 
-    /// The core's system made this one again.
-    fn reseed(&mut self) { self.twin = Twin::seeded(seed(&self.groups, self.frame_pairs())); }
+    /// The shadow made the core again: the forest with the same slots, versions and free lists
+    /// (so the ids each allocates next agree), the frames, the settings.
+    fn reseed_shadow(&mut self) {
+        let mut upstream = Upstream::new(self.insertion);
+        upstream.groups = upstream_tiles(self.core.forest());
+        upstream.geometry = self.saved().geometry.into_iter().collect();
+        upstream.spread_on_initialization = self.spread_on_initialization;
+        self.shadow = Shadow::of(upstream);
+    }
 
-    /// After an operation both systems took: the whole systems compared when due.
+    /// After an operation both took: the whole systems compared when due; the shadow re-seeded
+    /// from the core on a difference.
     fn settle(&mut self, what: &str) {
-        let pairs = self.frame_pairs();
-        self.twin.settle(what, &self.groups, || pairs.clone());
+        if self.shadow.differs(what, &self.core) {
+            self.reseed_shadow();
+        }
     }
 
-    /// The screen and spread as the core's floating geometry takes them.
-    fn core_floating(&self, screen: CGRect) -> rift_core::layout::floating::Floating {
-        rift_core::layout::floating::Floating {
-            screen: crate::layout_engine::core_rect(screen),
+    /// An answer: the core's, upstream's held to it (a difference re-seeds the shadow).
+    fn decided<T: PartialEq + std::fmt::Debug>(&mut self, what: &str, core: T, upstream: T) -> T {
+        if core != upstream {
+            super::floating_twin::report(what, &format!("core {core:?}, upstream {upstream:?}"));
+            self.reseed_shadow();
+        }
+        core
+    }
+
+    fn floating(&self, screen: CGRect) -> Floating {
+        Floating {
+            screen: core_rect(screen),
             spread: self.spread_on_initialization,
         }
     }
 
-    /// rift-cli's drawing of the layout (upstream's, the core's held to it).
+    pub fn set_window_insertion_point(&mut self, point: WindowInsertionPoint) {
+        self.insertion = point;
+        self.shadow.upstream_mut().set_window_insertion_point(point);
+    }
+
+    pub(crate) fn spread_initial_windows(&mut self) {
+        self.spread_on_initialization = true;
+        self.shadow.upstream_mut().spread_initial_windows();
+    }
+
+    /// rift-cli's drawing of the layout (the core's; upstream's held to it).
     pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
         held(
             "draw_tree",
-            self.groups.draw_tree(layout, &[]),
-            self.twin.core().forest().draw(layout),
+            self.core.forest().draw(layout),
+            self.shadow.upstream().groups.draw_tree(layout, &[]),
         )
     }
 
-    /// rift-cli's container view (upstream's, the core's held to it).
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         held(
             "container_tree",
-            self.groups.container_tree(layout),
-            super::group_system::container_node(self.twin.core().forest().container_view(layout)),
+            container_node(self.core.forest().container_view(layout)),
+            self.shadow.upstream().groups.container_tree(layout),
         )
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         held(
             "window_slot",
-            self.groups.window_slot(layout, window),
-            self.twin.core().forest().window_slot(layout, window),
+            self.core.forest().window_slot(layout, window),
+            self.shadow.upstream().groups.window_slot(layout, window),
         )
-    }
-
-    pub fn set_window_insertion_point(&mut self, point: WindowInsertionPoint) {
-        self.insertion = point;
     }
 
     pub(crate) fn collect_group_containers(
@@ -158,375 +184,41 @@ impl FloatingLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        let upstream = self.upstream_group_containers(layout, screen, gaps, selection_path_only);
-        let core =
-            self.twin
-                .core()
-                .group_bars(layout, self.core_floating(screen), selection_path_only);
+        let core: Vec<_> = self
+            .core
+            .group_bars(layout, self.floating(screen), selection_path_only)
+            .into_iter()
+            .map(|bar| crate::layout_engine::engine::GroupContainerInfo {
+                node_id: bar.stack,
+                container_kind: layout_kind(rift_core::layout::group_forest::Kind::Stack(
+                    bar.orientation,
+                )),
+                frame: cg_rect(bar.frame),
+                total_count: bar.windows.len(),
+                selected_index: bar.selected,
+                window_ids: bar.windows,
+            })
+            .collect();
+        let upstream = self.shadow.upstream().collect_group_containers(
+            layout,
+            screen,
+            gaps,
+            selection_path_only,
+        );
         held(
             "collect_group_containers",
-            upstream.iter().map(bar_words).collect::<Vec<BarWords>>(),
-            core.into_iter()
-                .map(|bar| {
-                    let frame = crate::layout_engine::cg_rect(bar.frame);
-                    (
-                        bar.stack,
-                        layout_kind(rift_core::layout::group_forest::Kind::Stack(bar.orientation)),
-                        rect_bits(frame),
-                        bar.windows.len(),
-                        bar.selected,
-                        bar.windows,
-                    )
-                })
-                .collect(),
+            core.iter().map(bar_words).collect::<Vec<BarWords>>(),
+            upstream.iter().map(bar_words).collect(),
         );
-        upstream
-    }
-
-    fn upstream_group_containers(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-        selection_path_only: bool,
-    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        let selection = self.groups.selection(layout);
-        let root = self.groups.root(layout);
-        root.traverse_preorder(self.groups.map())
-            .filter(|node| self.groups.layout(*node).is_stacked())
-            .filter(|node| {
-                !selection_path_only
-                    || selection.ancestors(self.groups.map()).any(|ancestor| ancestor == *node)
-            })
-            .filter_map(|node| {
-                let children: Vec<_> = node.children(self.groups.map()).collect();
-                let selected = self.groups.visible_stack_child(node)?;
-                let index = children.iter().position(|child| *child == selected)?;
-                let (window, wid) = self.groups.first_visible_window(selected)?;
-                if self.groups.fullscreen_frame(window, screen, gaps).is_some() {
-                    return None;
-                }
-                let frame = self.kept_frame(wid).unwrap_or_else(|| {
-                    Self::default_frame(screen, WindowLayoutConstraints::default())
-                });
-                Some(self.groups.stack_group_container_info(
-                    node,
-                    self.groups.layout(node),
-                    frame,
-                    &children,
-                    index,
-                ))
-            })
-            .collect()
-    }
-
-    fn members(&self, container: NodeId) -> Vec<WindowId> {
-        container
-            .traverse_preorder(self.groups.map())
-            .filter_map(|node| self.groups.window_at(node))
-            .collect()
-    }
-
-    fn selected_container(&self, layout: LayoutId) -> Option<NodeId> {
-        let selection = self.groups.selection(layout);
-        let container = if self.groups.window_at(selection).is_some() {
-            selection.parent(self.groups.map())?
-        } else {
-            selection
-        };
-        (container != self.groups.root(layout)).then_some(container)
-    }
-
-    fn remaining_leaf(&self, moving: NodeId) -> Option<NodeId> {
-        let map = self.groups.map();
-        let mut siblings = moving.parent(map)?.children(map).filter(|&node| node != moving);
-        siblings
-            .next()
-            .filter(|&node| siblings.next().is_none() && self.groups.window_at(node).is_some())
-    }
-
-    fn restore_if_independent(&mut self, layout: LayoutId, remaining: Option<NodeId>) {
-        if let Some(node) = remaining
-            && node.parent(self.groups.map()) == Some(self.groups.root(layout))
-            && let Some(window) = self.groups.window_at(node)
-        {
-            self.restore_frame(window);
-        }
+        core
     }
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
         held(
             "cycle_windows",
-            self.upstream_cycle_windows(layout),
-            self.twin.core().cycle_windows(layout),
+            self.core.cycle_windows(layout),
+            self.shadow.upstream().cycle_windows(layout),
         )
-    }
-
-    fn upstream_cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some((node, _)) = self.groups.focused_leaf(layout)
-            && let Some(parent) = node.parent(self.groups.map())
-            && self.groups.layout(parent).is_stacked()
-        {
-            return self
-                .groups
-                .windows_from(parent, Some(parent), true)
-                .filter(|&window| self.window_participates(window))
-                .collect();
-        }
-        self.groups.windows(layout, WindowQuery::Visible)
-    }
-
-    fn directional_window(
-        &self,
-        layout: LayoutId,
-        focused: WindowId,
-        direction: Direction,
-        exclude: Option<NodeId>,
-    ) -> Option<(NodeId, WindowId)> {
-        let source = self.kept_frame(focused)?;
-        let origin = source.mid();
-        let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        let mut best: Option<((NodeId, WindowId), bool, f64)> = None;
-        let _ = self.groups.visit_visible_windows(self.groups.root(layout), &mut |node, wid| {
-            if wid != focused
-                && !exclude.is_some_and(|parent| {
-                    node.ancestors(self.groups.map()).any(|ancestor| ancestor == parent)
-                })
-                && let Some(frame) = self.kept_frame(wid)
-            {
-                let candidate = frame.mid();
-                let (across, overlaps) = if horizontal {
-                    (
-                        candidate.y - origin.y,
-                        source.origin.y < frame.max().y && frame.origin.y < source.max().y,
-                    )
-                } else {
-                    (
-                        candidate.x - origin.x,
-                        source.origin.x < frame.max().x && frame.origin.x < source.max().x,
-                    )
-                };
-                if let Some(along) = (origin.x, origin.y)
-                    .distance_in_direction((candidate.x, candidate.y), direction)
-                    && along > 0.0
-                {
-                    let distance = along * along + across * across;
-                    if best.is_none_or(|(_, outside, previous)| {
-                        (!overlaps).cmp(&outside).then(distance.total_cmp(&previous)).is_lt()
-                    }) {
-                        best = Some(((node, wid), !overlaps, distance));
-                    }
-                }
-            }
-            std::ops::ControlFlow::<()>::Continue(())
-        });
-        best.map(|(target, _, _)| target)
-    }
-
-    fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        held(
-            "window_in_direction",
-            self.upstream_focus_target(layout, direction),
-            self.twin.core().window_in_direction(layout, core_direction(direction)),
-        )
-    }
-
-    fn upstream_focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        let (node, focused) = self.groups.focused_leaf(layout)?;
-        let parent = node.parent(self.groups.map())?;
-        let kind = self.groups.layout(parent);
-        let forward = matches!(direction, Direction::Right | Direction::Down);
-        let map = self.groups.map();
-        let stack_target = if kind.is_stacked() {
-            let next = node.step(parent, map, forward);
-            self.groups.windows_from(parent, next, forward).next()
-        } else {
-            None
-        };
-        // Walk hidden members along the stack axis, then try physical neighbors.
-        if kind.orientation() == direction.orientation() && stack_target.is_some() {
-            return stack_target;
-        }
-        self.directional_window(layout, focused, direction, None)
-            .map(|(_, window)| window)
-            .or(stack_target)
-            .or_else(|| {
-                if !kind.is_stacked() {
-                    return None;
-                }
-                let start = if forward {
-                    parent
-                } else {
-                    parent.last_descendant(map)
-                };
-                self.groups.windows_from(parent, Some(start), forward).next()
-            })
-    }
-
-    fn default_frame(screen: CGRect, limits: WindowLayoutConstraints) -> CGRect {
-        let limits = limits.normalized();
-        let dimension = |value: f64, horizontal| {
-            if let Some(fixed) = limits.fixed_for_axis(horizontal) {
-                return fixed;
-            }
-            let value = value.max(limits.min_for_axis(horizontal));
-            let max = limits.max_for_axis(horizontal);
-            if max > 0.0 { value.min(max) } else { value }
-        };
-        let size = CGSize::new(
-            dimension(screen.size.width * 0.7, true),
-            dimension(screen.size.height * 0.7, false),
-        );
-        CGRect::new(
-            CGPoint::new(
-                screen.mid().x - size.width / 2.,
-                screen.mid().y - size.height / 2.,
-            ),
-            size,
-        )
-    }
-
-    pub(crate) fn spread_initial_windows(&mut self) { self.spread_on_initialization = true; }
-
-    /// A floating layout as the core's geometry takes it: every window in the layout's order (a
-    /// window left out holds its position), each on the screen or in the tiling area when it or
-    /// an ancestor is fullscreen, else at the frame the layout keeps for it, else at a first
-    /// frame. Arguments as `calculate_layout` takes them.
-    /// The frames the floating system computes itself: since the core decides (policy (a)), the
-    /// shadow `calculate_layout` holds the core's to.
-    pub(crate) fn shadow_frames(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-    ) -> Vec<(WindowId, CGRect)> {
-        let count = if self.spread_on_initialization {
-            self.groups.windows_with_nodes(layout).count()
-        } else {
-            0
-        };
-        let frames: Vec<(WindowId, CGRect)> = self
-            .groups
-            .windows_with_nodes(layout)
-            .enumerate()
-            .filter(|(_, (_, wid))| self.groups.window_participates(*wid))
-            .map(|(index, (node, wid))| {
-                let frame = self
-                    .groups
-                    .fullscreen_frame(node, screen, gaps)
-                    .or_else(|| self.kept_frame(wid))
-                    .unwrap_or_else(|| {
-                        self.initial_frame(
-                            screen,
-                            constraints.get(&wid).copied().unwrap_or_default(),
-                            None,
-                            index,
-                            count,
-                        )
-                    });
-                (wid, frame)
-            })
-            .collect();
-        frames
-    }
-
-    pub(crate) fn shape(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &crate::common::config::GapSettings,
-    ) -> rift_core::layout::floating::Layout<WindowId> {
-        use rift_core::layout::floating::{Floating, Layout, Place, Slot};
-
-        use crate::layout_engine::core_geometry::core_constraints;
-        use crate::layout_engine::{core_gaps, core_rect};
-        let map = self.groups.map();
-        let windows = self
-            .groups
-            .windows_with_nodes(layout)
-            .map(|(node, window)| {
-                if !self.groups.window_participates(window) {
-                    return Slot::LeftOut;
-                }
-                let fullscreen = node.ancestors(map).find_map(|node| {
-                    let info = &map[node].layout;
-                    if info.is_fullscreen {
-                        Some(Place::Screen)
-                    } else if info.is_fullscreen_within_gaps {
-                        Some(Place::WithinGaps)
-                    } else {
-                        None
-                    }
-                });
-                let place = fullscreen
-                    .or_else(|| self.kept_frame(window).map(|frame| Place::Kept(core_rect(frame))))
-                    .unwrap_or_else(|| {
-                        Place::First(core_constraints(
-                            constraints.get(&window).copied().unwrap_or_default(),
-                        ))
-                    });
-                Slot::In { window, place }
-            })
-            .collect();
-        Layout {
-            floating: Floating {
-                screen: core_rect(screen),
-                spread: self.spread_on_initialization,
-            },
-            gaps: core_gaps(gaps),
-            windows,
-        }
-    }
-
-    fn cascade_frame(frame: CGRect, screen: CGRect, index: usize, count: usize) -> CGRect {
-        if count <= 1 {
-            return frame;
-        }
-        let slots = (count - 1) as f64;
-        let available_x = (screen.size.width - frame.size.width).max(0.0);
-        let available_y = (screen.size.height - frame.size.height).max(0.0);
-        let span_x = (slots * 36.0).min(available_x);
-        let span_y = (slots * 36.0).min(available_y);
-        let fraction = index as f64 / slots;
-        CGRect::new(
-            CGPoint::new(
-                screen.origin.x + available_x / 2.0 - span_x / 2.0 + span_x * fraction,
-                screen.origin.y + available_y / 2.0 - span_y / 2.0 + span_y * fraction,
-            ),
-            frame.size,
-        )
-    }
-
-    fn initial_frame(
-        &self,
-        screen: CGRect,
-        limits: WindowLayoutConstraints,
-        live: Option<CGRect>,
-        index: usize,
-        count: usize,
-    ) -> CGRect {
-        let default = Self::default_frame(screen, limits);
-        let mut frame = live.unwrap_or(default);
-        let size = CGSize::new(
-            frame.size.width.min(default.size.width),
-            frame.size.height.min(default.size.height),
-        );
-        if size != frame.size {
-            frame = CGRect::new(
-                CGPoint::new(
-                    screen.mid().x - size.width / 2.,
-                    screen.mid().y - size.height / 2.,
-                ),
-                size,
-            );
-        }
-        if self.spread_on_initialization {
-            Self::cascade_frame(frame, screen, index, count)
-        } else {
-            frame
-        }
     }
 
     pub(crate) fn initialize_frames(
@@ -536,199 +228,142 @@ impl FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         get_frame: &impl Fn(WindowId) -> Option<CGRect>,
     ) {
-        let floating = self.core_floating(screen);
-        self.twin.core_mut().initialize_frames(
+        let floating = self.floating(screen);
+        self.core.initialize_frames(
             layout,
             floating,
-            |window| {
-                crate::layout_engine::core_geometry::core_constraints(
-                    constraints.get(&window).copied().unwrap_or_default(),
-                )
-            },
-            |window| get_frame(window).map(crate::layout_engine::core_rect),
+            |window| core_constraints(constraints.get(&window).copied().unwrap_or_default()),
+            |window| get_frame(window).map(core_rect),
         );
-        let count = if self.spread_on_initialization {
-            self.groups.windows_with_nodes(layout).count()
-        } else {
-            0
-        };
-        for (index, (_, wid)) in self.groups.windows_with_nodes(layout).enumerate() {
-            if self.kept_frame(wid).is_some() {
-                continue;
-            }
-            let frame = self.initial_frame(
-                screen,
-                constraints.get(&wid).copied().unwrap_or_default(),
-                get_frame(wid),
-                index,
-                count,
-            );
-            self.geometry.entry(wid).or_default().frame = Some(frame);
-        }
         self.spread_on_initialization = false;
+        self.shadow
+            .upstream_mut()
+            .initialize_frames(layout, screen, constraints, get_frame);
         self.settle("initialize_frames");
     }
 
-    /// Upstream's kept frame, as its own operations read it.
-    fn kept_frame(&self, wid: WindowId) -> Option<CGRect> { self.geometry.get(&wid)?.frame }
-
     pub fn frame(&self, wid: WindowId) -> Option<CGRect> {
-        let upstream = self.geometry.get(&wid).and_then(|geometry| geometry.frame);
         held(
             "frame",
-            upstream.map(crate::layout_engine::core_rect),
-            self.twin.core().frame(wid),
-        );
-        upstream
-    }
-
-    fn restore_frame(&mut self, window: WindowId) {
-        if let Some(geometry) = self.geometry.get_mut(&window)
-            && let Some(frame) = geometry.restore.take()
-        {
-            geometry.frame = Some(frame);
-        }
+            self.core.frame(wid),
+            self.shadow.upstream().frame(wid).map(core_rect),
+        )
+        .map(cg_rect)
     }
 
     pub fn store_frame(&mut self, wid: WindowId, frame: CGRect) {
-        self.upstream_store_frame(wid, frame);
-        self.twin.core_mut().store_frame(wid, crate::layout_engine::core_rect(frame));
+        self.core.store_frame(wid, core_rect(frame));
+        self.shadow.upstream_mut().store_frame(wid, frame);
         self.settle("store_frame");
-    }
-
-    fn upstream_store_frame(&mut self, wid: WindowId, frame: CGRect) {
-        let occurrences = self.groups.tree.window.occurrences(wid);
-        if !occurrences.iter().any(|info| self.groups.node_is_visible(info.node)) {
-            return;
-        }
-        self.geometry.entry(wid).or_default().frame = Some(frame);
-        for info in occurrences {
-            let node = info.node;
-            // The outermost stack contains all members that share this frame.
-            let stack = node
-                .ancestors(self.groups.map())
-                .filter(|parent| self.groups.layout(*parent).is_stacked())
-                .last();
-            if let Some(stack) = stack {
-                for member in self.groups.windows_from(stack, Some(stack), true) {
-                    self.geometry.entry(member).or_default().frame = Some(frame);
-                }
-            }
-        }
-    }
-
-    fn align_members(&mut self, members: &[WindowId], anchor: WindowId, save: bool) {
-        let frame = self.kept_frame(anchor);
-        for &window in members {
-            if frame.is_none() && !self.geometry.contains_key(&window) {
-                continue;
-            }
-            let geometry = self.geometry.entry(window).or_default();
-            if save && geometry.restore.is_none() {
-                geometry.restore = geometry.frame;
-            }
-            geometry.frame = frame.or(geometry.frame);
-        }
     }
 
     pub fn contains_floating_window(&self, wid: WindowId) -> bool {
         held(
             "contains_floating_window",
-            self.groups.contains_any_window(wid),
-            self.twin.core().forest().index().iter().any(|&(window, ..)| window == wid),
+            self.core.forest().index().iter().any(|&(window, ..)| window == wid),
+            self.shadow.upstream().contains_floating_window(wid),
+        )
+    }
+
+    /// A floating layout as the core's geometry takes it.
+    pub(crate) fn shape(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &crate::common::config::GapSettings,
+    ) -> rift_core::layout::floating::Layout<WindowId> {
+        held(
+            "shape",
+            self.core.shape(layout, self.floating(screen), core_gaps(gaps), |window| {
+                core_constraints(constraints.get(&window).copied().unwrap_or_default())
+            }),
+            self.shadow.upstream().shape(layout, screen, constraints, gaps),
         )
     }
 }
+
 impl LayoutSystem for FloatingLayoutSystem {
     fn window_participates(&self, window: WindowId) -> bool {
         held(
             "window_participates",
-            self.groups.window_participates(window),
-            self.twin.core().forest().window_participates(window),
+            self.core.forest().window_participates(window),
+            self.shadow.upstream().window_participates(window),
         )
     }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        let upstream = self.groups.set_window_participation(window, participates);
-        let core = self
-            .twin
-            .core_mut()
-            .set_window_participation(window, participation(participates));
-        held("set_window_participation", upstream, core);
+        let core = self.core.set_window_participation(window, participation(participates));
+        let upstream = self.shadow.upstream_mut().set_window_participation(window, participates);
+        let answer = self.decided("set_window_participation", core, upstream);
         self.settle("set_window_participation");
-        upstream
+        answer
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool {
         held(
             "contains_layout",
-            self.groups.contains_layout(layout),
-            self.twin.core().forest().contains_layout(layout),
+            self.core.forest().contains_layout(layout),
+            self.shadow.upstream().contains_layout(layout),
         )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         held(
             "selected_window",
-            self.groups.selected_window(layout),
-            self.twin.core().forest().selected_window(layout),
+            self.core.forest().selected_window(layout),
+            self.shadow.upstream().selected_window(layout),
         )
     }
 
     fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
         held(
             "selection_contains_window",
-            self.groups.selection_contains_window(layout, window),
-            self.twin.core().forest().selection_contains_window(layout, window),
+            self.core.forest().selection_contains_window(layout, window),
+            self.shadow.upstream().selection_contains_window(layout, window),
         )
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         held(
             "contains_window",
-            self.groups.contains_window(layout, wid),
-            self.twin.core().forest().contains_window(layout, wid),
+            self.core.forest().contains_window(layout, wid),
+            self.shadow.upstream().contains_window(layout, wid),
         )
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         held(
             "has_any_fullscreen_node",
-            self.groups.has_any_fullscreen_node(layout),
-            self.twin.core().forest().has_any_fullscreen_node(layout),
+            self.core.forest().has_any_fullscreen_node(layout),
+            self.shadow.upstream().has_any_fullscreen_node(layout),
         )
     }
 
     fn create_layout(&mut self) -> LayoutId {
-        let upstream = self.groups.create_layout();
-        let core = self.twin.core_mut().create_layout();
-        held("create_layout", upstream, core);
+        let core = self.core.create_layout();
+        let upstream = self.shadow.upstream_mut().create_layout();
+        let answer = self.decided("create_layout", core, upstream);
         self.settle("create_layout");
-        upstream
+        answer
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let upstream = self.groups.clone_layout(layout);
-        let core = self.twin.core_mut().clone_layout(layout);
-        held("clone_layout", upstream, core);
+        let core = self.core.clone_layout(layout);
+        let upstream = self.shadow.upstream_mut().clone_layout(layout);
+        let answer = self.decided("clone_layout", core, upstream);
         self.settle("clone_layout");
-        upstream
+        answer
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        let windows = self.groups.windows(layout, WindowQuery::All);
-        self.groups.remove_layout(layout);
-        for wid in windows {
-            if !self.groups.contains_any_window(wid) {
-                self.geometry.remove(&wid);
-            }
-        }
-        self.twin.core_mut().remove_layout(layout);
+        self.core.remove_layout(layout);
+        self.shadow.upstream_mut().remove_layout(layout);
         self.settle("remove_layout");
     }
 
-    /// The core's frames (policy (a)): the system's own ([`Self::shadow_frames`]) are their
-    /// shadow; the core's floating system's shape is held to this system's.
+    /// The core geometry's frames for the core's shape (policy (a)); upstream's own frames
+    /// ([`Upstream::shadow_frames`]) are their shadow, upstream's shape held to the core's.
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -739,92 +374,100 @@ impl LayoutSystem for FloatingLayoutSystem {
         _stack_line: crate::common::config::StackLineReserve,
         shadow: crate::layout_engine::Shadow,
     ) -> Vec<(WindowId, CGRect)> {
-        let shape = held(
-            "shape",
+        crate::layout_engine::core_geometry::decide_floating(
             self.shape(layout, screen, constraints, gaps),
-            self.twin.core().shape(
-                layout,
-                self.core_floating(screen),
-                crate::layout_engine::core_gaps(gaps),
-                |window| {
-                    crate::layout_engine::core_geometry::core_constraints(
-                        constraints.get(&window).copied().unwrap_or_default(),
-                    )
-                },
-            ),
-        );
-        crate::layout_engine::core_geometry::decide_floating(shape, shadow, || {
-            self.shadow_frames(layout, screen, constraints, gaps)
-        })
+            shadow,
+            || self.shadow.upstream().shadow_frames(layout, screen, constraints, gaps),
+        )
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.focus_target(layout, direction)
+        held(
+            "window_in_direction",
+            self.core.window_in_direction(layout, core_direction(direction)),
+            self.shadow.upstream().window_in_direction(layout, direction),
+        )
     }
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         held(
             "has_windows_for_app",
-            self.groups.has_windows_for_app(layout, pid),
-            self.twin
-                .core()
-                .forest()
-                .has_windows_for_app(layout, |window| window.pid == pid),
+            self.core.forest().has_windows_for_app(layout, |window| window.pid == pid),
+            self.shadow.upstream().has_windows_for_app(layout, pid),
         )
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
         held(
             "parent_of_selection_is_stacked",
-            self.groups.parent_of_selection_is_stacked(layout),
-            self.twin.core().forest().parent_of_selection_is_stacked(layout),
+            self.core.forest().parent_of_selection_is_stacked(layout),
+            self.shadow.upstream().parent_of_selection_is_stacked(layout),
         )
     }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
         held(
             "windows",
-            self.groups.windows(layout, query),
-            self.twin.core().forest().windows(layout, core_query(query)),
+            self.core.forest().windows(layout, core_query(query)),
+            self.shadow.upstream().windows(layout, query),
         )
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        let core = focus_result(self.twin.core_mut().focus(layout, core_focus(focus)));
-        let upstream = self.upstream_focus(layout, focus);
-        held("focus", focus_words(&upstream), focus_words(&core));
+        let core = focus_result(self.core.focus(layout, core_focus(focus)));
+        let upstream = self.shadow.upstream_mut().focus(layout, focus);
+        if focus_words(&core) != focus_words(&upstream) {
+            super::floating_twin::report(
+                "focus",
+                &format!(
+                    "core {:?}, upstream {:?}",
+                    focus_words(&core),
+                    focus_words(&upstream)
+                ),
+            );
+            self.reseed_shadow();
+        }
         self.settle("focus");
-        upstream
+        core
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
-        let core = self.twin.core_mut();
         match &change {
             WindowChange::Add(layout, window, _) => {
-                core.add_window(*layout, *window, insertion_point(self.insertion))
+                self.core.add_window(*layout, *window, insertion_point(self.insertion))
             }
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                core.remove_window(*window)
+                self.core.remove_window(*window)
             }
-            WindowChange::Replace(from, to) => core.replace_window(*from, *to),
-            WindowChange::CloseApp(pid) => core.close_app(|window| window.pid == *pid),
+            WindowChange::Replace(from, to) => self.core.replace_window(*from, *to),
+            WindowChange::CloseApp(pid) => self.core.close_app(|window| window.pid == *pid),
             WindowChange::Resize { window, new, .. } => {
-                core.store_frame(*window, crate::layout_engine::core_rect(*new))
+                self.core.store_frame(*window, core_rect(*new))
             }
         }
-        self.upstream_update(change);
+        self.shadow.upstream_mut().update(change);
         self.settle("update");
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         let core = edit_result(match core_edit(edit) {
-            Some(edit) => self.twin.core_mut().edit(layout, edit),
+            Some(edit) => self.core.edit(layout, edit),
             None => rift_core::layout::group_forest::Edited::Unsupported,
         });
-        let upstream = self.upstream_edit_layout(layout, edit);
-        held("edit_layout", edit_words(&upstream), edit_words(&core));
+        let upstream = self.shadow.upstream_mut().edit_layout(layout, edit);
+        if edit_words(&core) != edit_words(&upstream) {
+            super::floating_twin::report(
+                "edit_layout",
+                &format!(
+                    "core {:?}, upstream {:?}",
+                    edit_words(&core),
+                    edit_words(&upstream)
+                ),
+            );
+            self.reseed_shadow();
+        }
         self.settle("edit_layout");
-        upstream
+        core
     }
 }
 
@@ -847,230 +490,21 @@ fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
 type BarWords = (NodeId, LayoutKind, [u64; 4], usize, usize, Vec<WindowId>);
 
 fn bar_words(bar: &crate::layout_engine::engine::GroupContainerInfo) -> BarWords {
+    let frame = bar.frame;
     (
         bar.node_id,
         bar.container_kind,
-        rect_bits(bar.frame),
+        [
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        ]
+        .map(f64::to_bits),
         bar.total_count,
         bar.selected_index,
         bar.window_ids.clone(),
     )
-}
-
-fn rect_bits(frame: CGRect) -> [u64; 4] {
-    [
-        frame.origin.x,
-        frame.origin.y,
-        frame.size.width,
-        frame.size.height,
-    ]
-    .map(f64::to_bits)
-}
-
-impl FloatingLayoutSystem {
-    fn upstream_focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        match focus {
-            Focus::Direction(direction) => {
-                FocusResult::movement(self.move_focus(layout, direction))
-            }
-            _ => self.groups.focus(layout, focus),
-        }
-    }
-
-    fn upstream_update(&mut self, change: WindowChange<'_>) {
-        match change {
-            WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
-            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                self.remove_window(window)
-            }
-            WindowChange::Replace(from, to) => {
-                if from == to {
-                    return;
-                }
-                let geometry = self.geometry.remove(&from);
-                self.geometry.remove(&to);
-                if let Some(geometry) = geometry {
-                    self.geometry.insert(to, geometry);
-                }
-                self.groups.replace_window(from, to);
-            }
-            WindowChange::CloseApp(pid) => {
-                self.geometry.retain(|wid, _| wid.pid != pid);
-                self.groups.close_app(pid)
-            }
-            WindowChange::Resize { window, new, .. } => self.upstream_store_frame(window, new),
-        }
-    }
-
-    fn upstream_edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        match edit {
-            LayoutEdit::Move { .. } => EditResult::Unchanged,
-
-            LayoutEdit::Fullscreen { within_gaps } => {
-                EditResult::Raise(self.groups.toggle_fullscreen(layout, within_gaps))
-            }
-            LayoutEdit::Swap(a, b) => EditResult::from(self.groups.swap_windows(layout, a, b)),
-            LayoutEdit::ReorderTab { window, target } => {
-                EditResult::from(self.groups.move_stack_tab(layout, window, target))
-            }
-            LayoutEdit::ToggleOrientation => self.groups.toggle_orientation(layout),
-            LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                EditResult::from(self.join_selection_with_direction(layout, direction))
-            }
-            LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
-                if self.selected_container(layout).is_some() {
-                    EditResult::from(self.unjoin_selection(layout))
-                } else {
-                    EditResult::from(self.join_selection_with_direction(layout, direction))
-                }
-            }
-            LayoutEdit::Group(GroupEdit::Stack(orientation)) => {
-                EditResult::Raise({
-                    let Some(focused) = self.groups.selected_window(layout) else {
-                        return EditResult::Raise(Vec::new());
-                    };
-                    // Only an explicitly joined container can become a floating stack.
-                    let Some(container) = self.selected_container(layout) else {
-                        return EditResult::Raise(Vec::new());
-                    };
-                    let members = self.members(container);
-                    let save = !self.groups.layout(container).is_stacked();
-                    self.align_members(&members, focused, save);
-                    self.groups.apply_stacking_to_parent_of_selection(layout, orientation);
-                    self.groups.focus(layout, Focus::Select(focused)).handled;
-                    self.groups.windows(layout, WindowQuery::Selection)
-                })
-            }
-            LayoutEdit::Group(GroupEdit::Unstack(orientation)) => {
-                EditResult::Raise(self.unstack_parent_of_selection(layout, orientation))
-            }
-            LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(self.unjoin_selection(layout)),
-            _ => EditResult::Unsupported,
-        }
-    }
-}
-
-impl FloatingLayoutSystem {
-    fn move_focus(
-        &mut self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> (Option<WindowId>, Vec<WindowId>) {
-        let target = self.upstream_focus_target(layout, direction);
-        if let Some(wid) = target {
-            self.groups.focus(layout, Focus::Select(wid)).handled;
-        }
-        (target, target.into_iter().collect())
-    }
-
-    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        if self.groups.contains_window(layout, wid) {
-            return;
-        }
-        // New windows remain independent until an explicit join command.
-        let root = self.groups.root(layout);
-        let anchor = (self.insertion == WindowInsertionPoint::NextToSelection)
-            .then(|| {
-                self.groups
-                    .selection(layout)
-                    .ancestors(self.groups.map())
-                    .find(|node| node.parent(self.groups.map()) == Some(root))
-            })
-            .flatten();
-        let node = if let Some(anchor) = anchor {
-            let node = self.groups.tree.insert(Placement::After(anchor));
-            self.groups.tree.window.set_window(&mut self.groups.tree.map, layout, node, wid);
-            node
-        } else {
-            self.groups.add_window_under(layout, root, wid)
-        };
-        self.groups.select(node);
-    }
-
-    fn remove_window(&mut self, wid: WindowId) {
-        self.geometry.remove(&wid);
-        self.groups.remove_window(wid);
-    }
-
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some((selection, focused)) = self.groups.focused_leaf(layout) else {
-            return false;
-        };
-        let root = self.groups.root(layout);
-        let parent = selection.parent(self.groups.map()).unwrap_or(root);
-        let exclude = (parent != root).then_some(parent);
-        let Some((target_node, target)) =
-            self.directional_window(layout, focused, direction, exclude)
-        else {
-            return false;
-        };
-        let container = if parent == root {
-            let kind = match direction {
-                Direction::Left | Direction::Right => LayoutKind::Horizontal,
-                _ => LayoutKind::Vertical,
-            };
-            self.groups.nest_in_container_internal(layout, selection, kind)
-        } else {
-            parent
-        };
-        let remaining = self.remaining_leaf(target_node);
-        if self.groups.layout(container).is_stacked() {
-            self.align_members(&[target], focused, true);
-        } else if let Some(geometry) = self.geometry.get_mut(&target) {
-            geometry.restore = None;
-        }
-        self.groups.tree.move_node(target_node, Placement::Back(container));
-        self.restore_if_independent(layout, remaining);
-        self.groups.select(selection);
-        true
-    }
-
-    fn unstack_parent_of_selection(
-        &mut self,
-        layout: LayoutId,
-        default_orientation: crate::common::config::StackDefaultOrientation,
-    ) -> Vec<WindowId> {
-        let focused = self.groups.selected_window(layout);
-        let selection = self.groups.selection(layout);
-        let container = selection
-            .ancestors(self.groups.map())
-            .find(|node| self.groups.layout(*node).is_stacked());
-        let Some(container) = container else {
-            return Vec::new();
-        };
-        let visible = self.groups.unstack_parent_of_selection(layout, default_orientation);
-        for wid in self.groups.windows_from(container, Some(container), true) {
-            if let Some(geometry) = self.geometry.get_mut(&wid) {
-                let restore = geometry.restore.take();
-                if Some(wid) != focused {
-                    geometry.frame = restore.or(geometry.frame);
-                }
-            }
-        }
-        if let Some(wid) = focused {
-            self.groups.focus(layout, Focus::Select(wid)).handled;
-        }
-        visible
-    }
-
-    fn unjoin_selection(&mut self, layout: LayoutId) -> bool {
-        let Some((selection, wid)) = self.groups.focused_leaf(layout) else {
-            return false;
-        };
-        let Some(parent) = selection.parent(self.groups.map()) else {
-            return false;
-        };
-        if parent == self.groups.root(layout) {
-            return false;
-        }
-        let remaining = self.remaining_leaf(selection);
-        // Detach only the focused member. The remaining stack stays intact.
-        self.groups.tree.move_node(selection, Placement::After(parent));
-        self.restore_frame(wid);
-        self.restore_if_independent(layout, remaining);
-        self.groups.select(selection);
-        true
-    }
 }
 
 #[cfg(test)]
@@ -1162,9 +596,14 @@ mod tests {
         system.store_frame(w(2), rect(100., 80.));
         system.store_frame(w(1), rect(999., 999.));
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
-        system.geometry.get_mut(&w(4)).unwrap().restore = Some(rect(999., 999.));
-        // A stale frame to return to, set by hand: the core's system takes it too.
-        system.reseed();
+        // A stale frame to return to, set by hand on the core; the shadow takes it too.
+        let mut geometry = system.core.geometry().clone();
+        geometry.insert(w(4), rift_core::layout::group_forest::Geometry::Aligned {
+            frame: core_rect(rect(770., 40.)),
+            restore: core_rect(rect(999., 999.)),
+        });
+        system.core = CoreFloating::from_parts(system.core.forest().clone(), geometry);
+        system.reseed_shadow();
         system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin));
         assert_eq!(system.frame(w(2)), Some(rect(270., 40.)));
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
@@ -1227,15 +666,18 @@ mod tests {
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         let bytes = ron::to_string(&system).unwrap();
         let mut restored: FloatingLayoutSystem = ron::from_str(&bytes).unwrap();
-        assert_eq!(restored.geometry, system.geometry);
+        assert_eq!(restored.core.geometry(), system.core.geometry());
         restored.update(WindowChange::Replace(w(2), w(9)));
         assert_eq!(restored.frame(w(9)), system.frame(w(2)));
-        assert_eq!(restored.geometry[&w(9)].restore, Some(rect(270., 40.)));
+        assert_eq!(
+            restored.core.geometry()[&w(9)].restore(),
+            Some(core_rect(rect(270., 40.)))
+        );
         let clone = restored.clone_layout(layout);
         restored.remove_layout(layout);
         assert!(restored.frame(w(9)).is_some());
         restored.remove_layout(clone);
-        assert!(restored.geometry.is_empty());
+        assert!(restored.core.geometry().is_empty());
     }
 
     /// A floating system after random edits: windows added and removed, frames kept (the user
@@ -1358,7 +800,8 @@ mod tests {
             let gaps = drawn_gaps(&mut rng);
             // Drawn but unused (a floating layout has no bar): the draws stay as they were.
             let _ = drawn_line(&mut rng);
-            let upstream = system.shadow_frames(layout, screen, &constraints, &gaps);
+            let upstream =
+                system.shadow.upstream().shadow_frames(layout, screen, &constraints, &gaps);
             let core: Vec<(WindowId, CGRect)> = system
                 .shape(layout, screen, &constraints, &gaps)
                 .frames()
@@ -1431,8 +874,9 @@ mod tests {
         let _ = bits(&[]);
     }
 
-    /// The core's floating system beside upstream's (step 2), over drawn systems: each drawn as
-    /// the frames test draws it, then layouts cloned and removed, windows replaced, closed by
+    /// The core's floating system beside upstream's (step 2; since step 3 upstream's is the
+    /// shadow), over drawn systems: each drawn as the frames test draws it and the shadow
+    /// re-seeded from the core, then layouts cloned and removed, windows replaced, closed by
     /// app, removed (rebalancing or not) and resized through `update`, in two layouts; every
     /// question asked along the way, and the system reloaded through serde. Any difference fails
     /// the test (the twin panics in tests).
@@ -1443,6 +887,8 @@ mod tests {
         let mut steps = 0;
         for _ in 0..1500 {
             let (mut system, first, mut windows) = drawn_system(&mut rng);
+            // The shadow re-seeded from the core (what a difference does), then held to it.
+            system.reseed_shadow();
             let mut layouts = vec![first];
             ask_everything(&system, &layouts, &windows);
             let mut next = 1000;
@@ -1505,6 +951,11 @@ mod tests {
                     }
                     7 => {
                         let bytes = ron::to_string(&system).unwrap();
+                        assert_eq!(
+                            bytes,
+                            upstream_save(system.shadow.upstream()),
+                            "the core saves upstream's bytes"
+                        );
                         let mut restored: FloatingLayoutSystem = ron::from_str(&bytes).unwrap();
                         restored.set_window_insertion_point(system.insertion);
                         system = restored;
@@ -1540,7 +991,7 @@ mod tests {
     fn states_only_a_file_builds_step_through_the_twin() {
         let load = |text: &str| -> (FloatingLayoutSystem, LayoutId) {
             let system: FloatingLayoutSystem = ron::from_str(text).unwrap();
-            let layout = system.groups.layout_roots.keys().next().unwrap();
+            let (layout, _) = system.core.forest().layouts().next().unwrap();
             (system, layout)
         };
         let all = [w(1), w(2), w(3), w(4)];
@@ -1561,7 +1012,7 @@ mod tests {
         stack(&mut system, layout);
         ask_everything(&system, &[layout], &all);
         assert_eq!(
-            system.geometry[&w(2)].restore,
+            system.core.geometry()[&w(2)].restore().map(cg_rect),
             Some(rect(900., 600.)),
             "the remembered frame kept"
         );
@@ -1578,11 +1029,72 @@ mod tests {
         system.edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)));
         ask_everything(&system, &[layout], &all);
         assert_eq!(
-            system.geometry[&w(3)].restore,
+            system.core.geometry()[&w(3)].restore().map(cg_rect),
             None,
             "joined into a split, the stale frame is forgotten"
         );
         system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin));
         ask_everything(&system, &[layout], &all);
+    }
+
+    /// Upstream's system as upstream saves it, its frames in window order (upstream's map
+    /// iterates in an order its history decides; the core writes them by window).
+    fn upstream_save(upstream: &Upstream) -> String {
+        #[derive(Serialize)]
+        struct Sorted<'a> {
+            inner: &'a super::super::groups::GroupLayouts,
+            geometry: BTreeMap<WindowId, &'a upstream::FloatingGeometry>,
+            spread_on_initialization: bool,
+        }
+        ron::to_string(&Sorted {
+            inner: &upstream.groups,
+            geometry: upstream
+                .geometry
+                .iter()
+                .map(|(&window, geometry)| (window, geometry))
+                .collect(),
+            spread_on_initialization: upstream.spread_on_initialization,
+        })
+        .unwrap()
+    }
+
+    /// Each saved form a load reads (the three file-built states and the older form with its
+    /// `frames` and `independent_frames` maps, a frame to return to with no frame among them),
+    /// loaded by upstream and by the flipped system: the core saves upstream's load byte for
+    /// byte, and upstream's load is frozen as bytes (`*.loaded.ron`).
+    #[test]
+    fn a_load_saves_upstreams_bytes_and_upstreams_loads_are_frozen() {
+        for (name, text, frozen) in [
+            (
+                "stack_in_stack",
+                include_str!("floating/stack_in_stack.ron"),
+                include_str!("floating/stack_in_stack.loaded.ron"),
+            ),
+            (
+                "aligned_in_split",
+                include_str!("floating/aligned_in_split.ron"),
+                include_str!("floating/aligned_in_split.loaded.ron"),
+            ),
+            (
+                "stale_restore_at_root",
+                include_str!("floating/stale_restore_at_root.ron"),
+                include_str!("floating/stale_restore_at_root.loaded.ron"),
+            ),
+            (
+                "legacy_frames",
+                include_str!("floating/legacy_frames.ron"),
+                include_str!("floating/legacy_frames.loaded.ron"),
+            ),
+        ] {
+            let upstream: Upstream = ron::from_str(text).unwrap();
+            let expected = upstream_save(&upstream);
+            assert_eq!(expected, frozen.trim_end(), "{name}: upstream's load as frozen");
+            let system: FloatingLayoutSystem = ron::from_str(text).unwrap();
+            assert_eq!(
+                ron::to_string(&system).unwrap(),
+                expected,
+                "{name}: the core saves upstream's load"
+            );
+        }
     }
 }

@@ -634,6 +634,9 @@ pub(crate) enum Held {
 
 impl NodeMap {
     /// The slots themselves (the twins' seed reads their versions and free list).
+    /// A map holding these slots (the floating shadow re-seeded from the core).
+    pub(crate) fn of_slots(map: SlotMap<NodeId, Node>) -> Self { Self { map } }
+
     pub(crate) fn slots(&self) -> &SlotMap<NodeId, Node> { &self.map }
 
     /// A node's parent and contents, its children listed in order.

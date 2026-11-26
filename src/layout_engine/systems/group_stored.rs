@@ -10,14 +10,16 @@ use serde::{Deserialize, Serialize};
 use slotmap::{SecondaryMap, SlotMap};
 
 use super::group_system::{CoreForest, core_kind, layout_kind};
-use super::groups::{LayoutRoot, deserialize_tile_tree};
+use super::groups::{GroupLayouts, LayoutRoot, deserialize_tile_tree};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{MasterStackSettings, MasterStackSide};
 use crate::layout_engine::{LayoutId, LayoutKind, Orientation};
 use crate::model::selection::SelectionInfo;
-use crate::model::slot_table::{SavedSlot, SlotTable, of_slotmap, saved};
-use crate::model::tree::{self, Held, NodeId, NodeMap, Placement, Tree};
+use crate::model::slot_table::{SavedSlot, SlotTable, of_slotmap, saved, to_slotmap};
+use crate::model::tree::{
+    self, Held, NodeId, NodeMap, Placement, Tree, WindowIndex, WindowNodeInfo,
+};
 
 /// The forest as upstream's `GroupLayouts` is saved (its derived form: the tree, then the layout
 /// roots).
@@ -188,6 +190,38 @@ impl Saved {
             },
             layout_roots: saved(forest.layout_table(), |_, &root| LayoutRoot(root)).collect(),
         }
+    }
+}
+
+/// Upstream's forest built from the core's (the floating shadow re-seeded): the same slots,
+/// versions and free lists, the index in the core's order, the windows left out.
+pub(super) fn upstream_tiles(forest: &CoreForest) -> GroupLayouts {
+    let siblings = siblings(forest);
+    let nodes: SlotMap<NodeId, tree::Node> = to_slotmap(
+        forest.nodes(),
+        |key, node| saved_node(node, siblings.get(&key).copied().unwrap_or_default()),
+        tree::Node::default(),
+    );
+    let mut window = WindowIndex::default();
+    for (id, layout, node) in forest.index() {
+        window
+            .window_nodes
+            .entry(id)
+            .or_default()
+            .0
+            .push(WindowNodeInfo { layout, node });
+    }
+    GroupLayouts {
+        inactive: forest.left_out().iter().copied().collect(),
+        tree: Tree {
+            map: NodeMap::of_slots(nodes),
+            window,
+        },
+        layout_roots: to_slotmap(
+            forest.layout_table(),
+            |_, &root| LayoutRoot(root),
+            LayoutRoot(NodeId::default()),
+        ),
     }
 }
 
