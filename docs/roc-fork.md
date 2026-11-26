@@ -114,6 +114,25 @@ forest), for whoever picks up the repro (the lead's option (b)):
   - `listed_children`'s region pair: the same as `insert`'s (a regular container's key).
   - `create_root`: none. `delete_subtree`: none (its `NotHeld` returns the forest since fix 2).
 
+**Floating onto the core forest (2026-11-26, the lead's go; steps 1-2 of 5).** Step 1 put the
+floating system in the core (`group_forest::FloatingSystem`, its frames a `Geometry` union);
+step 2 holds it to upstream's `FloatingLayoutSystem` as a shadow (`systems/floating_twin.rs`),
+upstream still deciding. Next: the flip (3), the Roc port (4), deleting upstream's tree and
+`groups.rs` (5). Rulings and notes so far:
+- **`Geometry::Restorable` stays** (a frame to return to and none kept): upstream reaches it
+  only by loading its older file form (`independent_frames` without `frames`), and saves stay
+  byte-compatible. A candidate for normalizing at load (to `Kept` of the restore, or dropped)
+  once upstream compatibility is no longer pinned.
+- **A stale frame to return to is kept, as upstream keeps it:** a swap or a tab reorder can move
+  an aligned window out of its group with its `restore`; a later stack or unjoin then uses it.
+  Likely an upstream quirk; if it is fixed, as a deliberate behaviour change, not in the port.
+- **Reachable only from a file (the shadow cannot reach them; the core's unit tests hold
+  them):** a stack inside a stack (floating's own operations nest a group only at the root, and
+  join only leaves), so "the outermost stack shares a stored frame" and "the innermost" agree on
+  every state floating builds; an aligned window aligned again into a new stack (its remembered
+  frame kept), and a stale restore on a window joined into a split (forgotten), which need the
+  stale-restore path above.
+
 **The 1000-window perf track, closed (2026-11-26, the lead's ruling).** At real sizes (10-30
 windows) a Roc step or pass costs a few microseconds; the track's job was removing shapes that
 allocate O(n) per event, and it stops here. Done: the walk without materialising, the sampled
