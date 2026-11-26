@@ -980,11 +980,7 @@ fn known_forest_copy(event: &ForestEvent) -> bool {
 fn known_edit_copy(edit: &Edit<u64>) -> bool {
     matches!(
         edit,
-        Edit::Drop { .. }
-            | Edit::Move { .. }
-            | Edit::Rebalance
-            | Edit::Join(_)
-            | Edit::ConsumeOrExpel(_)
+        Edit::Drop { .. } | Edit::Move { .. } | Edit::Join(_) | Edit::ConsumeOrExpel(_)
     )
 }
 

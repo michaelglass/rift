@@ -2229,16 +2229,17 @@ GroupForest := [].{
 			}
 		}
 
+	## Every node under `top` sized 1, and whether any was not (`Rebalance`'s answer): the
+	## question read first, then the sizes written.
 	rebalance : Forest, U64 -> (Forest, Bool)
-	rebalance = |forest, top|
-		children(forest, top).fold(
-			(forest, False),
-			|(at, changed), child| {
-				differs = size(at, child) != 1.0
-				(balanced, below) = rebalance(set_size(at, child, 1.0), child)
-				(balanced, changed or differs or below)
-			},
-		)
+	rebalance = |forest, top| {
+		changed = walk(forest, top, Preorder, False, |_, key| if key != top and size(forest, key) != 1.0 Break(True) else Continue(False))
+		(balance_sizes(forest, top), changed)
+	}
+
+	## Every node under `top` sized 1.
+	balance_sizes : Forest, U64 -> Forest
+	balance_sizes = |forest, top| children(forest, top).fold(forest, |at, child| balance_sizes(set_size(at, child, 1.0), child))
 
 	remove_and_rebalance : Forest, U64 -> Forest
 	remove_and_rebalance = |forest, window_word| {
