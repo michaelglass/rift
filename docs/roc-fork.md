@@ -9,24 +9,29 @@ History: the first Roc port stopped at `experiment/roc-paused` (2026-11-18) whil
 rearch finished on `experiment/rust-core` (the play-test line, now the owner's daily driver).
 The Roc work resumed on `experiment/roc-2`, branched from `experiment/rust-core`.
 
-## Handoff (2026-11-26, layout trees: BSP, the stack and the group forest done through slice 5): read this first
+## Handoff (2026-11-26, layout trees done: every layout system on the core): read this first
 
-**State.** Workspace `rift-roc`, line `experiment/roc-2`. Layout trees slices 1-5 are done for
-BSP, the stack and the group forest (traditional and master-stack); floating is the one layout
-system still on upstream's code (`GroupLayouts`), by the lead's ruling, for its own turn.
+**State.** Workspace `rift-roc`, line `experiment/roc-2`. Every layout system is the core's:
+BSP, the stack, the group forest (traditional and master-stack) and floating, each through its
+five slices; under `roc-core` the Roc core decides each, the Rust core its shadow. Upstream's
+layout code is gone (floating's step 5 deleted the last of it, with `GroupLayouts`); the loads
+read upstream's saved forms through `group_stored` and `stack/stored`, frozen by fixtures.
 `rearch/roc-next@fork` carries everything through this docs commit once it is published (publish
 procedure: "Rulings that bind", Public-clean; the published tip's id is in the slice report). All
-checks green at the tip: workspace tests 1056 (7 ignored), the lib with `roc-core` 936 (10
-ignored), `cargo test -p rift-core-roc --features roc` 56 (9 ignored), `cargo test -p rift-core`
-108, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and `cargo clippy
---all-targets --features roc-core` compiles with no errors and 323 warnings, counted as `cargo
+checks green at the tip: workspace tests 1070 (7 ignored), the lib with `roc-core` 943 (10
+ignored), `cargo test -p rift-core-roc --features roc` 61 (14 ignored), `cargo test -p rift-core`
+119, the fuzzer at 2000 × 40 both ways, `cargo check --locked` both ways, fmt, and `cargo clippy
+--all-targets --features roc-core` compiles with no errors and 318 warnings, counted as `cargo
 clippy --all-targets --features roc-core 2>&1 | grep -E '^(warning|error)' | grep -v generated |
 wc -l` (the bound: at most 336).
 
-**Next (the lead's):** the known costs set aside until after slice 5, the Roc step (about 105 us
-an operation at 1000 windows in one traditional layout) and the Roc layout pass (624 us), then
-floating's turn (it goes onto the core forest and `GroupLayouts` goes with it). The two Roc
-issue drafts below ("Roc issue drafts") wait for the owner.
+**Next (proposed to the lead, 2026-11-26):** (1) a window's place by type in the group forest
+(a window node always has a parent: the node type's place split so a window carries its parent,
+deleting `drop_stacking`'s and `smart_window_insertion`'s named crashes and every "window is a
+root" branch, in Rust and Roc); (2) the Roc known copies, which need the compiler's ownership
+decisions (a dev-diagnostics build's `ROC_LIR_DUMP`; the owner's call whether to ask upstream);
+(3) the open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
+below ("Roc issue drafts") wait for the owner.
 
 **Roc uniqueness: the node-table copies still open (2026-11-26, fix 2 of the lead's three Roc
 cost fixes).** A step that copies the forest's node table pays O(n) per event (about 112 bytes
@@ -118,8 +123,9 @@ forest), for whoever picks up the repro (the lead's option (b)):
 floating system in the core (`group_forest::FloatingSystem`, its frames a `Geometry` union);
 step 2 holds it to upstream's `FloatingLayoutSystem` as a shadow (`systems/floating_twin.rs`),
 upstream still deciding; step 3 flipped it (the core decides and is saved, upstream's system
-in `systems/floating/upstream.rs` the shadow). Next: the Roc port (4), deleting upstream's tree
-and `groups.rs` (5). Rulings and notes so far:
+the shadow); step 4 ported it to Roc and, under `roc-core`, made the Roc system decide (the
+core's its shadow, upstream's the core's until deleted); step 5 deleted upstream's system,
+`groups.rs` and the re-seed helpers (done 2026-11-26). Rulings and notes:
 - **"Byte-compatible", precisely:** the core's save equals upstream's byte for byte except the
   order of the frames, which the core writes by window (upstream's `FxHashMap` iterates in an
   order its history decides); both orders load the same. The core's saves are deterministic,
@@ -152,9 +158,9 @@ and `groups.rs` (5). Rulings and notes so far:
   master-stack copies have the same signature (refcount 1 at entry, a copy inside, sensitive to
   the caller). The next step is still the compiler's ownership decisions (a dev-diagnostics
   build's `ROC_LIR_DUMP`, see above).
-- **For deletion in step 5, with upstream:** `model/slot_table::to_slotmap`,
-  `NodeMap::of_slots` and `group_stored::upstream_tiles` (restored only to re-seed the floating
-  shadow from the core with the same slots, versions and free lists).
+- **Deleted in step 5, with upstream:** `model/slot_table::to_slotmap`, `NodeMap::of_slots`
+  and `group_stored::upstream_tiles` (restored only to re-seed the floating shadow from the core
+  with the same slots, versions and free lists).
 - **`Geometry::Restorable` stays** (a frame to return to and none kept): upstream reaches it
   only by loading its older file form (`independent_frames` without `frames`), and saves stay
   byte-compatible. A candidate for normalizing at load (to `Kept` of the restore, or dropped)
