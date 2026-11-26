@@ -335,15 +335,6 @@ impl GroupLayouts {
         }
     }
 
-    pub(super) fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) -> EditResult {
-        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
-            return EditResult::Unchanged;
-        }
-        let selection = self.selection(layout);
-        self.nest_in_container_internal(layout, selection, kind);
-        EditResult::Changed
-    }
-
     pub(super) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         self.container_tree_with_roles(layout, &[])
     }
@@ -863,32 +854,6 @@ impl GroupLayouts {
             .is_some_and(|node| node.ancestors(self.map()).any(|ancestor| ancestor == selection))
     }
 
-    pub(super) fn window_in_direction(
-        &self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> Option<WindowId> {
-        let map = self.map();
-        // Enter along the near edge. Across an axis, a split remembers the path used
-        // to leave it, while a stack prefers its presented child.
-        let reverse = matches!(direction, Direction::Left | Direction::Up);
-        map.find_window(
-            self.root(layout),
-            &|window| self.window_participates(window),
-            &|node| {
-                let kind = map.kind(node);
-                let preferred =
-                    if kind.is_stacked() || kind.orientation() != direction.orientation() {
-                        map.local_selection(node)
-                    } else {
-                        None
-                    };
-                (preferred, reverse)
-            },
-        )
-        .map(|(_, window)| window)
-    }
-
     pub(super) fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         self.window_node(layout, wid).is_some()
     }
@@ -997,13 +962,6 @@ impl GroupLayouts {
     }
 
     pub(super) fn map(&self) -> &NodeMap { &self.tree.map }
-
-    pub(super) fn local_selection(&self, node: NodeId) -> Option<NodeId> {
-        self.tree
-            .map
-            .local_selection(node)
-            .or_else(|| self.tree.map.last_selection(node))
-    }
 
     pub(super) fn layout(&self, node: NodeId) -> LayoutKind { self.tree.map.kind(node) }
 

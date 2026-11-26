@@ -24,10 +24,9 @@ mod tests {
     };
     use crate::layout_engine::engine::GroupContainerInfo;
     use crate::layout_engine::systems::drawn::*;
-    use crate::layout_engine::systems::traditional::Upstream as TraditionalLayoutSystem;
     use crate::layout_engine::systems::{
-        Focus, GroupEdit, LayoutEdit, LayoutSystem, WindowChange, WindowLayoutConstraints,
-        WindowQuery,
+        Focus, GroupEdit, LayoutEdit, LayoutSystem, TraditionalLayoutSystem, WindowChange,
+        WindowLayoutConstraints, WindowQuery,
     };
     use crate::layout_engine::utils::compute_tiling_area;
     use crate::layout_engine::{Direction, LayoutId, LayoutKind};
@@ -82,9 +81,18 @@ mod tests {
                 orientation: crate::layout_engine::ResizeOrientation::Horizontal,
             })
             .discard();
-        inner.tiles.set_layout(inner.tiles.root(layout), LayoutKind::HorizontalStack);
+        // The root made a horizontal stack (the selection's parent is the root).
+        assert!(
+            inner
+                .edit(
+                    layout,
+                    LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Horizontal))
+                )
+                .changed()
+        );
+        assert!(inner.focus(layout, Focus::Select(w(2))).handled);
         inner.edit(layout, LayoutEdit::Fullscreen { within_gaps: true }).into_windows();
-        let expected = inner.tiles.container_tree(layout);
+        let expected = inner.container_tree(layout);
         assert!(
             expected.children.iter().any(|child| child.weight != Some(1.0)),
             "{expected:?}"

@@ -1,23 +1,12 @@
-//! What the traditional and master-stack twins share (layout trees, the group forest's slice 1):
-//! the core's forest seeded from upstream's `GroupLayouts`, the view the twins compare, a
-//! difference's report, and the conversions of rift's edits, focus and answers.
-//!
-//! Upstream's system decides; the core is stepped on every operation, in every build, and held
-//! to it: each answer on every operation, the whole forest (the view) on every operation in tests
-//! and `roc-core` builds and every [`VIEW_EVERY`]th in a plain release build, each pass's shape on
-//! every pass. A difference is counted, fails a test, or in a running Rift is warned
-//! (`group-forest-divergence:`) and the core re-seeded from upstream's system.
-
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+//! What the traditional and master-stack systems share: the core's forest over rift's ids, the
+//! group bar's pass, and the conversions of rift's edits, focus, queries and answers to and from
+//! the core's.
 
 use objc2_core_foundation::CGRect;
 use rift_core::layout::group_forest::{
-    self as core, Bars, Body, DropAction, Fill, Forest, Kind, Node, Participation, Pass, Resize,
+    self as core, Bars, DropAction, Fill, Forest, Kind, Participation, Pass, Resize,
 };
 
-use super::group_stored::{core_node, forest_of, stamps};
-use super::groups::GroupLayouts;
 use super::{
     EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowLayoutConstraints, WindowQuery,
     core_direction,
@@ -32,30 +21,28 @@ use crate::model::tree::NodeId;
 /// The core's forest over rift's ids.
 pub(super) type CoreForest = Forest<LayoutId, NodeId, WindowId>;
 
-/// How often a plain release build compares the whole forest (the twins' sampling).
-pub(super) const VIEW_EVERY: u64 = 32;
-
-/// Whether every operation compares the whole forest.
-pub(super) const VIEW_ALWAYS: bool = cfg!(any(test, feature = "roc-core"));
-
-static GROUP_FOREST_DIVERGENCES: AtomicU64 = AtomicU64::new(0);
-
-/// Differences between the core's forest and upstream's systems, counted process-wide.
-pub(crate) fn group_forest_divergences() -> u64 { GROUP_FOREST_DIVERGENCES.load(Ordering::Relaxed) }
-
-/// Counts a difference, then fails the test, or in a running Rift warns it.
-pub(super) fn report(system: &str, what: &str, difference: &str) {
-    let divergences = GROUP_FOREST_DIVERGENCES.fetch_add(1, Ordering::Relaxed) + 1;
-    #[cfg(test)]
-    panic!("group-forest-divergence ({divergences} so far) in {system} after {what}: {difference}");
-    #[cfg(not(test))]
-    tracing::warn!(
-        system,
-        what,
-        divergences,
-        difference,
-        "group-forest-divergence: the core's forest differs from upstream's; re-seeded"
-    );
+/// A forest with these nodes' sizes among their siblings set (for tests: a state operations
+/// reach only by many resizes, or a saved file holds).
+#[cfg(test)]
+pub(super) fn with_sizes(forest: &CoreForest, sizes: &[(NodeId, f32)]) -> CoreForest {
+    let nodes = forest
+        .nodes()
+        .clone()
+        .map(|key, mut node| {
+            if let core::Place::Child { size, .. } = &mut node.place
+                && let Some(&(_, set)) = sizes.iter().find(|(sized, _)| *sized == key)
+            {
+                *size = set;
+            }
+            Ok::<_, std::convert::Infallible>(node)
+        })
+        .unwrap_or_else(|never| match never {});
+    Forest::from_parts(
+        forest.layout_table().clone(),
+        nodes,
+        forest.left_out().clone(),
+        forest.next_stamp(),
+    )
 }
 
 pub(super) fn core_kind(kind: LayoutKind) -> Kind {
@@ -65,95 +52,6 @@ pub(super) fn core_kind(kind: LayoutKind) -> Kind {
         LayoutKind::HorizontalStack => Kind::Stack(core::Orientation::Horizontal),
         LayoutKind::VerticalStack => Kind::Stack(core::Orientation::Vertical),
     }
-}
-
-/// Upstream's forest as the core holds it: both slot tables as upstream's slotmaps hold them
-/// (free lists included), each leaf stamped in the index's order.
-pub(super) fn seed(tiles: &GroupLayouts) -> CoreForest {
-    forest_of(
-        &tiles.tree,
-        &tiles.layout_roots,
-        &stamps(&tiles.tree.window),
-        tiles.inactive.iter().copied(),
-    )
-}
-
-/// A forest as the twins compare it: layouts and nodes by id (a leaf's stamp left out: only its
-/// order among the window's leaves is behaviour, which the index holds), the windows left out,
-/// and the index. Vacant slots and free lists are not compared: a difference there shows as the
-/// next id allocated.
-type View = (
-    Vec<(LayoutId, NodeId)>,
-    Vec<(NodeId, Node<NodeId, WindowId>)>,
-    BTreeSet<WindowId>,
-    Vec<(WindowId, LayoutId, NodeId)>,
-);
-
-fn unstamped(mut node: Node<NodeId, WindowId>) -> Node<NodeId, WindowId> {
-    if let Body::Window { stamp, .. } = &mut node.body {
-        *stamp = 0;
-    }
-    node
-}
-
-fn core_view(forest: &CoreForest) -> View {
-    (
-        forest.layouts().collect(),
-        forest
-            .nodes()
-            .iter()
-            .map(|(key, node)| (key, unstamped(node.clone())))
-            .collect(),
-        forest.left_out().clone(),
-        forest.index(),
-    )
-}
-
-/// Upstream's index as (window, layout, leaf), in its order.
-fn upstream_index(tiles: &GroupLayouts) -> Vec<(WindowId, LayoutId, NodeId)> {
-    tiles
-        .tree
-        .window
-        .window_nodes
-        .iter()
-        .flat_map(|(&window, nodes)| {
-            nodes.0.iter().map(move |info| (window, info.layout, info.node))
-        })
-        .collect()
-}
-
-fn upstream_view(tiles: &GroupLayouts) -> View {
-    let stamps = HashMap::default();
-    (
-        tiles.layout_roots.iter().map(|(layout, root)| (layout, root.0)).collect(),
-        tiles
-            .tree
-            .map
-            .slots()
-            .iter()
-            .map(|(key, node)| (key, unstamped(core_node(&tiles.tree.map, &stamps, key, node))))
-            .collect(),
-        tiles.inactive.iter().copied().collect(),
-        upstream_index(tiles),
-    )
-}
-
-/// Where the core's forest differs from upstream's, if it does.
-pub(super) fn view_difference(core: &CoreForest, tiles: &GroupLayouts) -> Option<String> {
-    let (ours, theirs) = (core_view(core), upstream_view(tiles));
-    if ours.0 != theirs.0 {
-        return Some(format!("layouts: upstream {:?}, core {:?}", theirs.0, ours.0));
-    }
-    if ours.1 != theirs.1 {
-        return Some(format!("nodes: upstream {:?}, core {:?}", theirs.1, ours.1));
-    }
-    if ours.2 != theirs.2 {
-        return Some(format!("left out: upstream {:?}, core {:?}", theirs.2, ours.2));
-    }
-    if ours.3 != theirs.3 {
-        return Some(format!("index: upstream {:?}, core {:?}", theirs.3, ours.3));
-    }
-    None
 }
 
 /// A core kind as upstream's layout kind.
@@ -200,36 +98,14 @@ pub(super) fn container_node(
     }
 }
 
-/// A group bar, comparable (its frame by bits).
-type BarWords = (NodeId, LayoutKind, [u64; 4], usize, usize, Vec<WindowId>);
-
-fn bar_words(bar: &GroupContainerInfo) -> BarWords {
-    let frame = bar.frame;
-    (
-        bar.node_id,
-        bar.container_kind,
-        [
-            frame.origin.x,
-            frame.origin.y,
-            frame.size.width,
-            frame.size.height,
-        ]
-        .map(f64::to_bits),
-        bar.total_count,
-        bar.selected_index,
-        bar.window_ids.clone(),
-    )
-}
-
 /// A layout pass with its group bars (upstream's `project` with a group output, which the
 /// group bar reads): the bars the core's forest gives, and the frames (when `emit_frames`) as
-/// `calculate_layout` decides them; upstream's projection (`tiles` laid out from its root or
-/// the master region of `regions`) is held to both.
+/// `calculate_layout` decides them. Under `roc-core` the Roc forest's pass decides, bars and
+/// frames (`roc`, given the Rust forest's bars to hold its own to).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn project_groups(
     system: &str,
     forest: &CoreForest,
-    (tiles, regions): (&GroupLayouts, Option<(NodeId, NodeId)>),
     layout: LayoutId,
     screen: CGRect,
     offset: f64,
@@ -244,7 +120,6 @@ pub(super) fn project_groups(
         &[core::GroupBar<NodeId, WindowId>],
     ) -> super::group_roc::Projected,
 ) -> (Vec<(WindowId, CGRect)>, Vec<GroupContainerInfo>) {
-    use crate::layout_engine::Shadow;
     use crate::layout_engine::core_geometry::{cg_rect, core_constraints};
     let constrained = |window: WindowId| constraints.get(&window).copied().map(core_constraints);
     let bars = if selection_path_only {
@@ -266,47 +141,12 @@ pub(super) fn project_groups(
             })
             .collect()
     };
-    let root = tiles.root(layout);
-    let mut theirs = Vec::new();
-    let upstream_frames = super::tiles::project(
-        tiles,
-        root,
-        |active| super::tiles::project_root(root, regions, active),
-        screen,
-        offset,
-        constraints,
-        gaps,
-        line,
-        emit_frames,
-        Some(super::tiles::GroupOutput {
-            groups: &mut theirs,
-            selection_path_only,
-        }),
-    );
-    let (upstream, core): (Vec<BarWords>, Vec<BarWords>) = (
-        theirs.iter().map(bar_words).collect(),
-        info(&rust).iter().map(bar_words).collect(),
-    );
-    if upstream != core {
-        report(
-            system,
-            "project_groups",
-            &format!("bars: upstream {upstream:?}, core {core:?}"),
-        );
-    }
     let shape = || forest.shape(layout, pass, &constrained);
-    // Under `roc-core` the Roc forest's pass decides, bars and frames.
     #[cfg(feature = "roc-core")]
     {
         let (frames, decided) = roc(pass, bars, &rust);
         let frames = if emit_frames {
-            crate::layout_engine::core_geometry::decide_group_tree(
-                system,
-                shape(),
-                Shadow::Run,
-                || upstream_frames,
-                || frames,
-            )
+            crate::layout_engine::core_geometry::decide_roc_tree(system, shape(), || frames)
         } else {
             Vec::new()
         };
@@ -315,12 +155,7 @@ pub(super) fn project_groups(
     #[cfg(not(feature = "roc-core"))]
     {
         let frames = if emit_frames {
-            crate::layout_engine::core_geometry::decide_traditional(
-                system,
-                shape(),
-                Shadow::Run,
-                || upstream_frames,
-            )
+            crate::layout_engine::core_geometry::decide_tree(system, shape())
         } else {
             Vec::new()
         };
@@ -419,21 +254,6 @@ pub(super) fn edit_result(edited: core::Edited<WindowId>) -> EditResult {
         core::Edited::Unchanged => EditResult::Unchanged,
         core::Edited::Changed => EditResult::Changed,
         core::Edited::Raise(windows) => EditResult::Raise(windows),
-    }
-}
-
-/// A focus's answer, comparable.
-pub(super) fn focus_words(result: &FocusResult) -> (bool, Option<WindowId>, Vec<WindowId>) {
-    (result.handled, result.window, result.raise.clone())
-}
-
-/// An edit's answer, comparable.
-pub(super) fn edit_words(result: &EditResult) -> (&'static str, Vec<WindowId>) {
-    match result {
-        EditResult::Unsupported => ("unsupported", Vec::new()),
-        EditResult::Unchanged => ("unchanged", Vec::new()),
-        EditResult::Changed => ("changed", Vec::new()),
-        EditResult::Raise(windows) => ("raise", windows.clone()),
     }
 }
 
@@ -731,7 +551,8 @@ pub(super) mod drawn {
         (old, new, screen, gaps)
     }
 
-    /// Every query, answered by both sides (the twin compares them), the system's own views
+    /// Every query (under `roc-core` the Roc forest's answer held to the Rust forest's), the
+    /// system's own views
     /// (rift-cli's, the group bar's) through `views`.
     fn query<S: LayoutSystem>(
         rng: &mut Rng,

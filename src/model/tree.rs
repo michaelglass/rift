@@ -235,29 +235,6 @@ impl NodeMap {
         })
     }
 
-    pub(crate) fn set_primary_region_first(&mut self, root: NodeId, first: bool) {
-        let Contents::RegionPair {
-            regions,
-            selection,
-            primary_first,
-        } = self[root].contents
-        else {
-            unreachable!("expected a region pair");
-        };
-        if primary_first != first {
-            let [left, right] = regions;
-            self[right].prev_sibling = None;
-            self[right].next_sibling = Some(left);
-            self[left].prev_sibling = Some(right);
-            self[left].next_sibling = None;
-            self[root].contents = Contents::RegionPair {
-                regions: [right, left],
-                selection,
-                primary_first: first,
-            };
-        }
-    }
-
     pub(crate) fn children_total(&self, parent: NodeId) -> f32 {
         parent.children(self).map(|child| self[child].layout.size.max(0.0)).sum()
     }
@@ -656,9 +633,6 @@ pub(crate) enum Held {
 }
 
 impl NodeMap {
-    /// A map holding these slots (the shadow re-seeded from the core).
-    pub(crate) fn of_slots(map: SlotMap<NodeId, Node>) -> Self { Self { map } }
-
     /// The slots themselves (the twins' seed reads their versions and free list).
     pub(crate) fn slots(&self) -> &SlotMap<NodeId, Node> { &self.map }
 

@@ -309,32 +309,6 @@ fn toggle_fullscreen_mode(full: &mut bool, gaps: &mut bool, within_gaps: bool) -
     *target
 }
 
-/// Return whether a native resize entered or left a fullscreen frame.
-fn track_fullscreen_resize(
-    full: &mut bool,
-    within_gaps: &mut bool,
-    old: CGRect,
-    new: CGRect,
-    screen: CGRect,
-    gaps: &GapSettings,
-) -> bool {
-    if new == screen {
-        (*full, *within_gaps) = (true, false);
-    } else if old == screen {
-        *full = false;
-    } else {
-        let tiling = super::utils::compute_tiling_area(screen, gaps);
-        if new == tiling {
-            (*full, *within_gaps) = (false, true);
-        } else if old == tiling {
-            *within_gaps = false;
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn window_participates(&self, _window: WindowId) -> bool { true }
@@ -437,10 +411,8 @@ mod group_roc;
 mod group_stored;
 #[cfg(feature = "roc-core")]
 pub(crate) use group_roc::group_forest_reseeds;
-mod group_twin;
-pub(crate) use group_twin::group_forest_divergences;
+mod group_system;
 mod groups;
-mod tiles;
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;

@@ -388,7 +388,7 @@ impl LayoutSystem for StackLayoutSystem {
         );
         // Under `roc-core` the Roc stacks' own shape through the Roc geometry decides.
         #[cfg(feature = "roc-core")]
-        return crate::layout_engine::core_geometry::decide_stack_tree(core, || {
+        return crate::layout_engine::core_geometry::decide_roc_tree("stack", core, || {
             use crate::roc_path::Word;
             let known: Vec<_> = constraints
                 .iter()
@@ -403,7 +403,7 @@ impl LayoutSystem for StackLayoutSystem {
             self.roc.frames(layout, pass, &known)
         });
         #[cfg(not(feature = "roc-core"))]
-        crate::layout_engine::core_geometry::decide_stack(core)
+        crate::layout_engine::core_geometry::decide_tree("stack", core)
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {

@@ -4462,8 +4462,9 @@ mod tests {
         }
     }
 
-    /// Each layout pass of a Space is counted for that Space (which passes run the layout
-    /// system's shadow is decided by its count: every one in tests).
+    /// Each layout pass of a Space is counted for that Space (which passes run a layout
+    /// system's shadow, floating's or the scrolling translation's, is decided by its count:
+    /// every one in tests). The layouts here are traditional, which has no shadow of its own.
     #[test]
     fn each_spaces_layout_passes_are_counted_for_the_shadow() {
         let mut window_store = OwnedWindows::default();
@@ -4489,7 +4490,6 @@ mod tests {
             );
         }
         let gaps = engine.layout_settings.gaps.clone();
-        let shadows = crate::layout_engine::layout_shadows();
         for space in [a, a, b] {
             let frames = engine.calculate_layout_with_virtual_workspaces(
                 window_store.view(),
@@ -4507,7 +4507,6 @@ mod tests {
         passes.pass(a);
         passes.pass(b);
         assert_eq!(engine.shadow_passes, passes);
-        assert!(crate::layout_engine::layout_shadows() >= shadows + 3);
     }
 
     #[test]

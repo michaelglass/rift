@@ -7,7 +7,7 @@
 //! every call. A difference is counted ([`group_forest_reseeds`]), fails a test, or in a running
 //! Rift warns `roc-divergence:`; an operation's re-seeds the Rust forest from the Roc forest's
 //! view (a query's or a view's is only reported: the Rust forest is not changed by one, and the
-//! next operation compares the views). Upstream's systems stay the Rust forest's shadow.
+//! next operation compares the views).
 //!
 //! The Roc forest holds the core's ids as words: layouts and nodes by slotmap's ffi form,
 //! windows as [`Word`] makes them, which order as `WindowId` does (pid, then index), so the
@@ -26,7 +26,7 @@ use rift_core::plain::Rect;
 use rift_core_roc::group_forest::{self as plain, Answer, ForestView, LayoutKey, NodeKey};
 use rift_core_roc::{RocMasterStack, RocTraditional};
 
-use super::group_twin::CoreForest;
+use super::group_system::CoreForest;
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::layout_engine::LayoutId;

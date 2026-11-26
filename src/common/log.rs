@@ -74,11 +74,6 @@ fn show_layout_core() {
     let shadows = crate::layout_engine::layout_shadows();
     println!("core: layout divergences: {divergences} (shadows run: {shadows})");
     tracing::info!(divergences, shadows, "core: layout divergences");
-    // The core's group forest, stepped beside upstream's traditional and master-stack systems
-    // (each difference a `group-forest-divergence:`).
-    let divergences = crate::layout_engine::systems::group_forest_divergences();
-    println!("core: group forest divergences: {divergences}");
-    tracing::info!(divergences, "core: group forest divergences");
 }
 
 /// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow, or a Roc

@@ -147,67 +147,29 @@ impl ShadowPasses {
     }
 }
 
-/// The frames rift gives a traditional layout (stack, master-stack, traditional): the core's for
-/// `shape` (none: nothing takes space), the Roc core's under `roc-core`, else the Rust core's. The
-/// layout system's frames (`upstream`) are the shadow: a difference fails tests, and a running
-/// Rift warns it, counts it and uses the core's frames.
-pub(crate) fn decide_traditional(
-    what: &str,
-    shape: Option<Traditional<WindowId>>,
-    shadow: Shadow,
-    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
-) -> Vec<(WindowId, CGRect)> {
-    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
-    #[cfg(feature = "roc-core")]
-    let roc = || match &shape {
-        None => Ok(Vec::new()),
-        Some(shape) => rift_core_roc::tile_traditional(shape.clone().map(&to_plain)),
-    };
-    #[cfg(not(feature = "roc-core"))]
-    let roc = no_roc;
-    decide(what, &shape, shadow, upstream, rust, roc)
-}
-
-/// The frames rift gives a group forest layout under `roc-core` (master-stack, traditional): the
-/// Roc forest's own (`roc`: its shape through the Roc traditional geometry), with the Rust
-/// core's frames for the Rust forest's `shape` and the layout system's (`upstream`) the shadows.
-#[cfg(feature = "roc-core")]
-pub(crate) fn decide_group_tree(
-    what: &str,
-    shape: Option<Traditional<WindowId>>,
-    shadow: Shadow,
-    upstream: impl FnOnce() -> Vec<(WindowId, CGRect)>,
-    roc: impl FnOnce() -> Vec<(rift_core::plain::WindowId, Rect)>,
-) -> Vec<(WindowId, CGRect)> {
-    let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
-    decide(what, &shape, shadow, upstream, rust, || {
-        Ok::<_, std::convert::Infallible>(roc())
-    })
-}
-
-/// The frames rift gives a stack layout without `roc-core`: the core's for its stacks' `shape`
-/// (none: no member takes part). The stack system has no geometry of its own to shadow.
+/// The frames rift gives a layout tree (stack, master-stack, traditional) without `roc-core`:
+/// the core's for its `shape` (none: nothing takes space). The systems have no geometry of their
+/// own to shadow.
 #[cfg(not(feature = "roc-core"))]
-pub(crate) fn decide_stack(shape: Option<Traditional<WindowId>>) -> Vec<(WindowId, CGRect)> {
+pub(crate) fn decide_tree(
+    what: &str,
+    shape: Option<Traditional<WindowId>>,
+) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
-    decide_unshadowed("stack", &shape, rust, no_roc)
+    decide_unshadowed(what, &shape, rust, no_roc)
 }
 
-/// The frames rift gives a stack layout under `roc-core`: the Roc stacks' own (`roc`: their
-/// shape through the Roc traditional geometry), with the Rust core's frames for the Rust stacks'
+/// The frames rift gives a layout tree under `roc-core`: the Roc tree's own (`roc`: its shape
+/// through the Roc traditional geometry), with the Rust core's frames for the Rust tree's
 /// `shape` the shadow.
 #[cfg(feature = "roc-core")]
-pub(crate) fn decide_stack_tree(
+pub(crate) fn decide_roc_tree(
+    what: &str,
     shape: Option<Traditional<WindowId>>,
     roc: impl FnOnce() -> Vec<(rift_core::plain::WindowId, Rect)>,
 ) -> Vec<(WindowId, CGRect)> {
     let rust = shape.as_ref().map_or_else(Vec::new, Traditional::frames);
-    decide_unshadowed(
-        "stack",
-        &shape,
-        rust,
-        || Ok::<_, std::convert::Infallible>(roc()),
-    )
+    decide_unshadowed(what, &shape, rust, || Ok::<_, std::convert::Infallible>(roc()))
 }
 
 /// A shadow (frames, or a placement) that differed from the deciding core, or the Roc core
@@ -454,7 +416,7 @@ impl StripPlacement {
 
 /// Where rift places a scrolling strip (none: no window takes part): the core's placement (the
 /// Roc core's under `roc-core`, else the Rust core's), with the scrolling system's own
-/// (`upstream`) the shadow, held word for word, as [`decide_traditional`].
+/// (`upstream`) the shadow, held word for word, as [`decide`].
 pub(crate) fn decide_strip(
     strip: Option<rift_core::layout::scrolling::Strip<WindowId, u64>>,
     shadow: Shadow,
@@ -480,7 +442,7 @@ pub(crate) fn decide_strip(
 
 /// The frames rift gives a placed strip shown by a camera: the core's (`translate`; the Roc
 /// core's under `roc-core`, else the Rust core's), with the scrolling system's
-/// (`translate_frames`'s own, `upstream`) the shadow, as [`decide_traditional`].
+/// (`translate_frames`'s own, `upstream`) the shadow, as [`decide`].
 pub(crate) fn decide_translation(
     world: &[(WindowId, Rect)],
     camera: rift_core::layout::scrolling::Camera,
@@ -502,7 +464,7 @@ pub(crate) fn decide_translation(
 }
 
 /// The frames rift gives a floating layout: the core's (the Roc core's under `roc-core`, else the
-/// Rust core's), with the floating system's (`upstream`) the shadow, as [`decide_traditional`].
+/// Rust core's), with the floating system's (`upstream`) the shadow, as [`decide`].
 pub(crate) fn decide_floating(
     layout: rift_core::layout::floating::Layout<WindowId>,
     shadow: Shadow,
@@ -534,7 +496,7 @@ fn bits(frames: &[(WindowId, Rect)]) -> Vec<(WindowId, [u64; 4])> {
         .collect()
 }
 
-#[cfg(feature = "roc-core")]
+#[cfg(any(test, feature = "roc-core"))]
 fn to_plain(window: WindowId) -> rift_core::plain::WindowId {
     rift_core::plain::WindowId {
         pid: window.pid,
@@ -671,7 +633,7 @@ pub(crate) mod tests {
             h: 600.0,
         };
         let window = WindowId::new(1, 1);
-        let shape = Traditional {
+        let shape: Traditional<WindowId> = Traditional {
             screen,
             area: screen,
             gaps: Gaps::default(),
@@ -694,7 +656,16 @@ pub(crate) mod tests {
         )];
         let before = layout_divergences();
         let failed = std::panic::catch_unwind(|| {
-            decide_traditional("test", Some(shape), Shadow::Run, || system.to_vec())
+            let rust: Vec<(WindowId, Rect)> = shape.frames();
+            let roc = rust.iter().map(|&(window, frame)| (to_plain(window), frame)).collect();
+            decide(
+                "test",
+                &shape,
+                Shadow::Run,
+                || system.to_vec(),
+                rust,
+                || Ok::<_, std::convert::Infallible>(roc),
+            )
         })
         .expect_err("a divergence fails tests");
         let message = failed.downcast_ref::<String>().cloned().unwrap_or_default();

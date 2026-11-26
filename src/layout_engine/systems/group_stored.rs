@@ -1,8 +1,7 @@
 //! The group forest as upstream saves it (`GroupLayouts`, the traditional and master-stack
 //! systems' saved form): written from the core byte for byte, and loaded into the core (the
 //! current form and master-stack's legacy forms, parsed through the old tree; the states only a
-//! saved file holds normalized here, at the boundary, one `{system}-load:` warn each). Also
-//! upstream's `GroupLayouts` built from the core (the shadow re-seeded after a divergence).
+//! saved file holds normalized here, at the boundary, one `{system}-load:` warn each).
 
 use std::collections::BTreeMap;
 
@@ -10,17 +9,15 @@ use rift_core::layout::group_forest::{Body, Container, Fill, Members, Memory, No
 use serde::{Deserialize, Serialize};
 use slotmap::{SecondaryMap, SlotMap};
 
-use super::group_twin::{CoreForest, core_kind, layout_kind};
-use super::groups::{GroupLayouts, LayoutRoot, deserialize_tile_tree};
+use super::group_system::{CoreForest, core_kind, layout_kind};
+use super::groups::{LayoutRoot, deserialize_tile_tree};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{MasterStackSettings, MasterStackSide};
 use crate::layout_engine::{LayoutId, LayoutKind, Orientation};
 use crate::model::selection::SelectionInfo;
-use crate::model::slot_table::{SavedSlot, SlotTable, of_slotmap, saved, to_slotmap};
-use crate::model::tree::{
-    self, Held, NodeId, NodeMap, Placement, Tree, WindowIndex, WindowNodeInfo,
-};
+use crate::model::slot_table::{SavedSlot, SlotTable, of_slotmap, saved};
+use crate::model::tree::{self, Held, NodeId, NodeMap, Placement, Tree};
 
 /// The forest as upstream's `GroupLayouts` is saved (its derived form: the tree, then the layout
 /// roots).
@@ -191,38 +188,6 @@ impl Saved {
             },
             layout_roots: saved(forest.layout_table(), |_, &root| LayoutRoot(root)).collect(),
         }
-    }
-}
-
-/// Upstream's forest built from the core's (the shadow re-seeded): the same slots, versions and
-/// free lists, the index in the core's order, the windows left out.
-pub(super) fn upstream_tiles(forest: &CoreForest) -> GroupLayouts {
-    let siblings = siblings(forest);
-    let nodes: slotmap::SlotMap<NodeId, tree::Node> = to_slotmap(
-        forest.nodes(),
-        |key, node| saved_node(node, siblings.get(&key).copied().unwrap_or_default()),
-        tree::Node::default(),
-    );
-    let mut window = WindowIndex::default();
-    for (id, layout, node) in forest.index() {
-        window
-            .window_nodes
-            .entry(id)
-            .or_default()
-            .0
-            .push(WindowNodeInfo { layout, node });
-    }
-    GroupLayouts {
-        inactive: forest.left_out().iter().copied().collect(),
-        tree: Tree {
-            map: NodeMap::of_slots(nodes),
-            window,
-        },
-        layout_roots: to_slotmap(
-            forest.layout_table(),
-            |_, &root| LayoutRoot(root),
-            LayoutRoot(NodeId::default()),
-        ),
     }
 }
 
@@ -453,16 +418,6 @@ fn core_memory(selection: Option<SelectionInfo>) -> Memory<NodeId> {
         Some((child, false)) => Memory::Toward(child),
         Some((child, true)) => Memory::Stops(child),
     }
-}
-
-/// Each indexed leaf's stamp, in the index's order: a window's leaves by when they entered.
-pub(super) fn stamps(index: &WindowIndex) -> HashMap<NodeId, u64> {
-    let mut stamps = HashMap::default();
-    let entries = index.window_nodes.values().flat_map(|nodes| nodes.0.iter());
-    for (stamp, info) in (0u64..).zip(entries) {
-        stamps.insert(info.node, stamp);
-    }
-    stamps
 }
 
 /// An old tree's node as the core holds it (a leaf no layout reaches is not indexed: the load
