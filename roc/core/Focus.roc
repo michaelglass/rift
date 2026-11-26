@@ -3,7 +3,7 @@
 ## Questions on plain data; Spaces, workspaces, window-server ids, modes and apps are one word
 ## each, and a window with an app is a WindowId (its app is its pid).
 
-import pf.Boundary exposing [WindowId, MaybeWord, MaybeWindow, Removal, RemovalFocus, FactBool, FactWord, FactWindow, FactWords, FactKnown, FactListing, WordBool, WindowBool, WindowWindow, WordFrame, WordLevels, ActivationQuestion, Follow, FollowTo, UntrackedFocus, Surface, KeyWindow, RaiseQuestion, MouseRaise, Rect]
+import pf.Boundary exposing [WindowId, MaybeWord, MaybeRefusal, FactRefusal, RefusingAxis, MaybeWindow, Removal, RemovalFocus, FactBool, FactWord, FactWindow, FactWords, FactKnown, FactListing, WordBool, WindowBool, WindowWindow, WordFrame, WordLevels, ActivationQuestion, Follow, FollowTo, UntrackedFocus, Surface, KeyWindow, RaiseQuestion, MouseRaise, Rect]
 import Asking exposing [ask, ask_window, ask_word]
 
 ## What a decision decided, or the first fact it read that its question does not carry (the
@@ -162,8 +162,8 @@ Focus := [].{
 		} else {
 			mode_of = ask(facts.mode_refusal, 6)?
 			match mode_of {
-				Some(mode) => Ok(Stay(Mode(mode)))
-				Nothing => {
+				Refusing(axis) => Ok(Stay(Mode(axis)))
+				NotRefusing => {
 					fullscreen = ask(facts.active_space_fullscreen, 7)?
 					if fullscreen {
 						Ok(Stay(FullscreenActive))

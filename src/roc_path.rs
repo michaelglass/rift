@@ -229,8 +229,7 @@ pub(crate) static MODE_GATE: Family = Family::new();
 /// (`rust`, as words: `words`) is its shadow. Equal, the Rust value is the Roc answer's own.
 /// Different, `family` counts it, tests fail (`roc-divergence:`), and a running Rift warns and
 /// takes the Roc answer, read back by `back`; a Roc answer naming nothing `back` can rebuild
-/// (an id no value of rift's has, or a mode the question carried only as a word) leaves the Rust
-/// answer, with a warn. A Roc decision that read a fact Rust did not ask has no answer on the
+/// (an id no value of rift's has) leaves the Rust answer, with a warn. A Roc decision that read a fact Rust did not ask has no answer on the
 /// facts asked: counted, a test failure, and the Rust answer stands.
 #[cfg(feature = "roc-core")]
 #[expect(

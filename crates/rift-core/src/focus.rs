@@ -379,6 +379,7 @@ pub mod plain {
         ActivationFacts, Follow, Hovered, MouseRaise, RaiseFacts, Removal, RemovalFocus,
         UntrackedFocus,
     };
+    use crate::modes::Axis;
     use crate::plain::{Answers, Fact, Reading, Rect, Unasked, WindowId};
 
     /// [`super::removal_focus`]: the removed window's Space, macOS's key window, the successor
@@ -466,7 +467,9 @@ pub mod plain {
         pub workspace: Fact<Option<u64>>,
         pub active_workspace: Fact<Option<u64>>,
         pub pending_window: Fact<bool>,
-        pub mode_refusal: Fact<Option<u64>>,
+        /// The mode refusing the follow: the refusing axis, a refusing pointer's window as its
+        /// word.
+        pub mode_refusal: Fact<Option<Axis<u64>>>,
         pub active_space_fullscreen: Fact<bool>,
         pub unmanageable_source: Fact<Option<u64>>,
         pub blacklisted: Fact<Option<bool>>,
@@ -479,7 +482,7 @@ pub mod plain {
     }
 
     impl ActivationFacts for Reads<'_> {
-        type Mode = u64;
+        type Mode = Axis<u64>;
         type Server = u64;
         type Space = u64;
         type Workspace = u64;
@@ -500,7 +503,7 @@ pub mod plain {
 
         fn pending_window(&self) -> bool { self.reading.fact(&self.facts.pending_window, 5, false) }
 
-        fn mode_refusal(&self) -> Option<u64> {
+        fn mode_refusal(&self) -> Option<Axis<u64>> {
             self.reading.fact(&self.facts.mode_refusal, 6, None)
         }
 
@@ -531,7 +534,7 @@ pub mod plain {
             "blacklisted",
         ];
 
-        pub fn answer(&self) -> Result<Follow<u64, u64, u64, u64>, Unasked> {
+        pub fn answer(&self) -> Result<Follow<u64, u64, Axis<u64>, u64>, Unasked> {
             let reads = Reads {
                 facts: self,
                 reading: Reading::new(),

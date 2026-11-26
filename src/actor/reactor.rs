@@ -6091,7 +6091,7 @@ impl Reactor {
                     Stay::NoWorkspace => Stay::NoWorkspace,
                     Stay::AlreadyActive => Stay::AlreadyActive,
                     Stay::PendingWindow => Stay::PendingWindow,
-                    Stay::Mode(_) => Stay::Mode(AskedActivation::MODE),
+                    Stay::Mode(axis) => Stay::Mode(axis.map(Word::word)),
                     Stay::FullscreenActive => Stay::FullscreenActive,
                     Stay::Unmanageable(wsid) => Stay::Unmanageable(wsid.word()),
                     Stay::NoBundleId => Stay::NoBundleId,
@@ -6120,9 +6120,9 @@ impl Reactor {
                             Stay::NoWorkspace => Stay::NoWorkspace,
                             Stay::AlreadyActive => Stay::AlreadyActive,
                             Stay::PendingWindow => Stay::PendingWindow,
-                            // The question names no mode, only that one refuses: which one is
-                            // the Rust answer's alone.
-                            Stay::Mode(_) => return None,
+                            Stay::Mode(axis) => {
+                                Stay::Mode(axis.try_map(crate::roc_path::window_of_word)?)
+                            }
                             Stay::FullscreenActive => Stay::FullscreenActive,
                             Stay::Unmanageable(wsid) => {
                                 Stay::Unmanageable(FromWord::from_word(wsid)?)
@@ -6139,7 +6139,7 @@ impl Reactor {
             Follow::Stay(why) => {
                 match why {
                     Stay::Mode(mode) => {
-                        debug!(pid, "mode-gate: discarded activation follow during {mode}")
+                        debug!(pid, "mode-gate: discarded activation follow during {mode:?}")
                     }
                     Stay::FullscreenActive => debug!(
                         pid,
@@ -7787,7 +7787,7 @@ struct ActivationQuery<'a> {
 }
 
 impl ActivationFacts for ActivationQuery<'_> {
-    type Mode = String;
+    type Mode = modes::Axis<WindowId>;
     type Server = WindowServerId;
     type Space = SpaceId;
     type Workspace = crate::model::VirtualWorkspaceId;
@@ -7825,9 +7825,9 @@ impl ActivationFacts for ActivationQuery<'_> {
         self.reactor.stores.state.windows.has_pending_window_for_pid(self.window.pid)
     }
 
-    fn mode_refusal(&self) -> Option<String> {
+    fn mode_refusal(&self) -> Option<modes::Axis<WindowId>> {
         match self.reactor.verdict(Initiative::FollowActivation) {
-            modes::Verdict::Refused(axis) => Some(format!("{axis:?}")),
+            modes::Verdict::Refused(axis) => Some(axis),
             modes::Verdict::Admitted => None,
         }
     }
@@ -7859,18 +7859,13 @@ struct AskedActivation<'a> {
     workspace: Asked<Option<crate::model::VirtualWorkspaceId>>,
     active_workspace: Asked<Option<crate::model::VirtualWorkspaceId>>,
     pending_window: Asked<bool>,
-    mode_refusal: Asked<Option<String>>,
+    mode_refusal: Asked<Option<modes::Axis<WindowId>>>,
     active_space_fullscreen: Asked<bool>,
     unmanageable_source: Asked<Option<WindowServerId>>,
     blacklisted: Asked<Option<bool>>,
 }
 
 impl<'a> AskedActivation<'a> {
-    /// A refusing mode, as one word: the decision only names back the mode the platform
-    /// named, so every mode is the same word to it.
-    #[cfg(feature = "roc-core")]
-    const MODE: u64 = 0;
-
     fn new(query: ActivationQuery<'a>) -> Self {
         AskedActivation {
             query,
@@ -7897,7 +7892,7 @@ impl<'a> AskedActivation<'a> {
             workspace: self.workspace.fact(|workspace| workspace.map(Word::word)),
             active_workspace: self.active_workspace.fact(|active| active.map(Word::word)),
             pending_window: self.pending_window.fact(|pending| pending),
-            mode_refusal: self.mode_refusal.fact(|mode| mode.map(|_| Self::MODE)),
+            mode_refusal: self.mode_refusal.fact(|mode| mode.map(|axis| axis.map(Word::word))),
             active_space_fullscreen: self.active_space_fullscreen.fact(|fullscreen| fullscreen),
             unmanageable_source: self.unmanageable_source.fact(|wsid| wsid.map(Word::word)),
             blacklisted: self.blacklisted.fact(|listed| listed),
@@ -7906,7 +7901,7 @@ impl<'a> AskedActivation<'a> {
 }
 
 impl rift_core::focus::ActivationFacts for AskedActivation<'_> {
-    type Mode = String;
+    type Mode = modes::Axis<WindowId>;
     type Server = WindowServerId;
     type Space = SpaceId;
     type Workspace = crate::model::VirtualWorkspaceId;
@@ -7927,7 +7922,9 @@ impl rift_core::focus::ActivationFacts for AskedActivation<'_> {
 
     fn pending_window(&self) -> bool { self.pending_window.ask(|| self.query.pending_window()) }
 
-    fn mode_refusal(&self) -> Option<String> { self.mode_refusal.ask(|| self.query.mode_refusal()) }
+    fn mode_refusal(&self) -> Option<modes::Axis<WindowId>> {
+        self.mode_refusal.ask(|| self.query.mode_refusal())
+    }
 
     fn active_space_fullscreen(&self) -> bool {
         self.active_space_fullscreen.ask(|| self.query.active_space_fullscreen())

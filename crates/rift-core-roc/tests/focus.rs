@@ -159,6 +159,26 @@ fn the_roc_core_finds_hidden_focus_as_the_rust_core_does() {
     });
 }
 
+/// A refusing axis, each as likely, a refusing pointer pressing or dragging a window.
+fn refusing_axis(rng: &mut Rng) -> rift_core::modes::Axis<u64> {
+    use rift_core::Pointer;
+    use rift_core::modes::Axis;
+    match rng.below(12) {
+        0 => Axis::Pointer(Pointer::Idle),
+        1 => Axis::Pointer(Pointer::Pressing(rng.id())),
+        2 => Axis::Pointer(Pointer::Dragging(rng.id())),
+        3 => Axis::Menu,
+        4 => Axis::MissionControl,
+        5 => Axis::Modal,
+        6 => Axis::Viewport,
+        7 => Axis::FocusClaim,
+        8 => Axis::UserSpaces,
+        9 => Axis::Wake,
+        10 => Axis::WorkspaceSwitch,
+        _ => Axis::Topology,
+    }
+}
+
 #[test]
 fn the_roc_core_follows_activations_as_the_rust_core_does() {
     typed(
@@ -172,7 +192,7 @@ fn the_roc_core_follows_activations_as_the_rust_core_does() {
             let workspace = rng.chance(90).then(|| rng.id());
             let active_workspace = rng.chance(80).then(|| rng.id());
             let pending_window = rng.chance(10);
-            let mode_refusal = rng.chance(10).then(|| rng.id());
+            let mode_refusal = rng.chance(10).then(|| refusing_axis(rng));
             let active_space_fullscreen = rng.chance(10);
             let unmanageable_source = rng.chance(10).then(|| rng.id());
             let blacklisted = rng.chance(85).then(|| rng.chance(10));

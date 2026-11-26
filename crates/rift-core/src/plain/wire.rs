@@ -12,6 +12,7 @@ use crate::core::{Desire, Effect, Event, Plan};
 use crate::focus::{Follow, RemovalFocus, Stay, UntrackedFocus};
 use crate::layout::scrolling;
 use crate::lifecycle;
+use crate::modes::Axis;
 use crate::plain::{Nanos, Plain, Rect, RequestId, WindowId};
 use crate::pointer::{Button, Release, Ungrip};
 use crate::reconciler::{Answer, Note, Reply, Want, Write};
@@ -34,6 +35,37 @@ struct Words(Vec<u64>);
 
 impl Words {
     fn word(&mut self, word: u64) { self.0.push(word) }
+
+    /// A refusing axis: its index in [`Axis`]'s order; the pointer's followed by its state's
+    /// index (idle, pressing, dragging) and, pressing or dragging, its window's word.
+    fn axis(&mut self, axis: Axis<u64>) {
+        use crate::pointer::Pointer;
+        match axis {
+            Axis::Pointer(pointer) => {
+                self.word(0);
+                match pointer {
+                    Pointer::Idle => self.word(0),
+                    Pointer::Pressing(window) => {
+                        self.word(1);
+                        self.word(window);
+                    }
+                    Pointer::Dragging(window) => {
+                        self.word(2);
+                        self.word(window);
+                    }
+                }
+            }
+            Axis::Menu => self.word(1),
+            Axis::MissionControl => self.word(2),
+            Axis::Modal => self.word(3),
+            Axis::Viewport => self.word(4),
+            Axis::FocusClaim => self.word(5),
+            Axis::UserSpaces => self.word(6),
+            Axis::Wake => self.word(7),
+            Axis::WorkspaceSwitch => self.word(8),
+            Axis::Topology => self.word(9),
+        }
+    }
 
     fn window(&mut self, window: WindowId) {
         self.word(i64::from(window.pid) as u64);
@@ -443,8 +475,9 @@ pub fn encode_removal_focus(answer: RemovalFocus<WindowId, u64>) -> Vec<u64> {
 }
 
 /// Whether an activation follows: 0 then the Space and workspace, or 1 then the reason's index
-/// in [`Stay`]'s order (a mode and an unmanageable source followed by their word).
-pub fn encode_follow(answer: Follow<u64, u64, u64, u64>) -> Vec<u64> {
+/// in [`Stay`]'s order (a mode followed by its axis, [`Words::axis`]; an unmanageable source by
+/// its word).
+pub fn encode_follow(answer: Follow<u64, u64, Axis<u64>, u64>) -> Vec<u64> {
     let mut words = Words::default();
     match answer {
         Follow::To(space, workspace) => {
@@ -463,7 +496,7 @@ pub fn encode_follow(answer: Follow<u64, u64, u64, u64>) -> Vec<u64> {
                 Stay::PendingWindow => words.word(5),
                 Stay::Mode(mode) => {
                     words.word(6);
-                    words.word(mode);
+                    words.axis(mode);
                 }
                 Stay::FullscreenActive => words.word(7),
                 Stay::Unmanageable(server) => {

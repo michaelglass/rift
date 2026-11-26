@@ -1815,7 +1815,9 @@ pub mod focus {
         boundary::verdict_answer(unsafe { abi::roc_hides_focus(question) })
     }
 
-    pub fn activation_follow(question: Activation) -> Result<Follow<u64, u64, u64, u64>, Unasked> {
+    pub fn activation_follow(
+        question: Activation,
+    ) -> Result<Follow<u64, u64, rift_core::modes::Axis<u64>, u64>, Unasked> {
         let host = host();
         let question = boundary::activation_question(question, &host);
         boundary::follow_answer(unsafe { abi::roc_activation_follow(question) })

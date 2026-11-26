@@ -135,23 +135,46 @@ impl<W> Modes<W> {
     }
 }
 
+impl<W> Axis<W> {
+    /// The same axis, a refusing pointer's window named by `f`.
+    pub fn map<V>(self, f: impl FnOnce(W) -> V) -> Axis<V> {
+        match self {
+            Axis::Pointer(pointer) => Axis::Pointer(pointer.map(f)),
+            Axis::Menu => Axis::Menu,
+            Axis::MissionControl => Axis::MissionControl,
+            Axis::Modal => Axis::Modal,
+            Axis::Viewport => Axis::Viewport,
+            Axis::FocusClaim => Axis::FocusClaim,
+            Axis::UserSpaces => Axis::UserSpaces,
+            Axis::Wake => Axis::Wake,
+            Axis::WorkspaceSwitch => Axis::WorkspaceSwitch,
+            Axis::Topology => Axis::Topology,
+        }
+    }
+
+    /// The same axis, a refusing pointer's window named by `f`, if `f` names it.
+    pub fn try_map<V>(self, f: impl FnOnce(W) -> Option<V>) -> Option<Axis<V>> {
+        Some(match self {
+            Axis::Pointer(pointer) => Axis::Pointer(pointer.try_map(f)?),
+            Axis::Menu => Axis::Menu,
+            Axis::MissionControl => Axis::MissionControl,
+            Axis::Modal => Axis::Modal,
+            Axis::Viewport => Axis::Viewport,
+            Axis::FocusClaim => Axis::FocusClaim,
+            Axis::UserSpaces => Axis::UserSpaces,
+            Axis::Wake => Axis::Wake,
+            Axis::WorkspaceSwitch => Axis::WorkspaceSwitch,
+            Axis::Topology => Axis::Topology,
+        })
+    }
+}
+
 impl<W> Verdict<W> {
     /// The same verdict, a refusing pointer's window named by `f`.
     pub fn map<V>(self, f: impl FnOnce(W) -> V) -> Verdict<V> {
         match self {
             Verdict::Admitted => Verdict::Admitted,
-            Verdict::Refused(axis) => Verdict::Refused(match axis {
-                Axis::Pointer(pointer) => Axis::Pointer(pointer.map(f)),
-                Axis::Menu => Axis::Menu,
-                Axis::MissionControl => Axis::MissionControl,
-                Axis::Modal => Axis::Modal,
-                Axis::Viewport => Axis::Viewport,
-                Axis::FocusClaim => Axis::FocusClaim,
-                Axis::UserSpaces => Axis::UserSpaces,
-                Axis::Wake => Axis::Wake,
-                Axis::WorkspaceSwitch => Axis::WorkspaceSwitch,
-                Axis::Topology => Axis::Topology,
-            }),
+            Verdict::Refused(axis) => Verdict::Refused(axis.map(f)),
         }
     }
 
@@ -159,18 +182,7 @@ impl<W> Verdict<W> {
     pub fn try_map<V>(self, f: impl FnOnce(W) -> Option<V>) -> Option<Verdict<V>> {
         Some(match self {
             Verdict::Admitted => Verdict::Admitted,
-            Verdict::Refused(axis) => Verdict::Refused(match axis {
-                Axis::Pointer(pointer) => Axis::Pointer(pointer.try_map(f)?),
-                Axis::Menu => Axis::Menu,
-                Axis::MissionControl => Axis::MissionControl,
-                Axis::Modal => Axis::Modal,
-                Axis::Viewport => Axis::Viewport,
-                Axis::FocusClaim => Axis::FocusClaim,
-                Axis::UserSpaces => Axis::UserSpaces,
-                Axis::Wake => Axis::Wake,
-                Axis::WorkspaceSwitch => Axis::WorkspaceSwitch,
-                Axis::Topology => Axis::Topology,
-            }),
+            Verdict::Refused(axis) => Verdict::Refused(axis.try_map(f)?),
         })
     }
 }

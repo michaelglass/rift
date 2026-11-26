@@ -207,6 +207,20 @@ Boundary := [].{
 			}
 	}
 
+	## The axis refusing an initiative, or none.
+	MaybeRefusal := [Refusing(RefusingAxis), NotRefusing]
+
+	## A fact of a refusing axis or none.
+	FactRefusal := [Asked(MaybeRefusal), Unasked].{
+		## The answer, if the platform asked.
+		answer : FactRefusal -> Try(MaybeRefusal, [Unasked])
+		answer = |fact|
+			match fact {
+				Asked(given) => Ok(given)
+				Unasked => Err(Unasked)
+			}
+	}
+
 	## A fact of a window or none.
 	FactWindow := [Asked(MaybeWindow), Unasked].{
 		## The answer, if the platform asked.
@@ -283,12 +297,12 @@ Boundary := [].{
 			}
 	}
 
-	ActivationQuestion := { standard : FactBool, unavailable : FactBool, space : FactWord, workspace : FactWord, active_workspace : FactWord, pending_window : FactBool, mode_refusal : FactWord, active_space_fullscreen : FactBool, unmanageable_source : FactWord, blacklisted : FactListing }
+	ActivationQuestion := { standard : FactBool, unavailable : FactBool, space : FactWord, workspace : FactWord, active_workspace : FactWord, pending_window : FactBool, mode_refusal : FactRefusal, active_space_fullscreen : FactBool, unmanageable_source : FactWord, blacklisted : FactListing }
 
 	FollowTo := { space : U64, workspace : U64 }
 
 	## Why an activation does not follow its window.
-	Stay := [NotStandard, Unavailable, NoSpace, NoWorkspace, AlreadyActive, PendingWindow, Mode(U64), FullscreenActive, Unmanageable(U64), NoBundleId, Blacklisted]
+	Stay := [NotStandard, Unavailable, NoSpace, NoWorkspace, AlreadyActive, PendingWindow, Mode(RefusingAxis), FullscreenActive, Unmanageable(U64), NoBundleId, Blacklisted]
 
 	## Whether an activation follows its window, and where, or why not.
 	Follow := [To(FollowTo), Stay(Stay)]

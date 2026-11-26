@@ -844,6 +844,28 @@ fact!(
     |v, host| list(&v, host)
 );
 fact!(
+    fact_refusal,
+    Option<rift_core::modes::Axis<u64>>,
+    BoundaryFactRefusal,
+    BoundaryFactRefusalPayload,
+    BoundaryFactRefusalTag,
+    |v, host| {
+        use abi::BoundaryMaybeRefusalTag as Tag;
+        match v {
+            Some(axis) => union!(
+                BoundaryMaybeRefusal,
+                BoundaryMaybeRefusalPayload.refusing(refusing_axis(axis)),
+                Tag::Refusing
+            ),
+            None => union!(
+                BoundaryMaybeRefusal,
+                BoundaryMaybeRefusalPayload.not_refusing,
+                Tag::NotRefusing
+            ),
+        }
+    }
+);
+fact!(
     fact_listing,
     Option<bool>,
     BoundaryFactListing,
@@ -1045,7 +1067,7 @@ pub(crate) fn activation_question(
         workspace: fact_word(question.workspace, host),
         active_workspace: fact_word(question.active_workspace, host),
         pending_window: fact_bool(question.pending_window, host),
-        mode_refusal: fact_word(question.mode_refusal, host),
+        mode_refusal: fact_refusal(question.mode_refusal, host),
         active_space_fullscreen: fact_bool(question.active_space_fullscreen, host),
         unmanageable_source: fact_word(question.unmanageable_source, host),
         blacklisted: fact_listing(question.blacklisted, host),
@@ -1054,7 +1076,7 @@ pub(crate) fn activation_question(
 
 pub(crate) fn follow_answer(
     answer: abi::BoundaryFollowAnswer,
-) -> Result<Follow<u64, u64, u64, u64>, Unasked> {
+) -> Result<Follow<u64, u64, rift_core::modes::Axis<u64>, u64>, Unasked> {
     use abi::{BoundaryFollowTag as Tag, BoundaryStayTag as Why};
     decision!(answer, BoundaryFollowAnswerTag, |follow| match follow.tag {
         Tag::To => {
@@ -1072,8 +1094,10 @@ pub(crate) fn follow_answer(
                 Why::NoWorkspace => Stay::NoWorkspace,
                 Why::AlreadyActive => Stay::AlreadyActive,
                 Why::PendingWindow => Stay::PendingWindow,
-                // SAFETY: the tag says the payload is the mode's word.
-                Why::Mode => Stay::Mode(unsafe { *why.borrow_payload_mode_unchecked() }),
+                // SAFETY: the tag says the payload is the refusing axis.
+                Why::Mode => Stay::Mode(from_refusing_axis(unsafe {
+                    *why.borrow_payload_mode_unchecked()
+                })),
                 Why::FullscreenActive => Stay::FullscreenActive,
                 // SAFETY: the tag says the payload is the window-server id.
                 Why::Unmanageable => {
@@ -3400,28 +3424,90 @@ fn topology_now(topology: rift_core::modes::Topology) -> abi::BoundaryTopologyNo
 pub(crate) fn from_mode_verdict(
     verdict: abi::BoundaryModeVerdict,
 ) -> rift_core::modes::Verdict<u64> {
-    use abi::{BoundaryModeVerdictTag as Tag, BoundaryRefusingAxisTag as AxisTag};
-    use rift_core::modes::{Axis, Verdict};
+    use abi::BoundaryModeVerdictTag as Tag;
+    use rift_core::modes::Verdict;
     match verdict.tag {
         Tag::Admitted => Verdict::Admitted,
-        Tag::Refused => {
+        Tag::Refused => Verdict::Refused(from_refusing_axis(
             // SAFETY: the tag says the payload is the refusing axis.
-            let axis = unsafe { *verdict.borrow_payload_refused_unchecked() };
-            Verdict::Refused(match axis.tag {
-                // SAFETY: the tag says the payload is the pointer.
-                AxisTag::Pointer => Axis::Pointer(from_pointer_now(unsafe {
-                    *axis.borrow_payload_pointer_unchecked()
-                })),
-                AxisTag::Menu => Axis::Menu,
-                AxisTag::MissionControl => Axis::MissionControl,
-                AxisTag::Modal => Axis::Modal,
-                AxisTag::Viewport => Axis::Viewport,
-                AxisTag::FocusClaim => Axis::FocusClaim,
-                AxisTag::UserSpaces => Axis::UserSpaces,
-                AxisTag::Wake => Axis::Wake,
-                AxisTag::WorkspaceSwitch => Axis::WorkspaceSwitch,
-                AxisTag::Topology => Axis::Topology,
-            })
+            unsafe { *verdict.borrow_payload_refused_unchecked() },
+        )),
+    }
+}
+
+fn from_refusing_axis(axis: abi::BoundaryRefusingAxis) -> rift_core::modes::Axis<u64> {
+    use abi::BoundaryRefusingAxisTag as AxisTag;
+    use rift_core::modes::Axis;
+    match axis.tag {
+        // SAFETY: the tag says the payload is the pointer.
+        AxisTag::Pointer => Axis::Pointer(from_pointer_now(unsafe {
+            *axis.borrow_payload_pointer_unchecked()
+        })),
+        AxisTag::Menu => Axis::Menu,
+        AxisTag::MissionControl => Axis::MissionControl,
+        AxisTag::Modal => Axis::Modal,
+        AxisTag::Viewport => Axis::Viewport,
+        AxisTag::FocusClaim => Axis::FocusClaim,
+        AxisTag::UserSpaces => Axis::UserSpaces,
+        AxisTag::Wake => Axis::Wake,
+        AxisTag::WorkspaceSwitch => Axis::WorkspaceSwitch,
+        AxisTag::Topology => Axis::Topology,
+    }
+}
+
+fn refusing_axis(axis: rift_core::modes::Axis<u64>) -> abi::BoundaryRefusingAxis {
+    use abi::BoundaryRefusingAxisTag as Tag;
+    use rift_core::modes::Axis;
+    match axis {
+        Axis::Pointer(pointer) => union!(
+            BoundaryRefusingAxis,
+            BoundaryRefusingAxisPayload.pointer(pointer_now(pointer)),
+            Tag::Pointer
+        ),
+        Axis::Menu => union!(BoundaryRefusingAxis, BoundaryRefusingAxisPayload.menu, Tag::Menu),
+        Axis::MissionControl => union!(
+            BoundaryRefusingAxis,
+            BoundaryRefusingAxisPayload.mission_control,
+            Tag::MissionControl
+        ),
+        Axis::Modal => union!(
+            BoundaryRefusingAxis,
+            BoundaryRefusingAxisPayload.modal,
+            Tag::Modal
+        ),
+        Axis::Viewport => {
+            union!(
+                BoundaryRefusingAxis,
+                BoundaryRefusingAxisPayload.viewport,
+                Tag::Viewport
+            )
+        }
+        Axis::FocusClaim => {
+            union!(
+                BoundaryRefusingAxis,
+                BoundaryRefusingAxisPayload.focus_claim,
+                Tag::FocusClaim
+            )
+        }
+        Axis::UserSpaces => {
+            union!(
+                BoundaryRefusingAxis,
+                BoundaryRefusingAxisPayload.user_spaces,
+                Tag::UserSpaces
+            )
+        }
+        Axis::Wake => union!(BoundaryRefusingAxis, BoundaryRefusingAxisPayload.wake, Tag::Wake),
+        Axis::WorkspaceSwitch => union!(
+            BoundaryRefusingAxis,
+            BoundaryRefusingAxisPayload.workspace_switch,
+            Tag::WorkspaceSwitch
+        ),
+        Axis::Topology => {
+            union!(
+                BoundaryRefusingAxis,
+                BoundaryRefusingAxisPayload.topology,
+                Tag::Topology
+            )
         }
     }
 }
