@@ -546,8 +546,12 @@ mod tests {
     }
 }
 mod floating;
+#[cfg(feature = "roc-core")]
+mod floating_roc;
 mod floating_twin;
 pub use floating::FloatingLayoutSystem;
+#[cfg(feature = "roc-core")]
+pub(crate) use floating_roc::floating_roc_reseeds;
 pub(crate) use floating_twin::floating_divergences;
 #[cfg(test)]
 pub(crate) mod drawn;

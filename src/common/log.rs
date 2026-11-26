@@ -107,6 +107,10 @@ fn show_roc_core() {
         let reseeds = crate::layout_engine::systems::group_forest_reseeds();
         println!("roc-core: group forest re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: group forest re-seeds");
+        // The Roc floating system, the core's shadow (re-seeded from the core).
+        let reseeds = crate::layout_engine::systems::floating_roc_reseeds();
+        println!("roc-core: floating re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: floating re-seeds");
     }
 }
 

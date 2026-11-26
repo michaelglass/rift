@@ -377,7 +377,7 @@ impl<M> Debug for RocForest<M> {
 }
 
 /// Every window's constraints rift knows, by the window's word.
-fn known(
+pub(super) fn known(
     constraints: &HashMap<WindowId, WindowLayoutConstraints>,
 ) -> Vec<(u64, WindowConstraints)> {
     constraints
@@ -397,7 +397,7 @@ pub(super) fn layout_key(layout: LayoutId) -> LayoutKey {
 
 fn node_key(node: NodeId) -> NodeKey { NodeKey(slotmap::Key::data(&node).as_ffi()) }
 
-fn node_id(key: NodeKey) -> NodeId { slotmap::KeyData::from_ffi(key.0).into() }
+pub(super) fn node_id(key: NodeKey) -> NodeId { slotmap::KeyData::from_ffi(key.0).into() }
 
 pub(super) fn window(window: WindowId) -> u64 { window.word() }
 
@@ -406,7 +406,7 @@ pub(super) fn windows(windows: &[WindowId]) -> Vec<u64> {
 }
 
 /// The window a Roc word names: the Roc forest holds only words rift gave it.
-fn window_id(word: u64) -> WindowId {
+pub(super) fn window_id(word: u64) -> WindowId {
     window_of_word(word).expect("the Roc forest holds the windows rift gave it")
 }
 
@@ -415,7 +415,7 @@ fn window_ids(words: &[u64]) -> Vec<WindowId> {
 }
 
 /// A container view on rift's ids.
-fn rift_view(view: plain::ContainerView) -> ContainerView<NodeId, WindowId> {
+pub(super) fn rift_view(view: plain::ContainerView) -> ContainerView<NodeId, WindowId> {
     ContainerView {
         node: node_id(view.node),
         selected: view.selected,
@@ -513,7 +513,7 @@ pub(super) fn query(query: Query<WindowId>) -> Query<u64> {
 }
 
 /// The core's forest as the Roc forest's view gives it.
-fn forest_view(forest: &CoreForest) -> ForestView {
+pub(super) fn forest_view(forest: &CoreForest) -> ForestView {
     ForestView {
         layouts: forest
             .layout_table()
