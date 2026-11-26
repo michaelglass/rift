@@ -36,6 +36,17 @@ use crate::roc_path::{Word, window_of_word};
 
 static RESEEDS: AtomicU64 = AtomicU64::new(0);
 
+/// How often a `roc-core` release build compares the whole systems after an operation (the old
+/// twins' sampling): answers are compared on every operation.
+const VIEW_EVERY: u64 = 32;
+
+/// Whether every operation compares the whole systems: in tests and debug builds (and so the
+/// differential and the drawn fuzzers).
+const VIEW_ALWAYS: bool = cfg!(any(test, debug_assertions));
+
+/// Whether the operation numbered `steps` compares the whole systems.
+fn view_due(always: bool, steps: u64) -> bool { always || steps.is_multiple_of(VIEW_EVERY) }
+
 /// How many times the Rust core's forest differed from the deciding Roc forest, process-wide
 /// (each one a `roc-divergence:`; an operation's re-seeds the Rust forest from the Roc forest).
 pub(crate) fn group_forest_reseeds() -> u64 { RESEEDS.load(Ordering::Relaxed) }
@@ -156,6 +167,8 @@ pub(super) type Projected = (
 /// interface), so it sits in a cell; nothing else reaches it.
 pub(super) struct RocForest<M> {
     machine: RefCell<M>,
+    /// Operations taken, which decide when the whole systems are compared.
+    steps: u64,
 }
 
 impl<M: Machine> RocForest<M> {
@@ -163,12 +176,15 @@ impl<M: Machine> RocForest<M> {
     pub(super) fn seeded(core: &M::Core) -> Self {
         Self {
             machine: RefCell::new(M::seeded(&M::view_of(core))),
+            steps: 0,
         }
     }
 
     /// An operation: the Roc forest takes `event` and decides, and its answer is rift's. The
-    /// Rust forest took it too (answering `rust`); a different answer or view re-seeds the Rust
-    /// forest from the Roc forest's view.
+    /// Rust forest took it too (answering `rust`); a different answer, or a different whole
+    /// system when one is compared (every operation in tests and debug builds, every
+    /// [`VIEW_EVERY`]th in a `roc-core` release build), re-seeds the Rust forest from the Roc
+    /// forest's view.
     pub(super) fn decided(
         &mut self,
         core: &mut M::Core,
@@ -176,18 +192,19 @@ impl<M: Machine> RocForest<M> {
         event: M::Event,
         rust: Answer,
     ) -> Answer {
+        self.steps += 1;
         let machine = self.machine.get_mut();
         let answer = machine.step(event);
-        let roc = machine.view();
-        let difference = if answer != rust {
-            Some(format!("answers: rust {rust:?}, roc {answer:?}"))
-        } else {
-            let held = M::view_of(core);
-            (roc != held).then(|| format!("views: rust {held:?}, roc {roc:?}"))
-        };
-        if let Some(difference) = difference {
-            report(what, &difference);
-            *core = M::core_of(&roc);
+        let view_due = view_due(VIEW_ALWAYS, self.steps);
+        if answer != rust {
+            report(what, &format!("answers: rust {rust:?}, roc {answer:?}"));
+            *core = M::core_of(&machine.view());
+        } else if view_due {
+            let (roc, held) = (machine.view(), M::view_of(core));
+            if roc != held {
+                report(what, &format!("views: rust {held:?}, roc {roc:?}"));
+                *core = M::core_of(&roc);
+            }
         }
         answer
     }
@@ -313,6 +330,7 @@ impl<M: Machine> Clone for RocForest<M> {
         let held = self.machine.borrow_mut().view();
         Self {
             machine: RefCell::new(M::seeded(&held)),
+            steps: self.steps,
         }
     }
 }
@@ -482,4 +500,18 @@ fn forest_view(forest: &CoreForest) -> ForestView {
 fn core_forest(view: &ForestView) -> CoreForest {
     view.forest_on(node_id, window_id)
         .expect("the Roc forest's tables are slot tables")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole systems are compared on every operation when always asked (tests, debug
+    /// builds), else on every 32nd (a `roc-core` release build), as the old twins sampled.
+    #[test]
+    fn the_whole_systems_are_compared_on_every_32nd_operation_unless_always() {
+        let due: Vec<u64> = (1..=96).filter(|&steps| view_due(false, steps)).collect();
+        assert_eq!(due, [32, 64, 96]);
+        assert!((1..=96).all(|steps| view_due(true, steps)));
+    }
 }
