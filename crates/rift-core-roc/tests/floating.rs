@@ -413,7 +413,7 @@ fn run(seed: u64, runs: u64, steps: usize) -> Reached {
                 _ => {}
             }
             reached.stacked += usize::from(rust.forest().nodes().values().any(|node| {
-                matches!(node.body, rift_core::layout::group_forest::Body::Container(ref c) if c.kind.is_stacked())
+                matches!(node.body, rift_core::layout::group_forest::Body::Container { ref container, .. } if container.kind.is_stacked())
             }));
             reached.aligned +=
                 usize::from(rust.geometry().values().any(|g| {
@@ -630,7 +630,7 @@ fn stepped_alike(view: &FloatingView, events: &[FloatingEvent], at: &str) {
 #[test]
 fn states_only_a_file_builds_step_alike() {
     use rift_core::layout::group_forest::{
-        Body, Container, Fill, Geometry, Members, Memory, Node, Place,
+        Body, Child, Container, Fill, Geometry, Members, Memory, Node, Place,
     };
     let key = |index: u64| group_forest::NodeKey((1 << 32) | index);
     let w = |index: u64| (1 << 32) | index;
@@ -640,20 +640,26 @@ fn states_only_a_file_builds_step_alike() {
         w: 200.0,
         h: 150.0,
     };
-    let child = |parent: u64| Place::Child { parent: key(parent), size: 1.0 };
+    let at = |parent: u64| Child { parent: key(parent), size: 1.0 };
+    let child = |parent: u64| Place::Child(at(parent));
     let container = |place, kind, children: &[u64], chosen: u64| Node {
-        place,
         fill: Fill::Tiled,
-        body: Body::Container(Container {
-            kind,
-            members: Members::Children(children.iter().map(|&c| key(c)).collect()),
-            memory: Memory::Toward(key(chosen)),
-        }),
+        body: Body::Container {
+            place,
+            container: Container {
+                kind,
+                members: Members::Children(children.iter().map(|&c| key(c)).collect()),
+                memory: Memory::Toward(key(chosen)),
+            },
+        },
     };
     let leaf = |parent: u64, window: u64, stamp: u64| Node {
-        place: child(parent),
         fill: Fill::Tiled,
-        body: Body::Window { window: w(window), stamp },
+        body: Body::Window {
+            at: at(parent),
+            window: w(window),
+            stamp,
+        },
     };
     let stack = Kind::Stack(Orientation::Horizontal);
     let nodes = vec![

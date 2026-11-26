@@ -437,7 +437,7 @@ pub(super) fn rift_view(view: plain::ContainerView) -> ContainerView<NodeId, Win
 pub(super) fn app_windows(forest: &CoreForest, of_app: impl Fn(WindowId) -> bool) -> Vec<u64> {
     let held = forest.nodes().values().filter_map(|node| match node.body {
         Body::Window { window, .. } => Some(window),
-        Body::Container(_) => None,
+        Body::Container { .. } => None,
     });
     let mut words: Vec<u64> = held
         .chain(forest.left_out().iter().copied())

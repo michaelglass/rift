@@ -234,11 +234,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> FloatingSystem<L, N,
             InsertionPoint::EndOfTree => None,
         };
         let node = match anchor {
-            Some(anchor) => {
-                let node = f.insert(Placement::After(anchor));
-                f.set_window(node, window);
-                node
-            }
+            Some(anchor) => f.insert_window(Placement::After(anchor), window),
             None => f.add_window_under(root, window),
         };
         f.select_node(node);

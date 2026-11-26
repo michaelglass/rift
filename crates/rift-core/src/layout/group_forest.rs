@@ -10,9 +10,11 @@
 //! list of ids (no sibling links); its selection memory names one of them ([`Memory`]); a region
 //! pair's primary is read from the children's order ([`Members::Regions`]); each pair of
 //! fullscreen flags is one [`Fill`]; a layout kind lives only on containers ([`Kind`]), never on
-//! a window; a node's size is where it is stored ([`Place::Child`]), so a root has none; the
-//! window index is derived from the leaves, ordered by when each window entered its layout
-//! ([`Body::Window`]'s stamp, the one fact the index holds that the tree does not).
+//! a window; a node's size is where it is stored ([`Child`]), so a root has none; a window is
+//! always a container's child ([`Body::Window`] holds its [`Child`] place, so no window is a
+//! root, not even while it is being placed); the window index is derived from the leaves,
+//! ordered by when each window entered its layout ([`Body::Window`]'s stamp, the one fact the
+//! index holds that the tree does not).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
@@ -129,25 +131,39 @@ pub struct Container<N> {
     pub memory: Memory<N>,
 }
 
-/// What a node is: a window (with the stamp taken when the window entered this layout, which
-/// orders the window index), or a container.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a node is, with its place: a window (always a container's child; with the stamp taken
+/// when the window entered this layout, which orders the window index), or a container (a
+/// layout's root or a child).
+#[derive(Debug, Clone, PartialEq)]
 pub enum Body<N, W> {
-    Window { window: W, stamp: u64 },
-    Container(Container<N>),
+    Window {
+        at: Child<N>,
+        window: W,
+        stamp: u64,
+    },
+    Container {
+        place: Place<N>,
+        container: Container<N>,
+    },
 }
 
-/// A node's place: a layout's root (or a node not placed yet), or a container's child with its
-/// size among its siblings (upstream keeps it as an `f32`).
+/// A child's place: its container, and its size among its siblings (upstream keeps it as an
+/// `f32`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Child<N> {
+    pub parent: N,
+    pub size: f32,
+}
+
+/// A container's place: a layout's root (or a container no layout reaches), or a child.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Place<N> {
     Root,
-    Child { parent: N, size: f32 },
+    Child(Child<N>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node<N, W> {
-    pub place: Place<N>,
     pub fill: Fill,
     pub body: Body<N, W>,
 }
@@ -169,36 +185,59 @@ enum BranchLimit {
 }
 
 impl<N: Copy, W: Copy> Node<N, W> {
+    /// The node's place (a window's is always a child's).
+    pub fn place(&self) -> Place<N> {
+        match self.body {
+            Body::Window { at, .. } => Place::Child(at),
+            Body::Container { place, .. } => place,
+        }
+    }
+
+    /// The node's place among its siblings, a root having none.
+    pub fn child_mut(&mut self) -> Option<&mut Child<N>> {
+        match &mut self.body {
+            Body::Window { at, .. } | Body::Container { place: Place::Child(at), .. } => Some(at),
+            Body::Container { place: Place::Root, .. } => None,
+        }
+    }
+
     /// The node on other keys (`node`) and windows (`window`).
     pub fn map<M, V>(&self, node: impl Fn(N) -> M, window: impl Fn(W) -> V) -> Node<M, V> {
+        let child = |at: Child<N>| Child {
+            parent: node(at.parent),
+            size: at.size,
+        };
         Node {
-            place: match self.place {
-                Place::Root => Place::Root,
-                Place::Child { parent, size } => Place::Child { parent: node(parent), size },
-            },
             fill: self.fill,
             body: match &self.body {
-                Body::Window { window: held, stamp } => Body::Window {
+                Body::Window { at, window: held, stamp } => Body::Window {
+                    at: child(*at),
                     window: window(*held),
                     stamp: *stamp,
                 },
-                Body::Container(container) => Body::Container(Container {
-                    kind: container.kind,
-                    members: match &container.members {
-                        Members::Children(children) => {
-                            Members::Children(children.iter().map(|&child| node(child)).collect())
-                        }
-                        Members::Regions { order, primary } => Members::Regions {
-                            order: order.map(&node),
-                            primary: *primary,
+                Body::Container { place, container } => Body::Container {
+                    place: match *place {
+                        Place::Root => Place::Root,
+                        Place::Child(at) => Place::Child(child(at)),
+                    },
+                    container: Container {
+                        kind: container.kind,
+                        members: match &container.members {
+                            Members::Children(children) => Members::Children(
+                                children.iter().map(|&child| node(child)).collect(),
+                            ),
+                            Members::Regions { order, primary } => Members::Regions {
+                                order: order.map(&node),
+                                primary: *primary,
+                            },
+                        },
+                        memory: match container.memory {
+                            Memory::Unset => Memory::Unset,
+                            Memory::Toward(child) => Memory::Toward(node(child)),
+                            Memory::Stops(child) => Memory::Stops(node(child)),
                         },
                     },
-                    memory: match container.memory {
-                        Memory::Unset => Memory::Unset,
-                        Memory::Toward(child) => Memory::Toward(node(child)),
-                        Memory::Stops(child) => Memory::Stops(node(child)),
-                    },
-                }),
+                },
             },
         }
     }
@@ -374,7 +413,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
             .values()
             .filter_map(|node| match node.body {
                 Body::Window { stamp, .. } => Some(stamp + 1),
-                Body::Container(_) => None,
+                Body::Container { .. } => None,
             })
             .max()
             .unwrap_or(0);
@@ -386,44 +425,47 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
 
     pub fn root(&self, layout: L) -> N { self.layouts[layout] }
 
+    /// A node's place (a window's is always a child's).
+    pub fn place(&self, node: N) -> Option<Place<N>> { Some(self.nodes.get(node)?.place()) }
+
     pub fn parent(&self, node: N) -> Option<N> {
-        match self.nodes.get(node)?.place {
+        match self.place(node)? {
             Place::Root => None,
-            Place::Child { parent, .. } => Some(parent),
+            Place::Child(at) => Some(at.parent),
         }
     }
 
     /// A node's size among its siblings (a root's reads as 0, as upstream's root keeps).
     pub fn size(&self, node: N) -> f32 {
-        match self.nodes[node].place {
-            Place::Root => 0.0,
-            Place::Child { size, .. } => size,
+        match self.place(node) {
+            Some(Place::Child(at)) => at.size,
+            Some(Place::Root) | None => 0.0,
         }
     }
 
     fn set_size(&mut self, node: N, size: f32) {
-        if let Place::Child { size: held, .. } = &mut self.nodes[node].place {
-            *held = size;
+        if let Some(at) = self.nodes[node].child_mut() {
+            at.size = size;
         }
     }
 
     pub fn window(&self, node: N) -> Option<W> {
         match self.nodes.get(node)?.body {
             Body::Window { window, .. } => Some(window),
-            Body::Container(_) => None,
+            Body::Container { .. } => None,
         }
     }
 
     fn container(&self, node: N) -> Option<&Container<N>> {
         match &self.nodes.get(node)?.body {
-            Body::Container(container) => Some(container),
+            Body::Container { container, .. } => Some(container),
             Body::Window { .. } => None,
         }
     }
 
     fn container_mut(&mut self, node: N) -> &mut Container<N> {
         match &mut self.nodes[node].body {
-            Body::Container(container) => container,
+            Body::Container { container, .. } => container,
             Body::Window { .. } => unreachable!("a window has no children"),
         }
     }
@@ -560,15 +602,19 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
         out
     }
 
-    fn create_root(&mut self) -> N {
+    fn create_root(&mut self) -> N { self.new_container(Place::Root, Kind::NEW) }
+
+    fn new_container(&mut self, place: Place<N>, kind: Kind) -> N {
         self.nodes.insert(Node {
-            place: Place::Root,
             fill: Fill::Tiled,
-            body: Body::Container(Container {
-                kind: Kind::NEW,
-                members: Members::Children(Vec::new()),
-                memory: Memory::Unset,
-            }),
+            body: Body::Container {
+                place,
+                container: Container {
+                    kind,
+                    members: Members::Children(Vec::new()),
+                    memory: Memory::Unset,
+                },
+            },
         })
     }
 
@@ -580,8 +626,20 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
         .filter(|&parent| self.window(parent).is_none())
     }
 
-    /// `node` (unplaced) put into `parent` where `placement` says, with `size`.
+    /// `node` put into `parent`'s children where `placement` says, its place made
+    /// `parent`'s child with `size` (a node `unlink` took out, or a root).
     fn link(&mut self, node: N, parent: N, placement: Placement<N>, size: f32) {
+        self.attach(node, parent, placement);
+        let at = Child { parent, size };
+        match &mut self.nodes[node].body {
+            Body::Window { at: held, .. } => *held = at,
+            Body::Container { place, .. } => *place = Place::Child(at),
+        }
+    }
+
+    /// `node` listed among `parent`'s children where `placement` says (its place already says
+    /// so, or `link` sets it).
+    fn attach(&mut self, node: N, parent: N, placement: Placement<N>) {
         let at = match placement {
             Placement::Back(_) => self.children(parent).len(),
             Placement::Before(sibling) => self.position(sibling).expect("a placed sibling").1,
@@ -591,11 +649,11 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
             unreachable!("only regular containers accept structural edits");
         };
         children.insert(at, node);
-        self.nodes[node].place = Place::Child { parent, size };
     }
 
     /// `node` taken out of its parent's children (its memory of it kept, as upstream's
-    /// `unlink`).
+    /// `unlink`). Its place still names the parent: every caller links it again or removes it
+    /// (a window is never a root, so there is no place to give it in between).
     fn unlink(&mut self, node: N) {
         let Some((parent, at)) = self.position(node) else {
             return;
@@ -604,14 +662,32 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
             unreachable!("only regular containers accept structural edits");
         };
         children.remove(at);
-        self.nodes[node].place = Place::Root;
     }
 
+    /// A new container where `placement` says.
     fn insert(&mut self, placement: Placement<N>) -> N {
         let parent = self.placement_parent(placement).expect("invalid tile insertion");
         assert!(!self.is_region_pair(parent));
-        let node = self.create_root();
-        self.link(node, parent, placement, 1.0);
+        let node = self.new_container(Place::Child(Child { parent, size: 1.0 }), Kind::NEW);
+        self.attach(node, parent, placement);
+        node
+    }
+
+    /// A new leaf holding `window` where `placement` says: it enters the layout now.
+    fn insert_window(&mut self, placement: Placement<N>, window: W) -> N {
+        let parent = self.placement_parent(placement).expect("invalid tile insertion");
+        assert!(!self.is_region_pair(parent));
+        let stamp = self.next_stamp;
+        self.next_stamp += 1;
+        let node = self.nodes.insert(Node {
+            fill: Fill::Tiled,
+            body: Body::Window {
+                at: Child { parent, size: 1.0 },
+                window,
+                stamp,
+            },
+        });
+        self.attach(node, parent, placement);
         node
     }
 
@@ -700,32 +776,48 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
 
     fn delete_subtree(&mut self, root: N) {
         let Some(node) = self.nodes.remove(root) else { return };
-        if let Body::Container(container) = node.body {
+        if let Body::Container { container, .. } = node.body {
             for &child in container.members.list() {
                 self.delete_subtree(child);
             }
         }
     }
 
-    fn copy_tile(&mut self, source: N) -> N {
-        let Node { fill, body, .. } = self.nodes[source].clone();
+    /// A copy of `source` (a window with a new stamp, a container empty) at the back of
+    /// `parent`, with `source`'s size.
+    fn copy_tile(&mut self, source: N, parent: N) -> N {
+        let at = Child {
+            parent,
+            size: self.size(source),
+        };
+        let Node { fill, body } = self.nodes[source].clone();
         let body = match body {
             Body::Window { window, .. } => {
                 let stamp = self.next_stamp;
                 self.next_stamp += 1;
-                Body::Window { window, stamp }
+                Body::Window { at, window, stamp }
             }
-            Body::Container(Container { kind, .. }) => Body::Container(Container {
-                kind,
-                members: Members::Children(Vec::new()),
-                memory: Memory::Unset,
-            }),
+            Body::Container {
+                container: Container { kind, .. },
+                ..
+            } => Body::Container {
+                place: Place::Child(at),
+                container: Container {
+                    kind,
+                    members: Members::Children(Vec::new()),
+                    memory: Memory::Unset,
+                },
+            },
         };
-        self.nodes.insert(Node { place: Place::Root, fill, body })
+        let node = self.nodes.insert(Node { fill, body });
+        self.attach(node, parent, Placement::Back(parent));
+        node
     }
 
+    /// A copy of the layout root `source` and everything under it, as a new root.
     fn clone_branch(&mut self, source: N) -> N {
-        let root = self.copy_tile(source);
+        let root = self.new_container(Place::Root, self.container_kind(source));
+        self.nodes[root].fill = self.nodes[source].fill;
         let mut stack = vec![(0, source, root)];
         while let Some((next, original_parent, new_parent)) = stack.last_mut() {
             let (original_parent, new_parent) = (*original_parent, *new_parent);
@@ -734,9 +826,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
                 continue;
             };
             *next += 1;
-            let new = self.copy_tile(old);
-            let size = self.size(old);
-            self.link(new, new_parent, Placement::Back(new_parent), size);
+            let new = self.copy_tile(old, new_parent);
             let memory = self.memory(original_parent);
             if memory.last() == Some(old) {
                 self.set_memory(new_parent, memory.on(new));
@@ -840,7 +930,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
 
     fn select_node(&mut self, selection: N) {
         if let Some(container) = match &mut self.nodes[selection].body {
-            Body::Container(container) => Some(container),
+            Body::Container { container, .. } => Some(container),
             Body::Window { .. } => None,
         } && let Memory::Toward(child) = container.memory
         {
@@ -1013,7 +1103,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
         let mut entries: Vec<(W, u64, L, N)> = Vec::new();
         for (layout, root) in self.layouts() {
             for node in self.preorder(root) {
-                if let Body::Window { window, stamp } = self.nodes[node].body {
+                if let Body::Window { window, stamp, .. } = self.nodes[node].body {
                     entries.push((window, stamp, layout, node));
                 }
             }
@@ -1035,13 +1125,20 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
 
     /// The leaf holding `window` in `layout` (the first to enter, as upstream's index lists).
     fn window_node(&self, layout: L, window: W) -> Option<N> {
+        self.window_leaf(layout, window).map(|(node, _)| node)
+    }
+
+    /// The leaf holding `window` in `layout`, with its place.
+    fn window_leaf(&self, layout: L, window: W) -> Option<(N, Child<N>)> {
         self.preorder(self.root(layout))
             .filter_map(|node| match self.nodes[node].body {
-                Body::Window { window: held, stamp } if held == window => Some((stamp, node)),
+                Body::Window { at, window: held, stamp } if held == window => {
+                    Some((stamp, node, at))
+                }
                 _ => None,
             })
-            .min_by_key(|&(stamp, _)| stamp)
-            .map(|(_, node)| node)
+            .min_by_key(|&(stamp, ..)| stamp)
+            .map(|(_, node, at)| (node, at))
     }
 
     fn windows_with_nodes(&self, layout: L) -> impl Iterator<Item = (N, W)> + '_ {
@@ -1049,11 +1146,14 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq, W: Copy + Ord> Forest<L, N, W> {
             .filter_map(|node| self.window(node).map(|w| (node, w)))
     }
 
-    /// A new leaf's window: it enters the layout now.
+    /// A leaf's window replaced: the new window enters the layout now.
     fn set_window(&mut self, node: N, window: W) {
-        let stamp = self.next_stamp;
-        self.next_stamp += 1;
-        self.nodes[node].body = Body::Window { window, stamp };
+        let next = self.next_stamp;
+        if let Body::Window { window: held, stamp, .. } = &mut self.nodes[node].body {
+            *held = window;
+            *stamp = next;
+            self.next_stamp += 1;
+        }
     }
 }
 
@@ -1486,13 +1586,16 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
         }
         let selection = self.selection(layout);
         // Each window keeps when it entered the layout (upstream's index entries move with it).
-        let (Body::Window { stamp: stamp_a, .. }, Body::Window { stamp: stamp_b, .. }) =
-            (self.nodes[node_a].body.clone(), self.nodes[node_b].body.clone())
-        else {
-            unreachable!("leaves hold windows");
+        let held = |f: &Self, node: N| match f.nodes[node].body {
+            Body::Window { window, stamp, .. } => (window, stamp),
+            Body::Container { .. } => unreachable!("leaves hold windows"),
         };
-        self.nodes[node_a].body = Body::Window { window: b, stamp: stamp_b };
-        self.nodes[node_b].body = Body::Window { window: a, stamp: stamp_a };
+        let (a_held, b_held) = (held(self, node_a), held(self, node_b));
+        for (node, (window, stamp)) in [(node_a, b_held), (node_b, a_held)] {
+            if let Body::Window { window: w, stamp: s, .. } = &mut self.nodes[node].body {
+                (*w, *s) = (window, stamp);
+            }
+        }
         self.select_node(if selection == node_a {
             node_b
         } else if selection == node_b {
@@ -1677,21 +1780,19 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
             DropAction::Swap => return self.swap_windows(layout, source, target),
             DropAction::Stack | DropAction::Insert(_) => action,
         };
-        let (Some(source_node), Some(target_node)) = (
+        let (Some(source_node), Some((target_node, target_at))) = (
             self.window_node(layout, source),
-            self.window_node(layout, target),
+            self.window_leaf(layout, target),
         ) else {
             return false;
         };
         let DropAction::Insert(direction) = direction else {
-            if self.parent(target_node).is_some_and(|p| self.is_stacked(p)) {
+            if self.is_stacked(target_at.parent) {
                 self.move_node(source_node, Placement::After(target_node));
                 self.select_node(source_node);
                 return true;
             }
-            let orientation = self
-                .parent(target_node)
-                .map_or(Orientation::Horizontal, |p| self.container_kind(p).orientation());
+            let orientation = self.container_kind(target_at.parent).orientation();
             let container = self.insert(Placement::Before(target_node));
             self.assume_size_of(container, target_node);
             self.move_node(target_node, Placement::Back(container));
@@ -1837,7 +1938,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
             }
             return;
         }
-        let Body::Container(container) = &self.nodes[node].body else {
+        let Body::Container { container, .. } = &self.nodes[node].body else {
             return;
         };
         let taking_part = |child: N| active.contains(child);
@@ -1908,7 +2009,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
                     fill,
                 };
             }
-            Body::Container(container) => container.kind,
+            Body::Container { container, .. } => container.kind,
         };
         let child = |child: N| geometry::Child {
             size: self.size(child),
@@ -1952,9 +2053,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
 /// `parent` (upstream's `add_window_under`).
 impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
     fn add_window_under(&mut self, parent: N, window: W) -> N {
-        let node = self.insert(Placement::Back(parent));
-        self.set_window(node, window);
-        node
+        self.insert_window(Placement::Back(parent), window)
     }
 
     /// How many windows a subtree holds, taking part or not (upstream's `count_windows`).
@@ -2118,35 +2217,33 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Traditional<L, N, W>
             return;
         }
         let selection = self.forest.selection(layout);
-        let node = if self.forest.parent(selection).is_none() {
+        let node = match self.forest.parent(selection) {
+            Some(parent) => self.smart_window_insertion(layout, selection, parent, window),
             // The root selected with children: split from its chosen child rather than append
             // a fresh full-weight sibling.
-            match self
+            None => match self
                 .forest
                 .local_selection(selection)
                 .or_else(|| self.forest.last_child(selection))
             {
-                Some(anchor) => self.smart_window_insertion(layout, anchor, window),
+                Some(anchor) => self.smart_window_insertion(layout, anchor, selection, window),
                 None => self.forest.add_window_under(selection, window),
-            }
-        } else {
-            self.smart_window_insertion(layout, selection, window)
+            },
         };
         self.forest.select_node(node);
     }
 
-    fn smart_window_insertion(&mut self, layout: L, selection: N, window: W) -> N {
+    /// A new leaf for `window` beside `selection`, a child of `parent`.
+    fn smart_window_insertion(&mut self, layout: L, selection: N, parent: N, window: W) -> N {
         let f = &mut self.forest;
-        let mut placement = Placement::After(selection);
-        if let Some(parent) = f.parent(selection) {
-            let kind = f.container_kind(parent);
-            if !kind.is_stacked() && f.children(parent).len() > 3 {
-                placement = Placement::Back(f.nest_in_container(layout, selection, kind));
-            }
-        }
-        let node = f.insert(placement);
+        let kind = f.container_kind(parent);
+        let placement = if !kind.is_stacked() && f.children(parent).len() > 3 {
+            Placement::Back(f.nest_in_container(layout, selection, kind))
+        } else {
+            Placement::After(selection)
+        };
+        let node = f.insert_window(placement, window);
         self.split_new_sibling_from_selection(selection, node);
-        self.forest.set_window(node, window);
         node
     }
 
@@ -2881,9 +2978,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> MasterStack<L, N, W>
             RegionInsertion::EndOfTree => None,
             RegionInsertion::Front => f.first_child(container).map(Placement::Before),
         };
-        let node = f.insert(relative.unwrap_or(Placement::Back(container)));
-        f.set_window(node, window);
-        node
+        f.insert_window(relative.unwrap_or(Placement::Back(container)), window)
     }
 
     /// A window added to the region the settings choose, the master count then enforced

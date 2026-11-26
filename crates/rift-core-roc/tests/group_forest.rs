@@ -459,12 +459,15 @@ fn with_saved_only_states(rng: &mut Rng, view: &mut ForestView) {
     }
     for (node, _) in &mut view.nodes {
         let Some(node) = node.as_mut() else { continue };
-        if let Place::Child { size, .. } = &mut node.place
+        if let Some(at) = node.child_mut()
             && rng.chance(15)
         {
-            *size = [0.25, 2.0, 3.5, 0.0][rng.below(4) as usize];
+            at.size = [0.25, 2.0, 3.5, 0.0][rng.below(4) as usize];
         }
-        if let Body::Container(Container { memory, members, .. }) = &mut node.body
+        if let Body::Container {
+            container: Container { memory, members, .. },
+            ..
+        } = &mut node.body
             && let Some(&child) = members.list().first()
         {
             match rng.below(10) {
@@ -789,15 +792,15 @@ fn run<T: Twin>(seed: u64, runs: u64, steps: usize) -> Reached {
                 reached.largest = reached.largest.max(forest.windows(layout, Query::All).len());
             }
             reached.nested += usize::from(forest.nodes().values().any(|node| {
-                matches!(node.place, Place::Child { parent, .. }
-                    if matches!(forest.node(parent).place, Place::Child { .. }))
-                    && matches!(node.body, Body::Container(_))
+                matches!(node.place(), Place::Child(at)
+                    if matches!(forest.node(at.parent).place(), Place::Child(_)))
+                    && matches!(node.body, Body::Container { .. })
             }));
             reached.stacked += usize::from(forest.nodes().values().any(|node| {
-                matches!(
-                    node.body,
-                    Body::Container(Container { kind: Kind::Stack(_), .. })
-                ) && node.fill == Fill::Tiled
+                matches!(node.body, Body::Container {
+                    container: Container { kind: Kind::Stack(_), .. },
+                    ..
+                }) && node.fill == Fill::Tiled
             }));
             if rng.chance(40)
                 && let Some(layout) = rng.pick(&live(twin.forest()))

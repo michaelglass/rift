@@ -12,7 +12,7 @@ import Floating
 import Geometry
 import Slots
 import Traditional exposing [Branch, Laid, Tree, TreeAxis, TreeStack]
-import pf.Boundary exposing [BspKnown, BspMovement, FloatingWindow, FloatingShapeQuestion, FloatingAdd, FloatingAligned, FloatingAnswer, FloatingEvent, FloatingFrame, FloatingFrames, FloatingGeometry, FloatingInitialize, FloatingLayout, FloatingLayoutAnswer, FloatingLayoutQuestion, FloatingPlace, FloatingScreen, FloatingSeed, FloatingSlot, FloatingStore, Gaps, Newcomer, Size, Frame, GroupBar, GroupBars, GroupBranch, GroupContainerView, GroupProjected, GroupRole, GroupRow, StackFramesQuestion, WindowConstraints, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
+import pf.Boundary exposing [BspKnown, BspMovement, FloatingWindow, FloatingShapeQuestion, FloatingAdd, FloatingAligned, FloatingAnswer, FloatingEvent, FloatingFrame, FloatingFrames, FloatingGeometry, FloatingInitialize, FloatingLayout, FloatingLayoutAnswer, FloatingLayoutQuestion, FloatingPlace, FloatingScreen, FloatingSeed, FloatingSlot, FloatingStore, Gaps, Newcomer, Size, Frame, GroupBar, GroupBars, GroupBranch, GroupContainerView, GroupProjected, GroupRole, GroupRow, StackFramesQuestion, WindowConstraints, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupChildPlace, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
 
 ## The nodes a layout pass takes part with: a mark per slot of the forest's node table
 ## (`Slots.unmarked`, `mark`, `marked`).
@@ -479,11 +479,27 @@ GroupForest := [].{
 	parent = |forest, key|
 		match Slots.get(forest.nodes, key) {
 			Held(held) =>
-				match held.place {
+				match place_of(held) {
 					Root => Nothing
 					Child({ parent: above, .. }) => Some(above)
 				}
 			NotHeld => Nothing
+		}
+
+	## A node's place, read from the node itself (a window's is always a child's).
+	place_of : GroupTreeNode -> GroupPlace
+	place_of = |held|
+		match held.body {
+			Window({ at, .. }) => Child(at)
+			Container({ place, .. }) => place
+		}
+
+	## The node with its place made `placed`'s child.
+	placed_at : GroupTreeNode, GroupChildPlace -> GroupTreeNode
+	placed_at = |held, placed|
+		match held.body {
+			Window(leaf) => { ..held, body: Window({ ..leaf, at: placed }) }
+			Container(holding) => { ..held, body: Container({ ..holding, place: Child(placed) }) }
 		}
 
 	## A node's size among its siblings (a root's reads as 0).
@@ -493,7 +509,7 @@ GroupForest := [].{
 	## A node's size, read from the node itself.
 	size_of : GroupTreeNode -> F32
 	size_of = |held|
-		match held.place {
+		match place_of(held) {
 			Root => 0.0
 			Child({ size: share, .. }) => share
 		}
@@ -501,9 +517,9 @@ GroupForest := [].{
 	set_size : Forest, U64, F32 -> Forest
 	set_size = |forest, key, value| {
 		at = node(forest, key, "set_size")
-		match at.place {
+		match place_of(at) {
 			Root => forest
-			Child(placed) => set_node(forest, key, { ..at, place: Child({ ..placed, size: value }) }, "set_size")
+			Child(placed) => set_node(forest, key, placed_at(at, { ..placed, size: value }), "set_size")
 		}
 	}
 
@@ -536,7 +552,7 @@ GroupForest := [].{
 		match Slots.get(forest.nodes, key) {
 			Held(held) =>
 				match held.body {
-					Container(holding) => Is(holding)
+					Container(holding) => Is(holding.container)
 					Window(_) => NotContainer
 				}
 			NotHeld => NotContainer
@@ -546,7 +562,7 @@ GroupForest := [].{
 	container_at : Forest, U64, Str -> GroupContainer
 	container_at = |forest, key, who|
 		match node(forest, key, who).body {
-			Container(holding) => holding
+			Container(holding) => holding.container
 			Window(_) => {
 				crash "GroupForest.${who}: node ${key.to_str()} is a window"
 			}
@@ -556,7 +572,7 @@ GroupForest := [].{
 	set_container = |forest, key, holding, who| {
 		at = node(forest, key, who)
 		match at.body {
-			Container(_) => set_node(forest, key, { ..at, body: Container(holding) }, who)
+			Container(held) => set_node(forest, key, { ..at, body: Container({ ..held, container: holding }) }, who)
 			Window(_) => {
 				crash "GroupForest.${who}: node ${key.to_str()} is a window"
 			}
@@ -628,7 +644,7 @@ GroupForest := [].{
 	children_of = |held|
 		match held.body {
 			Container(holding) =>
-				match holding.members {
+				match holding.container.members {
 					Children(listed) => listed
 					Regions({ first, second, .. }) => [first, second]
 				}
@@ -638,14 +654,18 @@ GroupForest := [].{
 	position : Forest, U64 -> Position
 	position = |forest, key|
 		match parent(forest, key) {
-			Some(above) =>
-				match children(forest, above).find_first_index(|child| child == key) {
-					Ok(index) => At({ above, index })
-					Err(_) => {
-						crash "GroupForest.position: node ${key.to_str()} is not a child of ${above.to_str()}"
-					}
-				}
+			Some(above) => At(child_place(forest, above, key))
 			Nothing => Unplaced
+		}
+
+	## Where `key`, a child of `above`, sits among its children.
+	child_place : Forest, U64, U64 -> Place
+	child_place = |forest, above, key|
+		match children(forest, above).find_first_index(|child| child == key) {
+			Ok(index) => { above, index }
+			Err(_) => {
+				crash "GroupForest.position: node ${key.to_str()} is not a child of ${above.to_str()}"
+			}
 		}
 
 	next_sibling : Forest, U64 -> MaybeWord
@@ -808,13 +828,16 @@ GroupForest := [].{
 	}
 
 	create_root : Forest -> (Forest, U64)
-	create_root = |forest| {
+	create_root = |forest| new_container(forest, Root)
+
+	## A new empty container of the new kind at `placed`.
+	new_container : Forest, GroupPlace -> (Forest, U64)
+	new_container = |forest, placed| {
 		(nodes, key) = Slots.insert(
 			forest.nodes,
 			{
-				place: Root,
 				fill: Tiled,
-				body: Container({ kind: Split(Horizontal), members: Children([]), memory: Unset }),
+				body: Container({ place: placed, container: { kind: Split(Horizontal), members: Children([]), memory: Unset } }),
 			},
 		)
 		({ ..forest, nodes }, key)
@@ -849,11 +872,9 @@ GroupForest := [].{
 		set_container(forest, key, { ..holding, members: Children(listed) }, who)
 	}
 
-	set_place : Forest, U64, GroupPlace -> Forest
-	set_place = |forest, key, placed| {
-		at = node(forest, key, "set_place")
-		set_node(forest, key, { ..at, place: placed }, "set_place")
-	}
+	## `key`'s place made `placed`'s child.
+	set_place : Forest, U64, GroupChildPlace -> Forest
+	set_place = |forest, key, placed| set_node(forest, key, placed_at(node(forest, key, "set_place"), placed), "set_place")
 
 	## The place at the back of `above`'s children.
 	back_of : Forest, U64 -> Place
@@ -890,12 +911,17 @@ GroupForest := [].{
 		{ above, index }
 	}
 
-	## `key` (unplaced) put at `place`, with `held` as its size. Two crashes stay, both about a
-	## key read just before: `listed_children`'s for a container that is a region pair (or not a
-	## container), and the list insert's for an index past the children (every place is read from
-	## them); neither is expressible as a type here.
+	## `key` (unlinked, or a root) put at `place`, with `held` as its size.
 	link : Forest, U64, Place, F32 -> Forest
-	link = |forest, key, { above, index }, held| {
+	link = |forest, key, place, held|
+		set_place(attach(forest, key, place), key, { parent: place.above, size: held })
+
+	## `key` listed among `above`'s children at `index` (its place already says so, or `link`
+	## sets it). Two crashes stay, both about a key read just before: `listed_children`'s for a
+	## container that is a region pair (or not a container), and the list insert's for an index
+	## past the children (every place is read from them); neither is expressible as a type here.
+	attach : Forest, U64, Place -> Forest
+	attach = |forest, key, { above, index }| {
 		listed = listed_children(forest, above, "link")
 		inserted =
 			match listed.insert(index, key) {
@@ -904,16 +930,18 @@ GroupForest := [].{
 					crash "GroupForest.link: no place ${index.to_str()} in ${above.to_str()}"
 				}
 			}
-		set_place(set_children(forest, above, inserted, "link"), key, Child({ parent: above, size: held }))
+		set_children(forest, above, inserted, "link")
 	}
 
-	## `key` taken out of its parent's children (its memory of it kept).
+	## `key` taken out of its parent's children (its memory of it kept). Its place still names
+	## the parent: every caller links it again or removes it (a window is never a root, so there
+	## is no place to give it in between).
 	unlink : Forest, U64 -> Forest
 	unlink = |forest, key|
 		match position(forest, key) {
 			At({ above, index }) => {
 				listed = listed_children(forest, above, "unlink")
-				set_place(set_children(forest, above, listed.drop_at(index), "unlink"), key, Root)
+				set_children(forest, above, listed.drop_at(index), "unlink")
 			}
 			Unplaced => forest
 		}
@@ -921,8 +949,18 @@ GroupForest := [].{
 	## A new container at `place` (the caller resolved it from what it knows).
 	insert : Forest, Place -> (Forest, U64)
 	insert = |forest, place| {
-		(created, key) = create_root(forest)
-		(link(created, key, place, 1.0), key)
+		(created, key) = new_container(forest, Child({ parent: place.above, size: 1.0 }))
+		(attach(created, key, place), key)
+	}
+
+	## A new leaf holding `window_word` at `place`: it enters the layout now.
+	insert_window : Forest, Place, U64 -> (Forest, U64)
+	insert_window = |forest, place, window_word| {
+		(nodes, key) = Slots.insert(
+			forest.nodes,
+			{ fill: Tiled, body: Window({ at: { parent: place.above, size: 1.0 }, window: window_word, stamp: forest.next_stamp }) },
+		)
+		(attach({ ..forest, nodes, next_stamp: forest.next_stamp + 1 }, key, place), key)
 	}
 
 	move_node : Forest, U64, Placement -> (Forest, Bool)
@@ -1049,7 +1087,7 @@ GroupForest := [].{
 				match held.body {
 					Container(holding) => {
 						listed =
-							match holding.members {
+							match holding.container.members {
 								Children(list) => list
 								Regions({ first, second, .. }) => [first, second]
 							}
@@ -1061,21 +1099,28 @@ GroupForest := [].{
 		}
 	}
 
-	copy_tile : Forest, U64 -> (Forest, U64)
-	copy_tile = |forest, source| {
+	## A copy of `source` (a window with a new stamp, a container empty) at `placed`: the
+	## caller attaches it there.
+	copy_tile : Forest, U64, GroupChildPlace -> (Forest, U64)
+	copy_tile = |forest, source, placed| {
 		at = node(forest, source, "copy_tile")
 		(stamped, body) =
 			match at.body {
-				Window({ window: leaf, .. }) => ({ ..forest, next_stamp: forest.next_stamp + 1 }, Window({ window: leaf, stamp: forest.next_stamp }))
-				Container(holding) => (forest, Container({ kind: holding.kind, members: Children([]), memory: Unset }))
+				Window({ window: leaf, .. }) => ({ ..forest, next_stamp: forest.next_stamp + 1 }, Window({ at: placed, window: leaf, stamp: forest.next_stamp }))
+				Container(holding) => (forest, Container({ place: Child(placed), container: { kind: holding.container.kind, members: Children([]), memory: Unset } }))
 			}
-		(nodes, key) = Slots.insert(stamped.nodes, { place: Root, fill: at.fill, body })
+		(nodes, key) = Slots.insert(stamped.nodes, { fill: at.fill, body })
 		({ ..stamped, nodes }, key)
 	}
 
 	clone_branch : Forest, U64 -> (Forest, U64)
 	clone_branch = |forest, source| {
-		(copied, top) = copy_tile(forest, source)
+		# Read before the new root: a read of `forest` after it would keep the old table alive (a
+		# copy on the insert).
+		made = container_kind(forest, source, "clone_branch")
+		fill = node(forest, source, "clone_branch").fill
+		(created, top) = new_container(forest, Root)
+		copied = set_fill(set_kind(created, top, made), top, fill)
 		cloned = clone_children(copied, source, top)
 		paired =
 			match container(cloned, source) {
@@ -1100,9 +1145,8 @@ GroupForest := [].{
 		children(forest, original).fold(
 			forest,
 			|at, old| {
-				(copied, new) = copy_tile(at, old)
-				held = size(copied, old)
-				linked = link(copied, new, back_of(copied, copy), held)
+				(copied, new) = copy_tile(at, old, { parent: copy, size: size(at, old) })
+				linked = attach(copied, new, back_of(copied, copy))
 				remembered = memory_at(linked, original)
 				with_memory =
 					if memory_last(remembered) == Some(old) {
@@ -1230,7 +1274,7 @@ GroupForest := [].{
 		at = node(forest, chosen, "select_node")
 		stopped =
 			match at.body {
-				Container({ memory: Toward(child), .. }) => set_memory(forest, chosen, Stops(child))
+				Container({ container: { memory: Toward(child), .. }, .. }) => set_memory(forest, chosen, Stops(child))
 				_ => forest
 			}
 		lead_up(stopped, chosen)
@@ -1445,7 +1489,7 @@ GroupForest := [].{
 					taking_part = children(forest, key).keep_if(|child| Slots.marked(active, child))
 					shown = |{}| participating_child(forest, key, False, |child| Slots.marked(active, child))
 					(with_bar, chosen) =
-						match holding.kind {
+						match holding.container.kind {
 							Stack(orientation) => {
 								focused =
 									match shown({}) {
@@ -1525,7 +1569,7 @@ GroupForest := [].{
 		{
 			node: key,
 			selected: key == selected,
-			weight: match held.place {
+			weight: match place_of(held) {
 				Root => AtRoot
 				Child({ size: share, .. }) => Weight(share)
 			},
@@ -1533,7 +1577,7 @@ GroupForest := [].{
 			role: role(forest, top, key),
 			held: match held.body {
 				Window({ window, .. }) => Window(window)
-				Container(holding) => Container({ kind: holding.kind, children: children(forest, key).map(|child| container_of(forest, top, child, selected)) })
+				Container(holding) => Container({ kind: holding.container.kind, children: children(forest, key).map(|child| container_of(forest, top, child, selected)) })
 			},
 		}
 	}
@@ -1551,7 +1595,7 @@ GroupForest := [].{
 	row_of = |forest, top, key, lead, rest, out| {
 		held = node(forest, key, "row_of")
 		mark =
-			match held.place {
+			match place_of(held) {
 				Root => Root
 				Child({ parent: above, .. }) =>
 					match local_selection_of(forest, above) {
@@ -1562,7 +1606,7 @@ GroupForest := [].{
 		drawn =
 			match held.body {
 				Window({ window, .. }) => Window(window)
-				Container(holding) => Container({ kind: holding.kind, total: children_total(forest, key) })
+				Container(holding) => Container({ kind: holding.container.kind, total: children_total(forest, key) })
 			}
 		row = { branches: lead, mark, node: key, held: drawn, size: size(forest, key), role: role(forest, top, key) }
 		listed = children(forest, key)
@@ -1605,7 +1649,7 @@ GroupForest := [].{
 			Container(holding) => {
 				branch = |child| Branch.{ size: size(forest, child), node: shape_node(forest, active, known, child) }
 				taking_part = children(forest, key).keep_if(|child| Slots.marked(active, child))
-				match holding.kind {
+				match holding.container.kind {
 					Stack(orientation) => {
 						focused =
 							match participating_child(forest, key, False, |child| Slots.marked(active, child)) {
@@ -1660,7 +1704,7 @@ GroupForest := [].{
 					gathered,
 					|held, key, at|
 						match at.body {
-							Window({ window: leaf, stamp }) if keep(leaf) => Continue(held.append((leaf, stamp, layout, key)))
+							Window({ window: leaf, stamp, .. }) if keep(leaf) => Continue(held.append((leaf, stamp, layout, key)))
 							_ => Continue(held)
 						},
 				),
@@ -1687,25 +1731,33 @@ GroupForest := [].{
 
 	## The leaf holding `window_word` in `layout` (the first to enter).
 	window_node : Forest, U64, U64 -> MaybeWord
-	window_node = |forest, layout, window_word| {
+	window_node = |forest, layout, window_word|
+		match window_leaf(forest, layout, window_word) {
+			Leaf(key, _) => Some(key)
+			NoLeaf => Nothing
+		}
+
+	## The leaf holding `window_word` in `layout` (the first to enter), with its place.
+	window_leaf : Forest, U64, U64 -> [Leaf(U64, GroupChildPlace), NoLeaf]
+	window_leaf = |forest, layout, window_word| {
 		best = walk(
 			forest,
 			root(forest, layout, "window_node"),
 			Preorder,
 			NoLeaf,
-			|chosen, key, at|
-				match at.body {
-					Window({ window: leaf, stamp }) if leaf == window_word =>
+			|chosen, key, held|
+				match held.body {
+					Window({ at, window: leaf, stamp }) if leaf == window_word =>
 						match chosen {
-							Leaf(_, held) if held <= stamp => Continue(chosen)
-							_ => Continue(Leaf(key, stamp))
+							Leaf(_, _, kept) if kept <= stamp => Continue(chosen)
+							_ => Continue(Leaf(key, at, stamp))
 						}
 					_ => Continue(chosen)
 				},
 		)
 		match best {
-			Leaf(key, _) => Some(key)
-			NoLeaf => Nothing
+			Leaf(key, at, _) => Leaf(key, at)
+			NoLeaf => NoLeaf
 		}
 	}
 
@@ -1723,12 +1775,17 @@ GroupForest := [].{
 				},
 		)
 
-	## A new leaf's window: it enters the layout now.
+	## A leaf's window replaced: the new window enters the layout now.
 	set_window : Forest, U64, U64 -> Forest
 	set_window = |forest, key, window_word| {
 		at = node(forest, key, "set_window")
-		stamped = { ..forest, next_stamp: forest.next_stamp + 1 }
-		set_node(stamped, key, { ..at, body: Window({ window: window_word, stamp: forest.next_stamp }) }, "set_window")
+		match at.body {
+			Window(leaf) => {
+				stamped = { ..forest, next_stamp: forest.next_stamp + 1 }
+				set_node(stamped, key, { ..at, body: Window({ ..leaf, window: window_word, stamp: forest.next_stamp }) }, "set_window")
+			}
+			Container(_) => forest
+		}
 	}
 
 	# The operations both systems share.
@@ -2222,17 +2279,17 @@ GroupForest := [].{
 					held_a = node(forest, node_a, "swap_windows")
 					held_b = node(forest, node_b, "swap_windows")
 					# Each window keeps when it entered the layout.
-					(stamp_a, stamp_b) =
+					(leaf_a, leaf_b) =
 						match (held_a.body, held_b.body) {
-							(Window({ stamp: sa, .. }), Window({ stamp: sb, .. })) => (sa, sb)
+							(Window(la), Window(lb)) => (la, lb)
 							_ => {
 								crash "GroupForest.swap_windows: a window's leaf holds no window"
 							}
 						}
 					swapped = set_node(
-						set_node(forest, node_a, { ..held_a, body: Window({ window: b, stamp: stamp_b }) }, "swap_windows"),
+						set_node(forest, node_a, { ..held_a, body: Window({ ..leaf_a, window: b, stamp: leaf_b.stamp }) }, "swap_windows"),
 						node_b,
-						{ ..held_b, body: Window({ window: a, stamp: stamp_a }) },
+						{ ..held_b, body: Window({ ..leaf_b, window: a, stamp: leaf_a.stamp }) },
 						"swap_windows",
 					)
 					reselected = if chosen == node_a node_b else if chosen == node_b node_a else chosen
@@ -2505,8 +2562,8 @@ GroupForest := [].{
 			match action {
 				Swap => swap_windows(forest, layout, source, target)
 				Stack =>
-					match (window_node(forest, layout, source), window_node(forest, layout, target)) {
-						(Some(source_node), Some(target_node)) => (drop_stacking(forest, source_node, target_node), True)
+					match (window_node(forest, layout, source), window_leaf(forest, layout, target)) {
+						(Some(source_node), Leaf(target_node, target_at)) => (drop_stacking(forest, source_node, target_node, target_at), True)
 						_ => (forest, False)
 					}
 				Insert(direction) =>
@@ -2517,25 +2574,18 @@ GroupForest := [].{
 			}
 		}
 
-	drop_stacking : Forest, U64, U64 -> Forest
-	drop_stacking = |forest, source_node, target_node|
-		match position(forest, target_node) {
-			At(at) =>
-				if is_stacked(forest, at.above) {
-					select_node(moved(forest, source_node, After(target_node)), source_node)
-				} else {
-					orientation = kind_orientation(container_kind(forest, at.above, "drop_window"))
-					(inserted, made) = insert(forest, at)
-					sized = assume_size_of(inserted, made, target_node)
-					gathered = moved(moved(sized, target_node, Back(made)), source_node, Back(made))
-					select_node(set_kind(gathered, made, Stack(orientation)), source_node)
-				}
-
-			# Rust panics here too (`insert`'s "invalid tile insertion"): the target is a window's
-			# leaf, and a layout's root is always a container.
-			Unplaced => {
-				crash "GroupForest.drop_stacking: window leaf ${target_node.to_str()} is a root"
-			}
+	## The source stacked with the target leaf, a child at `target_at` (a window's place is
+	## always a child's).
+	drop_stacking : Forest, U64, U64, GroupChildPlace -> Forest
+	drop_stacking = |forest, source_node, target_node, target_at|
+		if is_stacked(forest, target_at.parent) {
+			select_node(moved(forest, source_node, After(target_node)), source_node)
+		} else {
+			orientation = kind_orientation(container_kind(forest, target_at.parent, "drop_window"))
+			(inserted, made) = insert(forest, child_place(forest, target_at.parent, target_node))
+			sized = assume_size_of(inserted, made, target_node)
+			gathered = moved(moved(sized, target_node, Back(made)), source_node, Back(made))
+			select_node(set_kind(gathered, made, Stack(orientation)), source_node)
 		}
 
 	drop_inserting : Forest, U64, U64, U64, BspDirection -> (Forest, Bool)
@@ -2581,8 +2631,7 @@ GroupForest := [].{
 	## A new leaf holding the window at the back of `above` (`add_window_under`).
 	add_window_under : Forest, U64, U64 -> (Forest, U64)
 	add_window_under = |forest, above, window_word| {
-		(inserted, key) = insert(forest, back_of(forest, above))
-		(set_window(inserted, key, window_word), key)
+		insert_window(forest, back_of(forest, above), window_word)
 	}
 
 	## How many windows a subtree holds, taking part or not.
@@ -2660,45 +2709,57 @@ GroupForest := [].{
 			NextToSelection => {
 				chosen = selection(forest, layout)
 				(added, key) =
-					match parent(forest, chosen) {
-						Nothing =>
-							# The root selected with children: split from its chosen child rather
-							# than append a fresh full-weight sibling.
-							match or_else(local_selection(forest, chosen), |{}| last_child(forest, chosen)) {
-								Some(anchor) => smart_window_insertion(system, layout, anchor, window_word)
-								Nothing => add_window_under(forest, chosen, window_word)
+					match position(forest, chosen) {
+						At(at) => smart_window_insertion(system, layout, chosen, at, window_word)
+						# The root selected with children: split from its chosen child rather
+						# than append a fresh full-weight sibling.
+						Unplaced =>
+							match chosen_child(forest, chosen) {
+								Chose(anchor, at) => smart_window_insertion(system, layout, anchor, at, window_word)
+								Childless => add_window_under(forest, chosen, window_word)
 							}
-						Some(_) => smart_window_insertion(system, layout, chosen, window_word)
 					}
 				select_node(added, key)
 			}
 		}
 	}
 
-	smart_window_insertion : Traditionals, U64, U64, U64 -> (Forest, U64)
-	smart_window_insertion = |system, layout, chosen, window_word| {
-		forest = system.forest
-		(nested, place) =
-			match position(forest, chosen) {
-				At(at) => {
-					made = container_kind(forest, at.above, "smart_window_insertion")
-					if !kind_is_stacked(made) and children(forest, at.above).len() > 3 {
-						(after, container_key) = nest_in_container(forest, layout, chosen, made)
-						(after, back_of(after, container_key))
-					} else {
-						(forest, after_place(at))
+	## A container's chosen child with its place: its local selection, else its last child.
+	chosen_child : Forest, U64 -> [Chose(U64, Place), Childless]
+	chosen_child = |forest, above| {
+		remembered = local_selection(forest, above)
+		(_, remembered_child, last) = children(forest, above).fold(
+			(0, Childless, Childless),
+			|(index, so_far, _), child| {
+				here = Chose(child, { above, index })
+				kept =
+					match remembered {
+						Some(held) if held == child => here
+						_ => so_far
 					}
-				}
+				(index + 1, kept, here)
+			},
+		)
+		match remembered_child {
+			Chose(_, _) => remembered_child
+			Childless => last
+		}
+	}
 
-				# Rust panics here too (`insert(After(selection))` of a root): both callers pass a
-				# node with a parent (the selection when it has one, else the root's chosen child).
-				Unplaced => {
-					crash "GroupForest.smart_window_insertion: ${chosen.to_str()} is a root"
-				}
+	## A new leaf for the window beside `chosen`, which sits at `at`.
+	smart_window_insertion : Traditionals, U64, U64, Place, U64 -> (Forest, U64)
+	smart_window_insertion = |system, layout, chosen, at, window_word| {
+		forest = system.forest
+		made = container_kind(forest, at.above, "smart_window_insertion")
+		(nested, place) =
+			if !kind_is_stacked(made) and children(forest, at.above).len() > 3 {
+				(after, container_key) = nest_in_container(forest, layout, chosen, made)
+				(after, back_of(after, container_key))
+			} else {
+				(forest, after_place(at))
 			}
-		(inserted, key) = insert(nested, place)
-		split = split_new_sibling_from_selection(inserted, system.settings.new_sibling, chosen, key)
-		(set_window(split, key, window_word), key)
+		(inserted, key) = insert_window(nested, place, window_word)
+		(split_new_sibling_from_selection(inserted, system.settings.new_sibling, chosen, key), key)
 	}
 
 	split_new_sibling_from_selection : Forest, GroupNewSibling, U64, U64 -> Forest
@@ -3448,8 +3509,7 @@ GroupForest := [].{
 				# The front of the region: before its first child, or its back when it has none.
 				Front => { above: region, index: 0 }
 			}
-		(inserted, key) = insert(forest, place)
-		(set_window(inserted, key, window_word), key)
+		insert_window(forest, place, window_word)
 	}
 
 	## A window added to the region the settings choose, the master count then enforced.
@@ -3921,8 +3981,7 @@ GroupForest := [].{
 			(added, key) =
 				match anchor {
 					At(at) => {
-						(inserted, made) = insert(forest, after_place(at))
-						(set_window(inserted, made, window_word), made)
+						insert_window(forest, after_place(at), window_word)
 					}
 					Unplaced => add_window_under(forest, top, window_word)
 				}
@@ -4127,7 +4186,7 @@ GroupForest := [].{
 			[],
 			|bars, key, at|
 				match at.body {
-					Container({ kind: Stack(orientation), .. }) if !selection_path_only or path.contains(key) =>
+					Container({ container: { kind: Stack(orientation), .. }, .. }) if !selection_path_only or path.contains(key) =>
 						match visible_stack_child(forest, key) {
 							Some(shown) =>
 								match first_visible(forest, shown) {

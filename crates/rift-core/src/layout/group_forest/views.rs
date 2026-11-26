@@ -79,7 +79,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
     fn container_of(&self, root: N, node: N, selected: N) -> ContainerView<N, W> {
         let held = match &self.nodes[node].body {
             Body::Window { window, .. } => Held::Window(*window),
-            Body::Container(container) => Held::Container {
+            Body::Container { container, .. } => Held::Container {
                 kind: container.kind,
                 children: container
                     .members
@@ -135,7 +135,7 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> Forest<L, N, W> {
         };
         let held = match &self.nodes[node].body {
             Body::Window { window, .. } => Drawn::Window(*window),
-            Body::Container(container) => Drawn::Container {
+            Body::Container { container, .. } => Drawn::Container {
                 kind: container.kind,
                 total: self.children_total(node),
             },

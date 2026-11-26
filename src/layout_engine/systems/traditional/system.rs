@@ -753,6 +753,27 @@ mod tests {
         loaded.create_layout();
     }
 
+    /// A window added next to the selection of a split already holding four children nests the
+    /// selection in a new container of the split's kind and goes beside it there (upstream's
+    /// `smart_window_insertion`), so the split keeps four.
+    #[test]
+    fn a_window_added_beside_the_selection_of_a_crowded_split_nests_with_it() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=5 {
+            system.update(WindowChange::Add(layout, w(idx), None));
+        }
+        let forest = system.core.forest();
+        let (_, root) = forest.layouts().find(|&(l, _)| l == layout).unwrap();
+        let leaf =
+            |window| forest.index().into_iter().find(|&(held, ..)| held == window).unwrap().2;
+        let nest = forest.parent(leaf(w(5))).unwrap();
+        assert_eq!(forest.children(root).len(), 4);
+        assert_ne!(nest, root);
+        assert_eq!(forest.children(nest), &[leaf(w(4)), leaf(w(5))]);
+        assert_eq!(forest.kind(nest), forest.kind(root));
+    }
+
     /// Two windows side by side in one layout, the second selected.
     fn two_windows() -> (TraditionalLayoutSystem, LayoutId) {
         let mut system = TraditionalLayoutSystem::default();
@@ -799,6 +820,87 @@ mod tests {
             let corrupt = written_as(&normalized, "size:0.0,", &format!("size:{size},"));
             loads_normalized(&corrupt, &normalized);
         }
+    }
+
+    /// A saved node: `parent`, `children` (first, last), a window or a selected child.
+    fn saved_node(
+        parent: Option<u32>,
+        children: Option<(u32, u32)>,
+        size: &str,
+        held: Result<u32, Option<u32>>,
+    ) -> String {
+        let id = |idx: u32| format!("(idx:{idx},version:1)");
+        let some =
+            |idx: Option<u32>| idx.map_or("None".to_owned(), |idx| format!("Some({})", id(idx)));
+        let (selection, window) = match held {
+            Ok(window) => ("None".to_owned(), format!("Some((pid:1,idx:{window}))")),
+            Err(chosen) => (
+                chosen.map_or("None".to_owned(), |chosen| {
+                    format!("Some((selected_child:{},stop_here:false))", id(chosen))
+                }),
+                "None".to_owned(),
+            ),
+        };
+        format!(
+            "(value:Some((parent:{},prev_sibling:None,next_sibling:None,first_child:{},\
+             last_child:{},layout:(size:{size},kind:horizontal,is_fullscreen:false,\
+             is_fullscreen_within_gaps:false),selection:{selection},window:{window})),version:1)",
+            some(parent),
+            some(children.map(|(first, _)| first)),
+            some(children.map(|(_, last)| last)),
+        )
+    }
+
+    /// A saved system: `nodes` after the vacant first slot, window 1 indexed at `leaf` in layout
+    /// 1, whose root is `root`.
+    fn saved_file(nodes: &[String], leaf: u32, root: u32) -> String {
+        format!(
+            "(tree:(map:(map:[(value:None,version:0),{}]),window:(window_nodes:{{(pid:1,idx:1):\
+             ([(layout:(idx:1,version:1),node:(idx:{leaf},version:1))])}})),layout_roots:[(value:\
+             None,version:0),(value:Some((Some((idx:{root},version:1)),\"layout_root\")),version:\
+             1)])",
+            nodes.join(",")
+        )
+    }
+
+    /// A window saved as a layout's root (a state the core cannot hold: a window is always a
+    /// container's child) loads wrapped in a new root container of the default kind that selects
+    /// it, and saves as such; a new window then goes beside it.
+    #[test]
+    fn a_window_saved_as_a_layouts_root_loads_wrapped_in_a_container() {
+        let corrupt = saved_file(&[saved_node(None, None, "0.0", Ok(1))], 1, 1);
+        let normalized = saved_file(
+            &[
+                saved_node(Some(2), None, "1.0", Ok(1)),
+                saved_node(None, Some((1, 1)), "0.0", Err(Some(1))),
+            ],
+            1,
+            2,
+        );
+        loads_normalized(&corrupt, &normalized);
+        let mut loaded: TraditionalLayoutSystem = ron::from_str(&corrupt).unwrap();
+        let (layout, _) = loaded.core.forest().layouts().next().unwrap();
+        assert_eq!(loaded.selected_window(layout), Some(w(1)));
+        loaded.update(WindowChange::Add(layout, w(2), None));
+        assert_eq!(loaded.windows(layout, WindowQuery::All), vec![w(1), w(2)]);
+    }
+
+    /// A window saved without a parent that no layout reaches is dropped at the load (the index's
+    /// entry for it with it), its slot freed.
+    #[test]
+    fn a_saved_window_no_layout_reaches_is_dropped() {
+        let (system, _) = two_windows();
+        let normalized = ron::to_string(&system).unwrap();
+        let orphan = saved_node(None, None, "0.0", Ok(9));
+        let corrupt = written_as(&normalized, "]),window:", &format!(",{orphan}]),window:"));
+        let corrupt = written_as(
+            &corrupt,
+            "(pid:1,idx:2):([",
+            "(pid:1,idx:9):([(layout:(idx:1,version:1),node:(idx:4,version:1))]),(pid:1,idx:2):([",
+        );
+        // The dropped window's slot is freed (a vacant slot's version is even).
+        let freed = written_as(&normalized, "]),window:", ",(value:None,version:2)]),window:");
+        loads_normalized(&corrupt, &freed);
     }
 
     /// Entries naming no leaf of theirs (another window's leaf, a missing layout), and a leaf

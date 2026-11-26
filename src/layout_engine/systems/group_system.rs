@@ -29,10 +29,10 @@ pub(super) fn with_sizes(forest: &CoreForest, sizes: &[(NodeId, f32)]) -> CoreFo
         .nodes()
         .clone()
         .map(|key, mut node| {
-            if let core::Place::Child { size, .. } = &mut node.place
+            if let Some(at) = node.child_mut()
                 && let Some(&(_, set)) = sizes.iter().find(|(sized, _)| *sized == key)
             {
-                *size = set;
+                at.size = set;
             }
             Ok::<_, std::convert::Infallible>(node)
         })

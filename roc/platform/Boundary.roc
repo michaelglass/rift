@@ -1082,20 +1082,24 @@ Boundary := [].{
 
 	GroupContainer := { kind : GroupKind, members : GroupMembers, memory : GroupMemory }
 
-	## A window leaf: the window, and the stamp taken when it entered the layout (the window
-	## index's order).
-	GroupLeaf := { window : U64, stamp : U64 }
+	## A window leaf: its place (a window is always a container's child), the window, and the
+	## stamp taken when it entered the layout (the window index's order).
+	GroupLeaf := { at : GroupChildPlace, window : U64, stamp : U64 }
 
-	## What a node is (`Body`).
-	GroupBody := [Window(GroupLeaf), Container(GroupContainer)]
+	## A container node: its place and the container.
+	GroupContainerNode := { place : GroupPlace, container : GroupContainer }
+
+	## What a node is, with its place (`Body`).
+	GroupBody := [Window(GroupLeaf), Container(GroupContainerNode)]
 
 	## A container's child: its parent and its size among its siblings.
 	GroupChildPlace := { parent : U64, size : F32 }
 
-	## A node's place (`Place`): a root (or not placed yet), or a child.
+	## A container's place (`Place`): a layout's root (or a container no layout reaches), or a
+	## child.
 	GroupPlace := [Root, Child(GroupChildPlace)]
 
-	GroupTreeNode := { place : GroupPlace, fill : Fill, body : GroupBody }
+	GroupTreeNode := { fill : Fill, body : GroupBody }
 
 	GroupNodeHeld := { version : U32, node : GroupTreeNode }
 

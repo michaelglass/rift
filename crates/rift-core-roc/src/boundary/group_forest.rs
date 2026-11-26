@@ -7,8 +7,8 @@ use std::mem::ManuallyDrop;
 use rift_core::layout::WindowConstraints;
 use rift_core::layout::floating::{self, Floating};
 use rift_core::layout::group_forest::{
-    Arrangement, Bars, Beyond, Body, Branch, Container, ContainerView, Drawn, DropAction, Edit,
-    Fill, Geometry, GroupBar, Held, InsertionPoint, Kind, Mark, MasterSettings, MasterSide,
+    Arrangement, Bars, Beyond, Body, Branch, Child, Container, ContainerView, Drawn, DropAction,
+    Edit, Fill, Geometry, GroupBar, Held, InsertionPoint, Kind, Mark, MasterSettings, MasterSide,
     Members, Memory, NewSibling, NewWindowPlacement, Node, Pass, Place, RegionInsertion,
     ResizeAlong, Role, Row,
 };
@@ -247,32 +247,50 @@ fn from_container(container: &abi::BoundaryGroupContainer) -> Container<NodeKey>
     }
 }
 
+fn child_place(at: Child<NodeKey>) -> abi::BoundaryGroupChildPlace {
+    abi::BoundaryGroupChildPlace {
+        parent: at.parent.0,
+        size: at.size,
+    }
+}
+
+fn from_child_place(at: &abi::BoundaryGroupChildPlace) -> Child<NodeKey> {
+    Child {
+        parent: NodeKey(at.parent),
+        size: at.size,
+    }
+}
+
 fn node(node: &Node<NodeKey, u64>, host: &abi::RocHost) -> abi::BoundaryGroupTreeNode {
     abi::BoundaryGroupTreeNode {
-        place: match node.place {
-            Place::Root => union!(
-                BoundaryGroupPlace,
-                BoundaryGroupPlacePayload.root,
-                abi::BoundaryGroupPlaceTag::Root
-            ),
-            Place::Child { parent, size } => union!(
-                BoundaryGroupPlace,
-                BoundaryGroupPlacePayload
-                    .child(abi::BoundaryGroupChildPlace { parent: parent.0, size }),
-                abi::BoundaryGroupPlaceTag::Child
-            ),
-        },
         fill: traditional_fill(node.fill),
         body: match &node.body {
-            Body::Window { window, stamp } => union!(
+            Body::Window { at, window, stamp } => union!(
                 BoundaryGroupBody,
-                BoundaryGroupBodyPayload
-                    .window(abi::BoundaryGroupLeaf { window: *window, stamp: *stamp }),
+                BoundaryGroupBodyPayload.window(abi::BoundaryGroupLeaf {
+                    at: child_place(*at),
+                    window: *window,
+                    stamp: *stamp,
+                }),
                 abi::BoundaryGroupBodyTag::Window
             ),
-            Body::Container(held) => union!(
+            Body::Container { place, container: held } => union!(
                 BoundaryGroupBody,
-                BoundaryGroupBodyPayload.container(container(held, host)),
+                BoundaryGroupBodyPayload.container(abi::BoundaryGroupContainerNode {
+                    place: match *place {
+                        Place::Root => union!(
+                            BoundaryGroupPlace,
+                            BoundaryGroupPlacePayload.root,
+                            abi::BoundaryGroupPlaceTag::Root
+                        ),
+                        Place::Child(at) => union!(
+                            BoundaryGroupPlace,
+                            BoundaryGroupPlacePayload.child(child_place(at)),
+                            abi::BoundaryGroupPlaceTag::Child
+                        ),
+                    },
+                    container: container(held, host),
+                }),
                 abi::BoundaryGroupBodyTag::Container
             ),
         },
@@ -280,33 +298,33 @@ fn node(node: &Node<NodeKey, u64>, host: &abi::RocHost) -> abi::BoundaryGroupTre
 }
 
 fn from_node(node: &abi::BoundaryGroupTreeNode) -> Node<NodeKey, u64> {
-    let place = match node.place.tag {
-        abi::BoundaryGroupPlaceTag::Root => Place::Root,
-        abi::BoundaryGroupPlaceTag::Child => {
-            // SAFETY: the tag says the payload is the child's place.
-            let child = unsafe { node.place.borrow_payload_child_unchecked() };
-            Place::Child {
-                parent: NodeKey(child.parent),
-                size: child.size,
-            }
-        }
-    };
     let body = match node.body.tag {
         abi::BoundaryGroupBodyTag::Window => {
             // SAFETY: the tag says the payload is the leaf.
             let leaf = unsafe { node.body.borrow_payload_window_unchecked() };
             Body::Window {
+                at: from_child_place(&leaf.at),
                 window: leaf.window,
                 stamp: leaf.stamp,
             }
         }
-        // SAFETY: the tag says the payload is the container.
-        abi::BoundaryGroupBodyTag::Container => Body::Container(from_container(unsafe {
-            node.body.borrow_payload_container_unchecked()
-        })),
+        abi::BoundaryGroupBodyTag::Container => {
+            // SAFETY: the tag says the payload is the container node.
+            let held = unsafe { node.body.borrow_payload_container_unchecked() };
+            let place = match held.place.tag {
+                abi::BoundaryGroupPlaceTag::Root => Place::Root,
+                // SAFETY: the tag says the payload is the child's place.
+                abi::BoundaryGroupPlaceTag::Child => Place::Child(from_child_place(unsafe {
+                    held.place.borrow_payload_child_unchecked()
+                })),
+            };
+            Body::Container {
+                place,
+                container: from_container(&held.container),
+            }
+        }
     };
     Node {
-        place,
         fill: from_fill(node.fill),
         body,
     }

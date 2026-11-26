@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use rift_core::layout::group_forest::{Body, Container, Fill, Members, Memory, Node, Place, Side};
+use rift_core::layout::group_forest::{
+    Body, Child, Container, Fill, Members, Memory, Node, Place, Side,
+};
 use serde::{Deserialize, Serialize};
 use slotmap::{SecondaryMap, SlotMap};
 
@@ -191,7 +193,7 @@ struct SavedSelection {
 fn siblings(forest: &CoreForest) -> HashMap<NodeId, (Option<NodeId>, Option<NodeId>)> {
     let mut siblings = HashMap::default();
     for (_, node) in forest.nodes().iter() {
-        if let Body::Container(container) = &node.body {
+        if let Body::Container { container, .. } = &node.body {
             let list = container.members.list();
             for (at, &child) in list.iter().enumerate() {
                 let prev = at.checked_sub(1).map(|before| list[before]);
@@ -206,15 +208,15 @@ fn saved_node(
     node: &Node<NodeId, WindowId>,
     (prev_sibling, next_sibling): (Option<NodeId>, Option<NodeId>),
 ) -> SavedNode {
-    let (parent, size) = match node.place {
+    let (parent, size) = match node.place() {
         Place::Root => (None, 0.0),
-        Place::Child { parent, size } => (Some(parent), size),
+        Place::Child(at) => (Some(at.parent), at.size),
     };
     let (first_child, last_child, kind, selection, window, master_first) = match &node.body {
         Body::Window { window, .. } => {
             (None, None, LayoutKind::default(), None, Some(*window), None)
         }
-        Body::Container(container) => {
+        Body::Container { container, .. } => {
             let list = container.members.list();
             let selection = match container.memory {
                 Memory::Unset => None,
@@ -308,14 +310,41 @@ impl StoredForest {
     /// W2b rule; upstream keeps them, an upstream candidate). Three are only warned, as the
     /// core's types cannot hold them: both fullscreen flags on a node (a `Fill` is one of three,
     /// fullscreen first, as the projection reads them), a window's layout kind (a window has
-    /// none), a root's size other than 0 (a root has no size). The fourth is the window index
+    /// none), a root's size other than 0 (a root has no size). A window without a parent (the
+    /// core's windows are always a container's child) is wrapped when it is a layout's root, in
+    /// a new root container of the default kind that selects it (as a layout's first window
+    /// enters an empty root), and dropped when no layout reaches it; one warn each. The fifth is
+    /// the window index
     /// disagreeing with the tree: the leaves are stamped in the saved index's order, entries
     /// naming no leaf of theirs in that layout dropped, a leaf listed again after its first
     /// entry dropped, and the leaves it misses stamped after, in layout and tree order (one
     /// warn). The order kept is behaviour: it orders a window's leaves by when they entered
     /// their layouts.
     pub(super) fn normalized(self, system: &str) -> Loaded {
-        let StoredForest { tree, layout_roots } = self;
+        let StoredForest { mut tree, mut layout_roots } = self;
+        for root in layout_roots.values_mut() {
+            if let Some(window) = tree.map.window(root.0) {
+                let wrapper = tree.create_root();
+                tree.move_node(root.0, Placement::Back(wrapper));
+                tree.map.select(root.0);
+                tracing::warn!(
+                    ?window,
+                    "{system}-load: a window as a layout's root; wrapped in a container"
+                );
+                root.0 = wrapper;
+            }
+        }
+        let unplaced: Vec<(NodeId, WindowId)> = tree
+            .map
+            .slots()
+            .iter()
+            .filter(|&(node, _)| node.parent(&tree.map).is_none())
+            .filter_map(|(node, _)| tree.map.window(node).map(|window| (node, window)))
+            .collect();
+        for (node, window) in unplaced {
+            tree.remove_unplaced(node);
+            tracing::warn!(?window, "{system}-load: a window no layout reaches; dropped");
+        }
         let map = &tree.map;
         for (node, entry) in map.slots() {
             let info = entry.layout;
@@ -518,7 +547,9 @@ fn core_memory(selection: Option<SelectionInfo>) -> Memory<NodeId> {
 }
 
 /// An old tree's node as the core holds it (a leaf no layout reaches is not indexed: the load
-/// leaves every other one indexed; it takes the stamp after every indexed one).
+/// leaves every other one indexed; it takes the stamp after every indexed one). Every window
+/// has a parent here: a load wraps or drops a parentless one first
+/// ([`StoredForest::normalized`]), and the core's own trees never hold one.
 pub(super) fn core_node(
     map: &NodeMap,
     stamps: &HashMap<NodeId, u64>,
@@ -527,39 +558,43 @@ pub(super) fn core_node(
 ) -> Node<NodeId, WindowId> {
     let (parent, held) = map.held(key);
     let info = node.layout;
-    let place = match parent {
-        None => Place::Root,
-        Some(parent) => Place::Child { parent, size: info.size },
-    };
+    let child = parent.map(|parent| Child { parent, size: info.size });
+    let place = child.map_or(Place::Root, Place::Child);
     let body = match held {
         Held::Window(window) => Body::Window {
+            at: child.expect("a load wraps or drops a parentless window (normalized)"),
             window,
             stamp: stamps.get(&key).copied().unwrap_or(stamps.len() as u64),
         },
-        Held::Container { children, selection } => Body::Container(Container {
-            kind: core_kind(info.kind),
-            members: Members::Children(children),
-            memory: core_memory(selection),
-        }),
+        Held::Container { children, selection } => Body::Container {
+            place,
+            container: Container {
+                kind: core_kind(info.kind),
+                members: Members::Children(children),
+                memory: core_memory(selection),
+            },
+        },
         Held::RegionPair {
             regions,
             primary_first,
             selection,
-        } => Body::Container(Container {
-            kind: core_kind(info.kind),
-            members: Members::Regions {
-                order: regions,
-                primary: if primary_first {
-                    Side::First
-                } else {
-                    Side::Second
+        } => Body::Container {
+            place,
+            container: Container {
+                kind: core_kind(info.kind),
+                members: Members::Regions {
+                    order: regions,
+                    primary: if primary_first {
+                        Side::First
+                    } else {
+                        Side::Second
+                    },
                 },
+                memory: core_memory(selection),
             },
-            memory: core_memory(selection),
-        }),
+        },
     };
     Node {
-        place,
         fill: core_fill(info.is_fullscreen, info.is_fullscreen_within_gaps),
         body,
     }

@@ -49,6 +49,13 @@ impl Placement {
 impl Tree {
     pub(crate) fn create_root(&mut self) -> NodeId { self.map.map.insert(Node::default()) }
 
+    /// A parentless node no layout reaches, removed (a load dropping a window the core's
+    /// forest has no place for).
+    pub(crate) fn remove_unplaced(&mut self, node: NodeId) {
+        debug_assert!(node.parent(&self.map).is_none() && node.is_empty(&self.map));
+        self.map.map.remove(node);
+    }
+
     pub(crate) fn insert(&mut self, placement: Placement) -> NodeId {
         let parent = placement.parent(&self.map).expect("invalid tile insertion");
         assert!(!self.map[parent].is_region_pair());
