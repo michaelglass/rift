@@ -34,6 +34,12 @@ Placement : [Back(U64), Before(U64), After(U64)]
 ## How far a walk over a container's children goes (`BranchLimit`).
 Limit : [All, First, FirstVisible]
 
+## The order a walk visits a subtree in (`GroupForest.walk`).
+WalkOrder : [Preorder, Postorder]
+
+## A walk step's answer: go on with the state, or end the walk with it.
+Visit(s) : [Continue(s), Break(s)]
+
 ## A node's place among its parent's children.
 Position : [At({ above : U64, index : U64 }), Unplaced]
 
@@ -727,13 +733,46 @@ GroupForest := [].{
 	step_in = |forest, key, top, forward|
 		if forward next_in_subtree(forest, key, top) else prev_in_subtree(forest, key, top)
 
-	## The subtree in preorder.
-	preorder : Forest, U64 -> List(U64)
-	preorder = |forest, key| [key].concat(children(forest, key).join_map(|child| preorder(forest, child)))
+	## Folds `step` over the subtree at `key`, each node once, children in order: in
+	## `Preorder` a node before its children, in `Postorder` after them. `step` answering
+	## `Break` ends the walk with that state. The one walk the traversals share: nothing is
+	## materialised (as Rust's `preorder` and `postorder` iterate).
+	walk : Forest, U64, WalkOrder, s, (s, U64 -> Visit(s)) -> s
+	walk = |forest, key, order, state, step|
+		match walk_node(forest, key, order, state, step) {
+			Continue(walked) => walked
+			Break(walked) => walked
+		}
 
-	## The subtree in postorder (children before their parent).
-	postorder : Forest, U64 -> List(U64)
-	postorder = |forest, key| children(forest, key).join_map(|child| postorder(forest, child)).append(key)
+	walk_node : Forest, U64, WalkOrder, s, (s, U64 -> Visit(s)) -> Visit(s)
+	walk_node = |forest, key, order, state, step| {
+		entered =
+			match order {
+				Preorder => step(state, key)
+				Postorder => Continue(state)
+			}
+		match entered {
+			Break(stopped) => Break(stopped)
+			Continue(going) => {
+				through = children(forest, key).fold_until(
+					Continue(going),
+					|visited, child|
+						match visited {
+							Continue(before) =>
+								match walk_node(forest, child, order, before, step) {
+									Continue(after) => Continue(Continue(after))
+									Break(after) => Break(Break(after))
+								}
+							Break(_) => Break(visited)
+						},
+				)
+				match (through, order) {
+					(Continue(below), Postorder) => step(below, key)
+					_ => through
+				}
+			}
+		}
+	}
 
 	create_root : Forest -> (Forest, U64)
 	create_root = |forest| {
@@ -1285,9 +1324,12 @@ GroupForest := [].{
 		if forest.left_out.is_empty() {
 			Set.empty()
 		} else {
-			postorder(forest, top).fold(
+			walk(
+				forest,
+				top,
+				Postorder,
 				Set.empty(),
-				|active, key| if subtree_participates(forest, key, |child| active.contains(child)) active.insert(key) else active,
+				|active, key| Continue(if subtree_participates(forest, key, |child| active.contains(child)) active.insert(key) else active),
 			)
 		}
 
@@ -1486,9 +1528,12 @@ GroupForest := [].{
 	laid_out : Forest, U64 -> [LaidOut(Set(U64), U64), NothingLaidOut]
 	laid_out = |forest, layout| {
 		top = root(forest, layout, "laid_out")
-		active = postorder(forest, top).fold(
+		active = walk(
+			forest,
+			top,
+			Postorder,
 			Set.empty(),
-			|held, key| if subtree_participates(forest, key, |child| held.contains(child)) held.insert(key) else held,
+			|held, key| Continue(if subtree_participates(forest, key, |child| held.contains(child)) held.insert(key) else held),
 		)
 		start =
 			if is_tiled(node(forest, top, "laid_out").fill) {
@@ -1551,15 +1596,25 @@ GroupForest := [].{
 
 	## Every (window, layout, leaf), by window, then by stamp.
 	window_index : Forest -> List((U64, U64, U64))
-	window_index = |forest|
+	window_index = |forest| indexed_where(forest, |_| True)
+
+	## The index's entries for the windows `keep` keeps, in the index's order (by window, then
+	## stamp): each layout walked once, only the kept leaves gathered and sorted.
+	indexed_where : Forest, (U64 -> Bool) -> List((U64, U64, U64))
+	indexed_where = |forest, keep|
 		layout_roots(forest)
-		.join_map(
-			|(layout, top)|
-				preorder(forest, top).join_map(
-					|key|
-						match node(forest, key, "window_index").body {
-							Window({ window: leaf, stamp }) => [(leaf, stamp, layout, key)]
-							Container(_) => []
+		.fold(
+			[],
+			|gathered, (layout, top)|
+				walk(
+					forest,
+					top,
+					Preorder,
+					gathered,
+					|held, key|
+						match node(forest, key, "indexed_where").body {
+							Window({ window: leaf, stamp }) if keep(leaf) => Continue(held.append((leaf, stamp, layout, key)))
+							_ => Continue(held)
 						},
 				),
 		)
@@ -1581,21 +1636,24 @@ GroupForest := [].{
 
 	occurrences : Forest, U64 -> List((U64, U64))
 	occurrences = |forest, window_word|
-		window_index(forest).keep_if(|(leaf, _, _)| leaf == window_word).map(|(_, layout, key)| (layout, key))
+		indexed_where(forest, |leaf| leaf == window_word).map(|(_, layout, key)| (layout, key))
 
 	## The leaf holding `window_word` in `layout` (the first to enter).
 	window_node : Forest, U64, U64 -> MaybeWord
 	window_node = |forest, layout, window_word| {
-		best = preorder(forest, root(forest, layout, "window_node")).fold(
+		best = walk(
+			forest,
+			root(forest, layout, "window_node"),
+			Preorder,
 			NoLeaf,
 			|chosen, key|
 				match node(forest, key, "window_node").body {
 					Window({ window: leaf, stamp }) if leaf == window_word =>
 						match chosen {
-							Leaf(_, held) if held <= stamp => chosen
-							_ => Leaf(key, stamp)
+							Leaf(_, held) if held <= stamp => Continue(chosen)
+							_ => Continue(Leaf(key, stamp))
 						}
-					_ => chosen
+					_ => Continue(chosen)
 				},
 		)
 		match best {
@@ -1606,11 +1664,15 @@ GroupForest := [].{
 
 	windows_with_nodes : Forest, U64 -> List(U64)
 	windows_with_nodes = |forest, layout|
-		preorder(forest, root(forest, layout, "windows_with_nodes")).join_map(
-			|key|
+		walk(
+			forest,
+			root(forest, layout, "windows_with_nodes"),
+			Preorder,
+			[],
+			|held, key|
 				match window_at(forest, key) {
-					Some(leaf) => [leaf]
-					Nothing => []
+					Some(leaf) => Continue(held.append(leaf))
+					Nothing => Continue(held)
 				},
 		)
 
@@ -1681,8 +1743,7 @@ GroupForest := [].{
 	close_app : Forest, List(U64) -> Forest
 	close_app = |forest, windows| {
 		kept = { ..forest, left_out: Set.from_list(forest.left_out.to_list().drop_if(|leaf| windows.contains(leaf))) }
-		window_index(kept)
-		.keep_if(|(leaf, _, _)| windows.contains(leaf))
+		indexed_where(kept, |leaf| windows.contains(leaf))
 		.fold(kept, |at, (_, _, key)| remove_node(at, key))
 	}
 
@@ -1753,8 +1814,12 @@ GroupForest := [].{
 
 	has_any_fullscreen_node : Forest, U64 -> Bool
 	has_any_fullscreen_node = |forest, layout|
-		preorder(forest, root(forest, layout, "has_any_fullscreen_node")).any(
-			|key| !is_tiled(node(forest, key, "has_any_fullscreen_node").fill) and (forest.left_out.is_empty() or has_focus_target(forest, key)),
+		walk(
+			forest,
+			root(forest, layout, "has_any_fullscreen_node"),
+			Preorder,
+			False,
+			|_, key| if !is_tiled(node(forest, key, "has_any_fullscreen_node").fill) and (forest.left_out.is_empty() or has_focus_target(forest, key)) Break(True) else Continue(False),
 		)
 
 	stacked_selection_container : Forest, U64 -> MaybeWord
@@ -3431,10 +3496,7 @@ GroupForest := [].{
 	focused_window_in_container = |forest, region|
 		match or_else(local_selection(forest, region), |{}| first_child(forest, region)) {
 			Some(candidate) =>
-				match preorder(forest, candidate).find_first(|key| is_window(forest, key)) {
-					Ok(key) => window_at(forest, key)
-					Err(_) => Nothing
-				}
+				walk(forest, candidate, Preorder, Nothing, |_, key| if is_window(forest, key) Break(window_at(forest, key)) else Continue(Nothing))
 			Nothing => Nothing
 		}
 
