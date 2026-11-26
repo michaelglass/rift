@@ -1136,6 +1136,220 @@ mod tests {
         }
     }
 
+    /// A master and a stack region holding a window and a group of two (the group's second
+    /// selected; one window left out).
+    fn regions_with_a_group() -> (MasterStackLayoutSystem, LayoutId) {
+        use crate::layout_engine::WindowDropAction;
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        system
+            .edit_layout(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Stack,
+            })
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(3))).handled);
+        system.set_window_participation(w(1), false);
+        (system, layout)
+    }
+
+    fn screen_and_gaps() -> (CGRect, GapSettings) {
+        let mut gaps = GapSettings::default();
+        gaps.outer.top = 10.0;
+        gaps.outer.left = 20.0;
+        gaps.outer.bottom = 30.0;
+        gaps.outer.right = 40.0;
+        gaps.inner.horizontal = 8.0;
+        (rect(0.0, 25.0, 1000.0, 800.0), gaps)
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    fn frames(system: &MasterStackLayoutSystem, layout: LayoutId) -> Vec<(WindowId, CGRect)> {
+        let (screen, gaps) = screen_and_gaps();
+        system.calculate_layout(
+            layout,
+            screen,
+            12.0,
+            &HashMap::default(),
+            &gaps,
+            StackLineReserve::default(),
+            crate::layout_engine::Shadow::Run,
+        )
+    }
+
+    /// The group bars of a pass (all of them, or the selection path's).
+    fn bars(
+        system: &MasterStackLayoutSystem,
+        layout: LayoutId,
+        path_only: bool,
+    ) -> Vec<(
+        u64,
+        crate::layout_engine::LayoutKind,
+        CGRect,
+        usize,
+        usize,
+        Vec<WindowId>,
+    )> {
+        use slotmap::Key;
+        let (screen, gaps) = screen_and_gaps();
+        let (_, bars) = system.project_groups(
+            layout,
+            screen,
+            0.0,
+            &HashMap::default(),
+            &gaps,
+            StackLineReserve::default(),
+            false,
+            path_only,
+        );
+        bars.into_iter()
+            .map(|bar| {
+                (
+                    bar.node_id.data().as_ffi(),
+                    bar.container_kind,
+                    bar.frame,
+                    bar.total_count,
+                    bar.selected_index,
+                    bar.window_ids,
+                )
+            })
+            .collect()
+    }
+
+    /// rift-cli's drawing of a master-stack layout (`master_stack_drawn.txt`: as upstream's system
+    /// drew it) and its container view: the root and its regions with their roles, the group, each node's weight, the
+    /// selection, the window left out still listed.
+    #[test]
+    fn rift_cli_draws_and_lists_a_master_stack_layout() {
+        let (system, layout) = regions_with_a_group();
+        use crate::layout_engine::LayoutKind;
+        assert_eq!(
+            system.draw_tree(layout),
+            include_str!("master_stack_drawn.txt"),
+            "the drawing (ending with its own newline)"
+        );
+        let tree = system.container_tree(layout);
+        let node = |n: &rift_protocol::ContainerTreeNode| {
+            (
+                n.node_id,
+                n.layout_kind,
+                n.window_id,
+                n.weight,
+                n.is_selected,
+                n.role.clone(),
+            )
+        };
+        let id = |n: u64| (1 << 32) | n;
+        let role = |r: &str| Some(r.to_owned());
+        assert_eq!(
+            node(&tree),
+            (id(1), Some(LayoutKind::Horizontal), None, None, false, None)
+        );
+        let regions: Vec<_> = tree.children.iter().map(node).collect();
+        assert_eq!(regions, [
+            (
+                id(2),
+                Some(LayoutKind::Vertical),
+                None,
+                Some(f64::from(1.2_f32)),
+                false,
+                role("master")
+            ),
+            (
+                id(3),
+                Some(LayoutKind::Vertical),
+                None,
+                Some(f64::from(0.799_999_95_f32)),
+                false,
+                role("stack")
+            ),
+        ]);
+        assert_eq!(
+            node(&tree.children[0].children[0]),
+            (id(7), None, Some(w(4).into()), Some(1.0), false, None)
+        );
+        let stack: Vec<_> = tree.children[1].children.iter().map(node).collect();
+        assert_eq!(stack, [
+            (
+                id(8),
+                Some(LayoutKind::VerticalStack),
+                None,
+                Some(1.0),
+                false,
+                None
+            ),
+            (id(4), None, Some(w(1).into()), Some(1.0), false, None),
+        ]);
+        let group: Vec<_> = tree.children[1].children[0].children.iter().map(node).collect();
+        assert_eq!(group, [
+            (id(5), None, Some(w(2).into()), Some(1.0), false, None),
+            (id(6), None, Some(w(3).into()), Some(1.0), true, None),
+        ]);
+    }
+
+    /// The group bar shows the group's windows over the group, the selected one counted among
+    /// them, the same on the selection path; while the selected window fills the tiling area
+    /// or the screen, the selection path shows none.
+    #[test]
+    fn the_group_bar_shows_the_group_windows_taking_part() {
+        use crate::layout_engine::LayoutKind;
+        let (mut system, layout) = regions_with_a_group();
+        let shown = vec![(
+            (1 << 32) | 8,
+            LayoutKind::VerticalStack,
+            rect(587.0, 35.0, 373.0, 760.0),
+            2,
+            1,
+            vec![w(2), w(3)],
+        )];
+        assert_eq!(bars(&system, layout, false), shown);
+        assert_eq!(bars(&system, layout, true), shown);
+        for within_gaps in [true, false] {
+            system.edit_layout(layout, LayoutEdit::Fullscreen { within_gaps }).discard();
+            assert_eq!(bars(&system, layout, false), shown);
+            assert!(bars(&system, layout, true).is_empty());
+        }
+    }
+
+    /// Each fill's frames: tiled (the master, the group's windows offset along it), the
+    /// selected window filling the tiling area, then the screen (the window left out placed
+    /// nowhere).
+    #[test]
+    fn a_master_stack_layout_places_each_fill() {
+        let (mut system, layout) = regions_with_a_group();
+        let master = (w(4), rect(20.0, 35.0, 559.0, 760.0));
+        let first = (w(2), rect(587.0, 35.0, 373.0, 748.0));
+        assert_eq!(frames(&system, layout), vec![
+            master,
+            first,
+            (w(3), rect(587.0, 47.0, 373.0, 748.0))
+        ]);
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: true })
+            .discard();
+        assert_eq!(frames(&system, layout), vec![
+            master,
+            first,
+            (w(3), rect(20.0, 35.0, 940.0, 760.0))
+        ]);
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .discard();
+        assert_eq!(frames(&system, layout), vec![
+            master,
+            first,
+            (w(3), rect(0.0, 25.0, 1000.0, 800.0))
+        ]);
+    }
+
     fn drawn_direction_of(rng: &mut Rng) -> Direction {
         crate::layout_engine::systems::drawn::drawn_direction(rng)
     }

@@ -1147,6 +1147,187 @@ mod tests {
         assert_eq!(leaf, (3 << 32) | 9, "the vacant node slot freed last");
     }
 
+    /// One window beside a horizontal stack of three (the second selected, the first left out).
+    fn a_window_and_a_stack() -> (TraditionalLayoutSystem, LayoutId) {
+        use crate::common::config::StackDefaultOrientation;
+        use crate::layout_engine::LayoutKind;
+        use crate::layout_engine::systems::GroupEdit;
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        assert!(system.focus(layout, Focus::Select(w(2))).handled);
+        system.edit_layout(layout, LayoutEdit::Split(LayoutKind::Vertical)).discard();
+        for window in [w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        system
+            .edit_layout(
+                layout,
+                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Horizontal)),
+            )
+            .discard();
+        assert!(system.focus(layout, Focus::Select(w(3))).handled);
+        system.set_window_participation(w(2), false);
+        (system, layout)
+    }
+
+    fn screen_and_gaps() -> (CGRect, GapSettings) {
+        let mut gaps = GapSettings::default();
+        gaps.outer.top = 10.0;
+        gaps.outer.left = 20.0;
+        gaps.outer.bottom = 30.0;
+        gaps.outer.right = 40.0;
+        gaps.inner.horizontal = 8.0;
+        (rect(0.0, 25.0, 1000.0, 800.0), gaps)
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    fn frames(system: &TraditionalLayoutSystem, layout: LayoutId) -> Vec<(WindowId, CGRect)> {
+        let (screen, gaps) = screen_and_gaps();
+        system.calculate_layout(
+            layout,
+            screen,
+            12.0,
+            &HashMap::default(),
+            &gaps,
+            StackLineReserve::default(),
+            crate::layout_engine::Shadow::Run,
+        )
+    }
+
+    /// The group bars of a pass (all of them, or the selection path's).
+    fn bars(
+        system: &TraditionalLayoutSystem,
+        layout: LayoutId,
+        path_only: bool,
+    ) -> Vec<(
+        u64,
+        crate::layout_engine::LayoutKind,
+        CGRect,
+        usize,
+        usize,
+        Vec<WindowId>,
+    )> {
+        use slotmap::Key;
+        let (screen, gaps) = screen_and_gaps();
+        let (_, bars) = system.project_groups(
+            layout,
+            screen,
+            0.0,
+            &HashMap::default(),
+            &gaps,
+            StackLineReserve::default(),
+            false,
+            path_only,
+        );
+        bars.into_iter()
+            .map(|bar| {
+                (
+                    bar.node_id.data().as_ffi(),
+                    bar.container_kind,
+                    bar.frame,
+                    bar.total_count,
+                    bar.selected_index,
+                    bar.window_ids,
+                )
+            })
+            .collect()
+    }
+
+    /// rift-cli's drawing of a traditional layout (`traditional_drawn.txt`: as upstream's system
+    /// drew it) and its container view: the root and the stack, each node's weight, the
+    /// selection, the window left out still listed.
+    #[test]
+    fn rift_cli_draws_and_lists_a_traditional_layout() {
+        use crate::layout_engine::LayoutKind;
+        let (system, layout) = a_window_and_a_stack();
+        assert_eq!(
+            system.draw_tree(layout),
+            include_str!("traditional_drawn.txt"),
+            "the drawing (ending with its own newline)"
+        );
+        let tree = system.container_tree(layout);
+        let node = |n: &rift_protocol::ContainerTreeNode| {
+            (n.node_id, n.layout_kind, n.window_id, n.weight, n.is_selected)
+        };
+        let id = |n: u64| (1 << 32) | n;
+        assert_eq!(
+            node(&tree),
+            (id(1), Some(LayoutKind::Horizontal), None, None, false)
+        );
+        let children: Vec<_> = tree.children.iter().map(node).collect();
+        assert_eq!(children, [
+            (id(2), None, Some(w(1).into()), Some(1.0), false),
+            (id(4), Some(LayoutKind::HorizontalStack), None, Some(1.0), false),
+        ]);
+        let stacked: Vec<_> = tree.children[1].children.iter().map(node).collect();
+        assert_eq!(stacked, [
+            (id(3), None, Some(w(2).into()), Some(1.0), false),
+            (id(5), None, Some(w(3).into()), Some(1.0), true),
+            (id(6), None, Some(w(4).into()), Some(1.0), false),
+        ]);
+    }
+
+    /// The group bar shows the stack's windows taking part (the window left out before the
+    /// selected one not counted), the same on the selection path; while the selected window
+    /// fills the tiling area or the screen, the selection path shows none.
+    #[test]
+    fn the_group_bar_shows_the_stack_windows_taking_part() {
+        use crate::layout_engine::LayoutKind;
+        let (mut system, layout) = a_window_and_a_stack();
+        let shown = vec![(
+            (1 << 32) | 4,
+            LayoutKind::HorizontalStack,
+            rect(494.0, 35.0, 466.0, 760.0),
+            2,
+            0,
+            vec![w(3), w(4)],
+        )];
+        assert_eq!(bars(&system, layout, false), shown);
+        assert_eq!(bars(&system, layout, true), shown);
+        for within_gaps in [true, false] {
+            system.edit_layout(layout, LayoutEdit::Fullscreen { within_gaps }).discard();
+            assert_eq!(bars(&system, layout, false), shown);
+            assert!(bars(&system, layout, true).is_empty());
+        }
+    }
+
+    /// Each fill's frames: tiled (the stack's windows offset along it), the selected window
+    /// filling the tiling area, then the screen (the window left out placed nowhere).
+    #[test]
+    fn a_traditional_layout_places_each_fill() {
+        let (mut system, layout) = a_window_and_a_stack();
+        let first = (w(1), rect(20.0, 35.0, 466.0, 760.0));
+        let last = (w(4), rect(506.0, 35.0, 454.0, 760.0));
+        assert_eq!(frames(&system, layout), vec![
+            first,
+            (w(3), rect(494.0, 35.0, 454.0, 760.0)),
+            last
+        ]);
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: true })
+            .discard();
+        assert_eq!(frames(&system, layout), vec![
+            first,
+            (w(3), rect(20.0, 35.0, 940.0, 760.0)),
+            last
+        ]);
+        system
+            .edit_layout(layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .discard();
+        assert_eq!(frames(&system, layout), vec![
+            first,
+            (w(3), rect(0.0, 25.0, 1000.0, 800.0)),
+            last
+        ]);
+    }
+
     /// A query upstream's system answers otherwise than the core is counted and fails a test.
     #[test]
     fn a_query_answered_otherwise_is_counted_and_fails_tests() {

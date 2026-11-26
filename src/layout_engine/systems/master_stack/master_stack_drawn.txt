@@ -1,0 +1,8 @@
+ NodeId(1v1) Horizontal [size 0 total=2]
+ ├─ ☐ NodeId(2v1) Vertical [size 1.2 total=1] [master]
+ │  └─ ☒ NodeId(7v1) WindowId { pid: 1, idx: 4 } [size 1]
+ └─ ☒ NodeId(3v1) Vertical [size 0.79999995 total=2] [stack]
+    ├─ ☒ NodeId(8v1) VerticalStack [size 1 total=2]
+    │  ├─ ☐ NodeId(5v1) WindowId { pid: 1, idx: 2 } [size 1]
+    │  └─ ☒ NodeId(6v1) WindowId { pid: 1, idx: 3 } [size 1]
+    └─ ☐ NodeId(4v1) WindowId { pid: 1, idx: 1 } [size 1]
