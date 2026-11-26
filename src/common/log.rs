@@ -90,6 +90,10 @@ fn show_roc_core() {
         let divergences = crate::roc_path::MODE_GATE.divergences();
         println!("roc-core: mode-gate divergences: {divergences}");
         tracing::info!(divergences, "roc-core: mode-gate divergences");
+        // The topology questions, the Roc core's (the Rust answers their shadow).
+        let divergences = crate::roc_path::TOPOLOGY.divergences();
+        println!("roc-core: topology divergences: {divergences}");
+        tracing::info!(divergences, "roc-core: topology divergences");
         let reseeds = crate::roc_twin::lifecycle_reseeds();
         println!("roc-core: lifecycle re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: lifecycle re-seeds");

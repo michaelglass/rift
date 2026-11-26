@@ -978,7 +978,7 @@ impl Reactor {
             |wid| wid.pid,
         );
         #[cfg(feature = "roc-core")]
-        {
+        let windows_by_pid = {
             use rift_core::topology::plain::Candidates;
 
             use crate::roc_path::window;
@@ -998,14 +998,24 @@ impl Reactor {
                 .map(|(pid, windows)| (*pid, windows.iter().map(|&wid| window(wid)).collect()))
                 .collect();
             let roc = rift_core_roc::topology::app_rule_candidates(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::TOPOLOGY,
                 "app_rule_candidates",
                 Candidates::FACTS,
                 &question,
+                windows_by_pid,
                 &answer,
                 roc,
-            );
-        }
+                |roc| {
+                    roc.into_iter()
+                        .map(|(pid, windows)| {
+                            let windows = windows.into_iter().map(crate::roc_path::window_of_plain);
+                            Some((pid, windows.collect::<Option<_>>()?))
+                        })
+                        .collect()
+                },
+            )
+        };
 
         for (pid, window_ids) in windows_by_pid {
             let Some(app_state) = self.app_manager.apps.get(&pid) else {
@@ -1538,15 +1548,24 @@ impl Reactor {
         let quarantines =
             rift_core::topology::quarantines(topology, || class.ask(|| event_class(event)));
         #[cfg(feature = "roc-core")]
-        {
+        let quarantines = {
             use rift_core::topology::plain::Quarantine;
             let question = Quarantine {
                 topology,
                 class: class.fact(|class| class),
             };
             let roc = rift_core_roc::topology::quarantines(question);
-            crate::roc_path::check("quarantines", Quarantine::FACTS, &question, &quarantines, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::TOPOLOGY,
+                "quarantines",
+                Quarantine::FACTS,
+                &question,
+                quarantines,
+                &quarantines,
+                roc,
+                Some,
+            )
+        };
         quarantines
     }
 
@@ -3862,7 +3881,7 @@ impl Reactor {
         let admission =
             rift_core::topology::admit_space_snapshot(&current, &incoming, mission_control);
         #[cfg(feature = "roc-core")]
-        {
+        let admission = {
             use rift_core::topology::plain::Admit;
             let question = topology_workflow::plain_admit(&current, &incoming, mission_control);
             let answer = match &admission {
@@ -3881,8 +3900,37 @@ impl Reactor {
                 },
             };
             let roc = Ok(rift_core_roc::topology::admit_space_snapshot(question.clone()));
-            crate::roc_path::check("admit_space_snapshot", Admit::FACTS, &question, &answer, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::TOPOLOGY,
+                "admit_space_snapshot",
+                Admit::FACTS,
+                &question,
+                admission,
+                &answer,
+                roc,
+                |roc| {
+                    use rift_core::topology::Admission;
+
+                    use crate::roc_path::FromWord;
+                    Some(match roc {
+                        Admission::Hold(why) => Admission::Hold(why),
+                        Admission::Commit {
+                            invalidated,
+                            lost_local_desktops,
+                        } => Admission::Commit {
+                            invalidated: invalidated
+                                .into_iter()
+                                .map(FromWord::from_word)
+                                .collect::<Option<_>>()?,
+                            lost_local_desktops: lost_local_desktops
+                                .into_iter()
+                                .map(FromWord::from_word)
+                                .collect::<Option<_>>()?,
+                        },
+                    })
+                },
+            )
+        };
         let (invalidated_spaces, lost_local_desktops) = match admission {
             rift_core::topology::Admission::Hold(why) => {
                 trace!(?why, revision = space_state.revision, "space snapshot held");
@@ -4884,7 +4932,7 @@ impl Reactor {
                     || resolved.ask(|| self.resolve_native_space(wsid, None)),
                 );
                 #[cfg(feature = "roc-core")]
-                {
+                let discovered = {
                     use rift_core::topology::DiscoveredSpace;
                     use rift_core::topology::plain::Discovered;
                     let question = Discovered {
@@ -4902,14 +4950,33 @@ impl Reactor {
                         }
                     };
                     let roc = rift_core_roc::topology::discovered_space(question.clone());
-                    crate::roc_path::check(
+                    crate::roc_path::decided(
+                        &crate::roc_path::TOPOLOGY,
                         "discovered_space",
                         Discovered::FACTS,
                         &question,
+                        discovered,
                         &answer,
                         roc,
-                    );
-                }
+                        |roc| {
+                            use crate::roc_path::FromWord;
+                            Some(match roc {
+                                DiscoveredSpace::Observed(space) => {
+                                    DiscoveredSpace::Observed(FromWord::from_word(space)?)
+                                }
+                                DiscoveredSpace::Live(space) => {
+                                    DiscoveredSpace::Live(FromWord::from_word(space)?)
+                                }
+                                DiscoveredSpace::Fallback(space) => {
+                                    DiscoveredSpace::Fallback(match space {
+                                        Some(space) => Some(FromWord::from_word(space)?),
+                                        None => None,
+                                    })
+                                }
+                            })
+                        },
+                    )
+                };
                 if let Some(space) = discovered.observation() {
                     fullscreen_observations.insert(wsid, space);
                 }
@@ -5402,7 +5469,7 @@ impl Reactor {
             })
         });
         #[cfg(feature = "roc-core")]
-        {
+        let spaces = {
             use rift_core::topology::plain::Discovery;
             let question = Discovery {
                 standing,
@@ -5411,14 +5478,23 @@ impl Reactor {
                 by_frame: by_frame.fact(|space| space.map(Word::word)),
             };
             let roc = rift_core_roc::topology::discovery_spaces(question.clone());
-            crate::roc_path::check(
+            crate::roc_path::decided(
+                &crate::roc_path::TOPOLOGY,
                 "discovery_spaces",
                 Discovery::FACTS,
                 &question,
+                spaces,
                 &(spaces.0.map(Word::word), spaces.1.map(Word::word)),
                 roc,
-            );
-        }
+                |(first, second)| {
+                    let space = |word: Option<u64>| match word {
+                        Some(word) => crate::roc_path::FromWord::from_word(word).map(Some),
+                        None => Some(None),
+                    };
+                    Some((space(first)?, space(second)?))
+                },
+            )
+        };
         spaces
     }
 
@@ -7461,7 +7537,7 @@ impl Reactor {
             |space| active.ask(space, |space| self.is_space_active(space)),
         );
         #[cfg(feature = "roc-core")]
-        {
+        let target = {
             use rift_core::topology::plain::Target;
 
             use crate::roc_path::point;
@@ -7483,8 +7559,27 @@ impl Reactor {
                 .map(|(screen, space)| (u64::from(screen.id.as_u32()), space.word()))
                 .map_err(|why| *why);
             let roc = rift_core_roc::topology::target_display(question.clone());
-            crate::roc_path::check("target_display", Target::FACTS, &question, &answer, roc);
-        }
+            crate::roc_path::decided(
+                &crate::roc_path::TOPOLOGY,
+                "target_display",
+                Target::FACTS,
+                &question,
+                target,
+                &answer,
+                roc,
+                |roc| match roc {
+                    Ok((id, space)) => {
+                        let screen = self
+                            .space_state
+                            .screens
+                            .iter()
+                            .find(|screen| u64::from(screen.id.as_u32()) == id)?;
+                        Some(Ok((screen, crate::roc_path::FromWord::from_word(space)?)))
+                    }
+                    Err(why) => Some(Err(why)),
+                },
+            )
+        };
         match target {
             Ok((screen, space)) => Ok((screen.clone(), space)),
             Err(rift_core::topology::NoTarget::DisplayNotFound) => {

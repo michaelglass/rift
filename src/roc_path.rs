@@ -3,7 +3,7 @@
 //! data, and the two answers must be the same words. A checked decision ([`check`]): equal, the
 //! Rust answer stands, the Roc core's decision bit for bit; different (or no answer), tests
 //! fail, and a running Rift logs `roc-divergence:` and goes on with the Rust answer. A decided
-//! family ([`decided`]: focus, the mode gate) flips that: the Roc answer is rift's, the Rust answer its shadow,
+//! family ([`decided`]: focus, the mode gate, the topology questions) flips that: the Roc answer is rift's, the Rust answer its shadow,
 //! and a running Rift counts each difference ([`Family`]) and goes on with the Roc answer.
 //!
 //! A question carries only the facts the Rust decision asked: a call site asks each fact
@@ -225,8 +225,15 @@ pub(crate) static FOCUS: Family = Family::new();
 #[cfg(feature = "roc-core")]
 pub(crate) static MODE_GATE: Family = Family::new();
 
+/// The topology questions (`rift_core::topology`, `Topology.roc`): which events wait out an
+/// unsettled topology, a Space snapshot's admission, a discovered window's Space, a display to
+/// move to, the windows an app's rules apply to.
+#[cfg(feature = "roc-core")]
+pub(crate) static TOPOLOGY: Family = Family::new();
+
 /// The Roc core decides (policy (a)): its answer to `question` is rift's, and the Rust answer
-/// (`rust`, as words: `words`) is its shadow. Equal, the Rust value is the Roc answer's own.
+/// (`rust`, as words: `words`) is its shadow. Equal, the Rust value is the Roc answer's own (in
+/// tests, `back` must read the Roc answer back as it).
 /// Different, `family` counts it, tests fail (`roc-divergence:`), and a running Rift warns and
 /// takes the Roc answer, read back by `back`; a Roc answer naming nothing `back` can rebuild
 /// (an id no value of rift's has) leaves the Rust answer, with a warn. A Roc decision that read a fact Rust did not ask has no answer on the
@@ -236,7 +243,11 @@ pub(crate) static MODE_GATE: Family = Family::new();
     clippy::too_many_arguments,
     reason = "one decision's question, answers and reading"
 )]
-pub(crate) fn decided<Q: std::fmt::Debug, A: PartialEq + std::fmt::Debug, T>(
+pub(crate) fn decided<
+    Q: std::fmt::Debug,
+    A: PartialEq + std::fmt::Debug,
+    T: PartialEq + std::fmt::Debug,
+>(
     family: &Family,
     what: &str,
     facts: &[&str],
@@ -274,7 +285,11 @@ enum Report {
     clippy::too_many_arguments,
     reason = "one decision's question, answers and reading"
 )]
-fn decided_under<Q: std::fmt::Debug, A: PartialEq + std::fmt::Debug, T>(
+fn decided_under<
+    Q: std::fmt::Debug,
+    A: PartialEq + std::fmt::Debug,
+    T: PartialEq + std::fmt::Debug,
+>(
     report: Report,
     family: &Family,
     what: &str,
@@ -286,6 +301,18 @@ fn decided_under<Q: std::fmt::Debug, A: PartialEq + std::fmt::Debug, T>(
     back: impl FnOnce(A) -> Option<T>,
 ) -> T {
     match roc {
+        // In tests, the answer read back is the Rust value itself: every site's reading is
+        // held by the tests that reach it (it runs for real only on a difference).
+        #[cfg(test)]
+        Ok(roc) if roc == *words => {
+            assert_eq!(
+                back(roc).as_ref(),
+                Some(&rust),
+                "{what}: the Roc answer read back"
+            );
+            rust
+        }
+        #[cfg(not(test))]
         Ok(roc) if roc == *words => rust,
         Ok(roc) => {
             family.count();
