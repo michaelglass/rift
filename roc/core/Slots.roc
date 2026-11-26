@@ -85,6 +85,31 @@ Slots(v) := { slots : List(Slot(v)), free : List(U32) }.{
 			}
 		}
 
+	## One mark per slot, none set: the slots a pass picks out, by slot index (a key's version is
+	## not looked at; the marks are only read against the table they were made for).
+	unmarked : Slots(v) -> List(Bool)
+	unmarked = |table| List.repeat(False, table.slots.len())
+
+	## `key`'s slot marked (a key past the table's slots names no slot: nothing to mark).
+	mark : List(Bool), U64 -> List(Bool)
+	mark = |marks, key| {
+		(index, _) = parts(key)
+		match marks.set(index, True) {
+			Ok(set) => set
+			Err(OutOfBounds) => marks
+		}
+	}
+
+	## Whether `key`'s slot is marked.
+	marked : List(Bool), U64 -> Bool
+	marked = |marks, key| {
+		(index, _) = parts(key)
+		match marks.get(index) {
+			Ok(mark_) => mark_
+			Err(OutOfBounds) => False
+		}
+	}
+
 	## Every held value changed by `change`, the slots and versions as they were.
 	map_values : Slots(v), (v -> v) -> Slots(v)
 	map_values = |table, change| {

@@ -13,6 +13,10 @@ import Slots
 import Traditional exposing [Branch, Laid, Tree, TreeAxis, TreeStack]
 import pf.Boundary exposing [Frame, GroupBar, GroupBars, GroupBranch, GroupContainerView, GroupProjected, GroupRole, GroupRow, StackFramesQuestion, WindowConstraints, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
 
+## The nodes a layout pass takes part with: a mark per slot of the forest's node table
+## (`Slots.unmarked`, `mark`, `marked`).
+TakingPart : List(Bool)
+
 ## A forest: every layout's root, every node, the windows left out of layout, the next stamp.
 Forest : {
 	layouts : Slots(U64),
@@ -1319,19 +1323,26 @@ GroupForest := [].{
 			Nothing => children(forest, key).any(child_participates)
 		}
 
-	participating_nodes : Forest, U64 -> Set(U64)
+	## The nodes under `top` taking part: every one while no window is left out, else those marked.
+	participating_nodes : Forest, U64 -> [Everyone, Only(TakingPart)]
 	participating_nodes = |forest, top|
 		if forest.left_out.is_empty() {
-			Set.empty()
+			Everyone
 		} else {
-			walk(
-				forest,
-				top,
-				Postorder,
-				Set.empty(),
-				|active, key| Continue(if subtree_participates(forest, key, |child| active.contains(child)) active.insert(key) else active),
-			)
+			Only(taking_part_under(forest, top))
 		}
+
+	## The nodes under `top` taking part, marked bottom-up (a container takes part when a child
+	## does).
+	taking_part_under : Forest, U64 -> TakingPart
+	taking_part_under = |forest, top|
+		walk(
+			forest,
+			top,
+			Postorder,
+			Slots.unmarked(forest.nodes),
+			|marks, key| Continue(if subtree_participates(forest, key, |child| Slots.marked(marks, child)) Slots.mark(marks, key) else marks),
+		)
 
 	# The shape (`Forest::shape`): the traditional geometry's input.
 
@@ -1349,7 +1360,7 @@ GroupForest := [].{
 		}
 
 	## The shape laid out from `start`.
-	shape_from : Forest, StackFramesQuestion, Set(U64), U64 -> Laid(U64)
+	shape_from : Forest, StackFramesQuestion, TakingPart, U64 -> Laid(U64)
 	shape_from = |forest, question, active, start| {
 		known = Dict.from_list(question.known.map(|k| (k.window, k.constraints)))
 		Laid.{
@@ -1382,15 +1393,15 @@ GroupForest := [].{
 
 	## The bars under `key` (taking part) after `out`: a node that fills ends the walk below it
 	## (and along the selection path drops every bar found).
-	bars_from : Forest, U64, Set(U64), Dict(U64, Rect), GroupBars, List(GroupBar) -> List(GroupBar)
+	bars_from : Forest, U64, TakingPart, Dict(U64, Rect), GroupBars, List(GroupBar) -> List(GroupBar)
 	bars_from = |forest, key, active, stacks, bars, out| {
 		held = node(forest, key, "bars_from")
 		if is_tiled(held.fill) {
 			match held.body {
 				Window(_) => out
 				Container(holding) => {
-					taking_part = children(forest, key).keep_if(|child| active.contains(child))
-					shown = |{}| participating_child(forest, key, False, |child| active.contains(child))
+					taking_part = children(forest, key).keep_if(|child| Slots.marked(active, child))
+					shown = |{}| participating_child(forest, key, False, |child| Slots.marked(active, child))
 					(with_bar, chosen) =
 						match holding.kind {
 							Stack(orientation) => {
@@ -1525,43 +1536,37 @@ GroupForest := [].{
 	}
 
 	## What a layout pass lays out (`laid_out`): the nodes taking part, and the node laid out from.
-	laid_out : Forest, U64 -> [LaidOut(Set(U64), U64), NothingLaidOut]
+	laid_out : Forest, U64 -> [LaidOut(TakingPart, U64), NothingLaidOut]
 	laid_out = |forest, layout| {
 		top = root(forest, layout, "laid_out")
-		active = walk(
-			forest,
-			top,
-			Postorder,
-			Set.empty(),
-			|held, key| Continue(if subtree_participates(forest, key, |child| held.contains(child)) held.insert(key) else held),
-		)
+		active = taking_part_under(forest, top)
 		start =
 			if is_tiled(node(forest, top, "laid_out").fill) {
 				match regions(forest, top) {
-					Regions(master, stack) => if active.contains(stack) top else master
+					Regions(master, stack) => if Slots.marked(active, stack) top else master
 					NoRegions => top
 				}
 			} else {
 				top
 			}
-		if active.contains(start) LaidOut(active, start) else NothingLaidOut
+		if Slots.marked(active, start) LaidOut(active, start) else NothingLaidOut
 	}
 
 	## A node taking part as the geometry takes it: a container keeps its children taking part, a
 	## stack the child shown (its selection if it takes part, else the first that does) between
 	## those before and after it.
-	shape_node : Forest, Set(U64), Dict(U64, WindowConstraints), U64 -> Tree(U64)
+	shape_node : Forest, TakingPart, Dict(U64, WindowConstraints), U64 -> Tree(U64)
 	shape_node = |forest, active, known, key| {
 		held = node(forest, key, "shape_node")
 		match held.body {
 			Window({ window, .. }) => Tree.Window({ window: Geometry.window_id(window), constraints: Geometry.known_constraints(known, window), fill: held.fill })
 			Container(holding) => {
 				branch = |child| Branch.{ size: size(forest, child), node: shape_node(forest, active, known, child) }
-				taking_part = children(forest, key).keep_if(|child| active.contains(child))
+				taking_part = children(forest, key).keep_if(|child| Slots.marked(active, child))
 				match holding.kind {
 					Stack(orientation) => {
 						focused =
-							match participating_child(forest, key, False, |child| active.contains(child)) {
+							match participating_child(forest, key, False, |child| Slots.marked(active, child)) {
 								Some(chosen) => chosen
 								Nothing => crash "GroupForest.shape_node: stack ${key.to_str()} takes part with no child taking part"
 							}
@@ -1939,10 +1944,15 @@ GroupForest := [].{
 		descend_from(forest, target, direction, active)
 	}
 
-	descend_from : Forest, U64, BspDirection, Set(U64) -> U64
+	descend_from : Forest, U64, BspDirection, [Everyone, Only(TakingPart)] -> U64
 	descend_from = |forest, current, direction, active| {
 		reverse = !is_stacked(forest, current) and !backwards(direction)
-		match participating_child(forest, current, reverse, |child| forest.left_out.is_empty() or active.contains(child)) {
+		takes = |child|
+			match active {
+				Everyone => True
+				Only(marks) => Slots.marked(marks, child)
+			}
+		match participating_child(forest, current, reverse, takes) {
 			Some(child) => descend_from(forest, child, direction, active)
 			Nothing => current
 		}
