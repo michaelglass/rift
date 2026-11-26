@@ -31,6 +31,18 @@ wc -l` (the bound: at most 336).
 (3) The open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
 below ("Roc issue drafts") wait for the owner.
 
+**Focus and the mode gate decided in Roc (2026-11-26, the lead's go).** Both were checked on
+rift's path (the Rust answer stood); now `roc_path::decided` makes the Roc answer rift's, the
+Rust answer its shadow, one family each (`roc_path::FOCUS`: the eight focus decisions;
+`roc_path::MODE_GATE`: the verdict), each counted and logged at exit (`roc-core: focus
+divergences`, `roc-core: mode-gate divergences`). A different Roc answer is read back to rift's
+ids (`FromWord`, `window_of_plain`, `Verdict::try_map`); one naming nothing rift holds, or
+`activation_follow`'s `Stay::Mode` (the question carries refusing modes as one word), leaves the
+Rust answer with a warn; a Roc decision that read an unasked fact leaves it too. Plants 6/6 and
+4/4. Still checked, not decided: the topology, lifecycle and workspace questions on `roc_path`
+(their machines are decided as twins), and the reconciler. On hold (the lead): scrolling slice 1
+until the owner confirms; the #713 merge when we get there.
+
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
 names), plant and bisect variant builds, scratch outputs. Keep `target/debug/incremental` (it
