@@ -6,6 +6,15 @@
 //! nightly tarball lacks); the default is `~/.local/share/roc-nightly/src`. Only with the `roc`
 //! feature. Each run states how long the Roc build and the glue took, so a slow build is
 //! explainable.
+//!
+//! The archive and the glue are built once per input and shared: every build-script run (each
+//! feature set, `check`, `test`, clippy: each has its own `OUT_DIR`) keys them by a hash of
+//! everything that goes into them (each Roc source file's path and bytes, the compiler's path,
+//! size and mtime, the glue spec's bytes, the build arguments), keeps them under the target
+//! directory (`roc-build/<key>/`), and only links its `OUT_DIR` copy to them. An optimized Roc
+//! build takes about a minute and has no incremental reuse of its own (LLVM runs on the whole
+//! program every time), so the same sources are never built twice; and an `OUT_DIR` copy is
+//! rewritten only when its bytes change, so nothing downstream relinks for an unchanged core.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,29 +38,52 @@ fn main() {
     for dir in ["core", "platform"] {
         println!("cargo:rerun-if-changed={}", roc_dir.join(dir).display());
     }
+    // The compiler itself (a new nightly behind the same path is a new build).
+    println!("cargo:rerun-if-changed={roc}");
     println!("cargo:rerun-if-env-changed=ROC");
     println!("cargo:rerun-if-env-changed=ROC_SRC");
 
-    let started = Instant::now();
-    let archive = out.join("librift_core_roc.a");
-    let status = Command::new(&roc)
-        .current_dir(&roc_dir)
-        .args(["build", "--target=arm64mac", "--opt=speed"])
-        .arg(format!("--output={}", archive.display()))
-        .arg("core/main.roc")
-        .status()
-        .unwrap_or_else(|error| panic!("could not run {roc}: {error}"));
-    assert!(status.success(), "roc build failed");
-    let built = started.elapsed();
-
-    let started = Instant::now();
-    glue(&roc, Path::new(&roc_src), &roc_dir, &out);
-    let glued = started.elapsed();
-    println!(
-        "cargo:warning=rift-core-roc: roc build {:.1} s, roc glue {:.1} s",
-        built.as_secs_f64(),
-        glued.as_secs_f64()
+    const BUILD: [&str; 3] = ["build", "--target=arm64mac", "--opt=speed"];
+    let spec = Path::new(&roc_src).join("src/glue/src/RustGlue.roc");
+    let key = inputs_key(&roc_dir, &roc, &spec, &BUILD);
+    // The target directory: `OUT_DIR` is `<target>/<profile>/build/<unit>/out`.
+    let target = out.ancestors().nth(4).expect("OUT_DIR is under the target directory");
+    let shared = target.join("roc-build").join(format!("{key:016x}"));
+    let (archive, abi) = (
+        shared.join("librift_core_roc.a"),
+        shared.join("roc_platform_abi.rs"),
     );
+
+    if archive.is_file() && abi.is_file() {
+        println!("cargo:warning=rift-core-roc: roc build and glue reused ({key:016x})");
+    } else {
+        let work = shared.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::create_dir_all(&work).expect("a build directory");
+        let started = Instant::now();
+        let status = Command::new(&roc)
+            .current_dir(&roc_dir)
+            .args(BUILD)
+            .arg(format!("--output={}", work.join("librift_core_roc.a").display()))
+            .arg("core/main.roc")
+            .status()
+            .unwrap_or_else(|error| panic!("could not run {roc}: {error}"));
+        assert!(status.success(), "roc build failed");
+        let built = started.elapsed();
+        let started = Instant::now();
+        glue(&roc, &spec, &roc_dir, &work);
+        let glued = started.elapsed();
+        // Published whole: a concurrent run that built the same key keeps its own (equal) one.
+        if std::fs::rename(&work, &shared).is_err() {
+            let _ = std::fs::remove_dir_all(&work);
+        }
+        println!(
+            "cargo:warning=rift-core-roc: roc build {:.1} s, roc glue {:.1} s",
+            built.as_secs_f64(),
+            glued.as_secs_f64()
+        );
+    }
+    copy_if_changed(&archive, &out.join("librift_core_roc.a"));
+    copy_if_changed(&abi, &out.join("roc_platform_abi.rs"));
 
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=rift_core_roc");
@@ -62,8 +94,7 @@ fn main() {
 /// on a boundary type the generator had to name itself: an
 /// anonymous record (`AnonStruct<hash>`) or a structural union it numbered (`…Type<n>`), whose
 /// names change as other types come and go. Every boundary type is a named Roc type.
-fn glue(roc: &str, roc_src: &Path, roc_dir: &Path, out: &Path) {
-    let spec = roc_src.join("src/glue/src/RustGlue.roc");
+fn glue(roc: &str, spec: &Path, roc_dir: &Path, out: &Path) {
     assert!(
         spec.is_file(),
         "roc glue needs RustGlue.roc from a roc-lang/roc checkout at the pinned nightly's commit \
@@ -74,7 +105,7 @@ fn glue(roc: &str, roc_src: &Path, roc_dir: &Path, out: &Path) {
     let status = Command::new(roc)
         .current_dir(roc_dir)
         .arg("glue")
-        .arg(&spec)
+        .arg(spec)
         .arg(&generated)
         .arg("platform/main.roc")
         .status()
@@ -110,4 +141,62 @@ fn unnamed_types(text: &str) -> Vec<String> {
     found.sort();
     found.dedup();
     found
+}
+
+/// `from`'s bytes at `to`, written only when they differ (so `to` keeps its mtime, and cargo
+/// relinks nothing, when the build is unchanged).
+fn copy_if_changed(from: &Path, to: &Path) {
+    let bytes = std::fs::read(from).expect("the shared build's file");
+    if std::fs::read(to).ok().as_deref() == Some(&bytes[..]) {
+        return;
+    }
+    let staged = to.with_extension("tmp");
+    std::fs::write(&staged, &bytes).expect("a copy staged");
+    std::fs::rename(&staged, to).expect("the copy in place");
+}
+
+/// A key for everything a build of the core reads: each file under `roc/` (path and bytes, in
+/// path order), the compiler (path, size, mtime: a new nightly is a new key), the glue spec's
+/// bytes, and the build arguments. FNV-1a, so the key is the same in every run.
+fn inputs_key(roc_dir: &Path, roc: &str, spec: &Path, args: &[&str]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &byte in bytes.iter().chain(&[0xff]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    let mut files = Vec::new();
+    for dir in ["core", "platform"] {
+        collect(&roc_dir.join(dir), &mut files);
+    }
+    files.sort();
+    for file in &files {
+        feed(file.strip_prefix(roc_dir).unwrap_or(file).to_string_lossy().as_bytes());
+        feed(&std::fs::read(file).expect("a Roc source"));
+    }
+    let compiler = std::fs::metadata(roc).unwrap_or_else(|error| panic!("{roc}: {error}"));
+    let mtime = compiler
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    feed(roc.as_bytes());
+    feed(&compiler.len().to_le_bytes());
+    feed(&mtime.map_or(0, |t| t.as_nanos()).to_le_bytes());
+    feed(&std::fs::read(spec).unwrap_or_default());
+    for arg in args {
+        feed(arg.as_bytes());
+    }
+    hash
+}
+
+fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("a Roc source directory").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
 }

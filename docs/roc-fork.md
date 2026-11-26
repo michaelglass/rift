@@ -33,6 +33,20 @@ decisions (a dev-diagnostics build's `ROC_LIR_DUMP`; the owner's call whether to
 (3) the open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
 below ("Roc issue drafts") wait for the owner.
 
+**Build times (2026-11-26).** An optimized Roc build (`--opt=speed`) takes about 50 s every
+time: Roc caches its front end (every module a cache hit) but runs LLVM on the whole program,
+so it has no incremental reuse. The build script ran it on every rerun, and each build-script
+unit (check, test and clippy profiles; the `roc` and `roc-core` feature sets) has its own
+`OUT_DIR`, so one `.roc` change cost four builds in a check run. `build.rs` now keys the archive
+and glue by a hash of their inputs (the Roc sources' paths and bytes, the compiler, the glue
+spec, the arguments), builds each key once under `target/roc-build/<key>/` and copies it into
+`OUT_DIR` only when the bytes differ. A check run after a `.roc` change: 422 s to 285 s (one
+Roc build); after nothing: 198 s to 152 s; after a Rust-only change: 277 s to 203 s (what is
+left is test running and relinking). `target/roc-build` keeps every key built (about 8 MB
+each); `cargo clean` or deleting it is safe. The `--opt=dev` backend builds the archive in
+under a second; using it for tests would change what the tests exercise (not LLVM's code), so
+it is the owner's call, not done.
+
 **Roc uniqueness: the node-table copies still open (2026-11-26, fix 2 of the lead's three Roc
 cost fixes).** A step that copies the forest's node table pays O(n) per event (about 112 bytes
 a slot: 150 KB at 1000 windows). The rift-core-roc tripwire
