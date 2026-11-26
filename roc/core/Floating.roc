@@ -76,6 +76,19 @@ Floating := [].{
 		}
 	}
 
+	## The first frame of the window at `position` among `count` placed together, cascaded by its
+	## position when spreading (`Floating::first_frame`).
+	first_frame : Rect, Bool, Newcomer, U64, U64 -> Rect
+	first_frame = |screen, spread, window, position, count| {
+		frame = initial_frame(screen, window)
+		if spread and count > 1 {
+			slots = (count - 1).to_f64()
+			cascade(screen, frame, position.to_f64() / slots, slots)
+		} else {
+			frame
+		}
+	}
+
 	## Each window's first frame, in order; cascaded when spreading. A window's place in the
 	## cascade is its place in the list.
 	first_frames : Rect, Bool, List(Newcomer) -> List(Rect)

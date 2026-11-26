@@ -1234,6 +1234,85 @@ Boundary := [].{
 		Edit(GroupEditIn),
 	]
 
+	## A frame a floating layout keeps beside the window's own, to return to (`Geometry::Aligned`).
+	FloatingAligned := { frame : Rect, restore : Rect }
+
+	## The frame a floating layout keeps for a window (`group_forest::Geometry`): its own, one
+	## shared with its group and its own to return to, or only one to return to (a state only an
+	## older saved file holds).
+	FloatingGeometry := [Kept(Rect), Aligned(FloatingAligned), Restorable(Rect)]
+
+	FloatingFrames := { window : U64, geometry : FloatingGeometry }
+
+	## A floating system as the platform holds it (`FloatingSystem::from_parts`).
+	FloatingSeed := { forest : GroupForestSeed, geometry : List(FloatingFrames) }
+
+	## A window added to a floating layout, where the insertion point says.
+	FloatingAdd := { layout : U64, window : U64, insertion : BspInsertion }
+
+	## A frame the user gave a window.
+	FloatingStore := { window : U64, frame : Rect }
+
+	## A floating layout's screen, and whether its first frames spread (`floating::Floating`).
+	FloatingScreen := { screen : Rect, spread : Bool }
+
+	## A frame a window has on screen, as the host saw it.
+	FloatingLive := { window : U64, frame : Rect }
+
+	## A layout's windows without a frame given their first: the screen, each window's
+	## constraints the host knows and each live frame it saw.
+	FloatingInitialize := { layout : U64, floating : FloatingScreen, known : List(BspKnown), live : List(FloatingLive) }
+
+	## One operation or query of the floating system (`FloatingSystem`'s methods, one for one; an
+	## app's windows listed, since Roc has no pid).
+	FloatingEvent := [
+		CreateLayout,
+		CloneLayout(U64),
+		RemoveLayout(U64),
+		Participation(BspParticipation),
+		AddWindow(FloatingAdd),
+		RemoveWindow(U64),
+		ReplaceWindow(BspReplacement),
+		CloseApp(List(U64)),
+		StoreFrame(FloatingStore),
+		InitializeFrames(FloatingInitialize),
+		Focus(BspFocusIn),
+		Edit(GroupEditIn),
+		ContainsLayout(U64),
+		WindowParticipates(U64),
+		SelectedWindow(U64),
+		SelectionContainsWindow(BspWindowIn),
+		ContainsWindow(BspWindowIn),
+		HasAnyFullscreenNode(U64),
+		HasWindowsForApp(BspAppIn),
+		ParentOfSelectionIsStacked(U64),
+		Windows(BspWindowsQuery),
+		WindowSlot(BspWindowIn),
+		WindowInDirection(BspLayoutDirection),
+		Cycle(U64),
+		FrameOf(U64),
+		Floats(U64),
+	]
+
+	## A frame a floating layout keeps, or none.
+	FloatingFrame := [Framed(Rect), Unframed]
+
+	## What a floating operation answers: the tree's answers, or a kept frame.
+	FloatingAnswer := [Tree(BspTreeAnswer), Frame(FloatingFrame)]
+
+	## A floating layout as its geometry takes it: the layout, the screen and spread, the gaps,
+	## and the constraints the host knows.
+	FloatingShapeQuestion := { layout : U64, floating : FloatingScreen, gaps : Gaps, known : List(BspKnown) }
+
+	## A floating layout's group bars, along the selection path or every one.
+	FloatingBarsQuestion := { layout : U64, floating : FloatingScreen, selection_path_only : Bool }
+
+	## A floating layout question.
+	FloatingLayoutQuestion := [Shape(FloatingShapeQuestion), Bars(FloatingBarsQuestion), Container(U64), Draw(U64)]
+
+	## A floating layout question's answer.
+	FloatingLayoutAnswer := [Shape(FloatingLayout), Bars(List(GroupBar)), Container(GroupContainerView), Drawn(List(GroupRow))]
+
 	## One operation of the master-stack system (`MasterStack`'s methods, one for one).
 	MasterStackEvent := [
 		Forest(GroupForestEvent),

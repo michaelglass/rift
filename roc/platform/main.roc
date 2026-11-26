@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -82,6 +82,11 @@ platform ""
 			master_stack_step : masters, MasterStackEvent -> { model : masters, answer : BspTreeAnswer },
 			master_stack_view : masters -> { model : masters, view : MasterStackSeed },
 			master_stack_layout : masters, GroupLayoutQuestion -> { model : masters, answer : GroupLayoutAnswer },
+			floating_tree_init : {} -> floatings,
+			floating_tree_seed : FloatingSeed -> floatings,
+			floating_tree_step : floatings, FloatingEvent -> { model : floatings, answer : FloatingAnswer },
+			floating_tree_view : floatings -> { model : floatings, view : FloatingSeed },
+			floating_tree_layout : floatings, FloatingLayoutQuestion -> { model : floatings, answer : FloatingLayoutAnswer },
 		}
 	}
 	exposes [Boundary]
@@ -127,6 +132,12 @@ platform ""
 		"roc_master_stack_view": master_stack_view_for_host,
 		"roc_master_stack_layout": master_stack_layout_for_host,
 		"roc_master_stack_release": master_stack_release_for_host,
+		"roc_floating_tree_init": floating_tree_init_for_host,
+		"roc_floating_tree_seed": floating_tree_seed_for_host,
+		"roc_floating_tree_step": floating_tree_step_for_host,
+		"roc_floating_tree_view": floating_tree_view_for_host,
+		"roc_floating_tree_layout": floating_tree_layout_for_host,
+		"roc_floating_tree_release": floating_tree_release_for_host,
 		"roc_mode_verdict": mode_verdict_for_host,
 		"roc_release_model": release_model_for_host,
 		"roc_step": step_for_host,
@@ -179,7 +190,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -250,6 +261,15 @@ TraditionalTreeLaidOut := { model : Box(Traditionals), answer : GroupLayoutAnswe
 
 ## A master-stack system, unchanged, and what a layout question answers.
 MasterStackLaidOut := { model : Box(Masters), answer : GroupLayoutAnswer }
+
+## A floating layout system after an operation, and what it answered.
+FloatingTreeStepped := { model : Box(Floatings), answer : FloatingAnswer }
+
+## A floating layout system, unchanged, and the system as the platform holds it.
+FloatingTreeViewed := { model : Box(Floatings), view : FloatingSeed }
+
+## A floating system, unchanged, and what a layout question answers.
+FloatingTreeLaidOut := { model : Box(Floatings), answer : FloatingLayoutAnswer }
 
 init_for_host : {} -> Box(Model)
 init_for_host = |{}| Box.box((core.init)({}))
@@ -665,3 +685,37 @@ master_stack_layout_for_host = |boxed, question| {
 ## The host cannot release a `Box(Masters)`: only Roc knows its layout.
 master_stack_release_for_host : Box(Masters) -> {}
 master_stack_release_for_host = |_| {}
+
+## A floating layout system (`rift_core::layout::group_forest::FloatingSystem`), kept between
+## operations: no layouts, no frames.
+floating_tree_init_for_host : {} -> Box(Floatings)
+floating_tree_init_for_host = |{}| Box.box((core.floating_tree_init)({}))
+
+## A floating layout system as the platform holds it.
+floating_tree_seed_for_host : FloatingSeed -> Box(Floatings)
+floating_tree_seed_for_host = |seed| Box.box((core.floating_tree_seed)(seed))
+
+## One operation or query of the system: the system after it, and what it answered.
+floating_tree_step_for_host : Box(Floatings), FloatingEvent -> FloatingTreeStepped
+floating_tree_step_for_host = |boxed, event| {
+	stepped = (core.floating_tree_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), answer: stepped.answer }
+}
+
+## The system as the platform holds it, and the system back unchanged.
+floating_tree_view_for_host : Box(Floatings) -> FloatingTreeViewed
+floating_tree_view_for_host = |boxed| {
+	viewed = (core.floating_tree_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), view: viewed.view }
+}
+
+## A floating layout question's answer, and the system back unchanged.
+floating_tree_layout_for_host : Box(Floatings), FloatingLayoutQuestion -> FloatingTreeLaidOut
+floating_tree_layout_for_host = |boxed, question| {
+	laid = (core.floating_tree_layout)(Box.unbox(boxed), question)
+	{ model: Box.box(laid.model), answer: laid.answer }
+}
+
+## The host cannot release a `Box(Floatings)`: only Roc knows its layout.
+floating_tree_release_for_host : Box(Floatings) -> {}
+floating_tree_release_for_host = |_| {}

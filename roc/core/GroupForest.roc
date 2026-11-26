@@ -8,10 +8,11 @@
 ## forest, as it is in Rust (whose `Index` panics and whose `expect`s and `unreachable!`s stop),
 ## so the lookup crashes, naming what looked and the key.
 
+import Floating
 import Geometry
 import Slots
 import Traditional exposing [Branch, Laid, Tree, TreeAxis, TreeStack]
-import pf.Boundary exposing [Frame, GroupBar, GroupBars, GroupBranch, GroupContainerView, GroupProjected, GroupRole, GroupRow, StackFramesQuestion, WindowConstraints, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
+import pf.Boundary exposing [BspKnown, BspMovement, FloatingWindow, FloatingShapeQuestion, FloatingAdd, FloatingAligned, FloatingAnswer, FloatingEvent, FloatingFrame, FloatingFrames, FloatingGeometry, FloatingInitialize, FloatingLayout, FloatingLayoutAnswer, FloatingLayoutQuestion, FloatingPlace, FloatingScreen, FloatingSeed, FloatingSlot, FloatingStore, Gaps, Newcomer, Size, Frame, GroupBar, GroupBars, GroupBranch, GroupContainerView, GroupProjected, GroupRole, GroupRow, StackFramesQuestion, WindowConstraints, BspAppIn, BspDirection, BspEdited, BspFocusIn, BspFocused, BspFullscreen, BspLayoutDirection, BspMoveQuery, BspNativeResize, BspOrientation, BspParticipation, BspReplacement, BspResize, BspSlot, BspTreeAnswer, BspWindowIn, BspWindowsQuery, Fill, GroupContainer, GroupDrop, GroupDropAction, GroupEditIn, GroupForestEvent, GroupForestSeed, GroupKind, GroupMemory, GroupNewSibling, GroupPlace, GroupTreeNode, MasterArrangement, MasterSettings, MasterStackEvent, MasterStackSeed, MaybeWord, Rect, StackBeyond, StackDefault, TraditionalAdd, TraditionalEvent, TraditionalSeed, TraditionalSettings]
 
 ## The nodes a layout pass takes part with: a mark per slot of the forest's node table
 ## (`Slots.unmarked`, `mark`, `marked`).
@@ -31,6 +32,12 @@ Traditionals : { forest : Forest, settings : TraditionalSettings }
 ## The master-stack layout system: the forest, each layout's root a region pair, and its
 ## settings (`MasterStack`).
 Master : { forest : Forest, settings : MasterSettings }
+
+## The floating layout system: the forest and the frame kept for each window (`FloatingSystem`).
+Floats : { forest : Forest, geometry : Dict(U64, FloatingGeometry) }
+
+## A window's kept frame, or none (no entry).
+Entry : [Entry(FloatingGeometry), NoEntry]
 
 ## Where a node goes among a container's children (`Placement`).
 Placement : [Back(U64), Before(U64), After(U64)]
@@ -3651,6 +3658,826 @@ GroupForest := [].{
 			first_taking_part(neighbors)
 		} else {
 			Nothing
+		}
+	}
+	# The floating system (`FloatingSystem`): the forest, and the frame kept for each window.
+
+	floating_empty : {} -> Floats
+	floating_empty = |{}| { forest: empty_forest({}), geometry: Dict.empty() }
+
+	floating_seeded : FloatingSeed -> Floats
+	floating_seeded = |seed| {
+		forest: seeded_forest(seed.forest),
+		geometry: seed.geometry.fold(Dict.empty(), |held, framed| held.insert(framed.window, framed.geometry)),
+	}
+
+	## The system as the platform holds it, the frames by window.
+	floating_view : Floats -> FloatingSeed
+	floating_view = |system| {
+		forest: forest_view(system.forest),
+		geometry: system.geometry
+			.to_list()
+			.sort_with(|(a, _), (b, _)| a.order_relative_to(b))
+			.map(|(window, geometry)| FloatingFrames.{ window, geometry }),
+	}
+
+	## One operation or query of the floating system, and what it answers.
+	floating_step : Floats, FloatingEvent -> (Floats, FloatingAnswer)
+	floating_step = |system, event|
+		match event {
+			CreateLayout => {
+				(forest, layout) = create_layout(system.forest)
+				({ ..system, forest }, Tree(Layout(layout)))
+			}
+			CloneLayout(layout) => {
+				(forest, clone) = clone_layout(system.forest, layout)
+				({ ..system, forest }, Tree(Layout(clone)))
+			}
+			RemoveLayout(layout) => (floating_remove_layout(system, layout), Tree(Done))
+			Participation(participation) => {
+				(forest, changed) = set_window_participation(system.forest, participation)
+				({ ..system, forest }, Tree(Participated(changed)))
+			}
+			AddWindow(added) => ({ ..system, forest: floating_add_window(system.forest, added) }, Tree(Done))
+			RemoveWindow(window_word) => {
+				(forest, _) = remove_window(system.forest, window_word)
+				({ forest, geometry: system.geometry.remove(window_word) }, Tree(Done))
+			}
+			ReplaceWindow(replacement) => (floating_replace_window(system, replacement), Tree(Done))
+			CloseApp(windows) => ({ forest: close_app(system.forest, windows), geometry: system.geometry.drop_if(|(window_word, _)| windows.contains(window_word)) }, Tree(Done))
+			StoreFrame({ window: window_word, frame }) => (store_frame(system, window_word, frame), Tree(Done))
+			InitializeFrames(asked_frames) => (initialize_frames(system, asked_frames), Tree(Done))
+			Focus(focus_in) => {
+				(after, focused) = floating_focus(system, focus_in)
+				(after, Tree(Focused(focused)))
+			}
+			Edit(edit_in) => {
+				(after, edited) = floating_edit(system, edit_in)
+				(after, Tree(Edited(edited)))
+			}
+			ContainsLayout(layout) =>
+				match Slots.get(system.forest.layouts, layout) {
+					Held(_) => (system, Tree(Verdict(True)))
+					NotHeld => (system, Tree(Verdict(False)))
+				}
+			WindowParticipates(window_word) => (system, Tree(Verdict(takes_part(system.forest, window_word))))
+			SelectedWindow(layout) => (system, Tree(Window(selected_window(system.forest, layout))))
+			SelectionContainsWindow({ layout, window: window_word }) => (system, Tree(Verdict(selection_contains_window(system.forest, layout, window_word))))
+			ContainsWindow({ layout, window: window_word }) => (system, Tree(Verdict(contains_window(system.forest, layout, window_word))))
+			HasAnyFullscreenNode(layout) => (system, Tree(Verdict(has_any_fullscreen_node(system.forest, layout))))
+			HasWindowsForApp(windows_of) => (system, Tree(Verdict(has_windows_for_app(system.forest, windows_of))))
+			ParentOfSelectionIsStacked(layout) =>
+				match stacked_selection_container(system.forest, layout) {
+					Some(_) => (system, Tree(Verdict(True)))
+					Nothing => (system, Tree(Verdict(False)))
+				}
+			Windows(query) => (system, Tree(Windows(listed_windows(system.forest, query))))
+			WindowSlot({ layout, window: window_word }) => (system, Tree(WindowSlot(window_slot(system.forest, layout, window_word))))
+			WindowInDirection({ layout, direction }) => (system, Tree(Window(floating_target(system, layout, direction))))
+			Cycle(layout) => (system, Tree(Windows(cycle_windows(system, layout))))
+			FrameOf(window_word) => (system, Frame(frame_of(system, window_word)))
+			Floats(window_word) => (system, Tree(Verdict(holds_window(system.forest, window_word))))
+		}
+
+	## A floating layout question's answer (the system unchanged).
+	floating_layout : Floats, FloatingLayoutQuestion -> FloatingLayoutAnswer
+	floating_layout = |system, question|
+		match question {
+			Shape(asked) => Shape(floating_shape(system, asked))
+			Bars({ layout, floating, selection_path_only }) => Bars(floating_bars(system, layout, floating, selection_path_only))
+			Container(layout) => Container(container_view(system.forest, layout))
+			Draw(layout) => Drawn(rows(system.forest, layout))
+		}
+
+	## The constraints a window has when the host knows none (Rust's `Default`).
+	no_constraints : WindowConstraints
+	no_constraints = WindowConstraints.{ sizing: Fixed(Size.{ width: 0.0, height: 0.0 }), locked_width: 0.0, locked_height: 0.0, max_width: 0.0, max_height: 0.0 }
+
+	constraints_of : Dict(U64, WindowConstraints), U64 -> WindowConstraints
+	constraints_of = |known, window_word|
+		match known.get(window_word) {
+			Ok(constraints) => constraints
+			Err(KeyNotFound) => no_constraints
+		}
+
+	entry_of : Floats, U64 -> Entry
+	entry_of = |system, window_word|
+		match system.geometry.get(window_word) {
+			Ok(geometry) => Entry(geometry)
+			Err(KeyNotFound) => NoEntry
+		}
+
+	set_entry : Floats, U64, Entry -> Floats
+	set_entry = |system, window_word, entry|
+		match entry {
+			Entry(geometry) => { ..system, geometry: system.geometry.insert(window_word, geometry) }
+			NoEntry => { ..system, geometry: system.geometry.remove(window_word) }
+		}
+
+	## The frame kept, if any.
+	kept_frame : FloatingGeometry -> FloatingFrame
+	kept_frame = |geometry|
+		match geometry {
+			Kept(frame) => Framed(frame)
+			Aligned({ frame, .. }) => Framed(frame)
+			Restorable(_) => Unframed
+		}
+
+	frame_of : Floats, U64 -> FloatingFrame
+	frame_of = |system, window_word|
+		match entry_of(system, window_word) {
+			Entry(geometry) => kept_frame(geometry)
+			NoEntry => Unframed
+		}
+
+	## `frame` kept, the frame to return to kept with it (`Geometry::with_frame`).
+	with_frame : Entry, Rect -> FloatingGeometry
+	with_frame = |entry, frame|
+		match entry {
+			Entry(Aligned({ restore, .. })) => Aligned(FloatingAligned.{ frame, restore })
+			Entry(Restorable(restore)) => Aligned(FloatingAligned.{ frame, restore })
+			Entry(Kept(_)) => Kept(frame)
+			NoEntry => Kept(frame)
+		}
+
+	## The frame to return to, back as the frame (`Geometry::restored`).
+	restored : FloatingGeometry -> FloatingGeometry
+	restored = |geometry|
+		match geometry {
+			Aligned({ restore, .. }) => Kept(restore)
+			Restorable(restore) => Kept(restore)
+			Kept(frame) => Kept(frame)
+		}
+
+	## The frame to return to forgotten (`Geometry::forgetting`).
+	forgetting : FloatingGeometry -> Entry
+	forgetting = |geometry|
+		match geometry {
+			Kept(frame) => Entry(Kept(frame))
+			Aligned({ frame, .. }) => Entry(Kept(frame))
+			Restorable(_) => NoEntry
+		}
+
+	## Aligned to an anchor's frame, remembering its own with `save` (`Geometry::aligned`).
+	aligned : Entry, FloatingFrame, Bool -> Entry
+	aligned = |entry, anchor, save|
+		match (entry, anchor) {
+			(NoEntry, Unframed) => NoEntry
+			(NoEntry, Framed(frame)) => Entry(Kept(frame))
+			(Entry(Kept(own)), _) => {
+				frame =
+					match anchor {
+						Framed(at) => at
+						Unframed => own
+					}
+				if save Entry(Aligned(FloatingAligned.{ frame, restore: own })) else Entry(Kept(frame))
+			}
+			(Entry(Aligned({ frame: own, restore })), _) => {
+				frame =
+					match anchor {
+						Framed(at) => at
+						Unframed => own
+					}
+				Entry(Aligned(FloatingAligned.{ frame, restore }))
+			}
+			(Entry(Restorable(restore)), Framed(frame)) => Entry(Aligned(FloatingAligned.{ frame, restore }))
+			(Entry(Restorable(restore)), Unframed) => Entry(Restorable(restore))
+		}
+
+	## Out of a stack being unstacked (`Geometry::unstacked`).
+	unstacked : FloatingGeometry, Bool -> Entry
+	unstacked = |geometry, focused|
+		match (geometry, focused) {
+			(Kept(frame), _) => Entry(Kept(frame))
+			(Aligned({ frame, .. }), True) => Entry(Kept(frame))
+			(Aligned({ restore, .. }), False) => Entry(Kept(restore))
+			(Restorable(restore), False) => Entry(Kept(restore))
+			(Restorable(_), True) => NoEntry
+		}
+
+	keep_frame : Floats, U64, Rect -> Floats
+	keep_frame = |system, window_word, frame| set_entry(system, window_word, Entry(with_frame(entry_of(system, window_word), frame)))
+
+	restore_frame : Floats, U64 -> Floats
+	restore_frame = |system, window_word|
+		match entry_of(system, window_word) {
+			Entry(geometry) => set_entry(system, window_word, Entry(restored(geometry)))
+			NoEntry => system
+		}
+
+	align_members : Floats, List(U64), U64, Bool -> Floats
+	align_members = |system, members, anchor, save| {
+		frame = frame_of(system, anchor)
+		members.fold(system, |at, window_word| set_entry(at, window_word, aligned(entry_of(at, window_word), frame, save)))
+	}
+
+	floating_remove_layout : Floats, U64 -> Floats
+	floating_remove_layout = |system, layout| {
+		windows = windows_with_nodes(system.forest, layout)
+		forest = remove_layout(system.forest, layout)
+		geometry = windows.fold(system.geometry, |at, window_word| if holds_window(forest, window_word) at else at.remove(window_word))
+		{ forest, geometry }
+	}
+
+	## Whether any layout holds `window_word` (a walk that stops at its first leaf).
+	holds_window : Forest, U64 -> Bool
+	holds_window = |forest, window_word|
+		layout_roots(forest).any(
+			|(_, top)|
+				walk(
+					forest,
+					top,
+					Preorder,
+					False,
+					|_, _, at|
+						match at.body {
+							Window({ window: leaf, .. }) if leaf == window_word => Break(True)
+							_ => Continue(False)
+						},
+				),
+		)
+
+	## A new window after the selection's branch of the root (next to the selection), or at the
+	## root's back; selected.
+	floating_add_window : Forest, FloatingAdd -> Forest
+	floating_add_window = |forest, { layout, window: window_word, insertion }|
+		if contains_window(forest, layout, window_word) {
+			forest
+		} else {
+			top = root(forest, layout, "floating_add_window")
+			anchor =
+				match insertion {
+					NextToSelection =>
+						ancestors(forest, selection(forest, layout)).fold_until(
+							Unplaced,
+							|_, key|
+								match position(forest, key) {
+									At(at) if at.above == top => Break(At(at))
+									_ => Continue(Unplaced)
+								},
+						)
+					EndOfTree => Unplaced
+				}
+			(added, key) =
+				match anchor {
+					At(at) => {
+						(inserted, made) = insert(forest, after_place(at))
+						(set_window(inserted, made, window_word), made)
+					}
+					Unplaced => add_window_under(forest, top, window_word)
+				}
+			select_node(added, key)
+		}
+
+	floating_replace_window : Floats, BspReplacement -> Floats
+	floating_replace_window = |system, { from, to }|
+		if from == to {
+			system
+		} else {
+			moved_geometry =
+				match system.geometry.get(from) {
+					Ok(geometry) => system.geometry.remove(from).remove(to).insert(to, geometry)
+					Err(KeyNotFound) => system.geometry.remove(to)
+				}
+			{ forest: replace_window(system.forest, BspReplacement.{ from, to }), geometry: moved_geometry }
+		}
+
+	## The layout's visible leaves with their windows, in tree order (a stack giving its chosen
+	## child): the order equally near windows are compared in (`visible_order`).
+	visible_leaves : Forest, U64, Limit -> (List((U64, U64)), Bool)
+	visible_leaves = |forest, key, group_limit|
+		match window_at(forest, key) {
+			Some(leaf) => if takes_part(forest, leaf) ([(key, leaf)], True) else ([], False)
+			Nothing => {
+				(preferred, limit) = if is_stacked(forest, key) (local_selection_of(forest, key), group_limit) else (Nothing, All)
+				ordered_children(forest, key, preferred, False).fold_until(
+					([], False),
+					|(listed, seen), child| {
+						(under, child_seen) = visible_leaves(forest, child, group_limit)
+						now = seen or child_seen
+						after = (listed.concat(under), now)
+						stop =
+							match limit {
+								First => True
+								FirstVisible => now
+								All => False
+							}
+						if stop Break(after) else Continue(after)
+					},
+				)
+			}
+		}
+
+	visible_order : Forest, U64 -> List((U64, U64))
+	visible_order = |forest, key| {
+		group_limit = if forest.left_out.is_empty() First else FirstVisible
+		(leaves, _) = visible_leaves(forest, key, group_limit)
+		leaves
+	}
+
+	first_visible : Forest, U64 -> [Found(U64, U64), NotFound]
+	first_visible = |forest, key|
+		match visible_order(forest, key).first() {
+			Ok((leaf, window_word)) => Found(leaf, window_word)
+			Err(_) => NotFound
+		}
+
+	visible_stack_child : Forest, U64 -> MaybeWord
+	visible_stack_child = |forest, key|
+		participating_child(
+			forest,
+			key,
+			False,
+			|child|
+				match first_visible(forest, child) {
+					Found(_, _) => True
+					NotFound => False
+				},
+		)
+
+	## A leaf whose window takes part and that every stack above it shows.
+	node_is_visible : Forest, U64 -> Bool
+	node_is_visible = |forest, key|
+		match window_at(forest, key) {
+			Some(leaf) if takes_part(forest, leaf) => shown_up_from(forest, key)
+			_ => False
+		}
+
+	shown_up_from : Forest, U64 -> Bool
+	shown_up_from = |forest, key|
+		match parent(forest, key) {
+			Some(above) =>
+				if is_stacked(forest, above) and visible_stack_child(forest, above) != Some(key) {
+					False
+				} else {
+					shown_up_from(forest, above)
+				}
+			Nothing => True
+		}
+
+	## A frame the user gave a window: kept when one of its leaves is visible, and shared by
+	## every member of the outermost stack around each of its leaves.
+	store_frame : Floats, U64, Rect -> Floats
+	store_frame = |system, window_word, frame| {
+		forest = system.forest
+		leaves = occurrences(forest, window_word).map(|(_, key)| key)
+		if leaves.any(|key| node_is_visible(forest, key)) {
+			kept = keep_frame(system, window_word, frame)
+			leaves.fold(
+				kept,
+				|at, key|
+					match ancestors(forest, key).keep_if(|above| is_stacked(forest, above)).last() {
+						Ok(stack) => windows_from(forest, stack, Some(stack), True).fold(at, |shared, member| keep_frame(shared, member, frame))
+						Err(_) => at
+					},
+			)
+		} else {
+			system
+		}
+	}
+
+	## The first frame of each of the layout's windows without one, cascaded by its position
+	## among all the layout's windows when spreading.
+	initialize_frames : Floats, FloatingInitialize -> Floats
+	initialize_frames = |system, { layout, floating, known, live }| {
+		windows = windows_with_nodes(system.forest, layout)
+		count = windows.len()
+		constraints = known.fold(Dict.empty(), |held, k| held.insert(k.window, k.constraints))
+		seen = live.fold(Dict.empty(), |held, l| held.insert(l.window, l.frame))
+		(initialized, _) = windows.fold(
+			(system, 0),
+			|(at, index), window_word|
+				match frame_of(at, window_word) {
+					Framed(_) => (at, index + 1)
+					Unframed => {
+						newcomer = Newcomer.{
+							constraints: constraints_of(constraints, window_word),
+							seen: match seen.get(window_word) {
+								Ok(frame) => Live(frame)
+								Err(KeyNotFound) => Unseen
+							},
+						}
+						(keep_frame(at, window_word, Floating.first_frame(floating.screen, floating.spread, newcomer, index, count)), index + 1)
+					},
+				},
+		)
+		initialized
+	}
+
+	## The screen or the tiling area, when `key` or an ancestor fills.
+	fill_place : Forest, U64 -> [Filled(FloatingPlace), NotFilled]
+	fill_place = |forest, key|
+		ancestors(forest, key).fold_until(
+			NotFilled,
+			|_, above|
+				match node(forest, above, "fill_place").fill {
+					Screen => Break(Filled(Screen))
+					WithinGaps => Break(Filled(WithinGaps))
+					Tiled => Continue(NotFilled)
+				},
+		)
+
+	## A layout as the floating geometry takes it (`FloatingSystem::shape`).
+	floating_shape : Floats, FloatingShapeQuestion -> FloatingLayout
+	floating_shape = |system, { layout, floating, gaps, known }| {
+		forest = system.forest
+		constraints = known.fold(Dict.empty(), |held, k| held.insert(k.window, k.constraints))
+		leaves = walk(
+			forest,
+			root(forest, layout, "floating_shape"),
+			Preorder,
+			[],
+			|held, key, at|
+				match at.body {
+					Window({ window: leaf, .. }) => Continue(held.append((key, leaf)))
+					Container(_) => Continue(held)
+				},
+		)
+		windows =
+			leaves.map(
+				|(key, window_word)|
+					if takes_part(forest, window_word) {
+						place =
+							match fill_place(forest, key) {
+								Filled(filled) => filled
+								NotFilled =>
+									match frame_of(system, window_word) {
+										Framed(frame) => Kept(frame)
+										Unframed => First(constraints_of(constraints, window_word))
+									}
+							}
+						Placed(FloatingWindow.{ window: Geometry.window_id(window_word), place })
+					} else {
+						LeftOut
+					},
+			)
+		FloatingLayout.{ screen: floating.screen, spread: floating.spread, gaps, windows }
+	}
+
+	## The group bar of each stack (along the selection path, if asked) whose shown window does
+	## not fill: at the shown window's frame, or the default frame.
+	floating_bars : Floats, U64, FloatingScreen, Bool -> List(GroupBar)
+	floating_bars = |system, layout, floating, selection_path_only| {
+		forest = system.forest
+		path = ancestors(forest, selection(forest, layout))
+		walk(
+			forest,
+			root(forest, layout, "floating_bars"),
+			Preorder,
+			[],
+			|bars, key, at|
+				match at.body {
+					Container({ kind: Stack(orientation), .. }) if !selection_path_only or path.contains(key) =>
+						match visible_stack_child(forest, key) {
+							Some(shown) =>
+								match first_visible(forest, shown) {
+									Found(leaf, window_word) =>
+										match fill_place(forest, leaf) {
+											Filled(_) => Continue(bars)
+											NotFilled => {
+												frame =
+													match frame_of(system, window_word) {
+														Framed(kept) => kept
+														Unframed => Floating.default_frame(floating.screen, no_constraints)
+													}
+												Continue(bars.append(group_bar(forest, key, orientation, frame, children(forest, key), shown)))
+											}
+										}
+									NotFound => Continue(bars)
+								}
+							Nothing => Continue(bars)
+						}
+					_ => Continue(bars)
+				},
+		)
+	}
+
+	## The windows a cycle goes through: the focused stack's members taking part, else the
+	## layout's visible windows.
+	cycle_windows : Floats, U64 -> List(U64)
+	cycle_windows = |system, layout| {
+		forest = system.forest
+		stacked =
+			match focused_leaf(forest, layout) {
+				Found(key, _) =>
+					match parent(forest, key) {
+						Some(above) if is_stacked(forest, above) => Some(above)
+						_ => Nothing
+					}
+				NotFound => Nothing
+			}
+		match stacked {
+			Some(above) => windows_from(forest, above, Some(above), True).keep_if(|window_word| takes_part(forest, window_word))
+			Nothing => visible_windows_under(forest, root(forest, layout, "cycle_windows"))
+		}
+	}
+
+	## How near `candidate` is from `source` toward `direction`: outside the source's band
+	## across it or not, and the squared distance between centres; behind when not ahead.
+	nearness : Rect, Rect, BspDirection -> [Ahead(Bool, F64), Behind]
+	nearness = |source, candidate, direction| {
+		(ox, oy) = (source.x + source.w / 2.0, source.y + source.h / 2.0)
+		(tx, ty) = (candidate.x + candidate.w / 2.0, candidate.y + candidate.h / 2.0)
+		(across, overlaps) =
+			match direction {
+				Left | Right => (ty - oy, source.y < candidate.y + candidate.h and candidate.y < source.y + source.h)
+				Up | Down => (tx - ox, source.x < candidate.x + candidate.w and candidate.x < source.x + source.w)
+			}
+		along =
+			match direction {
+				Left => ox - tx
+				Right => tx - ox
+				Up => oy - ty
+				Down => ty - oy
+			}
+		if along > 0.0 Ahead(!overlaps, along * along + across * across) else Behind
+	}
+
+	## The nearest visible window toward `direction` from `focused`'s frame, not inside
+	## `exclude`: one in the frame's band before one outside it, then the nearest centre, then the
+	## first in `visible_order`.
+	directional_window : Floats, U64, U64, BspDirection, MaybeWord -> [Found(U64, U64), NotFound]
+	directional_window = |system, layout, focused, direction, exclude|
+		match frame_of(system, focused) {
+			Unframed => NotFound
+			Framed(source) => {
+				forest = system.forest
+				best = visible_order(forest, root(forest, layout, "directional_window")).fold(
+					NoBest,
+					|chosen, (key, window_word)| {
+						excluded =
+							match exclude {
+								Some(group) => is_within(forest, key, group)
+								Nothing => False
+							}
+						if window_word == focused or excluded {
+							chosen
+						} else {
+							match frame_of(system, window_word) {
+								Unframed => chosen
+								Framed(frame) =>
+									match nearness(source, frame, direction) {
+										Behind => chosen
+										Ahead(outside, distance) =>
+											match chosen {
+												NoBest => Best(key, window_word, outside, distance)
+												Best(_, _, best_outside, best_distance) =>
+													if (!outside and best_outside) or (outside == best_outside and distance < best_distance) {
+														Best(key, window_word, outside, distance)
+													} else {
+														chosen
+													}
+											}
+									}
+							}
+						}
+					},
+				)
+				match best {
+					Best(key, window_word, _, _) => Found(key, window_word)
+					NoBest => NotFound
+				}
+			}
+		}
+
+	## Where a directional focus move goes (`FloatingSystem::window_in_direction`).
+	floating_target : Floats, U64, BspDirection -> MaybeWord
+	floating_target = |system, layout, direction| {
+		forest = system.forest
+		match focused_leaf(forest, layout) {
+			NotFound => Nothing
+			Found(key, focused) =>
+				match parent(forest, key) {
+					Nothing => Nothing
+					Some(above) => {
+						made = container_kind(forest, above, "floating_target")
+						stacked = kind_is_stacked(made)
+						forward =
+							match direction {
+								Right | Down => True
+								Left | Up => False
+							}
+						stack_target = if stacked first_of(windows_from(forest, above, step_in(forest, key, above, forward), forward)) else Nothing
+						if same_orientation(kind_orientation(made), orientation_of(direction)) and stack_target != Nothing {
+							stack_target
+						} else {
+							match directional_window(system, layout, focused, direction, Nothing) {
+								Found(_, window_word) => Some(window_word)
+								NotFound =>
+									if stack_target != Nothing {
+										stack_target
+									} else if !stacked {
+										Nothing
+									} else {
+										start = if forward above else last_descendant(forest, above)
+										first_of(windows_from(forest, above, Some(start), forward))
+									}
+							}
+						}
+					}
+				}
+		}
+	}
+
+	floating_focus : Floats, BspFocusIn -> (Floats, BspFocused)
+	floating_focus = |system, { layout, focus: asked }|
+		match asked {
+			Direction(direction) => {
+				target = floating_target(system, layout, direction)
+				after =
+					match target {
+						Some(window_word) => {
+							(selected, _) = focus(system.forest, BspFocusIn.{ layout, focus: Select(window_word) })
+							{ ..system, forest: selected }
+						}
+						Nothing => system
+					}
+				raise =
+					match target {
+						Some(window_word) => [window_word]
+						Nothing => []
+					}
+				(after, Movement(BspMovement.{ window: target, raise }))
+			}
+			_ => {
+				(forest, focused) = focus(system.forest, BspFocusIn.{ layout, focus: asked })
+				({ ..system, forest }, focused)
+			}
+		}
+
+	## The group the selection is in (or is), when it is not the root.
+	selected_container : Forest, U64 -> MaybeWord
+	selected_container = |forest, layout| {
+		chosen = selection(forest, layout)
+		group =
+			match window_at(forest, chosen) {
+				Some(_) => parent(forest, chosen)
+				Nothing => Some(chosen)
+			}
+		match group {
+			Some(key) if key != root(forest, layout, "selected_container") => Some(key)
+			_ => Nothing
+		}
+	}
+
+	## The leaf left alone in `moving`'s group once `moving` leaves it, if that is what stays.
+	remaining_leaf : Forest, U64 -> MaybeWord
+	remaining_leaf = |forest, moving|
+		match parent(forest, moving) {
+			Some(above) =>
+				match children(forest, above).keep_if(|key| key != moving) {
+					[only] if window_at(forest, only) != Nothing => Some(only)
+					_ => Nothing
+				}
+			Nothing => Nothing
+		}
+
+	## A leaf left on its own at the root takes back its own frame.
+	restore_if_independent : Floats, U64, MaybeWord -> Floats
+	restore_if_independent = |system, layout, remaining|
+		match remaining {
+			Some(key) if parent(system.forest, key) == Some(root(system.forest, layout, "restore_if_independent")) =>
+				match window_at(system.forest, key) {
+					Some(window_word) => restore_frame(system, window_word)
+					Nothing => system
+				}
+			_ => system
+		}
+
+	floating_edit : Floats, GroupEditIn -> (Floats, BspEdited)
+	floating_edit = |system, { layout, edit }| {
+		forest = system.forest
+		on_forest = |(after, edited)| ({ ..system, forest: after }, edited)
+		changed = |(after, done)| (after, if done Changed else Unchanged)
+		match edit {
+			Moved(_) => (system, Unchanged)
+			Fullscreen(mode) => on_forest(edit_fullscreen(forest, layout, mode))
+			Swap({ a, b }) => on_forest(edited_by(swap_windows(forest, layout, a, b)))
+			ReorderTab({ window: window_word, target }) => on_forest(edited_by(move_stack_tab(forest, layout, window_word, target)))
+			ToggleOrientation => on_forest(toggle_orientation(forest, layout))
+			Join(direction) => changed(floating_join(system, layout, direction))
+			ConsumeOrExpel(direction) =>
+				match selected_container(forest, layout) {
+					Some(_) => changed(floating_unjoin(system, layout))
+					Nothing => changed(floating_join(system, layout, direction))
+				}
+			Stack(default) => {
+				(after, raised) = floating_stack(system, layout, default)
+				(after, Raise(raised))
+			}
+			Unstack(default) => {
+				(after, raised) = floating_unstack(system, layout, default)
+				(after, Raise(raised))
+			}
+			Unjoin => changed(floating_unjoin(system, layout))
+			Split(_) | Drop(_) | Resize(_) | Rebalance => (system, Unsupported)
+		}
+	}
+
+	## The selected group made a stack, its members sharing the focused window's frame.
+	floating_stack : Floats, U64, StackDefault -> (Floats, List(U64))
+	floating_stack = |system, layout, default| {
+		forest = system.forest
+		match (selected_window(forest, layout), selected_container(forest, layout)) {
+			(Some(focused), Some(group)) => {
+				members = windows_from(forest, group, Some(group), True)
+				save = !is_stacked(forest, group)
+				aligned_system = align_members(system, members, focused, save)
+				(stacked, _) = apply_stacking(aligned_system.forest, layout, default)
+				(selected, _) = focus(stacked, BspFocusIn.{ layout, focus: Select(focused) })
+				({ ..aligned_system, forest: selected }, listed_windows(selected, BspWindowsQuery.{ layout, query: Selection }))
+			}
+			_ => (system, [])
+		}
+	}
+
+	## The stack around the selection made a split: its members take back their own frames, but
+	## the focused one, which keeps the stack's.
+	floating_unstack : Floats, U64, StackDefault -> (Floats, List(U64))
+	floating_unstack = |system, layout, default| {
+		forest = system.forest
+		focused = selected_window(forest, layout)
+		chosen = selection(forest, layout)
+		match ancestors(forest, chosen).find_first(|key| is_stacked(forest, key)) {
+			Err(_) => (system, [])
+			Ok(group) => {
+				(unstacked_forest, visible) = unstack(forest, layout, default)
+				members = windows_from(unstacked_forest, group, Some(group), True)
+				reframed = members.fold(
+					{ ..system, forest: unstacked_forest },
+					|at, window_word|
+						match entry_of(at, window_word) {
+							Entry(geometry) => set_entry(at, window_word, unstacked(geometry, focused == Some(window_word)))
+							NoEntry => at
+						},
+				)
+				refocused =
+					match focused {
+						Some(window_word) => {
+							(selected, _) = focus(reframed.forest, BspFocusIn.{ layout, focus: Select(window_word) })
+							{ ..reframed, forest: selected }
+						}
+						Nothing => reframed
+					}
+				(refocused, visible)
+			}
+		}
+	}
+
+	## The focused window joined with the nearest window toward `direction`, outside its own group.
+	floating_join : Floats, U64, BspDirection -> (Floats, Bool)
+	floating_join = |system, layout, direction| {
+		forest = system.forest
+		match focused_leaf(forest, layout) {
+			NotFound => (system, False)
+			Found(chosen, focused) => {
+				top = root(forest, layout, "floating_join")
+				above =
+					match parent(forest, chosen) {
+						Some(key) => key
+						Nothing => top
+					}
+				exclude = if above != top Some(above) else Nothing
+				match directional_window(system, layout, focused, direction, exclude) {
+					NotFound => (system, False)
+					Found(target_node, target) => {
+						(nested, group) = if above == top nest_in_container(forest, layout, chosen, Split(orientation_of(direction))) else (forest, above)
+						with_group = { ..system, forest: nested }
+						remaining = remaining_leaf(nested, target_node)
+						reframed =
+							if is_stacked(nested, group) {
+								align_members(with_group, [target], focused, True)
+							} else {
+								match entry_of(with_group, target) {
+									Entry(geometry) => set_entry(with_group, target, forgetting(geometry))
+									NoEntry => with_group
+								}
+							}
+						moved_in = { ..reframed, forest: moved(reframed.forest, target_node, Back(group)) }
+						independent = restore_if_independent(moved_in, layout, remaining)
+						({ ..independent, forest: select_node(independent.forest, chosen) }, True)
+					}
+				}
+			}
+		}
+	}
+
+	## The focused window out of its group, after it, with its own frame back.
+	floating_unjoin : Floats, U64 -> (Floats, Bool)
+	floating_unjoin = |system, layout| {
+		forest = system.forest
+		match focused_leaf(forest, layout) {
+			NotFound => (system, False)
+			Found(chosen, window_word) =>
+				match parent(forest, chosen) {
+					Some(above) if above != root(forest, layout, "floating_unjoin") => {
+						remaining = remaining_leaf(forest, chosen)
+						moved_out = { ..system, forest: moved(forest, chosen, After(above)) }
+						independent = restore_if_independent(restore_frame(moved_out, window_word), layout, remaining)
+						({ ..independent, forest: select_node(independent.forest, chosen) }, True)
+					}
+					_ => (system, False)
+				}
 		}
 	}
 }

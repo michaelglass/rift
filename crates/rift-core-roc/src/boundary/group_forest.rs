@@ -5,10 +5,12 @@
 use std::mem::ManuallyDrop;
 
 use rift_core::layout::WindowConstraints;
+use rift_core::layout::floating::{self, Floating};
 use rift_core::layout::group_forest::{
     Arrangement, Bars, Beyond, Body, Branch, Container, ContainerView, Drawn, DropAction, Edit,
-    Fill, GroupBar, Held, InsertionPoint, Kind, Mark, MasterSettings, MasterSide, Members, Memory,
-    NewSibling, NewWindowPlacement, Node, Pass, Place, RegionInsertion, ResizeAlong, Role, Row,
+    Fill, Geometry, GroupBar, Held, InsertionPoint, Kind, Mark, MasterSettings, MasterSide,
+    Members, Memory, NewSibling, NewWindowPlacement, Node, Pass, Place, RegionInsertion,
+    ResizeAlong, Role, Row,
 };
 use rift_core::plain::{Rect, WindowId};
 
@@ -21,8 +23,8 @@ use super::{
 use crate::abi;
 use crate::bsp_tree::{Answer, LayoutKey, NodeKey, Saved};
 use crate::group_forest::{
-    ForestEvent, ForestView, MasterStackEvent, MasterStackView, Projected, TraditionalEvent,
-    TraditionalView,
+    FloatingAnswer, FloatingEvent, FloatingView, ForestEvent, ForestView, MasterStackEvent,
+    MasterStackView, Projected, TraditionalEvent, TraditionalView,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -1036,8 +1038,14 @@ pub(crate) fn read_rows(
 ) -> Vec<Row<NodeKey, u64>> {
     assert_eq!(answer.tag, abi::BoundaryGroupLayoutAnswerTag::Drawn, "a drawing");
     // SAFETY: the tag says the payload is the rows, read in full here, then released.
-    let rows = unsafe { answer.borrow_payload_drawn_unchecked() }
-        .as_slice()
+    let rows = rows_of(unsafe { answer.borrow_payload_drawn_unchecked() });
+    unsafe { answer.decref(host) };
+    rows
+}
+
+/// A drawing's rows, read.
+fn rows_of(rows: &abi::RocListWith<abi::BoundaryGroupRow, true>) -> Vec<Row<NodeKey, u64>> {
+    rows.as_slice()
         .iter()
         .map(|row| Row {
             branches: row
@@ -1073,9 +1081,7 @@ pub(crate) fn read_rows(
             size: row.size,
             role: from_role(row.role),
         })
-        .collect();
-    unsafe { answer.decref(host) };
-    rows
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1213,5 +1219,576 @@ impl Drop for MasterStackBox {
     fn drop(&mut self) {
         // SAFETY: the box is this system's and is never used again.
         unsafe { abi::roc_master_stack_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The floating system (`FloatingSystem`).
+
+fn floating_geometry(geometry: Geometry) -> abi::BoundaryFloatingGeometry {
+    use abi::BoundaryFloatingGeometryTag as Tag;
+    match geometry {
+        Geometry::Kept(frame) => union!(
+            BoundaryFloatingGeometry,
+            BoundaryFloatingGeometryPayload.kept(rect(frame)),
+            Tag::Kept
+        ),
+        Geometry::Aligned { frame, restore } => union!(
+            BoundaryFloatingGeometry,
+            BoundaryFloatingGeometryPayload.aligned(abi::BoundaryFloatingAligned {
+                frame: rect(frame),
+                restore: rect(restore),
+            }),
+            Tag::Aligned
+        ),
+        Geometry::Restorable(restore) => union!(
+            BoundaryFloatingGeometry,
+            BoundaryFloatingGeometryPayload.restorable(rect(restore)),
+            Tag::Restorable
+        ),
+    }
+}
+
+fn from_floating_geometry(geometry: &abi::BoundaryFloatingGeometry) -> Geometry {
+    use abi::BoundaryFloatingGeometryTag as Tag;
+    match geometry.tag {
+        // SAFETY (each arm): the tag says which payload it is.
+        Tag::Kept => {
+            Geometry::Kept(from_rect(unsafe { *geometry.borrow_payload_kept_unchecked() }))
+        }
+        Tag::Aligned => {
+            let aligned = unsafe { geometry.borrow_payload_aligned_unchecked() };
+            Geometry::Aligned {
+                frame: from_rect(aligned.frame),
+                restore: from_rect(aligned.restore),
+            }
+        }
+        Tag::Restorable => Geometry::Restorable(from_rect(unsafe {
+            *geometry.borrow_payload_restorable_unchecked()
+        })),
+    }
+}
+
+fn floating_seed(view: &FloatingView, host: &abi::RocHost) -> abi::BoundaryFloatingSeed {
+    let geometry: Vec<abi::BoundaryFloatingFrames> = view
+        .geometry
+        .iter()
+        .map(|&(window, geometry)| abi::BoundaryFloatingFrames {
+            window,
+            geometry: floating_geometry(geometry),
+        })
+        .collect();
+    abi::BoundaryFloatingSeed {
+        forest: forest_seed(&view.forest, host),
+        geometry: list(&geometry, host),
+    }
+}
+
+fn from_floating_seed(seed: &abi::BoundaryFloatingSeed) -> FloatingView {
+    FloatingView {
+        forest: from_forest_seed(&seed.forest),
+        geometry: seed
+            .geometry
+            .as_slice()
+            .iter()
+            .map(|framed| (framed.window, from_floating_geometry(&framed.geometry)))
+            .collect(),
+    }
+}
+
+fn floating_screen(floating: Floating) -> abi::BoundaryFloatingScreen {
+    abi::BoundaryFloatingScreen {
+        screen: rect(floating.screen),
+        spread: floating.spread,
+    }
+}
+
+fn known_list(
+    known: &[(u64, WindowConstraints)],
+    host: &abi::RocHost,
+) -> abi::RocListWith<abi::BoundaryBspKnown, false> {
+    let known: Vec<abi::BoundaryBspKnown> = known
+        .iter()
+        .map(|&(window, held)| abi::BoundaryBspKnown {
+            window,
+            constraints: window_constraints(held),
+        })
+        .collect();
+    list(&known, host)
+}
+
+fn floating_event(event: FloatingEvent, host: &abi::RocHost) -> abi::BoundaryFloatingEvent {
+    use abi::BoundaryFloatingEventTag as Tag;
+    use rift_core::layout::group_forest::Participation;
+    let window_in =
+        |layout: LayoutKey, window| abi::BoundaryBspWindowIn { layout: layout.0, window };
+    match event {
+        FloatingEvent::CreateLayout => {
+            union!(
+                BoundaryFloatingEvent,
+                BoundaryFloatingEventPayload.create_layout,
+                Tag::CreateLayout
+            )
+        }
+        FloatingEvent::CloneLayout(layout) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.clone_layout(layout.0),
+            Tag::CloneLayout
+        ),
+        FloatingEvent::RemoveLayout(layout) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.remove_layout(layout.0),
+            Tag::RemoveLayout
+        ),
+        FloatingEvent::Participation(window, participation) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.participation(abi::BoundaryBspParticipation {
+                window,
+                participation: match participation {
+                    Participation::TakesPart => abi::BoundaryBspTakesPart::TakesPart,
+                    Participation::LeftOut => abi::BoundaryBspTakesPart::LeftOut,
+                },
+            }),
+            Tag::Participation
+        ),
+        FloatingEvent::AddWindow(layout, window, point) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.add_window(abi::BoundaryFloatingAdd {
+                layout: layout.0,
+                window,
+                insertion: insertion(point),
+            }),
+            Tag::AddWindow
+        ),
+        FloatingEvent::RemoveWindow(window) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.remove_window(window),
+            Tag::RemoveWindow
+        ),
+        FloatingEvent::ReplaceWindow { from, to } => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.replace_window(abi::BoundaryBspReplacement { from, to }),
+            Tag::ReplaceWindow
+        ),
+        FloatingEvent::CloseApp(windows) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.close_app(list(&windows, host)),
+            Tag::CloseApp
+        ),
+        FloatingEvent::StoreFrame(window, frame) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload
+                .store_frame(abi::BoundaryFloatingStore { window, frame: rect(frame) }),
+            Tag::StoreFrame
+        ),
+        FloatingEvent::InitializeFrames { layout, floating, known, live } => {
+            let live: Vec<abi::BoundaryFloatingLive> = live
+                .iter()
+                .map(|&(window, frame)| abi::BoundaryFloatingLive { window, frame: rect(frame) })
+                .collect();
+            union!(
+                BoundaryFloatingEvent,
+                BoundaryFloatingEventPayload.initialize_frames(abi::BoundaryFloatingInitialize {
+                    layout: layout.0,
+                    floating: floating_screen(floating),
+                    known: known_list(&known, host),
+                    live: list(&live, host),
+                }),
+                Tag::InitializeFrames
+            )
+        }
+        FloatingEvent::Focus(layout, focus) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.focus(abi::BoundaryBspFocusIn {
+                layout: layout.0,
+                focus: tree_focus(focus),
+            }),
+            Tag::Focus
+        ),
+        FloatingEvent::Edit(layout, asked) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.edit(edit_in(layout, asked)),
+            Tag::Edit
+        ),
+        FloatingEvent::ContainsLayout(layout) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.contains_layout(layout.0),
+            Tag::ContainsLayout
+        ),
+        FloatingEvent::WindowParticipates(window) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.window_participates(window),
+            Tag::WindowParticipates
+        ),
+        FloatingEvent::SelectedWindow(layout) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.selected_window(layout.0),
+            Tag::SelectedWindow
+        ),
+        FloatingEvent::SelectionContainsWindow(layout, window) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.selection_contains_window(window_in(layout, window)),
+            Tag::SelectionContainsWindow
+        ),
+        FloatingEvent::ContainsWindow(layout, window) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.contains_window(window_in(layout, window)),
+            Tag::ContainsWindow
+        ),
+        FloatingEvent::HasAnyFullscreenNode(layout) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.has_any_fullscreen_node(layout.0),
+            Tag::HasAnyFullscreenNode
+        ),
+        FloatingEvent::HasWindowsForApp(layout, windows) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.has_windows_for_app(abi::BoundaryBspAppIn {
+                layout: layout.0,
+                windows: list(&windows, host),
+            }),
+            Tag::HasWindowsForApp
+        ),
+        FloatingEvent::ParentOfSelectionIsStacked(layout) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.parent_of_selection_is_stacked(layout.0),
+            Tag::ParentOfSelectionIsStacked
+        ),
+        FloatingEvent::Windows(layout, query) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.windows(abi::BoundaryBspWindowsQuery {
+                layout: layout.0,
+                query: tree_query(query),
+            }),
+            Tag::Windows
+        ),
+        FloatingEvent::WindowSlot(layout, window) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.window_slot(window_in(layout, window)),
+            Tag::WindowSlot
+        ),
+        FloatingEvent::WindowInDirection(layout, direction) => union!(
+            BoundaryFloatingEvent,
+            BoundaryFloatingEventPayload.window_in_direction(abi::BoundaryBspLayoutDirection {
+                layout: layout.0,
+                direction: tree_direction(direction),
+            }),
+            Tag::WindowInDirection
+        ),
+        FloatingEvent::Cycle(layout) => {
+            union!(
+                BoundaryFloatingEvent,
+                BoundaryFloatingEventPayload.cycle(layout.0),
+                Tag::Cycle
+            )
+        }
+        FloatingEvent::FrameOf(window) => {
+            union!(
+                BoundaryFloatingEvent,
+                BoundaryFloatingEventPayload.frame_of(window),
+                Tag::FrameOf
+            )
+        }
+        FloatingEvent::Floats(window) => {
+            union!(
+                BoundaryFloatingEvent,
+                BoundaryFloatingEventPayload.floats(window),
+                Tag::Floats
+            )
+        }
+    }
+}
+
+fn from_floating_answer(answer: &abi::BoundaryFloatingAnswer) -> FloatingAnswer {
+    use abi::BoundaryFloatingAnswerTag as Tag;
+    match answer.tag {
+        // SAFETY (each arm): the tag says which payload it is; read, not released (the caller
+        // releases the answer).
+        Tag::Tree => FloatingAnswer::Tree(from_tree_answer(unsafe {
+            std::ptr::read(answer.borrow_payload_tree_unchecked())
+        })),
+        Tag::Frame => {
+            let frame = unsafe { answer.borrow_payload_frame_unchecked() };
+            FloatingAnswer::Frame(match frame.tag {
+                abi::BoundaryFloatingFrameTag::Framed => {
+                    Some(from_rect(unsafe { *frame.borrow_payload_framed_unchecked() }))
+                }
+                abi::BoundaryFloatingFrameTag::Unframed => None,
+            })
+        }
+    }
+}
+
+/// A floating layout's shape.
+pub(crate) fn shape_question(
+    layout: LayoutKey,
+    floating: Floating,
+    gaps_given: rift_core::layout::Gaps,
+    known: &[(u64, WindowConstraints)],
+    host: &abi::RocHost,
+) -> abi::BoundaryFloatingLayoutQuestion {
+    use abi::BoundaryFloatingLayoutQuestionTag as Tag;
+    union!(
+        BoundaryFloatingLayoutQuestion,
+        BoundaryFloatingLayoutQuestionPayload.shape(abi::BoundaryFloatingShapeQuestion {
+            layout: layout.0,
+            floating: floating_screen(floating),
+            gaps: gaps(gaps_given),
+            known: known_list(known, host),
+        }),
+        Tag::Shape
+    )
+}
+
+/// A floating layout's group bars.
+pub(crate) fn bars_question(
+    layout: LayoutKey,
+    floating: Floating,
+    selection_path_only: bool,
+) -> abi::BoundaryFloatingLayoutQuestion {
+    use abi::BoundaryFloatingLayoutQuestionTag as Tag;
+    union!(
+        BoundaryFloatingLayoutQuestion,
+        BoundaryFloatingLayoutQuestionPayload.bars(abi::BoundaryFloatingBarsQuestion {
+            layout: layout.0,
+            floating: floating_screen(floating),
+            selection_path_only,
+        }),
+        Tag::Bars
+    )
+}
+
+/// A floating layout's container view.
+pub(crate) fn floating_container_question(
+    layout: LayoutKey,
+) -> abi::BoundaryFloatingLayoutQuestion {
+    use abi::BoundaryFloatingLayoutQuestionTag as Tag;
+    union!(
+        BoundaryFloatingLayoutQuestion,
+        BoundaryFloatingLayoutQuestionPayload.container(layout.0),
+        Tag::Container
+    )
+}
+
+/// A floating layout's drawing.
+pub(crate) fn floating_draw_question(layout: LayoutKey) -> abi::BoundaryFloatingLayoutQuestion {
+    use abi::BoundaryFloatingLayoutQuestionTag as Tag;
+    union!(
+        BoundaryFloatingLayoutQuestion,
+        BoundaryFloatingLayoutQuestionPayload.draw(layout.0),
+        Tag::Draw
+    )
+}
+
+fn from_size(size: abi::BoundarySize) -> rift_core::layout::Size {
+    rift_core::layout::Size::reported(size.width, size.height)
+        .unwrap_or(rift_core::layout::Size::ZERO)
+}
+
+fn from_window_constraints(constraints: &abi::BoundaryWindowConstraints) -> WindowConstraints {
+    use abi::BoundarySizingTag as Tag;
+    use rift_core::layout::Sizing;
+    let sizing = &constraints.sizing;
+    WindowConstraints {
+        // SAFETY (each arm): the tag says which payload it is.
+        sizing: match sizing.tag {
+            Tag::Fixed => Sizing::Fixed {
+                min: from_size(unsafe { *sizing.borrow_payload_fixed_unchecked() }),
+            },
+            Tag::Resizable => Sizing::Resizable {
+                advisory_min: from_size(unsafe { *sizing.borrow_payload_resizable_unchecked() }),
+            },
+            Tag::ResizableAtLeastMin => Sizing::ResizableAtLeastMin {
+                min: from_size(unsafe {
+                    *sizing.borrow_payload_resizable_at_least_min_unchecked()
+                }),
+            },
+        },
+        locked_width: constraints.locked_width,
+        locked_height: constraints.locked_height,
+        max_width: constraints.max_width,
+        max_height: constraints.max_height,
+    }
+}
+
+fn from_gaps(given: abi::BoundaryGaps) -> rift_core::layout::Gaps {
+    rift_core::layout::Gaps {
+        top: given.top,
+        left: given.left,
+        bottom: given.bottom,
+        right: given.right,
+        horizontal: given.horizontal,
+        vertical: given.vertical,
+    }
+}
+
+/// The shape a shape question answers, windows as the geometry's ids.
+pub(crate) fn read_shape(
+    answer: abi::BoundaryFloatingLayoutAnswer,
+    host: &abi::RocHost,
+) -> floating::Layout<WindowId> {
+    use abi::{BoundaryFloatingPlaceTag as PlaceTag, BoundaryFloatingSlotTag as SlotTag};
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryFloatingLayoutAnswerTag::Shape,
+        "a shape"
+    );
+    // SAFETY: the tag says the payload is the shape, read in full here, then released.
+    let shape = unsafe { answer.borrow_payload_shape_unchecked() };
+    let read = floating::Layout {
+        floating: Floating {
+            screen: from_rect(shape.screen),
+            spread: shape.spread,
+        },
+        gaps: from_gaps(shape.gaps),
+        windows: shape
+            .windows
+            .as_slice()
+            .iter()
+            .map(|slot| match slot.tag {
+                SlotTag::LeftOut => floating::Slot::LeftOut,
+                SlotTag::Placed => {
+                    let placed = unsafe { slot.borrow_payload_placed_unchecked() };
+                    let place = &placed.place;
+                    floating::Slot::In {
+                        window: from_window(placed.window),
+                        place: match place.tag {
+                            PlaceTag::Screen => floating::Place::Screen,
+                            PlaceTag::WithinGaps => floating::Place::WithinGaps,
+                            PlaceTag::Kept => floating::Place::Kept(from_rect(unsafe {
+                                *place.borrow_payload_kept_unchecked()
+                            })),
+                            PlaceTag::First => {
+                                floating::Place::First(from_window_constraints(unsafe {
+                                    place.borrow_payload_first_unchecked()
+                                }))
+                            }
+                        },
+                    }
+                }
+            })
+            .collect(),
+    };
+    unsafe { answer.decref(host) };
+    read
+}
+
+/// The group bars a bars question answers.
+pub(crate) fn read_bars(
+    answer: abi::BoundaryFloatingLayoutAnswer,
+    host: &abi::RocHost,
+) -> Vec<GroupBar<NodeKey, u64>> {
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryFloatingLayoutAnswerTag::Bars,
+        "group bars"
+    );
+    // SAFETY: the tag says the payload is the bars, read in full here, then released.
+    let bars = unsafe { answer.borrow_payload_bars_unchecked() }
+        .as_slice()
+        .iter()
+        .map(|bar| GroupBar {
+            stack: NodeKey(bar.stack),
+            orientation: from_orientation(bar.orientation),
+            frame: from_rect(bar.frame),
+            windows: bar.windows.as_slice().to_vec(),
+            selected: usize::try_from(bar.selected).expect("a bar's index fits a usize"),
+        })
+        .collect();
+    unsafe { answer.decref(host) };
+    bars
+}
+
+/// The container view a container question answers.
+pub(crate) fn read_floating_container(
+    answer: abi::BoundaryFloatingLayoutAnswer,
+    host: &abi::RocHost,
+) -> ContainerView<NodeKey, u64> {
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryFloatingLayoutAnswerTag::Container,
+        "a container view"
+    );
+    let view = from_view(unsafe { answer.borrow_payload_container_unchecked() });
+    // SAFETY: the answer is Roc's, owned here and read in full above.
+    unsafe { answer.decref(host) };
+    view
+}
+
+/// The rows a draw question answers.
+pub(crate) fn read_floating_rows(
+    answer: abi::BoundaryFloatingLayoutAnswer,
+    host: &abi::RocHost,
+) -> Vec<Row<NodeKey, u64>> {
+    assert_eq!(
+        answer.tag,
+        abi::BoundaryFloatingLayoutAnswerTag::Drawn,
+        "a drawing"
+    );
+    // SAFETY: the tag says the payload is the rows; they are read through the forest's own
+    // reader by viewing them as a forest answer's (the same list type).
+    let rows = rows_of(unsafe { answer.borrow_payload_drawn_unchecked() });
+    unsafe { answer.decref(host) };
+    rows
+}
+
+/// The floating system's box, which only Roc can read or free; only the
+/// `roc_floating_tree_*` entries make and take one. Dropping it releases the system.
+pub(crate) struct FloatingBox(abi::RocBox);
+
+impl FloatingBox {
+    pub(crate) fn new() -> FloatingBox { FloatingBox(unsafe { abi::roc_floating_tree_init() }) }
+
+    /// The system `view` holds, which the caller has parsed (`FloatingView::floating`).
+    pub(crate) fn seeded(view: &FloatingView, host: &abi::RocHost) -> FloatingBox {
+        // SAFETY: the seed's lists are allocated through the host and consumed by Roc.
+        FloatingBox(unsafe { abi::roc_floating_tree_seed(floating_seed(view, host)) })
+    }
+
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// One operation or query: the system after it, and what it answered.
+    pub(crate) fn step(
+        self,
+        asked: FloatingEvent,
+        host: &abi::RocHost,
+    ) -> (FloatingBox, FloatingAnswer) {
+        // SAFETY: as in `TraditionalBox::step`.
+        let stepped =
+            unsafe { abi::roc_floating_tree_step(self.into_raw(), floating_event(asked, host)) };
+        let answer = from_floating_answer(&stepped.answer);
+        unsafe { stepped.answer.decref(host) };
+        (FloatingBox(stepped.model), answer)
+    }
+
+    /// A layout question, its answer read by `read` (which releases it).
+    pub(crate) fn layout<T>(
+        self,
+        question: abi::BoundaryFloatingLayoutQuestion,
+        host: &abi::RocHost,
+        read: impl FnOnce(abi::BoundaryFloatingLayoutAnswer, &abi::RocHost) -> T,
+    ) -> (FloatingBox, T) {
+        // SAFETY: as in `TraditionalBox::layout`.
+        let laid = unsafe { abi::roc_floating_tree_layout(self.into_raw(), question) };
+        (FloatingBox(laid.model), read(laid.answer, host))
+    }
+
+    /// The forest's tables and free lists, the windows left out, the frames kept.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (FloatingBox, FloatingView) {
+        // SAFETY: as in `TraditionalBox::view`.
+        let viewed = unsafe { abi::roc_floating_tree_view(self.into_raw()) };
+        let view = from_floating_seed(&viewed.view);
+        unsafe { viewed.view.decref(host) };
+        (FloatingBox(viewed.model), view)
+    }
+}
+
+impl Drop for FloatingBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this system's and is never used again.
+        unsafe { abi::roc_floating_tree_release(self.0) }
     }
 }

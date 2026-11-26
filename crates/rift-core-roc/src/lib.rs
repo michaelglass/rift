@@ -744,6 +744,100 @@ impl RocTraditional {
     }
 }
 
+/// A floating layout system (`rift_core::layout::group_forest::FloatingSystem`) kept in Roc
+/// between operations.
+pub struct RocFloating {
+    system: boundary::group_forest::FloatingBox,
+}
+
+// SAFETY: as `RocCore`: the box is owned, never shared, and only stepped through `&mut self`.
+unsafe impl Send for RocFloating {}
+
+impl Default for RocFloating {
+    fn default() -> Self { Self::new() }
+}
+
+impl RocFloating {
+    /// As `FloatingSystem::default`: no layouts, no frames.
+    pub fn new() -> Self {
+        RocFloating {
+            system: boundary::group_forest::FloatingBox::new(),
+        }
+    }
+
+    /// The system `view` holds, as `FloatingSystem::from_parts` takes it: `view` must be one
+    /// [`group_forest::FloatingView::floating`] parses (a Rust system's view, or a load's).
+    pub fn seeded(view: &group_forest::FloatingView) -> Self {
+        let host = host();
+        RocFloating {
+            system: boundary::group_forest::FloatingBox::seeded(view, &host),
+        }
+    }
+
+    /// One operation or query, as [`group_forest::step_floating`] applies it.
+    pub fn step(&mut self, event: group_forest::FloatingEvent) -> group_forest::FloatingAnswer {
+        let host = host();
+        boundary::in_place(&mut self.system, |system| system.step(event, &host))
+    }
+
+    /// The whole system, as [`group_forest::FloatingView::from`] reads a `FloatingSystem`.
+    pub fn view(&mut self) -> group_forest::FloatingView {
+        let host = host();
+        boundary::in_place(&mut self.system, |system| system.view(&host))
+    }
+
+    /// A layout as the floating geometry takes it, as `FloatingSystem::shape` builds it (the
+    /// constraints in `known`, by window word; others the default).
+    pub fn shape(
+        &mut self,
+        layout: group_forest::LayoutKey,
+        floating: rift_core::layout::floating::Floating,
+        gaps: rift_core::layout::Gaps,
+        known: &[(u64, rift_core::layout::WindowConstraints)],
+    ) -> rift_core::layout::floating::Layout<WindowId> {
+        let host = host();
+        let question = boundary::group_forest::shape_question(layout, floating, gaps, known, &host);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_shape)
+        })
+    }
+
+    /// A layout's group bars, as `FloatingSystem::group_bars` gives them.
+    pub fn group_bars(
+        &mut self,
+        layout: group_forest::LayoutKey,
+        floating: rift_core::layout::floating::Floating,
+        selection_path_only: bool,
+    ) -> Vec<rift_core::layout::group_forest::GroupBar<group_forest::NodeKey, u64>> {
+        let host = host();
+        let question = boundary::group_forest::bars_question(layout, floating, selection_path_only);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_bars)
+        })
+    }
+
+    /// A layout's container view, as `Forest::container_view` gives it.
+    pub fn container_view(
+        &mut self,
+        layout: group_forest::LayoutKey,
+    ) -> group_forest::ContainerView {
+        let host = host();
+        let question = boundary::group_forest::floating_container_question(layout);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_floating_container)
+        })
+    }
+
+    /// A layout's drawing as rows, as `Forest::rows` gives them.
+    pub fn rows(&mut self, layout: group_forest::LayoutKey) -> Vec<group_forest::Row> {
+        let host = host();
+        let question = boundary::group_forest::floating_draw_question(layout);
+        boundary::in_place(&mut self.system, |system| {
+            system.layout(question, &host, boundary::group_forest::read_floating_rows)
+        })
+    }
+}
+
 /// A master-stack layout system (`rift_core::layout::group_forest::MasterStack`) kept in Roc
 /// between operations.
 pub struct RocMasterStack {
@@ -1372,6 +1466,178 @@ pub mod group_forest {
             MasterStackView {
                 forest: ForestView::from(system.forest()),
                 settings: system.settings(),
+            }
+        }
+    }
+
+    /// The Rust floating system.
+    pub type Floating = rift_core::layout::group_forest::FloatingSystem<LayoutKey, NodeKey, u64>;
+
+    /// One operation or query of the floating system (`FloatingSystem`'s methods, one for one;
+    /// an app's windows listed, which the predicate tells).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum FloatingEvent {
+        CreateLayout,
+        CloneLayout(LayoutKey),
+        RemoveLayout(LayoutKey),
+        Participation(u64, Participation),
+        AddWindow(LayoutKey, u64, InsertionPoint),
+        RemoveWindow(u64),
+        ReplaceWindow {
+            from: u64,
+            to: u64,
+        },
+        CloseApp(Vec<u64>),
+        StoreFrame(u64, rift_core::plain::Rect),
+        /// The layout's windows without a frame given their first: the screen and spread, the
+        /// constraints the host knows, the live frames it saw.
+        InitializeFrames {
+            layout: LayoutKey,
+            floating: rift_core::layout::floating::Floating,
+            known: Vec<(u64, rift_core::layout::WindowConstraints)>,
+            live: Vec<(u64, rift_core::plain::Rect)>,
+        },
+        Focus(LayoutKey, Focus<u64>),
+        Edit(LayoutKey, Edit<u64>),
+        ContainsLayout(LayoutKey),
+        WindowParticipates(u64),
+        SelectedWindow(LayoutKey),
+        SelectionContainsWindow(LayoutKey, u64),
+        ContainsWindow(LayoutKey, u64),
+        HasAnyFullscreenNode(LayoutKey),
+        HasWindowsForApp(LayoutKey, Vec<u64>),
+        ParentOfSelectionIsStacked(LayoutKey),
+        Windows(LayoutKey, Query<u64>),
+        WindowSlot(LayoutKey, u64),
+        WindowInDirection(LayoutKey, Direction),
+        Cycle(LayoutKey),
+        FrameOf(u64),
+        Floats(u64),
+    }
+
+    /// What a floating operation answers: the tree's answers, or a kept frame.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum FloatingAnswer {
+        Tree(Answer),
+        Frame(Option<rift_core::plain::Rect>),
+    }
+
+    /// `event` applied to the Rust floating system, and what it answers.
+    pub fn step_floating(system: &mut Floating, event: FloatingEvent) -> FloatingAnswer {
+        let tree = FloatingAnswer::Tree;
+        let known_of = |known: &[(u64, rift_core::layout::WindowConstraints)], window| {
+            known
+                .iter()
+                .find(|&&(held, _)| held == window)
+                .map(|&(_, c)| c)
+                .unwrap_or_default()
+        };
+        match event {
+            FloatingEvent::CreateLayout => tree(Answer::Layout(system.create_layout())),
+            FloatingEvent::CloneLayout(layout) => tree(Answer::Layout(system.clone_layout(layout))),
+            FloatingEvent::RemoveLayout(layout) => {
+                system.remove_layout(layout);
+                tree(Answer::Done)
+            }
+            FloatingEvent::Participation(window, participation) => tree(Answer::Participated(
+                system.set_window_participation(window, participation),
+            )),
+            FloatingEvent::AddWindow(layout, window, insertion) => {
+                system.add_window(layout, window, insertion);
+                tree(Answer::Done)
+            }
+            FloatingEvent::RemoveWindow(window) => {
+                system.remove_window(window);
+                tree(Answer::Done)
+            }
+            FloatingEvent::ReplaceWindow { from, to } => {
+                system.replace_window(from, to);
+                tree(Answer::Done)
+            }
+            FloatingEvent::CloseApp(windows) => {
+                system.close_app(|window| windows.contains(&window));
+                tree(Answer::Done)
+            }
+            FloatingEvent::StoreFrame(window, frame) => {
+                system.store_frame(window, frame);
+                tree(Answer::Done)
+            }
+            FloatingEvent::InitializeFrames { layout, floating, known, live } => {
+                system.initialize_frames(
+                    layout,
+                    floating,
+                    |window| known_of(&known, window),
+                    |window| live.iter().find(|&&(held, _)| held == window).map(|&(_, f)| f),
+                );
+                tree(Answer::Done)
+            }
+            FloatingEvent::Focus(layout, focus) => {
+                tree(Answer::Focused(system.focus(layout, focus)))
+            }
+            FloatingEvent::Edit(layout, edit) => tree(Answer::Edited(system.edit(layout, edit))),
+            FloatingEvent::ContainsLayout(layout) => {
+                tree(Answer::Verdict(system.forest().contains_layout(layout)))
+            }
+            FloatingEvent::WindowParticipates(window) => {
+                tree(Answer::Verdict(system.forest().window_participates(window)))
+            }
+            FloatingEvent::SelectedWindow(layout) => {
+                tree(Answer::Window(system.forest().selected_window(layout)))
+            }
+            FloatingEvent::SelectionContainsWindow(layout, window) => tree(Answer::Verdict(
+                system.forest().selection_contains_window(layout, window),
+            )),
+            FloatingEvent::ContainsWindow(layout, window) => {
+                tree(Answer::Verdict(system.forest().contains_window(layout, window)))
+            }
+            FloatingEvent::HasAnyFullscreenNode(layout) => {
+                tree(Answer::Verdict(system.forest().has_any_fullscreen_node(layout)))
+            }
+            FloatingEvent::HasWindowsForApp(layout, windows) => tree(Answer::Verdict(
+                system.forest().has_windows_for_app(layout, |window| windows.contains(&window)),
+            )),
+            FloatingEvent::ParentOfSelectionIsStacked(layout) => tree(Answer::Verdict(
+                system.forest().parent_of_selection_is_stacked(layout),
+            )),
+            FloatingEvent::Windows(layout, query) => {
+                tree(Answer::Windows(system.forest().windows(layout, query)))
+            }
+            FloatingEvent::WindowSlot(layout, window) => {
+                tree(Answer::WindowSlot(system.forest().window_slot(layout, window)))
+            }
+            FloatingEvent::WindowInDirection(layout, direction) => {
+                tree(Answer::Window(system.window_in_direction(layout, direction)))
+            }
+            FloatingEvent::Cycle(layout) => tree(Answer::Windows(system.cycle_windows(layout))),
+            FloatingEvent::FrameOf(window) => FloatingAnswer::Frame(system.frame(window)),
+            FloatingEvent::Floats(window) => tree(Answer::Verdict(
+                system.forest().index().iter().any(|&(held, ..)| held == window),
+            )),
+        }
+    }
+
+    /// A whole floating system, comparable: the forest and each window's kept frame, by window.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct FloatingView {
+        pub forest: ForestView,
+        pub geometry: Vec<(u64, rift_core::layout::group_forest::Geometry)>,
+    }
+
+    impl FloatingView {
+        /// The Rust system this view holds (refused as [`ForestView::forest`] refuses).
+        pub fn floating(&self) -> Result<Floating, SlotsError> {
+            Ok(Floating::from_parts(
+                self.forest.forest()?,
+                self.geometry.iter().copied().collect(),
+            ))
+        }
+    }
+
+    impl From<&Floating> for FloatingView {
+        fn from(system: &Floating) -> Self {
+            FloatingView {
+                forest: ForestView::from(system.forest()),
+                geometry: system.geometry().iter().map(|(&window, &g)| (window, g)).collect(),
             }
         }
     }
