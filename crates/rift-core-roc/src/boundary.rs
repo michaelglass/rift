@@ -7,6 +7,7 @@
 use std::mem::ManuallyDrop;
 
 use rift_core::constraints::{Constraints, ConstraintsEvent, Observed};
+use rift_core::floats::{Floats, FloatsEvent, FullscreenKind};
 use rift_core::focus::{
     self, Follow, MouseRaise, Removal, RemovalFocus, Stay, Unraised, UntrackedFocus,
 };
@@ -3439,6 +3440,217 @@ impl Drop for SizesBox {
     fn drop(&mut self) {
         // SAFETY: the box is this machine's and is never used again.
         unsafe { abi::roc_sizes_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The floating state.
+
+/// The floating machine as words: windows, Spaces and workspaces, frames as plain rects.
+pub(crate) type WordFloats = Floats<u64, u64, u64, Rect>;
+
+fn float_fullscreen(kind: FullscreenKind) -> abi::BoundaryFloatFullscreen {
+    match kind {
+        FullscreenKind::Full => abi::BoundaryFloatFullscreen::Full,
+        FullscreenKind::WithinGaps => abi::BoundaryFloatFullscreen::WithinGaps,
+    }
+}
+
+fn from_float_fullscreen(kind: abi::BoundaryFloatFullscreen) -> FullscreenKind {
+    match kind {
+        abi::BoundaryFloatFullscreen::Full => FullscreenKind::Full,
+        abi::BoundaryFloatFullscreen::WithinGaps => FullscreenKind::WithinGaps,
+    }
+}
+
+fn floats_event(
+    event: FloatsEvent<u64, u64, u64, u64, Rect>,
+    host: &abi::RocHost,
+) -> abi::BoundaryFloatsEvent {
+    use abi::BoundaryFloatsEventTag as Tag;
+    match event {
+        FloatsEvent::Floated(w) => {
+            union!(
+                BoundaryFloatsEvent,
+                BoundaryFloatsEventPayload.floated(w),
+                Tag::Floated
+            )
+        }
+        FloatsEvent::Unfloated(w) => {
+            union!(
+                BoundaryFloatsEvent,
+                BoundaryFloatsEventPayload.unfloated(w),
+                Tag::Unfloated
+            )
+        }
+        FloatsEvent::Fullscreen(window, kind) => {
+            use abi::BoundaryMaybeFloatFullscreenTag as K;
+            let kind = match kind {
+                Some(kind) => union!(
+                    BoundaryMaybeFloatFullscreen,
+                    BoundaryMaybeFloatFullscreenPayload.fullscreen(float_fullscreen(kind)),
+                    K::Fullscreen
+                ),
+                None => union!(
+                    BoundaryMaybeFloatFullscreen,
+                    BoundaryMaybeFloatFullscreenPayload.not_fullscreen,
+                    K::NotFullscreen
+                ),
+            };
+            union!(
+                BoundaryFloatsEvent,
+                BoundaryFloatsEventPayload
+                    .fullscreen(abi::BoundaryFloatFullscreenSet { window, kind }),
+                Tag::Fullscreen
+            )
+        }
+        FloatsEvent::Activated { space, window } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.activated(abi::BoundaryFloatSpaceWindow { space, window }),
+            Tag::Activated
+        ),
+        FloatsEvent::Deactivated { space, window } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.deactivated(abi::BoundaryFloatSpaceWindow { space, window }),
+            Tag::Deactivated
+        ),
+        FloatsEvent::DeactivatedEverywhere(w) => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.deactivated_everywhere(w),
+            Tag::DeactivatedEverywhere
+        ),
+        FloatsEvent::ActiveRebuilt { space, windows } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.active_rebuilt(abi::BoundaryFloatRebuild {
+                space,
+                windows: list(&windows, host),
+            }),
+            Tag::ActiveRebuilt
+        ),
+        FloatsEvent::SpaceRemapped { from, to } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.space_remapped(abi::BoundaryFloatPair { from, to }),
+            Tag::SpaceRemapped
+        ),
+        FloatsEvent::FloatingFocus(w) => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.floating_focus(maybe_word(w)),
+            Tag::FloatingFocus
+        ),
+        FloatsEvent::Focused(w) => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.focused(maybe_word(w)),
+            Tag::Focused
+        ),
+        FloatsEvent::Replaced { from, to } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.replaced(abi::BoundaryFloatPair { from, to }),
+            Tag::Replaced
+        ),
+        FloatsEvent::AppQuit(pid) => {
+            union!(
+                BoundaryFloatsEvent,
+                BoundaryFloatsEventPayload.app_quit(pid),
+                Tag::AppQuit
+            )
+        }
+        FloatsEvent::FloatingTaken => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.floating_taken,
+            Tag::FloatingTaken
+        ),
+        FloatsEvent::FrameStored {
+            workspace,
+            window,
+            frame,
+            if_absent,
+        } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.frame_stored(abi::BoundaryFloatFrame {
+                workspace,
+                window,
+                frame: rect(frame),
+                if_absent,
+            }),
+            Tag::FrameStored
+        ),
+        FloatsEvent::FramesForgotten(w) => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.frames_forgotten(w),
+            Tag::FramesForgotten
+        ),
+        FloatsEvent::FrameForgotten { workspace, window } => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload
+                .frame_forgotten(abi::BoundaryFloatWorkspaceWindow { workspace, window }),
+            Tag::FrameForgotten
+        ),
+        FloatsEvent::WorkspaceForgotten(ws) => union!(
+            BoundaryFloatsEvent,
+            BoundaryFloatsEventPayload.workspace_forgotten(ws),
+            Tag::WorkspaceForgotten
+        ),
+    }
+}
+
+/// The floating machine's box, which only Roc can read or free; only the `roc_floats_*` entries
+/// make and take one. Dropping it releases the machine.
+pub(crate) struct FloatsBox(abi::RocBox);
+
+impl FloatsBox {
+    pub(crate) fn empty() -> FloatsBox { FloatsBox(unsafe { abi::roc_floats_init() }) }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    pub(crate) fn step(
+        self,
+        event: FloatsEvent<u64, u64, u64, u64, Rect>,
+        host: &abi::RocHost,
+    ) -> (FloatsBox, ()) {
+        // SAFETY: the box is this machine's, given to the step; its successor comes back.
+        let model = unsafe { abi::roc_floats_step(self.into_raw(), floats_event(event, host)) };
+        (FloatsBox(model), ())
+    }
+
+    /// Everything the machine holds, each list in word order.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (FloatsBox, WordFloats) {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_floats_view(self.into_raw()) };
+        let floats = Floats::from_parts(
+            viewed.floating.as_slice().iter().copied(),
+            viewed
+                .fullscreen
+                .as_slice()
+                .iter()
+                .map(|e| (e.window, from_float_fullscreen(e.kind))),
+            viewed.active.as_slice().iter().map(|e| (e.space, e.window)),
+            from_maybe_word(viewed.floating_focus),
+            from_maybe_word(viewed.focused),
+            viewed
+                .frames
+                .as_slice()
+                .iter()
+                .map(|e| (e.workspace, e.window, from_rect(e.frame))),
+        );
+        unsafe {
+            viewed.floating.decref(host);
+            viewed.fullscreen.decref(host);
+            viewed.active.decref(host);
+            viewed.frames.decref(host);
+        }
+        (FloatsBox(viewed.model), floats)
+    }
+}
+
+impl Drop for FloatsBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this machine's and is never used again.
+        unsafe { abi::roc_floats_release(self.0) }
     }
 }
 

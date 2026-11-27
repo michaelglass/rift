@@ -837,6 +837,51 @@ Boundary := [].{
 	## An app's last reported minimum.
 	AppMinimum := { pid : U64, min : Size }
 
+	# The floating state (`rift_core::floats`), kept between events. Windows, pids, Spaces and
+	# workspaces are one word each.
+
+	## A floating window shown fullscreen: over the whole screen, or within the gaps.
+	FloatFullscreen := [Full, WithinGaps]
+
+	MaybeFloatFullscreen := [NotFullscreen, Fullscreen(FloatFullscreen)]
+
+	FloatFullscreenSet := { window : U64, kind : MaybeFloatFullscreen }
+
+	FloatSpaceWindow := { space : U64, window : U64 }
+
+	FloatRebuild := { space : U64, windows : List(U64) }
+
+	FloatPair := { from : U64, to : U64 }
+
+	FloatFrame := { workspace : U64, window : U64, frame : Rect, if_absent : Bool }
+
+	FloatWorkspaceWindow := { workspace : U64, window : U64 }
+
+	## What the layout engine decides or observes that the floating machine reads.
+	FloatsEvent := [
+		Floated(U64),
+		Unfloated(U64),
+		Fullscreen(FloatFullscreenSet),
+		Activated(FloatSpaceWindow),
+		Deactivated(FloatSpaceWindow),
+		DeactivatedEverywhere(U64),
+		ActiveRebuilt(FloatRebuild),
+		SpaceRemapped(FloatPair),
+		FloatingFocus(MaybeWord),
+		Focused(MaybeWord),
+		Replaced(FloatPair),
+		AppQuit(U64),
+		FloatingTaken,
+		FrameStored(FloatFrame),
+		FramesForgotten(U64),
+		FrameForgotten(FloatWorkspaceWindow),
+		WorkspaceForgotten(U64),
+	]
+
+	FloatFullscreenEntry := { window : U64, kind : FloatFullscreen }
+
+	FloatFrameEntry := { workspace : U64, window : U64, frame : Rect }
+
 	# A BSP layout system's trees (`rift_core::layout::bsp_tree::Tree`), kept between operations.
 	# Layouts and nodes are slotmap keys, one word each (`version << 32 | index`, slotmap's ffi
 	# form); windows are one word each.

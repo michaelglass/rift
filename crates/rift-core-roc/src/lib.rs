@@ -368,6 +368,40 @@ impl RocSizes {
     }
 }
 
+/// The floating state (`rift_core::floats::Floats`) kept in Roc between events. Stepped beside
+/// the Rust machine, it must hold the same state. Windows, pids, Spaces and workspaces are
+/// words, frames plain rects.
+pub struct RocFloats {
+    floats: boundary::FloatsBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocFloats {}
+
+impl Default for RocFloats {
+    fn default() -> Self {
+        RocFloats {
+            floats: boundary::FloatsBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocFloats {
+    /// As `Floats::step`.
+    pub fn step(&mut self, event: rift_core::floats::FloatsEvent<u64, u64, u64, u64, Rect>) {
+        let host = &self.host;
+        boundary::in_place(&mut self.floats, |floats| floats.step(event, host))
+    }
+
+    /// The whole machine, as a Rust `Floats` (each part in word order).
+    pub fn view(&mut self) -> rift_core::floats::Floats<u64, u64, u64, Rect> {
+        let host = &self.host;
+        boundary::in_place(&mut self.floats, |floats| floats.view(host))
+    }
+}
+
 /// What the main-window machine holds, as both twins give it.
 /// A BSP layout system's trees (`rift_core::layout::bsp_tree::Tree`) kept in Roc between
 /// operations.

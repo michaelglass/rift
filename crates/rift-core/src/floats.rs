@@ -18,6 +18,14 @@ impl OfApp for crate::plain::WindowId {
     fn app(&self) -> i32 { self.pid }
 }
 
+/// A window as a word (the Roc core's form): its pid in the high half, so its app is that half,
+/// sign-extended as a pid word is.
+impl OfApp for u64 {
+    type App = u64;
+
+    fn app(&self) -> u64 { (*self >> 32) as u32 as i32 as i64 as u64 }
+}
+
 /// A floating window shown fullscreen: over the whole screen, or within the gaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FullscreenKind {

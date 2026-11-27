@@ -61,6 +61,10 @@ name = "constraints"
 required-features = ["roc"]
 
 [[test]]
+name = "floats"
+required-features = ["roc"]
+
+[[test]]
 name = "bsp_tree"
 required-features = ["roc"]
 
