@@ -1765,9 +1765,10 @@ impl ScrollingLayoutSystem {
         layout: LayoutId,
         timestamp: Duration,
         animate: bool,
+        started: Instant,
     ) -> Option<ViewportRelease> {
         // The camera chooses the column it settles on, which the core makes active.
-        self.end_viewport_gesture_system(layout, timestamp, animate)
+        self.end_viewport_gesture_system(layout, timestamp, animate, started)
     }
 
     fn end_viewport_gesture_system(
@@ -1775,6 +1776,7 @@ impl ScrollingLayoutSystem {
         layout: LayoutId,
         timestamp: Duration,
         animate: bool,
+        started: Instant,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let Viewport::Gesture(offset) = state.camera.viewport else {
@@ -1791,7 +1793,7 @@ impl ScrollingLayoutSystem {
                 release.from_offset,
                 release.offset,
                 release.velocity,
-                Instant::now(),
+                started,
             ));
         }
         Some(release)
@@ -2787,7 +2789,7 @@ pub(crate) mod tests {
         assert_eq!(f.selected(), Some(wid(3)));
         let release = f
             .system
-            .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
+            .end_viewport_gesture(f.layout, Duration::from_millis(220), false, Instant::now())
             .unwrap();
         assert_eq!(release.from_offset, 50.0);
         assert_eq!(release.offset, 0.0);
@@ -3378,6 +3380,7 @@ mod core_geometry_tests {
                                     layout,
                                     start + Duration::from_millis(32),
                                     false,
+                                    Instant::now(),
                                 )
                                 .is_some()
                             {

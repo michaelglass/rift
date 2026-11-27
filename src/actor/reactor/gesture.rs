@@ -119,7 +119,7 @@ impl Reactor {
                     released: false,
                     applied: 0.0,
                 });
-                self.start_gesture_presentation();
+                self.start_gesture_presentation(Instant::now());
             }
             Lifecycle::End { sample, cancelled } => {
                 if self
@@ -139,12 +139,13 @@ impl Reactor {
         }
     }
 
-    fn start_gesture_presentation(&mut self) {
+    /// The gesture's camera presented, first sampled at `now`.
+    fn start_gesture_presentation(&mut self, now: Instant) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
             let gesture = (!s.released)
                 .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
-            let _ = self.present_camera(space, true, gesture);
+            let _ = self.present_camera(space, true, gesture, now);
         }
     }
 
@@ -172,7 +173,7 @@ impl Reactor {
     fn apply_viewport_frames(&mut self) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
-            let _ = self.present_camera(space, false, None);
+            let _ = self.present_camera(space, false, None, Instant::now());
             self.commit_presentations();
         }
     }
@@ -258,11 +259,14 @@ impl Reactor {
         else {
             return;
         };
+        // The release's instant, read once: its spring starts at it, and its camera is first
+        // sampled at it.
+        let released_at = Instant::now();
         let release = if cancelled {
             system.cancel_viewport_gesture(s.layout);
             None
         } else {
-            system.end_viewport_gesture(s.layout, s.timestamp, animate)
+            system.end_viewport_gesture(s.layout, s.timestamp, animate, released_at)
         };
         if !visible {
             self.viewport_gesture = Some(s);
@@ -273,7 +277,7 @@ impl Reactor {
             let space = s.context.space;
             self.viewport_gesture = Some(ViewportSession { released: true, ..s });
             if animate {
-                self.start_gesture_presentation();
+                self.start_gesture_presentation(released_at);
             } else {
                 self.apply_viewport_frames();
             }
@@ -687,7 +691,7 @@ mod tests {
         for (wid, frame) in frames {
             r.insert_test_window_state(wid, frame, None, true);
         }
-        r.start_gesture_presentation();
+        r.start_gesture_presentation(Instant::now());
         let before = offset(&r);
         motion.publish(sample(1, 40.0, 100));
         let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
@@ -1043,7 +1047,7 @@ mod tests {
             for (wid, frame) in initial {
                 r.insert_test_window_state(wid, frame, None, true);
             }
-            r.start_gesture_presentation();
+            r.start_gesture_presentation(Instant::now());
             r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(released);
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
@@ -1152,7 +1156,7 @@ mod tests {
             for (wid, frame) in initial {
                 r.insert_test_window_state(wid, frame, None, true);
             }
-            r.start_gesture_presentation();
+            r.start_gesture_presentation(Instant::now());
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
             let before =
@@ -1197,7 +1201,7 @@ mod tests {
                     );
                 }
             } else {
-                r.start_gesture_presentation();
+                r.start_gesture_presentation(Instant::now());
                 let camera =
                     r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
                 camera.sample(Instant::now() + Duration::from_millis(50));

@@ -674,11 +674,14 @@ impl Reactor {
         }
     }
 
+    /// `now` is the instant the camera is first sampled at: a release passes its spring's own
+    /// start, so the first frame is the hand-off exactly (no second clock read between them).
     pub(super) fn present_camera(
         &mut self,
         space: SpaceId,
         animate: bool,
         gesture: Option<(Context, Control, f64, Duration)>,
+        now: Instant,
     ) -> Option<HashSet<WindowId>> {
         if self.animation_tx.is_none() && gesture.is_none() && self.viewport_gesture.is_none() {
             return None;
@@ -720,7 +723,6 @@ impl Reactor {
                 })
                 .map(|s| (s.context.clone(), s.control.clone(), s.applied, s.timestamp))
         });
-        let now = Instant::now();
         let control = self.animation_tx.as_ref().map(|tx| tx.control.lock());
         let windows: Vec<PresentedWindow> = frames
             .into_iter()
@@ -1133,7 +1135,7 @@ impl AnimationManager {
             && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
-        let presentation = reactor.present_camera(space, animate_camera, None);
+        let presentation = reactor.present_camera(space, animate_camera, None, Instant::now());
         let camera = presentation.is_some();
         let presented = presentation.unwrap_or_default();
         if !animate_camera {
@@ -2434,7 +2436,7 @@ mod tests {
                 .frames
                 .insert(wid, (handle.clone(), retained, TransactionId::default()));
             // Within a Space, a new camera must preserve the last publication.
-            reactor.present_camera(spaces[source], true, None).unwrap();
+            reactor.present_camera(spaces[source], true, None, Instant::now()).unwrap();
             let Message::Camera(source_camera) = receiver.commands.try_recv().unwrap() else {
                 panic!("expected source camera");
             };
