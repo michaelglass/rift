@@ -8155,6 +8155,82 @@ fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
     assert_eq!(reactor.test_workspace_for_window(space, wid), None);
 }
 
+/// Closing an AX-invalidated window in a strip of quarter-width columns, the window third from
+/// the left selected with the camera moved off the strip's start: where the survivors settle.
+/// With `presenting`, a presenter runs the camera through the suspension and the close, so its
+/// snapshots are taken back while the layout re-aims; the bounds cannot mask a stale one here.
+fn narrow_strip_after_closing_an_invalidated_window(presenting: bool) -> Vec<(WindowId, CGRect)> {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let scrolling = &mut reactor.config.settings.layout.scrolling;
+    scrolling.column_width_ratio = 0.25;
+    scrolling.min_column_width_ratio = 0.1;
+    scrolling.max_column_width_ratio = 1.0;
+    scrolling.preserve_window_sizes = false;
+    let layout = reactor.config.settings.layout.clone();
+    reactor
+        .stores
+        .layout
+        .layout_engine
+        .set_layout_settings(reactor.stores.state.windows(), &layout);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    let closing = WindowId::new(1, 6);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(8), Some(closing));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, closing));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let receiver = presenting.then(|| {
+        let (sender, receiver) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        receiver
+    });
+    reactor.update_layout_or_warn(&HeldCameras::none(), false, Some(space));
+    let wsid = reactor.test_window_server_id(closing);
+    let mut presenter = super::animation::AnimationManager::new();
+    for event in [
+        Event::WindowInvalidated(closing, super::WindowInvalidationSource::InvalidUiElement),
+        Event::WindowClosed(wsid),
+    ] {
+        reactor.handle_event(event);
+        if let Some(receiver) = &receiver {
+            for message in receiver.commands.try_iter() {
+                presenter.handle_message(message);
+            }
+            presenter.tick_at(Instant::now() + Duration::from_millis(30));
+        }
+        apps.simulate_events();
+    }
+    // The presenter finishes; the camera ends where it was going.
+    if let Some(receiver) = &receiver {
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        presenter.tick_at(Instant::now() + Duration::from_secs(5));
+        apps.simulate_events();
+    }
+    apps.simulate_until_quiet(&mut reactor);
+    let mut frames: Vec<_> = (1..=8)
+        .map(|idx| WindowId::new(1, idx))
+        .filter(|&wid| wid != closing)
+        .map(|wid| (wid, apps.windows[&wid].frame))
+        .collect();
+    frames.sort_by_key(|(wid, _)| *wid);
+    frames
+}
+
+#[test]
+fn a_presenter_running_through_a_close_leaves_the_camera_where_the_layout_aims_it() {
+    assert_eq!(
+        narrow_strip_after_closing_an_invalidated_window(true),
+        narrow_strip_after_closing_an_invalidated_window(false)
+    );
+}
+
 // Upstream #705 (f168b6c6), the reactor's half, carried over.
 #[test]
 fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
