@@ -1,11 +1,12 @@
 //! Builds the Roc core (`roc/core/main.roc` on `roc/platform`) into a static archive with the
-//! pinned Roc nightly, links it, and generates the Rust glue for the platform's boundary types
-//! (`roc glue`, into `OUT_DIR`; never committed). `ROC` names the compiler; the default is the
-//! pinned nightly under `~/.local/share/roc-nightly/current`. `ROC_SRC` names a checkout of
-//! roc-lang/roc at the same commit, for the glue spec (`src/glue/src/RustGlue.roc`, which the
-//! nightly tarball lacks); the default is `~/.local/share/roc-nightly/src`. Only with the `roc`
-//! feature. Each run states how long the Roc build and the glue took, so a slow build is
-//! explainable.
+//! pinned Roc nightly (`roc/NIGHTLY`), links it, and generates the Rust glue for the platform's
+//! boundary types (`roc glue`, into `OUT_DIR`; never committed). `ROC` names the compiler; the
+//! default is the pinned nightly under `~/.local/share/roc-nightly/current`. `ROC_SRC` names
+//! roc-lang/roc's source at the same commit, for the glue spec (`src/glue/src/RustGlue.roc`, in
+//! the nightly's source tarball, not its compiler tarball); the default is
+//! `~/.local/share/roc-nightly/src-current`. `roc/bump.sh` points both at the pinned nightly.
+//! Only with the `roc` feature. Each run states how long the Roc build and the glue took, so a
+//! slow build is explainable.
 //!
 //! The archive and the glue are built once per input and shared: every build-script run (each
 //! feature set, `check`, `test`, clippy: each has its own `OUT_DIR`) keys them by a hash of
@@ -31,8 +32,8 @@ fn main() {
     let home = std::env::var("HOME").unwrap();
     let roc = std::env::var("ROC")
         .unwrap_or_else(|_| format!("{home}/.local/share/roc-nightly/current/roc"));
-    let roc_src =
-        std::env::var("ROC_SRC").unwrap_or_else(|_| format!("{home}/.local/share/roc-nightly/src"));
+    let roc_src = std::env::var("ROC_SRC")
+        .unwrap_or_else(|_| format!("{home}/.local/share/roc-nightly/src-current"));
     // The directories, not a list of modules: cargo rebuilds when any file in them changes, so
     // a new module can't be left out (Scrolling.roc once was, and a stale core was tested).
     for dir in ["core", "platform"] {

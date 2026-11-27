@@ -50,6 +50,28 @@ Gaps: no reactor test acks between 1.5 and 3 points (the ack tolerance is held b
 edge differential). On hold (the lead): scrolling slice 1 until the owner confirms; the #713
 merge when we get there.
 
+**Roc nightly policy (the owner, 2026-11-27): rift tracks the newest Roc nightly.** The pin is
+`roc/NIGHTLY` (a roc-lang/nightlies tag; roc-lang/roc's own releases stop at 0.1.0-RC2).
+- `mise run roc-bump` (`roc/bump.sh`) reads the newest nightly, installs its compiler, its
+  `-safe` build and its source (the glue spec, `RustGlue.roc`, is in the source tarball) under
+  `~/.local/share/roc-nightly` (`ROC_NIGHTLY_HOME`), points `current`, `safe` and `src-current`
+  at them (build.rs's defaults for `ROC` and `ROC_SRC`), writes `roc/NIGHTLY` and runs the check
+  run. A failed check run puts the old pin and links back and names the checks that broke (logs
+  in `target/check-logs`); the new nightly stays installed for a repro. The bump is its own
+  commit (`roc/NIGHTLY` alone).
+- `mise run check` (`roc/check.sh`) is the full check run, one line per check, exit 1 on any
+  failure. It starts by warning (never failing) when `roc/NIGHTLY` is older than the newest
+  nightly; offline, it says nothing.
+- Every slice starts with `mise run roc-bump`.
+- A failed bump is reported to the lead with the check that broke and, for a Roc regression, a
+  minimal repro (roc-bug-verify's repros and `both.sh` are the model). Never a workaround without
+  telling the lead.
+- When a bump fixes a bug rift works around, the workaround goes in the same or the next commit.
+- Kept on purpose (roc-bug-verify, at nightly-2026-11-26-890d6c8): the one-tag answer-union
+  convention (every answer union has two or more tags; a one-tag union still breaks), the deep
+  `decref_list_of_*` calls, the build's `unnamed_types` guard, Geometry's rounding and
+  `fmaxnm`/`fminnm`, and the host's own allocator hooks.
+
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
 names), plant and bisect variant builds, scratch outputs. Keep `target/debug/incremental` (it

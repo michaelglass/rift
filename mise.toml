@@ -1,0 +1,10 @@
+# The Roc fork's commands. `mise run check` is the full check run; `mise run roc-bump` moves the
+# pinned Roc nightly (roc/NIGHTLY) to the newest one and runs the check run (docs/roc-fork.md,
+# "Roc nightly policy").
+[tasks.check]
+description = "The full check run: fmt, check, tests, the Roc differentials, fuzzers, clippy"
+run = "roc/check.sh"
+
+[tasks.roc-bump]
+description = "Bump the pinned Roc nightly to the newest, then run the check run"
+run = "roc/bump.sh"
