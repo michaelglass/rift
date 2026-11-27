@@ -14,7 +14,7 @@ use crate::common::config::{LayoutMode, LayoutSettings, WorkspaceSelector};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::{
-    Focus, GroupEdit, LayoutEdit, Sizing, WindowChange, WindowLayoutConstraints, WindowQuery,
+    Focus, GroupEdit, LayoutEdit, WindowChange, WindowLayoutConstraints, WindowQuery,
 };
 use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
@@ -179,45 +179,19 @@ impl std::ops::Deref for LayoutEventOutcome {
     fn deref(&self) -> &Self::Target { &self.response }
 }
 
-#[derive(Default)]
-struct LayoutConstraints {
-    windows: HashMap<WindowId, WindowLayoutConstraints>,
+/// A scrolling layout's pass given every window's constraints (the core's records, in the
+/// engine's shape) and the core's revision of them.
+fn prepare_scrolling(
+    constraints: &HashMap<WindowId, WindowLayoutConstraints>,
     revision: u64,
-}
-
-impl LayoutConstraints {
-    fn insert(&mut self, window: WindowId, constraints: WindowLayoutConstraints) {
-        if self.windows.insert(window, constraints) != Some(constraints) {
-            self.revision += 1;
-        }
-    }
-
-    fn remove(&mut self, window: &WindowId) -> Option<WindowLayoutConstraints> {
-        let removed = self.windows.remove(window);
-        self.revision += u64::from(removed.is_some());
-        removed
-    }
-
-    fn set_width(&mut self, window: WindowId, width: f64) {
-        if let Some(constraints) = self.windows.get_mut(&window)
-            && constraints.locked_width != width
-        {
-            constraints.locked_width = width;
-            self.revision += 1;
-        }
-    }
-
-    fn prepare(
-        &self,
-        system: &mut LayoutSystemKind,
-        layout: LayoutId,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-        shadow: crate::layout_engine::Shadow,
-    ) {
-        if let LayoutSystemKind::Scrolling(scrolling) = system {
-            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps, shadow);
-        }
+    system: &mut LayoutSystemKind,
+    layout: LayoutId,
+    screen: CGRect,
+    gaps: &crate::common::config::GapSettings,
+    shadow: crate::layout_engine::Shadow,
+) {
+    if let LayoutSystemKind::Scrolling(scrolling) = system {
+        scrolling.prepare(layout, screen, constraints, Some(revision), gaps, shadow);
     }
 }
 
@@ -233,13 +207,8 @@ pub struct LayoutEngine {
     floating_positions: FloatingPositionStore,
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
-    window_layout_constraints: LayoutConstraints,
-    /// The constraints machine (engine slice E4), stepped beside `window_layout_constraints`
-    /// and `app_min_sizes` while it shadows them.
+    /// Every window's size constraints and each app's last reported minimum (engine slice E4).
     constraints: rift_core::constraints::Constraints<WindowId, pid_t>,
-    /// Each app's last reported minimum for a `respect_min_size` window, shared by all its rule
-    /// windows: some apps (e.g. WhatsApp) report none for a new window until it's first used.
-    app_min_sizes: HashMap<pid_t, CGSize>,
     workspaces: WorkspaceStore,
     layout_settings: LayoutSettings,
     space_display_map: HashMap<SpaceId, Option<String>>,
@@ -500,8 +469,15 @@ impl LayoutEngine {
             self.prospective_drop_tree(workspace, layout, source, target, action)?;
         // A drag preview is not a Space's layout pass.
         let shadow = crate::layout_engine::Shadow::outside_a_pass();
-        self.window_layout_constraints
-            .prepare(&mut system, layout, screen, &gaps, shadow);
+        prepare_scrolling(
+            &self.constraint_records(),
+            self.constraints.revision(),
+            &mut system,
+            layout,
+            screen,
+            &gaps,
+            shadow,
+        );
         let frame = self
             .project_arrangement(&system, layout, screen, &gaps, stack_line.reserve(), shadow)
             .into_iter()
@@ -649,8 +625,8 @@ impl LayoutEngine {
             return scrolling.calculate_frames(
                 layout,
                 screen,
-                &self.window_layout_constraints.windows,
-                Some(self.window_layout_constraints.revision),
+                &self.constraint_records(),
+                Some(self.constraints.revision()),
                 gaps,
                 true,
                 shadow,
@@ -660,7 +636,7 @@ impl LayoutEngine {
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
-            &self.window_layout_constraints.windows,
+            &self.constraint_records(),
             gaps,
             stack_line,
             shadow,
@@ -826,7 +802,7 @@ impl LayoutEngine {
             layout_id,
             screen,
             stack_offset,
-            &self.window_layout_constraints.windows,
+            &self.constraint_records(),
             gaps,
             stack_line,
             selection_path_only,
@@ -1747,22 +1723,6 @@ impl LayoutEngine {
 
     fn preserve_scrolling_window_width(&mut self, window_store: Windows<'_>, wid: WindowId) {
         if let Some(window) = window_store.window(wid) {
-            let mut constraints =
-                self.window_layout_constraints.windows.get(&wid).copied().unwrap_or_else(|| {
-                    // Scrolling ignores respect_min_size; WindowObserved sets it.
-                    WindowLayoutConstraints {
-                        sizing: Sizing::new(window.info.is_resizable, false),
-                        locked_height: window.frame_monotonic().size.height,
-                        min_width: window.info.min_size.map_or(0.0, |size| size.width),
-                        min_height: window.info.min_size.map_or(0.0, |size| size.height),
-                        max_width: window.info.max_size.map_or(0.0, |size| size.width),
-                        max_height: window.info.max_size.map_or(0.0, |size| size.height),
-                        ..Default::default()
-                    }
-                    .normalized()
-                });
-            constraints.locked_width = window.frame_monotonic().size.width;
-            self.window_layout_constraints.insert(wid, constraints);
             let frame = window.frame_monotonic().size;
             let observed = Self::observed_size(
                 window.info.is_resizable,
@@ -1770,7 +1730,7 @@ impl LayoutEngine {
                 window.info.min_size,
                 window.info.max_size,
             );
-            self.constrain(rift_core::constraints::ConstraintsEvent::WidthPreserved {
+            self.constraints.step(rift_core::constraints::ConstraintsEvent::WidthPreserved {
                 window: wid,
                 observed,
                 width: frame.width,
@@ -1954,8 +1914,6 @@ impl LayoutEngine {
             floating_positions: FloatingPositionStore::default(),
             app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
             focused_window: None,
-            window_layout_constraints: LayoutConstraints::default(),
-            app_min_sizes: HashMap::default(),
             constraints: Default::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
@@ -2003,8 +1961,7 @@ impl LayoutEngine {
         screen_frame: CGRect,
         display_uuid: Option<&str>,
     ) {
-        self.window_layout_constraints.set_width(resize.window, new_frame.size.width);
-        self.constrain(rift_core::constraints::ConstraintsEvent::WidthSet {
+        self.constraints.step(rift_core::constraints::ConstraintsEvent::WidthSet {
             window: resize.window,
             width: new_frame.size.width,
         });
@@ -2178,31 +2135,9 @@ impl LayoutEngine {
                     .expect("a listed workspace has a Space");
                 self.debug_tree(window_store.read(), space);
                 let wid = info.window_id;
-                // A rule window that reports no minimum yet takes its app's last one: some apps
-                // (e.g. WhatsApp) report none for a new window until it is first used.
-                let reported = info.min_size.filter(|s| s.width > 0.0 || s.height > 0.0);
-                let min = match (effects.respect_min_size, reported) {
-                    (true, Some(min)) => {
-                        self.app_min_sizes.insert(wid.pid, min);
-                        Some(min)
-                    }
-                    (true, None) => self.app_min_sizes.get(&wid.pid).copied(),
-                    (false, min) => min,
-                };
-                self.window_layout_constraints.insert(
-                    wid,
-                    WindowLayoutConstraints {
-                        sizing: Sizing::new(info.is_resizable, effects.respect_min_size),
-                        locked_width: info.current_size.width,
-                        locked_height: info.current_size.height,
-                        min_width: min.map_or(0.0, |s| s.width),
-                        min_height: min.map_or(0.0, |s| s.height),
-                        max_width: info.max_size.map_or(0.0, |s| s.width),
-                        max_height: info.max_size.map_or(0.0, |s| s.height),
-                    }
-                    .normalized(),
-                );
-                self.constrain(rift_core::constraints::ConstraintsEvent::Observed {
+                // A rule window that reports no minimum yet takes its app's last one (the
+                // constraints machine decides).
+                self.constraints.step(rift_core::constraints::ConstraintsEvent::Observed {
                     window: wid,
                     app: wid.pid,
                     respect_min_size: effects.respect_min_size,
@@ -2372,8 +2307,7 @@ impl LayoutEngine {
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
-                self.app_min_sizes.remove(&pid);
-                self.constrain(rift_core::constraints::ConstraintsEvent::AppQuit(pid));
+                self.constraints.step(rift_core::constraints::ConstraintsEvent::AppQuit(pid));
                 self.forget_persisted_app(pid);
 
                 self.floating_positions.remove_app(pid);
@@ -2474,8 +2408,7 @@ impl LayoutEngine {
                 {
                     return EventResponse::default();
                 }
-                self.window_layout_constraints.set_width(wid, new_frame.size.width);
-                self.constrain(rift_core::constraints::ConstraintsEvent::WidthSet {
+                self.constraints.step(rift_core::constraints::ConstraintsEvent::WidthSet {
                     window: wid,
                     width: new_frame.size.width,
                 });
@@ -3081,7 +3014,9 @@ impl LayoutEngine {
             return Vec::new();
         };
         let shadow = self.shadow_passes.pass(space);
-        self.window_layout_constraints.prepare(
+        prepare_scrolling(
+            &self.constraint_records(),
+            self.constraints.revision(),
             &mut self.workspaces[workspace_id].layout_system,
             layout,
             screen,
@@ -3154,7 +3089,7 @@ impl LayoutEngine {
             if let Some(layout) =
                 self.workspaces.reading(window_store).active_layout(space, active_workspace_id)
             {
-                let constraints = &self.window_layout_constraints.windows;
+                let constraints = &self.constraint_records();
                 if let LayoutSystemKind::Floating(system) =
                     &mut self.workspaces[active_workspace_id].layout_system
                 {
@@ -3191,10 +3126,19 @@ impl LayoutEngine {
                     );
                     None
                 });
+                let records = self.constraint_records();
                 positions.extend(frames.unwrap_or_else(|| {
                     let shadow = self.shadow_passes.pass(space);
                     let system = &mut self.workspaces[active_workspace_id].layout_system;
-                    self.window_layout_constraints.prepare(system, layout, screen, gaps, shadow);
+                    prepare_scrolling(
+                        &records,
+                        self.constraints.revision(),
+                        system,
+                        layout,
+                        screen,
+                        gaps,
+                        shadow,
+                    );
                     if finish_scrolling && let LayoutSystemKind::Scrolling(scrolling) = system {
                         scrolling.finish_viewport(layout);
                     }
@@ -3347,8 +3291,8 @@ impl LayoutEngine {
                 .calculate_frames(
                     layout,
                     screen,
-                    &self.window_layout_constraints.windows,
-                    Some(self.window_layout_constraints.revision),
+                    &self.constraint_records(),
+                    Some(self.constraints.revision()),
                     gaps,
                     false,
                     // A query is not a Space's layout pass.
@@ -4148,31 +4092,16 @@ impl LayoutEngine {
     /// A window's size constraints live as long as the window, so only its retirement drops
     /// them. Leaving a layout doesn't: a move between Spaces arrives as a layout removal.
     pub(crate) fn retire_window(&mut self, wid: WindowId) {
-        self.window_layout_constraints.remove(&wid);
-        self.constrain(rift_core::constraints::ConstraintsEvent::Retired(wid));
+        self.constraints.step(rift_core::constraints::ConstraintsEvent::Retired(wid));
     }
 
-    /// One step of the constraints machine; in tests, its records checked against the engine's.
-    fn constrain(&mut self, event: rift_core::constraints::ConstraintsEvent<WindowId, pid_t>) {
-        self.constraints.step(event);
-        #[cfg(test)]
-        {
-            let core: HashMap<WindowId, WindowLayoutConstraints> = self
-                .constraints
-                .windows()
-                .map(|(window, c)| (window, super::core_geometry::engine_constraints(c)))
-                .collect();
-            assert_eq!(
-                core, self.window_layout_constraints.windows,
-                "constraints shadow, {event:?}"
-            );
-            let minimums: HashMap<pid_t, CGSize> = self
-                .constraints
-                .app_minimums()
-                .map(|(app, min)| (app, CGSize::new(min.width(), min.height())))
-                .collect();
-            assert_eq!(minimums, self.app_min_sizes, "app minimums shadow, {event:?}");
-        }
+    /// Every window's constraints in the engine's shape, from the core's records: computed for
+    /// each pass that reads them, never kept.
+    fn constraint_records(&self) -> HashMap<WindowId, WindowLayoutConstraints> {
+        self.constraints
+            .windows()
+            .map(|(window, c)| (window, super::core_geometry::engine_constraints(c)))
+            .collect()
     }
 
     /// What an observation reports of `window`'s size, as the constraints machine reads it.
@@ -4194,7 +4123,7 @@ impl LayoutEngine {
 
     #[cfg(test)]
     pub(crate) fn has_window_constraints(&self, wid: WindowId) -> bool {
-        self.window_layout_constraints.windows.contains_key(&wid)
+        self.constraints.get(wid).is_some()
     }
 
     pub(crate) fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
@@ -4220,10 +4149,8 @@ impl LayoutEngine {
         self.workspaces.transfer_window_identity(from, to);
         self.floating_positions.transfer_window_identity(from, to);
         self.floating.transfer_window_identity(from, to);
-        if let Some(constraints) = self.window_layout_constraints.remove(&from) {
-            self.window_layout_constraints.insert(to, constraints);
-        }
-        self.constrain(rift_core::constraints::ConstraintsEvent::Replaced { from, to });
+        self.constraints
+            .step(rift_core::constraints::ConstraintsEvent::Replaced { from, to });
         if self.focused_window == Some(from) {
             self.focused_window = Some(to);
         }
@@ -4704,12 +4631,7 @@ mod tests {
                         LayoutEvent::WindowAdded(space, window),
                     );
                 }
-                engine.window_layout_constraints.insert(source, WindowLayoutConstraints {
-                    sizing: Sizing::Resizable,
-                    max_width: 180.0,
-                    ..Default::default()
-                });
-                engine.constrain(rift_core::constraints::ConstraintsEvent::Observed {
+                engine.constraints.step(rift_core::constraints::ConstraintsEvent::Observed {
                     window: source,
                     app: source.pid,
                     respect_min_size: false,
@@ -5049,6 +4971,145 @@ mod tests {
             let layout = workspace.active_layout().unwrap();
             assert_eq!(workspace.layout_system.contains_window(layout, wid), id == ws1);
         }
+    }
+
+    /// A fixed-size window (`fixed`, 300 wide) tiled beside a resizable one on a 1200x800 screen.
+    fn fixed_window_beside_another() -> (LayoutEngine, OwnedWindows, SpaceId, CGRect, WindowId) {
+        let mut engine = test_engine();
+        let mut window_store = OwnedWindows::default();
+        let space = SpaceId::new(93);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let _ = engine.handle_event(
+            &mut window_store.view_mut(),
+            LayoutEvent::SpaceExposed(space, screen.size),
+        );
+        let fixed = WindowId::new(7, 1);
+        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 800.0));
+        let info = crate::actor::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: false,
+            min_size: None,
+            max_size: None,
+            title: String::new(),
+            frame,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+        window_store.view_mut().insert_manageable_window(fixed, info.into());
+        // The engine projects only windows the store admits (#702).
+        window_store
+            .view_mut()
+            .insert_manageable_window(WindowId::new(8, 1), live_window(CGSize::new(500.0, 500.0)));
+        for (window, info) in [
+            (fixed, WindowLayoutInfo {
+                is_resizable: false,
+                ..window_layout_info(fixed, CGSize::new(300.0, 800.0))
+            }),
+            (
+                WindowId::new(8, 1),
+                window_layout_info(WindowId::new(8, 1), CGSize::new(500.0, 500.0)),
+            ),
+        ] {
+            let _ = engine.handle_event(
+                &mut window_store.view_mut(),
+                LayoutEvent::windows_observed(space, window.pid, vec![info], None),
+            );
+        }
+        (engine, window_store, space, screen, fixed)
+    }
+
+    /// The fixed window's tile width.
+    fn fixed_width(
+        engine: &mut LayoutEngine,
+        windows: Windows<'_>,
+        space: SpaceId,
+        screen: CGRect,
+        fixed: WindowId,
+    ) -> f64 {
+        engine
+            .calculate_layout(windows, space, screen, &Default::default(), Default::default())
+            .into_iter()
+            .find(|(w, _)| *w == fixed)
+            .expect("fixed window is tiled")
+            .1
+            .size
+            .width
+    }
+
+    /// A window's constraints follow it to a new identity.
+    #[test]
+    fn a_new_identity_keeps_the_windows_constraints() {
+        let (mut engine, _window_store, _, _, fixed) = fixed_window_beside_another();
+        let record = engine.constraints.get(fixed).expect("observed");
+        let new = WindowId::new(7, 2);
+        engine.transfer_persistent_window_identity(fixed, new);
+        assert_eq!(engine.constraints.get(fixed), None);
+        assert_eq!(engine.constraints.get(new), Some(record));
+    }
+
+    /// A native resize locks a window at its new width: a fixed window's tile is that wide.
+    #[test]
+    fn a_native_resize_locks_the_window_at_its_width() {
+        let (mut engine, mut window_store, space, screen, fixed) = fixed_window_beside_another();
+        assert_eq!(
+            fixed_width(&mut engine, window_store.view(), space, screen, fixed),
+            300.0
+        );
+        let old_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 800.0));
+        let new_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(350.0, 800.0));
+        let _ = engine.handle_event(&mut window_store.view_mut(), LayoutEvent::WindowResized {
+            wid: fixed,
+            old_frame,
+            new_frame,
+            screens: vec![(space, screen, None)].into(),
+        });
+        assert_eq!(
+            fixed_width(&mut engine, window_store.view(), space, screen, fixed),
+            350.0
+        );
+    }
+
+    /// Switched to a scrolling layout that preserves window sizes, each window keeps its width.
+    #[test]
+    fn a_switch_to_scrolling_preserving_sizes_keeps_each_windows_width() {
+        let (mut engine, mut window_store, space, screen, fixed) = fixed_window_beside_another();
+        // The resizable window is resized after its observation: the switch preserves 450.
+        let other = WindowId::new(8, 1);
+        window_store
+            .view_mut()
+            .window_mut(other)
+            .unwrap()
+            .project_seen(CGRect::new(CGPoint::ZERO, CGSize::new(450.0, 500.0)));
+        let mut settings = LayoutSettings::default();
+        settings.scrolling.preserve_window_sizes = true;
+        engine.set_layout_settings(window_store.view(), &settings);
+        let workspace =
+            engine.workspaces.reading(window_store.view()).active_workspace(space).unwrap();
+        engine.switch_workspace_layout_mode(
+            window_store.view(),
+            space,
+            workspace,
+            LayoutMode::Scrolling,
+        );
+        let widths: HashMap<WindowId, f64> = engine
+            .calculate_layout(
+                window_store.view(),
+                space,
+                screen,
+                &Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .map(|(w, frame)| (w, frame.size.width))
+            .collect();
+        assert_eq!(widths.get(&fixed), Some(&300.0), "{widths:?}");
+        assert_eq!(widths.get(&other), Some(&450.0), "{widths:?}");
     }
 
     #[test]
