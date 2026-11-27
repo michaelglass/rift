@@ -1,5 +1,10 @@
 # Roc dev backend: rift's traditional layout crashes (no standalone repro yet)
 
+**Superseded (2026-11-27):** the standalone repro is `../recursive-nominal-payload/`. The trigger
+is a nominal record (`TraditionalAxis := {…}`) as a recursive union's variant payload; the
+reductions below wrote the payload as an anonymous record, which does not crash. It crashes at
+`--opt=size` too.
+
 At nightly-2026-11-26-890d6c8, rift-core-roc linked against a `--opt=dev` build of `roc/core`
 SIGSEGVs in `the_roc_core_tiles_traditional_layouts_as_the_rust_core_does` and
 `the_roc_core_tiles_what_the_rust_core_tiles`: `Traditional.tree_of` → `roc__rc_incref_*` →
