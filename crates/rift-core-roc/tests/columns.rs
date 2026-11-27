@@ -378,7 +378,9 @@ fn the_roc_columns_answer_and_keep_the_arrangements_as_the_rust_system_does() {
         before.live(),
         "Roc allocations left live"
     );
-    assert!(reached.iter().all(|&n| n > 50), "reached {reached:?}");
+    // Each kind is reached more than 50 times in 4000 runs, proportionally in fewer.
+    let needed = (50 * runs / 4000).max(1);
+    assert!(reached.iter().all(|&n| n > needed), "reached {reached:?}");
     eprintln!("columns: reached {reached:?}");
 }
 

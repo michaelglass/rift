@@ -3016,6 +3016,11 @@ mod core_geometry_tests {
     use crate::layout_engine::systems::drawn::*;
     use crate::layout_engine::systems::{GroupEdit, LayoutEdit};
 
+    /// How many strips a drawn test here draws: `default`, or `RIFT_SCROLLING_CASES` (a cut for
+    /// `mise run check-fast`, or a raise for plant runs).
+    fn cases(default: usize) -> usize {
+        std::env::var("RIFT_SCROLLING_CASES").map_or(default, |n| n.parse().unwrap())
+    }
     fn drawn_settings(rng: &mut Rng) -> ScrollingLayoutSettings {
         let ratio = |rng: &mut Rng| match rng.below(6) {
             0 => f64::NAN,
@@ -3166,7 +3171,7 @@ mod core_geometry_tests {
     fn the_core_places_scrolling_strips_as_the_scrolling_system_does() {
         let mut rng = Rng(0x5eed_5c01);
         let (mut cases, mut frames_seen) = (0, 0);
-        for _ in 0..3000 {
+        for _ in 0..self::cases(3000) {
             let (system, layout, windows) = drawn_system(&mut rng);
             let screen = drawn_screen(&mut rng);
             let constraints = drawn_constraints_for(&mut rng, &windows);
@@ -3195,7 +3200,10 @@ mod core_geometry_tests {
             frames_seen += theirs.frames.len();
         }
         eprintln!("scrolling: {cases} strips, {frames_seen} frames identical");
-        assert!(frames_seen > 3000, "the draws reach frames ({frames_seen})");
+        assert!(
+            frames_seen > self::cases(3000),
+            "the draws reach frames ({frames_seen})"
+        );
     }
 
     /// An offset that puts a world frame at a parking edge, just past it, or anywhere
@@ -3225,7 +3233,7 @@ mod core_geometry_tests {
         use rift_core::layout::scrolling::translate;
         let mut rng = Rng(0x5eed_7a45);
         let (mut cases, mut frames_seen, mut parked) = (0, 0, 0);
-        for _ in 0..3000 {
+        for _ in 0..self::cases(3000) {
             let (mut system, layout, windows) = drawn_system(&mut rng);
             let screen = drawn_screen(&mut rng);
             let constraints = drawn_constraints_for(&mut rng, &windows);
@@ -3271,7 +3279,7 @@ mod core_geometry_tests {
             "scrolling shown: {cases} cameras, {frames_seen} frames identical, {parked} parked"
         );
         assert!(
-            frames_seen > 3000 && parked > 300,
+            frames_seen > self::cases(3000) && parked > self::cases(3000) / 10,
             "the draws reach frames and parking"
         );
     }
@@ -3285,7 +3293,8 @@ mod core_geometry_tests {
     fn the_core_arranges_scrolling_strips_as_the_scrolling_system_does() {
         let mut rng = Rng(0x5eed_c011);
         let mut reached = [0u32; 8];
-        for _ in 0..600 {
+        let systems = cases(600);
+        for _ in 0..systems {
             let (mut system, layout, mut windows) = drawn_system(&mut rng);
             for _ in 0..12 {
                 let pick = |rng: &mut Rng, windows: &[WindowId]| {
@@ -3397,7 +3406,9 @@ mod core_geometry_tests {
                 }
             }
         }
-        assert!(reached.iter().all(|&n| n >= 20), "reached {reached:?}");
+        // Each kind is reached 20 times in 600 systems, proportionally in fewer.
+        let needed = (20 * systems / 600).max(1) as u32;
+        assert!(reached.iter().all(|&n| n >= needed), "reached {reached:?}");
     }
 
     /// A saved system holding `columns` (each `(id, rows, active_window, width)`) and these

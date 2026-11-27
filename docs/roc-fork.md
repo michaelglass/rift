@@ -60,7 +60,16 @@ merge when we get there.
   in `target/check-logs`); the new nightly stays installed for a repro. The bump is its own
   commit (`roc/NIGHTLY` alone).
 - `mise run check` (`roc/check.sh`) is the full check run, one line per check, exit 1 on any
-  failure. It starts by warning (never failing) when `roc/NIGHTLY` is older than the newest
+  failure. Since 2026-11-27 it builds everything first, then runs the test runs side by side:
+  the two lib runs and the drag fuzzers through libtest (nextest's process per test costs about
+  0.4 s of system time each for the lib's 950 tests: 144 s against libtest's 54 s), the crates
+  with few long tests through cargo-nextest (pinned in `mise.toml`, 0.9.149; rift-core-roc 43 s
+  to 14 s). `mise run check-fast` (`roc/check.sh fast`) is the inner loop: fmt, the `roc-core`
+  check, the lib with `roc-core`, rift-core-roc and rift-core, each drawn test cut to the counts
+  in `FAST_CUTS` (one table in `roc/check.sh`; `RIFT_SCROLLING_CASES` added for the scrolling
+  strips); not a publish gate. Wall times (12 cores), before and after: the full run after a
+  Rust change 500 s to 133 s, after a `.roc` change 441 s to 177 s, after nothing 347 s to 91 s;
+  check-fast 58 s, 109 s and 23 s. It starts by warning (never failing) when `roc/NIGHTLY` is older than the newest
   nightly; offline, it says nothing.
 - Every slice starts with `mise run roc-bump`.
 - A failed bump is reported to the lead with the check that broke and, for a Roc regression, a

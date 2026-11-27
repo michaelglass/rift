@@ -1,9 +1,18 @@
 # The Roc fork's commands. `mise run check` is the full check run; `mise run roc-bump` moves the
 # pinned Roc nightly (roc/NIGHTLY) to the newest one and runs the check run (docs/roc-fork.md,
 # "Roc nightly policy").
+# Project tools, over anything on PATH inside the repo: cargo-nextest runs the check run's tests
+# (nixpkgs' version; a cargo-nextest older than the toolchain's libtest lists no tests).
+[tools]
+"github:nextest-rs/nextest" = "cargo-nextest-0.9.149"
+
 [tasks.check]
 description = "The full check run: fmt, check, tests, the Roc differentials, fuzzers, clippy"
 run = "roc/check.sh"
+
+[tasks.check-fast]
+description = "The inner loop: fmt, the roc-core check, the lib with roc-core, rift-core-roc and rift-core, drawn tests cut (roc/check.sh, FAST_CUTS). Not a publish gate"
+run = "roc/check.sh fast"
 
 [tasks.roc-bump]
 description = "Bump the pinned Roc nightly to the newest, then run the check run"
