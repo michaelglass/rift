@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -61,6 +61,9 @@ platform ""
 			main_window_init : {} -> mains,
 			main_window_step : mains, MainWindowEvent -> { model : mains, focus : MaybeWord },
 			main_window_view : mains -> { model : mains, main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord },
+			sizes_init : {} -> sizes,
+			sizes_step : sizes, SizesEvent -> { model : sizes, changed : Bool },
+			sizes_view : sizes -> { model : sizes, windows : List(SizeRecord), app_minimums : List(AppMinimum), revision : U64 },
 			narrow : F64 -> F32,
 			bsp_tree_init : BspInsertion -> trees,
 			bsp_tree_seed : BspTreeSeed -> trees,
@@ -111,6 +114,10 @@ platform ""
 		"roc_main_window_step": main_window_step_for_host,
 		"roc_main_window_view": main_window_view_for_host,
 		"roc_main_window_release": main_window_release_for_host,
+		"roc_sizes_init": sizes_init_for_host,
+		"roc_sizes_step": sizes_step_for_host,
+		"roc_sizes_view": sizes_view_for_host,
+		"roc_sizes_release": sizes_release_for_host,
 		"roc_narrow": narrow_for_host,
 		"roc_bsp_tree_init": bsp_tree_init_for_host,
 		"roc_bsp_tree_seed": bsp_tree_seed_for_host,
@@ -199,7 +206,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -232,6 +239,13 @@ MainWindowsStepped := { model : Box(Mains), focus : MaybeWord }
 ## The main windows, unchanged, and what they hold: the main window, the native focus, every
 ## app in pid order and the globally frontmost app.
 MainWindowsViewed := { model : Box(Mains), main_window : MaybeWord, native_focus : NativeFocus, apps : List(MainApp), global_frontmost : MaybeWord }
+
+## The constraints machine after an event, and whether the records or app minimums changed.
+SizesStepped := { model : Box(Sizes), changed : Bool }
+
+## The constraints machine, unchanged, and what it holds: every window's record and each app's
+## last minimum (in word order) and its revision.
+SizesViewed := { model : Box(Sizes), windows : List(SizeRecord), app_minimums : List(AppMinimum), revision : U64 }
 
 ## A BSP layout system's trees after an operation, and what it answered.
 BspTreeStepped := { model : Box(Trees), answer : BspTreeAnswer }
@@ -550,6 +564,29 @@ main_window_view_for_host = |boxed| {
 ## The host cannot release a `Box(Mains)`: only Roc knows its layout.
 main_window_release_for_host : Box(Mains) -> {}
 main_window_release_for_host = |_| {}
+
+## Window size constraints (`rift_core::constraints::Constraints`), kept between events: no
+## records, no app minimums, revision 0.
+sizes_init_for_host : {} -> Box(Sizes)
+sizes_init_for_host = |{}| Box.box((core.sizes_init)({}))
+
+## An observed event, and whether it changed the records or the app minimums.
+sizes_step_for_host : Box(Sizes), SizesEvent -> SizesStepped
+sizes_step_for_host = |boxed, event| {
+	stepped = (core.sizes_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), changed: stepped.changed }
+}
+
+## Every record, each app minimum and the revision, and the machine back unchanged.
+sizes_view_for_host : Box(Sizes) -> SizesViewed
+sizes_view_for_host = |boxed| {
+	viewed = (core.sizes_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), windows: viewed.windows, app_minimums: viewed.app_minimums, revision: viewed.revision }
+}
+
+## The host cannot release a `Box(Sizes)`: only Roc knows its layout.
+sizes_release_for_host : Box(Sizes) -> {}
+sizes_release_for_host = |_| {}
 
 ## The mode table's verdict on an initiative.
 mode_verdict_for_host : ModesQuestion -> ModeVerdict

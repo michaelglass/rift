@@ -335,6 +335,39 @@ impl RocMainWindows {
     }
 }
 
+/// Window size constraints (`rift_core::constraints::Constraints`) kept in Roc between events:
+/// every window's record and each app's last minimum. Stepped beside the Rust machine, it must
+/// answer the same change and hold the same state. Windows and pids are words.
+pub struct RocSizes {
+    sizes: boundary::SizesBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocSizes {}
+
+impl Default for RocSizes {
+    fn default() -> Self {
+        RocSizes {
+            sizes: boundary::SizesBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocSizes {
+    /// As `Constraints::step`: whether the records or app minimums changed.
+    pub fn step(&mut self, event: rift_core::constraints::ConstraintsEvent<u64, u64>) -> bool {
+        boundary::in_place(&mut self.sizes, |sizes| sizes.step(event))
+    }
+
+    /// The whole machine, as a Rust `Constraints` (records and minimums in word order).
+    pub fn view(&mut self) -> rift_core::constraints::Constraints<u64, u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.sizes, |sizes| sizes.view(host))
+    }
+}
+
 /// What the main-window machine holds, as both twins give it.
 /// A BSP layout system's trees (`rift_core::layout::bsp_tree::Tree`) kept in Roc between
 /// operations.

@@ -33,6 +33,7 @@ FAST_CUTS=(
     RIFT_COLUMNS_RUNS=400      # rift-core-roc: the scrolling columns (4000)
     RIFT_WORKSPACES_CASES=2000 # rift-core-roc: the workspaces (20,000)
     RIFT_MAIN_WINDOW_RUNS=100  # rift-core-roc: the main window (1000)
+    RIFT_CONSTRAINTS_RUNS=200  # rift-core-roc: the window constraints (2000)
     RIFT_SESSION_ROUNDS=40     # rift-core-roc: the session (200)
 )
 # The full run's fuzzer budget.

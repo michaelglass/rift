@@ -811,6 +811,32 @@ Boundary := [].{
 	## One app as the machine knows it.
 	MainApp := { pid : U64, standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }
 
+	# Window size constraints (`rift_core::constraints`), kept between events. Windows and apps
+	# are one word each.
+
+	## A window's reported minimum, if it reports a non-zero one.
+	ReportedMin := [NoMin, Min(Size)]
+
+	## A window's size as an observation reports it.
+	SizeObserved := { resizable : Bool, width : F64, height : F64, min : ReportedMin, max_width : F64, max_height : F64 }
+
+	SizeObservation := { window : U64, pid : U64, respect_min_size : Bool, observed : SizeObserved }
+
+	SizeWidth := { window : U64, width : F64 }
+
+	SizePreserve := { window : U64, observed : SizeObserved, width : F64 }
+
+	SizeReplacement := { from : U64, to : U64 }
+
+	## What the layout engine observes that the constraints machine reads.
+	SizesEvent := [Observed(SizeObservation), WidthSet(SizeWidth), WidthPreserved(SizePreserve), Retired(U64), Replaced(SizeReplacement), AppQuit(U64)]
+
+	## A window's constraints.
+	SizeRecord := { window : U64, constraints : WindowConstraints }
+
+	## An app's last reported minimum.
+	AppMinimum := { pid : U64, min : Size }
+
 	# A BSP layout system's trees (`rift_core::layout::bsp_tree::Tree`), kept between operations.
 	# Layouts and nodes are slotmap keys, one word each (`version << 32 | index`, slotmap's ffi
 	# form); windows are one word each.

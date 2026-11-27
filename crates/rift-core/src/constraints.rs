@@ -105,12 +105,12 @@ impl<W: Ord + Copy, A: Ord + Copy> Constraints<W, A> {
                 let record = record(observed, respect_min_size, min, observed.width);
                 self.windows.insert(window, record) != Some(record)
             }
-            ConstraintsEvent::WidthSet { window, width } => match self.windows.get_mut(&window) {
-                Some(record) if record.locked_width != width => {
-                    record.locked_width = width;
-                    true
+            ConstraintsEvent::WidthSet { window, width } => match self.windows.get(&window) {
+                Some(&known) => {
+                    let locked = WindowConstraints { locked_width: width, ..known }.normalized();
+                    self.windows.insert(window, locked) != Some(locked)
                 }
-                Some(_) | None => false,
+                None => false,
             },
             ConstraintsEvent::WidthPreserved { window, observed, width } => {
                 let mut preserved = self
@@ -119,6 +119,7 @@ impl<W: Ord + Copy, A: Ord + Copy> Constraints<W, A> {
                     .copied()
                     .unwrap_or_else(|| record(observed, false, observed.min, 0.0));
                 preserved.locked_width = width;
+                let preserved = preserved.normalized();
                 self.windows.insert(window, preserved) != Some(preserved)
             }
             ConstraintsEvent::Retired(window) => self.windows.remove(&window).is_some(),
@@ -320,5 +321,14 @@ mod tests {
         assert_eq!(record.sizing, Sizing::Fixed {
             min: Size::reported(300.0, 0.0).unwrap()
         });
+        // A width set or preserved is normalized too.
+        m.step(ConstraintsEvent::WidthSet { window: 1, width: f64::NAN });
+        assert_eq!(m.get(1).unwrap().locked_width, 0.0);
+        m.step(ConstraintsEvent::WidthPreserved {
+            window: 1,
+            observed: observed(None),
+            width: -8.0,
+        });
+        assert_eq!(m.get(1).unwrap().locked_width, 0.0);
     }
 }

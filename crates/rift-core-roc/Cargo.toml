@@ -57,6 +57,10 @@ name = "main_window"
 required-features = ["roc"]
 
 [[test]]
+name = "constraints"
+required-features = ["roc"]
+
+[[test]]
 name = "bsp_tree"
 required-features = ["roc"]
 

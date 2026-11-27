@@ -6,6 +6,7 @@
 
 use std::mem::ManuallyDrop;
 
+use rift_core::constraints::{Constraints, ConstraintsEvent, Observed};
 use rift_core::focus::{
     self, Follow, MouseRaise, Removal, RemovalFocus, Stay, Unraised, UntrackedFocus,
 };
@@ -3281,6 +3282,163 @@ impl Drop for MainWindowsBox {
     fn drop(&mut self) {
         // SAFETY: the box is these main windows' and is never used again.
         unsafe { abi::roc_main_window_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Window size constraints.
+
+fn size_observed(observed: Observed) -> abi::BoundarySizeObserved {
+    use abi::BoundaryReportedMinTag as Tag;
+    abi::BoundarySizeObserved {
+        resizable: observed.resizable,
+        width: observed.width,
+        height: observed.height,
+        min: match observed.min {
+            Some(min) => union!(
+                BoundaryReportedMin,
+                BoundaryReportedMinPayload.min(size(min)),
+                Tag::Min
+            ),
+            None => union!(
+                BoundaryReportedMin,
+                BoundaryReportedMinPayload.no_min,
+                Tag::NoMin
+            ),
+        },
+        max_width: observed.max_width,
+        max_height: observed.max_height,
+    }
+}
+
+fn sizes_event(event: ConstraintsEvent<u64, u64>) -> abi::BoundarySizesEvent {
+    use abi::BoundarySizesEventTag as Tag;
+    match event {
+        ConstraintsEvent::Observed {
+            window,
+            app,
+            respect_min_size,
+            observed,
+        } => union!(
+            BoundarySizesEvent,
+            BoundarySizesEventPayload.observed(abi::BoundarySizeObservation {
+                window,
+                pid: app,
+                respect_min_size,
+                observed: size_observed(observed),
+            }),
+            Tag::Observed
+        ),
+        ConstraintsEvent::WidthSet { window, width } => union!(
+            BoundarySizesEvent,
+            BoundarySizesEventPayload.width_set(abi::BoundarySizeWidth { window, width }),
+            Tag::WidthSet
+        ),
+        ConstraintsEvent::WidthPreserved { window, observed, width } => union!(
+            BoundarySizesEvent,
+            BoundarySizesEventPayload.width_preserved(abi::BoundarySizePreserve {
+                window,
+                observed: size_observed(observed),
+                width,
+            }),
+            Tag::WidthPreserved
+        ),
+        ConstraintsEvent::Retired(window) => union!(
+            BoundarySizesEvent,
+            BoundarySizesEventPayload.retired(window),
+            Tag::Retired
+        ),
+        ConstraintsEvent::Replaced { from, to } => union!(
+            BoundarySizesEvent,
+            BoundarySizesEventPayload.replaced(abi::BoundarySizeReplacement { from, to }),
+            Tag::Replaced
+        ),
+        ConstraintsEvent::AppQuit(app) => union!(
+            BoundarySizesEvent,
+            BoundarySizesEventPayload.app_quit(app),
+            Tag::AppQuit
+        ),
+    }
+}
+
+/// A size Roc gives back: normalized, so finite and not negative.
+fn from_size(size: abi::BoundarySize) -> Size {
+    Size::reported(size.width, size.height).unwrap_or(Size::ZERO)
+}
+
+fn from_window_constraints(c: abi::BoundaryWindowConstraints) -> WindowConstraints {
+    use abi::BoundarySizingTag as Tag;
+    // SAFETY: each arm reads the payload its tag names.
+    let sizing = match c.sizing.tag {
+        Tag::Fixed => Sizing::Fixed {
+            min: from_size(unsafe { *c.sizing.borrow_payload_fixed_unchecked() }),
+        },
+        Tag::Resizable => Sizing::Resizable {
+            advisory_min: from_size(unsafe { *c.sizing.borrow_payload_resizable_unchecked() }),
+        },
+        Tag::ResizableAtLeastMin => Sizing::ResizableAtLeastMin {
+            min: from_size(unsafe { *c.sizing.borrow_payload_resizable_at_least_min_unchecked() }),
+        },
+    };
+    WindowConstraints {
+        sizing,
+        locked_width: c.locked_width,
+        locked_height: c.locked_height,
+        max_width: c.max_width,
+        max_height: c.max_height,
+    }
+}
+
+/// The constraints machine's box, which only Roc can read or free; only the `roc_sizes_*`
+/// entries make and take one. Dropping it releases the machine.
+pub(crate) struct SizesBox(abi::RocBox);
+
+impl SizesBox {
+    pub(crate) fn empty() -> SizesBox { SizesBox(unsafe { abi::roc_sizes_init() }) }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// An observed event: the machine after it, and whether the records or app minimums changed.
+    pub(crate) fn step(self, event: ConstraintsEvent<u64, u64>) -> (SizesBox, bool) {
+        // SAFETY: the box is this machine's, given to the step; its successor comes back.
+        let stepped = unsafe { abi::roc_sizes_step(self.into_raw(), sizes_event(event)) };
+        (SizesBox(stepped.model), stepped.changed)
+    }
+
+    /// Every record and app minimum (in word order) and the revision.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (SizesBox, Constraints<u64, u64>) {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_sizes_view(self.into_raw()) };
+        let windows: Vec<_> = viewed
+            .windows
+            .as_slice()
+            .iter()
+            .map(|record| (record.window, from_window_constraints(record.constraints)))
+            .collect();
+        let minimums: Vec<_> = viewed
+            .app_minimums
+            .as_slice()
+            .iter()
+            .map(|m| (m.pid, from_size(m.min)))
+            .collect();
+        unsafe {
+            viewed.windows.decref(host);
+            viewed.app_minimums.decref(host);
+        }
+        let view = Constraints::from_parts(windows, minimums, viewed.revision);
+        (SizesBox(viewed.model), view)
+    }
+}
+
+impl Drop for SizesBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this machine's and is never used again.
+        unsafe { abi::roc_sizes_release(self.0) }
     }
 }
 
