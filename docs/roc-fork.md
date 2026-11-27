@@ -82,9 +82,12 @@ the dev backend runs the same program, and at nightly-2026-11-26-890d6c8 it does
 - **A separate crash in rift's dev build**, with every `__DATA,__const` at 0 mod 8 (so not the
   above): `the_roc_core_tiles_traditional_layouts_*` and `the_roc_core_tiles_what_the_rust_core_tiles`
   SIGSEGV in `Traditional.tree_of` (`roc_builtins_incref_data_ptr` on 0x4088F8…, the F64 799.0, a
-  window's `locked_height`, read as a pointer) on a host-built shape. Repro: being reduced.
-- Retry on a bump once both are fixed. The key cache stays (one optimized Roc build per `.roc`
-  change).
+  window's `locked_height`, read as a pointer) on a host-built shape. No standalone repro yet:
+  what crashes from rift's side, the reductions that did not reproduce, and the next step are in
+  `roc/repros/dev-from-platform-crash/README.md`.
+- Retry on a bump once both are fixed: `roc/bump.sh` runs rift-core-roc's layout tests under dev
+  (`ROC_OPT=dev`, the build script's only other setting, in `target/roc-dev`) and says whether they
+  pass; it never gates. The key cache stays (one optimized Roc build per `.roc` change).
 - `mise run check-release` (what `rift-local.sh` runs before an install) is an alias of the check
   run: the release build's Roc is the one the check run tests.
 

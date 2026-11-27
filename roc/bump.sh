@@ -69,6 +69,14 @@ point safe "$safe"
 point src-current "$source"
 echo "$latest" >roc/NIGHTLY
 echo "roc-bump: $pinned -> $latest; running the check run"
+# The dev backend is not used (docs/roc-fork.md, "The dev backend"); each bump says whether
+# rift-core-roc's layout tests, where it crashed, now pass under it. Never a gate. Its own target
+# directory: the Roc archive is bundled into rift-core-roc's rlib.
+if ROC_OPT=dev CARGO_TARGET_DIR=target/roc-dev cargo test -q -p rift-core-roc --features roc --test layout >target/roc-dev.log 2>&1; then
+    echo "roc-bump: rift-core-roc's layout tests pass under --opt=dev at $latest; the dev backend may be worth retrying (docs/roc-fork.md)"
+else
+    echo "roc-bump: rift-core-roc's layout tests still fail under --opt=dev at $latest (target/roc-dev.log)"
+fi
 if roc/check.sh; then
     echo "roc-bump: $latest is green; commit roc/NIGHTLY"
 else

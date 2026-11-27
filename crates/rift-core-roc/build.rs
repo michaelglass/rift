@@ -44,9 +44,17 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ROC");
     println!("cargo:rerun-if-env-changed=ROC_SRC");
 
-    const BUILD: [&str; 3] = ["build", "--target=arm64mac", "--opt=speed"];
+    // Every build is optimized: the dev backend runs a different program (docs/roc-fork.md, "The
+    // dev backend"). `ROC_OPT=dev` exists only for `roc/bump.sh`'s probe of whether it still does.
+    println!("cargo:rerun-if-env-changed=ROC_OPT");
+    let opt = match std::env::var("ROC_OPT").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("speed") => "--opt=speed",
+        Ok("dev") => "--opt=dev",
+        other => panic!("ROC_OPT is speed or dev, not {other:?}"),
+    };
+    let build = ["build", "--target=arm64mac", opt];
     let spec = Path::new(&roc_src).join("src/glue/src/RustGlue.roc");
-    let key = inputs_key(&roc_dir, &roc, &spec, &BUILD);
+    let key = inputs_key(&roc_dir, &roc, &spec, &build);
     // The target directory: `OUT_DIR` is `<target>/<profile>/build/<unit>/out`.
     let target = out.ancestors().nth(4).expect("OUT_DIR is under the target directory");
     let shared = target.join("roc-build").join(format!("{key:016x}"));
@@ -63,7 +71,7 @@ fn main() {
         let started = Instant::now();
         let status = Command::new(&roc)
             .current_dir(&roc_dir)
-            .args(BUILD)
+            .args(build)
             .arg(format!("--output={}", work.join("librift_core_roc.a").display()))
             .arg("core/main.roc")
             .status()
