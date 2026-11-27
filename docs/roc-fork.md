@@ -313,6 +313,14 @@ constraints (`preserve_window_sizes`).
     data true where it is: `HeldCameras`, the Spaces whose camera holds still, merged as a set;
     each Space's pass reads its `CameraMotion::{Follows, HoldsStill}`, matched exhaustively in
     `animate_layout`. Plants 5/5.
+  - (g) #705's reactor half (f168b6c6): upstream stopped a suspension's presentation cancel
+    from committing the camera's in-flight viewport over the target the layout change had just
+    set (`cancel_window_frame_writes`, without the commit). Nothing to port: this line's
+    suspension (`reconcile_window_membership` → `WindowSuspended`) cancels no presentation.
+    Upstream's test carried over and passes. Its plants survive (upstream's bug planted back,
+    a cancel after the suspension; participation's reveal removed): with two full-width
+    columns the strip's clamp places the camera on the survivor anyway, so the test guards the
+    outcome, not the mechanism; a sharper one belongs with #718's clamp tests in (h).
 - The rest of #718's range needs ports before the merge: our reactor no longer has upstream's
   presentation policy, so 17a3c021 (tears), #705's reactor half and #709 are ported into its
   shape, and #718's camera commits are the camera slice.
