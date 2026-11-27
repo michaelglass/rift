@@ -242,6 +242,162 @@ fn geometry_commands_request_arrangement_without_camera_movement() {
     }
 }
 
+// Upstream 17a3c021 ("tears in scrolling animation"), carried over.
+#[test]
+fn scrolling_resize_places_the_new_geometry_on_the_first_frame() {
+    use crate::actor::app::FrameMode;
+    use crate::layout_engine::ResizeOrientation::Horizontal;
+
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let left = WindowId::new(1, 1);
+    let right = WindowId::new(2, 1);
+    for (selected, command, width) in [
+        (left, LayoutCommand::ResizeWindowShrink(Horizontal), 450.),
+        (right, LayoutCommand::ResizeWindowGrow(Horizontal), 550.),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let layout = &mut reactor.config.settings.layout;
+        layout.gaps = Default::default();
+        layout.scrolling.animate = Some(true);
+        layout.scrolling.column_width_ratio = 0.5;
+        layout.scrolling.preserve_window_sizes = false;
+        let layout = layout.clone();
+        reactor
+            .stores
+            .layout
+            .layout_engine
+            .set_layout_settings(reactor.stores.state.windows(), &layout);
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, selected));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            apps.windows[&left].frame.max().x,
+            apps.windows[&right].frame.origin.x
+        );
+        assert_eq!(apps.windows[&right].frame.max().x, screen.max().x);
+
+        let (sender, receiver) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        reactor.handle_test_layout_command(command);
+        let mut presenter = super::animation::AnimationManager::new();
+        for message in receiver.commands.try_iter() {
+            presenter.handle_message(message);
+        }
+        presenter.tick_at(Instant::now());
+        let requests = apps.requests();
+        for request in &requests {
+            if let Request::SetWindowFrames(frames, _, FrameMode::Full, ..) = request {
+                for &(window, frame) in frames {
+                    if window == selected {
+                        assert!(
+                            frame.origin.x >= screen.origin.x && frame.max().x <= screen.max().x,
+                            "resizing a fully visible column requested a frame outside the screen: {frame:?}"
+                        );
+                    }
+                }
+            }
+        }
+        apps.simulate_events_for_requests(requests);
+
+        assert_eq!(apps.windows[&selected].frame.size.width, width);
+        assert_eq!(
+            apps.windows[&left].frame.max().x,
+            apps.windows[&right].frame.origin.x
+        );
+    }
+}
+
+#[test]
+fn a_moving_camera_resizes_at_the_old_origin_and_eases_from_there() {
+    use crate::actor::app::FrameMode;
+
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let right = WindowId::new(2, 1);
+    let (mut apps, mut reactor) = test_context();
+    let layout = &mut reactor.config.settings.layout;
+    layout.gaps = Default::default();
+    layout.scrolling.animate = Some(true);
+    layout.scrolling.column_width_ratio = 0.5;
+    layout.scrolling.preserve_window_sizes = false;
+    let layout = layout.clone();
+    reactor
+        .stores
+        .layout
+        .layout_engine
+        .set_layout_settings(reactor.stores.state.windows(), &layout);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, right));
+    apps.simulate_until_quiet(&mut reactor);
+    let before = apps.windows[&right].frame;
+    assert_eq!(before.origin.x, 500.);
+
+    // Fullscreen moves the camera onto the window, so it eases there.
+    let (sender, receiver) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(sender);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    let mut presenter = super::animation::AnimationManager::new();
+    for message in receiver.commands.try_iter() {
+        presenter.handle_message(message);
+    }
+    let first = apps
+        .requests()
+        .into_iter()
+        .find_map(|request| match request {
+            Request::SetWindowFrames(frames, _, FrameMode::Full, ..) => {
+                frames.into_iter().find(|&(window, _)| window == right)
+            }
+            _ => None,
+        })
+        .expect("the resized window's first write")
+        .1;
+    assert_ne!(first.size, before.size, "the window is resized at the boundary");
+    assert_eq!(
+        first.origin, before.origin,
+        "the moving camera starts it where it was"
+    );
+}
+
+#[test]
+fn a_resize_holds_the_camera_still_only_in_a_scrolling_layout() {
+    use crate::layout_engine::ResizeOrientation::Horizontal;
+    let resizes = [
+        LayoutCommand::ResizeWindowGrow(Horizontal),
+        LayoutCommand::ResizeWindowShrink(Horizontal),
+        LayoutCommand::ResizeWindowBy { amount: Amount::literal(0.1) },
+        LayoutCommand::SwitchPresetColumnWidth { backwards: false },
+    ];
+    for mode in [LayoutMode::Scrolling, LayoutMode::Traditional] {
+        let (mut reactor, _, _, _, _, _) = reactor_with_window_on_space1();
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+        for command in resizes.iter().cloned().chain([LayoutCommand::MoveNode(Direction::Left)]) {
+            let resize = !matches!(command, LayoutCommand::MoveNode(_));
+            let outcome = reactor.dispatch_test_layout_command(command.clone());
+            assert_eq!(
+                outcome.arrange.is_resize,
+                resize && mode == LayoutMode::Scrolling,
+                "{mode:?} {command:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn no_op_layout_command_does_not_schedule_arrange() {
     let mut reactor = test_reactor();

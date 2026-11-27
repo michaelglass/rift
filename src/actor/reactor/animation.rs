@@ -260,13 +260,15 @@ enum Sample<'a> {
 }
 
 impl PresentedWindow {
-    fn begin(&mut self) {
+    /// `immediate_target`: where a camera that holds still places the window, its frame written
+    /// at once instead of the new size at the old origin.
+    fn begin(&mut self, immediate_target: Option<CGRect>) {
         // Reconcile size at the semantic boundary. Subsequent scrolling samples
         // move the accepted AX size without reading or resizing on display ticks.
         if self.handle.constrains_scrolling() && !self.from.size.same_as(self.to.size) {
             let _ = self.handle.send(Request::set_window_frame(
                 self.wid,
-                CGRect::new(self.from.origin, self.to.size),
+                immediate_target.unwrap_or_else(|| CGRect::new(self.from.origin, self.to.size)),
                 self.txid,
                 true,
             ));
@@ -466,9 +468,16 @@ impl CameraAnimation {
 
     fn begin(&mut self) {
         self.windows.sort_unstable_by_key(|w| w.wid.pid);
+        let holds_still = !self.animate && self.gesture.is_none() && !self.presentation.gesturing();
         for window in &mut self.windows {
             window.announced = false;
-            window.begin();
+            // Growing at the old origin can push a visible window past the display edge and
+            // trigger parking before the first sample places it (upstream 17a3c021).
+            let target = holds_still.then(|| {
+                let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
+                self.bound.map_or(frame, |bounds| bounds.apply(frame))
+            });
+            window.begin(target);
         }
     }
 
@@ -1407,7 +1416,7 @@ impl ActiveAnimation {
                 window.frame = old.frame;
                 window.leased = old.leased;
             } else {
-                window.begin();
+                window.begin(None);
             }
         }
         for mut old in self.animation.windows {
@@ -1521,7 +1530,7 @@ impl Animation {
 
     fn begin(&mut self) {
         for window in &mut self.windows {
-            window.begin();
+            window.begin(None);
         }
     }
 

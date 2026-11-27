@@ -46,6 +46,13 @@ pub fn handle_command_layout(
     } = payload;
     info!(?cmd);
     let is_move_node = matches!(cmd, LayoutCommand::MoveNode(_));
+    let is_resize = matches!(
+        cmd,
+        LayoutCommand::ResizeWindowGrow(_)
+            | LayoutCommand::ResizeWindowShrink(_)
+            | LayoutCommand::ResizeWindowBy { .. }
+            | LayoutCommand::SwitchPresetColumnWidth { .. }
+    );
     let is_selection_command = matches!(cmd, LayoutCommand::Ascend | LayoutCommand::Descend);
     let is_focus_command = matches!(
         cmd,
@@ -176,8 +183,15 @@ pub fn handle_command_layout(
     } else {
         response_changed || (!is_selection_command && !is_virtual_workspace_command)
     };
+    // The viewport applies a scrolling resize's sizes up front: the camera holds still, so the
+    // neighbours are placed on the same sample and leave no gap while easing (upstream 17a3c021).
+    let scrolling_resize = is_resize
+        && response.layout_space.or(command_space).is_some_and(|space| {
+            layout.layout_engine.active_layout_mode_at(state.windows(), space)
+                == config::LayoutMode::Scrolling
+        });
     let mut outcome = if needs_arrange {
-        EventOutcome::layout_changed(false)
+        EventOutcome::layout_changed(scrolling_resize)
     } else {
         EventOutcome::no_change()
     }

@@ -287,6 +287,17 @@ constraints (`preserve_window_sizes`).
     never by leaving a layout. This line already kept them while the store held the window,
     the engine reading the store on a layout removal; upstream's three tests pass on both, and
     upstream's shape is taken for its single owner of the lifetime. Plants 4/4.
+  - (e) 17a3c021, tears in scrolling animation: a resize command in a scrolling layout holds
+    the camera still (our outcome's `is_resize`, where upstream picks `Presentation::Resize`),
+    so the neighbours are placed on the same sample as the resized window; and a camera that
+    holds still writes each resized window's target frame at once (bounded to the display),
+    where a moving one still resizes at the old origin and eases from there. Upstream's test
+    carried over (it fails here before the port: the neighbour lagged 50 px); two new ones (the
+    resize commands hold the camera only in a scrolling layout; a moving camera resizes at the
+    old origin). Shape difference: our outcome's `is_resize` covers every Space that pass
+    arranges, where upstream's presentation is the target Space's; a resize changes only its
+    own layout, so nothing else moves. Plants 5/6 (the sixth, the display bound dropped, is
+    equivalent here: a still camera's viewport keeps the resized column on screen).
 - The rest of #718's range needs ports before the merge: our reactor no longer has upstream's
   presentation policy, so 17a3c021 (tears), #705's reactor half and #709 are ported into its
   shape, and #718's camera commits are the camera slice.
