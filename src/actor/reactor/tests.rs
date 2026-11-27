@@ -2208,6 +2208,22 @@ fn reactor_with_window_on_space1_two_displays() -> (
     (reactor, wid, wsid, space1, space2, initial_frame, screen2)
 }
 
+/// Toggling a floating window back tiles it: it floats no longer, and its fullscreen, its
+/// active entry and the floating focus on it go with it.
+#[test]
+fn toggling_a_floating_window_back_tiles_it() {
+    let (mut reactor, wid, space, _, _) = reactor_with_floating_window();
+    let engine = &reactor.stores.layout.layout_engine;
+    assert!(engine.is_window_floating(wid));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    let engine = &mut reactor.stores.layout.layout_engine;
+    assert!(!engine.is_window_floating(wid));
+    assert!(
+        !engine.active_workspace_for_space_has_fullscreen(reactor.stores.state.windows(), space)
+    );
+}
+
 fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect) {
     let (mut reactor, wid, _wsid, space1, _space2, screen) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));

@@ -20,8 +20,7 @@ use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRu
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::window_store::{Windows, WindowsMut};
 use crate::model::{
-    AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
-    WindowVisibility,
+    AppRuleEffects, AppRuleEngine, AppRuleResult, WindowRuleContext, WindowVisibility,
 };
 use crate::sys::screen::SpaceId;
 
@@ -203,10 +202,9 @@ enum WindowRelocation {
 }
 
 pub struct LayoutEngine {
-    floating: FloatingManager,
-    floating_positions: FloatingPositionStore,
+    /// The floating windows, their frames and the focused window (engine slice E2).
+    floats: super::floating::EngineFloats,
     app_rules: AppRuleEngine,
-    focused_window: Option<WindowId>,
     /// Every window's size constraints and each app's last reported minimum (engine slice E4).
     constraints: crate::roc_twin::TwinnedConstraints,
     workspaces: WorkspaceStore,
@@ -268,7 +266,7 @@ pub(crate) struct WorkspaceLayoutQuerySnapshot {
 }
 
 impl LayoutEngine {
-    pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
+    pub fn focused_window(&self) -> Option<WindowId> { self.floats.focused() }
 
     pub(crate) fn apply_window_drop(
         &mut self,
@@ -390,8 +388,8 @@ impl LayoutEngine {
             self.native_layouts.remove(&destination);
             self.workspaces[destination].layout_system = tree;
         }
-        if self.focused_window == Some(drop.window) {
-            self.focused_window = None;
+        if self.floats.focused() == Some(drop.window) {
+            self.floats.set_focused(None);
         }
         if let Some(frame) = drop.frame {
             windows.clear_floating_display_geometry(drop.window);
@@ -679,11 +677,11 @@ impl LayoutEngine {
 
         if current_mode == LayoutMode::Floating || mode == LayoutMode::Floating {
             for &wid in &window_order {
-                self.floating.remove_floating(wid);
-                self.floating_positions.remove_window(wid);
+                self.floats.remove_floating(wid);
+                self.floats.remove_window(wid);
             }
         }
-        window_order.retain(|wid| !self.floating.is_floating(*wid));
+        window_order.retain(|wid| !self.floats.is_floating(*wid));
 
         if mode == LayoutMode::Scrolling && self.layout_settings.scrolling.preserve_window_sizes {
             for &wid in &window_order {
@@ -707,7 +705,7 @@ impl LayoutEngine {
             system.spread_initial_windows();
         }
 
-        if let Some(selected) = selected_window.filter(|wid| !self.floating.is_floating(*wid)) {
+        if let Some(selected) = selected_window.filter(|wid| !self.floats.is_floating(*wid)) {
             let _ = workspace.layout_system.focus(new_layout, Focus::Select(selected)).handled;
         }
 
@@ -924,7 +922,7 @@ impl LayoutEngine {
         window_store: Windows<'_>,
         space: SpaceId,
     ) -> Vec<WindowId> {
-        self.floating
+        self.floats
             .active_windows(space)
             .filter(|&window| self.is_active_workspace_window(window_store, space, window))
             .collect()
@@ -957,7 +955,7 @@ impl LayoutEngine {
             })
             .or_else(|| {
                 let floating = self.active_floating_windows_in_workspace(window_store, space);
-                self.floating
+                self.floats
                     .last_focus()
                     .filter(|wid| floating.contains(wid))
                     .or_else(|| floating.first().copied())
@@ -973,7 +971,7 @@ impl LayoutEngine {
         let Some(workspace_id) =
             self.workspaces.reading(window_store.read()).active_workspace(space)
         else {
-            self.focused_window = None;
+            self.floats.set_focused(None);
             return;
         };
 
@@ -983,15 +981,15 @@ impl LayoutEngine {
         });
 
         if let Some(wid) = focus_window {
-            self.focused_window = Some(wid);
+            self.floats.set_focused(Some(wid));
             self.workspaces.set_last_focused_window(
                 &window_store.core,
                 space,
                 workspace_id,
                 Some(wid),
             );
-            if self.floating.is_floating(wid) {
-                self.floating.set_last_focus(Some(wid));
+            if self.floats.is_floating(wid) {
+                self.floats.set_last_focus(Some(wid));
             } else if let Some(layout) =
                 self.workspaces.reading(window_store.read()).active_layout(space, workspace_id)
             {
@@ -1001,7 +999,7 @@ impl LayoutEngine {
                     .handled;
             }
         } else {
-            self.focused_window = None;
+            self.floats.set_focused(None);
             self.workspaces
                 .set_last_focused_window(&window_store.core, space, workspace_id, None);
         }
@@ -1154,9 +1152,9 @@ impl LayoutEngine {
         response: &EventResponse,
     ) {
         if let Some(wid) = response.focus_window {
-            self.focused_window = Some(wid);
-            if self.floating.is_floating(wid) {
-                self.floating.set_last_focus(Some(wid));
+            self.floats.set_focused(Some(wid));
+            if self.floats.is_floating(wid) {
+                self.floats.set_last_focus(Some(wid));
             } else {
                 let _ =
                     self.workspaces[ws_id].layout_system.focus(layout, Focus::Select(wid)).handled;
@@ -1219,7 +1217,7 @@ impl LayoutEngine {
             let windows = self.active_floating_windows_in_workspace(window_store.read(), space);
             if matches!(direction, Direction::Left | Direction::Right)
                 && windows.len() > 1
-                && let Some(index) = windows.iter().position(|&w| Some(w) == self.focused_window)
+                && let Some(index) = windows.iter().position(|&w| Some(w) == self.floats.focused())
             {
                 let step = if direction == Direction::Left {
                     windows.len() - 1
@@ -1407,7 +1405,7 @@ impl LayoutEngine {
             return;
         };
         let workspace = assignment;
-        if self.floating.is_floating(wid) || self.native_layouts.contains_key(&workspace) {
+        if self.floats.is_floating(wid) || self.native_layouts.contains_key(&workspace) {
             return;
         }
         let current = &self.workspaces[workspace];
@@ -1539,7 +1537,7 @@ impl LayoutEngine {
                     .or_else(|| windows.claim(*window).and_then(|claim| claim.workspace()))
                     == Some(workspace)
                     && (windows.is_admitted(*window) || windows.is_temporarily_unavailable(*window))
-                    && !self.floating.is_floating(*window)
+                    && !self.floats.is_floating(*window)
                     && desired.insert(*window)
             })
             .collect();
@@ -1566,7 +1564,7 @@ impl LayoutEngine {
             system.set_window_participation(window, !windows.is_temporarily_unavailable(window));
         }
         state.ensure_active(size, &mut system);
-        if let Some(focused) = self.focused_window.filter(|window| desired.contains(window))
+        if let Some(focused) = self.floats.focused().filter(|window| desired.contains(window))
             && let Some(layout) = state.active()
         {
             system.focus(layout, Focus::Select(focused)).handled;
@@ -1589,10 +1587,10 @@ impl LayoutEngine {
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
             let changed = (workspace.layout_system.set_window_participation(wid, false)
                 && projected)
-                || self.floating.is_active(space, wid);
-            self.floating.remove_active_for_window(wid);
-            if self.focused_window == Some(wid) {
-                self.focused_window = None;
+                || self.floats.is_active(space, wid);
+            self.floats.remove_active_for_window(wid);
+            if self.floats.focused() == Some(wid) {
+                self.floats.set_focused(None);
             }
             return changed;
         }
@@ -1608,20 +1606,20 @@ impl LayoutEngine {
         let removal = self.remove_window_layout_membership(window_store.read(), wid);
 
         if preserve_floating {
-            self.floating.remove_active_for_window(wid);
+            self.floats.remove_active_for_window(wid);
         } else {
-            self.floating.remove_floating(wid);
+            self.floats.remove_floating(wid);
         }
 
         if !preserve_floating {
             self.workspaces.remove_window(window_store, wid);
-            self.floating_positions.remove_window(wid);
+            self.floats.remove_window(wid);
             self.forget_persisted_window(wid);
             self.evicted.remove(&wid);
         }
 
-        if self.focused_window == Some(wid) {
-            self.focused_window = None;
+        if self.floats.focused() == Some(wid) {
+            self.floats.set_focused(None);
         }
 
         removal.is_some()
@@ -1643,7 +1641,7 @@ impl LayoutEngine {
             if workspace.last_focused() == Some(wid) {
                 workspace.set_last_focused(None);
             }
-            return (projected || self.floating.is_active(space, wid)).then_some(space);
+            return (projected || self.floats.is_active(space, wid)).then_some(space);
         }
         let active_space = self.space_with_window(window_store, wid);
 
@@ -1682,15 +1680,15 @@ impl LayoutEngine {
             self.workspaces[assigned_workspace].layout_system,
             LayoutSystemKind::Floating(_)
         ) {
-            self.floating.remove_floating(wid);
+            self.floats.remove_floating(wid);
         }
-        let should_be_floating = self.floating.is_floating(wid);
+        let should_be_floating = self.floats.is_floating(wid);
         let resumed = self.workspaces[assigned_workspace]
             .layout_system
             .set_window_participation(wid, true);
 
         if should_be_floating {
-            self.floating.add_active(space, wid.pid, wid);
+            self.floats.add_active(space, wid.pid, wid);
         } else if let Some(layout) =
             self.workspaces.reading(window_store).active_layout(space, assigned_workspace)
         {
@@ -1780,7 +1778,7 @@ impl LayoutEngine {
             && current
                 .active_layout()
                 .is_some_and(|layout| current.layout_system.contains_window(layout, window));
-        (visible || self.floating.is_active(space, window)).then_some(space)
+        (visible || self.floats.is_active(space, window)).then_some(space)
     }
 
     pub(crate) fn space_with_window(&self, windows: Windows<'_>, wid: WindowId) -> Option<SpaceId> {
@@ -1873,7 +1871,7 @@ impl LayoutEngine {
             return;
         }
 
-        self.floating.remap_space(old_space, new_space);
+        self.floats.remap_space(old_space, new_space);
 
         // Saved native arrangements are keyed by workspace; one for a deleted workspace
         // would no longer resolve.
@@ -1899,7 +1897,7 @@ impl LayoutEngine {
         if let Some(batch) = self.native_reconcile_batch.as_mut() {
             batch.remove(&workspace);
         }
-        self.floating_positions.remove_workspace(workspace);
+        self.floats.remove_workspace(workspace);
         self.forget_persisted_workspace(workspace);
     }
 
@@ -1910,10 +1908,8 @@ impl LayoutEngine {
         let workspaces = WorkspaceStore::new_with_config(virtual_workspace_config, layout_settings);
 
         LayoutEngine {
-            floating: FloatingManager::new(),
-            floating_positions: FloatingPositionStore::default(),
+            floats: super::floating::EngineFloats::new(),
             app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
-            focused_window: None,
             constraints: Default::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
@@ -1938,10 +1934,10 @@ impl LayoutEngine {
     ) -> Option<(WindowId, VirtualWorkspaceId)> {
         let should_float = effects.should_float(was_floating);
         if should_float {
-            self.floating.add_floating(window);
-            self.floating.add_active(space, window.pid, window);
+            self.floats.add_floating(window);
+            self.floats.add_active(space, window.pid, window);
         } else if was_floating {
-            self.floating.remove_floating(window);
+            self.floats.remove_floating(window);
         }
 
         app_rule_outcome.frame =
@@ -2156,7 +2152,7 @@ impl LayoutEngine {
                     || self.space_with_window(window_store.read(), wid),
                     |id| self.projected_space_in(window_store.read(), id, wid),
                 );
-                let was_floating = self.floating.is_floating(wid);
+                let was_floating = self.floats.is_floating(wid);
                 let focus_request = self.apply_app_rule_outcome(
                     wid,
                     space,
@@ -2171,9 +2167,9 @@ impl LayoutEngine {
                     self.workspaces[target_workspace].layout_system,
                     LayoutSystemKind::Floating(_)
                 ) {
-                    self.floating.remove_floating(wid);
+                    self.floats.remove_floating(wid);
                 }
-                let should_float = self.floating.is_floating(wid);
+                let should_float = self.floats.is_floating(wid);
                 let relocated = source_workspace
                     .filter(|&source| source != target_workspace)
                     .is_some_and(|source| {
@@ -2208,7 +2204,7 @@ impl LayoutEngine {
                 }
 
                 if !relocated {
-                    self.floating.remove_active_for_window(wid);
+                    self.floats.remove_active_for_window(wid);
                     let previous_selection = self
                         .workspaces
                         .reading(window_store.read())
@@ -2295,8 +2291,8 @@ impl LayoutEngine {
                                 })
                         },
                     );
-                if self.focused_window.is_some_and(|wid| wid.pid == pid) {
-                    self.focused_window = None;
+                if self.floats.focused().is_some_and(|wid| wid.pid == pid) {
+                    self.floats.set_focused(None);
                 }
                 for (_, ws) in self.workspaces.workspaces.iter_mut() {
                     ws.layout_system.update(WindowChange::CloseApp(pid));
@@ -2306,11 +2302,10 @@ impl LayoutEngine {
                 }
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();
-                self.floating.remove_all_for_pid(pid);
+                self.floats.app_quit(pid);
                 self.constraints.step(rift_core::constraints::ConstraintsEvent::AppQuit(pid));
                 self.forget_persisted_app(pid);
 
-                self.floating_positions.remove_app(pid);
                 return EventResponse {
                     changed,
                     ..EventResponse::default()
@@ -2346,9 +2341,9 @@ impl LayoutEngine {
                 if window_store.is_temporarily_unavailable(wid) {
                     return EventResponse::default();
                 }
-                if self.floating.is_floating(wid) {
-                    self.focused_window = Some(wid);
-                    self.floating.set_last_focus(Some(wid));
+                if self.floats.is_floating(wid) {
+                    self.floats.set_focused(Some(wid));
+                    self.floats.set_last_focus(Some(wid));
                 } else if let Some((ws_id, layout)) =
                     self.workspaces.reading(window_store.read()).active_layout_for_space(space)
                 {
@@ -2359,11 +2354,11 @@ impl LayoutEngine {
                         );
                         return EventResponse::default();
                     }
-                    let preserve_selection = self.focused_window == Some(wid)
+                    let preserve_selection = self.floats.focused() == Some(wid)
                         && self.workspaces[ws_id]
                             .layout_system
                             .selection_contains_window(layout, wid);
-                    self.focused_window = Some(wid);
+                    self.floats.set_focused(Some(wid));
                     let selection_changed =
                         self.workspaces[ws_id].layout_system.selected_window(layout) != Some(wid);
                     if !preserve_selection {
@@ -2518,12 +2513,12 @@ impl LayoutEngine {
                 ..EventResponse::default()
             };
         }
-        let is_floating = if let Some(focus) = self.focused_window {
-            self.floating.is_floating(focus)
+        let is_floating = if let Some(focus) = self.floats.focused() {
+            self.floats.is_floating(focus)
         } else {
             false
         };
-        debug!(?self.focused_window, last_floating_focus=?self.floating.last_focus(), ?is_floating);
+        debug!(focused = ?self.floats.focused(), last_floating_focus = ?self.floats.last_focus(), ?is_floating);
 
         let floating_options = match &command {
             LayoutCommand::ToggleWindowFloating => Some(ToggleWindowFloatingOptions::default()),
@@ -2531,7 +2526,7 @@ impl LayoutEngine {
             _ => None,
         };
         if let Some(options) = floating_options {
-            if let Some(window) = self.focused_window {
+            if let Some(window) = self.floats.focused() {
                 window_store.clear_floating_display_geometry(window);
             }
             if space.is_some_and(|space| {
@@ -2539,7 +2534,7 @@ impl LayoutEngine {
             }) {
                 return EventResponse::default();
             }
-            let Some(wid) = self.focused_window else {
+            let Some(wid) = self.floats.focused() else {
                 return EventResponse::default();
             };
             if is_floating {
@@ -2569,13 +2564,13 @@ impl LayoutEngine {
                         );
                     }
 
-                    self.floating.remove_active(space, wid.pid, wid);
+                    self.floats.remove_active(space, wid.pid, wid);
                 }
-                self.floating.remove_floating(wid);
-                self.floating.set_last_focus(None);
+                self.floats.remove_floating(wid);
+                self.floats.set_last_focus(None);
             } else {
                 if let Some(space) = space {
-                    self.floating.add_active(space, wid.pid, wid);
+                    self.floats.add_active(space, wid.pid, wid);
                     if let Some((ws_id, _)) =
                         self.workspaces.reading(window_store.read()).active_layout_for_space(space)
                     {
@@ -2600,7 +2595,7 @@ impl LayoutEngine {
                                 options.center,
                                 options.size,
                             );
-                            self.floating_positions.store(ws_id, wid, frame);
+                            self.floats.store(ws_id, wid, frame);
                         }
                     } else {
                         debug!(
@@ -2609,8 +2604,8 @@ impl LayoutEngine {
                         );
                     }
                 }
-                self.floating.add_floating(wid);
-                self.floating.set_last_focus(Some(wid));
+                self.floats.add_floating(wid);
+                self.floats.set_last_focus(Some(wid));
                 debug!("Removed window {:?} from tiling tree, now floating", wid);
             }
             return EventResponse::default();
@@ -2620,19 +2615,19 @@ impl LayoutEngine {
             &command
             && is_floating
         {
-            let Some(wid) = self.focused_window else {
+            let Some(wid) = self.floats.focused() else {
                 return EventResponse::default();
             };
             let target = match command {
                 LayoutCommand::ToggleFullscreenWithinGaps => FloatingFullscreenKind::WithinGaps,
                 _ => FloatingFullscreenKind::Full,
             };
-            if self.floating.fullscreen_kind(wid) == Some(target) {
-                self.floating.set_fullscreen(wid, None);
+            if self.floats.fullscreen_kind(wid) == Some(target) {
+                self.floats.set_fullscreen(wid, None);
             } else {
                 // Only save the pre-fullscreen frame when switching from a non-fullscreen state,
                 // and _not_ when switching between fullscreen kinds.
-                if self.floating.fullscreen_kind(wid).is_none()
+                if self.floats.fullscreen_kind(wid).is_none()
                     && let Some(space) = space
                 {
                     let ws = self
@@ -2645,10 +2640,10 @@ impl LayoutEngine {
                     if let (Some(ws), Some(frame)) =
                         (ws, window_store.window(wid).map(|w| w.frame_monotonic()))
                     {
-                        self.floating_positions.store(ws, wid, frame);
+                        self.floats.store(ws, wid, frame);
                     }
                 }
-                self.floating.set_fullscreen(wid, Some(target));
+                self.floats.set_fullscreen(wid, Some(target));
             }
             return EventResponse {
                 changed: true,
@@ -2690,7 +2685,7 @@ impl LayoutEngine {
                     system.selected_window(layout),
                 )
             } else {
-                let selection = self.floating.last_focus();
+                let selection = self.floats.last_focus();
                 let windows = self
                     .active_floating_windows_in_workspace(window_store.read(), space)
                     .into_iter()
@@ -2747,7 +2742,7 @@ impl LayoutEngine {
                     )
                 };
                 let focus_window = if let Some(idx) =
-                    windows.iter().position(|&w| Some(w) == self.focused_window)
+                    windows.iter().position(|&w| Some(w) == self.floats.focused())
                 {
                     let next = if forward {
                         (idx + 1) % windows.len()
@@ -3157,13 +3152,12 @@ impl LayoutEngine {
             // floating-position store makes every switch depend on windows in
             // unrelated workspaces (and displays).
             for window_id in window_store.workspace_windows(active_workspace_id) {
-                if self.floating.is_floating(window_id)
-                    && let Some(stored_position) =
-                        self.floating_positions.get(active_workspace_id, window_id)
+                if self.floats.is_floating(window_id)
+                    && let Some(stored_position) = self.floats.get(active_workspace_id, window_id)
                 {
                     let frame = floating_frame(window_id, Some(stored_position));
                     positions.insert(window_id, frame);
-                    self.floating_positions.store(active_workspace_id, window_id, frame);
+                    self.floats.store(active_workspace_id, window_id, frame);
                 }
             }
 
@@ -3171,11 +3165,11 @@ impl LayoutEngine {
             for wid in floating_windows {
                 let frame = floating_frame(wid, positions.get(&wid).copied());
                 positions.insert(wid, frame);
-                self.floating_positions.store(active_workspace_id, wid, frame);
+                self.floats.store(active_workspace_id, wid, frame);
             }
 
             for (wid, frame) in &mut positions {
-                if let Some(kind) = self.floating.fullscreen_kind(*wid) {
+                if let Some(kind) = self.floats.fullscreen_kind(*wid) {
                     *frame = match kind {
                         FloatingFullscreenKind::Full => screen,
                         FloatingFullscreenKind::WithinGaps => {
@@ -3200,17 +3194,13 @@ impl LayoutEngine {
         for wid in hidden_windows {
             let original_frame = get_window_frame(wid);
 
-            if self.floating.is_floating(wid)
+            if self.floats.is_floating(wid)
                 && let Some(workspace_id) =
                     self.workspaces().reading(window_store).workspace_for_window(space, wid)
-                && self.floating_positions.get(workspace_id, wid).is_none()
+                && self.floats.get(workspace_id, wid).is_none()
             {
                 let candidate = original_frame.or_else(|| positions.get(&wid).copied());
-                self.floating_positions.store_if_absent(
-                    workspace_id,
-                    wid,
-                    floating_frame(wid, candidate),
-                );
+                self.floats.store_if_absent(workspace_id, wid, floating_frame(wid, candidate));
             }
 
             let reference_frame = original_frame
@@ -3260,7 +3250,7 @@ impl LayoutEngine {
             .is_some_and(|layout_id| {
                 self.workspaces[workspace].layout_system.has_any_fullscreen_node(layout_id)
             })
-            || windows.iter().any(|wid| self.floating.fullscreen_kind(*wid).is_some())
+            || windows.iter().any(|wid| self.floats.fullscreen_kind(*wid).is_some())
     }
 
     pub(crate) fn collect_group_containers(
@@ -3318,9 +3308,9 @@ impl LayoutEngine {
             .into_iter()
             .collect();
 
-        let floating_positions = self.floating_positions.workspace_positions(workspace_id);
+        let floating_positions = self.floats.workspace_positions(workspace_id);
         for (window_id, stored_position) in floating_positions {
-            if self.floating.is_floating(window_id)
+            if self.floats.is_floating(window_id)
                 && window_store.workspace_for_window(window_id) == Some(workspace_id)
             {
                 positions.insert(window_id, stored_position);
@@ -3394,7 +3384,7 @@ impl LayoutEngine {
                             *index,
                         )
                     }
-                    None => self.focused_window,
+                    None => self.floats.focused(),
                 };
                 let Some(focused_window) =
                     window.filter(|&window| window_store.read().can_move_assigned_window(window))
@@ -3455,7 +3445,7 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
                 let placeable = window_store.read().can_place_window(focused_window);
-                let is_floating = self.floating.is_floating(focused_window);
+                let is_floating = self.floats.is_floating(focused_window);
                 if *follow || target_space != op_space {
                     let mut response = if *follow {
                         self.activate_workspace(
@@ -3490,7 +3480,7 @@ impl LayoutEngine {
 
                 if Some(target_workspace_id) == active_workspace {
                     if is_floating {
-                        self.floating.add_active(op_space, focused_window.pid, focused_window);
+                        self.floats.add_active(op_space, focused_window.pid, focused_window);
                     }
                     return EventResponse {
                         changed: true,
@@ -3501,7 +3491,7 @@ impl LayoutEngine {
                         ..EventResponse::default()
                     };
                 } else if Some(current_workspace_id) == active_workspace {
-                    self.focused_window = None;
+                    self.floats.set_focused(None);
                     self.workspaces.set_last_focused_window(
                         &window_store.core,
                         op_space,
@@ -3599,7 +3589,7 @@ impl LayoutEngine {
                     layout_space: Some(space),
                     raise_windows,
                     focus_window: if is_active_workspace {
-                        self.focused_window
+                        self.floats.focused()
                     } else {
                         None
                     },
@@ -3757,7 +3747,7 @@ impl LayoutEngine {
             target_workspace_id,
             Some(window_id),
         );
-        self.focused_window = Some(window_id);
+        self.floats.set_focused(Some(window_id));
 
         EventResponse {
             changed: true,
@@ -3883,9 +3873,9 @@ impl LayoutEngine {
         self.workspaces[id].ensure_layout_for_size(size);
         for &window in &members {
             self.evicted.remove(&window);
-            if self.floating.is_floating(window) {
-                self.floating.remove_active_for_window(window);
-                self.floating.add_active(target, window.pid, window);
+            if self.floats.is_floating(window) {
+                self.floats.remove_active_for_window(window);
+                self.floats.add_active(target, window.pid, window);
             }
         }
 
@@ -3951,7 +3941,7 @@ impl LayoutEngine {
         let was_floating = if preserve_floating {
             self.is_window_floating(window)
         } else {
-            self.floating.is_floating(window)
+            self.floats.is_floating(window)
                 && (directional.is_some() || !(source_floating_layout || target_floating_layout))
         };
         let target_layout =
@@ -3969,19 +3959,19 @@ impl LayoutEngine {
         self.workspaces[source].layout_system.update(WindowChange::Remove(window));
         let project_as_floating = directional.is_none() && was_floating && !target_floating_layout;
         if directional.is_none() {
-            self.floating.remove_active_for_window(window);
+            self.floats.remove_active_for_window(window);
             if project_as_floating {
-                self.floating.add_floating(window);
-                self.floating.add_active(space, window.pid, window);
+                self.floats.add_floating(window);
+                self.floats.add_active(space, window.pid, window);
                 if observed {
                     self.workspaces[destination].layout_system.update(WindowChange::Remove(window));
                 }
             } else {
-                self.floating.remove_floating(window);
+                self.floats.remove_floating(window);
             }
             if was_floating {
-                self.floating_positions.remove_window(window);
-                self.floating.set_last_focus(Some(window));
+                self.floats.remove_window(window);
+                self.floats.set_last_focus(Some(window));
             }
         }
 
@@ -4014,8 +4004,8 @@ impl LayoutEngine {
                 .layout_system
                 .set_window_participation(window, true);
         }
-        if directional.is_none() && self.focused_window == Some(window) {
-            self.focused_window = None;
+        if directional.is_none() && self.floats.focused() == Some(window) {
+            self.floats.set_focused(None);
         }
         true
     }
@@ -4033,7 +4023,7 @@ impl LayoutEngine {
     }
 
     pub fn is_window_floating(&self, window_id: WindowId) -> bool {
-        self.floating.is_floating(window_id)
+        self.floats.is_floating(window_id)
             || self.workspaces.workspaces.values().any(|ws| {
                 matches!(&ws.layout_system, LayoutSystemKind::Floating(system) if system.contains_floating_window(window_id))
             })
@@ -4064,7 +4054,7 @@ impl LayoutEngine {
             system.store_frame(window, frame);
             return;
         }
-        self.floating_positions.store(workspace, window, frame);
+        self.floats.store(workspace, window, frame);
     }
 
     pub fn get_floating_position(
@@ -4075,18 +4065,18 @@ impl LayoutEngine {
         if let LayoutSystemKind::Floating(system) = &self.workspaces[workspace].layout_system {
             return system.frame(window);
         }
-        self.floating_positions.get(workspace, window)
+        self.floats.get(workspace, window)
     }
 
     pub fn workspace_floating_positions(
         &self,
         workspace: VirtualWorkspaceId,
     ) -> Vec<(WindowId, CGRect)> {
-        self.floating_positions.workspace_positions(workspace)
+        self.floats.workspace_positions(workspace)
     }
 
     pub fn remove_floating_position(&mut self, window: WindowId) {
-        self.floating_positions.remove_window(window);
+        self.floats.remove_window(window);
     }
 
     /// A window's size constraints live as long as the window, so only its retirement drops
@@ -4147,12 +4137,11 @@ impl LayoutEngine {
             workspace.layout_system.update(WindowChange::Replace(from, to));
         }
         self.workspaces.transfer_window_identity(from, to);
-        self.floating_positions.transfer_window_identity(from, to);
-        self.floating.transfer_window_identity(from, to);
+        self.floats.replace_identity(from, to);
         self.constraints
             .step(rift_core::constraints::ConstraintsEvent::Replaced { from, to });
-        if self.focused_window == Some(from) {
-            self.focused_window = Some(to);
+        if self.floats.focused() == Some(from) {
+            self.floats.set_focused(Some(to));
         }
     }
 
@@ -4164,7 +4153,7 @@ impl LayoutEngine {
             .into_iter()
             .filter(|wid| !window_store.is_temporarily_unavailable(*wid))
             .collect();
-        self.floating.rebuild_active_for_workspace(space, windows_in_workspace);
+        self.floats.rebuild_active_for_workspace(space, windows_in_workspace);
     }
 
     pub(crate) fn store_floating_window_positions(

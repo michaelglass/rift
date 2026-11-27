@@ -267,8 +267,8 @@ impl LayoutEngine {
             let evidence = WindowFingerprint::of(live, window);
             let matched = self.reconcile_saved_window(window_store, live, &evidence, scope);
             report.matched += usize::from(matched);
-            if !matched && self.floating.is_floating(live) {
-                self.floating_positions.store_if_absent(target, live, frame);
+            if !matched && self.floats.is_floating(live) {
+                self.floats.store_if_absent(target, live, frame);
             }
             // Rebuild the projection for both outcomes: a matched floating window needs its
             // runtime-only active entry, and a current window absent from the file needs a slot
@@ -283,7 +283,7 @@ impl LayoutEngine {
                 report.moved.push((live, from, space));
             }
             self.add_window_to_layout(window_store.read(), space, live);
-            if self.focused_window == Some(live) {
+            if self.floats.focused() == Some(live) {
                 self.workspaces.set_last_focused_window(
                     &window_store.core,
                     space,

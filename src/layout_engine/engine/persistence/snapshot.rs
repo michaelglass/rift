@@ -253,10 +253,8 @@ impl PersistedLayout {
             native_reconcile_batch: None,
             evicted: HashMap::default(),
             shadow_passes: Default::default(),
-            floating: self.floating,
-            floating_positions: FloatingPositionStore::default(),
+            floats: crate::layout_engine::floating::EngineFloats::loaded(self.floating),
             app_rules: AppRuleEngine::default(),
-            focused_window: None,
             constraints: Default::default(),
             workspaces: self.loaded.store,
             layout_settings: LayoutSettings::default(),
@@ -306,9 +304,9 @@ impl LayoutEngine {
                 continue;
             };
             identities.windows.insert(window, WindowFingerprint::of(window, state));
-            if self.floating.is_floating(window) {
+            if self.floats.is_floating(window) {
                 // A hidden window's live frame is its parked position, not its placement.
-                let stored = self.floating_positions.get(workspace, window).filter(|_| {
+                let stored = self.floats.get(workspace, window).filter(|_| {
                     let view = self.workspaces.reading(window_store);
                     let space =
                         view.workspace_space(workspace).expect("a listed workspace has a Space");
@@ -319,7 +317,7 @@ impl LayoutEngine {
         }
         ron::ser::to_string(&PersistedLayoutRef {
             schema_version: CURRENT_SCHEMA_VERSION,
-            floating: &self.floating.persisted_view(floating.positioned_windows()),
+            floating: &self.floats.persisted_view(floating.positioned_windows()),
             floating_positions: &floating,
             workspaces: self.workspaces.saved(window_store.core_workspaces()),
             space_display_map: &self.space_display_map,

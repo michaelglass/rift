@@ -48,6 +48,19 @@ impl FloatingPositionStore {
         positions
     }
 
+    /// Every saved frame by workspace then window, the store kept (the floating core's shadow
+    /// check).
+    #[cfg(test)]
+    pub(crate) fn clone_sorted(&self) -> Vec<(VirtualWorkspaceId, WindowId, CGRect)> {
+        let mut positions: Vec<_> = self
+            .positions
+            .iter()
+            .map(|(&(workspace, window), &frame)| (workspace, window, frame))
+            .collect();
+        positions.sort_unstable_by_key(|&(workspace, window, _)| (workspace, window));
+        positions
+    }
+
     pub(crate) fn positioned_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
         self.positions.keys().map(|(_, window)| *window)
     }

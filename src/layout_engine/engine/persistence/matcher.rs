@@ -134,18 +134,18 @@ impl LayoutEngine {
             .filter(|id| *id != saved.workspace)
         {
             self.workspaces[previous].layout_system.update(WindowChange::Remove(live));
-            self.floating_positions.remove_workspace_window(previous, live);
+            self.floats.remove_workspace_window(previous, live);
         }
         self.transfer_persistent_window_identity(old, live);
         if let Some(frame) = saved.frame {
             self.workspaces[saved.workspace]
                 .layout_system
                 .update(WindowChange::Remove(live));
-            self.floating.add_floating(live);
-            self.floating_positions.store(saved.workspace, live, frame);
+            self.floats.add_floating(live);
+            self.floats.store(saved.workspace, live, frame);
         } else {
-            self.floating.remove_floating(live);
-            self.floating_positions.remove_workspace_window(saved.workspace, live);
+            self.floats.remove_floating(live);
+            self.floats.remove_workspace_window(saved.workspace, live);
         }
         let space = self
             .workspaces
@@ -165,8 +165,8 @@ impl LayoutEngine {
         if workspace.last_focused() == Some(window) {
             workspace.set_last_focused(None);
         }
-        if self.floating.last_focus() == Some(window) {
-            self.floating.set_last_focus(None);
+        if self.floats.last_focus() == Some(window) {
+            self.floats.set_last_focus(None);
         }
     }
 
