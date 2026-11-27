@@ -25,7 +25,7 @@ use rift_core::slot_table::SlotTable;
 use rift_core_roc::RocColumns;
 use rift_core_roc::columns::{Answer, ColumnsView, Event, LayoutKey};
 
-use super::twinned::CoreColumns;
+use super::projection::CoreColumns;
 use crate::actor::app::WindowId;
 use crate::layout_engine::LayoutId;
 use crate::layout_engine::systems::group_roc::{ON_DIVERGENCE, OnDivergence};
@@ -239,7 +239,7 @@ impl ColumnsDecider {
         answer
     }
 
-    // What the twinned system reads of the arrangements (the Rust core's, held to the Roc
+    // What the scrolling system reads of the arrangements (the Rust core's, held to the Roc
     // system's).
 
     pub(super) fn layouts(&self) -> &SlotTable<LayoutId, Arrangement<WindowId>> {

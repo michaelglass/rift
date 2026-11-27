@@ -181,7 +181,32 @@ constraints (`preserve_window_sizes`).
   core re-seeded from the Roc view, an app closing forgetting its windows left out of every
   layout. Plants 8/8 (answers and re-seed, the view comparison, the app's and locked widths'
   lists, the select event, a Roc insertion bug).
-- Next: slice 5 deletes rift's arrangement (the camera reads the core's); then the camera.
+- Slice 5 (2026-11-27): **rift's arrangement deleted** (option (A), proposed to the lead; (B) below). Every operation
+  is the core's (`Decider`), then the camera's answer to it; rift's own steps (`Arrangement`'s
+  `move_destination`, `new_column`, `detach`, `transfer`, the `*_system` queries,
+  `set_height_share`, `update_participation`) and the compare-and-re-seed machinery
+  (`twinned`'s `decide`, `Logged`, the replays, `core: scrolling arrangement divergences`) are
+  gone; `systems/scrolling/projection.rs` keeps the conversions. The camera reads each layout's
+  arrangement as a **projection** in rift's shape, refreshed from the core after every change
+  (`edited`: the core's edit inside the camera's `mutate` transaction, the projection refreshed
+  before the geometry is rebuilt) and never stepped on its own; `inactive` is the projection of
+  the core's windows left out. The camera's own writes go to the core: `restore`,
+  `restore_fullscreen_view` and `settle` name the column, and `activate_chosen` makes it active
+  on the core; a pass's preserved widths are the core's (`prepare_geometry` takes the preserve
+  step from the system). A removal is the caller's sequence of slice 3: `forget_window` /
+  `forget_app`, then per layout `remove_from` and the camera's answer (`remove_from_layout`,
+  which reads the core's `Removal`). Saving writes the core's arrangement; a load seeds the core
+  and projects from it. Tests: the projection is the core's after every operation, the answers
+  the core's, saving the core's, a window that comes and goes giving back the view before it, a
+  window left out removed and re-added taking part, a pass preserving a locked width on the
+  core, a fullscreen ended giving back the view before it. Plants 9/10 (the tenth, a load
+  leaving the projections as rift read them, is equivalent: rift's load and the core normalize
+  the same states). The scrolling tests run 8x faster (no per-operation seed).
+- **Left for the camera slice:** the projection itself (the camera's ~120 reads of rift's shape;
+  option (B) would rewrite them against the core's types), and the camera's own reads of the
+  selection through the projection (`Arrangement::selected`, `selected_location`, `locate`, used
+  by `mutate`'s anchor), which repeat the core's rule on the projection.
+- Next: the camera (modelled on PR #718).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

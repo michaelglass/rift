@@ -3,7 +3,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::common::config::{GapSettings, StackDefaultOrientation};
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation, WindowDropAction};
 
@@ -122,24 +122,6 @@ impl WindowLayoutConstraints {
 
     pub fn resizable_any_axis(self) -> bool {
         self.resizable_for_axis(true) || self.resizable_for_axis(false)
-    }
-}
-
-fn update_participation(
-    inactive: &mut HashSet<WindowId>,
-    window: WindowId,
-    participates: bool,
-) -> bool {
-    if participates {
-        inactive.remove(&window)
-    } else {
-        inactive.insert(window)
-    }
-}
-
-fn replace_participation(inactive: &mut HashSet<WindowId>, from: WindowId, to: WindowId) {
-    if inactive.remove(&from) {
-        inactive.insert(to);
     }
 }
 
@@ -397,7 +379,6 @@ pub(crate) mod scrolling;
 #[cfg(feature = "roc-core")]
 pub(crate) use scrolling::columns_roc_reseeds;
 pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
-pub(crate) use scrolling::{scrolling_divergences, scrolling_shadows};
 
 #[cfg(test)]
 mod tests {
