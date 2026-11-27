@@ -46,6 +46,15 @@ static LIFECYCLE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 #[cfg(feature = "roc-core")]
 static MAIN_WINDOW_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How many times the floating state's Rust shadow was re-seeded from the Roc core.
+#[cfg(feature = "roc-core")]
+static FLOATS_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the floating state's Rust shadow has been re-seeded from the Roc core (each one
+/// a `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn floats_reseeds() -> u64 { FLOATS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) }
+
 /// How many times the window constraints' Rust shadow was re-seeded from the Roc core.
 #[cfg(feature = "roc-core")]
 static CONSTRAINTS_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -807,6 +816,206 @@ impl TwinnedConstraints {
     }
 }
 
+/// The floating state as the engine holds it (engine slice E2).
+pub(crate) type RiftFloats =
+    rift_core::floats::Floats<WindowId, SpaceId, VirtualWorkspaceId, objc2_core_foundation::CGRect>;
+
+/// An event of the floating state as the engine steps it.
+pub(crate) type RiftFloatsEvent = rift_core::floats::FloatsEvent<
+    WindowId,
+    pid_t,
+    SpaceId,
+    VirtualWorkspaceId,
+    objc2_core_foundation::CGRect,
+>;
+
+/// The floating state (engine slice E2), with its Roc twin under `roc-core`. Flipped (policy
+/// (a)): under `roc-core` the Roc core holds the state and the Rust machine is its shadow, read
+/// through `Deref` and re-seeded on any difference.
+#[derive(Default)]
+pub(crate) struct TwinnedFloats {
+    rust: RiftFloats,
+    #[cfg(feature = "roc-core")]
+    twin: FloatsTwin,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct FloatsTwin {
+    roc: rift_core_roc::RocFloats,
+    steps: u64,
+}
+
+impl Deref for TwinnedFloats {
+    type Target = RiftFloats;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl TwinnedFloats {
+    /// A machine holding a saved layout's floating state (the Roc twin seeded with the same).
+    pub(crate) fn seeded(rust: RiftFloats) -> Self {
+        #[cfg(feature = "roc-core")]
+        let twin = {
+            use rift_core::floats::FloatsEvent;
+            let mut twin = FloatsTwin::default();
+            let mut seed = |event: RiftFloatsEvent| twin.roc.step(words(event));
+            rust.floating().for_each(|w| seed(FloatsEvent::Floated(w)));
+            seed(FloatsEvent::FloatingFocus(rust.floating_focus()));
+            twin
+        };
+        let seeded = TwinnedFloats {
+            rust,
+            #[cfg(feature = "roc-core")]
+            twin,
+        };
+        // Tests compare the seed at once: a load is often not followed by a step.
+        #[cfg(all(test, feature = "roc-core"))]
+        {
+            let mut seeded = seeded;
+            let (rust, view) = (seeded.rust_view(), seeded.twin.roc.view());
+            if rust != view {
+                crate::roc_path::diverged("floats seed", &"a saved layout", &rust, &view);
+            }
+            return seeded;
+        }
+        #[allow(unreachable_code)]
+        seeded
+    }
+
+    /// As [`rift_core::floats::Floats::step`]: both must hold the same state when due.
+    pub(crate) fn step(&mut self, event: RiftFloatsEvent) {
+        #[cfg(feature = "roc-core")]
+        let plain = words(event.clone());
+        self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        {
+            use crate::roc_path::diverged;
+            self.twin.roc.step(plain.clone());
+            self.twin.steps += 1;
+            if cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
+                let rust = self.rust_view();
+                let view = self.twin.roc.view();
+                if rust != view {
+                    diverged("floats", &plain, &rust, &view);
+                    self.reseed(view);
+                }
+            }
+        }
+    }
+
+    /// The Rust machine as words, as the Roc core views it (every part in word order).
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&self) -> rift_core::floats::Floats<u64, u64, u64, rift_core::plain::Rect> {
+        use crate::roc_path::Word;
+        let r = &self.rust;
+        rift_core::floats::Floats::from_parts(
+            r.floating().map(Word::word),
+            r.fullscreens().map(|(w, k)| (w.word(), k)),
+            r.active().map(|(s, w)| (s.word(), w.word())),
+            r.floating_focus().map(Word::word),
+            r.focused().map(Word::word),
+            r.frames().map(|(ws, w, f)| (ws.word(), w.word(), plain_rect(f))),
+        )
+    }
+
+    /// Replace the Rust shadow with the Roc core's state, and count it.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, view: rift_core::floats::Floats<u64, u64, u64, rift_core::plain::Rect>) {
+        use crate::roc_path::window_of_word;
+        self.rust = RiftFloats::from_parts(
+            view.floating().filter_map(window_of_word),
+            view.fullscreens().filter_map(|(w, k)| Some((window_of_word(w)?, k))),
+            view.active().filter_map(|(s, w)| Some((SpaceId::new(s), window_of_word(w)?))),
+            view.floating_focus().and_then(window_of_word),
+            view.focused().and_then(window_of_word),
+            view.frames().filter_map(|(ws, w, f)| {
+                Some((workspace_of_word(ws), window_of_word(w)?, cg_rect(f)))
+            }),
+        );
+        let reseeds = FLOATS_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the floating state's Rust shadow was re-seeded from the Roc core"
+        );
+    }
+}
+
+#[cfg(feature = "roc-core")]
+fn plain_rect(f: objc2_core_foundation::CGRect) -> rift_core::plain::Rect {
+    rift_core::plain::Rect {
+        x: f.origin.x,
+        y: f.origin.y,
+        w: f.size.width,
+        h: f.size.height,
+    }
+}
+
+#[cfg(feature = "roc-core")]
+fn cg_rect(r: rift_core::plain::Rect) -> objc2_core_foundation::CGRect {
+    objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(r.x, r.y),
+        objc2_core_foundation::CGSize::new(r.w, r.h),
+    )
+}
+
+/// An event of the floating state as words, as the Roc core takes it.
+#[cfg(feature = "roc-core")]
+fn words(
+    event: RiftFloatsEvent,
+) -> rift_core::floats::FloatsEvent<u64, u64, u64, u64, rift_core::plain::Rect> {
+    use rift_core::floats::FloatsEvent as E;
+
+    use crate::roc_path::Word;
+    match event {
+        E::Floated(w) => E::Floated(w.word()),
+        E::Unfloated(w) => E::Unfloated(w.word()),
+        E::Fullscreen(w, k) => E::Fullscreen(w.word(), k),
+        E::Activated { space, window } => E::Activated {
+            space: space.word(),
+            window: window.word(),
+        },
+        E::Deactivated { space, window } => E::Deactivated {
+            space: space.word(),
+            window: window.word(),
+        },
+        E::DeactivatedEverywhere(w) => E::DeactivatedEverywhere(w.word()),
+        E::ActiveRebuilt { space, windows } => E::ActiveRebuilt {
+            space: space.word(),
+            windows: windows.into_iter().map(Word::word).collect(),
+        },
+        E::SpaceRemapped { from, to } => E::SpaceRemapped {
+            from: from.word(),
+            to: to.word(),
+        },
+        E::FloatingFocus(w) => E::FloatingFocus(w.map(Word::word)),
+        E::Focused(w) => E::Focused(w.map(Word::word)),
+        E::Replaced { from, to } => E::Replaced {
+            from: from.word(),
+            to: to.word(),
+        },
+        E::AppQuit(pid) => E::AppQuit(pid.word()),
+        E::FloatingTaken => E::FloatingTaken,
+        E::FrameStored {
+            workspace,
+            window,
+            frame,
+            if_absent,
+        } => E::FrameStored {
+            workspace: workspace.word(),
+            window: window.word(),
+            frame: plain_rect(frame),
+            if_absent,
+        },
+        E::FramesForgotten(w) => E::FramesForgotten(w.word()),
+        E::FrameForgotten { workspace, window } => E::FrameForgotten {
+            workspace: workspace.word(),
+            window: window.word(),
+        },
+        E::WorkspaceForgotten(ws) => E::WorkspaceForgotten(ws.word()),
+    }
+}
+
 #[cfg(all(test, feature = "roc-core"))]
 mod tests {
     use rift_core::lifecycle::{
@@ -907,6 +1116,37 @@ mod tests {
         constraints.step(ConstraintsEvent::AppQuit(4));
         constraints.step(ConstraintsEvent::AppQuit(-4));
         assert_eq!(constraints.app_minimums().count(), 0);
+    }
+
+    /// Re-seeding gives the floating state's Rust shadow exactly the Roc core's (a negative pid's
+    /// window, a workspace key and a frame back from their words), and is counted.
+    #[test]
+    fn a_floats_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        use rift_core::floats::FloatsEvent;
+        let mut floats = super::TwinnedFloats::default();
+        let window = WindowId::new(-6, 2);
+        let workspace: crate::model::VirtualWorkspaceId =
+            slotmap::KeyData::from_ffi((3 << 32) | 5).into();
+        let frame = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 200.0));
+        floats.step(FloatsEvent::Floated(window));
+        floats.step(FloatsEvent::Activated { space: SpaceId::new(4), window });
+        floats.step(FloatsEvent::FrameStored {
+            workspace,
+            window,
+            frame,
+            if_absent: false,
+        });
+        // The shadow loses the window the Roc core still has.
+        floats.rust.step(FloatsEvent::Unfloated(window));
+        assert!(!floats.is_floating(window), "the shadow lost it");
+        let before = super::FLOATS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = floats.twin.roc.view();
+        floats.reseed(view.clone());
+        assert_eq!(floats.rust_view(), view);
+        assert!(floats.is_floating(window) && floats.is_active(SpaceId::new(4), window));
+        assert_eq!(floats.frame(workspace, window), Some(frame));
+        assert!(super::FLOATS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
     }
 
     /// A main window machine whose Rust shadow lost the app the Roc core still has.

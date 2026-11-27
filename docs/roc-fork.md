@@ -562,7 +562,35 @@ shadow, re-seeded on a difference; 3/4, the fourth, no re-seed after a differenc
 equivalent under tests, where a difference panics). A raw NaN width had been recorded as it
 came; the differential found it (NaN never equals itself), and both cores now normalize it.
 
-- Next: E2 (floating and focus).
+### E2, floating and focus (2026-11-28)
+
+The engine's `FloatingManager`, `FloatingPositionStore` and `focused_window` are a core machine,
+`rift_core::floats::Floats` (Rust) and `roc/core/Floats.roc` (Roc): the floating windows, a
+floating window's fullscreen, each Space's active floating windows, the floating focus, the
+focused window and each workspace's floating frames, stepped by `FloatsEvent`. A window's app
+(for an app quitting) is `OfApp`: its pid, or for a window word its high half, sign-extended.
+The engine holds it as `floating::EngineFloats`, one field carrying both old APIs, so the 110
+sites only renamed (the paired calls merged: `replace_identity`, `app_quit`). The old types are
+now only persistence's saved form: `FloatingManager` the floating windows and floating focus,
+`FloatingPositionStore` the saved frames; their live operations went with the flip.
+
+Five steps: the Rust core (9/9); the shadow (every lib test checking the machine's whole state
+against the engine's after each step; two engine tests for what had none; 3/3); the flip (five
+engine tests for what had none: a workspace's activation, a Space remapped, a workspace
+forgotten, an app closing, a save and load; 9/9); the Roc port (the differential, 80,000 steps,
+and a copy tripwire, which found a frame store copying its workspace's frame table: the copy
+hunt's known shape, a field bound while its record stays live, fixed by taking the entry out of
+the outer table first, `with_frames` and `with_active`; 7/7); and Roc deciding
+(`roc_twin::TwinnedFloats`, seeded from a saved layout and compared at once in tests; 2/3, the
+third, a quit app's pid crossing as its low half, being equivalent: Roc compares a window's app
+with the pid's low 32 bits).
+
+**Open, proposed as its own step:** each Space's active floating windows are derived state (the
+floating windows among the active workspace's), rebuilt at activation and kept in step by hand
+at a dozen sites. The machine carries them faithfully; computing them from the core's topology
+and floating set would remove the second source of truth.
+
+- Next: E3 (native-layout memory and displays).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

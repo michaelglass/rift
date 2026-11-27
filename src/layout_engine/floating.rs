@@ -43,13 +43,9 @@ impl FloatingManager {
     }
 }
 
-/// The core machine as the engine holds it: windows, Spaces, workspaces and frames in rift's
-/// types (engine slice E2).
-pub(crate) type FloatsCore =
-    rift_core::floats::Floats<WindowId, SpaceId, VirtualWorkspaceId, CGRect>;
+type FloatsCore = crate::roc_twin::RiftFloats;
 
-type FloatsEvent =
-    rift_core::floats::FloatsEvent<WindowId, pid_t, SpaceId, VirtualWorkspaceId, CGRect>;
+type FloatsEvent = crate::roc_twin::RiftFloatsEvent;
 
 impl rift_core::floats::OfApp for WindowId {
     type App = pid_t;
@@ -76,7 +72,7 @@ fn engine_kind(kind: rift_core::floats::FullscreenKind) -> FloatingFullscreenKin
 /// (engine slice E2), all of it the core machine's ([`rift_core::floats`]): the engine steps it
 /// and reads it back.
 pub(crate) struct EngineFloats {
-    core: FloatsCore,
+    core: crate::roc_twin::TwinnedFloats,
 }
 
 impl EngineFloats {
@@ -85,14 +81,14 @@ impl EngineFloats {
     /// The floating state a saved layout brings: its floating windows and floating focus.
     pub(crate) fn loaded(floating: FloatingManager) -> Self {
         EngineFloats {
-            core: FloatsCore::from_parts(
+            core: crate::roc_twin::TwinnedFloats::seeded(FloatsCore::from_parts(
                 floating.floating_windows,
                 [],
                 [],
                 floating.last_floating_focus,
                 None,
                 [],
-            ),
+            )),
         }
     }
 
