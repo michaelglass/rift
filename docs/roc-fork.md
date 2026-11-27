@@ -542,7 +542,27 @@ stays 48.
 | 4154 | `update_active_floating_windows` | effect | - / floating | E2 |  |
 | 4165 | `store_floating_window_positions` | effect | - / workspaces | E2 |  |
 
-- Next: E4 (constraints), after the lead's review of E0.
+### E4, window constraints (2026-11-27)
+
+The engine's `window_layout_constraints` and `app_min_sizes` are a core machine,
+`rift_core::constraints::Constraints` (Rust) and `roc/core/Sizes.roc` (Roc; Boundary's
+`Constraints` already names the traditional layout's `Constrained | Unconstrained`), stepped by
+`ConstraintsEvent`: `Observed` (the record from what the window reports; under
+`respect_min_size` a window reporting no minimum takes its app's last one, and one reporting a
+minimum makes it its app's), `WidthSet`, `WidthPreserved` (recording the window without
+`respect_min_size` if it has none), `Retired` and `Replaced` (#707: a record lives as long as the
+window and follows its identity), `AppQuit`. Records are normalized, widths set included;
+`revision` moves on every change to the records. In five steps, each proven by planted bugs:
+the Rust core (8/8); the engine shadowing it (every lib test checking the machine against the
+engine's records on every step; 2/2); the flip (the engine's own records gone, each pass that
+reads constraints getting them from the core, computed, never kept; three engine tests for what
+had none; 8/8); the Roc port (the differential, 80,000 steps, state compared after each, and a
+copy tripwire; 6/6); and Roc deciding (`roc_twin::TwinnedConstraints`, the Rust machine its
+shadow, re-seeded on a difference; 3/4, the fourth, no re-seed after a difference, being
+equivalent under tests, where a difference panics). A raw NaN width had been recorded as it
+came; the differential found it (NaN never equals itself), and both cores now normalize it.
+
+- Next: E2 (floating and focus).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

@@ -17,6 +17,7 @@
 
 use std::ops::Deref;
 
+use rift_core::constraints::{Constraints, ConstraintsEvent};
 use rift_core::lifecycle::{Invalidation, Lifecycle, LifecycleEvent, Revalidation, Transition};
 use rift_core::main_window::{MainWindowEvent, MainWindows};
 #[cfg(feature = "roc-core")]
@@ -44,6 +45,17 @@ static LIFECYCLE_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 /// How many times the main window's Rust shadow was re-seeded from the Roc core, process-wide.
 #[cfg(feature = "roc-core")]
 static MAIN_WINDOW_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the window constraints' Rust shadow was re-seeded from the Roc core.
+#[cfg(feature = "roc-core")]
+static CONSTRAINTS_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the window constraints' Rust shadow has been re-seeded from the Roc core (each
+/// one a `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn constraints_reseeds() -> u64 {
+    CONSTRAINTS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// How many times the joined workspaces' Rust shadow was re-seeded from the Roc core.
 #[cfg(feature = "roc-core")]
@@ -674,6 +686,122 @@ impl TwinnedMainWindows {
     }
 }
 
+/// Every window's size constraints and each app's last minimum (engine slice E4), with its Roc
+/// twin under `roc-core`. Flipped (policy (a)): under `roc-core` the Roc core decides and the
+/// Rust machine is its shadow, read through `Deref` and re-seeded on any difference.
+#[derive(Default)]
+pub(crate) struct TwinnedConstraints {
+    rust: Constraints<WindowId, pid_t>,
+    #[cfg(feature = "roc-core")]
+    twin: ConstraintsTwin,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct ConstraintsTwin {
+    roc: rift_core_roc::RocSizes,
+    steps: u64,
+}
+
+impl Deref for TwinnedConstraints {
+    type Target = Constraints<WindowId, pid_t>;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl std::fmt::Debug for TwinnedConstraints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
+}
+
+impl TwinnedConstraints {
+    /// As [`Constraints::step`]: both must answer the same change, and, when due, keep the same
+    /// state.
+    pub(crate) fn step(&mut self, event: ConstraintsEvent<WindowId, pid_t>) -> bool {
+        let answer = self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        {
+            use crate::roc_path::{Word, diverged};
+            let plain = match event {
+                ConstraintsEvent::Observed {
+                    window,
+                    app,
+                    respect_min_size,
+                    observed,
+                } => ConstraintsEvent::Observed {
+                    window: window.word(),
+                    app: app.word(),
+                    respect_min_size,
+                    observed,
+                },
+                ConstraintsEvent::WidthSet { window, width } => {
+                    ConstraintsEvent::WidthSet { window: window.word(), width }
+                }
+                ConstraintsEvent::WidthPreserved { window, observed, width } => {
+                    ConstraintsEvent::WidthPreserved {
+                        window: window.word(),
+                        observed,
+                        width,
+                    }
+                }
+                ConstraintsEvent::Retired(window) => ConstraintsEvent::Retired(window.word()),
+                ConstraintsEvent::Replaced { from, to } => ConstraintsEvent::Replaced {
+                    from: from.word(),
+                    to: to.word(),
+                },
+                ConstraintsEvent::AppQuit(app) => ConstraintsEvent::AppQuit(app.word()),
+            };
+            let roc = self.twin.roc.step(plain);
+            let answer_differs = roc != answer;
+            if answer_differs {
+                diverged("constraints step", &plain, &answer, &roc);
+            }
+            self.twin.steps += 1;
+            if answer_differs || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+                let rust = self.rust_view();
+                let view = self.twin.roc.view();
+                if rust != view {
+                    diverged("constraints", &plain, &rust, &view);
+                }
+                if answer_differs || rust != view {
+                    self.reseed(view);
+                }
+            }
+            // The Roc core decides.
+            return roc;
+        }
+        #[cfg(not(feature = "roc-core"))]
+        answer
+    }
+
+    /// The Rust machine as words, as the Roc core views it (records and minimums in word order).
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&self) -> Constraints<u64, u64> {
+        use crate::roc_path::Word;
+        Constraints::from_parts(
+            self.rust.windows().map(|(window, c)| (window.word(), c)),
+            self.rust.app_minimums().map(|(app, min)| (app.word(), min)),
+            self.rust.revision(),
+        )
+    }
+
+    /// Replace the Rust shadow with the Roc core's state, and count it.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, view: Constraints<u64, u64>) {
+        use crate::roc_path::window_of_word;
+        let pid = |word: u64| word as i64 as pid_t;
+        self.rust = Constraints::from_parts(
+            view.windows().filter_map(|(word, c)| Some((window_of_word(word)?, c))),
+            view.app_minimums().map(|(word, min)| (pid(word), min)),
+            view.revision(),
+        );
+        let reseeds = CONSTRAINTS_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the window constraints' Rust shadow was re-seeded from the Roc core"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "roc-core"))]
 mod tests {
     use rift_core::lifecycle::{
@@ -713,6 +841,67 @@ mod tests {
         assert_eq!(lifecycle.rust_view(), roc);
         assert!(lifecycle.manages(window), "reads follow the Roc core");
         assert!(LIFECYCLE_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// Re-seeding gives the constraints' Rust shadow exactly the Roc core's records and app
+    /// minimums (a negative pid among them, back from its word), and is counted.
+    #[test]
+    fn a_constraints_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        use rift_core::constraints::{ConstraintsEvent, Observed};
+        let mut constraints = super::TwinnedConstraints::default();
+        let window = WindowId::new(-4, 1);
+        constraints.step(ConstraintsEvent::Observed {
+            window,
+            app: -4,
+            respect_min_size: true,
+            observed: Observed {
+                resizable: true,
+                width: 600.0,
+                height: 400.0,
+                min: rift_core::layout::Size::reported(200.0, 100.0),
+                max_width: 0.0,
+                max_height: 0.0,
+            },
+        });
+        // The shadow loses the window the Roc core still has.
+        constraints.rust.step(ConstraintsEvent::Retired(window));
+        assert_eq!(constraints.get(window), None, "the shadow lost it");
+        let before = super::CONSTRAINTS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = constraints.twin.roc.view();
+        constraints.reseed(view.clone());
+        assert_eq!(constraints.rust_view(), view);
+        assert!(constraints.get(window).is_some(), "reads follow the Roc core");
+        assert_eq!(
+            constraints.app_minimums().map(|(app, _)| app).collect::<Vec<_>>(),
+            [-4]
+        );
+        assert!(super::CONSTRAINTS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// An app quitting reaches the Roc core as the same app: its minimum goes in both.
+    #[test]
+    fn a_constraints_twin_forgets_a_quitting_apps_minimum() {
+        use rift_core::constraints::{ConstraintsEvent, Observed};
+        let mut constraints = super::TwinnedConstraints::default();
+        for app in [4, -4] {
+            constraints.step(ConstraintsEvent::Observed {
+                window: WindowId::new(app, 1),
+                app,
+                respect_min_size: true,
+                observed: Observed {
+                    resizable: true,
+                    width: 600.0,
+                    height: 400.0,
+                    min: rift_core::layout::Size::reported(200.0, 100.0),
+                    max_width: 0.0,
+                    max_height: 0.0,
+                },
+            });
+        }
+        // Every step compares the whole state in tests: a difference panics.
+        constraints.step(ConstraintsEvent::AppQuit(4));
+        constraints.step(ConstraintsEvent::AppQuit(-4));
+        assert_eq!(constraints.app_minimums().count(), 0);
     }
 
     /// A main window machine whose Rust shadow lost the app the Roc core still has.

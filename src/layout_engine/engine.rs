@@ -208,7 +208,7 @@ pub struct LayoutEngine {
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
     /// Every window's size constraints and each app's last reported minimum (engine slice E4).
-    constraints: rift_core::constraints::Constraints<WindowId, pid_t>,
+    constraints: crate::roc_twin::TwinnedConstraints,
     workspaces: WorkspaceStore,
     layout_settings: LayoutSettings,
     space_display_map: HashMap<SpaceId, Option<String>>,
@@ -5086,8 +5086,13 @@ mod tests {
             .window_mut(other)
             .unwrap()
             .project_seen(CGRect::new(CGPoint::ZERO, CGSize::new(450.0, 500.0)));
-        let mut settings = LayoutSettings::default();
-        settings.scrolling.preserve_window_sizes = true;
+        let settings = LayoutSettings {
+            scrolling: crate::common::config::ScrollingLayoutSettings {
+                preserve_window_sizes: true,
+                ..Default::default()
+            },
+            ..LayoutSettings::default()
+        };
         engine.set_layout_settings(window_store.view(), &settings);
         let workspace =
             engine.workspaces.reading(window_store.view()).active_workspace(space).unwrap();
