@@ -1188,11 +1188,13 @@ pub mod columns {
         CreateLayout,
         CloneLayout(LayoutKey),
         RemoveLayout(LayoutKey),
-        Participation(u64, Participation),
+        /// A window taking part or left out, and the column each layout's camera remembers.
+        Participation(u64, Participation, Vec<(LayoutKey, ColumnId)>),
         Settings(Settings),
         Insert(LayoutKey, u64),
         ForgetWindow(u64),
-        RemoveFrom(LayoutKey, u64),
+        /// A window removed from a layout, and the column its camera remembers.
+        RemoveFrom(LayoutKey, u64, Option<ColumnId>),
         ReplaceWindow {
             from: u64,
             to: u64,
@@ -1276,17 +1278,17 @@ pub mod columns {
                 columns.remove_layout(layout);
                 Answer::Done
             }
-            Event::Participation(window, participation) => {
-                Answer::Verdict(columns.set_window_participation(window, participation))
-            }
+            Event::Participation(window, participation, remembered) => Answer::Verdict(
+                columns.set_window_participation(window, participation, &remembered),
+            ),
             Event::Settings(settings) => {
                 columns.set_settings(settings);
                 Answer::Done
             }
             Event::Insert(layout, window) => Answer::Verdict(columns.insert(layout, window)),
             Event::ForgetWindow(window) => Answer::Layouts(columns.forget_window(window)),
-            Event::RemoveFrom(layout, window) => {
-                Answer::Removal(columns.remove_from(layout, window))
+            Event::RemoveFrom(layout, window, remembered) => {
+                Answer::Removal(columns.remove_from(layout, window, remembered))
             }
             Event::ReplaceWindow { from, to } => {
                 columns.replace_window(from, to);

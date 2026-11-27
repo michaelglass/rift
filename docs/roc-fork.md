@@ -251,7 +251,23 @@ constraints (`preserve_window_sizes`).
     (the build script failing); one slice-3 plant (`.reverse()`, not a Roc list method) proved
     nothing. The runner now reports a build failure as such, and that plant, redone with a fold,
     is caught.
-- Next: ports (b) and (c), the merge, then the camera (modelled on PR #718).
+  - (b) the unified scrolling column fallback (bafcc444) and #705's reveal of the surviving
+    column (f168b6c6), the scrolling halves: when the selection's column goes, or no window in
+    it takes part any more, the core shows an available column (`select_available_column`, Rust
+    and Roc): the one the camera remembers from before a window came, if a window in it takes
+    part, else the nearest from the active one rightwards, then leftwards (its active row kept).
+    The camera's remembered column crosses as data, the core never asking the camera:
+    `remove_from(layout, window, remembered)` (taken only when the window's column went, as
+    upstream's restore) and `set_window_participation(window, participation, remembered)` (each
+    layout's). The camera goes back to its remembered view only when that is the column the
+    core showed, and otherwise reveals the one shown (participation: only when the column
+    changed). #705's reactor half (frame writes cancelled without committing the presentation)
+    and upstream's reactor tests for both come with the merge. Tests: upstream's
+    `removing_selected_column_skips_suspended_neighbor`, carried over; the remembered column
+    else the nearest (rightwards before leftwards) when a selection is left out; a column shown
+    after a selection is left out revealed whole; a removal revealing the shown column when the
+    remembered one takes no part. Plants 9/9.
+- Next: port (c), the merge, then the camera (modelled on PR #718).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

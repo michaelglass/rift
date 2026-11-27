@@ -161,7 +161,11 @@ impl Made {
             9 => Event::CloneLayout(layout),
             10 => Event::RemoveLayout(layout),
             11 => Event::ForgetWindow(window),
-            12 => Event::RemoveFrom(layout, if rng.chance(90) { window } else { rng.window() }),
+            12 => Event::RemoveFrom(
+                layout,
+                if rng.chance(90) { window } else { rng.window() },
+                rng.pick(&Made::columns(rust)).filter(|_| rng.chance(60)),
+            ),
             13 => {
                 let pid = 1 + rng.below(3);
                 Event::ForgetApp(WINDOWS.iter().copied().filter(|w| w >> 32 == pid).collect())
@@ -174,6 +178,13 @@ impl Made {
                 } else {
                     Participation::LeftOut
                 },
+                self.layouts
+                    .iter()
+                    .filter_map(|&layout| {
+                        let id = rng.pick(&Made::columns(rust))?;
+                        rng.chance(50).then_some((layout, id))
+                    })
+                    .collect(),
             ),
             16 => Event::Settings(rng.settings()),
             17 => {

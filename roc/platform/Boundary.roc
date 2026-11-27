@@ -1122,6 +1122,14 @@ Boundary := [].{
 
 	ColumnsActivate := { layout : U64, column : U64 }
 
+	## A window taking part or left out, and the column each layout's camera remembers (an
+	## available column to show, should the selection stop taking part).
+	ColumnsParticipation := { window : U64, participation : BspTakesPart, remembered : List(ColumnsActivate) }
+
+	## A window removed from a layout, and the column its camera remembers from before the window
+	## came (shown, should the selection's column go).
+	ColumnsRemoveFrom := { layout : U64, window : U64, remembered : MaybeWord }
+
 	ColumnsLocked := { window : U64, width : F64 }
 
 	## A layout pass's preserved widths: the view's width, the gap, each window's locked width.
@@ -1146,11 +1154,11 @@ Boundary := [].{
 		CreateLayout,
 		CloneLayout(U64),
 		RemoveLayout(U64),
-		Participation(BspParticipation),
+		Participation(ColumnsParticipation),
 		Settings(ColumnsSettings),
 		Insert(BspWindowIn),
 		ForgetWindow(U64),
-		RemoveFrom(BspWindowIn),
+		RemoveFrom(ColumnsRemoveFrom),
 		ReplaceWindow(BspReplacement),
 		ForgetApp(List(U64)),
 		ResizeFromFrame(ColumnsFrameResize),

@@ -257,14 +257,24 @@ fn event(event: Event, host: &abi::RocHost) -> abi::BoundaryColumnsEvent {
             BoundaryColumnsEventPayload.remove_layout(layout.0),
             Tag::RemoveLayout
         ),
-        Event::Participation(window, participation) => union!(
+        Event::Participation(window, participation, remembered) => union!(
             BoundaryColumnsEvent,
-            BoundaryColumnsEventPayload.participation(abi::BoundaryBspParticipation {
+            BoundaryColumnsEventPayload.participation(abi::BoundaryColumnsParticipation {
                 window,
                 participation: match participation {
                     Participation::TakesPart => abi::BoundaryBspTakesPart::TakesPart,
                     Participation::LeftOut => abi::BoundaryBspTakesPart::LeftOut,
                 },
+                remembered: list(
+                    &remembered
+                        .iter()
+                        .map(|&(layout, column)| abi::BoundaryColumnsActivate {
+                            layout: layout.0,
+                            column: column.0,
+                        })
+                        .collect::<Vec<_>>(),
+                    host,
+                ),
             }),
             Tag::Participation
         ),
@@ -283,9 +293,13 @@ fn event(event: Event, host: &abi::RocHost) -> abi::BoundaryColumnsEvent {
             BoundaryColumnsEventPayload.forget_window(window),
             Tag::ForgetWindow
         ),
-        Event::RemoveFrom(layout, window) => union!(
+        Event::RemoveFrom(layout, window, remembered) => union!(
             BoundaryColumnsEvent,
-            BoundaryColumnsEventPayload.remove_from(window_in(layout, window)),
+            BoundaryColumnsEventPayload.remove_from(abi::BoundaryColumnsRemoveFrom {
+                layout: layout.0,
+                window,
+                remembered: super::maybe_word(remembered.map(|column| column.0)),
+            }),
             Tag::RemoveFrom
         ),
         Event::ReplaceWindow { from, to } => union!(

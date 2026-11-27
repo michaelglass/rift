@@ -393,6 +393,25 @@ impl<W: Copy + Eq> Editing<W> {
         })
     }
 
+    /// The column shown when the selection's column went, or no window in it takes part any
+    /// more: the one the camera remembers (`preferred`), if it holds a window taking part, else
+    /// the first that does from the active one rightwards, then leftwards; made active (its
+    /// active row kept), its id. Upstream's unified fallback (bafcc444).
+    fn select_available_column(
+        &mut self,
+        preferred: Option<ColumnId>,
+        left_out: &impl Fn(W) -> bool,
+    ) -> Option<ColumnId> {
+        let remembered = preferred.and_then(|id| self.columns.iter().position(|c| c.id == id));
+        let at = remembered
+            .into_iter()
+            .chain(self.active_column..self.columns.len())
+            .chain((0..self.active_column.min(self.columns.len())).rev())
+            .find(|&index| self.columns[index].rows.iter().any(|r| !left_out(r.window)))?;
+        self.active_column = at;
+        Some(self.columns[at].id)
+    }
+
     fn activate(&mut self, window: W) -> bool {
         let Some((col, row)) = self.locate(window) else {
             return false;
@@ -554,9 +573,16 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
 
     pub fn window_participates(&self, window: W) -> bool { !self.left_out.contains(&window) }
 
-    /// A window taking part or left out; whether that changed. Every layout holding it gets a
-    /// selection again if it had none taking part.
-    pub fn set_window_participation(&mut self, window: W, participation: Participation) -> bool {
+    /// A window taking part or left out; whether that changed. Every layout holding it with no
+    /// selection taking part any more shows an available column again
+    /// ([`Editing::select_available_column`]): the one its camera remembers (`remembered`, per
+    /// layout), else the nearest.
+    pub fn set_window_participation(
+        &mut self,
+        window: W,
+        participation: Participation,
+        remembered: &[(L, ColumnId)],
+    ) -> bool {
         let changed = match participation {
             Participation::TakesPart => self.left_out.remove(&window),
             Participation::LeftOut => self.left_out.insert(window),
@@ -566,18 +592,14 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
         }
         let left_out = self.left_out.clone();
         let is_left_out = |w: W| left_out.contains(&w);
-        for arrangement in self.layouts.values_mut() {
+        for (layout, arrangement) in self.layouts.iter_mut() {
             if arrangement.locate(window).is_none() {
                 continue;
             }
+            let preferred = remembered.iter().find(|(at, _)| *at == layout).map(|&(_, id)| id);
             arrangement.edited(|e| {
-                if e.selected(&is_left_out).is_none()
-                    && let Some((col, row)) = e.columns.iter().enumerate().find_map(|(col, c)| {
-                        c.rows.iter().position(|r| !is_left_out(r.window)).map(|row| (col, row))
-                    })
-                {
-                    e.active_column = col;
-                    e.columns[col].active_window = row;
+                if e.selected(&is_left_out).is_none() {
+                    e.select_available_column(preferred, &is_left_out);
                 }
             });
         }
@@ -636,8 +658,16 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
     }
 
     /// `window` removed from `layout`: what that did, for the camera; none when the layout does
-    /// not hold it.
-    pub fn remove_from(&mut self, layout: L, window: W) -> Option<Removal> {
+    /// not hold it. When the selection went, an available column is shown
+    /// ([`Editing::select_available_column`]): the one the camera remembers from before the
+    /// window came (`remembered`, taken when the window's column went with it), else the
+    /// nearest.
+    pub fn remove_from(
+        &mut self,
+        layout: L,
+        window: W,
+        remembered: Option<ColumnId>,
+    ) -> Option<Removal> {
         let left_out = self.left_out.clone();
         let is_left_out = |w: W| left_out.contains(&w);
         let arrangement = self.layouts.get_mut(layout)?;
@@ -649,6 +679,12 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
                 was_fullscreen: e.columns[col].rows[row].fill != Fill::Tiled,
             };
             e.detach(window, &is_left_out);
+            if removal.active_removed {
+                e.select_available_column(
+                    remembered.filter(|_| removal.column_removed),
+                    &is_left_out,
+                );
+            }
             removal
         }))
     }
@@ -1300,7 +1336,7 @@ mod tests {
         let layout = system.create_layout();
         system.insert(layout, 1);
         for layout in system.forget_window(1) {
-            system.remove_from(layout, 1);
+            system.remove_from(layout, 1, None);
         }
         assert_eq!(system.arrangement(layout).unwrap().strip, Strip::Empty);
         system.insert(layout, 2);

@@ -7,7 +7,7 @@
 
 import Geometry exposing [clamp, max]
 import Slots
-import pf.Boundary exposing [BspTakesPart, BspDirection, BspEdited, BspFocusIn, BspFocused, BspMoveQuery, BspResizeAlong, BspSlot, BspWindowsQuery, ColumnsAnswer, ColumnsArrangement, ColumnsClosing, ColumnsColumn, ColumnsEvent, ColumnsFrameResize, ColumnsFullscreened, ColumnsLayoutSlot, ColumnsMaybeLocation, ColumnsMaybeMoved, ColumnsMaybeRemoval, ColumnsMaybeSpan, ColumnsMoved, ColumnsPreserve, ColumnsRemoval, ColumnsRow, ColumnsSeed, ColumnsSettings, ColumnsStrip, ColumnsTransfer, ColumnsWidth, Fill, MaybeWord]
+import pf.Boundary exposing [BspTakesPart, BspDirection, BspEdited, BspFocusIn, BspFocused, BspMoveQuery, BspResizeAlong, BspSlot, BspWindowsQuery, ColumnsActivate, ColumnsAnswer, ColumnsArrangement, ColumnsClosing, ColumnsColumn, ColumnsEvent, ColumnsFrameResize, ColumnsFullscreened, ColumnsLayoutSlot, ColumnsMaybeLocation, ColumnsMaybeMoved, ColumnsMaybeRemoval, ColumnsMaybeSpan, ColumnsMoved, ColumnsPreserve, ColumnsRemoval, ColumnsRow, ColumnsSeed, ColumnsSettings, ColumnsStrip, ColumnsTransfer, ColumnsWidth, Fill, MaybeWord]
 
 ## A scrolling layout system's arrangements, the windows left out, the settings.
 Cols : {
@@ -82,8 +82,8 @@ Columns := [].{
 				(layouts, _) = Slots.remove(cols.layouts, layout)
 				({ ..cols, layouts }, Done)
 			}
-			Participation({ window, participation }) => {
-				(after, changed) = set_window_participation(cols, window, participation)
+			Participation({ window, participation, remembered }) => {
+				(after, changed) = set_window_participation(cols, window, participation, remembered)
 				(after, Verdict(changed))
 			}
 			Settings(settings) => ({ ..cols, settings }, Done)
@@ -95,8 +95,8 @@ Columns := [].{
 				(after, layouts) = forget_window(cols, window)
 				(after, Layouts(layouts))
 			}
-			RemoveFrom({ layout, window }) => {
-				(after, removal) = edited_layout(cols, layout, NotHeld, |e| removed_from(e, cols.left_out, window))
+			RemoveFrom({ layout, window, remembered }) => {
+				(after, removal) = edited_layout(cols, layout, NotHeld, |e| removed_from(e, cols.left_out, window, remembered))
 				(after, Removal(removal))
 			}
 			ReplaceWindow({ from, to }) => (replace_window(cols, from, to), Done)
@@ -603,8 +603,8 @@ Columns := [].{
 
 	# The system's operations.
 
-	set_window_participation : Cols, U64, BspTakesPart -> (Cols, Bool)
-	set_window_participation = |cols, window, participation| {
+	set_window_participation : Cols, U64, BspTakesPart, List(ColumnsActivate) -> (Cols, Bool)
+	set_window_participation = |cols, window, participation, remembered| {
 		(left_out, changed) =
 			match participation {
 				TakesPart => (cols.left_out.remove(window), cols.left_out.contains(window))
@@ -618,7 +618,12 @@ Columns := [].{
 				marked,
 				|acc, layout|
 					if contains_window(acc, layout, window) {
-						(after, _) = edited_layout(acc, layout, {}, |e| (repair_selection(e, left_out), {}))
+						preferred =
+							match remembered.find_first(|r| r.layout == layout) {
+								Ok(r) => Some(r.column)
+								Err(_) => Nothing
+							}
+						(after, _) = edited_layout(acc, layout, {}, |e| (repair_selection(e, left_out, preferred), {}))
 						after
 					} else {
 						acc
@@ -628,30 +633,43 @@ Columns := [].{
 		}
 	}
 
-	## With no selection taking part, the first row taking part made the selection.
-	repair_selection : Editing, Set(U64) -> Editing
-	repair_selection = |e, left_out|
+	## With no selection taking part, an available column shown (`select_available_column`).
+	repair_selection : Editing, Set(U64), MaybeWord -> Editing
+	repair_selection = |e, left_out, preferred|
 		match selected(e, left_out) {
 			Some(_) => e
-			Nothing => {
-				(_, found) = e.columns.fold_until(
-					(0, None),
-					|(col, _), column|
-						match first_taking_part(column, left_out) {
-							Some(row) => Break((col, Some((col, row))))
-							None => Continue((col + 1, None)),
-						},
-				)
-				match found {
-					Some((col, row)) =>
-						match column_at(e, col) {
-							Some(column) => set_column({ ..e, active: col }, col, { ..column, active: row })
-							None => e
-						}
-					None => e
-				}
-			}
+			Nothing => select_available_column(e, left_out, preferred)
 		}
+
+	## The column shown when the selection's column went, or no window in it takes part any more:
+	## the one the camera remembers (`preferred`), if it holds a window taking part, else the
+	## first that does from the active one rightwards, then leftwards; made active, its active row
+	## kept. Upstream's unified fallback (bafcc444).
+	select_available_column : Editing, Set(U64), MaybeWord -> Editing
+	select_available_column = |e, left_out, preferred| {
+		indices = e.columns.map_with_index(|_, index| index)
+		remembered =
+			match preferred {
+				Some(id) =>
+					match e.columns.find_first_index(|c| c.id == id) {
+						Ok(index) => [index]
+						Err(_) => []
+					}
+				Nothing => []
+			}
+		rightwards = indices.keep_if(|i| i >= e.active)
+		leftwards = indices.keep_if(|i| i < e.active).fold([], |acc, i| [i].concat(acc))
+		candidates = remembered.concat(rightwards).concat(leftwards)
+		available = |index|
+			match e.columns.get(index) {
+				Ok(column) => first_taking_part(column, left_out) != None
+				Err(_) => False
+			}
+		match candidates.find_first(available) {
+			Ok(index) => { ..e, active: index }
+			Err(_) => e
+		}
+	}
 
 	## Every layout's key, in table order.
 	layout_keys : Cols -> List(U64)
@@ -694,8 +712,8 @@ Columns := [].{
 
 	## What removing `window` from `e` did (for the camera), and the edit after; the camera's
 	## answer comes as its own events (`ActivateColumn`), never asked here.
-	removed_from : Editing, Set(U64), U64 -> (Editing, ColumnsMaybeRemoval)
-	removed_from = |e, left_out, window|
+	removed_from : Editing, Set(U64), U64, MaybeWord -> (Editing, ColumnsMaybeRemoval)
+	removed_from = |e, left_out, window, remembered|
 		match locate(e, window) {
 			Nowhere => (e, NotHeld)
 			At(col, row) =>
@@ -711,7 +729,13 @@ Columns := [].{
 									Err(_) => False
 								},
 						}
-						(after, _) = detach(e, left_out, window)
+						(detached, _) = detach(e, left_out, window)
+						after =
+							if removal.active_removed {
+								select_available_column(detached, left_out, if removal.column_removed remembered else Nothing)
+							} else {
+								detached
+							}
 						(after, Removed(removal))
 					}
 				}

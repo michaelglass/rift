@@ -878,6 +878,14 @@ struct LayoutState {
 // Store the camera relative to its active column as well as its absolute
 // position. On another display, the first preparation rebases it using the new
 // geometry. Serialize borrowed fields so saving does not clone geometry/maps.
+/// What the camera's half of an edit keeps from before it (`ScrollingLayoutSystem::edited`).
+struct BeforeEdit {
+    view: ArrangementView,
+    window: Option<WindowId>,
+    id: Option<ColumnId>,
+    old_x: Option<f64>,
+}
+
 /// A layout as it is saved: its arrangement (the core's, in rift's shape) beside its camera.
 struct SavedLayout<'a> {
     view: ArrangementView,
@@ -1371,24 +1379,44 @@ impl ScrollingLayoutSystem {
         core.activate_column(layout, rift_core::layout::columns::ColumnId(column.0));
     }
 
-    /// An edit of `layout` the core makes (`edit`), then the camera's half of it: the geometry
-    /// rebuilt from the arrangement after it, the camera holding the selection still. None for
-    /// a layout the system does not hold.
+    /// What the camera's half of an edit needs from before it: the arrangement, the core's
+    /// selection, its column and where that column was.
+    fn before_edit(&self, layout: LayoutId) -> Option<BeforeEdit> {
+        let view = self.view(layout)?;
+        let window = self.core.selected_window(layout);
+        let id = view.columns.get(view.active_column).map(|c| c.id);
+        let old_x = id
+            .and_then(|id| self.layouts.get(layout)?.geometry.as_ref()?.column(id))
+            .map(|c| c.world_x);
+        Some(BeforeEdit { view, window, id, old_x })
+    }
+
+    /// The camera's half of an edit the core made: the geometry rebuilt from the arrangement
+    /// after it, the camera holding the selection still; the arrangement after it.
+    fn after_edit(&mut self, layout: LayoutId, before: &BeforeEdit) -> Option<ArrangementView> {
+        let after = self.view(layout)?;
+        let state = self.layouts.get_mut(layout)?;
+        state.rebuilt(
+            &after,
+            &self.settings,
+            self.core.left_out(),
+            before.window,
+            before.id,
+            before.old_x,
+        );
+        Some(after)
+    }
+
+    /// An edit of `layout` the core makes (`edit`), then the camera's half of it. None for a
+    /// layout the system does not hold.
     fn edited<R>(
         &mut self,
         layout: LayoutId,
         edit: impl FnOnce(&mut projection::Decider) -> R,
     ) -> Option<R> {
-        let before = self.view(layout)?;
-        let window = self.core.selected_window(layout);
-        let id = before.columns.get(before.active_column).map(|c| c.id);
-        let old_x = id
-            .and_then(|id| self.layouts.get(layout)?.geometry.as_ref()?.column(id))
-            .map(|c| c.world_x);
+        let before = self.before_edit(layout)?;
         let answer = edit(&mut self.core);
-        let after = self.view(layout)?;
-        let state = self.layouts.get_mut(layout)?;
-        state.rebuilt(&after, &self.settings, self.core.left_out(), window, id, old_x);
+        self.after_edit(layout, &before)?;
         Some(answer)
     }
 
@@ -1454,7 +1482,14 @@ impl ScrollingLayoutSystem {
     /// fullscreen (when the window was fullscreen), or else the new selection revealed. Each
     /// column the camera chooses is made active on the core before the next removal.
     fn remove_from_layout(&mut self, layout: LayoutId, wid: WindowId) {
-        let Some(removal) = self.edited(layout, |core| core.remove_from(layout, wid)).flatten()
+        // The view the camera remembers from before the window came: the core shows its column
+        // if the selection's column goes (upstream's unified fallback, bafcc444).
+        let remembered = self.layouts.get(layout).and_then(|state| {
+            let bookmark = state.camera.transient_restore.as_ref()?;
+            Some(rift_core::layout::columns::ColumnId(bookmark.column.0))
+        });
+        let Some(removal) =
+            self.edited(layout, |core| core.remove_from(layout, wid, remembered)).flatten()
         else {
             return;
         };
@@ -1468,10 +1503,14 @@ impl ScrollingLayoutSystem {
         } else {
             None
         };
-        let restored = restore.and_then(|bookmark| state.restore(&view(core), bookmark));
-        if let Some(column) = restored {
-            Self::activate_chosen(core, layout, column);
-        }
+        // Restored only when it is the column the core showed.
+        let shown = {
+            let now = view(core);
+            now.columns.get(now.active_column).map(|c| c.id)
+        };
+        let restored = restore
+            .filter(|bookmark| Some(bookmark.column) == shown)
+            .and_then(|bookmark| state.restore(&view(core), bookmark));
         let restored_fullscreen = removal
             .was_fullscreen
             .then(|| state.restore_fullscreen_view(&view(core)))
@@ -2188,17 +2227,44 @@ impl ScrollingLayoutSystem {
         } else {
             Participation::LeftOut
         };
-        // The core repairs the selection of every layout holding the window.
-        if !self.core.set_window_participation(window, participation) {
-            return false;
-        }
-        let holding: Vec<LayoutId> = self
+        let holding: Vec<(LayoutId, BeforeEdit)> = self
             .layouts
             .keys()
             .filter(|&layout| self.core.contains_window(layout, window))
+            .filter_map(|layout| Some((layout, self.before_edit(layout)?)))
             .collect();
-        for layout in holding {
-            self.edited(layout, |_| ());
+        // The core shows an available column where the selection stops taking part: the one each
+        // camera remembers, else the nearest (upstream's unified fallback, bafcc444).
+        let remembered: Vec<_> = self
+            .layouts
+            .iter()
+            .filter_map(|(layout, state)| {
+                let bookmark = state.camera.transient_restore.as_ref()?;
+                Some((layout, rift_core::layout::columns::ColumnId(bookmark.column.0)))
+            })
+            .collect();
+        if !self.core.set_window_participation(window, participation, &remembered) {
+            return false;
+        }
+        for (layout, before) in holding {
+            let Some(after) = self.after_edit(layout, &before) else {
+                continue;
+            };
+            // The camera follows a column the core moved to: back to the view it remembers, if
+            // that is the column, or else revealing it (upstream #705, f168b6c6, and bafcc444).
+            if after.active_column != before.view.active_column {
+                let shown = after.columns[after.active_column].id;
+                let state = &mut self.layouts[layout];
+                let restored = state
+                    .camera
+                    .transient_restore
+                    .take()
+                    .filter(|bookmark| bookmark.column == shown)
+                    .and_then(|bookmark| state.restore(&after, bookmark));
+                if restored.is_none() {
+                    state.reveal(&after, &self.settings);
+                }
+            }
         }
         true
     }
@@ -2767,6 +2833,103 @@ pub(crate) mod tests {
                 Some(vec![usize::from(direction == Direction::Right), 0])
             );
         }
+    }
+
+    /// Upstream's test (bafcc444), carried over: removing the selected column shows the
+    /// nearest column with a window taking part, past a suspended neighbour.
+    #[test]
+    fn removing_selected_column_skips_suspended_neighbor() {
+        let mut f = Fixture::new(3);
+        f.select(3);
+        f.system.set_window_participation(wid(2), false);
+
+        f.system.update(WindowChange::Remove(wid(3)));
+
+        assert_eq!(f.selected(), Some(wid(1)));
+        assert_eq!(f.frame(1).origin.x, f.screen.origin.x);
+    }
+
+    /// A selection left out shows an available column: the one the camera remembers from before
+    /// the window came, and the camera goes back to that view; with nothing remembered, the
+    /// nearest column taking part, revealed (upstream bafcc444, #705).
+    #[test]
+    fn leaving_out_the_selection_shows_the_remembered_column_else_the_nearest() {
+        let mut f = Fixture::new(3);
+        f.select(1);
+        let before = f.frame(1);
+        // Window 4 comes next to 1, remembering the view on 1; left out, that view comes back
+        // (the nearest column, rightwards, would be 2's).
+        f.system.update(WindowChange::Add(f.layout, wid(4), None));
+        assert_eq!(f.selected(), Some(wid(4)));
+        f.system.set_window_participation(wid(4), false);
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.selected(), Some(wid(1)));
+        assert_eq!(f.frame(1), before);
+        // Nothing remembered: with 2 selected and taking part on both sides, 2 left out shows
+        // the nearest rightwards (3), revealed, before leftwards (4, then 1).
+        f.system.set_window_participation(wid(4), true);
+        f.select(2);
+        f.system.set_window_participation(wid(2), false);
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.selected(), Some(wid(3)));
+        let shown = f.frame(3);
+        use crate::sys::geometry::CGRectExt;
+        assert!(f.screen.contains(shown.mid()), "{shown:?}");
+    }
+
+    /// A selection left out shows the nearest column taking part, and the camera reveals it
+    /// whole (upstream #705, f168b6c6): a wide column only partly in view comes fully into it.
+    #[test]
+    fn a_column_shown_after_a_selection_is_left_out_is_revealed() {
+        let mut f = Fixture::new(3);
+        f.select(3);
+        f.system
+            .edit_layout(f.layout, LayoutEdit::Resize {
+                amount: 0.5,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        // The camera back at the strip's start, 1 and 2 in view, 3 partly beyond the edge.
+        f.select(1);
+        f.system.finish_viewport(f.layout);
+        f.select(2);
+        f.system.finish_viewport(f.layout);
+        f.system.set_window_participation(wid(2), false);
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.selected(), Some(wid(3)));
+        let shown = f.frame(3);
+        assert!(
+            shown.origin.x >= f.screen.origin.x && shown.max().x <= f.screen.max().x,
+            "{shown:?}"
+        );
+    }
+
+    /// When the column the camera remembers takes no part any more, a removal shows the nearest
+    /// one instead, and the camera reveals that one rather than going back to the remembered
+    /// view (upstream bafcc444).
+    #[test]
+    fn a_removal_reveals_the_shown_column_when_the_remembered_one_takes_no_part() {
+        let mut f = Fixture::new(3);
+        f.select(3);
+        f.system
+            .edit_layout(f.layout, LayoutEdit::Resize {
+                amount: 0.5,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        f.select(2);
+        f.system.finish_viewport(f.layout);
+        // 4 comes next to 2, remembering the view on 2; 2 then takes no part.
+        f.system.update(WindowChange::Add(f.layout, wid(4), None));
+        f.system.set_window_participation(wid(2), false);
+        f.system.update(WindowChange::Remove(wid(4)));
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.selected(), Some(wid(3)));
+        let shown = f.frame(3);
+        assert!(
+            shown.origin.x >= f.screen.origin.x && shown.max().x <= f.screen.max().x,
+            "{shown:?}"
+        );
     }
 
     #[test]

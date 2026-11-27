@@ -288,9 +288,14 @@ impl ColumnsDecider {
         &mut self,
         window: WindowId,
         participation: Participation,
+        remembered: &[(LayoutId, ColumnId)],
     ) -> bool {
-        let rust = self.rust.set_window_participation(window, participation);
-        let event = Event::Participation(word(window), participation);
+        let rust = self.rust.set_window_participation(window, participation, remembered);
+        let event = Event::Participation(
+            word(window),
+            participation,
+            remembered.iter().map(|&(layout, id)| (key(layout), id)).collect(),
+        );
         verdict(
             self.operation("participation", event, Answer::Verdict(rust)),
             rust,
@@ -312,9 +317,14 @@ impl ColumnsDecider {
         }
     }
 
-    pub(super) fn remove_from(&mut self, layout: LayoutId, window: WindowId) -> Option<Removal> {
-        let rust = self.rust.remove_from(layout, window);
-        let event = Event::RemoveFrom(key(layout), word(window));
+    pub(super) fn remove_from(
+        &mut self,
+        layout: LayoutId,
+        window: WindowId,
+        remembered: Option<ColumnId>,
+    ) -> Option<Removal> {
+        let rust = self.rust.remove_from(layout, window, remembered);
+        let event = Event::RemoveFrom(key(layout), word(window), remembered);
         match self.operation("remove_from", event, Answer::Removal(rust)) {
             Answer::Removal(roc) => roc,
             _ => rust,
@@ -795,9 +805,11 @@ mod tests {
     #[test]
     fn the_roc_columns_answer() {
         let (mut decider, layout) = three();
-        decider.rust.set_window_participation(wid(2), Participation::LeftOut);
+        decider.rust.set_window_participation(wid(2), Participation::LeftOut, &[]);
         let mut changed = false;
-        tolerating(|| changed = decider.set_window_participation(wid(2), Participation::LeftOut));
+        tolerating(|| {
+            changed = decider.set_window_participation(wid(2), Participation::LeftOut, &[])
+        });
         assert!(changed, "window 2 took part in the Roc columns");
         decider.rust.select_window(layout, wid(3));
         let mut selected = None;
@@ -810,7 +822,7 @@ mod tests {
     #[test]
     fn an_app_closing_forgets_its_windows_left_out_of_every_layout() {
         let (mut decider, _) = three();
-        decider.set_window_participation(wid(9), Participation::LeftOut);
+        decider.set_window_participation(wid(9), Participation::LeftOut, &[]);
         decider.forget_app(|window| window.pid == 1);
         assert!(decider.window_participates(wid(9)));
     }
