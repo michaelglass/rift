@@ -72,6 +72,36 @@ merge when we get there.
   `decref_list_of_*` calls, the build's `unnamed_types` guard, Geometry's rounding and
   `fmaxnm`/`fminnm`, and the host's own allocator hooks.
 
+**Scrolling onto the core, slice 1 (2026-11-27): the arrangement as the system's shadow.** The
+core takes the scrolling strip's arrangement (`rift_core::layout::columns`): a strip is `Empty |
+Columns { before, active, after }`, a column `{ id, width, before, active: Row, after }` (never
+empty, its active row always there), a row `{ window, height, fill }` (a window's fullscreen mode
+on its row, so it moves, swaps and is replaced with it); the operations run on an editing form
+with rift's indices and are parsed back after each, the active indices clamped as rift clamps
+them. Every structural operation and query is rift's `ScrollingLayoutSystem`'s, op for op. The
+camera (offset, spring, gesture, bookmarks, reveal) stays rift's: it reads world geometry. Its
+writes to the arrangement are its decisions: the column a gesture settles on or a remembered
+view restores (`activate_column`), and, after each removal, the columns it makes active (the
+core's `remove_window` and `close_app` ask it, `camera: FnMut(..) -> Vec<ColumnId>`); a layout
+pass's preserved widths read the pass's constraints (`preserve_window_sizes`).
+- The shadow (`systems/scrolling/core_shadow.rs`): rift's system decides; each operation is run
+  again on the core seeded from rift's state just before it, and its answer and the arrangements
+  it leaves are held to rift's (every operation in tests and debug builds, every 32nd in
+  release; `core: scrolling arrangement divergences` at exit). The camera's and a pass's writes
+  are logged (`Logged::Activated | Preserved | Removed`) and replayed on the core in order, a
+  removal's answer taken at its marker. Arrangements compare as written (a height that is not a
+  number is the same on both sides).
+- One state only a saved file holds, which the core cannot: a fullscreen mode for a window no
+  column holds. Rift kept it, so the layout had a fullscreen node forever; the load now drops it
+  with a `scrolling-load:` warn (pinned by a fixture). The other file-only states (a window in
+  two columns, two columns with one id, heights and widths that are zero, negative or not a
+  number, active indices past the end, the legacy fields) step alike.
+- Tests: the drawn differential (600 drawn systems, then replacements, an app closing, native
+  resizes, layout clones and removals, gestures settling, every query; each reached), the
+  file-built fixtures, two core parse tests. Plants 12/12.
+- Next: slice 2, the Roc mirror (`Columns.roc`), then the flip (the core decides and is saved),
+  Roc decides, rift's arrangement deleted; then the camera.
+
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
 names), plant and bisect variant builds, scratch outputs. Keep `target/debug/incremental` (it

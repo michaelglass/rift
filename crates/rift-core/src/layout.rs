@@ -5,6 +5,7 @@
 pub mod axis;
 pub mod bsp;
 pub mod bsp_tree;
+pub mod columns;
 pub mod floating;
 pub mod group_forest;
 pub mod scrolling;

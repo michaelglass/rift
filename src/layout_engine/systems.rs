@@ -174,6 +174,7 @@ pub enum WindowQuery {
     Stack(WindowId),
 }
 
+#[derive(Clone, Copy)]
 pub enum WindowChange<'a> {
     Add(LayoutId, WindowId, Option<Direction>),
     Remove(WindowId),
@@ -198,7 +199,7 @@ pub enum Focus {
     Direction(Direction),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FocusResult {
     pub handled: bool,
     pub window: Option<WindowId>,
@@ -263,7 +264,7 @@ pub enum LayoutEdit {
     ToggleOrientation,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum EditResult {
     Unsupported,
     Unchanged,
@@ -394,6 +395,7 @@ mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
 pub(crate) mod scrolling;
 pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
+pub(crate) use scrolling::{scrolling_divergences, scrolling_shadows};
 
 #[cfg(test)]
 mod tests {

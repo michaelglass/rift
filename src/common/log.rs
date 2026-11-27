@@ -74,6 +74,11 @@ fn show_layout_core() {
     let shadows = crate::layout_engine::layout_shadows();
     println!("core: layout divergences: {divergences} (shadows run: {shadows})");
     tracing::info!(divergences, shadows, "core: layout divergences");
+    // The core's scrolling arrangement, the scrolling system's shadow (scrolling slice 1).
+    let divergences = crate::layout_engine::systems::scrolling_divergences();
+    let shadows = crate::layout_engine::systems::scrolling_shadows();
+    println!("core: scrolling arrangement divergences: {divergences} (shadows run: {shadows})");
+    tracing::info!(divergences, shadows, "core: scrolling arrangement divergences");
 }
 
 /// The Roc core's standing on rift's path: how often a flipped machine's Rust shadow, or a Roc
