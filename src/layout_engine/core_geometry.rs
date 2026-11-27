@@ -137,7 +137,7 @@ impl Sampling {
     fn shadow(self, pass: u64) -> Shadow {
         match self {
             Self::EveryPass => Shadow::Run,
-            Self::Every(every) if pass % every.get() == 0 => Shadow::Run,
+            Self::Every(every) if pass.is_multiple_of(every.get()) => Shadow::Run,
             Self::Every(_) => Shadow::Skip,
         }
     }

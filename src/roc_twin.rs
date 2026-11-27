@@ -120,7 +120,7 @@ impl TwinnedLifecycle {
             | LifecycleEvent::Gone(window) => window,
         };
         #[cfg(feature = "roc-core")]
-        {
+        let decided = {
             use crate::roc_path::Word;
             let event = match event {
                 LifecycleEvent::Live { window, facts } => {
@@ -138,41 +138,44 @@ impl TwinnedLifecycle {
             });
             self.stepped("lifecycle step", &event, &rust, &roc);
             // The Roc core decides.
-            return roc.map(|change| match change {
+            roc.map(|change| match change {
                 rift_core::lifecycle::Change::Admitted => Transition::Admitted(window),
                 rift_core::lifecycle::Change::Suspended(why) => Transition::Suspended(window, why),
-            });
-        }
+            })
+        };
         #[cfg(not(feature = "roc-core"))]
-        transition
+        let decided = transition;
+        decided
     }
 
     /// As [`Lifecycle::invalidate`].
     pub(crate) fn invalidate(&mut self, window: WindowId) -> Invalidation {
         let invalidated = self.rust.invalidate(window);
         #[cfg(feature = "roc-core")]
-        {
+        let decided = {
             use crate::roc_path::Word;
             let roc = self.twin.roc.invalidate(window.word());
             self.stepped("lifecycle invalidate", &window, &invalidated, &roc);
-            return roc;
-        }
+            roc
+        };
         #[cfg(not(feature = "roc-core"))]
-        invalidated
+        let decided = invalidated;
+        decided
     }
 
     /// As [`Lifecycle::revalidate`].
     pub(crate) fn revalidate(&mut self, window: WindowId) -> Revalidation {
         let revalidated = self.rust.revalidate(window);
         #[cfg(feature = "roc-core")]
-        {
+        let decided = {
             use crate::roc_path::Word;
             let roc = self.twin.roc.revalidate(window.word());
             self.stepped("lifecycle revalidate", &window, &revalidated, &roc);
-            return roc;
-        }
+            roc
+        };
         #[cfg(not(feature = "roc-core"))]
-        revalidated
+        let decided = revalidated;
+        decided
     }
 
     /// As [`Lifecycle::carry_invalidation`], step by step so the twin takes each.
@@ -198,7 +201,7 @@ impl TwinnedLifecycle {
         if outcome_differs {
             diverged(what, question, rust, roc);
         }
-        if outcome_differs || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+        if outcome_differs || cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
             let roc = self.twin.roc.view();
             let rust = self.rust_view();
             if rust != roc {
@@ -318,7 +321,7 @@ impl TwinnedWorkspaces {
         }
         self.twin.steps += 1;
         let topology = !matches!(event, WorkspacesEvent::Owned { .. });
-        if outcome_differs || topology || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+        if outcome_differs || topology || cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
             let roc_view = self.twin.roc.view();
             let rust_view = self.rust_view();
             if rust_view != roc_view {
@@ -562,7 +565,7 @@ impl TwinnedMainWindows {
     pub(crate) fn step(&mut self, event: MainWindowEvent<pid_t, WindowId>) -> Option<WindowId> {
         let answer = self.rust.step(event);
         #[cfg(feature = "roc-core")]
-        {
+        let decided = {
             use crate::roc_path::{Word, diverged};
             let plain = match event {
                 MainWindowEvent::Launched { pid, standing, main_window } => {
@@ -609,7 +612,7 @@ impl TwinnedMainWindows {
                 diverged("main window step", &plain, &rust, &roc);
             }
             self.twin.steps += 1;
-            if answer_differs || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+            if answer_differs || cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
                 let rust = self.rust_view();
                 let view = self.twin.roc.view();
                 if rust != view {
@@ -620,10 +623,11 @@ impl TwinnedMainWindows {
                 }
             }
             // The Roc core decides.
-            return roc.and_then(crate::roc_path::window_of_word);
-        }
+            roc.and_then(crate::roc_path::window_of_word)
+        };
         #[cfg(not(feature = "roc-core"))]
-        answer
+        let decided = answer;
+        decided
     }
 
     /// Replace the Rust shadow with the Roc core's state, and count it.
@@ -719,7 +723,7 @@ impl TwinnedConstraints {
     pub(crate) fn step(&mut self, event: ConstraintsEvent<WindowId, pid_t>) -> bool {
         let answer = self.rust.step(event);
         #[cfg(feature = "roc-core")]
-        {
+        let decided = {
             use crate::roc_path::{Word, diverged};
             let plain = match event {
                 ConstraintsEvent::Observed {
@@ -756,7 +760,7 @@ impl TwinnedConstraints {
                 diverged("constraints step", &plain, &answer, &roc);
             }
             self.twin.steps += 1;
-            if answer_differs || cfg!(test) || self.twin.steps % VIEW_EVERY == 0 {
+            if answer_differs || cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
                 let rust = self.rust_view();
                 let view = self.twin.roc.view();
                 if rust != view {
@@ -767,10 +771,11 @@ impl TwinnedConstraints {
                 }
             }
             // The Roc core decides.
-            return roc;
-        }
+            roc
+        };
         #[cfg(not(feature = "roc-core"))]
-        answer
+        let decided = answer;
+        decided
     }
 
     /// The Rust machine as words, as the Roc core views it (records and minimums in word order).
