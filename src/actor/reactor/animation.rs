@@ -1129,7 +1129,6 @@ impl AnimationManager {
         space: SpaceId,
         desired: &Desired,
         camera: CameraMotion,
-        allow_animation: bool,
     ) -> bool {
         let layout = desired.frames();
         // The animated path's own bookkeeping still names the dragged window: a replaced
@@ -1145,8 +1144,7 @@ impl AnimationManager {
             CameraMotion::Follows => true,
             CameraMotion::HoldsStill => false,
         };
-        let animate_camera = allow_animation
-            && follows
+        let animate_camera = follows
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
         let presentation = reactor.present_camera(space, animate_camera, None, Instant::now());

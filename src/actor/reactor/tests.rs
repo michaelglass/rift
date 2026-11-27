@@ -6568,7 +6568,6 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         space,
         &layout,
         super::events::CameraMotion::Follows,
-        true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
     let wsid = reactor.stores.state.windows.window(right).unwrap().info.sys_id.unwrap();
@@ -6596,7 +6595,6 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         space,
         &layout,
         super::events::CameraMotion::Follows,
-        true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
     apps.requests();
@@ -6653,7 +6651,6 @@ fn animated_layout_handles_windows_without_server_ids() {
         space,
         &layout,
         super::events::CameraMotion::HoldsStill,
-        true,
     ));
 
     let requests = apps.requests();

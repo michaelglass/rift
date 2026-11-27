@@ -528,7 +528,6 @@ impl LayoutManager {
                     space,
                     &desired,
                     held_cameras.motion(space),
-                    true,
                 );
             }
             if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
