@@ -363,6 +363,11 @@ constraints (`preserve_window_sizes`).
       dormant saved view, the presented overwrite (moving, still), the fullscreen return's
       transitions (the toggle's answer, the settle's reconciliation, gates 1-3, the
       replacement, saving, the legacy load). By construction: the cancel after a suspension.
+  - (i) bafcc444's reactor test: the #705 test as upstream extended it (two and three columns,
+    one app each; closing the last column's AX-invalidated window shows the column before it,
+    and focus goes there), carried over in place of (g)'s copy; it passes in both builds.
+    Found while resolving the merge (upstream's copy auto-merged unadapted). Plant 1/1 (the
+    nearest column leftwards taken from the far end).
 - Next: the merge, holding resolutions only.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:

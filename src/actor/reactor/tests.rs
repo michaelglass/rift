@@ -8231,14 +8231,22 @@ fn a_presenter_running_through_a_close_leaves_the_camera_where_the_layout_aims_i
     );
 }
 
-// Upstream #705 (f168b6c6), the reactor's half, carried over.
+// Upstream #705 (f168b6c6), the reactor's half, as bafcc444 extended it, carried over: two and
+// three columns, one app each; closing the last column's AX-invalidated window shows the column
+// before it, and focus goes there.
 #[test]
-fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
+fn closing_ax_invalidated_scrolling_window_returns_to_previous_column() {
+    for window_count in [2, 3] {
+        assert_scrolling_close_returns_to_previous_column(window_count);
+    }
+}
+
+fn assert_scrolling_close_returns_to_previous_column(window_count: pid_t) {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
-    let survivor = WindowId::new(1, 1);
-    let closing = WindowId::new(1, 2);
+    let survivor = WindowId::new(window_count - 1, 1);
+    let closing = WindowId::new(window_count, 1);
     let scrolling = &mut reactor.config.settings.layout.scrolling;
     scrolling.column_width_ratio = 1.0;
     scrolling.max_column_width_ratio = 1.0;
@@ -8254,9 +8262,12 @@ fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
         workspace: None,
         mode: LayoutMode::Scrolling,
     });
-    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(closing));
-    reactor.send_layout_event(LayoutEvent::WindowFocused(space, closing));
-    apps.simulate_until_quiet(&mut reactor);
+    for pid in 1..=window_count {
+        let window = WindowId::new(pid, 1);
+        make_active_app(&mut apps, &mut reactor, pid, make_windows(1), Some(window));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, window));
+        apps.simulate_until_quiet(&mut reactor);
+    }
 
     let visible_frame = apps.windows[&closing].frame;
     assert!(screen.contains(visible_frame.mid()));
@@ -8265,6 +8276,8 @@ fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
     let (sender, receiver) = super::animation::AnimationSender::channel();
     reactor.animation_tx = Some(sender);
     reactor.update_layout_or_warn(&HeldCameras::none(), false, Some(space));
+    let (raise_tx, mut raises) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
 
     let wsid = reactor.test_window_server_id(closing);
     let mut presenter = super::animation::AnimationManager::new();
@@ -8280,10 +8293,23 @@ fn closing_ax_invalidated_scrolling_window_reveals_surviving_column() {
         presenter.tick_at(Instant::now() + Duration::from_secs(2));
         // Apply the frame writes while controlling the close notification order.
         apps.simulate_events();
-        assert_eq!(apps.windows[&survivor].frame, visible_frame, "after {name}");
+        assert_eq!(
+            apps.windows[&survivor].frame, visible_frame,
+            "{window_count} windows, after {name}"
+        );
     }
 
     assert!(reactor.stores.state.windows().record(closing).is_none());
+    let (_, raise_manager::Event::RaiseRequest(request)) =
+        raises.try_recv().expect("focus goes to the survivor")
+    else {
+        panic!("expected an ordinary raise");
+    };
+    assert_eq!(
+        request.focus_window.unwrap().0,
+        survivor,
+        "{window_count} windows"
+    );
 }
 
 #[test]
