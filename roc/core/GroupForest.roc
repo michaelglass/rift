@@ -2802,7 +2802,7 @@ GroupForest := [].{
 					ReorderTab({ window: window_word, target }) => edited_by(move_stack_tab(forest, layout, window_word, target))
 					Resize(asked) => resize_selection(forest, layout, asked)
 					Drop(dropped) => edit_drop(forest, layout, dropped)
-					Moved({ direction, beyond }) => edited_by(move_selection_with_display_neighbor(forest, layout, direction, beyond))
+					Move({ direction, beyond }) => edited_by(move_selection_with_display_neighbor(forest, layout, direction, beyond))
 					Split(made) => split_selection(forest, layout, made)
 					Join(direction) => edited_by(join_selection_with_direction(forest, layout, direction))
 					ConsumeOrExpel(direction) => {
@@ -3656,7 +3656,7 @@ GroupForest := [].{
 			ReorderTab({ window: window_word, target }) => on_forest(edited_by(move_stack_tab(system.forest, layout, window_word, target)))
 			Resize(asked) => on_forest(resize_selection(system.forest, layout, asked))
 			Drop(dropped) => on_forest(edit_drop(system.forest, layout, dropped))
-			Moved({ direction, .. }) => {
+			Move({ direction, .. }) => {
 				(after, did) = master_move_selection(system, layout, direction)
 				(after, if did Changed else Unchanged)
 			}
@@ -4409,7 +4409,7 @@ GroupForest := [].{
 		on_forest = |(after, edited)| ({ ..system, forest: after }, edited)
 		changed = |(after, done)| (after, if done Changed else Unchanged)
 		match edit {
-			Moved(_) => (system, Unchanged)
+			Move(_) => (system, Unchanged)
 			Fullscreen(mode) => on_forest(edit_fullscreen(forest, layout, mode))
 			Swap({ a, b }) => on_forest(edited_by(swap_windows(forest, layout, a, b)))
 			ReorderTab({ window: window_word, target }) => on_forest(edited_by(move_stack_tab(forest, layout, window_word, target)))

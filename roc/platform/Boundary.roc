@@ -1,6 +1,11 @@
 ## The platform's boundary types: every record and union that crosses between Rust and Roc has
 ## a name of its own here, so the generated glue names it (never by hash or number; the build
 ## fails on either). Each mirrors the Rust core's type of the same meaning.
+##
+## Every union here has two or more tags, an answer with nothing else to say among them: the
+## glue still mis-describes a one-tag union whose payload is a `List` or `Box` (its generated
+## alias names the element type, not the union; unfiled, "Roc issue drafts" (a) in
+## docs/roc-fork.md, still broken at nightly-2026-11-26-890d6c8).
 Boundary := [].{
 
 	# Shared geometry (`rift_core::plain`, `rift_core::layout`).
@@ -919,15 +924,13 @@ Boundary := [].{
 	## Two windows.
 	BspPair := { a : U64, b : U64 }
 
-	## What a window dropped onto another does (upstream's `WindowDropAction`; its `Move` is
-	## `Moved`, since the glue does not escape Rust's `move`).
-	BspDropAction := [Swap, Stack, Insert(BspDirection), Moved(BspDirection), ConsumeOrExpel(BspDirection)]
+	## What a window dropped onto another does (upstream's `WindowDropAction`).
+	BspDropAction := [Swap, Stack, Insert(BspDirection), Move(BspDirection), ConsumeOrExpel(BspDirection)]
 
 	BspDrop := { source : U64, target : U64, action : BspDropAction }
 
-	## An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads; its `Move` is
-	## `Moved`, since the glue does not escape Rust's `move`).
-	BspEdit := [Moved(BspDirection), Swap(BspPair), Drop(BspDrop), Join(BspDirection), ConsumeOrExpel(BspDirection), Unjoin, Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
+	## An edit of a layout (upstream's `LayoutEdit`, the ones its BSP system reads).
+	BspEdit := [Move(BspDirection), Swap(BspPair), Drop(BspDrop), Join(BspDirection), ConsumeOrExpel(BspDirection), Unjoin, Split(BspSplitKind), Fullscreen(BspFullscreen), Resize(BspResize), Rebalance, ToggleOrientation]
 
 	BspEditIn := { layout : U64, edit : BspEdit }
 
@@ -1026,7 +1029,7 @@ Boundary := [].{
 	StackTab := { window : U64, target : U64 }
 
 	## The edits a stack has a case for (a drop's pair: the source, then the target).
-	StackEdit := [Moved(StackMove), Fullscreen(BspFullscreen), Swap(BspPair), ReorderTab(StackTab), Drop(BspPair), Restack, ToggleOrientation]
+	StackEdit := [Move(StackMove), Fullscreen(BspFullscreen), Swap(BspPair), ReorderTab(StackTab), Drop(BspPair), Restack, ToggleOrientation]
 
 	StackEditIn := { layout : U64, edit : StackEdit }
 
@@ -1207,7 +1210,7 @@ Boundary := [].{
 	GroupDrop := { source : U64, target : U64, action : GroupDropAction }
 
 	## An edit of a layout (`Edit`).
-	GroupEdit := [Moved(StackMove), Split(GroupKind), Fullscreen(BspFullscreen), Swap(BspPair), ReorderTab(StackTab), Drop(GroupDrop), Join(BspDirection), ConsumeOrExpel(BspDirection), Stack(StackDefault), Unstack(StackDefault), Unjoin, Resize(BspResize), Rebalance, ToggleOrientation]
+	GroupEdit := [Move(StackMove), Split(GroupKind), Fullscreen(BspFullscreen), Swap(BspPair), ReorderTab(StackTab), Drop(GroupDrop), Join(BspDirection), ConsumeOrExpel(BspDirection), Stack(StackDefault), Unstack(StackDefault), Unjoin, Resize(BspResize), Rebalance, ToggleOrientation]
 
 	GroupEditIn := { layout : U64, edit : GroupEdit }
 

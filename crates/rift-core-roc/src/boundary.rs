@@ -3829,8 +3829,8 @@ fn tree_edit(edit: Edit<u64>) -> abi::BoundaryBspEdit {
         ),
         Edit::Move(direction) => union!(
             BoundaryBspEdit,
-            BoundaryBspEditPayload.moved(tree_direction(direction)),
-            Tag::Moved
+            BoundaryBspEditPayload.r#move(tree_direction(direction)),
+            Tag::Move
         ),
         Edit::Swap(a, b) => union!(
             BoundaryBspEdit,
@@ -3884,8 +3884,8 @@ fn drop_action(action: DropAction) -> abi::BoundaryBspDropAction {
         ),
         DropAction::Move(direction) => union!(
             BoundaryBspDropAction,
-            BoundaryBspDropActionPayload.moved(tree_direction(direction)),
-            Tag::Moved
+            BoundaryBspDropActionPayload.r#move(tree_direction(direction)),
+            Tag::Move
         ),
         DropAction::ConsumeOrExpel(direction) => union!(
             BoundaryBspDropAction,

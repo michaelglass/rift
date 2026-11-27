@@ -735,7 +735,7 @@ BspTree := [].{
 	edit : Trees, BspEditIn -> (Trees, BspEdited)
 	edit = |trees, { layout, edit: asked }|
 		match asked {
-			Moved(direction) => edited_by(move_selection(trees, layout, direction))
+			Move(direction) => edited_by(move_selection(trees, layout, direction))
 			Swap({ a, b }) => edited_by(swap_windows(trees, layout, a, b))
 			Drop(dropped) => edited_by(apply_target_drop(trees, layout, dropped))
 			Join(direction) => edited_by(join_selection_with_direction(trees, layout, direction))
@@ -987,7 +987,7 @@ BspTree := [].{
 		} else {
 			match action {
 				Swap => swap_windows(trees, layout, source, target)
-				Moved(_) | ConsumeOrExpel(_) => (trees, False)
+				Move(_) | ConsumeOrExpel(_) => (trees, False)
 				Stack => {
 					(taken, onto) = taken_from_beside(trees, layout, source, target)
 					stacked =

@@ -188,14 +188,14 @@ fn edit(edit: Edit<u64>) -> abi::BoundaryStackEdit {
     match edit {
         Edit::Move { direction, beyond } => union!(
             BoundaryStackEdit,
-            BoundaryStackEditPayload.moved(abi::BoundaryStackMove {
+            BoundaryStackEditPayload.r#move(abi::BoundaryStackMove {
                 direction: tree_direction(direction),
                 beyond: match beyond {
                     Beyond::AnotherDisplay => abi::BoundaryStackBeyond::AnotherDisplay,
                     Beyond::Nothing => abi::BoundaryStackBeyond::Nothing,
                 },
             }),
-            Tag::Moved
+            Tag::Move
         ),
         Edit::Fullscreen { within_gaps } => union!(
             BoundaryStackEdit,

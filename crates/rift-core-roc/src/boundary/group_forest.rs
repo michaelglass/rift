@@ -491,14 +491,14 @@ fn edit(edit: Edit<u64>) -> abi::BoundaryGroupEdit {
     match edit {
         Edit::Move { direction, beyond } => union!(
             BoundaryGroupEdit,
-            BoundaryGroupEditPayload.moved(abi::BoundaryStackMove {
+            BoundaryGroupEditPayload.r#move(abi::BoundaryStackMove {
                 direction: tree_direction(direction),
                 beyond: match beyond {
                     Beyond::AnotherDisplay => abi::BoundaryStackBeyond::AnotherDisplay,
                     Beyond::Nothing => abi::BoundaryStackBeyond::Nothing,
                 },
             }),
-            Tag::Moved
+            Tag::Move
         ),
         Edit::Split(asked) => {
             union!(

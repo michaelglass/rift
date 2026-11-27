@@ -510,7 +510,7 @@ StackTree := [].{
 	edit : Stacks, StackEditIn -> (Stacks, BspEdited)
 	edit = |stacks, { layout, edit: asked }|
 		match asked {
-			Moved(move) => edited_by(move_selection(stacks, layout, move))
+			Move(move) => edited_by(move_selection(stacks, layout, move))
 			Fullscreen(mode) => {
 				(after, raised) = toggle_fullscreen(stacks, layout, mode)
 				(after, Raise(raised))
