@@ -234,6 +234,9 @@ pub struct LayoutEngine {
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
     window_layout_constraints: LayoutConstraints,
+    /// The constraints machine (engine slice E4), stepped beside `window_layout_constraints`
+    /// and `app_min_sizes` while it shadows them.
+    constraints: rift_core::constraints::Constraints<WindowId, pid_t>,
     /// Each app's last reported minimum for a `respect_min_size` window, shared by all its rule
     /// windows: some apps (e.g. WhatsApp) report none for a new window until it's first used.
     app_min_sizes: HashMap<pid_t, CGSize>,
@@ -1760,6 +1763,18 @@ impl LayoutEngine {
                 });
             constraints.locked_width = window.frame_monotonic().size.width;
             self.window_layout_constraints.insert(wid, constraints);
+            let frame = window.frame_monotonic().size;
+            let observed = Self::observed_size(
+                window.info.is_resizable,
+                frame,
+                window.info.min_size,
+                window.info.max_size,
+            );
+            self.constrain(rift_core::constraints::ConstraintsEvent::WidthPreserved {
+                window: wid,
+                observed,
+                width: frame.width,
+            });
         }
     }
 
@@ -1941,6 +1956,7 @@ impl LayoutEngine {
             focused_window: None,
             window_layout_constraints: LayoutConstraints::default(),
             app_min_sizes: HashMap::default(),
+            constraints: Default::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
             space_display_map: HashMap::default(),
@@ -1988,6 +2004,10 @@ impl LayoutEngine {
         display_uuid: Option<&str>,
     ) {
         self.window_layout_constraints.set_width(resize.window, new_frame.size.width);
+        self.constrain(rift_core::constraints::ConstraintsEvent::WidthSet {
+            window: resize.window,
+            width: new_frame.size.width,
+        });
         let Some(layout) = self
             .workspaces
             .reading(windows)
@@ -2182,6 +2202,17 @@ impl LayoutEngine {
                     }
                     .normalized(),
                 );
+                self.constrain(rift_core::constraints::ConstraintsEvent::Observed {
+                    window: wid,
+                    app: wid.pid,
+                    respect_min_size: effects.respect_min_size,
+                    observed: Self::observed_size(
+                        info.is_resizable,
+                        info.current_size,
+                        info.min_size,
+                        info.max_size,
+                    ),
+                });
 
                 let target_workspace = effects.workspace_id;
                 let source_workspace = effects.source_workspace;
@@ -2342,6 +2373,7 @@ impl LayoutEngine {
                 self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
                 self.app_min_sizes.remove(&pid);
+                self.constrain(rift_core::constraints::ConstraintsEvent::AppQuit(pid));
                 self.forget_persisted_app(pid);
 
                 self.floating_positions.remove_app(pid);
@@ -2443,6 +2475,10 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
                 self.window_layout_constraints.set_width(wid, new_frame.size.width);
+                self.constrain(rift_core::constraints::ConstraintsEvent::WidthSet {
+                    window: wid,
+                    width: new_frame.size.width,
+                });
                 for (space, screen_frame, display_uuid) in screens.iter() {
                     let Some((ws_id, layout)) = self
                         .workspaces
@@ -4113,6 +4149,47 @@ impl LayoutEngine {
     /// them. Leaving a layout doesn't: a move between Spaces arrives as a layout removal.
     pub(crate) fn retire_window(&mut self, wid: WindowId) {
         self.window_layout_constraints.remove(&wid);
+        self.constrain(rift_core::constraints::ConstraintsEvent::Retired(wid));
+    }
+
+    /// One step of the constraints machine; in tests, its records checked against the engine's.
+    fn constrain(&mut self, event: rift_core::constraints::ConstraintsEvent<WindowId, pid_t>) {
+        self.constraints.step(event);
+        #[cfg(test)]
+        {
+            let core: HashMap<WindowId, WindowLayoutConstraints> = self
+                .constraints
+                .windows()
+                .map(|(window, c)| (window, super::core_geometry::engine_constraints(c)))
+                .collect();
+            assert_eq!(
+                core, self.window_layout_constraints.windows,
+                "constraints shadow, {event:?}"
+            );
+            let minimums: HashMap<pid_t, CGSize> = self
+                .constraints
+                .app_minimums()
+                .map(|(app, min)| (app, CGSize::new(min.width(), min.height())))
+                .collect();
+            assert_eq!(minimums, self.app_min_sizes, "app minimums shadow, {event:?}");
+        }
+    }
+
+    /// What an observation reports of `window`'s size, as the constraints machine reads it.
+    fn observed_size(
+        resizable: bool,
+        size: CGSize,
+        min: Option<CGSize>,
+        max: Option<CGSize>,
+    ) -> rift_core::constraints::Observed {
+        rift_core::constraints::Observed {
+            resizable,
+            width: size.width,
+            height: size.height,
+            min: min.and_then(|min| rift_core::layout::Size::reported(min.width, min.height)),
+            max_width: max.map_or(0.0, |s| s.width),
+            max_height: max.map_or(0.0, |s| s.height),
+        }
     }
 
     #[cfg(test)]
@@ -4146,6 +4223,7 @@ impl LayoutEngine {
         if let Some(constraints) = self.window_layout_constraints.remove(&from) {
             self.window_layout_constraints.insert(to, constraints);
         }
+        self.constrain(rift_core::constraints::ConstraintsEvent::Replaced { from, to });
         if self.focused_window == Some(from) {
             self.focused_window = Some(to);
         }
@@ -4630,6 +4708,17 @@ mod tests {
                     sizing: Sizing::Resizable,
                     max_width: 180.0,
                     ..Default::default()
+                });
+                engine.constrain(rift_core::constraints::ConstraintsEvent::Observed {
+                    window: source,
+                    app: source.pid,
+                    respect_min_size: false,
+                    observed: LayoutEngine::observed_size(
+                        true,
+                        CGSize::new(0.0, 0.0),
+                        None,
+                        Some(CGSize::new(180.0, 0.0)),
+                    ),
                 });
                 let before =
                     engine.calculate_layout(store.view(), space, screen, &gaps, line.reserve());

@@ -55,6 +55,30 @@ pub(crate) fn core_constraints(
     }
 }
 
+/// The engine's shape of the core's constraints (the inverse of [`core_constraints`] on
+/// normalized records): the minimum out of the sizing, beside it.
+pub(crate) fn engine_constraints(
+    c: rift_core::layout::WindowConstraints,
+) -> crate::layout_engine::systems::WindowLayoutConstraints {
+    use crate::layout_engine::systems::Sizing;
+    let (sizing, min) = match c.sizing {
+        rift_core::layout::Sizing::Fixed { min } => (Sizing::Fixed, min),
+        rift_core::layout::Sizing::Resizable { advisory_min } => (Sizing::Resizable, advisory_min),
+        rift_core::layout::Sizing::ResizableAtLeastMin { min } => {
+            (Sizing::ResizableAtLeastMin, min)
+        }
+    };
+    crate::layout_engine::systems::WindowLayoutConstraints {
+        sizing,
+        locked_width: c.locked_width,
+        locked_height: c.locked_height,
+        min_width: min.width(),
+        min_height: min.height(),
+        max_width: c.max_width,
+        max_height: c.max_height,
+    }
+}
+
 /// The stack bar's reservation, as the core takes it.
 pub(crate) fn core_stack_line(line: crate::common::config::StackLineReserve) -> StackLine {
     use crate::common::config::{HorizontalPlacement, VerticalPlacement};
