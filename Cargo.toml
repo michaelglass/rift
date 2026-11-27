@@ -1,6 +1,6 @@
 [package]
 name = "rift-wm"
-version = "0.8.5"
+version = "0.8.6"
 edition = "2024"
 build = "build.rs"
 
@@ -68,7 +68,7 @@ roc-core = ["dep:rift-core-roc", "rift-core-roc/roc"]
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
-cgs = { version = "0.5.2" }#, path = "cgs" }
+cgs = { version = "0.5.3" }#, path = "cgs" }
 anyhow = { version = "1.0.83", default-features = false }
 ascii_tree = "0.1.1"
 thiserror = { version = "2.0.17", default-features = false }
@@ -202,7 +202,7 @@ rift-client = { path = "crates/rift-client" }
 rift-core = { path = "crates/rift-core" }
 rift-core-roc = { path = "crates/rift-core-roc", optional = true }
 rift-protocol = { path = "crates/rift-protocol" }
-multitouch = "0.3.2"
+multitouch = "0.3.3"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
