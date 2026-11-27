@@ -87,13 +87,13 @@ fn place_on_its_space(
         warn!(?window, ?workspace, "failed to assign a let-go window");
         return EventOutcome::no_change();
     }
-    EventOutcome::layout_changed(false).with_layout_event(LayoutEvent::WindowAdded(space, window))
+    EventOutcome::layout_changed().with_layout_event(LayoutEvent::WindowAdded(space, window))
 }
 
 fn cancelled_outcome(window: WindowId, cancelled: Session) -> EventOutcome {
     let source = cancelled.source;
     match (cancelled.kind, source.tiled) {
-        (DragKind::Modifier { .. }, true) => EventOutcome::layout_changed(false),
+        (DragKind::Modifier { .. }, true) => EventOutcome::layout_changed(),
         (DragKind::Modifier { .. }, false) if source.last_frame != source.origin_frame => {
             EventOutcome::no_change().with_placement(window, source.origin_frame)
         }
@@ -160,7 +160,7 @@ pub fn handle_mouse_up(
     placed: Placed,
     final_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
-    let mut outcome = EventOutcome::layout_changed(false);
+    let mut outcome = EventOutcome::layout_changed();
     let plan = plan_drop(
         &commit,
         placed,

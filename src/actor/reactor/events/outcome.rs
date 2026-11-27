@@ -109,11 +109,37 @@ pub(crate) struct EventOutcome {
     pub(crate) released: Vec<crate::actor::reactor::reconciler::Write>,
 }
 
+/// How a Space's scrolling camera moves through an arrange pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CameraMotion {
+    /// The camera eases to the arrangement's view.
+    Follows,
+    /// The camera holds still: a resize there places every window on the same sample, so the
+    /// neighbours leave no gap while they ease (upstream 17a3c021).
+    HoldsStill,
+}
+
+/// The Spaces whose camera holds still this pass; every other Space's camera follows.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct HeldCameras(std::collections::BTreeSet<SpaceId>);
+
+impl HeldCameras {
+    pub(crate) fn none() -> Self { Self::default() }
+
+    pub(crate) fn motion(&self, space: SpaceId) -> CameraMotion {
+        if self.0.contains(&space) {
+            CameraMotion::HoldsStill
+        } else {
+            CameraMotion::Follows
+        }
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ArrangeRequest {
     /// Zero or one: arrange the final model, regardless of how many reducers requested it.
     pub(crate) passes: u8,
-    pub(crate) is_resize: bool,
+    pub(crate) held_cameras: HeldCameras,
     /// The renderer covers this layout transition and owns its visible animation.
     pub(crate) instant: bool,
     /// Reapply full frames after external geometry changes, bypassing cached targets.
@@ -179,7 +205,7 @@ impl EventOutcome {
                 self.arrange.secondary_space_scope = None;
             }
             self.arrange.passes = 1;
-            self.arrange.is_resize |= other.arrange.is_resize;
+            self.arrange.held_cameras.0.extend(other.arrange.held_cameras.0);
             self.arrange.instant |= other.arrange.instant;
             self.arrange.force_frames |= other.arrange.force_frames;
             self.arrange.window_was_destroyed |= other.arrange.window_was_destroyed;
@@ -190,11 +216,11 @@ impl EventOutcome {
     }
 
     /// The event changed geometry or layout state and requires one arrange pass.
-    pub(crate) fn layout_changed(is_resize: bool) -> Self {
+    pub(crate) fn layout_changed() -> Self {
         Self {
             arrange: ArrangeRequest {
                 passes: 1,
-                is_resize,
+                held_cameras: HeldCameras::none(),
                 instant: false,
                 force_frames: false,
                 window_was_destroyed: false,
@@ -211,7 +237,7 @@ impl EventOutcome {
         window_was_destroyed: bool,
         refresh_window_notifications: bool,
     ) -> Self {
-        let mut outcome = Self::layout_changed(false);
+        let mut outcome = Self::layout_changed();
         outcome.arrange.window_was_destroyed = window_was_destroyed;
         outcome.refresh_window_notifications = refresh_window_notifications;
         outcome
@@ -262,6 +288,12 @@ impl EventOutcome {
 
     pub(crate) fn with_arrange_passes(mut self, passes: u8) -> Self {
         self.arrange.passes = u8::from(passes > 0);
+        self
+    }
+
+    /// `space`'s camera holds still through the pass.
+    pub(crate) fn holding_the_camera_on(mut self, space: SpaceId) -> Self {
+        self.arrange.held_cameras.0.insert(space);
         self
     }
 
@@ -361,17 +393,13 @@ mod tests {
         let first_space = SpaceId::new(1);
         let second_space = SpaceId::new(2);
         let mut outcome =
-            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space));
+            EventOutcome::layout_changed().with_arrange_space_scope(Some(first_space));
 
-        outcome.absorb(
-            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space)),
-        );
+        outcome.absorb(EventOutcome::layout_changed().with_arrange_space_scope(Some(first_space)));
         assert_eq!(outcome.arrange.space_scope, Some(first_space));
         assert_eq!(outcome.arrange.passes, 1);
 
-        outcome.absorb(
-            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(second_space)),
-        );
+        outcome.absorb(EventOutcome::layout_changed().with_arrange_space_scope(Some(second_space)));
         assert_eq!(outcome.arrange.space_scope, None);
         assert_eq!(outcome.arrange.passes, 1);
     }
@@ -379,16 +407,17 @@ mod tests {
     #[test]
     fn zero_pass_arrange_does_not_merge_resize_or_scope() {
         let space = SpaceId::new(1);
-        let mut outcome = EventOutcome::layout_changed(false).with_arrange_space_scope(Some(space));
+        let mut outcome = EventOutcome::layout_changed().with_arrange_space_scope(Some(space));
         outcome.absorb(
-            EventOutcome::layout_changed(true)
+            EventOutcome::layout_changed()
+                .holding_the_camera_on(space)
                 .with_arrange_space_scope(None)
                 .with_arrange_passes(0),
         );
 
         assert_eq!(outcome.arrange.passes, 1);
         assert_eq!(outcome.arrange.space_scope, Some(space));
-        assert!(!outcome.arrange.is_resize);
+        assert_eq!(outcome.arrange.held_cameras, HeldCameras::none());
     }
 
     #[test]
@@ -397,10 +426,15 @@ mod tests {
         assert_eq!(outcome.arrange.passes, 0);
         outcome.absorb(EventOutcome::no_change());
         assert_eq!(outcome.arrange.passes, 0);
-        outcome.absorb(EventOutcome::layout_changed(true));
+        let (held, other) = (SpaceId::new(1), SpaceId::new(2));
+        outcome.absorb(EventOutcome::layout_changed().holding_the_camera_on(held));
         outcome.absorb(EventOutcome::window_membership_changed(true, false));
         assert_eq!(outcome.arrange.passes, 1);
-        assert!(outcome.arrange.is_resize);
+        assert_eq!(
+            outcome.arrange.held_cameras.motion(held),
+            CameraMotion::HoldsStill
+        );
+        assert_eq!(outcome.arrange.held_cameras.motion(other), CameraMotion::Follows);
         assert!(outcome.arrange.window_was_destroyed);
     }
 

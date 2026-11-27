@@ -199,8 +199,7 @@ impl Reactor {
         outcome.memberships.push((window, Some(target)));
         if available {
             self.refocus_manager.refocus_state = RefocusState::Pending(target);
-            outcome
-                .absorb(EventOutcome::layout_changed(false).with_arrange_space_scope(Some(target)));
+            outcome.absorb(EventOutcome::layout_changed().with_arrange_space_scope(Some(target)));
         }
         outcome
     }

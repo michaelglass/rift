@@ -298,6 +298,10 @@ constraints (`preserve_window_sizes`).
     arranges, where upstream's presentation is the target Space's; a resize changes only its
     own layout, so nothing else moves. Plants 5/6 (the sixth, the display bound dropped, is
     equivalent here: a still camera's viewport keeps the resized column on screen).
+    Then the outcome's `is_resize` flag (which covered every Space a pass arranges) became
+    data true where it is: `HeldCameras`, the Spaces whose camera holds still, merged as a set;
+    each Space's pass reads its `CameraMotion::{Follows, HoldsStill}`, matched exhaustively in
+    `animate_layout`. Plants 5/5.
 - The rest of #718's range needs ports before the merge: our reactor no longer has upstream's
   presentation policy, so 17a3c021 (tears), #705's reactor half and #709 are ported into its
   shape, and #718's camera commits are the camera slice.

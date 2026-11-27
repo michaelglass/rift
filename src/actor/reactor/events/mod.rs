@@ -10,5 +10,6 @@ pub mod window_discovery;
 mod outcome;
 
 pub(crate) use outcome::{
-    CloseWindowRequest, EventOutcome, TopologyReassignment, WindowDiscoveryRequest,
+    CameraMotion, CloseWindowRequest, EventOutcome, HeldCameras, TopologyReassignment,
+    WindowDiscoveryRequest,
 };

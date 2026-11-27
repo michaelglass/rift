@@ -95,9 +95,7 @@ fn sync_existing_window_state(
         && state.windows().is_admitted(wid)
         && was_minimized == is_minimized
     {
-        outcome.absorb(crate::actor::reactor::events::EventOutcome::layout_changed(
-            false,
-        ));
+        outcome.absorb(crate::actor::reactor::events::EventOutcome::layout_changed());
     }
     outcome.released.extend(released);
 
@@ -182,7 +180,7 @@ pub(crate) fn process_window_list(
             // Anything pending for the old identity died with it: arrange, so the core writes
             // the desire again for the new one (an outside owner's window is never arranged).
             if state.windows().claim(wid).is_none() {
-                let arrange = crate::actor::reactor::events::EventOutcome::layout_changed(false);
+                let arrange = crate::actor::reactor::events::EventOutcome::layout_changed();
                 outcome.absorb(arrange);
             }
         }

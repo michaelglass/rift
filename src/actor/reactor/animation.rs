@@ -11,6 +11,7 @@ use super::reconciler::{Desired, Owner, Want};
 use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
+use crate::actor::reactor::events::CameraMotion;
 use crate::actor::reactor::reconciler::CoreEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::scrolling::{
@@ -1127,7 +1128,7 @@ impl AnimationManager {
         reactor: &mut Reactor,
         space: SpaceId,
         desired: &Desired,
-        is_resize: bool,
+        camera: CameraMotion,
         allow_animation: bool,
     ) -> bool {
         let layout = desired.frames();
@@ -1140,8 +1141,12 @@ impl AnimationManager {
             .layout
             .layout_engine
             .layout_specific_animate_settings(reactor.stores.state.windows(), space);
+        let follows = match camera {
+            CameraMotion::Follows => true,
+            CameraMotion::HoldsStill => false,
+        };
         let animate_camera = allow_animation
-            && !is_resize
+            && follows
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
         let presentation = reactor.present_camera(space, animate_camera, None, Instant::now());

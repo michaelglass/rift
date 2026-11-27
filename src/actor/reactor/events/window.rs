@@ -215,7 +215,7 @@ pub fn handle_window_frame_changed(
     if state.windows.drag_on(wid).is_some_and(|session| session.is_modifier()) {
         return Ok(EventOutcome::no_change());
     }
-    outcome = EventOutcome::layout_changed(false);
+    outcome = EventOutcome::layout_changed();
 
     state.windows.clear_floating_display_geometry(wid);
     // External moves as well as resizes are authoritative for floating layouts.

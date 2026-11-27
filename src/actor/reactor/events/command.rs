@@ -185,15 +185,15 @@ pub fn handle_command_layout(
     };
     // The viewport applies a scrolling resize's sizes up front: the camera holds still, so the
     // neighbours are placed on the same sample and leave no gap while easing (upstream 17a3c021).
-    let scrolling_resize = is_resize
-        && response.layout_space.or(command_space).is_some_and(|space| {
-            layout.layout_engine.active_layout_mode_at(state.windows(), space)
+    let held_camera = response.layout_space.or(command_space).filter(|&space| {
+        is_resize
+            && layout.layout_engine.active_layout_mode_at(state.windows(), space)
                 == config::LayoutMode::Scrolling
-        });
-    let mut outcome = if needs_arrange {
-        EventOutcome::layout_changed(scrolling_resize)
-    } else {
-        EventOutcome::no_change()
+    });
+    let mut outcome = match (needs_arrange, held_camera) {
+        (true, Some(space)) => EventOutcome::layout_changed().holding_the_camera_on(space),
+        (true, None) => EventOutcome::layout_changed(),
+        (false, _) => EventOutcome::no_change(),
     }
     .with_layout_response(response, workspace_space)
     .with_arrange_space_scope(arrange_space_scope);
@@ -351,7 +351,7 @@ pub fn handle_config_updated(
     outcome.absorb(EventOutcome {
         service_config_update: Some(config.clone()),
         reprocess_app_rules: rules_changed,
-        ..EventOutcome::layout_changed(false)
+        ..EventOutcome::layout_changed()
     });
     Ok(outcome)
 }
@@ -439,7 +439,7 @@ pub fn handle_command_reactor_toggle_space_activated(
     )[0]
     .is_some();
     info!(?space, display_uuid = ?payload.display_uuid, enabled, "Toggled Rift space management");
-    Ok(EventOutcome::layout_changed(false).with_active_space_recompute())
+    Ok(EventOutcome::layout_changed().with_active_space_recompute())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -582,7 +582,7 @@ pub fn handle_command_reactor_move_workspace_to_display(
 
     workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
     let mut outcome =
-        EventOutcome::layout_changed(false).with_layout_response(response, Some(target_space));
+        EventOutcome::layout_changed().with_layout_response(response, Some(target_space));
     for window_move in windows {
         if layout
             .layout_engine

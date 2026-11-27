@@ -6,6 +6,7 @@ use rift_protocol::WindowClaimFlags;
 
 use super::{LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
+use crate::actor::reactor::events::HeldCameras;
 use crate::common::collections::HashSet;
 use crate::layout_engine::systems::LayoutSystem;
 use crate::model::window_store::ClaimOwner;
@@ -56,7 +57,7 @@ impl Reactor {
                 .changed;
             reactor.stores.state.windows_mut().insert_claim(wid, owner, flags);
             if removed {
-                reactor.update_layout_or_warn(false, false, space);
+                reactor.update_layout_or_warn(&HeldCameras::none(), false, space);
             }
             reactor.maybe_send_menu_update();
         }
@@ -98,7 +99,7 @@ impl Reactor {
             let spaces: HashSet<_> =
                 windows.into_iter().filter_map(|wid| reactor.readmit(wid)).collect();
             for space in spaces {
-                reactor.update_layout_or_warn(false, false, Some(space));
+                reactor.update_layout_or_warn(&HeldCameras::none(), false, Some(space));
             }
             reactor.maybe_send_menu_update();
         }

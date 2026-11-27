@@ -96,7 +96,7 @@ fn a_frame_write_that_failed_is_written_again_at_the_next_arrange() {
     let sent = writes(apps.requests());
     let &(window, frame, txid) = sent.first().expect("the resize writes a window");
     reactor.handle_event(Event::WindowFrameWriteFailed(window, txid));
-    reactor.update_layout_or_warn_with(false, false, None, "test");
+    reactor.update_layout_or_warn_with(&HeldCameras::none(), false, None, "test");
     let again = writes(apps.requests());
     assert!(
         again.iter().any(|&(w, f, _)| w == window && f.same_as(frame)),
@@ -389,9 +389,17 @@ fn a_resize_holds_the_camera_still_only_in_a_scrolling_layout() {
         for command in resizes.iter().cloned().chain([LayoutCommand::MoveNode(Direction::Left)]) {
             let resize = !matches!(command, LayoutCommand::MoveNode(_));
             let outcome = reactor.dispatch_test_layout_command(command.clone());
+            let held = &outcome.arrange.held_cameras;
+            let expected = if resize && mode == LayoutMode::Scrolling {
+                super::events::CameraMotion::HoldsStill
+            } else {
+                super::events::CameraMotion::Follows
+            };
+            assert_eq!(held.motion(SpaceId::new(1)), expected, "{mode:?} {command:?}");
+            // Held only where the resize is: another Space's camera follows.
             assert_eq!(
-                outcome.arrange.is_resize,
-                resize && mode == LayoutMode::Scrolling,
+                held.motion(SpaceId::new(2)),
+                super::events::CameraMotion::Follows,
                 "{mode:?} {command:?}"
             );
         }
@@ -468,7 +476,7 @@ fn secondary_arrangement_only_updates_a_space_outside_primary_scope() {
         (Some(SpaceId::new(2)), 2),
     ] {
         let (mut reactor, _, _, source, _, _, _) = reactor_with_window_on_space1_two_displays();
-        let mut outcome = EventOutcome::layout_changed(false).with_arrange_space_scope(scope);
+        let mut outcome = EventOutcome::layout_changed().with_arrange_space_scope(scope);
         outcome.arrange.secondary_space_scope = Some(source);
         let before = reactor.layout_update_count;
         reactor.apply_event_outcome(outcome);
@@ -3014,7 +3022,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     reactor.nudge_drag(30.0);
     assert!(reactor.user_is_dragging());
     let before = reactor.layout_update_count;
-    reactor.apply_event_outcome(EventOutcome::layout_changed(false));
+    reactor.apply_event_outcome(EventOutcome::layout_changed());
     assert_eq!(reactor.layout_update_count, before);
     reactor.apply_event_outcome(EventOutcome::window_membership_changed(true, false));
     assert_eq!(reactor.layout_update_count - before, 1);
@@ -4120,7 +4128,7 @@ fn app_rescue_after_clamped_hide_is_hidden_again() {
     assert!(reactor.set_test_active_workspace(space, workspaces[1]));
     assert!(reactor.assign_test_window_to_workspace(space, wid, workspaces[0]));
     let _ = apps.requests();
-    assert!(reactor.update_layout_or_warn(false, true, None));
+    assert!(reactor.update_layout_or_warn(&HeldCameras::none(), true, None));
     let hidden_target = reactor.stores.state.tx.target(wsid).unwrap();
     let txid = last_sent(&reactor, wsid);
     let _ = apps.requests();
@@ -4221,7 +4229,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         Requested(true),
     ));
 
-    assert!(!reactor.update_layout_or_warn(false, true, None));
+    assert!(!reactor.update_layout_or_warn(&HeldCameras::none(), true, None));
     assert!(
         apps.requests().is_empty(),
         "a refused hide target suppresses the hide write before topology invalidation"
@@ -6559,7 +6567,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         &mut reactor,
         space,
         &layout,
-        false,
+        super::events::CameraMotion::Follows,
         true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
@@ -6587,7 +6595,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         &mut reactor,
         space,
         &layout,
-        false,
+        super::events::CameraMotion::Follows,
         true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
@@ -6644,7 +6652,7 @@ fn animated_layout_handles_windows_without_server_ids() {
         &mut reactor,
         space,
         &layout,
-        true,
+        super::events::CameraMotion::HoldsStill,
         true,
     ));
 
@@ -10600,7 +10608,13 @@ fn stack_tabs_keep_fullscreen_suppression_when_another_display_has_focus() {
         if focus_only {
             LayoutManager::refresh_stack_tabs(&mut reactor, first);
         } else {
-            LayoutManager::update_layout(&mut reactor, false, false, None).unwrap();
+            LayoutManager::update_layout(
+                &mut reactor,
+                &super::events::HeldCameras::none(),
+                false,
+                None,
+            )
+            .unwrap();
         }
         let fullscreen =
             std::iter::from_fn(|| tabs.try_recv().ok()).find_map(|(_, event)| match event {
@@ -10705,7 +10719,7 @@ fn topology_revocation_protects_windows_before_queued_invalidation_is_delivered(
         "an older snapshot cannot release the quarantine"
     );
     assert!(reactor.refreshes_blocked());
-    assert!(!reactor.update_layout_or_warn(false, false, None));
+    assert!(!reactor.update_layout_or_warn(&HeldCameras::none(), false, None));
     reactor.handle_loop_event(invalidation);
     assert!(reactor.refreshes_blocked());
     // Even a fresh native revision cannot authorize old geometry while its membership
@@ -13649,7 +13663,7 @@ fn overview_activation_arranges_and_focuses_under_cover() {
         });
         apps.simulate_until_quiet(&mut reactor);
         reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
-        reactor.update_layout_or_warn(false, false, Some(space));
+        reactor.update_layout_or_warn(&HeldCameras::none(), false, Some(space));
         apps.simulate_until_quiet(&mut reactor);
         if switch_workspace {
             reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
@@ -15083,7 +15097,7 @@ fn an_app_that_adjusts_the_size_it_is_given_is_refused_once_and_not_written_agai
 
         // Arranging again asks nothing more of it.
         for _ in 0..3 {
-            let _ = reactor.update_layout_or_warn(false, false, None);
+            let _ = reactor.update_layout_or_warn(&HeldCameras::none(), false, None);
             assert!(
                 apps.requests().is_empty(),
                 "{sizing:?}: a refused frame was asked again"
@@ -15133,7 +15147,7 @@ fn an_app_that_rounds_within_the_ack_tolerance_settles_off_by_less_than_it_and_i
     };
     assert!(acked.same_as(got));
     for _ in 0..3 {
-        let _ = reactor.update_layout_or_warn(false, false, None);
+        let _ = reactor.update_layout_or_warn(&HeldCameras::none(), false, None);
         assert_eq!(
             frames_written(&apps.requests()),
             [],

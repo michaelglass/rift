@@ -322,7 +322,7 @@ fn claimed_window_keeps_its_workspace_across_workspace_switches() {
     // Neither hiding nor revealing a workspace touches the claimed window.
     for workspace in [other, home] {
         assert!(reactor.set_test_active_workspace(space, workspace));
-        reactor.update_layout_or_warn(false, true, Some(space));
+        reactor.update_layout_or_warn(&HeldCameras::none(), true, Some(space));
         apps.simulate_until_quiet(&mut reactor);
         assert!(!tiled(&mut reactor, space).contains(&wid(1)));
         assert_eq!(apps.windows[&wid(1)].frame, parked);

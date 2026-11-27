@@ -13,6 +13,8 @@ mod main_window;
 pub(crate) mod managers;
 mod native;
 use native::Native;
+
+use crate::actor::reactor::events::HeldCameras;
 mod native_tabs;
 mod query;
 pub(crate) mod reconciler;
@@ -2478,9 +2480,9 @@ impl Reactor {
                 let mut outcome = if changed {
                     self.workspace_switch_manager
                         .start_workspace_switch(WorkspaceSwitchOrigin::Manual);
-                    EventOutcome::layout_changed(false).with_arrange_space_scope(Some(space))
+                    EventOutcome::layout_changed().with_arrange_space_scope(Some(space))
                 } else if window.is_some() {
-                    EventOutcome::layout_changed(false).with_arrange_space_scope(Some(space))
+                    EventOutcome::layout_changed().with_arrange_space_scope(Some(space))
                 } else {
                     EventOutcome::focus_changed(None, false)
                 };
@@ -2566,7 +2568,7 @@ impl Reactor {
                     .workspace_space(source.unwrap())
                     .expect("a listed workspace has a Space");
                 let destination = destination.unwrap();
-                let mut outcome = EventOutcome::layout_changed(false);
+                let mut outcome = EventOutcome::layout_changed();
                 outcome = outcome.with_arrange_space_scope(Some(destination));
                 if source_space != destination {
                     outcome.arrange.secondary_space_scope = Some(source_space);
@@ -2724,7 +2726,7 @@ impl Reactor {
                     // authoritative; the cover separately verifies native focus.
                     self.stop_camera(space);
                     outcome.absorb(
-                        EventOutcome::layout_changed(false)
+                        EventOutcome::layout_changed()
                             .with_layout_event(LayoutEvent::WindowFocused(space, selected))
                             .with_arrange_space_scope(Some(space)),
                     );
@@ -3264,7 +3266,7 @@ impl Reactor {
                 })
             } else {
                 self.update_layout_or_warn(
-                    outcome.arrange.is_resize,
+                    &outcome.arrange.held_cameras,
                     matches!(
                         self.workspace_switch_manager.workspace_switch_state,
                         WorkspaceSwitchState::Active(_)
@@ -3276,7 +3278,7 @@ impl Reactor {
                 && outcome.arrange.space_scope.is_some_and(|primary| primary != space)
             {
                 layout_changed |=
-                    self.update_layout_or_warn(outcome.arrange.is_resize, false, Some(space));
+                    self.update_layout_or_warn(&outcome.arrange.held_cameras, false, Some(space));
             }
             // Publish the menu state once after all affected spaces have been arranged.
             self.maybe_send_menu_update();
@@ -4739,7 +4741,7 @@ impl Reactor {
                 placed,
                 final_space,
             )?,
-            None => EventOutcome::layout_changed(false),
+            None => EventOutcome::layout_changed(),
         };
         if let Some((space, window)) = focused {
             outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
@@ -4849,7 +4851,7 @@ impl Reactor {
                     frame,
                 );
                 outcome.absorb(
-                    EventOutcome::layout_changed(false)
+                    EventOutcome::layout_changed()
                         .with_arrange_space_scope(Some(target))
                         .with_placement(window, frame),
                 );
@@ -5739,7 +5741,7 @@ impl Reactor {
                 || matches!(event_clone, LayoutEvent::WindowRemoved(_)))
         {
             self.update_layout_or_warn(
-                false,
+                &HeldCameras::none(),
                 workspace_switch_space.is_some(),
                 workspace_switch_space.or(event_space),
             );
@@ -6185,7 +6187,7 @@ impl Reactor {
             workspace,
             Some(window),
         );
-        EventOutcome::layout_changed(false).with_layout_response(response, Some(space))
+        EventOutcome::layout_changed().with_layout_response(response, Some(space))
     }
 
     /// Whether an activation of `window` follows it to its workspace, and where: its space and
@@ -7047,7 +7049,7 @@ impl Reactor {
             &[],
         );
         self.request_window_inventories();
-        self.update_layout_or_warn(false, false, None);
+        self.update_layout_or_warn(&HeldCameras::none(), false, None);
         self.maybe_send_menu_update();
     }
 
@@ -7427,7 +7429,7 @@ impl Reactor {
             return EventOutcome::no_change();
         }
         let source_frame = self.space_state.screen_by_space(source).map(|screen| screen.frame);
-        let mut outcome = EventOutcome::layout_changed(false).with_layout_response(response, None);
+        let mut outcome = EventOutcome::layout_changed().with_layout_response(response, None);
         outcome.absorb(self.request_window_transfer(window, target, source_frame));
         outcome
     }
@@ -7719,12 +7721,12 @@ impl Reactor {
 
     pub(crate) fn update_layout_or_warn(
         &mut self,
-        is_resize: bool,
+        held_cameras: &HeldCameras,
         is_workspace_switch: bool,
         space_scope: Option<SpaceId>,
     ) -> bool {
         self.update_layout_or_warn_with(
-            is_resize,
+            held_cameras,
             is_workspace_switch,
             space_scope,
             "Layout update failed",
@@ -7733,7 +7735,7 @@ impl Reactor {
 
     pub(crate) fn update_layout_or_warn_with(
         &mut self,
-        is_resize: bool,
+        held_cameras: &HeldCameras,
         is_workspace_switch: bool,
         space_scope: Option<SpaceId>,
         context: &'static str,
@@ -7742,7 +7744,7 @@ impl Reactor {
         {
             self.layout_update_count += 1;
         }
-        LayoutManager::update_layout(self, is_resize, is_workspace_switch, space_scope)
+        LayoutManager::update_layout(self, held_cameras, is_workspace_switch, space_scope)
             .unwrap_or_else(|e| {
                 warn!(error = ?e, "{}", context);
                 false

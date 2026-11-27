@@ -9,6 +9,7 @@ use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
 use crate::actor::drag::Session;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
+use crate::actor::reactor::events::HeldCameras;
 use crate::actor::reactor::reconciler::Desired;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
@@ -323,7 +324,7 @@ impl LayoutManager {
 
     pub fn update_layout(
         reactor: &mut Reactor,
-        is_resize: bool,
+        held_cameras: &HeldCameras,
         is_workspace_switch: bool,
         space_scope: Option<SpaceId>,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
@@ -334,7 +335,7 @@ impl LayoutManager {
         Self::apply_layout(
             reactor,
             layout_result,
-            is_resize,
+            held_cameras,
             is_workspace_switch,
             false,
             false,
@@ -368,7 +369,7 @@ impl LayoutManager {
             }
         }
         let layout = Self::calculate_layout(reactor, space_scope);
-        Self::apply_layout(reactor, layout, false, false, true, force_frames)
+        Self::apply_layout(reactor, layout, &HeldCameras::none(), false, true, force_frames)
     }
 
     pub(super) fn calculate_layout(
@@ -449,7 +450,7 @@ impl LayoutManager {
     fn apply_layout(
         reactor: &mut Reactor,
         layout_result: LayoutResult,
-        is_resize: bool,
+        held_cameras: &HeldCameras,
         is_workspace_switch: bool,
         instant: bool,
         force_frames: bool,
@@ -522,8 +523,13 @@ impl LayoutManager {
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
                 any_frame_changed |= AnimationManager::instant_layout(reactor, space, &desired);
             } else {
-                any_frame_changed |=
-                    AnimationManager::animate_layout(reactor, space, &desired, is_resize, true);
+                any_frame_changed |= AnimationManager::animate_layout(
+                    reactor,
+                    space,
+                    &desired,
+                    held_cameras.motion(space),
+                    true,
+                );
             }
             if reactor.workspace_switch_manager.owed_warp == Some(OwedWarp::Focus)
                 && let Some(window) = reactor.stores.layout.layout_engine.focused_window()

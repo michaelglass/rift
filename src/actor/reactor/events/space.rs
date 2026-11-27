@@ -378,7 +378,7 @@ pub fn handle_mission_control_native_exited(
     mission_control: &mut MissionControlManager,
 ) -> anyhow::Result<EventOutcome> {
     mission_control.mission_control_state = MissionControlState::Inactive;
-    let mut outcome = EventOutcome::layout_changed(false);
+    let mut outcome = EventOutcome::layout_changed();
     outcome.recover_after_mission_control = true;
     Ok(outcome)
 }
