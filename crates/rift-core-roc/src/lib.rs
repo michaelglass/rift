@@ -1179,9 +1179,10 @@ pub mod columns {
     /// The Rust system, on plain keys and windows as words.
     pub type Columns = rift_core::layout::columns::ColumnSystem<LayoutKey, u64>;
 
-    /// One operation of the system (`ColumnSystem`'s methods, one for one). A removal carries the
-    /// camera's answer to each removal it makes, in order (the columns it makes active after it);
-    /// an app closing lists its windows, which `close_app`'s predicate tells.
+    /// One operation of the system (`ColumnSystem`'s methods, one for one). A removal is the
+    /// caller's sequence: `ForgetWindow` or `ForgetApp` (an app closing lists its windows, which
+    /// `forget_app`'s predicate tells), then `RemoveFrom` per layout and window, each followed by
+    /// the camera's `ActivateColumn`s.
     #[derive(Debug, Clone, PartialEq)]
     pub enum Event {
         CreateLayout,
@@ -1190,18 +1191,13 @@ pub mod columns {
         Participation(u64, Participation),
         Settings(Settings),
         Insert(LayoutKey, u64),
-        RemoveWindow {
-            window: u64,
-            camera: Vec<Vec<ColumnId>>,
-        },
+        ForgetWindow(u64),
+        RemoveFrom(LayoutKey, u64),
         ReplaceWindow {
             from: u64,
             to: u64,
         },
-        CloseApp {
-            windows: Vec<u64>,
-            camera: Vec<Vec<ColumnId>>,
-        },
+        ForgetApp(Vec<u64>),
         ResizeFromFrame(LayoutKey, u64, FrameResize),
         ActivateColumn(LayoutKey, ColumnId),
         PreserveWindowSizes {
@@ -1264,16 +1260,11 @@ pub mod columns {
         Focused(Focused<u64>),
         Edited(Edited<u64>),
         Moved(Option<Moved>),
-        Removals(Vec<(LayoutKey, Removal)>),
-        AppRemovals(Vec<(LayoutKey, u64, Removal)>),
+        Layouts(Vec<LayoutKey>),
+        Closing(Vec<(LayoutKey, Vec<u64>)>),
+        Removal(Option<Removal>),
         Fullscreened(Fullscreened<u64>),
         Fixed(Vec<ColumnId>),
-    }
-
-    /// The camera's answers, taken in order; none once they run out.
-    fn answers(camera: Vec<Vec<ColumnId>>) -> impl FnMut() -> Vec<ColumnId> {
-        let mut camera = camera.into_iter();
-        move || camera.next().unwrap_or_default()
     }
 
     /// `event` applied to the Rust system, and what it answers.
@@ -1293,19 +1284,16 @@ pub mod columns {
                 Answer::Done
             }
             Event::Insert(layout, window) => Answer::Verdict(columns.insert(layout, window)),
-            Event::RemoveWindow { window, camera } => {
-                let mut next = answers(camera);
-                Answer::Removals(columns.remove_window(window, |_, _| next()))
+            Event::ForgetWindow(window) => Answer::Layouts(columns.forget_window(window)),
+            Event::RemoveFrom(layout, window) => {
+                Answer::Removal(columns.remove_from(layout, window))
             }
             Event::ReplaceWindow { from, to } => {
                 columns.replace_window(from, to);
                 Answer::Done
             }
-            Event::CloseApp { windows, camera } => {
-                let mut next = answers(camera);
-                Answer::AppRemovals(
-                    columns.close_app(|window| windows.contains(&window), |_, _, _| next()),
-                )
+            Event::ForgetApp(windows) => {
+                Answer::Closing(columns.forget_app(|window| windows.contains(&window)))
             }
             Event::ResizeFromFrame(layout, window, resize) => {
                 Answer::Verdict(columns.resize_from_frame(layout, window, resize))

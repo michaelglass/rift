@@ -7,7 +7,7 @@
 
 import Geometry exposing [clamp, max]
 import Slots
-import pf.Boundary exposing [BspTakesPart, BspDirection, BspEdited, BspFocusIn, BspFocused, BspMoveQuery, BspResizeAlong, BspSlot, BspWindowsQuery, ColumnsAnswer, ColumnsAppRemoval, ColumnsArrangement, ColumnsColumn, ColumnsEvent, ColumnsFrameResize, ColumnsFullscreened, ColumnsLayoutRemoval, ColumnsLayoutSlot, ColumnsMaybeLocation, ColumnsMaybeMoved, ColumnsMaybeSpan, ColumnsMoved, ColumnsPreserve, ColumnsRemoval, ColumnsRow, ColumnsSeed, ColumnsSettings, ColumnsStrip, ColumnsTransfer, ColumnsWidth, Fill, MaybeWord]
+import pf.Boundary exposing [BspTakesPart, BspDirection, BspEdited, BspFocusIn, BspFocused, BspMoveQuery, BspResizeAlong, BspSlot, BspWindowsQuery, ColumnsAnswer, ColumnsArrangement, ColumnsClosing, ColumnsColumn, ColumnsEvent, ColumnsFrameResize, ColumnsFullscreened, ColumnsLayoutSlot, ColumnsMaybeLocation, ColumnsMaybeMoved, ColumnsMaybeRemoval, ColumnsMaybeSpan, ColumnsMoved, ColumnsPreserve, ColumnsRemoval, ColumnsRow, ColumnsSeed, ColumnsSettings, ColumnsStrip, ColumnsTransfer, ColumnsWidth, Fill, MaybeWord]
 
 ## A scrolling layout system's arrangements, the windows left out, the settings.
 Cols : {
@@ -91,14 +91,18 @@ Columns := [].{
 				(after, inserted) = insert(cols, layout, window)
 				(after, Verdict(inserted))
 			}
-			RemoveWindow({ window, camera }) => {
-				(after, removals) = remove_window(cols, window, camera)
-				(after, Removals(removals))
+			ForgetWindow(window) => {
+				(after, layouts) = forget_window(cols, window)
+				(after, Layouts(layouts))
+			}
+			RemoveFrom({ layout, window }) => {
+				(after, removal) = edited_layout(cols, layout, NotHeld, |e| removed_from(e, cols.left_out, window))
+				(after, Removal(removal))
 			}
 			ReplaceWindow({ from, to }) => (replace_window(cols, from, to), Done)
-			CloseApp({ windows, camera }) => {
-				(after, removals) = close_app(cols, windows, camera)
-				(after, AppRemovals(removals))
+			ForgetApp(windows) => {
+				(after, closing) = forget_app(cols, windows)
+				(after, Closing(closing))
 			}
 			ResizeFromFrame(resize) => {
 				(after, changed) = resize_from_frame(cols, resize)
@@ -688,14 +692,15 @@ Columns := [].{
 				}
 		}
 
-	## What removing `window` from `e` does, and the edit after (the camera's answer applied).
-	removed_from : Editing, Set(U64), U64, List(U64) -> (Editing, [Removed(ColumnsRemoval), NotThere])
-	removed_from = |e, left_out, window, camera|
+	## What removing `window` from `e` did (for the camera), and the edit after; the camera's
+	## answer comes as its own events (`ActivateColumn`), never asked here.
+	removed_from : Editing, Set(U64), U64 -> (Editing, ColumnsMaybeRemoval)
+	removed_from = |e, left_out, window|
 		match locate(e, window) {
-			Nowhere => (e, NotThere)
+			Nowhere => (e, NotHeld)
 			At(col, row) =>
 				match column_at(e, col) {
-					None => (e, NotThere)
+					None => (e, NotHeld)
 					Some(column) => {
 						removal = {
 							active_removed: selected(e, left_out) == Some(window),
@@ -707,35 +712,16 @@ Columns := [].{
 								},
 						}
 						(after, _) = detach(e, left_out, window)
-						answered = camera.fold(after, |acc, id| activate_column(acc, id).0)
-						(answered, Removed(removal))
+						(after, Removed(removal))
 					}
 				}
 		}
 
-	remove_window : Cols, U64, List(List(U64)) -> (Cols, List(ColumnsLayoutRemoval))
-	remove_window = |cols, window, camera| {
+	## `window` going: no longer left out, and the layouts holding it, in layout order.
+	forget_window : Cols, U64 -> (Cols, List(U64))
+	forget_window = |cols, window| {
 		without = { ..cols, left_out: cols.left_out.remove(window) }
-		(after, _, removals) = layout_keys(without).fold(
-			(without, camera, []),
-			|(acc, answers, out), layout|
-				match editing_of(acc, layout) {
-					None => (acc, answers, out)
-					Some(e) =>
-						match locate(e, window) {
-							Nowhere => (acc, answers, out)
-							At(_, _) => {
-								answer = answers.first() ?? []
-								(changed, removed) = edited_layout(acc, layout, NotThere, |edit| removed_from(edit, acc.left_out, window, answer))
-								match removed {
-									Removed(removal) => (changed, answers.drop_first(1), out.append({ layout, removal }))
-									NotThere => (changed, answers.drop_first(1), out)
-								}
-							}
-						}
-				},
-		)
-		(after, removals)
+		(without, layout_keys(without).keep_if(|layout| contains_window(without, layout, window)))
 	}
 
 	replace_window : Cols, U64, U64 -> Cols
@@ -759,35 +745,15 @@ Columns := [].{
 		)
 	}
 
-	close_app : Cols, List(U64), List(List(U64)) -> (Cols, List(ColumnsAppRemoval))
-	close_app = |cols, windows, camera| {
+	## An app's windows going: none left out any more, and each layout's windows of the app, in
+	## layout order and its own (layouts holding none left out).
+	forget_app : Cols, List(U64) -> (Cols, List(ColumnsClosing))
+	forget_app = |cols, windows| {
 		marked = { ..cols, left_out: cols.left_out.drop_if(|w| windows.contains(w)) }
-		(after, _, removals) = layout_keys(marked).fold(
-			(marked, camera, []),
-			|(acc, answers, out), layout| {
-				closing = windows_of(acc, layout).keep_if(|w| windows.contains(w))
-				closing.fold(
-					(acc, answers, out),
-					|(inner, left, listed), window|
-						match editing_of(inner, layout) {
-							None => (inner, left, listed)
-							Some(e) =>
-								match locate(e, window) {
-									Nowhere => (inner, left, listed)
-									At(_, _) => {
-										answer = left.first() ?? []
-										(changed, removed) = edited_layout(inner, layout, NotThere, |edit| removed_from(edit, inner.left_out, window, answer))
-										match removed {
-											Removed(removal) => (changed, left.drop_first(1), listed.append({ layout, window, removal }))
-											NotThere => (changed, left.drop_first(1), listed)
-										}
-									}
-								}
-						},
-				)
-			},
-		)
-		(after, removals)
+		closing = layout_keys(marked)
+			.map(|layout| { layout, windows: windows_of(marked, layout).keep_if(|w| windows.contains(w)) })
+			.keep_if(|c| !c.windows.is_empty())
+		(marked, closing)
 	}
 
 	windows_of : Cols, U64 -> List(U64)

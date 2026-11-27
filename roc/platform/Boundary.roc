@@ -1116,12 +1116,6 @@ Boundary := [].{
 
 	ColumnsMaybeSpan := [Span(ColumnsSpan), NoSpan]
 
-	## A window removed: the camera's answer to each removal it makes, in order (the columns it
-	## makes active after it).
-	ColumnsRemove := { window : U64, camera : List(List(U64)) }
-
-	## An app's windows removed, and the camera's answer to each removal.
-	ColumnsCloseApp := { windows : List(U64), camera : List(List(U64)) }
 
 	## A window's frame changed natively: its old and new frame, the tiling area, the gaps.
 	ColumnsFrameResize := { layout : U64, window : U64, old : Rect, new : Rect, tiling : Rect, horizontal_gap : F64, vertical_gap : F64 }
@@ -1155,9 +1149,10 @@ Boundary := [].{
 		Participation(BspParticipation),
 		Settings(ColumnsSettings),
 		Insert(BspWindowIn),
-		RemoveWindow(ColumnsRemove),
+		ForgetWindow(U64),
+		RemoveFrom(BspWindowIn),
 		ReplaceWindow(BspReplacement),
-		CloseApp(ColumnsCloseApp),
+		ForgetApp(List(U64)),
 		ResizeFromFrame(ColumnsFrameResize),
 		ActivateColumn(ColumnsActivate),
 		PreserveWindowSizes(ColumnsPreserve),
@@ -1201,15 +1196,17 @@ Boundary := [].{
 	## What removing a window did to a layout it was in.
 	ColumnsRemoval := { active_removed : Bool, column_removed : Bool, was_fullscreen : Bool }
 
-	ColumnsLayoutRemoval := { layout : U64, removal : ColumnsRemoval }
+	## A window removed from a layout, or a layout not holding it.
+	ColumnsMaybeRemoval := [Removed(ColumnsRemoval), NotHeld]
 
-	ColumnsAppRemoval := { layout : U64, window : U64, removal : ColumnsRemoval }
+	## A layout's windows of a closing app, in its order.
+	ColumnsClosing := { layout : U64, windows : List(U64) }
 
 	## What a fullscreen toggle did to the selected window.
 	ColumnsFullscreened := [Nothing, Entered(U64), Left(U64)]
 
 	## What an operation answers.
-	ColumnsAnswer := [Layout(U64), Done, Verdict(Bool), Window(MaybeWord), Location(ColumnsMaybeLocation), Windows(List(U64)), Slot(BspSlot), Focused(BspFocused), Edited(BspEdited), Moved(ColumnsMaybeMoved), Removals(List(ColumnsLayoutRemoval)), AppRemovals(List(ColumnsAppRemoval)), Fullscreened(ColumnsFullscreened), Fixed(List(U64))]
+	ColumnsAnswer := [Layout(U64), Done, Verdict(Bool), Window(MaybeWord), Location(ColumnsMaybeLocation), Windows(List(U64)), Slot(BspSlot), Focused(BspFocused), Edited(BspEdited), Moved(ColumnsMaybeMoved), Layouts(List(U64)), Closing(List(ColumnsClosing)), Removal(ColumnsMaybeRemoval), Fullscreened(ColumnsFullscreened), Fixed(List(U64))]
 
 	# The group forest (`rift_core::layout::group_forest`): the tree the traditional and
 	# master-stack systems share, and each system's settings and operations. Shared with the BSP

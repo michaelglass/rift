@@ -257,22 +257,25 @@ fn report(what: &str, difference: &str) {
     );
 }
 
-/// A window change as the core takes it, the frame resize's facts read from rift's change,
-/// and the camera's answers to removals from the log.
+/// A window change as the core takes it, the frame resize's facts read from rift's change, and
+/// the camera's answer to each removal from the log, made active before the next removal.
 pub(super) fn change(core: &mut CoreColumns, change: &WindowChange<'_>, replays: &mut Replays) {
     match *change {
         WindowChange::Add(layout, window, _) => {
             core.insert(layout, window);
         }
         WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-            core.remove_window(window, |layout, _| replays.removal(layout));
+            for layout in core.forget_window(window) {
+                removed(core, layout, window, replays);
+            }
         }
         WindowChange::Replace(from, to) => core.replace_window(from, to),
         WindowChange::CloseApp(pid) => {
-            core.close_app(
-                |window| window.pid == pid,
-                |layout, _, _| replays.removal(layout),
-            );
+            for (layout, windows) in core.forget_app(|window| window.pid == pid) {
+                for window in windows {
+                    removed(core, layout, window, replays);
+                }
+            }
         }
         WindowChange::Resize {
             layout,
@@ -284,6 +287,14 @@ pub(super) fn change(core: &mut CoreColumns, change: &WindowChange<'_>, replays:
         } => {
             core.resize_from_frame(layout, window, frame_resize(old, new, screen, gaps));
         }
+    }
+}
+
+/// `window` removed from `layout`, then the camera's answer to that removal made active.
+fn removed(core: &mut CoreColumns, layout: LayoutId, window: WindowId, replays: &mut Replays) {
+    core.remove_from(layout, window);
+    for id in replays.removal(layout) {
+        core.activate_column(layout, id);
     }
 }
 

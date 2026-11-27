@@ -223,14 +223,6 @@ fn span(span: Option<Span>) -> abi::BoundaryColumnsMaybeSpan {
     }
 }
 
-/// The camera's answers, each a list as Roc takes it (the caller lists them).
-fn camera(camera: &[Vec<ColumnId>], host: &abi::RocHost) -> Vec<abi::RocListWith<u64, false>> {
-    camera
-        .iter()
-        .map(|ids| list(&ids.iter().map(|id| id.0).collect::<Vec<_>>(), host))
-        .collect()
-}
-
 fn window_in(layout: LayoutKey, window: u64) -> abi::BoundaryBspWindowIn {
     abi::BoundaryBspWindowIn { layout: layout.0, window }
 }
@@ -286,26 +278,25 @@ fn event(event: Event, host: &abi::RocHost) -> abi::BoundaryColumnsEvent {
             BoundaryColumnsEventPayload.insert(window_in(layout, window)),
             Tag::Insert
         ),
-        Event::RemoveWindow { window, camera: answers } => union!(
+        Event::ForgetWindow(window) => union!(
             BoundaryColumnsEvent,
-            BoundaryColumnsEventPayload.remove_window(abi::BoundaryColumnsRemove {
-                window,
-                camera: list(&camera(&answers, host), host),
-            }),
-            Tag::RemoveWindow
+            BoundaryColumnsEventPayload.forget_window(window),
+            Tag::ForgetWindow
+        ),
+        Event::RemoveFrom(layout, window) => union!(
+            BoundaryColumnsEvent,
+            BoundaryColumnsEventPayload.remove_from(window_in(layout, window)),
+            Tag::RemoveFrom
         ),
         Event::ReplaceWindow { from, to } => union!(
             BoundaryColumnsEvent,
             BoundaryColumnsEventPayload.replace_window(abi::BoundaryBspReplacement { from, to }),
             Tag::ReplaceWindow
         ),
-        Event::CloseApp { windows, camera: answers } => union!(
+        Event::ForgetApp(windows) => union!(
             BoundaryColumnsEvent,
-            BoundaryColumnsEventPayload.close_app(abi::BoundaryColumnsCloseApp {
-                windows: list(&windows, host),
-                camera: list(&camera(&answers, host), host),
-            }),
-            Tag::CloseApp
+            BoundaryColumnsEventPayload.forget_app(list(&windows, host)),
+            Tag::ForgetApp
         ),
         Event::ResizeFromFrame(
             layout,
@@ -648,20 +639,29 @@ fn from_answer(answer: &abi::BoundaryColumnsAnswer) -> Answer {
                 }
             })
         }
-        Tag::Removals => Answer::Removals(
-            unsafe { answer.borrow_payload_removals_unchecked() }
+        Tag::Layouts => Answer::Layouts(
+            unsafe { answer.borrow_payload_layouts_unchecked() }
                 .as_slice()
                 .iter()
-                .map(|r| (LayoutKey(r.layout), from_removal(&r.removal)))
+                .map(|&layout| LayoutKey(layout))
                 .collect(),
         ),
-        Tag::AppRemovals => Answer::AppRemovals(
-            unsafe { answer.borrow_payload_app_removals_unchecked() }
+        Tag::Closing => Answer::Closing(
+            unsafe { answer.borrow_payload_closing_unchecked() }
                 .as_slice()
                 .iter()
-                .map(|r| (LayoutKey(r.layout), r.window, from_removal(&r.removal)))
+                .map(|c| (LayoutKey(c.layout), c.windows.as_slice().to_vec()))
                 .collect(),
         ),
+        Tag::Removal => {
+            let removal = unsafe { answer.borrow_payload_removal_unchecked() };
+            Answer::Removal(match removal.tag {
+                abi::BoundaryColumnsMaybeRemovalTag::NotHeld => None,
+                abi::BoundaryColumnsMaybeRemovalTag::Removed => Some(from_removal(unsafe {
+                    removal.borrow_payload_removed_unchecked()
+                })),
+            })
+        }
         Tag::Fullscreened => {
             let toggled = unsafe { answer.borrow_payload_fullscreened_unchecked() };
             Answer::Fullscreened(match toggled.tag {

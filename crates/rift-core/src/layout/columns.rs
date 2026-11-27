@@ -623,37 +623,34 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
         true
     }
 
-    /// `window` removed from every layout, what that did to each (in layout order). After each
-    /// removal the camera is told what it did (`camera`) and answers the columns it makes active
-    /// (a remembered view's), made active in order.
-    pub fn remove_window(
-        &mut self,
-        window: W,
-        mut camera: impl FnMut(L, Removal) -> Vec<ColumnId>,
-    ) -> Vec<(L, Removal)> {
+    /// `window` going: it is no longer left out, and the layouts holding it, in layout order. The
+    /// caller removes it from each ([`Self::remove_from`]) and, after each removal, makes active
+    /// the columns the camera chooses ([`Self::activate_column`]): the core never asks the camera.
+    pub fn forget_window(&mut self, window: W) -> Vec<L> {
         self.left_out.remove(&window);
+        self.layouts
+            .iter()
+            .filter(|(_, arrangement)| arrangement.locate(window).is_some())
+            .map(|(layout, _)| layout)
+            .collect()
+    }
+
+    /// `window` removed from `layout`: what that did, for the camera; none when the layout does
+    /// not hold it.
+    pub fn remove_from(&mut self, layout: L, window: W) -> Option<Removal> {
         let left_out = self.left_out.clone();
         let is_left_out = |w: W| left_out.contains(&w);
-        let mut removed = Vec::new();
-        for (layout, arrangement) in self.layouts.iter_mut() {
-            let Some((col, row)) = arrangement.locate(window) else {
-                continue;
+        let arrangement = self.layouts.get_mut(layout)?;
+        let (col, row) = arrangement.locate(window)?;
+        Some(arrangement.edited(|e| {
+            let removal = Removal {
+                active_removed: e.selected(&is_left_out) == Some(window),
+                column_removed: e.columns[col].rows.len() == 1,
+                was_fullscreen: e.columns[col].rows[row].fill != Fill::Tiled,
             };
-            let removal = arrangement.edited(|e| {
-                let removal = Removal {
-                    active_removed: e.selected(&is_left_out) == Some(window),
-                    column_removed: e.columns[col].rows.len() == 1,
-                    was_fullscreen: e.columns[col].rows[row].fill != Fill::Tiled,
-                };
-                e.detach(window, &is_left_out);
-                removal
-            });
-            for id in camera(layout, removal) {
-                activate(arrangement, id);
-            }
-            removed.push((layout, removal));
-        }
-        removed
+            e.detach(window, &is_left_out);
+            removal
+        }))
     }
 
     /// `from` replaced by `to` wherever it is, its row and its participation kept.
@@ -675,40 +672,22 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
         }
     }
 
-    /// Every window `is_app` tells removed, layout by layout, in each layout's order; what each
-    /// removal did. After each the camera answers the columns it makes active, as for
-    /// [`Self::remove_window`].
-    pub fn close_app(
-        &mut self,
-        is_app: impl Fn(W) -> bool,
-        mut camera: impl FnMut(L, W, Removal) -> Vec<ColumnId>,
-    ) -> Vec<(L, W, Removal)> {
+    /// An app's windows (`is_app`) going: none is left out any more, and each layout's windows of
+    /// the app, in layout order and each layout's own order (layouts holding none left out). The
+    /// caller removes them one by one ([`Self::remove_from`]), the camera answering each removal
+    /// before the next, as for [`Self::forget_window`].
+    pub fn forget_app(&mut self, is_app: impl Fn(W) -> bool) -> Vec<(L, Vec<W>)> {
         self.left_out.retain(|&w| !is_app(w));
-        let left_out = self.left_out.clone();
-        let is_left_out = |w: W| left_out.contains(&w);
-        let mut removed = Vec::new();
-        for (layout, arrangement) in self.layouts.iter_mut() {
-            let closing: Vec<W> = arrangement.windows().filter(|&w| is_app(w)).collect();
-            for window in closing {
-                let Some((col, row)) = arrangement.locate(window) else {
-                    continue;
-                };
-                let removal = arrangement.edited(|e| {
-                    let removal = Removal {
-                        active_removed: e.selected(&is_left_out) == Some(window),
-                        column_removed: e.columns[col].rows.len() == 1,
-                        was_fullscreen: e.columns[col].rows[row].fill != Fill::Tiled,
-                    };
-                    e.detach(window, &is_left_out);
-                    removal
-                });
-                for id in camera(layout, window, removal) {
-                    activate(arrangement, id);
-                }
-                removed.push((layout, window, removal));
-            }
-        }
-        removed
+        self.layouts
+            .iter()
+            .map(|(layout, arrangement)| {
+                (
+                    layout,
+                    arrangement.windows().filter(|&w| is_app(w)).collect::<Vec<_>>(),
+                )
+            })
+            .filter(|(_, windows)| !windows.is_empty())
+            .collect()
     }
 
     pub fn has_windows_for_app(&self, layout: L, is_app: impl Fn(W) -> bool) -> bool {
@@ -1320,7 +1299,9 @@ mod tests {
         });
         let layout = system.create_layout();
         system.insert(layout, 1);
-        system.remove_window(1, |_, _| Vec::new());
+        for layout in system.forget_window(1) {
+            system.remove_from(layout, 1);
+        }
         assert_eq!(system.arrangement(layout).unwrap().strip, Strip::Empty);
         system.insert(layout, 2);
         let Strip::Columns { active, .. } = &system.arrangement(layout).unwrap().strip else {

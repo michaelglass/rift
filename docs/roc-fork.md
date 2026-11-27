@@ -100,9 +100,9 @@ with rift's indices and are parsed back after each, the active indices clamped a
 them. Every structural operation and query is rift's `ScrollingLayoutSystem`'s, op for op. The
 camera (offset, spring, gesture, bookmarks, reveal) stays rift's: it reads world geometry. Its
 writes to the arrangement are its decisions: the column a gesture settles on or a remembered
-view restores (`activate_column`), and, after each removal, the columns it makes active (the
-core's `remove_window` and `close_app` ask it, `camera: FnMut(..) -> Vec<ColumnId>`); a layout
-pass's preserved widths read the pass's constraints (`preserve_window_sizes`).
+view restores (`activate_column`), and, after each removal, the columns it makes active (since
+slice 3, the caller's: see "Slice 3"); a layout pass's preserved widths read the pass's
+constraints (`preserve_window_sizes`).
 - The shadow (`systems/scrolling/core_shadow.rs`): rift's system decides; each operation is run
   again on the core seeded from rift's state just before it, and its answer and the arrangements
   it leaves are held to rift's (every operation in tests and debug builds, every 32nd in
@@ -123,7 +123,7 @@ pass's preserved widths read the pass's constraints (`preserve_window_sizes`).
   event per operation, an answer per kind) and the same editing form, ported function for
   function; `roc_columns_{init,seed,step,view,release}`; `rift_core_roc::columns` (the events,
   answers, view and `step` on the Rust system) and `RocColumns`. A removal's camera answers
-  cross as data (`camera: List(List(U64))`, taken in order). Differential
+  crossed as data (`camera: List(List(U64))`, taken in order; gone since slice 3). Differential
   (`tests/columns.rs`): 4000 runs of 60 drawn operations (every kind; layouts and column ids
   live and gone; reloads with heights, widths and fills only a file holds), each answer and the
   whole system compared as written: identical (240,000 operations). A tripwire: no step copies
@@ -131,8 +131,18 @@ pass's preserved widths read the pass's constraints (`preserve_window_sizes`).
   times that); the edited layout's own columns are rebuilt each step (O(its columns and rows),
   as the Rust core's editing form). Plants 15/15 in Roc, and a table copy caught by the
   tripwire.
-- Next: slice 3, the flip (the core decides and is saved), then Roc decides, rift's
-  arrangement deleted; then the camera.
+- Slice 3, part 1 (2026-11-27, the lead's ruling): **no callback into the camera.** The core's
+  `remove_window` and `close_app` asked the camera mid-operation (`camera: FnMut(..) ->
+  Vec<ColumnId>`; in Roc, the answers crossed in advance as `camera: List(List(U64))`). Removal
+  is now per layout and stops where the camera must choose: `forget_window(window) -> Vec<L>`
+  (no longer left out; the layouts holding it), `forget_app(is_app) -> Vec<(L, Vec<W>)>` (each
+  layout's windows of the app, in order) and `remove_from(layout, window) -> Option<Removal>`;
+  the caller runs removal, the camera's answer (`activate_column`), the next removal. Roc's
+  events are `ForgetWindow`, `ForgetApp`, `RemoveFrom`, answering `Layouts`, `Closing` and
+  `Removal(Removed | NotHeld)`. The differential draws each step on its own, so every
+  interleaving with other operations is reached.
+- Next: slice 3's flip (the core decides and is saved), then Roc decides, rift's arrangement
+  deleted; then the camera.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

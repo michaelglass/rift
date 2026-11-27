@@ -1,8 +1,10 @@
 //! A scrolling layout's arrangements, kept between operations: the Roc twin (`RocColumns`)
 //! against the Rust system (`rift_core::layout::columns::ColumnSystem`), on drawn runs of
 //! operations. Runs reuse a few windows, the layouts the run has made (removed ones too: every
-//! operation takes a key it may not hold) and the columns' ids (a removal's camera answers and a
-//! column made active name live columns and gone ones). Every operation must answer alike and
+//! operation takes a key it may not hold) and the columns' ids (a column made active, the camera's
+//! answer to a removal among them, names live columns and gone ones). A removal is drawn as its
+//! steps (a window or an app forgotten, a window removed from a layout), so every interleaving
+//! with other operations is reached. Every operation must answer alike and
 //! leave the same whole system, compared as written (a height that is not a number is the same
 //! on both sides): the table's slots, versions and free list, every strip, the windows left
 //! out, the settings. Reloads seed both from the same system, with states only a saved file
@@ -147,13 +149,6 @@ impl Made {
         ids
     }
 
-    fn camera(rng: &mut Rng, rust: &Columns) -> Vec<Vec<ColumnId>> {
-        let ids = Made::columns(rust);
-        (0..rng.below(4))
-            .map(|_| (0..rng.below(3)).filter_map(|_| rng.pick(&ids)).collect())
-            .collect()
-    }
-
     fn event(&mut self, rng: &mut Rng, rust: &Columns) -> Event {
         let Some(layout) = rng.pick(&self.layouts).filter(|_| rng.chance(95)) else {
             return Event::CreateLayout;
@@ -165,16 +160,11 @@ impl Made {
             8 => Event::CreateLayout,
             9 => Event::CloneLayout(layout),
             10 => Event::RemoveLayout(layout),
-            11 | 12 => Event::RemoveWindow {
-                window,
-                camera: Made::camera(rng, rust),
-            },
+            11 => Event::ForgetWindow(window),
+            12 => Event::RemoveFrom(layout, if rng.chance(90) { window } else { rng.window() }),
             13 => {
                 let pid = 1 + rng.below(3);
-                Event::CloseApp {
-                    windows: WINDOWS.iter().copied().filter(|w| w >> 32 == pid).collect(),
-                    camera: Made::camera(rng, rust),
-                }
+                Event::ForgetApp(WINDOWS.iter().copied().filter(|w| w >> 32 == pid).collect())
             }
             14 => Event::ReplaceWindow { from: window, to: rng.window() },
             15 => Event::Participation(
@@ -321,12 +311,8 @@ fn the_roc_columns_answer_and_keep_the_arrangements_as_the_rust_system_does() {
             );
             made.answered(&expected);
             match (&event, &expected) {
-                (Event::RemoveWindow { .. }, Answer::Removals(r)) if !r.is_empty() => {
-                    reached[0] += 1
-                }
-                (Event::CloseApp { .. }, Answer::AppRemovals(r)) if !r.is_empty() => {
-                    reached[1] += 1
-                }
+                (Event::RemoveFrom(..), Answer::Removal(Some(_))) => reached[0] += 1,
+                (Event::ForgetApp(_), Answer::Closing(c)) if !c.is_empty() => reached[1] += 1,
                 (Event::MoveSelection(..), Answer::Moved(Some(_))) => reached[2] += 1,
                 (Event::Drop { .. }, Answer::Verdict(true)) => reached[3] += 1,
                 (Event::Stack(_) | Event::Unstack(_), Answer::Windows(w)) if !w.is_empty() => {
