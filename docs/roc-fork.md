@@ -27,7 +27,7 @@ wc -l` (the bound: at most 336).
 
 **Next:** (1) a window's place by type: done 2026-11-26 (below, "A window's place by type").
 (2) The Roc known copies need the compiler's ownership decisions (a dev-diagnostics build's
-`ROC_LIR_DUMP`), and `--opt=dev` for test builds (below, "Build times"): both the owner's call.
+`ROC_LIR_DUMP`): the owner's call. (`--opt=dev` for test builds: tried and rejected, below.)
 (3) The open perf leads below, only if a profile at real sizes asks. The two Roc issue drafts
 below ("Roc issue drafts") wait for the owner.
 
@@ -71,6 +71,22 @@ merge when we get there.
   convention (every answer union has two or more tags; a one-tag union still breaks), the deep
   `decref_list_of_*` calls, the build's `unnamed_types` guard, Geometry's rounding and
   `fmaxnm`/`fminnm`, and the host's own allocator hooks.
+
+**The dev backend: tried and rejected (2026-11-27, the lead's ruling).** Every Roc build is
+`--opt=speed`. Building tests with `--opt=dev` (a 0.2 s Roc build instead of about 58 s) assumed
+the dev backend runs the same program, and at nightly-2026-11-26-890d6c8 it does not:
+- **Misaligned static literals** (roc-lang/roc#13568): the dev backend's Mach-O writer places
+  `__DATA,__const` right after `__text` without aligning it, so when `__text` is 4 mod 8 a static
+  `Str`'s refcount sits where its atomic add faults (SIGBUS in `roc_builtins_incref_data_ptr`),
+  depending on code size.
+- **A separate crash in rift's dev build**, with every `__DATA,__const` at 0 mod 8 (so not the
+  above): `the_roc_core_tiles_traditional_layouts_*` and `the_roc_core_tiles_what_the_rust_core_tiles`
+  SIGSEGV in `Traditional.tree_of` (`roc_builtins_incref_data_ptr` on 0x4088F8…, the F64 799.0, a
+  window's `locked_height`, read as a pointer) on a host-built shape. Repro: being reduced.
+- Retry on a bump once both are fixed. The key cache stays (one optimized Roc build per `.roc`
+  change).
+- `mise run check-release` (what `rift-local.sh` runs before an install) is an alias of the check
+  run: the release build's Roc is the one the check run tests.
 
 **Scrolling onto the core, slice 1 (2026-11-27): the arrangement as the system's shadow.** The
 core takes the scrolling strip's arrangement (`rift_core::layout::columns`): a strip is `Empty |
@@ -131,8 +147,7 @@ spec, the arguments), builds each key once under `target/roc-build/<key>/` and c
 Roc build); after nothing: 198 s to 152 s; after a Rust-only change: 277 s to 203 s (what is
 left is test running and relinking). `target/roc-build` keeps every key built (about 8 MB
 each); `cargo clean` or deleting it is safe. The `--opt=dev` backend builds the archive in
-under a second; using it for tests would change what the tests exercise (not LLVM's code), so
-it is the owner's call, not done.
+under a second, but miscompiles rift: rejected (above, "The dev backend").
 
 **Roc uniqueness: the node-table copies still open (2026-11-26, fix 2 of the lead's three Roc
 cost fixes).** A step that copies the forest's node table pays O(n) per event (about 112 bytes

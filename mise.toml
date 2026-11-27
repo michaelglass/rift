@@ -8,3 +8,10 @@ run = "roc/check.sh"
 [tasks.roc-bump]
 description = "Bump the pinned Roc nightly to the newest, then run the check run"
 run = "roc/bump.sh"
+
+# What an install or QA build runs first (the owner's install script refuses on a failure): the
+# check run itself. Every Roc build is optimized (the dev backend was rejected, docs/roc-fork.md),
+# so a release build's Roc is the one the check run tests; a second gate would test nothing new.
+[tasks.check-release]
+description = "Before an install or QA build: the full check run (an alias of check)"
+depends = ["check"]
