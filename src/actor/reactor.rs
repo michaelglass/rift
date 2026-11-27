@@ -515,7 +515,9 @@ impl Classify for InputClass {
                 | L::AdjustMasterRatio(_)
                 | L::AdjustMasterCount { .. }
                 | L::PromoteToMaster
-                | L::SwapMasterStack,
+                | L::SwapMasterStack
+                | L::RotateMasterStackNext
+                | L::RotateMasterStackPrev,
             ) => Arranging,
             Command::Reactor(
                 R::RestoreLayout { .. }

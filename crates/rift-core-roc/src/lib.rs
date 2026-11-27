@@ -1485,6 +1485,7 @@ pub mod group_forest {
         AdjustCount(i32),
         Promote(LayoutKey),
         SwapMasterStack(LayoutKey),
+        Rotate(LayoutKey, bool),
         CanMoveWindow(LayoutKey, u64, Direction),
         Edit(LayoutKey, Edit<u64>),
     }
@@ -1624,6 +1625,9 @@ pub mod group_forest {
             MasterStackEvent::SwapMasterStack(layout) => {
                 system.swap_master_stack(layout);
                 Answer::Done
+            }
+            MasterStackEvent::Rotate(layout, backwards) => {
+                Answer::Verdict(system.rotate_master_stack(layout, backwards))
             }
             MasterStackEvent::CanMoveWindow(layout, window, direction) => {
                 Answer::Verdict(system.can_move_window(layout, window, direction))

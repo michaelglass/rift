@@ -181,6 +181,23 @@ impl MasterStackLayoutSystem {
         );
     }
 
+    /// The windows carried one slot toward the first master slot (`backwards`: the other way);
+    /// whether two or more took part (upstream #706).
+    pub fn rotate_master_stack(&mut self, layout: LayoutId, backwards: bool) -> bool {
+        let core = self.core.rotate_master_stack(layout, backwards);
+        #[cfg(feature = "roc-core")]
+        let core = bsp_roc::decided(
+            self.roc_stepped(
+                "rotate_master_stack",
+                E::Rotate(roc::layout_key(layout), backwards),
+                Answer::Verdict(core),
+            ),
+            bsp_roc::as_verdict,
+            core,
+        );
+        core
+    }
+
     /// A layout pass with its group bars, the core's.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn project_groups(
@@ -759,7 +776,7 @@ mod tests {
                 steps,
                 &mut |rng, system, drawn| {
                     let layout = drawn.layout(rng);
-                    match rng.below(5) {
+                    match rng.below(6) {
                         0 => {
                             let settings = drawn_settings(rng, &system.configured());
                             system.update_settings(settings);
@@ -767,6 +784,9 @@ mod tests {
                         1 => system.adjust_master_ratio(layout, rng.length(-0.5, 0.5)),
                         2 => system.adjust_master_count(layout, rng.below(5) as i32 - 2),
                         3 => system.promote_to_master(layout),
+                        4 => {
+                            system.rotate_master_stack(layout, rng.chance(50));
+                        }
                         _ => system.swap_master_stack(layout),
                     }
                     #[cfg(feature = "roc-core")]
@@ -927,6 +947,45 @@ mod tests {
 
     /// A master and a stack region holding a window and a group of two (the group's second
     /// selected; one window left out).
+    /// Rotating carries each window taking part one slot toward the first master slot, the
+    /// first wrapping to the last, and backwards undoes it; a window left out keeps its slot
+    /// and fewer than two taking part is no rotation (upstream's cyclic navigation, #706).
+    #[test]
+    fn rotating_carries_each_window_one_slot_and_back() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3), w(4)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        let slots = |system: &MasterStackLayoutSystem| {
+            [1, 2, 3, 4].map(|i| system.window_slot(layout, w(i)))
+        };
+        let before = slots(&system);
+        // The windows in slot order (the master region's, then the stack's).
+        let mut order = [0, 1, 2, 3];
+        order.sort_by_key(|&i| before[i].clone());
+        assert!(system.rotate_master_stack(layout, false));
+        let after = slots(&system);
+        // Each window took the slot of the one before it; the first took the last.
+        for (k, &i) in order.iter().enumerate() {
+            let from = if k == 0 { order[3] } else { order[k - 1] };
+            assert_eq!(after[i], before[from], "window {}", i + 1);
+        }
+        assert!(system.rotate_master_stack(layout, true));
+        assert_eq!(slots(&system), before);
+        system.set_window_participation(w(4), false);
+        assert!(system.rotate_master_stack(layout, false));
+        let rotated = slots(&system);
+        assert_eq!(rotated[3], before[3], "a window left out keeps its slot");
+        for window in [w(2), w(3)] {
+            system.set_window_participation(window, false);
+        }
+        assert!(
+            !system.rotate_master_stack(layout, false),
+            "one window taking part"
+        );
+    }
+
     fn regions_with_a_group() -> (MasterStackLayoutSystem, LayoutId) {
         use crate::layout_engine::WindowDropAction;
         let mut system = MasterStackLayoutSystem::default();

@@ -1103,6 +1103,57 @@ fn scrolling_focus_warps_to_revealed_window() {
     }
 }
 
+/// The master-stack rotations reach the master-stack layout through the command path,
+/// forward then back (upstream's cyclic navigation, #706).
+#[test]
+fn master_stack_rotation_commands_rotate_the_layout() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::MasterStack,
+    });
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        make_windows(3),
+        Some(WindowId::new(1, 1)),
+    );
+    let slots = |reactor: &Reactor| {
+        let engine = &reactor.stores.layout.layout_engine;
+        let (workspace, layout) = engine
+            .workspaces()
+            .reading(reactor.stores.state.windows())
+            .active_layout_for_space(space)
+            .unwrap();
+        let crate::layout_engine::LayoutSystemKind::MasterStack(system) =
+            &engine.workspaces()[workspace].layout_system
+        else {
+            panic!("master stack")
+        };
+        (1..=3)
+            .map(|i| system.window_slot(layout, WindowId::new(1, i)))
+            .collect::<Vec<_>>()
+    };
+    let before = slots(&reactor);
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::RotateMasterStackNext);
+    reactor.apply_event_outcome(outcome);
+    let forward = slots(&reactor);
+    // Forward: the window in the first master slot wraps to the last slot.
+    let first = (0..3).min_by_key(|&i| before[i].clone()).unwrap();
+    assert_eq!(forward[first], before.iter().max().unwrap().clone());
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::RotateMasterStackPrev);
+    reactor.apply_event_outcome(outcome);
+    assert_eq!(slots(&reactor), before);
+    // Forward again lands where forward did: the commands go the ways they name.
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::RotateMasterStackNext);
+    reactor.apply_event_outcome(outcome);
+    assert_eq!(slots(&reactor), forward);
+}
+
 #[test]
 fn ordinary_focus_keeps_warp_in_raise_request() {
     for mode in [

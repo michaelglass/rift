@@ -679,6 +679,7 @@ impl Twin for MasterStackTwin {
             16 => MasterStackEvent::AdjustCount([-3, -1, 1, 3][rng.below(4) as usize]),
             17 | 18 => MasterStackEvent::Promote(layout),
             19 => MasterStackEvent::SwapMasterStack(layout),
+            32 | 33 => MasterStackEvent::Rotate(layout, rng.chance(50)),
             20..=31 => MasterStackEvent::Edit(layout, rng.edit(&held)),
             _ => MasterStackEvent::Forest(forest_change(rng, layout, &held)),
         }
@@ -691,6 +692,11 @@ impl Twin for MasterStackTwin {
     fn known_copy(event: &Self::Event) -> bool {
         match event {
             MasterStackEvent::CreateLayout => true,
+            // The first swap after the rotation order is listed copies the node table, though a
+            // lone swap (SwapMasterStack, Edit::Swap) does not; not found within the time box
+            // (the order listed without closures holding the forest, the swaps by recursion and
+            // inline through the record all still copy). Open, docs/roc-fork.md.
+            MasterStackEvent::Rotate(..) => true,
             MasterStackEvent::Forest(forest) => known_forest_copy(forest),
             MasterStackEvent::Edit(_, edit) => known_edit_copy(edit),
             _ => false,

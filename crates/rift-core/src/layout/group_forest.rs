@@ -3086,6 +3086,35 @@ impl<L: SlotKey + Eq, N: SlotKey + Eq + Ord, W: Copy + Ord> MasterStack<L, N, W>
         self.forest.swap_windows(layout, master_window, stack_window);
     }
 
+    /// The windows taking part, the master region's and then the stack's (each in tree order),
+    /// each carried one slot toward the first master slot, the first wrapping to the last
+    /// (`backwards`: the other way): the wrapping window is swapped through every other slot, so
+    /// the containers stay where they are. Whether two or more windows took part. Upstream's
+    /// cyclic navigation (#706, d8b83aba).
+    pub fn rotate_master_stack(&mut self, layout: L, backwards: bool) -> bool {
+        let (_, master, stack) = self.region_roots(layout);
+        let f = &self.forest;
+        let mut windows: Vec<W> = f
+            .preorder(master)
+            .chain(f.preorder(stack))
+            .filter_map(|node| f.window(node))
+            .filter(|&window| f.window_participates(window))
+            .collect();
+        if backwards {
+            windows.reverse();
+        }
+        let Some((&wrap, rest)) = windows.split_first() else {
+            return false;
+        };
+        if rest.is_empty() {
+            return false;
+        }
+        for &window in rest {
+            self.forest.swap_windows(layout, wrap, window);
+        }
+        true
+    }
+
     pub fn can_move_window(&self, layout: L, window: W, direction: Direction) -> bool {
         self.forest.window_participates(window)
             && self

@@ -1465,6 +1465,9 @@ Boundary := [].{
 	## A floating layout question's answer.
 	FloatingLayoutAnswer := [Shape(FloatingLayout), Bars(List(GroupBar)), Container(GroupContainerView), Drawn(List(GroupRow))]
 
+	## The master-stack windows carried one slot along (`backwards`: the other way).
+	MasterRotate := { layout : U64, backwards : Bool }
+
 	## One operation of the master-stack system (`MasterStack`'s methods, one for one).
 	MasterStackEvent := [
 		Forest(GroupForestEvent),
@@ -1477,6 +1480,7 @@ Boundary := [].{
 		AdjustCount(I32),
 		Promote(U64),
 		SwapMasterStack(U64),
+		Rotate(MasterRotate),
 		CanMoveWindow(BspMoveQuery),
 		Edit(GroupEditIn),
 	]

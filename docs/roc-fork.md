@@ -229,7 +229,29 @@ constraints (`preserve_window_sizes`).
 - **Left for the camera slice:** the view itself (the camera's reads of rift's shape, to be
   rewritten against the core's types), and `fullscreen_restore` living outside the fullscreen
   (the lead's ruling: put it inside the fullscreen state and delete the gates).
-- Next: the camera (modelled on PR #718).
+- **Upstream ports before the #718 merge** (the lead's plan, 2026-11-27): the merge of
+  `pr/scrolling-clamp-after-edit` (eb00c2f1) brings upstream changes to decisions the core owns
+  here; each is ported first, on this line, in the core (Rust, Roc, the differentials, plants),
+  so the merge commit holds resolutions only.
+  - (a) #706 (d8b83aba), cyclic navigation in the master-stack layout: `rotate_master_stack(layout,
+    backwards) -> bool` on the core's `MasterStack` and in GroupForest.roc (`Rotate(MasterRotate)`
+    answering `Verdict`): the windows taking part, master region then stack in tree order, each
+    carried one slot toward the first master slot, the first wrapping to the last, by swaps (the
+    containers stay); fewer than two taking part is no rotation. The commands
+    `rotate_master_stack_next` / `_prev` as upstream's (protocol, CLI, default config, the
+    engine forgetting a native layout only when the rotation changed something). Tests (upstream
+    had none): the slots carried and carried back, a window left out keeping its slot, the
+    commands going the ways they name through the reactor. Plants 9/9.
+    **Open: Roc's rotation copies the node table** (the copy tripwire, 45 KB for a 400-window
+    forest's 25.8 KB bound): the first swap after the order is listed copies, though a lone swap
+    does not. Listing the order without closures holding the forest, swapping by recursion and
+    writing the update inline through the record all still copy; time-boxed, `Rotate` joins the
+    known copies (`Twin::known_copy`) for the copy hunt.
+  - A plant-runner fix found on the way: a Roc plant that does not build was counted as caught
+    (the build script failing); one slice-3 plant (`.reverse()`, not a Roc list method) proved
+    nothing. The runner now reports a build failure as such, and that plant, redone with a fold,
+    is caught.
+- Next: ports (b) and (c), the merge, then the camera (modelled on PR #718).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

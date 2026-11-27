@@ -843,6 +843,12 @@ fn master_stack_event(
             BoundaryMasterStackEventPayload.promote(layout.0),
             Tag::Promote
         ),
+        MasterStackEvent::Rotate(layout, backwards) => union!(
+            BoundaryMasterStackEvent,
+            BoundaryMasterStackEventPayload
+                .rotate(abi::BoundaryMasterRotate { layout: layout.0, backwards }),
+            Tag::Rotate
+        ),
         MasterStackEvent::SwapMasterStack(layout) => union!(
             BoundaryMasterStackEvent,
             BoundaryMasterStackEventPayload.swap_master_stack(layout.0),

@@ -185,6 +185,10 @@ GroupForest := [].{
 			AdjustCount(delta) => (adjust_master_count(system, delta), Done)
 			Promote(layout) => (promote_to_master(system, layout), Done)
 			SwapMasterStack(layout) => (swap_master_stack(system, layout), Done)
+			Rotate({ layout, backwards: toward_stack }) => {
+				(after, rotated) = rotate_master_stack(system, layout, toward_stack)
+				(after, Verdict(rotated))
+			}
 			CanMoveWindow(asked) => (system, Verdict(master_can_move_window(system, asked)))
 			Edit(asked) => {
 				(after, edited) = master_edit(system, asked)
@@ -3636,6 +3640,69 @@ GroupForest := [].{
 			_ => system
 		}
 	}
+
+	## The windows taking part, the master region's and then the stack's (each in tree order),
+	## each carried one slot toward the first master slot, the first wrapping to the last
+	## (`backwards`: the other way), by swapping the wrapping window through every other slot;
+	## whether two or more took part. Upstream's cyclic navigation (#706).
+	rotate_master_stack : Master, U64, Bool -> (Master, Bool)
+	rotate_master_stack = |system, layout, toward_stack|
+		match rotation_order(system.forest, layout, toward_stack) {
+			# Written inline through the record, the order listed by a function of its own: a forest
+			# a live closure or binding still holds would be shared, and its table copied
+			# (docs/roc-fork.md, the copy hunt).
+			[wrap, .. as rest] if !rest.is_empty() =>
+				({ ..system, forest: swap_through(system.forest, layout, wrap, rest) }, True)
+			_ => (system, False)
+		}
+
+	## `wrap` swapped with each of `rest` in turn.
+	swap_through : Forest, U64, U64, List(U64) -> Forest
+	swap_through = |forest, layout, wrap, rest|
+		match rest {
+			[] => forest
+			[window, .. as more] => {
+				(after, _) = swap_windows(forest, layout, wrap, window)
+				swap_through(after, layout, wrap, more)
+			}
+		}
+
+	## The windows a rotation carries, in the order it carries them: those taking part, the
+	## master region's and then the stack's (each in tree order), reversed toward the stack. No
+	## closure here holds the forest: one that did would make it owned here, and the caller's
+	## forest shared through its swaps (a table copy; docs/roc-fork.md, the copy hunt).
+	rotation_order : Forest, U64, Bool -> List(U64)
+	rotation_order = |forest, layout, toward_stack| {
+		{ master, stack, .. } = region_roots(forest, layout)
+		listed = keep_taking_part(forest, windows_under(forest, master).concat(windows_under(forest, stack)))
+		if toward_stack listed.fold([], |acc, w| [w].concat(acc)) else listed
+	}
+
+	## The windows under `region`, in tree order.
+	windows_under : Forest, U64 -> List(U64)
+	windows_under = |forest, region|
+		walk(
+			forest,
+			region,
+			Preorder,
+			[],
+			|listed, _, at|
+				match at.body {
+					Window({ window: leaf, .. }) => Continue(listed.append(leaf))
+					Container(_) => Continue(listed)
+				},
+		)
+
+	## The windows of `windows` taking part, in order.
+	keep_taking_part : Forest, List(U64) -> List(U64)
+	keep_taking_part = |forest, windows|
+		match windows {
+			[] => []
+			[window, .. as more] => {
+				kept = keep_taking_part(forest, more)
+				if takes_part(forest, window) [window].concat(kept) else kept
+			}
+		}
 
 	master_can_move_window : Master, BspMoveQuery -> Bool
 	master_can_move_window = |system, { layout, window: window_word, direction }|
