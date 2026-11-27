@@ -4341,3 +4341,8 @@ pub(crate) mod stack_tree;
 // The group forest's traditional and master-stack layout systems.
 
 pub(crate) mod group_forest;
+
+// ---------------------------------------------------------------------------------------------
+// A scrolling layout's arrangements.
+
+pub(crate) mod columns;

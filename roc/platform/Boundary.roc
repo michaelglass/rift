@@ -1077,6 +1077,140 @@ Boundary := [].{
 	## What an operation answers.
 	StackTreeAnswer := [Layout(U64), Participated(Bool), Done, Verdict(Bool), Window(MaybeWord), Windows(List(U64)), WindowSlot(StackSlot), Group(StackGroupAnswer), Focused(BspFocused), Edited(BspEdited)]
 
+	# A scrolling layout's arrangement (`rift_core::layout::columns`): every layout's strip of
+	# columns in one slot table, the windows left out, the settings.
+
+	## How wide a column is asked to be: the default, a proportion of the view, or fixed.
+	ColumnsWidth := [Default, Proportion(F64), Fixed(F64)]
+
+	## A window in a column: its height (a weight among the column's rows) and its fill.
+	ColumnsRow := { window : U64, height : F64, fill : Fill }
+
+	## A column: its rows around the active one, which always exists.
+	ColumnsColumn := { id : U64, width : ColumnsWidth, before : List(ColumnsRow), active : ColumnsRow, after : List(ColumnsRow) }
+
+	## A layout's columns around the active one.
+	ColumnsAround := { before : List(ColumnsColumn), active : ColumnsColumn, after : List(ColumnsColumn) }
+
+	## A layout's columns: none, or those around the active one.
+	ColumnsStrip := [Empty, Columns(ColumnsAround)]
+
+	## A layout's strip and the id its next column takes.
+	ColumnsArrangement := { strip : ColumnsStrip, next_column : U64 }
+
+	ColumnsLayoutHeld := { version : U32, arrangement : ColumnsArrangement }
+
+	## A slot of the layout table: an arrangement under its version, or a vacant slot's version.
+	ColumnsLayoutSlot := [Occupied(ColumnsLayoutHeld), Vacant(U32)]
+
+	## Where a new window goes, and the column widths.
+	ColumnsSettings := { insertion : BspInsertion, column_width_ratio : F64, min_column_width_ratio : F64, max_column_width_ratio : F64, preset_column_widths : List(F64), preserve_window_sizes : Bool }
+
+	## A system as the platform holds it: the table's slots and free list, the windows left
+	## out in order, the settings.
+	ColumnsSeed := { layouts : List(ColumnsLayoutSlot), layout_free : List(U32), left_out : List(U64), settings : ColumnsSettings }
+
+	## The selected column as a layout pass lays it out: the view's width, the gap between
+	## columns, the column's width.
+	ColumnsSpan := { view : F64, gap : F64, width : F64 }
+
+	ColumnsMaybeSpan := [Span(ColumnsSpan), NoSpan]
+
+	## A window removed: the camera's answer to each removal it makes, in order (the columns it
+	## makes active after it).
+	ColumnsRemove := { window : U64, camera : List(List(U64)) }
+
+	## An app's windows removed, and the camera's answer to each removal.
+	ColumnsCloseApp := { windows : List(U64), camera : List(List(U64)) }
+
+	## A window's frame changed natively: its old and new frame, the tiling area, the gaps.
+	ColumnsFrameResize := { layout : U64, window : U64, old : Rect, new : Rect, tiling : Rect, horizontal_gap : F64, vertical_gap : F64 }
+
+	ColumnsActivate := { layout : U64, column : U64 }
+
+	ColumnsLocked := { window : U64, width : F64 }
+
+	## A layout pass's preserved widths: the view's width, the gap, each window's locked width.
+	ColumnsPreserve := { layout : U64, view : F64, gap : F64, locked : List(ColumnsLocked) }
+
+	ColumnsSwap := { layout : U64, a : U64, b : U64 }
+
+	ColumnsTransfer := [Stack, Insert(BspDirection)]
+
+	ColumnsDropAction := [Swap, Move(BspDirection), Transfer(ColumnsTransfer)]
+
+	ColumnsDrop := { layout : U64, source : U64, target : U64, action : ColumnsDropAction }
+
+	ColumnsResize := { layout : U64, amount : F64, along : BspResizeAlong, span : ColumnsMaybeSpan }
+
+	ColumnsPreset := { layout : U64, backwards : Bool, span : ColumnsMaybeSpan }
+
+	ColumnsFullscreen := { layout : U64, within_gaps : Bool }
+
+	## One operation of the system (`ColumnSystem`'s methods, one for one).
+	ColumnsEvent := [
+		CreateLayout,
+		CloneLayout(U64),
+		RemoveLayout(U64),
+		Participation(BspParticipation),
+		Settings(ColumnsSettings),
+		Insert(BspWindowIn),
+		RemoveWindow(ColumnsRemove),
+		ReplaceWindow(BspReplacement),
+		CloseApp(ColumnsCloseApp),
+		ResizeFromFrame(ColumnsFrameResize),
+		ActivateColumn(ColumnsActivate),
+		PreserveWindowSizes(ColumnsPreserve),
+		ContainsLayout(U64),
+		WindowParticipates(U64),
+		SelectedWindow(U64),
+		SelectedLocation(U64),
+		WindowInDirection(BspLayoutDirection),
+		ContainsWindow(BspWindowIn),
+		HasAnyFullscreenNode(U64),
+		ParentOfSelectionIsStacked(U64),
+		HasWindowsForApp(BspAppIn),
+		Windows(BspWindowsQuery),
+		WindowSlot(BspWindowIn),
+		CanMoveWindow(BspMoveQuery),
+		Focus(BspFocusIn),
+		Swap(ColumnsSwap),
+		MoveSelection(BspLayoutDirection),
+		Drop(ColumnsDrop),
+		Join(BspLayoutDirection),
+		ConsumeOrExpel(BspLayoutDirection),
+		Stack(U64),
+		Unstack(U64),
+		Unjoin(U64),
+		Resize(ColumnsResize),
+		SwitchPreset(ColumnsPreset),
+		ToggleFullscreen(ColumnsFullscreen),
+	]
+
+	## The selection's column and row.
+	ColumnsLocation := { column : U64, row : U64 }
+
+	ColumnsMaybeLocation := [Location(ColumnsLocation), NoLocation]
+
+	## Where the selection moved: a new column at this index, another column's place, another
+	## row's.
+	ColumnsMoved := [NewColumn(U64), Column(U64), Row(U64)]
+
+	ColumnsMaybeMoved := [Moved(ColumnsMoved), Stayed]
+
+	## What removing a window did to a layout it was in.
+	ColumnsRemoval := { active_removed : Bool, column_removed : Bool, was_fullscreen : Bool }
+
+	ColumnsLayoutRemoval := { layout : U64, removal : ColumnsRemoval }
+
+	ColumnsAppRemoval := { layout : U64, window : U64, removal : ColumnsRemoval }
+
+	## What a fullscreen toggle did to the selected window.
+	ColumnsFullscreened := [Nothing, Entered(U64), Left(U64)]
+
+	## What an operation answers.
+	ColumnsAnswer := [Layout(U64), Done, Verdict(Bool), Window(MaybeWord), Location(ColumnsMaybeLocation), Windows(List(U64)), Slot(BspSlot), Focused(BspFocused), Edited(BspEdited), Moved(ColumnsMaybeMoved), Removals(List(ColumnsLayoutRemoval)), AppRemovals(List(ColumnsAppRemoval)), Fullscreened(ColumnsFullscreened), Fixed(List(U64))]
+
 	# The group forest (`rift_core::layout::group_forest`): the tree the traditional and
 	# master-stack systems share, and each system's settings and operations. Shared with the BSP
 	# tree and the stacks: orientations, directions, sides, the insertion point, participation,

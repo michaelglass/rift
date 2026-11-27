@@ -99,8 +99,21 @@ pass's preserved widths read the pass's constraints (`preserve_window_sizes`).
 - Tests: the drawn differential (600 drawn systems, then replacements, an app closing, native
   resizes, layout clones and removals, gestures settling, every query; each reached), the
   file-built fixtures, two core parse tests. Plants 12/12.
-- Next: slice 2, the Roc mirror (`Columns.roc`), then the flip (the core decides and is saved),
-  Roc decides, rift's arrangement deleted; then the camera.
+- Slice 2 (2026-11-27): the Roc mirror, `roc/core/Columns.roc`, the same shape over the
+  platform's types (`Columns*` in Boundary.roc: the strip and column zippers, the settings, an
+  event per operation, an answer per kind) and the same editing form, ported function for
+  function; `roc_columns_{init,seed,step,view,release}`; `rift_core_roc::columns` (the events,
+  answers, view and `step` on the Rust system) and `RocColumns`. A removal's camera answers
+  cross as data (`camera: List(List(U64))`, taken in order). Differential
+  (`tests/columns.rs`): 4000 runs of 60 drawn operations (every kind; layouts and column ids
+  live and gone; reloads with heights, widths and fills only a file holds), each answer and the
+  whole system compared as written: identical (240,000 operations). A tripwire: no step copies
+  the layout table (64 layouts; the largest allocation of a step 1576 bytes, a copy several
+  times that); the edited layout's own columns are rebuilt each step (O(its columns and rows),
+  as the Rust core's editing form). Plants 15/15 in Roc, and a table copy caught by the
+  tripwire.
+- Next: slice 3, the flip (the core decides and is saved), then Roc decides, rift's
+  arrangement deleted; then the camera.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

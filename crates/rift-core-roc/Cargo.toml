@@ -65,6 +65,10 @@ name = "stack_tree"
 required-features = ["roc"]
 
 [[test]]
+name = "columns"
+required-features = ["roc"]
+
+[[test]]
 name = "group_forest"
 required-features = ["roc"]
 

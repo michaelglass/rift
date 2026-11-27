@@ -593,6 +593,46 @@ pub mod bsp_tree {
 
 /// A stack layout system's stacks (`rift_core::layout::stack_tree::Stacks`) kept in Roc between
 /// operations.
+/// A scrolling layout's arrangements in Roc (`Columns.roc`), stepped by the same events as the
+/// Rust `ColumnSystem`.
+pub struct RocColumns {
+    columns: boundary::columns::ColumnsBox,
+}
+
+// SAFETY: as `RocCore`: the box is owned, never shared, and only stepped through `&mut self`.
+unsafe impl Send for RocColumns {}
+
+impl RocColumns {
+    /// As `ColumnSystem::new`.
+    pub fn new(settings: &rift_core::layout::columns::Settings) -> Self {
+        let host = host();
+        RocColumns {
+            columns: boundary::columns::ColumnsBox::new(settings, &host),
+        }
+    }
+
+    /// The system `view` holds, as `ColumnSystem::from_parts` takes it: `view` must be one
+    /// [`columns::ColumnsView::columns`] parses.
+    pub fn seeded(view: &columns::ColumnsView) -> Self {
+        let host = host();
+        RocColumns {
+            columns: boundary::columns::ColumnsBox::seeded(view, &host),
+        }
+    }
+
+    /// One operation, as [`columns::step`] applies it to a `ColumnSystem`.
+    pub fn step(&mut self, event: columns::Event) -> columns::Answer {
+        let host = host();
+        boundary::in_place(&mut self.columns, |held| held.step(event, &host))
+    }
+
+    /// The whole system, comparable with a Rust one's.
+    pub fn view(&mut self) -> columns::ColumnsView {
+        let host = host();
+        boundary::in_place(&mut self.columns, |held| held.view(&host))
+    }
+}
+
 pub struct RocStackTree {
     stacks: boundary::stack_tree::StackTreeBox,
 }
@@ -1119,6 +1159,253 @@ pub mod stack_tree {
                 orientation: stacks.orientation(),
                 insertion: stacks.insertion(),
                 left_out: stacks.left_out().iter().copied().collect(),
+            }
+        }
+    }
+}
+
+/// A scrolling layout's arrangements on plain keys (`rift_core::layout::columns`), their
+/// operations and views, and the Rust system they are held to.
+pub mod columns {
+    use rift_core::layout::columns::{
+        Arrangement, ColumnId, Direction, DropAction, Edited, Focus, Focused, FrameResize,
+        Fullscreened, Moved, Participation, Query, Removal, ResizeAlong, Settings, Span,
+    };
+    use rift_core::slot_table::{SlotTable, SlotsError};
+
+    pub use crate::bsp_tree::LayoutKey;
+    use crate::bsp_tree::Saved;
+
+    /// The Rust system, on plain keys and windows as words.
+    pub type Columns = rift_core::layout::columns::ColumnSystem<LayoutKey, u64>;
+
+    /// One operation of the system (`ColumnSystem`'s methods, one for one). A removal carries the
+    /// camera's answer to each removal it makes, in order (the columns it makes active after it);
+    /// an app closing lists its windows, which `close_app`'s predicate tells.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Event {
+        CreateLayout,
+        CloneLayout(LayoutKey),
+        RemoveLayout(LayoutKey),
+        Participation(u64, Participation),
+        Settings(Settings),
+        Insert(LayoutKey, u64),
+        RemoveWindow {
+            window: u64,
+            camera: Vec<Vec<ColumnId>>,
+        },
+        ReplaceWindow {
+            from: u64,
+            to: u64,
+        },
+        CloseApp {
+            windows: Vec<u64>,
+            camera: Vec<Vec<ColumnId>>,
+        },
+        ResizeFromFrame(LayoutKey, u64, FrameResize),
+        ActivateColumn(LayoutKey, ColumnId),
+        PreserveWindowSizes {
+            layout: LayoutKey,
+            view: f64,
+            gap: f64,
+            locked: Vec<(u64, f64)>,
+        },
+        ContainsLayout(LayoutKey),
+        WindowParticipates(u64),
+        SelectedWindow(LayoutKey),
+        SelectedLocation(LayoutKey),
+        WindowInDirection(LayoutKey, Direction),
+        ContainsWindow(LayoutKey, u64),
+        HasAnyFullscreenNode(LayoutKey),
+        ParentOfSelectionIsStacked(LayoutKey),
+        /// The app's windows, which `has_windows_for_app`'s predicate tells.
+        HasWindowsForApp(LayoutKey, Vec<u64>),
+        Windows(LayoutKey, Query<u64>),
+        WindowSlot(LayoutKey, u64),
+        CanMoveWindow(LayoutKey, u64, Direction),
+        Focus(LayoutKey, Focus<u64>),
+        Swap(LayoutKey, u64, u64),
+        MoveSelection(LayoutKey, Direction),
+        Drop {
+            layout: LayoutKey,
+            source: u64,
+            target: u64,
+            action: DropAction,
+        },
+        Join(LayoutKey, Direction),
+        ConsumeOrExpel(LayoutKey, Direction),
+        Stack(LayoutKey),
+        Unstack(LayoutKey),
+        Unjoin(LayoutKey),
+        Resize {
+            layout: LayoutKey,
+            amount: f64,
+            along: ResizeAlong,
+            span: Option<Span>,
+        },
+        SwitchPreset {
+            layout: LayoutKey,
+            backwards: bool,
+            span: Option<Span>,
+        },
+        ToggleFullscreen(LayoutKey, bool),
+    }
+
+    /// What an operation answers.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Answer {
+        Layout(LayoutKey),
+        Done,
+        Verdict(bool),
+        Window(Option<u64>),
+        Location(Option<(usize, usize)>),
+        Windows(Vec<u64>),
+        Slot(Option<Vec<usize>>),
+        Focused(Focused<u64>),
+        Edited(Edited<u64>),
+        Moved(Option<Moved>),
+        Removals(Vec<(LayoutKey, Removal)>),
+        AppRemovals(Vec<(LayoutKey, u64, Removal)>),
+        Fullscreened(Fullscreened<u64>),
+        Fixed(Vec<ColumnId>),
+    }
+
+    /// The camera's answers, taken in order; none once they run out.
+    fn answers(camera: Vec<Vec<ColumnId>>) -> impl FnMut() -> Vec<ColumnId> {
+        let mut camera = camera.into_iter();
+        move || camera.next().unwrap_or_default()
+    }
+
+    /// `event` applied to the Rust system, and what it answers.
+    pub fn step(columns: &mut Columns, event: Event) -> Answer {
+        match event {
+            Event::CreateLayout => Answer::Layout(columns.create_layout()),
+            Event::CloneLayout(layout) => Answer::Layout(columns.clone_layout(layout)),
+            Event::RemoveLayout(layout) => {
+                columns.remove_layout(layout);
+                Answer::Done
+            }
+            Event::Participation(window, participation) => {
+                Answer::Verdict(columns.set_window_participation(window, participation))
+            }
+            Event::Settings(settings) => {
+                columns.set_settings(settings);
+                Answer::Done
+            }
+            Event::Insert(layout, window) => Answer::Verdict(columns.insert(layout, window)),
+            Event::RemoveWindow { window, camera } => {
+                let mut next = answers(camera);
+                Answer::Removals(columns.remove_window(window, |_, _| next()))
+            }
+            Event::ReplaceWindow { from, to } => {
+                columns.replace_window(from, to);
+                Answer::Done
+            }
+            Event::CloseApp { windows, camera } => {
+                let mut next = answers(camera);
+                Answer::AppRemovals(
+                    columns.close_app(|window| windows.contains(&window), |_, _, _| next()),
+                )
+            }
+            Event::ResizeFromFrame(layout, window, resize) => {
+                Answer::Verdict(columns.resize_from_frame(layout, window, resize))
+            }
+            Event::ActivateColumn(layout, id) => {
+                Answer::Verdict(columns.activate_column(layout, id))
+            }
+            Event::PreserveWindowSizes { layout, view, gap, locked } => {
+                Answer::Fixed(columns.preserve_window_sizes(layout, view, gap, |window| {
+                    locked.iter().find(|(held, _)| *held == window).map(|&(_, width)| width)
+                }))
+            }
+            Event::ContainsLayout(layout) => Answer::Verdict(columns.contains_layout(layout)),
+            Event::WindowParticipates(window) => {
+                Answer::Verdict(columns.window_participates(window))
+            }
+            Event::SelectedWindow(layout) => Answer::Window(columns.selected_window(layout)),
+            Event::SelectedLocation(layout) => Answer::Location(columns.selected_location(layout)),
+            Event::WindowInDirection(layout, direction) => {
+                Answer::Window(columns.window_in_direction(layout, direction))
+            }
+            Event::ContainsWindow(layout, window) => {
+                Answer::Verdict(columns.contains_window(layout, window))
+            }
+            Event::HasAnyFullscreenNode(layout) => {
+                Answer::Verdict(columns.has_any_fullscreen_node(layout))
+            }
+            Event::ParentOfSelectionIsStacked(layout) => {
+                Answer::Verdict(columns.parent_of_selection_is_stacked(layout))
+            }
+            Event::HasWindowsForApp(layout, windows) => Answer::Verdict(
+                columns.has_windows_for_app(layout, |window| windows.contains(&window)),
+            ),
+            Event::Windows(layout, query) => Answer::Windows(columns.windows(layout, query)),
+            Event::WindowSlot(layout, window) => Answer::Slot(columns.window_slot(layout, window)),
+            Event::CanMoveWindow(layout, window, direction) => {
+                Answer::Verdict(columns.can_move_window(layout, window, direction))
+            }
+            Event::Focus(layout, focus) => Answer::Focused(columns.focus(layout, focus)),
+            Event::Swap(layout, a, b) => Answer::Verdict(columns.swap_windows(layout, a, b)),
+            Event::MoveSelection(layout, direction) => {
+                Answer::Moved(columns.move_selection(layout, direction))
+            }
+            Event::Drop { layout, source, target, action } => {
+                Answer::Verdict(columns.drop_window(layout, source, target, action))
+            }
+            Event::Join(layout, direction) => {
+                Answer::Verdict(columns.join_selection(layout, direction))
+            }
+            Event::ConsumeOrExpel(layout, direction) => {
+                Answer::Edited(columns.consume_or_expel(layout, direction))
+            }
+            Event::Stack(layout) => Answer::Windows(columns.stack(layout)),
+            Event::Unstack(layout) => Answer::Windows(columns.unstack(layout)),
+            Event::Unjoin(layout) => Answer::Verdict(columns.unjoin(layout)),
+            Event::Resize { layout, amount, along, span } => {
+                Answer::Edited(columns.resize_selection(layout, amount, along, span))
+            }
+            Event::SwitchPreset { layout, backwards, span } => {
+                Answer::Verdict(columns.switch_preset_column_width(layout, backwards, span))
+            }
+            Event::ToggleFullscreen(layout, within_gaps) => {
+                Answer::Fullscreened(columns.toggle_fullscreen(layout, within_gaps))
+            }
+        }
+    }
+
+    /// The whole system, comparable: the table's slots and free list, the windows left out in
+    /// order, the settings.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ColumnsView {
+        pub layouts: Vec<Saved<Arrangement<u64>>>,
+        pub layout_free: Vec<u32>,
+        pub left_out: Vec<u64>,
+        pub settings: Settings,
+    }
+
+    impl ColumnsView {
+        /// The Rust system this view holds, its table parsed as slotmap reads it.
+        pub fn columns(&self) -> Result<Columns, SlotsError> {
+            let taking: Vec<u32> = self.layout_free.iter().rev().copied().collect();
+            Ok(Columns::from_parts(
+                SlotTable::parse(self.layouts.clone())?.resumed(&taking)?,
+                self.left_out.iter().copied().collect(),
+                self.settings.clone(),
+            ))
+        }
+    }
+
+    impl From<&Columns> for ColumnsView {
+        fn from(columns: &Columns) -> Self {
+            ColumnsView {
+                layouts: columns
+                    .layouts()
+                    .saved()
+                    .map(|(held, version)| (held.map(|(_, a)| a.clone()), version))
+                    .collect(),
+                layout_free: columns.layouts().free().to_vec(),
+                left_out: columns.left_out().iter().copied().collect(),
+                settings: columns.settings().clone(),
             }
         }
     }

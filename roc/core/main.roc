@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackTreeStack, StackFramesQuestion, GroupTreeNode, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingGeometry, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer]
+import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackTreeStack, StackFramesQuestion, GroupTreeNode, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingGeometry, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer, ColumnsArrangement]
 import Geometry
 import Bsp
 import Traditional
@@ -20,6 +20,7 @@ import BspTree
 import Slots
 import StackTree
 import GroupForest
+import Columns
 
 ## The events, effects and their payloads are the platform's (`Boundary.Event`,
 ## `Boundary.Effect`): taking the platform's own types, not ones of the same shape, is what keeps
@@ -119,6 +120,9 @@ Masters : { forest : GroupForestHeld, settings : MasterSettings }
 ## A floating layout system, kept between operations: its forest and each window's kept frame.
 Floatings : { forest : GroupForestHeld, geometry : Dict(U64, FloatingGeometry) }
 
+## A scrolling layout's arrangements, kept between operations.
+Cols : { layouts : Slots(ColumnsArrangement), left_out : Set(U64), settings : ColumnsSettings }
+
 Model : {
 	windows : Dict(WindowId, Record),
 
@@ -134,7 +138,7 @@ Model : {
 	armed : Armed,
 }
 
-core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_seed, bsp_tree_step, bsp_tree_view, bsp_tree_frames, stack_tree_init, stack_tree_seed, stack_tree_step, stack_tree_view, stack_tree_frames, traditional_tree_init, traditional_tree_seed, traditional_tree_step, traditional_tree_view, traditional_tree_layout, master_stack_init, master_stack_seed, master_stack_step, master_stack_view, master_stack_layout, floating_tree_init, floating_tree_seed, floating_tree_step, floating_tree_view, floating_tree_layout, narrow }
+core = { init, step, bsp, traditional, strip, settle, floating, axis, translate, floating_layout, removal_focus, focus_candidate, hides_focus, activation_follow, display_to_follow, untracked_focus, focuses_desktop, discovered_space, discovery_spaces, admit_space_snapshot, app_rule_candidates, rule_targets, rule_refreshes_layout, pointer_display_target, is_native_transient, keeps_transient, misplaced, out_of_inventory_view, reapplies_on_title_change, window_admission, lifecycle_read, lifecycle_presence, lifecycle_net, inventory_retirement, workspace_step, workspace_resolve, workspace_previous, joined_steps, workspace_eligible, emits_window, quarantines, target_display, mouse_raise, lifecycle_init, lifecycle_step, lifecycle_invalidate, lifecycle_revalidate, lifecycle_view, workspaces_init, workspaces_step, workspaces_view, mode_verdict, main_window_init, main_window_step, main_window_view, bsp_tree_init, bsp_tree_seed, bsp_tree_step, bsp_tree_view, bsp_tree_frames, stack_tree_init, stack_tree_seed, stack_tree_step, stack_tree_view, stack_tree_frames, traditional_tree_init, traditional_tree_seed, traditional_tree_step, traditional_tree_view, traditional_tree_layout, master_stack_init, master_stack_seed, master_stack_step, master_stack_view, master_stack_layout, floating_tree_init, floating_tree_seed, floating_tree_step, floating_tree_view, floating_tree_layout, columns_init, columns_seed, columns_step, columns_view, narrow }
 
 # The layout questions, typed (`Boundary`). The core modules take and answer the platform's own
 # types: a plain record or union never passes for a named one, nor a named one for a plain one.
@@ -595,6 +599,28 @@ floating_tree_view = |system| { model: system, view: GroupForest.floating_view(s
 ## A floating layout question's answer (the system unchanged).
 floating_tree_layout : Floatings, FloatingLayoutQuestion -> { model : Floatings, answer : FloatingLayoutAnswer }
 floating_tree_layout = |system, question| { model: system, answer: GroupForest.floating_layout(system, question) }
+
+## A scrolling layout's arrangements: no layouts, no windows left out.
+columns_init : ColumnsSettings -> Cols
+columns_init = |settings| Columns.empty(settings)
+
+## A scrolling layout's arrangements as the platform holds them.
+columns_seed : ColumnsSeed -> Cols
+columns_seed = |seed| Columns.seeded(seed)
+
+## One operation of the arrangements, and what it answers.
+columns_step : Cols, ColumnsEvent -> { model : Cols, answer : ColumnsAnswer }
+columns_step = |cols, event| {
+	(model, answer) = Columns.step(cols, event)
+	{ model, answer }
+}
+
+## The arrangements as the platform holds them.
+columns_view : Cols -> { model : Cols, view : ColumnsSeed }
+columns_view = |cols| {
+	viewed = Columns.view(cols)
+	{ model: cols, view: { layouts: viewed.layouts, layout_free: viewed.layout_free, left_out: viewed.left_out, settings: viewed.settings } }
+}
 
 ## The mode table's verdict on an initiative.
 mode_verdict : ModesQuestion -> ModeVerdict
