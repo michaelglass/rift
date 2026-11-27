@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use rift_core::display_memory::{DisplayEvent, LastSpace};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -209,8 +210,8 @@ pub struct LayoutEngine {
     constraints: crate::roc_twin::TwinnedConstraints,
     workspaces: WorkspaceStore,
     layout_settings: LayoutSettings,
-    space_display_map: HashMap<SpaceId, Option<String>>,
-    display_last_space: HashMap<String, SpaceId>,
+    /// Each Space's display and each display's last Space (engine slice E3).
+    displays: crate::roc_twin::TwinnedDisplays,
     persistence: PersistenceState,
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
@@ -825,8 +826,8 @@ impl LayoutEngine {
         for (id, ws) in self.workspaces.workspaces.iter_mut() {
             let display = spaces
                 .get(&id)
-                .and_then(|space| self.space_display_map.get(space))
-                .and_then(Option::as_deref);
+                .and_then(|space| self.displays.display_of(*space))
+                .map(String::as_str);
             ws.apply_layout_settings(settings, display);
         }
     }
@@ -1814,47 +1815,42 @@ impl LayoutEngine {
         space: SpaceId,
         display_uuid: Option<&str>,
     ) {
-        // An unchanged topology mapping is a no-op.
-        if display_uuid.is_none() && !self.space_display_map.contains_key(&space) {
-            return;
-        }
-        if let Some(uuid) = display_uuid
-            && self.display_uuid_for_space(space) == Some(uuid)
-            && self.display_last_space.get(uuid) == Some(&space)
-            && !self
-                .workspaces
-                .reading(windows)
-                .workspaces_on(space)
-                .any(|id| self.workspaces[id].home.display().is_none())
-        {
-            return;
-        }
-        if let Some(uuid) = display_uuid {
-            let on_space: Vec<_> = self.workspaces.reading(windows).workspaces_on(space).collect();
-            for id in on_space {
-                let workspace = &mut self.workspaces[id];
-                if workspace.home.display().is_none() {
-                    let by = workspace.home.placed_by().unwrap_or_default();
-                    workspace.home = crate::model::virtual_workspace::Home::placed(
-                        space,
-                        Some(uuid.to_owned()),
-                        by,
-                    );
-                }
+        let Some(uuid) = display_uuid else {
+            if self.displays.step(DisplayEvent::Hidden(space)) {
+                self.sync_scrolling_widths_for_space(windows, space);
             }
-            self.space_display_map.insert(space, Some(uuid.to_owned()));
-            // An unresolved saved Space still needs this display's evidence.
-            if !self.saved_space_is_unresolved(self.display_last_space.get(uuid).copied()) {
-                self.display_last_space.insert(uuid.to_owned(), space);
+            return;
+        };
+        let mut placed = false;
+        let on_space: Vec<_> = self.workspaces.reading(windows).workspaces_on(space).collect();
+        for id in on_space {
+            let workspace = &mut self.workspaces[id];
+            if workspace.home.display().is_none() {
+                let by = workspace.home.placed_by().unwrap_or_default();
+                workspace.home =
+                    crate::model::virtual_workspace::Home::placed(space, Some(uuid.to_owned()), by);
+                placed = true;
             }
+        }
+        // An unresolved saved Space still needs this display's evidence.
+        let last = if self.saved_space_is_unresolved(self.last_space_for_display_uuid(uuid)) {
+            LastSpace::Hold
         } else {
-            self.space_display_map.remove(&space);
+            LastSpace::Follow
+        };
+        let shown = self.displays.step(DisplayEvent::Shown {
+            space,
+            display: uuid.to_owned(),
+            last,
+        });
+        if !(shown || placed) {
+            return;
         }
         self.sync_scrolling_widths_for_space(windows, space);
     }
 
     fn sync_scrolling_widths_for_space(&mut self, windows: Windows<'_>, space: SpaceId) {
-        let display = self.space_display_map.get(&space).and_then(Option::as_deref);
+        let display = self.display_uuid_for_space(space);
         let widths = self.layout_settings.scrolling.widths_for_display(display);
         for id in self.workspaces.reading(windows).workspaces_on(space).collect::<Vec<_>>() {
             if let LayoutSystemKind::Scrolling(system) = &mut self.workspaces[id].layout_system {
@@ -1864,11 +1860,11 @@ impl LayoutEngine {
     }
 
     pub fn last_space_for_display_uuid(&self, display_uuid: &str) -> Option<SpaceId> {
-        self.display_last_space.get(display_uuid).copied()
+        self.displays.last_space(display_uuid)
     }
 
     pub(crate) fn display_uuid_for_space(&self, space: SpaceId) -> Option<&str> {
-        self.space_display_map.get(&space).and_then(Option::as_deref)
+        self.displays.display_of(space).map(String::as_str)
     }
 
     /// Move all per-space layout state from `old_space` to `new_space`.
@@ -1888,15 +1884,7 @@ impl LayoutEngine {
             self.forget_workspace(deleted);
         }
 
-        if let Some(uuid) = self.space_display_map.remove(&old_space) {
-            self.space_display_map.insert(new_space, uuid);
-        }
-
-        for (_uuid, space) in self.display_last_space.iter_mut() {
-            if *space == old_space {
-                *space = new_space;
-            }
-        }
+        self.displays.step(DisplayEvent::Remapped { from: old_space, to: new_space });
     }
 
     /// Drop everything keyed by a workspace that no longer exists; one left behind would no
@@ -1922,8 +1910,7 @@ impl LayoutEngine {
             constraints: Default::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
-            space_display_map: HashMap::default(),
-            display_last_space: HashMap::default(),
+            displays: Default::default(),
             persistence: PersistenceState::default(),
             scroll_boundary: None,
             native_layouts: HashMap::default(),
@@ -3819,7 +3806,7 @@ impl LayoutEngine {
                 ..EventResponse::default()
             };
         }
-        let display = self.space_display_map.get(&target_space).cloned().flatten();
+        let display = self.display_uuid_for_space(target_space).map(str::to_owned);
         self.transfer_workspace(
             window_store,
             id,
@@ -5083,6 +5070,75 @@ mod tests {
                 .active_floating_windows_in_workspace(store.view(), space)
                 .contains(&window)
         );
+    }
+
+    fn shown_space(engine: &mut LayoutEngine, store: &mut OwnedWindows, space: SpaceId) {
+        let _ = engine.handle_event(
+            &mut store.view_mut(),
+            LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+        );
+    }
+
+    /// A Space shown on no display loses its display; the display keeps it as its last Space.
+    #[test]
+    fn a_hidden_space_loses_its_display_and_stays_the_displays_last() {
+        let (mut engine, mut store) = (test_engine(), OwnedWindows::default());
+        let space = SpaceId::new(97);
+        shown_space(&mut engine, &mut store, space);
+        engine.update_space_display(store.view(), space, Some("a"));
+        assert_eq!(engine.display_uuid_for_space(space), Some("a"));
+        engine.update_space_display(store.view(), space, None);
+        assert_eq!(engine.display_uuid_for_space(space), None);
+        assert_eq!(engine.last_space_for_display_uuid("a"), Some(space));
+    }
+
+    /// A remapped Space takes its display, and the display's memory of it, to its successor.
+    #[test]
+    fn a_remapped_space_takes_its_display_along() {
+        let (mut engine, mut store) = (test_engine(), OwnedWindows::default());
+        let (old, new) = (SpaceId::new(97), SpaceId::new(98));
+        shown_space(&mut engine, &mut store, old);
+        engine.update_space_display(store.view(), old, Some("a"));
+        engine.remap_space(&mut store.view_mut(), old, new);
+        assert_eq!(engine.display_uuid_for_space(new), Some("a"));
+        assert_eq!(engine.display_uuid_for_space(old), None);
+        assert_eq!(engine.last_space_for_display_uuid("a"), Some(new));
+    }
+
+    /// A workspace homed with no display on a Space whose display is known (as a file can hold
+    /// one) takes the display and its column widths when the display is next reported, though the
+    /// Space's display did not change.
+    #[test]
+    fn a_workspace_without_a_display_takes_the_spaces_and_its_column_widths() {
+        use crate::common::config::ScrollingWidthOverride;
+        use crate::model::virtual_workspace::{Home, PlacedBy};
+        let mut layout = LayoutSettings {
+            mode: LayoutMode::Scrolling,
+            ..LayoutSettings::default()
+        };
+        layout.scrolling.per_display.insert("a".into(), ScrollingWidthOverride {
+            column_width_ratio: Some(0.45),
+            min_column_width_ratio: None,
+            max_column_width_ratio: None,
+        });
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &layout);
+        let mut store = OwnedWindows::default();
+        let space = SpaceId::new(97);
+        shown_space(&mut engine, &mut store, space);
+        engine.update_space_display(store.view(), space, Some("a"));
+        let unplaced = engine.workspaces.reading(store.view()).active_workspace(space).unwrap();
+        let workspace = &mut engine.workspaces[unplaced];
+        workspace.home = Home::placed(space, None, PlacedBy::Automatic);
+        workspace.apply_layout_settings(&layout, None);
+        let widths = |engine: &LayoutEngine| match &engine.workspaces[unplaced].layout_system {
+            LayoutSystemKind::Scrolling(system) => system.configured_widths(),
+            _ => panic!("a scrolling workspace"),
+        };
+        assert_eq!(widths(&engine), layout.scrolling.widths_for_display(None));
+        assert_ne!(widths(&engine), layout.scrolling.widths_for_display(Some("a")));
+        engine.update_space_display(store.view(), space, Some("a"));
+        assert_eq!(engine.workspaces[unplaced].home.display(), Some("a"));
+        assert_eq!(widths(&engine), layout.scrolling.widths_for_display(Some("a")));
     }
 
     /// A floating window projects onto its Space only while its workspace is the active one and

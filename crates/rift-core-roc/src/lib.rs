@@ -368,6 +368,39 @@ impl RocSizes {
     }
 }
 
+/// What the layout engine remembers of displays (`rift_core::display_memory::DisplayMemory`),
+/// kept in Roc between events. Stepped beside the Rust machine, it must answer the same change
+/// and hold the same state. Spaces and displays are words.
+pub struct RocDisplayMemory {
+    memory: boundary::DisplayMemoryBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocDisplayMemory {}
+
+impl Default for RocDisplayMemory {
+    fn default() -> Self {
+        RocDisplayMemory {
+            memory: boundary::DisplayMemoryBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocDisplayMemory {
+    /// As `DisplayMemory::step`: whether either map changed.
+    pub fn step(&mut self, event: rift_core::display_memory::DisplayEvent<u64, u64>) -> bool {
+        boundary::in_place(&mut self.memory, |memory| memory.step(event))
+    }
+
+    /// The whole machine, as a Rust `DisplayMemory`.
+    pub fn view(&mut self) -> rift_core::display_memory::DisplayMemory<u64, u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.memory, |memory| memory.view(host))
+    }
+}
+
 /// The floating state (`rift_core::floats::Floats`) kept in Roc between events. Stepped beside
 /// the Rust machine, it must hold the same state. Windows and workspaces are words, pids i32,
 /// frames plain rects.

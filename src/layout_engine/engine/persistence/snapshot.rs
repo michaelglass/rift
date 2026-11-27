@@ -65,8 +65,8 @@ struct PersistedLayoutRef<'a> {
     floating_positions: &'a FloatingPositionStore,
     #[serde(rename = "virtual_workspace_manager")]
     workspaces: SavedStoreRef<'a>,
-    space_display_map: &'a HashMap<SpaceId, Option<String>>,
-    display_last_space: &'a HashMap<String, SpaceId>,
+    space_display_map: HashMap<SpaceId, Option<String>>,
+    display_last_space: HashMap<&'a str, SpaceId>,
     #[serde(flatten)]
     identities: &'a PersistedIdentities,
 }
@@ -258,8 +258,15 @@ impl PersistedLayout {
             constraints: Default::default(),
             workspaces: self.loaded.store,
             layout_settings: LayoutSettings::default(),
-            space_display_map: self.space_display_map,
-            display_last_space: self.display_last_space,
+            // A Space saved with no display is one whose display is not known.
+            displays: crate::roc_twin::TwinnedDisplays::seeded(
+                crate::roc_twin::RiftDisplays::from_parts(
+                    self.space_display_map
+                        .into_iter()
+                        .filter_map(|(space, display)| Some((space, display?))),
+                    self.display_last_space,
+                ),
+            ),
             persistence: PersistenceState {
                 pending: self.pending,
                 ..PersistenceState::default()
@@ -320,8 +327,12 @@ impl LayoutEngine {
             floating: &self.floats.persisted_view(floating.positioned_windows()),
             floating_positions: &floating,
             workspaces: self.workspaces.saved(window_store.core_workspaces()),
-            space_display_map: &self.space_display_map,
-            display_last_space: &self.display_last_space,
+            space_display_map: (self.displays.displays())
+                .map(|(space, display)| (space, Some(display.clone())))
+                .collect(),
+            display_last_space: (self.displays.last_spaces())
+                .map(|(display, space)| (display.as_str(), space))
+                .collect(),
             identities: &identities,
         })
         .expect("persisted layout serialization must support all engine layout state")

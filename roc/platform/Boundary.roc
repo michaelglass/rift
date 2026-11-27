@@ -837,6 +837,23 @@ Boundary := [].{
 	## An app's last reported minimum.
 	AppMinimum := { pid : I32, min : Size }
 
+	# What the layout engine remembers of displays (`rift_core::display_memory`), kept between
+	# events. Spaces and displays are one word each.
+
+	## Whether a display's last Space follows the Space it now shows, or holds a saved Space not
+	## resolved yet.
+	LastSpace := [Follow, Hold]
+
+	DisplayShown := { space : U64, display : U64, last : LastSpace }
+
+	DisplayRemap := { from : U64, to : U64 }
+
+	## What the layout engine learns of a Space's display.
+	DisplayEvent := [Shown(DisplayShown), Hidden(U64), Remapped(DisplayRemap), Forgotten(U64)]
+
+	## A Space and a display: the Space's display, or the display's last Space.
+	SpaceDisplay := { space : U64, display : U64 }
+
 	# The floating state (`rift_core::floats`), kept between events. Windows and workspaces are one
 	# word each, pids an I32 (macOS's pid_t).
 

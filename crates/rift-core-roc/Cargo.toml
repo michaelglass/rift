@@ -92,3 +92,7 @@ libmimalloc-sys = { version = "0.1.39", optional = true }
 # builds every member's tests without the Roc nightly).
 [dev-dependencies]
 rift-core-roc = { path = ".", features = ["count-allocations"] }
+
+[[test]]
+name = "display_memory"
+required-features = ["roc"]

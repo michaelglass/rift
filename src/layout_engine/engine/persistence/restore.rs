@@ -213,8 +213,7 @@ impl LayoutEngine {
                 .reading(window_store.read())
                 .workspace_space(target)
                 .expect("a listed workspace has a Space");
-            let display = self.space_display_map.get(&target_space);
-            let display = display.and_then(Option::as_deref);
+            let display = self.displays.display_of(target_space).map(String::as_str);
             let workspace = &mut self.workspaces[target];
             workspace.restore_contents(saved);
             workspace.apply_layout_settings(layout_settings, display);

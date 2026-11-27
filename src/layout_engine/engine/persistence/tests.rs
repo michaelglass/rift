@@ -1054,3 +1054,52 @@ fn scrolling_checkpoint_preserves_selection_and_viewport_through_readmission() {
         assert_eq!(frames(&mut engine, &store), expected);
     }
 }
+
+/// A display shown before its saved Space is resolved keeps that Space as its last: it is the
+/// evidence the resolution remaps the saved Space by.
+#[test]
+fn a_display_holds_its_unresolved_saved_space_until_it_is_resolved() {
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::PerDisplay,
+        ..Default::default()
+    };
+    let (old, new) = (SpaceId::new(811), SpaceId::new(812));
+    let file = session(&settings, &[(old, "display", &[win(81, 1)])]);
+    let (mut engine, mut store) = boot(&settings, &file);
+    let saved = engine.workspaces.reading(store.view()).workspace_ids(old);
+    engine.update_space_display(store.view(), new, Some("display"));
+    assert_eq!(engine.last_space_for_display_uuid("display"), Some(old));
+    assert_eq!(engine.display_uuid_for_space(new), Some("display"));
+    resolve(&mut engine, &mut store.view_mut(), &[(new, "display")], &[(
+        "display",
+        &[new],
+    )]);
+    assert_eq!(engine.workspaces.reading(store.view()).workspace_ids(new), saved);
+    // Resolved, the display's last Space follows what it shows.
+    engine.update_space_display(store.view(), new, Some("display"));
+    assert_eq!(engine.last_space_for_display_uuid("display"), Some(new));
+}
+
+/// A saved Space that is gone, from a display still connected, is dropped with its display.
+#[test]
+fn a_gone_saved_space_leaves_no_display_behind() {
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::PerDisplay,
+        ..Default::default()
+    };
+    let (gone, last, new) = (SpaceId::new(821), SpaceId::new(822), SpaceId::new(823));
+    let (engine, store) = fresh(&settings, &[(gone, "display"), (last, "display")]);
+    let file = engine.serialize_to_string(store.view());
+    let (mut engine, mut store) = boot(&settings, &file);
+    resolve(&mut engine, &mut store.view_mut(), &[(new, "display")], &[(
+        "display",
+        &[new],
+    )]);
+    assert_eq!(
+        engine.display_uuid_for_space(new),
+        Some("display"),
+        "the last one remapped"
+    );
+    assert_eq!(engine.display_uuid_for_space(gone), None);
+    assert_eq!(engine.display_uuid_for_space(last), None);
+}

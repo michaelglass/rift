@@ -8,6 +8,7 @@
 
 pub mod constraints;
 pub mod core;
+pub mod display_memory;
 pub mod floats;
 pub mod focus;
 pub mod layout;

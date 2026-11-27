@@ -43,7 +43,7 @@ impl LayoutEngine {
         let proposed: Vec<(SpaceId, SpaceId)> = current_spaces
             .iter()
             .filter_map(|(current, display, _)| {
-                let old = *self.display_last_space.get(display)?;
+                let old = self.last_space_for_display_uuid(display)?;
                 (old != *current && saved.contains(&old)).then_some((old, *current))
             })
             .collect();
@@ -109,8 +109,7 @@ impl LayoutEngine {
                 for id in removed {
                     self.forget_workspace(id);
                 }
-                self.space_display_map.remove(&space);
-                self.display_last_space.retain(|_, last| *last != space);
+                self.displays.step(rift_core::display_memory::DisplayEvent::Forgotten(space));
             }
         }
         if opened {

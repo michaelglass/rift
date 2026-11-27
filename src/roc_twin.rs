@@ -66,6 +66,17 @@ pub(crate) fn constraints_reseeds() -> u64 {
     CONSTRAINTS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// How many times the display memory's Rust shadow was re-seeded from the Roc core.
+#[cfg(feature = "roc-core")]
+static DISPLAYS_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the display memory's Rust shadow has been re-seeded from the Roc core (each one
+/// a `roc-divergence:` warned).
+#[cfg(feature = "roc-core")]
+pub(crate) fn displays_reseeds() -> u64 {
+    DISPLAYS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How many times the joined workspaces' Rust shadow was re-seeded from the Roc core.
 #[cfg(feature = "roc-core")]
 static WORKSPACES_RESEEDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -815,6 +826,198 @@ impl TwinnedConstraints {
     }
 }
 
+/// What the layout engine remembers of displays as it holds them (engine slice E3).
+pub(crate) type RiftDisplays = rift_core::display_memory::DisplayMemory<SpaceId, String>;
+
+/// An event of the display memory as the engine steps it.
+pub(crate) type RiftDisplayEvent = rift_core::display_memory::DisplayEvent<SpaceId, String>;
+
+/// Each Space's display and each display's last Space (engine slice E3), with its Roc twin under
+/// `roc-core`. Flipped (policy (a)): under `roc-core` the Roc core decides and the Rust machine is
+/// its shadow, read through `Deref` and re-seeded on any difference. A display crosses as a word:
+/// its place in the twin's table of display names, which only grows.
+#[derive(Default)]
+pub(crate) struct TwinnedDisplays {
+    rust: RiftDisplays,
+    #[cfg(feature = "roc-core")]
+    twin: DisplaysTwin,
+}
+
+#[cfg(feature = "roc-core")]
+#[derive(Default)]
+struct DisplaysTwin {
+    roc: rift_core_roc::RocDisplayMemory,
+    names: Vec<String>,
+    steps: u64,
+}
+
+#[cfg(feature = "roc-core")]
+impl DisplaysTwin {
+    /// `display`'s word: its place in the table, added if new.
+    fn word(&mut self, display: &str) -> u64 {
+        let place = match self.names.iter().position(|named| named == display) {
+            Some(place) => place,
+            None => {
+                self.names.push(display.to_owned());
+                self.names.len() - 1
+            }
+        };
+        place as u64
+    }
+
+    fn event(
+        &mut self,
+        event: &RiftDisplayEvent,
+    ) -> rift_core::display_memory::DisplayEvent<u64, u64> {
+        use rift_core::display_memory::DisplayEvent as E;
+
+        use crate::roc_path::Word;
+        match event {
+            E::Shown { space, display, last } => E::Shown {
+                space: space.word(),
+                display: self.word(display),
+                last: *last,
+            },
+            E::Hidden(space) => E::Hidden(space.word()),
+            E::Remapped { from, to } => E::Remapped {
+                from: from.word(),
+                to: to.word(),
+            },
+            E::Forgotten(space) => E::Forgotten(space.word()),
+        }
+    }
+}
+
+impl Deref for TwinnedDisplays {
+    type Target = RiftDisplays;
+
+    fn deref(&self) -> &Self::Target { &self.rust }
+}
+
+impl std::fmt::Debug for TwinnedDisplays {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.rust.fmt(f) }
+}
+
+impl TwinnedDisplays {
+    /// A loaded memory: the Roc core is stepped to the same state (each last Space shown on its
+    /// display and hidden again, then each Space shown without moving a last Space).
+    pub(crate) fn seeded(rust: RiftDisplays) -> Self {
+        #[cfg(feature = "roc-core")]
+        let twin = {
+            use rift_core::display_memory::{DisplayEvent, LastSpace};
+            let mut twin = DisplaysTwin::default();
+            let mut seed = |event: RiftDisplayEvent| {
+                let plain = twin.event(&event);
+                twin.roc.step(plain);
+            };
+            for (display, space) in rust.last_spaces() {
+                let display = display.clone();
+                seed(DisplayEvent::Shown {
+                    space,
+                    display,
+                    last: LastSpace::Follow,
+                });
+                seed(DisplayEvent::Hidden(space));
+            }
+            for (space, display) in rust.displays() {
+                let display = display.clone();
+                seed(DisplayEvent::Shown {
+                    space,
+                    display,
+                    last: LastSpace::Hold,
+                });
+            }
+            twin
+        };
+        let seeded = TwinnedDisplays {
+            rust,
+            #[cfg(feature = "roc-core")]
+            twin,
+        };
+        // Tests compare the seed at once: a load is often not followed by a step.
+        #[cfg(all(test, feature = "roc-core"))]
+        {
+            let mut seeded = seeded;
+            let (rust, view) = (seeded.rust_view(), seeded.twin.roc.view());
+            if rust != view {
+                crate::roc_path::diverged("display memory seed", &"a saved layout", &rust, &view);
+            }
+            return seeded;
+        }
+        #[allow(unreachable_code)]
+        seeded
+    }
+
+    /// As [`rift_core::display_memory::DisplayMemory::step`]: both must answer the same change,
+    /// and, when due, keep the same state.
+    pub(crate) fn step(&mut self, event: RiftDisplayEvent) -> bool {
+        #[cfg(feature = "roc-core")]
+        let plain = self.twin.event(&event);
+        let answer = self.rust.step(event);
+        #[cfg(feature = "roc-core")]
+        let decided = {
+            use crate::roc_path::diverged;
+            let roc = self.twin.roc.step(plain);
+            let answer_differs = roc != answer;
+            if answer_differs {
+                diverged("display memory step", &plain, &answer, &roc);
+            }
+            self.twin.steps += 1;
+            if answer_differs || cfg!(test) || self.twin.steps.is_multiple_of(VIEW_EVERY) {
+                let rust = self.rust_view();
+                let view = self.twin.roc.view();
+                if rust != view {
+                    diverged("display memory", &plain, &rust, &view);
+                }
+                if answer_differs || rust != view {
+                    self.reseed(view);
+                }
+            }
+            // The Roc core decides.
+            roc
+        };
+        #[cfg(not(feature = "roc-core"))]
+        let decided = answer;
+        decided
+    }
+
+    /// The Rust machine as words, as the Roc core views it.
+    #[cfg(feature = "roc-core")]
+    fn rust_view(&mut self) -> rift_core::display_memory::DisplayMemory<u64, u64> {
+        use crate::roc_path::Word;
+        let displays: Vec<_> = (self.rust.displays())
+            .map(|(space, display)| (space.word(), display.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(space, display)| (space, self.twin.word(&display)))
+            .collect();
+        let lasts: Vec<_> = (self.rust.last_spaces())
+            .map(|(display, space)| (display.clone(), space.word()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(display, space)| (self.twin.word(&display), space))
+            .collect();
+        rift_core::display_memory::DisplayMemory::from_parts(displays, lasts)
+    }
+
+    /// Replace the Rust shadow with the Roc core's state, and count it.
+    #[cfg(feature = "roc-core")]
+    fn reseed(&mut self, view: rift_core::display_memory::DisplayMemory<u64, u64>) {
+        let names = &self.twin.names;
+        // Every word the Roc core holds came from the table.
+        let name = |word: u64| names[word as usize].clone();
+        self.rust = RiftDisplays::from_parts(
+            view.displays().map(|(space, &display)| (SpaceId::new(space), name(display))),
+            view.last_spaces().map(|(&display, space)| (name(display), SpaceId::new(space))),
+        );
+        let reseeds = DISPLAYS_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::warn!(
+            reseeds,
+            "roc-divergence: the display memory's Rust shadow was re-seeded from the Roc core"
+        );
+    }
+}
+
 /// The floating state as the engine holds it (engine slice E2).
 pub(crate) type RiftFloats =
     rift_core::floats::Floats<WindowId, VirtualWorkspaceId, objc2_core_foundation::CGRect>;
@@ -1069,6 +1272,42 @@ mod tests {
             [-4]
         );
         assert!(super::CONSTRAINTS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
+    }
+
+    /// Re-seeding gives the display memory's Rust shadow exactly the Roc core's maps, each display
+    /// back from its word, and is counted; a seeded memory holds the loaded maps in both.
+    #[test]
+    fn a_displays_reseed_makes_the_shadow_the_roc_cores_and_is_counted() {
+        use rift_core::display_memory::{DisplayEvent, LastSpace};
+        let mut displays = super::TwinnedDisplays::seeded(super::RiftDisplays::from_parts(
+            [
+                (SpaceId::new(1), "a".to_owned()),
+                (SpaceId::new(2), "b".to_owned()),
+            ],
+            [
+                ("a".to_owned(), SpaceId::new(3)),
+                ("c".to_owned(), SpaceId::new(2)),
+            ],
+        ));
+        assert_eq!(displays.last_space("a"), Some(SpaceId::new(3)));
+        displays.step(DisplayEvent::Shown {
+            space: SpaceId::new(4),
+            display: "d".to_owned(),
+            last: LastSpace::Follow,
+        });
+        // The shadow loses the Space the Roc core still has.
+        displays.rust.step(DisplayEvent::Forgotten(SpaceId::new(4)));
+        assert_eq!(displays.display_of(SpaceId::new(4)), None, "the shadow lost it");
+        let before = super::DISPLAYS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed);
+        let view = displays.twin.roc.view();
+        displays.reseed(view.clone());
+        assert_eq!(displays.rust_view(), view);
+        assert_eq!(
+            displays.display_of(SpaceId::new(4)).map(String::as_str),
+            Some("d")
+        );
+        assert_eq!(displays.last_space("c"), Some(SpaceId::new(2)));
+        assert!(super::DISPLAYS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
     }
 
     /// An app quitting reaches the Roc core as the same app: its minimum goes in both.

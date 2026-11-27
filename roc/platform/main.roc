@@ -5,7 +5,7 @@
 ## step.
 platform ""
 	requires {
-		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes, Floats : floats] for core : {
+		[Model : model, Windows : windows, Mains : mains, Joined : joined, Trees : trees, Stacks : stacks, Traditionals : traditionals, Masters : masters, Floatings : floatings, Cols : cols, Sizes : sizes, Floats : floats, Remembered : remembered] for core : {
 			init : {} -> model,
 			step : model, Event -> { model : model, effects : List(Effect) },
 			bsp : BspShape -> List(Frame),
@@ -67,6 +67,9 @@ platform ""
 			floats_init : {} -> floats,
 			floats_step : floats, FloatsEvent -> floats,
 			floats_view : floats -> { model : floats, floating : List(U64), fullscreen : List(FloatFullscreenEntry), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) },
+			display_memory_init : {} -> remembered,
+			display_memory_step : remembered, DisplayEvent -> { model : remembered, changed : Bool },
+			display_memory_view : remembered -> { model : remembered, displays : List(SpaceDisplay), last_spaces : List(SpaceDisplay) },
 			narrow : F64 -> F32,
 			bsp_tree_init : BspInsertion -> trees,
 			bsp_tree_seed : BspTreeSeed -> trees,
@@ -125,6 +128,10 @@ platform ""
 		"roc_floats_step": floats_step_for_host,
 		"roc_floats_view": floats_view_for_host,
 		"roc_floats_release": floats_release_for_host,
+		"roc_display_memory_init": display_memory_init_for_host,
+		"roc_display_memory_step": display_memory_step_for_host,
+		"roc_display_memory_view": display_memory_view_for_host,
+		"roc_display_memory_release": display_memory_release_for_host,
 		"roc_narrow": narrow_for_host,
 		"roc_bsp_tree_init": bsp_tree_init_for_host,
 		"roc_bsp_tree_seed": bsp_tree_seed_for_host,
@@ -213,7 +220,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, DisplayEvent, SpaceDisplay, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -256,6 +263,12 @@ SizesViewed := { model : Box(Sizes), windows : List(SizeRecord), app_minimums : 
 
 ## The floating machine, unchanged, and what it holds (each list in word order).
 FloatsViewed := { model : Box(Floats), floating : List(U64), fullscreen : List(FloatFullscreenEntry), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) }
+
+## The display memory after an event, and whether either map changed.
+DisplayMemoryStepped := { model : Box(Remembered), changed : Bool }
+
+## The display memory, unchanged, and what it holds (each list in word order).
+DisplayMemoryViewed := { model : Box(Remembered), displays : List(SpaceDisplay), last_spaces : List(SpaceDisplay) }
 
 ## A BSP layout system's trees after an operation, and what it answered.
 BspTreeStepped := { model : Box(Trees), answer : BspTreeAnswer }
@@ -617,6 +630,29 @@ floats_view_for_host = |boxed| {
 ## The host cannot release a `Box(Floats)`: only Roc knows its layout.
 floats_release_for_host : Box(Floats) -> {}
 floats_release_for_host = |_| {}
+
+## What the layout engine remembers of displays (`rift_core::display_memory::DisplayMemory`),
+## kept between events: nothing, at first.
+display_memory_init_for_host : {} -> Box(Remembered)
+display_memory_init_for_host = |{}| Box.box((core.display_memory_init)({}))
+
+## An event, and whether it changed either map.
+display_memory_step_for_host : Box(Remembered), DisplayEvent -> DisplayMemoryStepped
+display_memory_step_for_host = |boxed, event| {
+	stepped = (core.display_memory_step)(Box.unbox(boxed), event)
+	{ model: Box.box(stepped.model), changed: stepped.changed }
+}
+
+## Each Space's display and each display's last Space, and the machine back unchanged.
+display_memory_view_for_host : Box(Remembered) -> DisplayMemoryViewed
+display_memory_view_for_host = |boxed| {
+	viewed = (core.display_memory_view)(Box.unbox(boxed))
+	{ model: Box.box(viewed.model), displays: viewed.displays, last_spaces: viewed.last_spaces }
+}
+
+## The host cannot release a `Box(Remembered)`: only Roc knows its layout.
+display_memory_release_for_host : Box(Remembered) -> {}
+display_memory_release_for_host = |_| {}
 
 ## The mode table's verdict on an initiative.
 mode_verdict_for_host : ModesQuestion -> ModeVerdict

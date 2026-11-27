@@ -603,7 +603,47 @@ sides: a window word's app is its high half as an I32 (`OfApp for u64`, `Floats.
 Plants 3/3 (a window's app read from its low half, in Roc and in Rust; a quit app's minimum
 removed under another pid). The earlier "equivalent" pid plant has nothing left to cross.
 
-- Next: E3 (native-layout memory and displays).
+#### E3, in three steps
+
+E3's state is three things with different shapes, so it goes in three steps, data first:
+**E3a** the display memory (`space_display_map`, `display_last_space`), **E3b** the evictions
+(`evicted`), **E3c** the native-layout memory (`native_layouts`, `native_reconcile_batch`). The
+snapshots E3c keeps are layout systems, whose own cores hold their state; the E3c machine
+decides which workspaces keep one, which windows each covers and when one is restored or
+dropped, and the snapshots stay host data keyed by its answers.
+
+**E3a (2026-11-28): the display memory is a core machine.**
+`rift_core::display_memory::DisplayMemory<S, D>`, twinned (policy (a)) by
+`roc_twin::TwinnedDisplays` over `roc/core/DisplayMemory.roc`, holds each Space's display and
+each display's last Space; it was the engine's `space_display_map` and `display_last_space`.
+Events: `Shown { space, display, last }`, `Hidden`, `Remapped`, `Forgotten`; each step answers
+whether either map changed.
+- **Whether a display's last Space follows is a `LastSpace::{Follow, Hold}` the engine passes**,
+  not a flag: `Hold` while that last Space is a saved Space not resolved yet, whose evidence it
+  still is. Which saved Spaces are unresolved is persistence state, outside this slice.
+- **A Space's display is a `D`, never an `Option<D>`.** The saved form keeps its
+  `HashMap<SpaceId, Option<String>>` for compatibility; a `None` read from a file is a Space
+  whose display is not known, so it is dropped at load (parsed once) and never written.
+- **Displays cross as words**: each display's place in the twin's table of display names,
+  which only grows. The seed steps the Roc core to a loaded memory (each last Space shown and
+  hidden again, then each Space shown with `Hold`) and is compared at once in tests.
+- `update_space_display` resyncs a Space's column widths when the memory changed or a workspace
+  on the Space took the display as its home; it was an early return on "nothing to do".
+- The step updates in place: the first port read `last_space` after inserting into it, so the
+  insert copied the table; the tripwire (300 Spaces on 300 displays) caught it, and every read
+  now comes first.
+- Tests for what nothing tested: a hidden Space loses its display and stays its display's last;
+  a remapped Space takes its display along; a workspace homed with no display takes the
+  Space's display and its column widths; a display holds its unresolved saved Space until it
+  is resolved (then follows); a gone saved Space leaves no display behind. Differential 80 000
+  steps and the copy tripwire in `rift-core-roc/tests/display_memory.rs`.
+- Plants 10/10: an unresolved saved Space's last Space followed; a hidden Space keeps its
+  display; no width resync for a newly homed workspace; a remap leaves the display behind; a
+  gone saved Space keeps its display; a display saved as none; in Roc, a held last Space
+  followed, a remap leaving last Spaces, a forgotten Space still a last Space, a self-remap
+  moving.
+
+- Next: E3b (the evictions).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

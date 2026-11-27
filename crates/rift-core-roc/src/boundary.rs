@@ -7,6 +7,7 @@
 use std::mem::ManuallyDrop;
 
 use rift_core::constraints::{Constraints, ConstraintsEvent, Observed};
+use rift_core::display_memory::{DisplayEvent, DisplayMemory, LastSpace};
 use rift_core::floats::{Floats, FloatsEvent, FullscreenKind};
 use rift_core::focus::{
     self, Follow, MouseRaise, Removal, RemovalFocus, Stay, Unraised, UntrackedFocus,
@@ -3440,6 +3441,89 @@ impl Drop for SizesBox {
     fn drop(&mut self) {
         // SAFETY: the box is this machine's and is never used again.
         unsafe { abi::roc_sizes_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The display memory.
+
+fn display_event(event: DisplayEvent<u64, u64>) -> abi::BoundaryDisplayEvent {
+    use abi::BoundaryDisplayEventTag as Tag;
+    match event {
+        DisplayEvent::Shown { space, display, last } => union!(
+            BoundaryDisplayEvent,
+            BoundaryDisplayEventPayload.shown(abi::BoundaryDisplayShown {
+                space,
+                display,
+                last: match last {
+                    LastSpace::Follow => abi::BoundaryLastSpace::Follow,
+                    LastSpace::Hold => abi::BoundaryLastSpace::Hold,
+                },
+            }),
+            Tag::Shown
+        ),
+        DisplayEvent::Hidden(space) => union!(
+            BoundaryDisplayEvent,
+            BoundaryDisplayEventPayload.hidden(space),
+            Tag::Hidden
+        ),
+        DisplayEvent::Remapped { from, to } => union!(
+            BoundaryDisplayEvent,
+            BoundaryDisplayEventPayload.remapped(abi::BoundaryDisplayRemap { from, to }),
+            Tag::Remapped
+        ),
+        DisplayEvent::Forgotten(space) => union!(
+            BoundaryDisplayEvent,
+            BoundaryDisplayEventPayload.forgotten(space),
+            Tag::Forgotten
+        ),
+    }
+}
+
+/// The display memory's box, which only Roc can read or free; only the `roc_display_memory_*`
+/// entries make and take one. Dropping it releases the machine.
+pub(crate) struct DisplayMemoryBox(abi::RocBox);
+
+impl DisplayMemoryBox {
+    pub(crate) fn empty() -> DisplayMemoryBox {
+        DisplayMemoryBox(unsafe { abi::roc_display_memory_init() })
+    }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// An event: the machine after it, and whether either map changed.
+    pub(crate) fn step(self, event: DisplayEvent<u64, u64>) -> (DisplayMemoryBox, bool) {
+        // SAFETY: the box is this machine's, given to the step; its successor comes back.
+        let stepped =
+            unsafe { abi::roc_display_memory_step(self.into_raw(), display_event(event)) };
+        (DisplayMemoryBox(stepped.model), stepped.changed)
+    }
+
+    /// Each Space's display and each display's last Space.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (DisplayMemoryBox, DisplayMemory<u64, u64>) {
+        // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_display_memory_view(self.into_raw()) };
+        let view = DisplayMemory::from_parts(
+            viewed.displays.as_slice().iter().map(|e| (e.space, e.display)),
+            viewed.last_spaces.as_slice().iter().map(|e| (e.display, e.space)),
+        );
+        unsafe {
+            viewed.displays.decref(host);
+            viewed.last_spaces.decref(host);
+        }
+        (DisplayMemoryBox(viewed.model), view)
+    }
+}
+
+impl Drop for DisplayMemoryBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this machine's and is never used again.
+        unsafe { abi::roc_display_memory_release(self.0) }
     }
 }
 
