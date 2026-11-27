@@ -23,8 +23,8 @@ use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAct
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
 
-mod core_shadow;
-pub(crate) use core_shadow::{scrolling_divergences, scrolling_shadows};
+mod twinned;
+pub(crate) use twinned::{scrolling_divergences, scrolling_shadows};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(transparent)]
@@ -882,7 +882,7 @@ enum Logged {
 
 #[derive(Clone, Debug, Default)]
 struct Camera {
-    /// This operation's arrangement writes, for the core's shadow (`core_shadow`).
+    /// This operation's arrangement writes, made on the core after rift's side (`twinned`).
     logged: Vec<Logged>,
     viewport: Viewport,
     motion: MotionHistory,
@@ -1432,13 +1432,63 @@ impl LayoutState {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+/// The scrolling layouts. The core's arrangements (`core`) decide and are saved (slice 3, the
+/// flip, `twinned`); `layouts` holds each layout's camera and geometry, and rift's own
+/// arrangement, their shadow, which the camera reads.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(from = "SavedSystem")]
 pub struct ScrollingLayoutSystem {
-    #[serde(skip)]
     inactive: HashSet<WindowId>,
     layouts: slotmap::SlotMap<LayoutId, LayoutState>,
-    #[serde(skip)]
     pub(super) settings: ScrollingLayoutSettings,
+    core: twinned::CoreColumns,
+}
+
+impl Default for ScrollingLayoutSystem {
+    fn default() -> Self {
+        let settings = ScrollingLayoutSettings::default();
+        ScrollingLayoutSystem {
+            inactive: HashSet::default(),
+            layouts: slotmap::SlotMap::default(),
+            core: twinned::CoreColumns::new(twinned::settings(&settings)),
+            settings,
+        }
+    }
+}
+
+/// A saved system: its layouts, read as rift reads them; the core is seeded from them.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SavedSystem {
+    layouts: slotmap::SlotMap<LayoutId, LayoutState>,
+}
+
+impl From<SavedSystem> for ScrollingLayoutSystem {
+    fn from(saved: SavedSystem) -> Self {
+        let mut system = ScrollingLayoutSystem {
+            layouts: saved.layouts,
+            ..ScrollingLayoutSystem::default()
+        };
+        system.core = twinned::seed(&system);
+        system
+    }
+}
+
+// Saving is the core's: each layout's arrangement as the core holds it, in rift's saved form
+// (byte-compatible by construction), beside the layout's camera.
+impl Serialize for ScrollingLayoutSystem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut layouts = self.layouts.clone();
+        for (layout, state) in layouts.iter_mut() {
+            state.arrangement = twinned::rift_arrangement(
+                self.core.arrangement(layout).expect("the core holds every layout rift's does"),
+            );
+        }
+        let mut saved = serializer.serialize_struct("ScrollingLayoutSystem", 1)?;
+        saved.serialize_field("layouts", &layouts)?;
+        saved.end()
+    }
 }
 
 impl ScrollingLayoutSystem {
@@ -1465,6 +1515,7 @@ impl ScrollingLayoutSystem {
             return;
         }
         self.settings = settings;
+        self.core.set_settings(twinned::settings(&self.settings));
         for state in self.layouts.values_mut() {
             state.mutate(&self.settings, &self.inactive, |_| {});
         }
@@ -1477,6 +1528,7 @@ impl ScrollingLayoutSystem {
         self.settings.column_width_ratio = ratio;
         self.settings.min_column_width_ratio = min;
         self.settings.max_column_width_ratio = max;
+        self.core.set_settings(twinned::settings(&self.settings));
         for state in self.layouts.values_mut() {
             state.mutate(&self.settings, &self.inactive, |_| {});
         }
@@ -1560,7 +1612,7 @@ impl ScrollingLayoutSystem {
         gaps: &GapSettings,
         shadow: crate::layout_engine::Shadow,
     ) {
-        let core = core_shadow::begin(self);
+        let due = twinned::begin(self);
         if let Some(state) = self.layouts.get_mut(layout) {
             state.prepare_geometry(
                 &self.settings,
@@ -1573,14 +1625,14 @@ impl ScrollingLayoutSystem {
             );
         }
         // A pass's own writes (the preserved widths, a remembered view's column) are replayed.
-        core_shadow::check_pass(
-            core,
+        twinned::decide_pass(
+            due,
             "prepare",
             self,
-            &(),
+            (),
             |_, _| (),
             |core, at| {
-                core_shadow::preserve(core, at, screen, gaps, |window| {
+                twinned::preserve(core, at, screen, gaps, |window| {
                     constraints.get(&window).map(|c| c.locked_width)
                 });
             },
@@ -1818,11 +1870,12 @@ impl ScrollingLayoutSystem {
         timestamp: Duration,
         animate: bool,
     ) -> Option<ViewportRelease> {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         let release = self.end_viewport_gesture_system(layout, timestamp, animate);
-        // The camera chooses the column it settles on (replayed); the core's selection follows.
+        // The camera chooses the column it settles on (made active on the core); the core's
+        // selection follows, held to the camera's window.
         let window = release.map(|release| release.window);
-        core_shadow::check(shadow, "end_viewport_gesture", self, &window, |_, _| window);
+        twinned::decide(due, "end_viewport_gesture", self, window, |_, _| window);
         release
     }
 
@@ -1954,11 +2007,10 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn snap_to_nearest_column(&mut self, layout: LayoutId) -> Option<WindowId> {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         let window = self.snap_to_nearest_column_system(layout);
-        // The camera chooses the column (replayed); the core's selection follows it.
-        core_shadow::check(shadow, "snap_to_nearest_column", self, &window, |_, _| window);
-        window
+        // The camera chooses the column (made active on the core); the core's selection follows.
+        twinned::decide(due, "snap_to_nearest_column", self, window, |_, _| window)
     }
 
     pub fn center_selected_column(&mut self, layout: LayoutId) {
@@ -1977,17 +2029,12 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn switch_preset_column_width(&mut self, layout: LayoutId, backwards: bool) -> bool {
-        let span = core_shadow::span(self, layout);
-        let shadow = core_shadow::begin(self);
+        let span = twinned::span(self, layout);
+        let due = twinned::begin(self);
         let changed = self.switch_preset_column_width_system(layout, backwards);
-        core_shadow::check(
-            shadow,
-            "switch_preset_column_width",
-            self,
-            &changed,
-            |core, _| core.switch_preset_column_width(layout, backwards, span),
-        );
-        changed
+        twinned::decide(due, "switch_preset_column_width", self, changed, |core, _| {
+            core.switch_preset_column_width(layout, backwards, span)
+        })
     }
 
     fn toggle_fullscreen(&mut self, layout: LayoutId, within_gaps: bool) -> Vec<WindowId> {
@@ -2026,18 +2073,22 @@ impl ScrollingLayoutSystem {
 impl LayoutSystem for ScrollingLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         let answer = self.has_windows_for_app_system(layout, pid);
-        core_shadow::check_query(self, "has_windows_for_app", &answer, |core| {
+        twinned::decide_query(self, "has_windows_for_app", answer, |core| {
             core.has_windows_for_app(layout, |window| window.pid == pid)
-        });
-        answer
+        })
     }
 
-    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
+    fn window_participates(&self, window: WindowId) -> bool {
+        let answer = !self.inactive.contains(&window);
+        twinned::decide_query(self, "window_participates", answer, |core| {
+            core.window_participates(window)
+        })
+    }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         let changed = self.set_window_participation_system(window, participates);
-        core_shadow::check(shadow, "participation", self, &changed, |core, _| {
+        twinned::decide(due, "participation", self, changed, |core, _| {
             core.set_window_participation(
                 window,
                 if participates {
@@ -2046,34 +2097,36 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     rift_core::layout::columns::Participation::LeftOut
                 },
             )
-        });
-        changed
+        })
     }
 
     fn create_layout(&mut self) -> LayoutId {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         let layout = self.create_layout_system();
-        core_shadow::check(shadow, "create_layout", self, &layout, |core, _| {
+        twinned::decide(due, "create_layout", self, layout, |core, _| {
             core.create_layout()
-        });
-        layout
+        })
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        let answer = self.layouts.contains_key(layout);
+        twinned::decide_query(self, "contains_layout", answer, |core| {
+            core.contains_layout(layout)
+        })
+    }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         let clone = self.clone_layout_system(layout);
-        core_shadow::check(shadow, "clone_layout", self, &clone, |core, _| {
+        twinned::decide(due, "clone_layout", self, clone, |core, _| {
             core.clone_layout(layout)
-        });
-        clone
+        })
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         self.remove_layout_system(layout);
-        core_shadow::check(shadow, "remove_layout", self, &(), |core, _| {
+        twinned::decide(due, "remove_layout", self, (), |core, _| {
             core.remove_layout(layout)
         });
     }
@@ -2104,63 +2157,56 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         let answer = self.selected_window_system(layout);
-        core_shadow::check_query(self, "selected_window", &answer, |core| {
+        twinned::decide_query(self, "selected_window", answer, |core| {
             core.selected_window(layout)
-        });
-        answer
+        })
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let answer = self.window_in_direction_system(layout, direction);
-        core_shadow::check_query(self, "window_in_direction", &answer, |core| {
+        twinned::decide_query(self, "window_in_direction", answer, |core| {
             core.window_in_direction(layout, super::core_direction(direction))
-        });
-        answer
+        })
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         let answer = self.contains_window_system(layout, wid);
-        core_shadow::check_query(self, "contains_window", &answer, |core| {
+        twinned::decide_query(self, "contains_window", answer, |core| {
             core.contains_window(layout, wid)
-        });
-        answer
+        })
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         let answer = self.has_any_fullscreen_node_system(layout);
-        core_shadow::check_query(self, "has_any_fullscreen_node", &answer, |core| {
+        twinned::decide_query(self, "has_any_fullscreen_node", answer, |core| {
             core.has_any_fullscreen_node(layout)
-        });
-        answer
+        })
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
         let answer = self.parent_of_selection_is_stacked_system(layout);
-        core_shadow::check_query(self, "parent_of_selection_is_stacked", &answer, |core| {
+        twinned::decide_query(self, "parent_of_selection_is_stacked", answer, |core| {
             core.parent_of_selection_is_stacked(layout)
-        });
-        answer
+        })
     }
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
         let answer = self.windows_system(layout, query);
-        core_shadow::check_query(self, "windows", &answer, |core| {
-            core.windows(layout, core_shadow::query(query))
-        });
-        answer
+        twinned::decide_query(self, "windows", answer, |core| {
+            core.windows(layout, twinned::query(query))
+        })
     }
 
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         let result = self.focus_system(layout, focus);
-        core_shadow::check(shadow, "focus", self, &result, |core, _| {
-            core_shadow::focus(core, layout, focus)
-        });
-        result
+        twinned::decide(due, "focus", self, result, |core, _| {
+            twinned::focus(core, layout, focus)
+        })
     }
 
     fn update(&mut self, change: WindowChange<'_>) {
-        let shadow = core_shadow::begin(self);
+        let due = twinned::begin(self);
         self.update_system(change);
         let what = match change {
             WindowChange::Add(..) => "update: add",
@@ -2169,19 +2215,18 @@ impl LayoutSystem for ScrollingLayoutSystem {
             WindowChange::CloseApp(_) => "update: close app",
             WindowChange::Resize { .. } => "update: resize",
         };
-        core_shadow::check(shadow, what, self, &(), |core, replays| {
-            core_shadow::change(core, &change, replays)
+        twinned::decide(due, what, self, (), |core, replays| {
+            twinned::change(core, &change, replays)
         });
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        let span = core_shadow::span(self, layout);
-        let shadow = core_shadow::begin(self);
+        let span = twinned::span(self, layout);
+        let due = twinned::begin(self);
         let result = self.edit_layout_system(layout, edit);
-        core_shadow::check(shadow, "edit", self, &result, |core, _| {
-            core_shadow::edit(core, layout, edit, span)
-        });
-        result
+        twinned::decide(due, "edit", self, result, |core, _| {
+            twinned::edit(core, layout, edit, span)
+        })
     }
 }
 
@@ -2286,10 +2331,9 @@ impl ScrollingLayoutSystem {
         direction: Direction,
     ) -> bool {
         let answer = self.can_move_window_system(layout, window, direction);
-        core_shadow::check_query(self, "can_move_window", &answer, |core| {
+        twinned::decide_query(self, "can_move_window", answer, |core| {
             core.can_move_window(layout, window, super::core_direction(direction))
-        });
-        answer
+        })
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
@@ -2348,8 +2392,37 @@ impl ScrollingLayoutSystem {
     }
 }
 
+/// The system's own operations that tests call directly, run as the [`LayoutSystem`] methods
+/// run them: decided by the core, rift's own arrangement their shadow.
+#[cfg(test)]
+impl ScrollingLayoutSystem {
+    fn select_window_twinned(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+        let due = twinned::begin(self);
+        let selected = self.select_window(layout, wid);
+        twinned::decide(due, "select_window", self, selected, |core, _| {
+            core.select_window(layout, wid)
+        })
+    }
+
+    fn move_selection_twinned(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let due = twinned::begin(self);
+        let moved = self.move_selection(layout, direction);
+        twinned::decide(due, "move_selection", self, moved, |core, _| {
+            core.move_selection(layout, super::core_direction(direction)).is_some()
+        })
+    }
+
+    fn join_selection_twinned(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let due = twinned::begin(self);
+        let joined = self.join_selection_with_direction(layout, direction);
+        twinned::decide(due, "join_selection", self, joined, |core, _| {
+            core.join_selection(layout, super::core_direction(direction))
+        })
+    }
+}
+
 /// The system's own operations, which the [`LayoutSystem`] methods and the public ones above
-/// run with the core's arrangement as their shadow (`core_shadow`).
+/// run as the core's shadow (`twinned`): the core decides, these step rift's own arrangement.
 impl ScrollingLayoutSystem {
     fn set_window_participation_system(&mut self, window: WindowId, participates: bool) -> bool {
         let changed = super::update_participation(&mut self.inactive, window, participates);
@@ -2891,10 +2964,9 @@ impl ScrollingLayoutSystem {
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         let answer = self.window_slot_system(layout, window);
-        core_shadow::check_query(self, "window_slot", &answer, |core| {
+        twinned::decide_query(self, "window_slot", answer, |core| {
             core.window_slot(layout, window)
-        });
-        answer
+        })
     }
 }
 #[cfg(test)]
@@ -2967,7 +3039,7 @@ pub(crate) mod tests {
                 system.update(WindowChange::Add(layout, wid(index), None));
             }
             if count > 0 {
-                system.select_window(layout, wid(1));
+                system.select_window_twinned(layout, wid(1));
             }
             let mut fixture = Self {
                 system,
@@ -3008,7 +3080,7 @@ pub(crate) mod tests {
         }
 
         fn select(&mut self, index: u32) {
-            assert!(self.system.select_window(self.layout, wid(index)));
+            assert!(self.system.select_window_twinned(self.layout, wid(index)));
         }
 
         fn selected(&self) -> Option<WindowId> { self.system.selected_window(self.layout) }
@@ -3206,7 +3278,7 @@ pub(crate) mod tests {
                 .find(|c| c.children[0].window_id == Some(wid(2).into()))
                 .unwrap();
             assert_ne!(expelled.node_id, destination_id);
-            f.system.join_selection_with_direction(
+            f.system.join_selection_twinned(
                 f.layout,
                 if direction == Direction::Left {
                     Direction::Right
@@ -3216,7 +3288,7 @@ pub(crate) mod tests {
             );
             assert_eq!(f.selected(), Some(wid(2)));
             assert_eq!(f.frame(2).size.height, 560.0);
-            assert!(f.system.move_selection(f.layout, direction));
+            assert!(f.system.move_selection_twinned(f.layout, direction));
             assert_eq!(f.selected(), Some(wid(2)));
             assert_eq!(
                 f.system.window_slot(f.layout, wid(2)),
@@ -3248,6 +3320,81 @@ pub(crate) mod tests {
         assert_eq!(f.frame(3).origin.x, 500.0);
     }
 
+    /// The flip: a difference in rift's own arrangement (the camera's shadow) is counted, and
+    /// the next operation, decided by the core, makes rift's the core's again.
+    #[test]
+    fn a_difference_in_rifts_arrangement_is_reseeded_from_the_core() {
+        let mut f = Fixture::new(3);
+        f.system.layouts[f.layout].arrangement.columns.swap(0, 2);
+        let differences = twinned::tolerating(|| {
+            f.system.update(WindowChange::Add(f.layout, wid(4), None));
+        });
+        assert_eq!(differences, 1);
+        let core = f.system.core.arrangement(f.layout).unwrap();
+        // The core placed the new window by its own order: next to the selection, 1.
+        assert_eq!(core.windows().collect::<Vec<_>>(), vec![
+            wid(1),
+            wid(4),
+            wid(2),
+            wid(3)
+        ]);
+        assert_eq!(
+            twinned::arrangement(&f.system.layouts[f.layout].arrangement),
+            *core
+        );
+    }
+
+    /// The flip: every answer is the core's, an operation's and a query's.
+    #[test]
+    fn the_answers_are_the_cores() {
+        let mut f = Fixture::new(3);
+        f.system.inactive.insert(wid(2));
+        let mut changed = false;
+        let differences = twinned::tolerating(|| {
+            changed = f.system.set_window_participation(wid(2), false);
+        });
+        assert!(changed, "window 2 took part in the core's system");
+        assert_eq!(differences, 1);
+        f.system.layouts[f.layout].arrangement.active_column = 2;
+        let mut selected = None;
+        let differences = twinned::tolerating(|| selected = f.system.selected_window(f.layout));
+        assert_eq!(selected, Some(wid(1)));
+        assert_eq!(differences, 1);
+    }
+
+    /// Per-display width settings reach the core: a resize narrower than their minimum is
+    /// clamped to it on both sides (a difference fails the test).
+    #[test]
+    fn width_settings_reach_the_core() {
+        let mut f = Fixture::new(2);
+        f.system.update_width_settings((0.5, 0.4, 0.6));
+        f.prepare();
+        f.system
+            .edit_layout(f.layout, LayoutEdit::Resize {
+                amount: -0.5,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        let core = f.system.core.arrangement(f.layout).unwrap();
+        let rift_core::layout::columns::Strip::Columns { active, .. } = &core.strip else {
+            panic!("columns")
+        };
+        assert_eq!(active.width, rift_core::layout::columns::Width::Proportion(0.4));
+    }
+
+    /// The flip: saving writes the core's arrangement, not rift's own.
+    #[test]
+    fn saving_writes_the_cores_arrangement() {
+        let mut f = Fixture::new(3);
+        f.system.layouts[f.layout].arrangement.columns.swap(0, 2);
+        let saved: ScrollingLayoutSystem =
+            ron::from_str(&ron::to_string(&f.system).unwrap()).unwrap();
+        assert_eq!(
+            saved.layouts[f.layout].arrangement.windows().collect::<Vec<_>>(),
+            vec![wid(1), wid(2), wid(3)]
+        );
+    }
+
     #[test]
     fn persistence_and_clone_preserve_column_state() {
         let mut f = Fixture::new(3);
@@ -3271,7 +3418,7 @@ pub(crate) mod tests {
         );
         assert_eq!(restored.container_tree(f.layout), tree);
         assert_eq!(presented_frames(&restored, f.layout).collect::<Vec<_>>(), frames);
-        f.system.select_window(clone, wid(3));
+        f.system.select_window_twinned(clone, wid(3));
         f.system.center_selected_column(clone);
         let old_x = f
             .system
@@ -3335,6 +3482,8 @@ pub(crate) mod tests {
         let state: LayoutState = ron::from_str(&text).unwrap();
         let mut system = ScrollingLayoutSystem::default();
         let layout = system.layouts.insert(state);
+        // A layout put in by hand: the core is seeded from it, as a load seeds it.
+        system.core = twinned::seed(&system);
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
         system.prepare_layout(
             layout,

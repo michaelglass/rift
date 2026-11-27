@@ -141,8 +141,31 @@ constraints (`preserve_window_sizes`).
   events are `ForgetWindow`, `ForgetApp`, `RemoveFrom`, answering `Layouts`, `Closing` and
   `Removal(Removed | NotHeld)`. The differential draws each step on its own, so every
   interleaving with other operations is reached.
-- Next: slice 3's flip (the core decides and is saved), then Roc decides, rift's arrangement
-  deleted; then the camera.
+- Slice 3, part 2 (2026-11-27): **the flip** (policy (a); `systems/scrolling/twinned.rs`, was
+  `core_shadow.rs`). `ScrollingLayoutSystem` holds the core (`core: ColumnSystem<LayoutId,
+  WindowId>`), stepped with every operation in every build; every answer, an operation's and a
+  query's, is the core's. Rift's own arrangements (in `layouts`, beside each layout's camera and
+  geometry) step as its shadow, because the camera still reads them: held to the core's after
+  every operation in tests and debug builds, every 32nd in release; a difference is counted
+  (`core: scrolling arrangement divergences`), fails a test, or warns `layout-divergence:` and
+  re-seeds rift's arrangements and windows left out from the core's (`rift_arrangement`). The
+  camera's writes (`Logged`) are made on the core after rift's side, a removal's answer after
+  that removal. **Saving is the core's**: each layout's arrangement as the core holds it, in
+  rift's saved form, so the bytes are rift's by construction; a load reads rift's form and seeds
+  the core from it (`SavedSystem`). Settings (`update_settings`, `update_width_settings`) reach
+  the core. Tests: a difference re-seeded, the answers the core's, saving the core's, width
+  settings reaching the core (each makes rift's side differ on purpose, `twinned::tolerating`).
+  Plants 9/9.
+- **Fullscreen has one source, the row's fill** (the lead's ruling, audited): `ViewBookmark` is
+  `{ column, relative_offset }` and the camera's `fullscreen_restore` is one of them, a camera
+  position and nothing else; whether a window is fullscreen is read from rift's `fullscreen`
+  map, which is the core's fills (re-seeded from them, and saved as `fullscreen_modes` from
+  them). Left for the camera slice: a `fullscreen_restore` can outlive its fullscreen (it is
+  dropped only when the selection leaves its column or the fullscreen ends through the camera);
+  every use is gated on the active column having no fullscreen row, so it only ever restores a
+  position.
+- Next: slice 4, Roc decides (under `roc-core` the Roc columns answer, the Rust core their
+  shadow); slice 5 deletes rift's arrangement (the camera reads the core's); then the camera.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
