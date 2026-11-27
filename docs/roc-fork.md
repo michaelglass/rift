@@ -164,8 +164,24 @@ constraints (`preserve_window_sizes`).
   dropped only when the selection leaves its column or the fullscreen ends through the camera);
   every use is gated on the active column having no fullscreen row, so it only ever restores a
   position.
-- Next: slice 4, Roc decides (under `roc-core` the Roc columns answer, the Rust core their
-  shadow); slice 5 deletes rift's arrangement (the camera reads the core's); then the camera.
+- Slice 4 (2026-11-27): **under `roc-core` the Roc columns decide**
+  (`systems/scrolling/roc_columns.rs`, as floating's step 4). The system's arrangements are a
+  `Decider`: without `roc-core` the Rust core; with it `ColumnsDecider { rust, roc:
+  RefCell<RocColumns> }`, whose methods are the Rust core's, name for name, so the scrolling
+  system and `twinned` call the same methods in either build. Each operation and query goes to
+  both; the Roc answer is rift's, the Rust core's held to it on every call, and the whole
+  systems (`ColumnsView`, compared as written) after every operation in tests and debug builds
+  and every 32nd in a `roc-core` release build. A difference is counted (`roc-core: scrolling
+  columns re-seeds` at exit), fails a test, or warns `roc-divergence:`; an operation's re-seeds
+  the Rust core from the Roc view (`core_of`). An answer of another kind, or naming a window rift
+  never gave the Roc columns, leaves the Rust answer (after the report). An app's windows cross
+  as a list (the windows the Rust core holds that `is_app` tells, left-out ones included), as
+  the differential lists them. Saving stays the Rust core's (equal after every compared
+  operation). Tests: the Roc answer is rift's (an operation's and a query's), a differing Rust
+  core re-seeded from the Roc view, an app closing forgetting its windows left out of every
+  layout. Plants 8/8 (answers and re-seed, the view comparison, the app's and locked widths'
+  lists, the select event, a Roc insertion bug).
+- Next: slice 5 deletes rift's arrangement (the camera reads the core's); then the camera.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

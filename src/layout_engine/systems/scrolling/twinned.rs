@@ -37,6 +37,22 @@ use crate::model::slot_table::of_slotmap;
 /// The core's arrangements over rift's ids.
 pub(super) type CoreColumns = core::ColumnSystem<LayoutId, WindowId>;
 
+/// What decides the arrangements: under `roc-core` the Roc columns, the Rust core their shadow
+/// (`roc_columns`, scrolling slice 4); otherwise the Rust core. Both answer the Rust core's
+/// methods, name for name.
+#[cfg(feature = "roc-core")]
+pub(super) type Decider = super::roc_columns::ColumnsDecider;
+#[cfg(not(feature = "roc-core"))]
+pub(super) type Decider = CoreColumns;
+
+/// The decider holding what `core` holds.
+pub(super) fn decider(core: CoreColumns) -> Decider {
+    #[cfg(feature = "roc-core")]
+    return super::roc_columns::ColumnsDecider::seeded(core);
+    #[cfg(not(feature = "roc-core"))]
+    core
+}
+
 /// A release build holds rift's arrangements to the core's after every this many operations.
 const EVERY: u64 = 32;
 
@@ -242,7 +258,7 @@ pub(super) fn decide<A: PartialEq + Debug>(
     what: &str,
     system: &mut ScrollingLayoutSystem,
     rift: A,
-    core_op: impl FnOnce(&mut CoreColumns, &mut Replays) -> A,
+    core_op: impl FnOnce(&mut Decider, &mut Replays) -> A,
 ) -> A {
     decide_pass(due, what, system, rift, core_op, |_, _| {})
 }
@@ -254,8 +270,8 @@ pub(super) fn decide_pass<A: PartialEq + Debug>(
     what: &str,
     system: &mut ScrollingLayoutSystem,
     rift: A,
-    core_op: impl FnOnce(&mut CoreColumns, &mut Replays) -> A,
-    preserved: impl Fn(&mut CoreColumns, LayoutId),
+    core_op: impl FnOnce(&mut Decider, &mut Replays) -> A,
+    preserved: impl Fn(&mut Decider, LayoutId),
 ) -> A {
     let mut replays = Replays(
         system
@@ -306,7 +322,7 @@ pub(super) fn decide_query<A: PartialEq + Debug>(
     system: &ScrollingLayoutSystem,
     what: &str,
     rift: A,
-    query: impl FnOnce(&CoreColumns) -> A,
+    query: impl FnOnce(&Decider) -> A,
 ) -> A {
     let answer = query(&system.core);
     if due() == Due::Compared {
@@ -355,7 +371,7 @@ fn report(what: &str, difference: &str) {
 
 /// A window change as the core takes it, the frame resize's facts read from rift's change, and
 /// the camera's answer to each removal from the log, made active before the next removal.
-pub(super) fn change(core: &mut CoreColumns, change: &WindowChange<'_>, replays: &mut Replays) {
+pub(super) fn change(core: &mut Decider, change: &WindowChange<'_>, replays: &mut Replays) {
     match *change {
         WindowChange::Add(layout, window, _) => {
             core.insert(layout, window);
@@ -387,7 +403,7 @@ pub(super) fn change(core: &mut CoreColumns, change: &WindowChange<'_>, replays:
 }
 
 /// `window` removed from `layout`, then the camera's answer to that removal made active.
-fn removed(core: &mut CoreColumns, layout: LayoutId, window: WindowId, replays: &mut Replays) {
+fn removed(core: &mut Decider, layout: LayoutId, window: WindowId, replays: &mut Replays) {
     core.remove_from(layout, window);
     for id in replays.removal(layout) {
         core.activate_column(layout, id);
@@ -446,7 +462,7 @@ fn drop_action(action: WindowDropAction) -> Option<core::DropAction> {
 /// An edit as the core makes it, its answer as rift's; `span` the selected column as laid out
 /// before the edit.
 pub(super) fn edit(
-    core: &mut CoreColumns,
+    core: &mut Decider,
     layout: LayoutId,
     edit: LayoutEdit,
     span: Option<core::Span>,
@@ -493,7 +509,7 @@ pub(super) fn edit(
 
 /// A focus as the core takes it, its answer as rift's.
 pub(super) fn focus(
-    core: &mut CoreColumns,
+    core: &mut Decider,
     layout: LayoutId,
     focus: crate::layout_engine::systems::Focus,
 ) -> FocusResult {
@@ -523,7 +539,7 @@ pub(super) fn query(query: WindowQuery) -> core::Query<WindowId> {
 /// A layout pass's preserved widths as the core fixes them: the tiling area's width and the
 /// gap between columns, and each window's locked width.
 pub(super) fn preserve(
-    core: &mut CoreColumns,
+    core: &mut Decider,
     layout: LayoutId,
     screen: objc2_core_foundation::CGRect,
     gaps: &GapSettings,

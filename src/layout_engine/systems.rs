@@ -394,6 +394,8 @@ pub(crate) use bsp::bsp_tree_reseeds;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
 pub(crate) mod scrolling;
+#[cfg(feature = "roc-core")]
+pub(crate) use scrolling::columns_roc_reseeds;
 pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 pub(crate) use scrolling::{scrolling_divergences, scrolling_shadows};
 

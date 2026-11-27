@@ -136,6 +136,10 @@ fn show_roc_core() {
         let reseeds = crate::layout_engine::systems::floating_roc_reseeds();
         println!("roc-core: floating re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: floating re-seeds");
+        // The Rust scrolling arrangements, the deciding Roc columns' shadow (re-seeded from them).
+        let reseeds = crate::layout_engine::systems::columns_roc_reseeds();
+        println!("roc-core: scrolling columns re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: scrolling columns re-seeds");
     }
 }
 

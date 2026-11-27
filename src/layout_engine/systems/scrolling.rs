@@ -23,7 +23,11 @@ use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAct
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
 
+#[cfg(feature = "roc-core")]
+mod roc_columns;
 mod twinned;
+#[cfg(feature = "roc-core")]
+pub(crate) use roc_columns::columns_roc_reseeds;
 pub(crate) use twinned::{scrolling_divergences, scrolling_shadows};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1441,7 +1445,7 @@ pub struct ScrollingLayoutSystem {
     inactive: HashSet<WindowId>,
     layouts: slotmap::SlotMap<LayoutId, LayoutState>,
     pub(super) settings: ScrollingLayoutSettings,
-    core: twinned::CoreColumns,
+    core: twinned::Decider,
 }
 
 impl Default for ScrollingLayoutSystem {
@@ -1450,7 +1454,7 @@ impl Default for ScrollingLayoutSystem {
         ScrollingLayoutSystem {
             inactive: HashSet::default(),
             layouts: slotmap::SlotMap::default(),
-            core: twinned::CoreColumns::new(twinned::settings(&settings)),
+            core: twinned::decider(twinned::CoreColumns::new(twinned::settings(&settings))),
             settings,
         }
     }
@@ -1469,7 +1473,7 @@ impl From<SavedSystem> for ScrollingLayoutSystem {
             layouts: saved.layouts,
             ..ScrollingLayoutSystem::default()
         };
-        system.core = twinned::seed(&system);
+        system.core = twinned::decider(twinned::seed(&system));
         system
     }
 }
@@ -3483,7 +3487,7 @@ pub(crate) mod tests {
         let mut system = ScrollingLayoutSystem::default();
         let layout = system.layouts.insert(state);
         // A layout put in by hand: the core is seeded from it, as a load seeds it.
-        system.core = twinned::seed(&system);
+        system.core = twinned::decider(twinned::seed(&system));
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
         system.prepare_layout(
             layout,
