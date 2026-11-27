@@ -1,46 +1,27 @@
 ## Which windows float, and what the layout engine remembers of them (`rift_core::floats`): the
-## floating windows, a floating window's fullscreen, each Space's active floating windows, the
-## last floating window focused, the engine's focused window, and each workspace's floating
-## frames. Windows, pids, Spaces and workspaces are one word each (a window's pid is its word's
-## high half; a pid word is sign-extended).
+## floating windows, a floating window's fullscreen, the last floating window focused, the engine's
+## focused window, and each workspace's floating frames. Windows and workspaces are one word each,
+## a pid an I32 (macOS's pid_t; a window's pid is its word's high half).
 
-import pf.Boundary exposing [FloatsEvent, FloatFullscreen, FloatFullscreenEntry, FloatSpaceWindow, FloatFrameEntry, MaybeWord, Rect]
+import pf.Boundary exposing [FloatsEvent, FloatFullscreen, FloatFullscreenEntry, FloatFrameEntry, MaybeWord, Rect]
 
 ## The floating state, all of it.
-Kept : { floating : Set(U64), fullscreen : Dict(U64, FloatFullscreen), active : Dict(U64, Set(U64)), floating_focus : MaybeWord, focused : MaybeWord, frames : Dict(U64, Dict(U64, Rect)) }
+Kept : { floating : Set(U64), fullscreen : Dict(U64, FloatFullscreen), floating_focus : MaybeWord, focused : MaybeWord, frames : Dict(U64, Dict(U64, Rect)) }
 
 Floats := [].{
 
 	empty : {} -> Kept
-	empty = |{}| { floating: Set.empty(), fullscreen: Dict.empty(), active: Dict.empty(), floating_focus: Nothing, focused: Nothing, frames: Dict.empty() }
+	empty = |{}| { floating: Set.empty(), fullscreen: Dict.empty(), floating_focus: Nothing, focused: Nothing, frames: Dict.empty() }
 
 	step : Kept, FloatsEvent -> Kept
 	step = |kept, event|
 		match event {
 			Floated(window) => { ..kept, floating: kept.floating.insert(window) }
-			Unfloated(window) => {
-				deactivated = deactivate_everywhere(kept, window)
-				{ ..deactivated, floating: kept.floating.remove(window), fullscreen: kept.fullscreen.remove(window), floating_focus: if (kept.floating_focus == Some(window)) Nothing else kept.floating_focus }
-			}
+			Unfloated(window) => { ..kept, floating: kept.floating.remove(window), fullscreen: kept.fullscreen.remove(window), floating_focus: if (kept.floating_focus == Some(window)) Nothing else kept.floating_focus }
 			Fullscreen(set) =>
 				match set.kind {
 					Fullscreen(kind) => { ..kept, fullscreen: kept.fullscreen.insert(set.window, kind) }
 					NotFullscreen => { ..kept, fullscreen: kept.fullscreen.remove(set.window) }
-				}
-			Activated(at) => { ..kept, active: with_active(kept.active, at.space, |windows| windows.insert(at.window)) }
-			Deactivated(at) => { ..kept, active: with_active(kept.active, at.space, |windows| windows.remove(at.window)) }
-			DeactivatedEverywhere(window) => deactivate_everywhere(kept, window)
-			ActiveRebuilt(rebuilt) => {
-				active = rebuilt.windows.fold(Set.empty(), |set, window| if kept.floating.contains(window) set.insert(window) else set)
-				{ ..kept, active: kept.active.insert(rebuilt.space, active) }
-			}
-			SpaceRemapped(pair) =>
-				if pair.from == pair.to {
-					kept
-				} else {
-					merged = windows_on(kept, pair.to).union(windows_on(kept, pair.from))
-					removed = kept.active.remove(pair.from).remove(pair.to)
-					{ ..kept, active: if merged.is_empty() removed else removed.insert(pair.to, merged) }
 				}
 			FloatingFocus(window) => { ..kept, floating_focus: window }
 			Focused(window) => { ..kept, focused: window }
@@ -56,26 +37,8 @@ Floats := [].{
 			WorkspaceForgotten(workspace) => { ..kept, frames: kept.frames.remove(workspace) }
 		}
 
-	windows_on : Kept, U64 -> Set(U64)
-	windows_on = |kept, space|
-		match kept.active.get(space) {
-			Ok(windows) => windows
-			Err(_) => Set.empty()
-		}
-
-	## `space`'s active windows changed by `change`, in place: taken out of the table first, so
-	## the table no longer shares them (a field bound while its record stays live is copied).
-	with_active : Dict(U64, Set(U64)), U64, (Set(U64) -> Set(U64)) -> Dict(U64, Set(U64))
-	with_active = |active, space, change|
-		match active.get(space) {
-			Ok(windows) => {
-				rest = active.remove(space)
-				rest.insert(space, change(windows))
-			}
-			Err(_) => active.insert(space, change(Set.empty()))
-		}
-
-	## `workspace`'s frames changed by `change`, in place, as `with_active`.
+	## `workspace`'s frames changed by `change`, in place: taken out of the table first, so the
+	## table no longer shares them (a field bound while its record stays live is copied).
 	with_frames : Dict(U64, Dict(U64, Rect)), U64, (Dict(U64, Rect) -> Dict(U64, Rect)) -> Dict(U64, Dict(U64, Rect))
 	with_frames = |frames, workspace, change|
 		match frames.get(workspace) {
@@ -85,9 +48,6 @@ Floats := [].{
 			}
 			Err(_) => frames.insert(workspace, change(Dict.empty()))
 		}
-
-	deactivate_everywhere : Kept, U64 -> Kept
-	deactivate_everywhere = |kept, window| { ..kept, active: kept.active.map(|_, windows| windows.remove(window)) }
 
 	replaced : Kept, U64, U64 -> Kept
 	replaced = |kept, from, to| {
@@ -100,7 +60,6 @@ Floats := [].{
 				Ok(kind) => fullscreen0.insert(to, kind)
 				Err(_) => fullscreen0
 			}
-		active = kept.active.map(|_, windows| if windows.contains(from) windows.remove(from).remove(to).insert(to) else windows.remove(to))
 		floating_focus = if (kept.floating_focus == Some(from)) Some(to) else kept.floating_focus
 		frames = kept.frames.map(
 			|_, in_ws|
@@ -109,21 +68,20 @@ Floats := [].{
 					Err(_) => in_ws.remove(to)
 				},
 		)
-		{ ..kept, floating, fullscreen, active, floating_focus, frames }
+		{ ..kept, floating, fullscreen, floating_focus, frames }
 	}
 
-	## `window`'s app is `pid`: its word's high half is the pid's low 32 bits.
-	of_app : U64, U64 -> Bool
-	of_app = |window, pid| U64.div_trunc_by(window, 4294967296) == pid % 4294967296
+	## `window`'s app is `pid`: its word's high half is the pid.
+	of_app : U64, I32 -> Bool
+	of_app = |window, pid| U64.to_i32_wrap(U64.div_trunc_by(window, 4294967296)) == pid
 
-	app_quit : Kept, U64 -> Kept
+	app_quit : Kept, I32 -> Kept
 	app_quit = |kept, pid| {
 		other = |window| !of_app(window, pid)
 		{
 			..kept,
 			floating: kept.floating.keep_if(other),
 			fullscreen: kept.fullscreen.keep_if(|(window, _)| other(window)),
-			active: kept.active.map(|_, windows| windows.keep_if(other)),
 			floating_focus:
 				match kept.floating_focus {
 					Some(window) => if other(window) kept.floating_focus else Nothing
@@ -142,14 +100,6 @@ Floats := [].{
 
 	fullscreens : Kept -> List(FloatFullscreenEntry)
 	fullscreens = |kept| kept.fullscreen.to_list().sort_with(ascending).map(|(window, kind)| FloatFullscreenEntry.{ window, kind })
-
-	## Every active floating window, by Space then window.
-	active_list : Kept -> List(FloatSpaceWindow)
-	active_list = |kept|
-		kept.active
-			.to_list()
-			.sort_with(ascending)
-			.join_map(|(space, windows)| windows.to_list().sort_with(|a, b| if a < b Before else if a > b After else Same).map(|window| FloatSpaceWindow.{ space, window }))
 
 	## Every floating frame, by workspace then window.
 	frames_list : Kept -> List(FloatFrameEntry)

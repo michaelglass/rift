@@ -1,8 +1,7 @@
 //! The floating state, kept between events: the Roc twin (`RocFloats`) against the Rust machine
 //! (`rift_core::floats::Floats`), on random runs of events. Runs reuse a few windows of a few
-//! apps (one of them a negative pid, as rift's words carry it), a few Spaces and workspaces, so
-//! windows float and tile again, go fullscreen, move between Spaces, take new identities, and
-//! apps quit with frames saved. Every step must leave the same whole state.
+//! apps (one of them a negative pid), a few workspaces, so windows float and tile again, go
+//! fullscreen, take new identities, and apps quit with frames saved. Every step must leave the same whole state.
 
 use rift_core::floats::{Floats, FloatsEvent, FullscreenKind};
 use rift_core::plain::Rect;
@@ -35,8 +34,6 @@ impl Rng {
 
     fn maybe_window(&mut self) -> Option<u64> { self.chance(70).then(|| self.window()) }
 
-    fn space(&mut self) -> u64 { 10 + self.below(3) }
-
     fn workspace(&mut self) -> u64 { (1 << 32) | (1 + self.below(3)) }
 
     fn frame(&mut self) -> Rect {
@@ -48,7 +45,7 @@ impl Rng {
         }
     }
 
-    fn event(&mut self) -> FloatsEvent<u64, u64, u64, u64, Rect> {
+    fn event(&mut self) -> FloatsEvent<u64, i32, u64, Rect> {
         match self.below(26) {
             0..=3 => FloatsEvent::Floated(self.window()),
             4 | 5 => FloatsEvent::Unfloated(self.window()),
@@ -57,30 +54,13 @@ impl Rng {
                 1 => Some(FullscreenKind::Full),
                 _ => Some(FullscreenKind::WithinGaps),
             }),
-            7..=9 => FloatsEvent::Activated {
-                space: self.space(),
-                window: self.window(),
-            },
-            10 => FloatsEvent::Deactivated {
-                space: self.space(),
-                window: self.window(),
-            },
-            11 => FloatsEvent::DeactivatedEverywhere(self.window()),
-            12 => FloatsEvent::ActiveRebuilt {
-                space: self.space(),
-                windows: (0..self.below(4)).map(|_| self.window()).collect(),
-            },
-            13 => FloatsEvent::SpaceRemapped {
-                from: self.space(),
-                to: self.space(),
-            },
-            14 => FloatsEvent::FloatingFocus(self.maybe_window()),
+            7..=14 => FloatsEvent::FloatingFocus(self.maybe_window()),
             15 => FloatsEvent::Focused(self.maybe_window()),
             16 | 17 => FloatsEvent::Replaced {
                 from: self.window(),
                 to: self.window(),
             },
-            18 => FloatsEvent::AppQuit(self.pid() as i64 as u64),
+            18 => FloatsEvent::AppQuit(self.pid()),
             19 if self.chance(20) => FloatsEvent::FloatingTaken,
             19..=21 => FloatsEvent::FrameStored {
                 workspace: self.workspace(),
@@ -98,14 +78,13 @@ impl Rng {
     }
 }
 
-type Machine = Floats<u64, u64, u64, Rect>;
+type Machine = Floats<u64, u64, Rect>;
 
-/// The Rust machine as the Roc twin views it: every part in word order, no empty Space kept.
+/// The Rust machine as the Roc twin views it: every part in order.
 fn canonical(rust: &Machine) -> Machine {
     Floats::from_parts(
         rust.floating(),
         rust.fullscreens(),
-        rust.active(),
         rust.floating_focus(),
         rust.focused(),
         rust.frames(),
@@ -147,8 +126,8 @@ fn the_roc_floats_keep_state_as_the_rust_ones_do() {
     eprintln!("floats: {steps} steps identical, state compared after each");
 }
 
-/// A step updates the state in place: with 200 floating windows, all active, fullscreen and framed
-/// in one workspace (the tables full, so none grows), no step allocates more than a sliver of it.
+/// A step updates the state in place: with 200 floating windows, all fullscreen and framed in one
+/// workspace (the tables full, so none grows), no step allocates more than a sliver of it.
 #[test]
 fn the_roc_floats_step_without_copying_a_table() {
     let mut rng = Rng(0xF10A_7000_0000_0002);
@@ -158,7 +137,6 @@ fn the_roc_floats_step_without_copying_a_table() {
     for &w in &windows {
         for event in [
             FloatsEvent::Floated(w),
-            FloatsEvent::Activated { space: 10, window: w },
             FloatsEvent::Fullscreen(w, Some(FullscreenKind::Full)),
             FloatsEvent::FrameStored {
                 workspace: 1,
@@ -174,9 +152,7 @@ fn the_roc_floats_step_without_copying_a_table() {
     let bound = 2048;
     for step in 0..3000 {
         let w = windows[rng.below(200) as usize];
-        let event = match rng.below(8) {
-            6 => FloatsEvent::Deactivated { space: 10, window: w },
-            7 => FloatsEvent::Activated { space: 10, window: w },
+        let event = match rng.below(6) {
             0 => FloatsEvent::Fullscreen(w, Some(FullscreenKind::Full)),
             1 => FloatsEvent::Fullscreen(w, Some(FullscreenKind::WithinGaps)),
             2 => FloatsEvent::FloatingFocus(Some(w)),

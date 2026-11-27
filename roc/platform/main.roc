@@ -66,7 +66,7 @@ platform ""
 			sizes_view : sizes -> { model : sizes, windows : List(SizeRecord), app_minimums : List(AppMinimum), revision : U64 },
 			floats_init : {} -> floats,
 			floats_step : floats, FloatsEvent -> floats,
-			floats_view : floats -> { model : floats, floating : List(U64), fullscreen : List(FloatFullscreenEntry), active : List(FloatSpaceWindow), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) },
+			floats_view : floats -> { model : floats, floating : List(U64), fullscreen : List(FloatFullscreenEntry), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) },
 			narrow : F64 -> F32,
 			bsp_tree_init : BspInsertion -> trees,
 			bsp_tree_seed : BspTreeSeed -> trees,
@@ -213,7 +213,7 @@ platform ""
 		},
 	}
 
-import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatSpaceWindow, FloatFrameEntry, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
+import Boundary exposing [AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, Rect, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, MaybeWord, Event, Effect, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, Invalidation, Revalidation, OwnershipEvent, Owned, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, FloatsEvent, FloatFullscreenEntry, FloatFrameEntry, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackFramesQuestion, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer]
 
 ## The entries' results: each machine's box and what its step answers. They name the
 ## platform's model variables, so they live here, not in `Boundary`.
@@ -255,7 +255,7 @@ SizesStepped := { model : Box(Sizes), changed : Bool }
 SizesViewed := { model : Box(Sizes), windows : List(SizeRecord), app_minimums : List(AppMinimum), revision : U64 }
 
 ## The floating machine, unchanged, and what it holds (each list in word order).
-FloatsViewed := { model : Box(Floats), floating : List(U64), fullscreen : List(FloatFullscreenEntry), active : List(FloatSpaceWindow), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) }
+FloatsViewed := { model : Box(Floats), floating : List(U64), fullscreen : List(FloatFullscreenEntry), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) }
 
 ## A BSP layout system's trees after an operation, and what it answered.
 BspTreeStepped := { model : Box(Trees), answer : BspTreeAnswer }
@@ -611,7 +611,7 @@ floats_step_for_host = |boxed, event| Box.box((core.floats_step)(Box.unbox(boxed
 floats_view_for_host : Box(Floats) -> FloatsViewed
 floats_view_for_host = |boxed| {
 	viewed = (core.floats_view)(Box.unbox(boxed))
-	{ model: Box.box(viewed.model), floating: viewed.floating, fullscreen: viewed.fullscreen, active: viewed.active, floating_focus: viewed.floating_focus, focused: viewed.focused, frames: viewed.frames }
+	{ model: Box.box(viewed.model), floating: viewed.floating, fullscreen: viewed.fullscreen, floating_focus: viewed.floating_focus, focused: viewed.focused, frames: viewed.frames }
 }
 
 ## The host cannot release a `Box(Floats)`: only Roc knows its layout.

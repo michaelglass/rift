@@ -337,7 +337,7 @@ impl RocMainWindows {
 
 /// Window size constraints (`rift_core::constraints::Constraints`) kept in Roc between events:
 /// every window's record and each app's last minimum. Stepped beside the Rust machine, it must
-/// answer the same change and hold the same state. Windows and pids are words.
+/// answer the same change and hold the same state. Windows are words, pids i32.
 pub struct RocSizes {
     sizes: boundary::SizesBox,
     host: abi::RocHost,
@@ -357,20 +357,20 @@ impl Default for RocSizes {
 
 impl RocSizes {
     /// As `Constraints::step`: whether the records or app minimums changed.
-    pub fn step(&mut self, event: rift_core::constraints::ConstraintsEvent<u64, u64>) -> bool {
+    pub fn step(&mut self, event: rift_core::constraints::ConstraintsEvent<u64, i32>) -> bool {
         boundary::in_place(&mut self.sizes, |sizes| sizes.step(event))
     }
 
     /// The whole machine, as a Rust `Constraints` (records and minimums in word order).
-    pub fn view(&mut self) -> rift_core::constraints::Constraints<u64, u64> {
+    pub fn view(&mut self) -> rift_core::constraints::Constraints<u64, i32> {
         let host = &self.host;
         boundary::in_place(&mut self.sizes, |sizes| sizes.view(host))
     }
 }
 
 /// The floating state (`rift_core::floats::Floats`) kept in Roc between events. Stepped beside
-/// the Rust machine, it must hold the same state. Windows, pids, Spaces and workspaces are
-/// words, frames plain rects.
+/// the Rust machine, it must hold the same state. Windows and workspaces are words, pids i32,
+/// frames plain rects.
 pub struct RocFloats {
     floats: boundary::FloatsBox,
     host: abi::RocHost,
@@ -390,13 +390,12 @@ impl Default for RocFloats {
 
 impl RocFloats {
     /// As `Floats::step`.
-    pub fn step(&mut self, event: rift_core::floats::FloatsEvent<u64, u64, u64, u64, Rect>) {
-        let host = &self.host;
-        boundary::in_place(&mut self.floats, |floats| floats.step(event, host))
+    pub fn step(&mut self, event: rift_core::floats::FloatsEvent<u64, i32, u64, Rect>) {
+        boundary::in_place(&mut self.floats, |floats| floats.step(event))
     }
 
     /// The whole machine, as a Rust `Floats` (each part in word order).
-    pub fn view(&mut self) -> rift_core::floats::Floats<u64, u64, u64, Rect> {
+    pub fn view(&mut self) -> rift_core::floats::Floats<u64, u64, Rect> {
         let host = &self.host;
         boundary::in_place(&mut self.floats, |floats| floats.view(host))
     }

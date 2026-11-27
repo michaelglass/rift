@@ -1,14 +1,14 @@
 ## What the layout passes know of each window's size (`rift_core::constraints`): its
 ## constraints, kept for as long as the window lives (upstream #707), and each app's last
 ## reported minimum, which a `respect_min_size` window reporting none takes. `revision` moves on
-## every change to the records. Windows and apps are one word each (a pid sign-extended).
+## every change to the records. Windows are one word each, pids an I32 (macOS's pid_t).
 
 import pf.Boundary exposing [SizesEvent, SizeObserved, ReportedMin, WindowConstraints, Sizing, Size, SizeRecord, AppMinimum]
 import Geometry exposing [normalized]
 
 ## Every window's constraints, each app's last reported minimum, and how often the records
 ## changed.
-Kept : { windows : Dict(U64, WindowConstraints), app_minimums : Dict(U64, Size), revision : U64 }
+Kept : { windows : Dict(U64, WindowConstraints), app_minimums : Dict(I32, Size), revision : U64 }
 
 Sizes := [].{
 

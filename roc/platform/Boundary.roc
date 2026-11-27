@@ -811,8 +811,8 @@ Boundary := [].{
 	## One app as the machine knows it.
 	MainApp := { pid : U64, standing : AppStanding, last_activation : Initiator, main_window : MaybeWord }
 
-	# Window size constraints (`rift_core::constraints`), kept between events. Windows and apps
-	# are one word each.
+	# Window size constraints (`rift_core::constraints`), kept between events. Windows are one word
+	# each, pids an I32 (macOS's pid_t).
 
 	## A window's reported minimum, if it reports a non-zero one.
 	ReportedMin := [NoMin, Min(Size)]
@@ -820,7 +820,7 @@ Boundary := [].{
 	## A window's size as an observation reports it.
 	SizeObserved := { resizable : Bool, width : F64, height : F64, min : ReportedMin, max_width : F64, max_height : F64 }
 
-	SizeObservation := { window : U64, pid : U64, respect_min_size : Bool, observed : SizeObserved }
+	SizeObservation := { window : U64, pid : I32, respect_min_size : Bool, observed : SizeObserved }
 
 	SizeWidth := { window : U64, width : F64 }
 
@@ -829,16 +829,16 @@ Boundary := [].{
 	SizeReplacement := { from : U64, to : U64 }
 
 	## What the layout engine observes that the constraints machine reads.
-	SizesEvent := [Observed(SizeObservation), WidthSet(SizeWidth), WidthPreserved(SizePreserve), Retired(U64), Replaced(SizeReplacement), AppQuit(U64)]
+	SizesEvent := [Observed(SizeObservation), WidthSet(SizeWidth), WidthPreserved(SizePreserve), Retired(U64), Replaced(SizeReplacement), AppQuit(I32)]
 
 	## A window's constraints.
 	SizeRecord := { window : U64, constraints : WindowConstraints }
 
 	## An app's last reported minimum.
-	AppMinimum := { pid : U64, min : Size }
+	AppMinimum := { pid : I32, min : Size }
 
-	# The floating state (`rift_core::floats`), kept between events. Windows, pids, Spaces and
-	# workspaces are one word each.
+	# The floating state (`rift_core::floats`), kept between events. Windows and workspaces are one
+	# word each, pids an I32 (macOS's pid_t).
 
 	## A floating window shown fullscreen: over the whole screen, or within the gaps.
 	FloatFullscreen := [Full, WithinGaps]
@@ -846,10 +846,6 @@ Boundary := [].{
 	MaybeFloatFullscreen := [NotFullscreen, Fullscreen(FloatFullscreen)]
 
 	FloatFullscreenSet := { window : U64, kind : MaybeFloatFullscreen }
-
-	FloatSpaceWindow := { space : U64, window : U64 }
-
-	FloatRebuild := { space : U64, windows : List(U64) }
 
 	FloatPair := { from : U64, to : U64 }
 
@@ -862,15 +858,10 @@ Boundary := [].{
 		Floated(U64),
 		Unfloated(U64),
 		Fullscreen(FloatFullscreenSet),
-		Activated(FloatSpaceWindow),
-		Deactivated(FloatSpaceWindow),
-		DeactivatedEverywhere(U64),
-		ActiveRebuilt(FloatRebuild),
-		SpaceRemapped(FloatPair),
 		FloatingFocus(MaybeWord),
 		Focused(MaybeWord),
 		Replaced(FloatPair),
-		AppQuit(U64),
+		AppQuit(I32),
 		FloatingTaken,
 		FrameStored(FloatFrame),
 		FramesForgotten(U64),

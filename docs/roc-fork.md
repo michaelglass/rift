@@ -585,10 +585,23 @@ the outer table first, `with_frames` and `with_active`; 7/7); and Roc deciding
 third, a quit app's pid crossing as its low half, being equivalent: Roc compares a window's app
 with the pid's low 32 bits).
 
-**Open, proposed as its own step:** each Space's active floating windows are derived state (the
-floating windows among the active workspace's), rebuilt at activation and kept in step by hand
-at a dozen sites. The machine carries them faithfully; computing them from the core's topology
-and floating set would remove the second source of truth.
+**Then (2026-11-28, the lead's ruling): the active floating windows are computed, never kept.**
+Whether a floating window is active on a Space is now `LayoutEngine::is_floating_active`:
+floating (the machine), in the Space's active workspace and available (the topology and the
+window store). The machine's per-Space set, its five events and the dozen hand-sync sites are
+gone, in Rust, Roc, the boundary and the twin; the machine has no Space type any more. The kept
+set had drifted from its own definition: three of the hand-sync sites added a floating window to
+a Space whose active workspace was not the window's, until the next rebuild. Tests for what the
+hand-sync covered and nothing tested: a floating window is active only while its workspace is
+(a switch away and back; a tiled window never), it projects onto its Space only from the active
+workspace and while available (minimized, it does not), a remapped Space keeps them. Plants 3/3
+(a tiled window counted; any workspace counted; an unavailable window counted).
+
+**And pids cross as I32** (macOS's pid_t), in Boundary and both Roc machines (`Floats`'
+`AppQuit`, `Sizes`' observations, app minimums and `AppQuit`), so no width differs between the
+sides: a window word's app is its high half as an I32 (`OfApp for u64`, `Floats.of_app`).
+Plants 3/3 (a window's app read from its low half, in Roc and in Rust; a quit app's minimum
+removed under another pid). The earlier "equivalent" pid plant has nothing left to cross.
 
 - Next: E3 (native-layout memory and displays).
 

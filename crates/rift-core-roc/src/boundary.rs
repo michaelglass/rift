@@ -3312,7 +3312,7 @@ fn size_observed(observed: Observed) -> abi::BoundarySizeObserved {
     }
 }
 
-fn sizes_event(event: ConstraintsEvent<u64, u64>) -> abi::BoundarySizesEvent {
+fn sizes_event(event: ConstraintsEvent<u64, i32>) -> abi::BoundarySizesEvent {
     use abi::BoundarySizesEventTag as Tag;
     match event {
         ConstraintsEvent::Observed {
@@ -3405,14 +3405,14 @@ impl SizesBox {
     }
 
     /// An observed event: the machine after it, and whether the records or app minimums changed.
-    pub(crate) fn step(self, event: ConstraintsEvent<u64, u64>) -> (SizesBox, bool) {
+    pub(crate) fn step(self, event: ConstraintsEvent<u64, i32>) -> (SizesBox, bool) {
         // SAFETY: the box is this machine's, given to the step; its successor comes back.
         let stepped = unsafe { abi::roc_sizes_step(self.into_raw(), sizes_event(event)) };
         (SizesBox(stepped.model), stepped.changed)
     }
 
     /// Every record and app minimum (in word order) and the revision.
-    pub(crate) fn view(self, host: &abi::RocHost) -> (SizesBox, Constraints<u64, u64>) {
+    pub(crate) fn view(self, host: &abi::RocHost) -> (SizesBox, Constraints<u64, i32>) {
         // SAFETY: as in `step`; the lists are Roc's answer, owned here, read in full, released.
         let viewed = unsafe { abi::roc_sizes_view(self.into_raw()) };
         let windows: Vec<_> = viewed
@@ -3446,8 +3446,8 @@ impl Drop for SizesBox {
 // ---------------------------------------------------------------------------------------------
 // The floating state.
 
-/// The floating machine as words: windows, Spaces and workspaces, frames as plain rects.
-pub(crate) type WordFloats = Floats<u64, u64, u64, Rect>;
+/// The floating machine as words: windows and workspaces, pids as i32, frames as plain rects.
+pub(crate) type WordFloats = Floats<u64, u64, Rect>;
 
 fn float_fullscreen(kind: FullscreenKind) -> abi::BoundaryFloatFullscreen {
     match kind {
@@ -3463,10 +3463,7 @@ fn from_float_fullscreen(kind: abi::BoundaryFloatFullscreen) -> FullscreenKind {
     }
 }
 
-fn floats_event(
-    event: FloatsEvent<u64, u64, u64, u64, Rect>,
-    host: &abi::RocHost,
-) -> abi::BoundaryFloatsEvent {
+fn floats_event(event: FloatsEvent<u64, i32, u64, Rect>) -> abi::BoundaryFloatsEvent {
     use abi::BoundaryFloatsEventTag as Tag;
     match event {
         FloatsEvent::Floated(w) => {
@@ -3504,34 +3501,6 @@ fn floats_event(
                 Tag::Fullscreen
             )
         }
-        FloatsEvent::Activated { space, window } => union!(
-            BoundaryFloatsEvent,
-            BoundaryFloatsEventPayload.activated(abi::BoundaryFloatSpaceWindow { space, window }),
-            Tag::Activated
-        ),
-        FloatsEvent::Deactivated { space, window } => union!(
-            BoundaryFloatsEvent,
-            BoundaryFloatsEventPayload.deactivated(abi::BoundaryFloatSpaceWindow { space, window }),
-            Tag::Deactivated
-        ),
-        FloatsEvent::DeactivatedEverywhere(w) => union!(
-            BoundaryFloatsEvent,
-            BoundaryFloatsEventPayload.deactivated_everywhere(w),
-            Tag::DeactivatedEverywhere
-        ),
-        FloatsEvent::ActiveRebuilt { space, windows } => union!(
-            BoundaryFloatsEvent,
-            BoundaryFloatsEventPayload.active_rebuilt(abi::BoundaryFloatRebuild {
-                space,
-                windows: list(&windows, host),
-            }),
-            Tag::ActiveRebuilt
-        ),
-        FloatsEvent::SpaceRemapped { from, to } => union!(
-            BoundaryFloatsEvent,
-            BoundaryFloatsEventPayload.space_remapped(abi::BoundaryFloatPair { from, to }),
-            Tag::SpaceRemapped
-        ),
         FloatsEvent::FloatingFocus(w) => union!(
             BoundaryFloatsEvent,
             BoundaryFloatsEventPayload.floating_focus(maybe_word(w)),
@@ -3607,13 +3576,9 @@ impl FloatsBox {
         raw
     }
 
-    pub(crate) fn step(
-        self,
-        event: FloatsEvent<u64, u64, u64, u64, Rect>,
-        host: &abi::RocHost,
-    ) -> (FloatsBox, ()) {
+    pub(crate) fn step(self, event: FloatsEvent<u64, i32, u64, Rect>) -> (FloatsBox, ()) {
         // SAFETY: the box is this machine's, given to the step; its successor comes back.
-        let model = unsafe { abi::roc_floats_step(self.into_raw(), floats_event(event, host)) };
+        let model = unsafe { abi::roc_floats_step(self.into_raw(), floats_event(event)) };
         (FloatsBox(model), ())
     }
 
@@ -3628,7 +3593,6 @@ impl FloatsBox {
                 .as_slice()
                 .iter()
                 .map(|e| (e.window, from_float_fullscreen(e.kind))),
-            viewed.active.as_slice().iter().map(|e| (e.space, e.window)),
             from_maybe_word(viewed.floating_focus),
             from_maybe_word(viewed.focused),
             viewed
@@ -3640,7 +3604,6 @@ impl FloatsBox {
         unsafe {
             viewed.floating.decref(host);
             viewed.fullscreen.decref(host);
-            viewed.active.decref(host);
             viewed.frames.decref(host);
         }
         (FloatsBox(viewed.model), floats)

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::BTreeSet;
 use crate::model::VirtualWorkspaceId;
-use crate::sys::screen::SpaceId;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FloatingFullscreenKind {
@@ -67,8 +66,7 @@ fn engine_kind(kind: rift_core::floats::FullscreenKind) -> FloatingFullscreenKin
     }
 }
 
-/// The engine's floating state: the floating windows and their fullscreen, each Space's active
-/// floating windows, the floating focus, each workspace's floating frames and the focused window
+/// The engine's floating state: the floating windows and their fullscreen, the floating focus, each workspace's floating frames and the focused window
 /// (engine slice E2), all of it the core machine's ([`rift_core::floats`]): the engine steps it
 /// and reads it back.
 pub(crate) struct EngineFloats {
@@ -83,7 +81,6 @@ impl EngineFloats {
         EngineFloats {
             core: crate::roc_twin::TwinnedFloats::seeded(FloatsCore::from_parts(
                 floating.floating_windows,
-                [],
                 [],
                 floating.last_floating_focus,
                 None,
@@ -116,39 +113,11 @@ impl EngineFloats {
         self.core.fullscreen_kind(window).map(engine_kind)
     }
 
-    pub(crate) fn add_active(&mut self, space: SpaceId, _pid: pid_t, window: WindowId) {
-        self.step(FloatsEvent::Activated { space, window });
-    }
-
-    pub(crate) fn remove_active(&mut self, space: SpaceId, _pid: pid_t, window: WindowId) {
-        self.step(FloatsEvent::Deactivated { space, window });
-    }
-
-    pub(crate) fn remove_active_for_window(&mut self, window: WindowId) {
-        self.step(FloatsEvent::DeactivatedEverywhere(window));
-    }
-
-    pub(crate) fn active_windows(&self, space: SpaceId) -> impl Iterator<Item = WindowId> + '_ {
-        self.core.active_windows(space)
-    }
-
-    pub(crate) fn is_active(&self, space: SpaceId, window: WindowId) -> bool {
-        self.core.is_active(space, window)
-    }
-
     pub(crate) fn set_last_focus(&mut self, window: Option<WindowId>) {
         self.step(FloatsEvent::FloatingFocus(window));
     }
 
     pub(crate) fn last_focus(&self) -> Option<WindowId> { self.core.floating_focus() }
-
-    pub(crate) fn rebuild_active_for_workspace(&mut self, space: SpaceId, windows: Vec<WindowId>) {
-        self.step(FloatsEvent::ActiveRebuilt { space, windows });
-    }
-
-    pub(crate) fn remap_space(&mut self, from: SpaceId, to: SpaceId) {
-        self.step(FloatsEvent::SpaceRemapped { from, to });
-    }
 
     /// The engine's focused window.
     pub(crate) fn focused(&self) -> Option<WindowId> { self.core.focused() }

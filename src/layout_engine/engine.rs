@@ -922,10 +922,24 @@ impl LayoutEngine {
         window_store: Windows<'_>,
         space: SpaceId,
     ) -> Vec<WindowId> {
-        self.floats
-            .active_windows(space)
-            .filter(|&window| self.is_active_workspace_window(window_store, space, window))
+        self.workspaces
+            .reading(window_store)
+            .windows_in_active_workspace(window_store, space)
+            .into_iter()
+            .filter(|&window| self.is_floating_active(window_store, space, window))
             .collect()
+    }
+
+    /// Whether `window` is an active floating window on `space`: floating, in the Space's active
+    /// workspace and available. Computed from the core's floating set and topology, never kept.
+    fn is_floating_active(
+        &self,
+        window_store: Windows<'_>,
+        space: SpaceId,
+        window: WindowId,
+    ) -> bool {
+        self.floats.is_floating(window)
+            && self.is_active_workspace_window(window_store, space, window)
     }
 
     fn preferred_focus_for_workspace(
@@ -1015,7 +1029,6 @@ impl LayoutEngine {
         if !self.workspaces.set_active_workspace(window_store, space, workspace_id) {
             return EventResponse::default();
         }
-        self.update_active_floating_windows(window_store.read(), space);
 
         EventResponse {
             changed: true,
@@ -1587,8 +1600,7 @@ impl LayoutEngine {
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
             let changed = (workspace.layout_system.set_window_participation(wid, false)
                 && projected)
-                || self.floats.is_active(space, wid);
-            self.floats.remove_active_for_window(wid);
+                || self.is_floating_active(window_store, space, wid);
             if self.floats.focused() == Some(wid) {
                 self.floats.set_focused(None);
             }
@@ -1606,7 +1618,6 @@ impl LayoutEngine {
         let removal = self.remove_window_layout_membership(window_store.read(), wid);
 
         if preserve_floating {
-            self.floats.remove_active_for_window(wid);
         } else {
             self.floats.remove_floating(wid);
         }
@@ -1641,7 +1652,8 @@ impl LayoutEngine {
             if workspace.last_focused() == Some(wid) {
                 workspace.set_last_focused(None);
             }
-            return (projected || self.floats.is_active(space, wid)).then_some(space);
+            return (projected || self.is_floating_active(window_store, space, wid))
+                .then_some(space);
         }
         let active_space = self.space_with_window(window_store, wid);
 
@@ -1688,7 +1700,6 @@ impl LayoutEngine {
             .set_window_participation(wid, true);
 
         if should_be_floating {
-            self.floats.add_active(space, wid.pid, wid);
         } else if let Some(layout) =
             self.workspaces.reading(window_store).active_layout(space, assigned_workspace)
         {
@@ -1778,7 +1789,7 @@ impl LayoutEngine {
             && current
                 .active_layout()
                 .is_some_and(|layout| current.layout_system.contains_window(layout, window));
-        (visible || self.floats.is_active(space, window)).then_some(space)
+        (visible || self.is_floating_active(windows, space, window)).then_some(space)
     }
 
     pub(crate) fn space_with_window(&self, windows: Windows<'_>, wid: WindowId) -> Option<SpaceId> {
@@ -1871,8 +1882,6 @@ impl LayoutEngine {
             return;
         }
 
-        self.floats.remap_space(old_space, new_space);
-
         // Saved native arrangements are keyed by workspace; one for a deleted workspace
         // would no longer resolve.
         for deleted in self.workspaces.remap_space(window_store, old_space, new_space) {
@@ -1935,7 +1944,6 @@ impl LayoutEngine {
         let should_float = effects.should_float(was_floating);
         if should_float {
             self.floats.add_floating(window);
-            self.floats.add_active(space, window.pid, window);
         } else if was_floating {
             self.floats.remove_floating(window);
         }
@@ -2204,7 +2212,6 @@ impl LayoutEngine {
                 }
 
                 if !relocated {
-                    self.floats.remove_active_for_window(wid);
                     let previous_selection = self
                         .workspaces
                         .reading(window_store.read())
@@ -2563,14 +2570,11 @@ impl LayoutEngine {
                             wid, assigned_workspace
                         );
                     }
-
-                    self.floats.remove_active(space, wid.pid, wid);
                 }
                 self.floats.remove_floating(wid);
                 self.floats.set_last_focus(None);
             } else {
                 if let Some(space) = space {
-                    self.floats.add_active(space, wid.pid, wid);
                     if let Some((ws_id, _)) =
                         self.workspaces.reading(window_store.read()).active_layout_for_space(space)
                     {
@@ -3445,7 +3449,6 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
                 let placeable = window_store.read().can_place_window(focused_window);
-                let is_floating = self.floats.is_floating(focused_window);
                 if *follow || target_space != op_space {
                     let mut response = if *follow {
                         self.activate_workspace(
@@ -3479,9 +3482,6 @@ impl LayoutEngine {
                     self.workspaces.reading(window_store.read()).active_workspace(op_space);
 
                 if Some(target_workspace_id) == active_workspace {
-                    if is_floating {
-                        self.floats.add_active(op_space, focused_window.pid, focused_window);
-                    }
                     return EventResponse {
                         changed: true,
                         layout_space: Some(op_space),
@@ -3808,7 +3808,6 @@ impl LayoutEngine {
                 self.workspaces.reading(window_store.read()).active_workspace(target_space)
                     != Some(destination);
             self.workspaces.set_active_workspace(window_store, target_space, destination);
-            self.update_active_floating_windows(window_store.read(), target_space);
             return EventResponse {
                 changed: changed || !moved.is_empty(),
                 workspace_space: Some(target_space),
@@ -3873,10 +3872,6 @@ impl LayoutEngine {
         self.workspaces[id].ensure_layout_for_size(size);
         for &window in &members {
             self.evicted.remove(&window);
-            if self.floats.is_floating(window) {
-                self.floats.remove_active_for_window(window);
-                self.floats.add_active(target, window.pid, window);
-            }
         }
 
         EventResponse {
@@ -3959,10 +3954,8 @@ impl LayoutEngine {
         self.workspaces[source].layout_system.update(WindowChange::Remove(window));
         let project_as_floating = directional.is_none() && was_floating && !target_floating_layout;
         if directional.is_none() {
-            self.floats.remove_active_for_window(window);
             if project_as_floating {
                 self.floats.add_floating(window);
-                self.floats.add_active(space, window.pid, window);
                 if observed {
                     self.workspaces[destination].layout_system.update(WindowChange::Remove(window));
                 }
@@ -4143,17 +4136,6 @@ impl LayoutEngine {
         if self.floats.focused() == Some(from) {
             self.floats.set_focused(Some(to));
         }
-    }
-
-    fn update_active_floating_windows(&mut self, window_store: Windows<'_>, space: SpaceId) {
-        let windows_in_workspace = self
-            .workspaces
-            .reading(window_store)
-            .windows_in_active_workspace(window_store, space)
-            .into_iter()
-            .filter(|wid| !window_store.is_temporarily_unavailable(*wid))
-            .collect();
-        self.floats.rebuild_active_for_workspace(space, windows_in_workspace);
     }
 
     pub(crate) fn store_floating_window_positions(
@@ -5054,6 +5036,8 @@ mod tests {
             ),
         );
         let workspace = engine.workspaces.reading(store.view()).active_workspace(space).unwrap();
+        // A floating window leaves the tiling layout, as the toggle does.
+        engine.remove_window_from_all_tiling_trees(window);
         engine.floats.add_floating(window);
         engine.floats.store(
             workspace,
@@ -5063,26 +5047,83 @@ mod tests {
         (engine, store, space, workspace, window)
     }
 
-    /// A floating window of the active workspace is active on its Space once the workspace is
-    /// activated (the active floating windows rebuilt).
+    /// A floating window is active on its Space while its workspace is the Space's active one,
+    /// and only then (computed from the topology, never kept).
     #[test]
-    fn activating_a_workspace_makes_its_floating_windows_active() {
-        let (mut engine, store, space, _, window) = floating_window();
-        engine.floats.remove_active_for_window(window);
-        assert!(!engine.floats.is_active(space, window));
-        engine.update_active_floating_windows(store.view(), space);
-        assert!(engine.floats.is_active(space, window));
+    fn a_floating_window_is_active_only_while_its_workspace_is() {
+        let (mut engine, mut store, space, workspace, window) = floating_window();
+        assert!(
+            engine
+                .active_floating_windows_in_workspace(store.view(), space)
+                .contains(&window)
+        );
+        let other = engine
+            .workspaces
+            .reading(store.view())
+            .workspaces_on(space)
+            .into_iter()
+            .find(|&id| id != workspace)
+            .expect("a second workspace on the Space");
+        let _ = engine.activate_workspace(&mut store.view_mut(), space, other, None);
+        assert!(
+            !engine
+                .active_floating_windows_in_workspace(store.view(), space)
+                .contains(&window)
+        );
+        let _ = engine.activate_workspace(&mut store.view_mut(), space, workspace, None);
+        assert!(
+            engine
+                .active_floating_windows_in_workspace(store.view(), space)
+                .contains(&window)
+        );
+        // A tiled window is no active floating window.
+        engine.floats.remove_floating(window);
+        assert!(
+            !engine
+                .active_floating_windows_in_workspace(store.view(), space)
+                .contains(&window)
+        );
     }
 
-    /// A remapped Space keeps its active floating windows.
+    /// A floating window projects onto its Space only while its workspace is the active one and
+    /// it is available (the active floating windows, computed).
+    #[test]
+    fn a_floating_window_projects_only_from_the_active_workspace_and_while_available() {
+        let (mut engine, mut store, space, workspace, window) = floating_window();
+        assert_eq!(
+            engine.projected_space_in(store.view(), workspace, window),
+            Some(space)
+        );
+        let other = engine
+            .workspaces
+            .reading(store.view())
+            .workspaces_on(space)
+            .into_iter()
+            .find(|&id| id != workspace)
+            .expect("a second workspace on the Space");
+        let _ = engine.activate_workspace(&mut store.view_mut(), space, other, None);
+        assert_eq!(engine.projected_space_in(store.view(), workspace, window), None);
+        let _ = engine.activate_workspace(&mut store.view_mut(), space, workspace, None);
+        assert_eq!(
+            engine.projected_space_in(store.view(), workspace, window),
+            Some(space)
+        );
+        store.view_mut().set_minimized(window, true);
+        assert_eq!(engine.projected_space_in(store.view(), workspace, window), None);
+    }
+
+    /// A remapped Space keeps its active floating windows: they follow its workspaces.
     #[test]
     fn a_remapped_space_keeps_its_active_floating_windows() {
         let (mut engine, mut store, space, _, window) = floating_window();
-        engine.update_active_floating_windows(store.view(), space);
         let new = SpaceId::new(98);
         engine.remap_space(&mut store.view_mut(), space, new);
-        assert!(engine.floats.is_active(new, window));
-        assert!(!engine.floats.is_active(space, window));
+        assert!(engine.active_floating_windows_in_workspace(store.view(), new).contains(&window));
+        assert!(
+            !engine
+                .active_floating_windows_in_workspace(store.view(), space)
+                .contains(&window)
+        );
     }
 
     /// A workspace forgotten takes its floating frames.

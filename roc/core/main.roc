@@ -4,7 +4,7 @@
 ## differential test holds it to that.
 app [core] { pf: platform "../platform/main.roc" }
 
-import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, WindowConstraints, Size, FloatsEvent, FloatFullscreen, FloatFullscreenEntry, FloatSpaceWindow, FloatFrameEntry, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackTreeStack, StackFramesQuestion, GroupTreeNode, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingGeometry, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer, ColumnsArrangement]
+import pf.Boundary exposing [Event, Effect, UngripWhy, NoteKind, PlanEffect, Observation, Want, WorkspaceMode, PendingTarget, SpaceActivation, NativeFocus, WindowId, Rect, Desire, WriteEffect, Button, Reply, Armed, Present, Ownership, WorkspaceSpace, AppStanding, Initiator, MaybeWord, AxisQuestion, TranslateQuestion, FloatingLayout, BspShape, Frame, TraditionalShape, Strip, Placed, SettleQuestion, Settled, FloatingQuestion, ActivationQuestion, CandidateQuestion, DesktopQuestion, DisplayFollowQuestion, FollowAnswer, HidesQuestion, RemovalAnswer, RemovalQuestion, UntrackedAnswer, UntrackedQuestion, VerdictAnswer, WordAnswer, Admission, AdmitQuestion, CandidatesAnswer, CandidatesQuestion, DiscoveredAnswer, DiscoveredQuestion, DiscoveryAnswer, DiscoveryQuestion, AdmissionFacts, Change, InventoryQuestion, KeepsTransientQuestion, MisplacedQuestion, NativeTransientQuestion, NetQuestion, OutOfViewQuestion, PointerTargetQuestion, PresenceAnswer, PresenceQuestion, ReadAnswer, ReadQuestion, RetirementAnswer, RuleRefreshQuestion, RuleTargetsAnswer, RuleTargetsQuestion, SpaceAnswer, TitleChangeQuestion, VerdictAnswer, WindowAdmission, JoinedQuestion, JoinedView, PreviousQuestion, Reached, ResolveQuestion, StepQuestion, ReachedAnswer, EligibleQuestion, LifecycleEvent, PresentWindow, WindowOwnership, WorkspaceSpace, SpaceActivation, JoinedEvent, Outcome, WorkspaceWindows, Invalidation, Revalidation, ModesQuestion, ModeVerdict, MainWindowEvent, NativeFocus, MainApp, SizesEvent, SizeRecord, AppMinimum, WindowConstraints, Size, FloatsEvent, FloatFullscreen, FloatFullscreenEntry, FloatFrameEntry, EmitsQuestion, QuarantineQuestion, TargetQuestion, TargetAnswer, RaiseQuestion, RaiseAnswer, BspTreeSeed, BspInsertion, BspTreeEvent, BspTreeAnswer, BspLayoutSlot, BspNodeSlot, BspTreeNode, Aspect, BspFramesQuestion, StackSettings, StackTreeSeed, StackTreeEvent, StackTreeAnswer, StackLayoutSlot, StackTreeStack, StackFramesQuestion, GroupTreeNode, TraditionalSettings, TraditionalSeed, TraditionalEvent, MasterSettings, MasterStackSeed, MasterStackEvent, GroupLayoutQuestion, GroupLayoutAnswer, FloatingGeometry, FloatingSeed, FloatingEvent, FloatingAnswer, FloatingLayoutQuestion, FloatingLayoutAnswer, ColumnsSettings, ColumnsSeed, ColumnsEvent, ColumnsAnswer, ColumnsArrangement]
 import Geometry
 import Bsp
 import Traditional
@@ -430,7 +430,7 @@ workspaces_view = |joined| {
 
 ## Which window is the main one: no apps and no native focus, at first.
 ## Window size constraints (`Sizes.Sizes`, written out: the platform needs the name here).
-SizesModel : { windows : Dict(U64, WindowConstraints), app_minimums : Dict(U64, Size), revision : U64 }
+SizesModel : { windows : Dict(U64, WindowConstraints), app_minimums : Dict(I32, Size), revision : U64 }
 
 sizes_init : {} -> SizesModel
 sizes_init = |{}| Sizes.empty({})
@@ -445,7 +445,7 @@ sizes_view : SizesModel -> { model : SizesModel, windows : List(SizeRecord), app
 sizes_view = |sizes| { model: sizes, windows: Sizes.records(sizes), app_minimums: Sizes.minimums(sizes), revision: sizes.revision }
 
 ## The floating state (`Floats.Kept`, written out: the platform needs the name here).
-FloatsModel : { floating : Set(U64), fullscreen : Dict(U64, FloatFullscreen), active : Dict(U64, Set(U64)), floating_focus : MaybeWord, focused : MaybeWord, frames : Dict(U64, Dict(U64, Rect)) }
+FloatsModel : { floating : Set(U64), fullscreen : Dict(U64, FloatFullscreen), floating_focus : MaybeWord, focused : MaybeWord, frames : Dict(U64, Dict(U64, Rect)) }
 
 floats_init : {} -> FloatsModel
 floats_init = |{}| Floats.empty({})
@@ -453,8 +453,8 @@ floats_init = |{}| Floats.empty({})
 floats_step : FloatsModel, FloatsEvent -> FloatsModel
 floats_step = |kept, event| Floats.step(kept, event)
 
-floats_view : FloatsModel -> { model : FloatsModel, floating : List(U64), fullscreen : List(FloatFullscreenEntry), active : List(FloatSpaceWindow), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) }
-floats_view = |kept| { model: kept, floating: Floats.floating_list(kept), fullscreen: Floats.fullscreens(kept), active: Floats.active_list(kept), floating_focus: kept.floating_focus, focused: kept.focused, frames: Floats.frames_list(kept) }
+floats_view : FloatsModel -> { model : FloatsModel, floating : List(U64), fullscreen : List(FloatFullscreenEntry), floating_focus : MaybeWord, focused : MaybeWord, frames : List(FloatFrameEntry) }
+floats_view = |kept| { model: kept, floating: Floats.floating_list(kept), fullscreen: Floats.fullscreens(kept), floating_focus: kept.floating_focus, focused: kept.focused, frames: Floats.frames_list(kept) }
 
 main_window_init : {} -> Mains
 main_window_init = |{}| MainWindow.empty({})

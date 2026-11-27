@@ -742,7 +742,7 @@ impl TwinnedConstraints {
                     observed,
                 } => ConstraintsEvent::Observed {
                     window: window.word(),
-                    app: app.word(),
+                    app,
                     respect_min_size,
                     observed,
                 },
@@ -761,7 +761,7 @@ impl TwinnedConstraints {
                     from: from.word(),
                     to: to.word(),
                 },
-                ConstraintsEvent::AppQuit(app) => ConstraintsEvent::AppQuit(app.word()),
+                ConstraintsEvent::AppQuit(app) => ConstraintsEvent::AppQuit(app),
             };
             let roc = self.twin.roc.step(plain);
             let answer_differs = roc != answer;
@@ -789,23 +789,22 @@ impl TwinnedConstraints {
 
     /// The Rust machine as words, as the Roc core views it (records and minimums in word order).
     #[cfg(feature = "roc-core")]
-    fn rust_view(&self) -> Constraints<u64, u64> {
+    fn rust_view(&self) -> Constraints<u64, pid_t> {
         use crate::roc_path::Word;
         Constraints::from_parts(
             self.rust.windows().map(|(window, c)| (window.word(), c)),
-            self.rust.app_minimums().map(|(app, min)| (app.word(), min)),
+            self.rust.app_minimums(),
             self.rust.revision(),
         )
     }
 
     /// Replace the Rust shadow with the Roc core's state, and count it.
     #[cfg(feature = "roc-core")]
-    fn reseed(&mut self, view: Constraints<u64, u64>) {
+    fn reseed(&mut self, view: Constraints<u64, pid_t>) {
         use crate::roc_path::window_of_word;
-        let pid = |word: u64| word as i64 as pid_t;
         self.rust = Constraints::from_parts(
             view.windows().filter_map(|(word, c)| Some((window_of_word(word)?, c))),
-            view.app_minimums().map(|(word, min)| (pid(word), min)),
+            view.app_minimums(),
             view.revision(),
         );
         let reseeds = CONSTRAINTS_RESEEDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -818,13 +817,12 @@ impl TwinnedConstraints {
 
 /// The floating state as the engine holds it (engine slice E2).
 pub(crate) type RiftFloats =
-    rift_core::floats::Floats<WindowId, SpaceId, VirtualWorkspaceId, objc2_core_foundation::CGRect>;
+    rift_core::floats::Floats<WindowId, VirtualWorkspaceId, objc2_core_foundation::CGRect>;
 
 /// An event of the floating state as the engine steps it.
 pub(crate) type RiftFloatsEvent = rift_core::floats::FloatsEvent<
     WindowId,
     pid_t,
-    SpaceId,
     VirtualWorkspaceId,
     objc2_core_foundation::CGRect,
 >;
@@ -906,13 +904,12 @@ impl TwinnedFloats {
 
     /// The Rust machine as words, as the Roc core views it (every part in word order).
     #[cfg(feature = "roc-core")]
-    fn rust_view(&self) -> rift_core::floats::Floats<u64, u64, u64, rift_core::plain::Rect> {
+    fn rust_view(&self) -> rift_core::floats::Floats<u64, u64, rift_core::plain::Rect> {
         use crate::roc_path::Word;
         let r = &self.rust;
         rift_core::floats::Floats::from_parts(
             r.floating().map(Word::word),
             r.fullscreens().map(|(w, k)| (w.word(), k)),
-            r.active().map(|(s, w)| (s.word(), w.word())),
             r.floating_focus().map(Word::word),
             r.focused().map(Word::word),
             r.frames().map(|(ws, w, f)| (ws.word(), w.word(), plain_rect(f))),
@@ -921,12 +918,11 @@ impl TwinnedFloats {
 
     /// Replace the Rust shadow with the Roc core's state, and count it.
     #[cfg(feature = "roc-core")]
-    fn reseed(&mut self, view: rift_core::floats::Floats<u64, u64, u64, rift_core::plain::Rect>) {
+    fn reseed(&mut self, view: rift_core::floats::Floats<u64, u64, rift_core::plain::Rect>) {
         use crate::roc_path::window_of_word;
         self.rust = RiftFloats::from_parts(
             view.floating().filter_map(window_of_word),
             view.fullscreens().filter_map(|(w, k)| Some((window_of_word(w)?, k))),
-            view.active().filter_map(|(s, w)| Some((SpaceId::new(s), window_of_word(w)?))),
             view.floating_focus().and_then(window_of_word),
             view.focused().and_then(window_of_word),
             view.frames().filter_map(|(ws, w, f)| {
@@ -963,7 +959,7 @@ fn cg_rect(r: rift_core::plain::Rect) -> objc2_core_foundation::CGRect {
 #[cfg(feature = "roc-core")]
 fn words(
     event: RiftFloatsEvent,
-) -> rift_core::floats::FloatsEvent<u64, u64, u64, u64, rift_core::plain::Rect> {
+) -> rift_core::floats::FloatsEvent<u64, i32, u64, rift_core::plain::Rect> {
     use rift_core::floats::FloatsEvent as E;
 
     use crate::roc_path::Word;
@@ -971,30 +967,13 @@ fn words(
         E::Floated(w) => E::Floated(w.word()),
         E::Unfloated(w) => E::Unfloated(w.word()),
         E::Fullscreen(w, k) => E::Fullscreen(w.word(), k),
-        E::Activated { space, window } => E::Activated {
-            space: space.word(),
-            window: window.word(),
-        },
-        E::Deactivated { space, window } => E::Deactivated {
-            space: space.word(),
-            window: window.word(),
-        },
-        E::DeactivatedEverywhere(w) => E::DeactivatedEverywhere(w.word()),
-        E::ActiveRebuilt { space, windows } => E::ActiveRebuilt {
-            space: space.word(),
-            windows: windows.into_iter().map(Word::word).collect(),
-        },
-        E::SpaceRemapped { from, to } => E::SpaceRemapped {
-            from: from.word(),
-            to: to.word(),
-        },
         E::FloatingFocus(w) => E::FloatingFocus(w.map(Word::word)),
         E::Focused(w) => E::Focused(w.map(Word::word)),
         E::Replaced { from, to } => E::Replaced {
             from: from.word(),
             to: to.word(),
         },
-        E::AppQuit(pid) => E::AppQuit(pid.word()),
+        E::AppQuit(pid) => E::AppQuit(pid),
         E::FloatingTaken => E::FloatingTaken,
         E::FrameStored {
             workspace,
@@ -1130,7 +1109,6 @@ mod tests {
             slotmap::KeyData::from_ffi((3 << 32) | 5).into();
         let frame = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 200.0));
         floats.step(FloatsEvent::Floated(window));
-        floats.step(FloatsEvent::Activated { space: SpaceId::new(4), window });
         floats.step(FloatsEvent::FrameStored {
             workspace,
             window,
@@ -1144,7 +1122,7 @@ mod tests {
         let view = floats.twin.roc.view();
         floats.reseed(view.clone());
         assert_eq!(floats.rust_view(), view);
-        assert!(floats.is_floating(window) && floats.is_active(SpaceId::new(4), window));
+        assert!(floats.is_floating(window));
         assert_eq!(floats.frame(workspace, window), Some(frame));
         assert!(super::FLOATS_RESEEDS.load(std::sync::atomic::Ordering::Relaxed) > before);
     }
