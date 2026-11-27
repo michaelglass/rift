@@ -5031,6 +5031,78 @@ mod tests {
             .width
     }
 
+    /// One observed window on a 1200x800 Space, made floating, with a frame in its workspace.
+    fn floating_window() -> (LayoutEngine, OwnedWindows, SpaceId, VirtualWorkspaceId, WindowId) {
+        let mut engine = test_engine();
+        let mut store = OwnedWindows::default();
+        let space = SpaceId::new(97);
+        let _ = engine.handle_event(
+            &mut store.view_mut(),
+            LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+        );
+        let window = WindowId::new(9, 1);
+        store
+            .view_mut()
+            .insert_manageable_window(window, live_window(CGSize::new(400.0, 300.0)));
+        let _ = engine.handle_event(
+            &mut store.view_mut(),
+            LayoutEvent::windows_observed(
+                space,
+                window.pid,
+                vec![window_layout_info(window, CGSize::new(400.0, 300.0))],
+                None,
+            ),
+        );
+        let workspace = engine.workspaces.reading(store.view()).active_workspace(space).unwrap();
+        engine.floats.add_floating(window);
+        engine.floats.store(
+            workspace,
+            window,
+            CGRect::new(CGPoint::ZERO, CGSize::new(400.0, 300.0)),
+        );
+        (engine, store, space, workspace, window)
+    }
+
+    /// A floating window of the active workspace is active on its Space once the workspace is
+    /// activated (the active floating windows rebuilt).
+    #[test]
+    fn activating_a_workspace_makes_its_floating_windows_active() {
+        let (mut engine, store, space, _, window) = floating_window();
+        engine.floats.remove_active_for_window(window);
+        assert!(!engine.floats.is_active(space, window));
+        engine.update_active_floating_windows(store.view(), space);
+        assert!(engine.floats.is_active(space, window));
+    }
+
+    /// A remapped Space keeps its active floating windows.
+    #[test]
+    fn a_remapped_space_keeps_its_active_floating_windows() {
+        let (mut engine, mut store, space, _, window) = floating_window();
+        engine.update_active_floating_windows(store.view(), space);
+        let new = SpaceId::new(98);
+        engine.remap_space(&mut store.view_mut(), space, new);
+        assert!(engine.floats.is_active(new, window));
+        assert!(!engine.floats.is_active(space, window));
+    }
+
+    /// A workspace forgotten takes its floating frames.
+    #[test]
+    fn a_forgotten_workspace_takes_its_floating_frames() {
+        let (mut engine, _store, _, workspace, window) = floating_window();
+        assert!(engine.floats.get(workspace, window).is_some());
+        engine.forget_workspace(workspace);
+        assert_eq!(engine.floats.get(workspace, window), None);
+    }
+
+    /// An app closing takes its windows' floating state and frames.
+    #[test]
+    fn a_closing_app_takes_its_windows_floating_state_and_frames() {
+        let (mut engine, mut store, _, workspace, window) = floating_window();
+        let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::AppClosed(window.pid));
+        assert!(!engine.floats.is_floating(window));
+        assert_eq!(engine.floats.get(workspace, window), None);
+    }
+
     /// A window's constraints follow it to a new identity.
     #[test]
     fn a_new_identity_keeps_the_windows_constraints() {

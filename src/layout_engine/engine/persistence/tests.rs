@@ -195,8 +195,7 @@ fn with_floating(
     marked: &[WindowId],
     frames: &[(VirtualWorkspaceId, WindowId, CGRect)],
 ) -> String {
-    let mut floating = FloatingManager::new();
-    marked.iter().for_each(|window| floating.add_floating(*window));
+    let floating = FloatingManager::marking(marked);
     let mut positions = FloatingPositionStore::default();
     frames
         .iter()
