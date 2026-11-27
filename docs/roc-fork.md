@@ -321,6 +321,15 @@ constraints (`preserve_window_sizes`).
     a cancel after the suspension; participation's reveal removed): with two full-width
     columns the strip's clamp places the camera on the survivor anyway, so the test guards the
     outcome, not the mechanism; a sharper one belongs with #718's clamp tests in (h).
+  - (f) #709 (c12631bd), a drag drops on the display under the pointer, native drags too: this
+    line already had it (the pointer's display is the drag's `current_space`, entering a display
+    swaps in its scene, `plan_drop`'s `Across { space, onto }` carries a target there), with three
+    of upstream's six tests. The other three carried over and pass in both builds (a drag whose
+    first frame is on another display targets it; a drop with the pointer on its own display
+    stays; one with no target lands on the pointer's display). Taken from upstream: one
+    `prospective_drop_tree` builds both the preview and the drop's layout, so a drop lands where
+    it was previewed. New test for what neither side tested: a drop that leaves the window in
+    its slot previews `same_slot` and is refused. Plants 6/6.
 - The rest of #718's range needs ports before the merge: our reactor no longer has upstream's
   presentation policy, so 17a3c021 (tears), #705's reactor half and #709 are ported into its
   shape, and #718's camera commits are the camera slice.

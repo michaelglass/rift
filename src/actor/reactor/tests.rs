@@ -16065,6 +16065,82 @@ fn with_the_pointer_on_another_display_no_target_is_on_the_source_display() {
     }
 }
 
+/// The drag's first frame is already mostly on display B, with the pointer there too: the drag
+/// starts on B, so it targets B's tiles, not the origin display's (upstream #709, c12631bd,
+/// carried over).
+#[test]
+fn a_native_drag_whose_first_frame_is_on_another_display_targets_that_display() {
+    let mut fixture = two_displays_two_tiles_each(2);
+    let TwoDisplays {
+        apps,
+        reactor,
+        dragged,
+        b_left,
+        space_b,
+        ..
+    } = &mut fixture;
+    let start = apps.windows[dragged].frame;
+    let dx = 1000. - start.size.width / 4. - start.origin.x;
+    let moved = drag_by(apps, reactor, *dragged, dx, 0.);
+    apps.windows.get_mut(dragged).unwrap().frame = moved;
+    assert!(
+        moved.max().x - 1000. > 1000. - moved.origin.x,
+        "most of the frame is on B"
+    );
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(1040., 400.),
+    }));
+    let target = drop_target(reactor).expect("a target on display B");
+    assert_eq!(target.intent.space, *space_b, "{target:?}");
+    assert_eq!(target.intent.window, *b_left, "{target:?}");
+}
+
+/// The pointer decides the display a drop lands on: with the pointer still on A, a frame that is
+/// mostly on B does not move the window to B (upstream #709, c12631bd, carried over).
+#[test]
+fn a_native_drag_dropped_with_the_pointer_on_its_own_display_stays_there() {
+    let mut fixture = two_displays_two_tiles_each(2);
+    let TwoDisplays {
+        apps,
+        reactor,
+        dragged,
+        space_a,
+        ..
+    } = &mut fixture;
+    let start = apps.windows[dragged].frame;
+    let moved = drag_by(apps, reactor, *dragged, 980. - start.origin.x, 0.);
+    apps.windows.get_mut(dragged).unwrap().frame = moved;
+    assert!(
+        moved.max().x - 1000. > 1000. - moved.origin.x,
+        "most of the frame is on B"
+    );
+    reactor.handle_event(Event::DragMotion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(990., 10.),
+    }));
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    apps.simulate_until_quiet(reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(*dragged), Some(*space_a));
+}
+
+/// With nothing to drop onto on B, the window still lands on the pointer's display (upstream
+/// #709, c12631bd, carried over).
+#[test]
+fn a_native_drag_dropped_with_no_target_lands_on_the_pointers_display() {
+    let mut fixture = two_displays_two_tiles_each(0);
+    drag_onto_display_b_with_the_frame_lagging(&mut fixture);
+    let TwoDisplays {
+        apps,
+        reactor,
+        dragged,
+        space_b,
+        ..
+    } = &mut fixture;
+    assert!(drop_target(reactor).is_none());
+    reactor.handle_event(Event::PointerReleased(crate::actor::drag::MouseButton::Left));
+    apps.simulate_until_quiet(reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(*dragged), Some(*space_b));
+}
+
 #[test]
 fn a_modifier_drop_onto_another_display_lands_where_it_previewed() {
     // Rift moves the window by the pointer's travel, so its frame lags the pointer too.

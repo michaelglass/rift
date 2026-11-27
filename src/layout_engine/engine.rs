@@ -387,25 +387,13 @@ impl LayoutEngine {
                 {
                     return false;
                 }
-                let Some(mut tree) = self.workspaces[destination].layout_system.preview_clone()
+                // The same prospective layout the preview showed (upstream #709).
+                let Some((mut tree, before)) =
+                    self.prospective_drop_tree(destination, layout, drop.window, target, action)
                 else {
                     return false;
                 };
-                if different {
-                    tree.update(WindowChange::Add(layout, drop.window, None));
-                }
-                let before = tree.window_slot(layout, drop.window);
-                if !tree
-                    .edit(layout, LayoutEdit::Drop {
-                        source: drop.window,
-                        target,
-                        action,
-                    })
-                    .changed()
-                    || (!different
-                        && before.is_some()
-                        && before == tree.window_slot(layout, drop.window))
-                {
+                if before.is_some() && before == tree.window_slot(layout, drop.window) {
                     return false;
                 }
                 tree.focus(layout, Focus::Select(drop.window)).handled;
@@ -498,9 +486,6 @@ impl LayoutEngine {
     ) -> Option<DropPreview> {
         let (workspace, layout) = self.workspaces.active_layout_in(core, space)?;
         let system = &self.workspaces[workspace].layout_system;
-        // A window dragged in from another display is in no slot here yet: it joins this layout
-        // the way the drop adds it.
-        let before = system.window_slot(layout, source);
         if !system.window_participates(source)
             || !system.window_participates(target)
             || !system.contains_window(layout, target)
@@ -508,14 +493,8 @@ impl LayoutEngine {
             return None;
         }
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
-        let mut system = system.preview_clone()?;
-        if before.is_none() {
-            system.update(WindowChange::Add(layout, source, None));
-        }
-        system
-            .edit(layout, LayoutEdit::Drop { source, target, action })
-            .changed()
-            .then_some(())?;
+        let (mut system, before) =
+            self.prospective_drop_tree(workspace, layout, source, target, action)?;
         // A drag preview is not a Space's layout pass.
         let shadow = crate::layout_engine::Shadow::outside_a_pass();
         self.window_layout_constraints
@@ -526,8 +505,28 @@ impl LayoutEngine {
             .find_map(|(window, frame)| (window == source).then_some(frame))?;
         Some(DropPreview {
             frame,
-            same_slot: system.window_slot(layout, source) == before,
+            same_slot: before.is_some() && system.window_slot(layout, source) == before,
         })
+    }
+
+    /// The layout a drop of `source` on `target` would leave, and `source`'s slot before it.
+    /// A window from elsewhere (no slot) joins the layout first, as the drop adds it. The
+    /// preview and the drop both build it here, so a drop lands where it was previewed.
+    fn prospective_drop_tree(
+        &self,
+        workspace: VirtualWorkspaceId,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> Option<(LayoutSystemKind, Option<Vec<usize>>)> {
+        let mut tree = self.workspaces[workspace].layout_system.preview_clone()?;
+        let before = tree.window_slot(layout, source);
+        if before.is_none() {
+            tree.update(WindowChange::Add(layout, source, None));
+        }
+        let changed = tree.edit(layout, LayoutEdit::Drop { source, target, action }).changed();
+        changed.then_some((tree, before))
     }
 
     pub(crate) fn source_move_neighbors(
@@ -4593,7 +4592,7 @@ mod tests {
             LayoutMode::Stack,
         ] {
             for action in [
-                WindowDropAction::Swap,
+                crate::layout_engine::WindowDropAction::Swap,
                 WindowDropAction::Insert(Direction::Down),
             ] {
                 let settings = LayoutSettings {
@@ -4665,6 +4664,72 @@ mod tests {
                     "{mode:?} {action:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_drop_that_leaves_the_window_in_its_slot_previews_so_and_is_refused() {
+        for (action, stays) in [
+            (
+                crate::layout_engine::WindowDropAction::Insert(Direction::Left),
+                true,
+            ),
+            (
+                crate::layout_engine::WindowDropAction::Insert(Direction::Right),
+                false,
+            ),
+        ] {
+            let settings = LayoutSettings {
+                mode: LayoutMode::Traditional,
+                ..LayoutSettings::default()
+            };
+            let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings);
+            let mut store = OwnedWindows::default();
+            let space = SpaceId::new(96);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
+            let line = crate::common::config::StackLineSettings::default();
+            // `source` is left of `target`: dropping it on target's left changes nothing.
+            let (source, target) = (WindowId::new(1, 1), WindowId::new(1, 2));
+            let _ = engine.handle_event(
+                &mut store.view_mut(),
+                LayoutEvent::SpaceExposed(space, screen.size),
+            );
+            let owner = engine.workspaces.reading(store.view()).active_workspace(space).unwrap();
+            for window in [source, target] {
+                store.view_mut().insert_manageable_window(window, live_window(screen.size));
+                assert!(engine.workspaces.assign_window_to_workspace(
+                    &mut store.view_mut(),
+                    space,
+                    window,
+                    owner
+                ));
+                let _ = engine
+                    .handle_event(&mut store.view_mut(), LayoutEvent::WindowAdded(space, window));
+            }
+            let preview = engine
+                .drop_preview_frame(
+                    store.view().core,
+                    space,
+                    source,
+                    target,
+                    action,
+                    screen,
+                    None,
+                    &line,
+                )
+                .expect("a preview");
+            assert_eq!(preview.same_slot, stays, "{action:?}");
+            let drop = crate::layout_engine::WorkspaceDropRequest {
+                window: source,
+                workspace: owner,
+                target: Some((target, action)),
+                frame: None,
+            };
+            assert_eq!(
+                engine.relocate_window_with_drop(&mut store.view_mut(), &drop),
+                !stays,
+                "{action:?}"
+            );
         }
     }
 
