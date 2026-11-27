@@ -198,12 +198,6 @@ impl LayoutConstraints {
         removed
     }
 
-    fn remove_app(&mut self, pid: pid_t) {
-        let count = self.windows.len();
-        self.windows.retain(|window, _| window.pid != pid);
-        self.revision += u64::from(self.windows.len() != count);
-    }
-
     fn set_width(&mut self, window: WindowId, width: f64) {
         if let Some(constraints) = self.windows.get_mut(&window)
             && constraints.locked_width != width
@@ -1651,10 +1645,6 @@ impl LayoutEngine {
         if self.focused_window == Some(wid) {
             self.focused_window = None;
         }
-        // A display move also arrives as a removal: keep constraints while the window exists.
-        if window_store.read().record(wid).is_none() {
-            self.window_layout_constraints.remove(&wid);
-        }
 
         removal.is_some()
     }
@@ -2352,7 +2342,6 @@ impl LayoutEngine {
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
-                self.window_layout_constraints.remove_app(pid);
                 self.app_min_sizes.remove(&pid);
                 self.forget_persisted_app(pid);
 
@@ -4121,6 +4110,17 @@ impl LayoutEngine {
         self.floating_positions.remove_window(window);
     }
 
+    /// A window's size constraints live as long as the window, so only its retirement drops
+    /// them. Leaving a layout doesn't: a move between Spaces arrives as a layout removal.
+    pub(crate) fn retire_window(&mut self, wid: WindowId) {
+        self.window_layout_constraints.remove(&wid);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_window_constraints(&self, wid: WindowId) -> bool {
+        self.window_layout_constraints.windows.contains_key(&wid)
+    }
+
     pub(crate) fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
@@ -4987,10 +4987,13 @@ mod tests {
             assert_eq!(width(&mut engine, window_store.view()), 300.0);
         }
 
-        window_store.view_mut().remove_window(fixed);
+        // Leaving the layout for good still isn't the window's end; its retirement is (#707).
         let _ =
             engine.handle_event(&mut window_store.view_mut(), LayoutEvent::WindowRemoved(fixed));
-        assert!(!engine.window_layout_constraints.windows.contains_key(&fixed));
+        assert!(engine.has_window_constraints(fixed));
+        window_store.view_mut().remove_window(fixed);
+        engine.retire_window(fixed);
+        assert!(!engine.has_window_constraints(fixed));
     }
 
     /// A master_stack engine whose new windows join the stack, with a rule for

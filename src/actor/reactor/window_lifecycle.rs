@@ -55,6 +55,8 @@ impl Reactor {
         };
         let wsid = record.window_server_id();
         self.discard_window_activity(wid, wsid);
+        // A window's size constraints live as long as the window (#707).
+        self.stores.layout.layout_engine.retire_window(wid);
         self.replace_window_references(wid, None);
         let retired =
             super::events::window::apply_window_retirement(&self.stores.state.tx, (wid, wsid));
@@ -112,6 +114,7 @@ impl Reactor {
         for &wid in &windows {
             let wsid = self.stores.state.windows().record(wid).and_then(|r| r.window_server_id());
             self.discard_window_activity(wid, wsid);
+            self.stores.layout.layout_engine.retire_window(wid);
             self.replace_window_references(wid, None);
         }
         self.transient_focus.windows.retain(|_, transient| transient.pid != pid);

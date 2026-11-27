@@ -282,7 +282,15 @@ constraints (`preserve_window_sizes`).
     a dormant saved view. Plants 10/11 (the eleventh, dormant windows put through a
     participation change, is equivalent here: at a load the saved view or no window taking part
     keeps the selection).
-- Next: the merge, then the camera (modelled on PR #718).
+  - (d) #707 (f6847f70): a window's size constraints live as long as the window, dropped by
+    its retirement (`LayoutEngine::retire_window`, from the reactor's two retirement paths),
+    never by leaving a layout. This line already kept them while the store held the window,
+    the engine reading the store on a layout removal; upstream's three tests pass on both, and
+    upstream's shape is taken for its single owner of the lifetime. Plants 4/4.
+- The rest of #718's range needs ports before the merge: our reactor no longer has upstream's
+  presentation policy, so 17a3c021 (tears), #705's reactor half and #709 are ported into its
+  shape, and #718's camera commits are the camera slice.
+- Next: those ports, the merge, then the camera (modelled on PR #718).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
