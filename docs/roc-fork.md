@@ -267,7 +267,22 @@ constraints (`preserve_window_sizes`).
     else the nearest (rightwards before leftwards) when a selection is left out; a column shown
     after a selection is left out revealed whole; a removal revealing the shown column when the
     remembered one takes no part. Plants 9/9.
-- Next: port (c), the merge, then the camera (modelled on PR #718).
+  - (c) #663 (f08825a4), ghost tiles after a restore: the windows a restore retains start out
+    dormant, left out until seen again, every layout's selection and saved view kept
+    (`initialize_dormant_windows`; for scrolling the core's `leave_out_dormant`, Rust and Roc,
+    with no selection repair); the camera keeps its saved view until its column has geometry
+    (`apply_restored_view`, after a pass and after an edit), forgets it once the column is gone,
+    a new window comes or a window is selected; and a participation change does not repair a
+    layout's selection before its first pass or while its saved view is pending (the camera's
+    `CameraMemory::Restoring`, alongside `Remembers(column)`, crossing as data). Upstream's three
+    tests carried over (a window minimized through the store's setter, which keeps the
+    lifecycle's facts in step, where upstream writes the AX state directly) and its legacy-load
+    assertion; tests for what upstream left untested: windows seen before the first pass keeping
+    the saved selection (with and without a saved view), a new window or a selection forgetting
+    a dormant saved view. Plants 10/11 (the eleventh, dormant windows put through a
+    participation change, is equivalent here: at a load the saved view or no window taking part
+    keeps the selection).
+- Next: the merge, then the camera (modelled on PR #718).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

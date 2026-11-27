@@ -527,6 +527,18 @@ pub enum LayoutSystemKind {
 }
 
 impl LayoutSystemKind {
+    /// A freshly loaded layout's windows not seen yet, left out without disturbing its saved
+    /// view (upstream #663, f08825a4).
+    pub(crate) fn initialize_dormant_windows(&mut self, windows: Vec<WindowId>) {
+        if let Self::Scrolling(system) = self {
+            system.initialize_dormant_windows(windows);
+        } else {
+            for window in windows {
+                self.set_window_participation(window, false);
+            }
+        }
+    }
+
     pub(crate) fn preview_clone(&self) -> Option<Self> {
         match self {
             Self::Traditional(system) => Some(Self::Traditional(system.clone())),

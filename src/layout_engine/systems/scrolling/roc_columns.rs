@@ -18,8 +18,9 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rift_core::layout::columns::{
-    Arrangement, Column, ColumnId, Direction, DropAction, Edited, Focus, Focused, FrameResize,
-    Fullscreened, Moved, Participation, Query, Removal, ResizeAlong, Row, Settings, Span, Strip,
+    Arrangement, CameraMemory, Column, ColumnId, Direction, DropAction, Edited, Focus, Focused,
+    FrameResize, Fullscreened, Moved, Participation, Query, Removal, ResizeAlong, Row, Settings,
+    Span, Strip,
 };
 use rift_core::slot_table::SlotTable;
 use rift_core_roc::RocColumns;
@@ -288,13 +289,13 @@ impl ColumnsDecider {
         &mut self,
         window: WindowId,
         participation: Participation,
-        remembered: &[(LayoutId, ColumnId)],
+        cameras: &[(LayoutId, CameraMemory)],
     ) -> bool {
-        let rust = self.rust.set_window_participation(window, participation, remembered);
+        let rust = self.rust.set_window_participation(window, participation, cameras);
         let event = Event::Participation(
             word(window),
             participation,
-            remembered.iter().map(|&(layout, id)| (key(layout), id)).collect(),
+            cameras.iter().map(|&(layout, memory)| (key(layout), memory)).collect(),
         );
         verdict(
             self.operation("participation", event, Answer::Verdict(rust)),
@@ -329,6 +330,15 @@ impl ColumnsDecider {
             Answer::Removal(roc) => roc,
             _ => rust,
         }
+    }
+
+    pub(super) fn leave_out_dormant(&mut self, windows: Vec<WindowId>) {
+        self.rust.leave_out_dormant(windows.iter().copied());
+        self.operation(
+            "leave_out_dormant",
+            Event::LeaveOutDormant(words(&windows)),
+            Answer::Done,
+        );
     }
 
     pub(super) fn replace_window(&mut self, from: WindowId, to: WindowId) {

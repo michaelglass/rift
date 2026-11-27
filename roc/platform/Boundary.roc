@@ -1122,9 +1122,14 @@ Boundary := [].{
 
 	ColumnsActivate := { layout : U64, column : U64 }
 
-	## A window taking part or left out, and the column each layout's camera remembers (an
-	## available column to show, should the selection stop taking part).
-	ColumnsParticipation := { window : U64, participation : BspTakesPart, remembered : List(ColumnsActivate) }
+	## What a layout's camera holds that a participation change reads: a column it remembers, or
+	## a saved view it is still restoring (the selection kept).
+	ColumnsMemory := [Remembers(U64), Restoring]
+
+	ColumnsCamera := { layout : U64, memory : ColumnsMemory }
+
+	## A window taking part or left out, and what each layout's camera holds.
+	ColumnsParticipation := { window : U64, participation : BspTakesPart, cameras : List(ColumnsCamera) }
 
 	## A window removed from a layout, and the column its camera remembers from before the window
 	## came (shown, should the selection's column go).
@@ -1161,6 +1166,7 @@ Boundary := [].{
 		RemoveFrom(ColumnsRemoveFrom),
 		ReplaceWindow(BspReplacement),
 		ForgetApp(List(U64)),
+		LeaveOutDormant(List(U64)),
 		ResizeFromFrame(ColumnsFrameResize),
 		ActivateColumn(ColumnsActivate),
 		PreserveWindowSizes(ColumnsPreserve),

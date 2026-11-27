@@ -1149,7 +1149,9 @@ impl LayoutState {
         // The arrangement this pass lays out: the core's, after it fixed preserved widths (a
         // window's locked width fixing its column's, with this pass's constraints).
         let view = view(settings.preserve_window_sizes);
-        let bookmark = self.camera.restored_view.take().or_else(|| self.bookmark(&view));
+        if self.camera.restored_view.is_none() {
+            self.camera.restored_view = self.bookmark(&view);
+        }
         let initial = matches!(self.camera.viewport, Viewport::Uninitialized);
         let mut snapshot = self.geometry.take().map(|g| g.constraints).unwrap_or_default();
         if !same_constraints {
@@ -1165,12 +1167,7 @@ impl LayoutState {
             gaps.clone(),
             shadow,
         ));
-        if let Some(bookmark) = bookmark
-            && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
-        {
-            let old = self.camera.viewport.offset();
-            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - old);
-        }
+        self.apply_restored_view(&view);
         self.reconcile_camera_bounds();
         if initial {
             self.camera.viewport = Viewport::Static(0.0);
@@ -1181,6 +1178,27 @@ impl LayoutState {
                 self.reveal(&view, settings);
             }
             self.camera.viewport = Viewport::Static(self.camera.viewport.offset());
+        }
+    }
+
+    /// The saved view brought back once its column has geometry, and then forgotten; while the
+    /// column is dormant (no window in it taking part yet), kept for its readmission, the camera
+    /// held within the strip's bounds meanwhile; forgotten once the column is gone (upstream
+    /// #663, f08825a4).
+    fn apply_restored_view(&mut self, view: &ArrangementView) {
+        let (Some(bookmark), Some(geometry)) = (&self.camera.restored_view, &self.geometry) else {
+            return;
+        };
+        if let Some(column) = geometry.column(bookmark.column) {
+            let offset = self.camera.viewport.offset();
+            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - offset);
+            self.camera.restored_view = None;
+        } else {
+            let offset = self.camera.viewport.offset().clamp(geometry.bounds.0, geometry.bounds.1);
+            self.camera.viewport = Viewport::Static(offset);
+            if !view.columns.iter().any(|column| column.id == bookmark.column) {
+                self.camera.restored_view = None;
+            }
         }
     }
 
@@ -1287,6 +1305,7 @@ impl LayoutState {
             {
                 self.camera.viewport.rebase(new.world_x - old_x);
             }
+            self.apply_restored_view(view);
         }
         self.reconcile_camera_bounds();
         if view.columns.is_empty() {
@@ -1362,6 +1381,12 @@ impl Serialize for ScrollingLayoutSystem {
 }
 
 impl ScrollingLayoutSystem {
+    /// Windows a restored system holds before they are seen again: left out, every layout's
+    /// selection and saved view kept (upstream #663, f08825a4).
+    pub(super) fn initialize_dormant_windows(&mut self, windows: Vec<WindowId>) {
+        self.core.leave_out_dormant(windows);
+    }
+
     /// `layout`'s arrangement as the camera reads it, computed from the core's.
     fn view(&self, layout: LayoutId) -> Option<ArrangementView> {
         self.core.arrangement(layout).map(projection::view)
@@ -1470,6 +1495,7 @@ impl ScrollingLayoutSystem {
             return;
         }
         let bookmark = state.bookmark(&view);
+        self.layouts[layout].camera.restored_view = None;
         self.edited(layout, |core| core.insert(layout, wid));
         let view = self.view(layout).expect("the layout the edit was made in");
         let state = &mut self.layouts[layout];
@@ -2118,6 +2144,7 @@ impl ScrollingLayoutSystem {
         let (Some(view), Some(state)) = (self.view(layout), self.layouts.get_mut(layout)) else {
             return selected;
         };
+        state.camera.restored_view = None;
         state.camera.transient_restore = None;
         if state
             .camera
@@ -2227,23 +2254,35 @@ impl ScrollingLayoutSystem {
         } else {
             Participation::LeftOut
         };
+        use rift_core::layout::columns::{CameraMemory, ColumnId as CoreColumnId};
+        // Before a layout's first projection, discovery order does not replace its saved
+        // selection, nor does any change while a saved view is being restored (upstream #663).
+        let unprojected = |state: &LayoutState| participates && state.geometry.is_none();
         let holding: Vec<(LayoutId, BeforeEdit)> = self
             .layouts
-            .keys()
-            .filter(|&layout| self.core.contains_window(layout, window))
+            .iter()
+            .filter(|&(layout, state)| {
+                !unprojected(state) && self.core.contains_window(layout, window)
+            })
+            .map(|(layout, _)| layout)
+            .collect::<Vec<_>>()
+            .into_iter()
             .filter_map(|layout| Some((layout, self.before_edit(layout)?)))
             .collect();
-        // The core shows an available column where the selection stops taking part: the one each
-        // camera remembers, else the nearest (upstream's unified fallback, bafcc444).
-        let remembered: Vec<_> = self
+        // Otherwise the core shows an available column where the selection stops taking part:
+        // the one each camera remembers, else the nearest (upstream's unified fallback, bafcc444).
+        let cameras: Vec<_> = self
             .layouts
             .iter()
             .filter_map(|(layout, state)| {
+                if unprojected(state) || state.camera.restored_view.is_some() {
+                    return Some((layout, CameraMemory::Restoring));
+                }
                 let bookmark = state.camera.transient_restore.as_ref()?;
-                Some((layout, rift_core::layout::columns::ColumnId(bookmark.column.0)))
+                Some((layout, CameraMemory::Remembers(CoreColumnId(bookmark.column.0))))
             })
             .collect();
-        if !self.core.set_window_participation(window, participation, &remembered) {
+        if !self.core.set_window_participation(window, participation, &cameras) {
             return false;
         }
         for (layout, before) in holding {
@@ -2930,6 +2969,83 @@ pub(crate) mod tests {
             shown.origin.x >= f.screen.origin.x && shown.max().x <= f.screen.max().x,
             "{shown:?}"
         );
+    }
+
+    /// A system saved with 3 selected and read back before any pass, its windows dormant (as a
+    /// restore leaves them; upstream #663).
+    fn restored_dormant() -> (Fixture, ScrollingLayoutSystem) {
+        let mut f = Fixture::new(3);
+        f.select(3);
+        f.system.finish_viewport(f.layout);
+        let mut loaded: ScrollingLayoutSystem =
+            ron::from_str(&ron::to_string(&f.system).unwrap()).unwrap();
+        loaded.update_settings(&f.system.settings);
+        loaded.initialize_dormant_windows(vec![wid(1), wid(2), wid(3)]);
+        (f, loaded)
+    }
+
+    /// Before a layout's first pass, windows seen again do not replace its saved selection in
+    /// the order they are seen (upstream #663).
+    #[test]
+    fn windows_seen_before_the_first_pass_keep_the_saved_selection() {
+        // With a saved view to restore, and without one (a file saved before any pass).
+        for anchored in [true, false] {
+            let (f, mut loaded) = restored_dormant();
+            if !anchored {
+                loaded.layouts[f.layout].camera.restored_view = None;
+            }
+            for i in [1, 2, 3] {
+                loaded.set_window_participation(wid(i), true);
+            }
+            assert_eq!(
+                loaded.selected_window(f.layout),
+                Some(wid(3)),
+                "anchored {anchored}"
+            );
+        }
+    }
+
+    /// The saved view waits for its column while the column is dormant, unless a new window or
+    /// a selection makes it stale: then the camera stays with them when the column comes back
+    /// (upstream #663).
+    #[test]
+    fn a_new_window_or_a_selection_forgets_a_dormant_saved_view() {
+        for forget in [false, true] {
+            for by_selection in [false, true] {
+                let (f, mut loaded) = restored_dormant();
+                for i in [1, 2] {
+                    loaded.set_window_participation(wid(i), true);
+                }
+                let prepare = |system: &mut ScrollingLayoutSystem| {
+                    system.prepare_layout(
+                        f.layout,
+                        f.screen,
+                        &f.constraints,
+                        &f.gaps,
+                        crate::layout_engine::Shadow::Run,
+                    );
+                    system.finish_viewport(f.layout);
+                };
+                prepare(&mut loaded);
+                if forget {
+                    if by_selection {
+                        assert!(loaded.select_window(f.layout, wid(1)));
+                    } else {
+                        loaded.update(WindowChange::Add(f.layout, wid(4), None));
+                    }
+                    prepare(&mut loaded);
+                }
+                let before = presented_frames(&loaded, f.layout).collect::<Vec<_>>();
+                loaded.set_window_participation(wid(3), true);
+                prepare(&mut loaded);
+                let after = presented_frames(&loaded, f.layout).collect::<Vec<_>>();
+                let shown = |frames: &[(WindowId, CGRect)], w| {
+                    frames.iter().find(|(x, _)| *x == w).map(|(_, frame)| frame.origin.x)
+                };
+                let stayed = shown(&after, wid(1)) == shown(&before, wid(1));
+                assert_eq!(stayed, forget, "forget {forget} by_selection {by_selection}");
+            }
+        }
     }
 
     #[test]

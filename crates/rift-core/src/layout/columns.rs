@@ -145,6 +145,15 @@ pub struct Removal {
     pub was_fullscreen: bool,
 }
 
+/// What a layout's camera holds that a participation change reads: a column it remembers
+/// from before a window came (shown, should the selection stop taking part), or a saved view
+/// it is still restoring (the selection kept until the view is back: upstream #663).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMemory {
+    Remembers(ColumnId),
+    Restoring,
+}
+
 /// What a fullscreen toggle did to the selected window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fullscreened<W> {
@@ -575,13 +584,14 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
 
     /// A window taking part or left out; whether that changed. Every layout holding it with no
     /// selection taking part any more shows an available column again
-    /// ([`Editing::select_available_column`]): the one its camera remembers (`remembered`, per
-    /// layout), else the nearest.
+    /// ([`Editing::select_available_column`]): the one its camera remembers (`cameras`, per
+    /// layout), else the nearest; a layout whose camera is restoring a saved view keeps its
+    /// selection.
     pub fn set_window_participation(
         &mut self,
         window: W,
         participation: Participation,
-        remembered: &[(L, ColumnId)],
+        cameras: &[(L, CameraMemory)],
     ) -> bool {
         let changed = match participation {
             Participation::TakesPart => self.left_out.remove(&window),
@@ -596,7 +606,11 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
             if arrangement.locate(window).is_none() {
                 continue;
             }
-            let preferred = remembered.iter().find(|(at, _)| *at == layout).map(|&(_, id)| id);
+            let preferred = match cameras.iter().find(|(at, _)| *at == layout) {
+                Some((_, CameraMemory::Restoring)) => continue,
+                Some(&(_, CameraMemory::Remembers(id))) => Some(id),
+                None => None,
+            };
             arrangement.edited(|e| {
                 if e.selected(&is_left_out).is_none() {
                     e.select_available_column(preferred, &is_left_out);
@@ -604,6 +618,12 @@ impl<L: SlotKey + Eq, W: Copy + Ord> ColumnSystem<L, W> {
             });
         }
         true
+    }
+
+    /// Windows a restored system holds before they are seen again: left out, every layout's
+    /// selection and view kept as saved (upstream #663, `initialize_dormant_windows`).
+    pub fn leave_out_dormant(&mut self, windows: impl IntoIterator<Item = W>) {
+        self.left_out.extend(windows);
     }
 
     pub fn create_layout(&mut self) -> L { self.layouts.insert(Arrangement::default()) }

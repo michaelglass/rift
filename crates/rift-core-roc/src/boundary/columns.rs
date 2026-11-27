@@ -6,8 +6,9 @@ use std::mem::ManuallyDrop;
 
 use rift_core::layout::bsp_tree::Focused;
 use rift_core::layout::columns::{
-    Arrangement, Column, ColumnId, DropAction, Edited, Fill, FrameResize, Fullscreened, Moved,
-    Participation, Removal, ResizeAlong, Row, Settings, Span, Strip, Transfer, Width,
+    Arrangement, CameraMemory, Column, ColumnId, DropAction, Edited, Fill, FrameResize,
+    Fullscreened, Moved, Participation, Removal, ResizeAlong, Row, Settings, Span, Strip, Transfer,
+    Width,
 };
 
 use super::{
@@ -223,6 +224,22 @@ fn span(span: Option<Span>) -> abi::BoundaryColumnsMaybeSpan {
     }
 }
 
+fn camera_memory(memory: CameraMemory) -> abi::BoundaryColumnsMemory {
+    use abi::BoundaryColumnsMemoryTag as Tag;
+    match memory {
+        CameraMemory::Remembers(column) => union!(
+            BoundaryColumnsMemory,
+            BoundaryColumnsMemoryPayload.remembers(column.0),
+            Tag::Remembers
+        ),
+        CameraMemory::Restoring => union!(
+            BoundaryColumnsMemory,
+            BoundaryColumnsMemoryPayload.restoring,
+            Tag::Restoring
+        ),
+    }
+}
+
 fn window_in(layout: LayoutKey, window: u64) -> abi::BoundaryBspWindowIn {
     abi::BoundaryBspWindowIn { layout: layout.0, window }
 }
@@ -257,7 +274,7 @@ fn event(event: Event, host: &abi::RocHost) -> abi::BoundaryColumnsEvent {
             BoundaryColumnsEventPayload.remove_layout(layout.0),
             Tag::RemoveLayout
         ),
-        Event::Participation(window, participation, remembered) => union!(
+        Event::Participation(window, participation, cameras) => union!(
             BoundaryColumnsEvent,
             BoundaryColumnsEventPayload.participation(abi::BoundaryColumnsParticipation {
                 window,
@@ -265,12 +282,12 @@ fn event(event: Event, host: &abi::RocHost) -> abi::BoundaryColumnsEvent {
                     Participation::TakesPart => abi::BoundaryBspTakesPart::TakesPart,
                     Participation::LeftOut => abi::BoundaryBspTakesPart::LeftOut,
                 },
-                remembered: list(
-                    &remembered
+                cameras: list(
+                    &cameras
                         .iter()
-                        .map(|&(layout, column)| abi::BoundaryColumnsActivate {
+                        .map(|&(layout, memory)| abi::BoundaryColumnsCamera {
                             layout: layout.0,
-                            column: column.0,
+                            memory: camera_memory(memory),
                         })
                         .collect::<Vec<_>>(),
                     host,
@@ -306,6 +323,11 @@ fn event(event: Event, host: &abi::RocHost) -> abi::BoundaryColumnsEvent {
             BoundaryColumnsEvent,
             BoundaryColumnsEventPayload.replace_window(abi::BoundaryBspReplacement { from, to }),
             Tag::ReplaceWindow
+        ),
+        Event::LeaveOutDormant(windows) => union!(
+            BoundaryColumnsEvent,
+            BoundaryColumnsEventPayload.leave_out_dormant(list(&windows, host)),
+            Tag::LeaveOutDormant
         ),
         Event::ForgetApp(windows) => union!(
             BoundaryColumnsEvent,

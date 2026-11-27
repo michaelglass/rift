@@ -11,8 +11,8 @@
 //! holds planted (heights and widths that are zero, negative or not a number, fills).
 
 use rift_core::layout::columns::{
-    ColumnId, Direction, DropAction, Fill, Focus, FrameResize, InsertionPoint, Participation,
-    Query, ResizeAlong, Settings, Span, Strip, Transfer, Width,
+    CameraMemory, ColumnId, Direction, DropAction, Fill, Focus, FrameResize, InsertionPoint,
+    Participation, Query, ResizeAlong, Settings, Span, Strip, Transfer, Width,
 };
 use rift_core::plain::Rect;
 use rift_core_roc::columns::{self, Answer, Columns, ColumnsView, Event, LayoutKey};
@@ -170,6 +170,9 @@ impl Made {
                 let pid = 1 + rng.below(3);
                 Event::ForgetApp(WINDOWS.iter().copied().filter(|w| w >> 32 == pid).collect())
             }
+            14 if rng.chance(15) => {
+                Event::LeaveOutDormant(WINDOWS.iter().copied().filter(|_| rng.chance(20)).collect())
+            }
             14 => Event::ReplaceWindow { from: window, to: rng.window() },
             15 => Event::Participation(
                 window,
@@ -180,9 +183,12 @@ impl Made {
                 },
                 self.layouts
                     .iter()
-                    .filter_map(|&layout| {
-                        let id = rng.pick(&Made::columns(rust))?;
-                        rng.chance(50).then_some((layout, id))
+                    .filter_map(|&layout| match rng.below(4) {
+                        0 => Some((layout, CameraMemory::Restoring)),
+                        1 | 2 => {
+                            Some((layout, CameraMemory::Remembers(rng.pick(&Made::columns(rust))?)))
+                        }
+                        _ => None,
                     })
                     .collect(),
             ),

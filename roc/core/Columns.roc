@@ -7,7 +7,7 @@
 
 import Geometry exposing [clamp, max]
 import Slots
-import pf.Boundary exposing [BspTakesPart, BspDirection, BspEdited, BspFocusIn, BspFocused, BspMoveQuery, BspResizeAlong, BspSlot, BspWindowsQuery, ColumnsActivate, ColumnsAnswer, ColumnsArrangement, ColumnsClosing, ColumnsColumn, ColumnsEvent, ColumnsFrameResize, ColumnsFullscreened, ColumnsLayoutSlot, ColumnsMaybeLocation, ColumnsMaybeMoved, ColumnsMaybeRemoval, ColumnsMaybeSpan, ColumnsMoved, ColumnsPreserve, ColumnsRemoval, ColumnsRow, ColumnsSeed, ColumnsSettings, ColumnsStrip, ColumnsTransfer, ColumnsWidth, Fill, MaybeWord]
+import pf.Boundary exposing [BspTakesPart, BspDirection, BspEdited, BspFocusIn, BspFocused, BspMoveQuery, BspResizeAlong, BspSlot, BspWindowsQuery, ColumnsCamera, ColumnsAnswer, ColumnsArrangement, ColumnsClosing, ColumnsColumn, ColumnsEvent, ColumnsFrameResize, ColumnsFullscreened, ColumnsLayoutSlot, ColumnsMaybeLocation, ColumnsMaybeMoved, ColumnsMaybeRemoval, ColumnsMaybeSpan, ColumnsMoved, ColumnsPreserve, ColumnsRemoval, ColumnsRow, ColumnsSeed, ColumnsSettings, ColumnsStrip, ColumnsTransfer, ColumnsWidth, Fill, MaybeWord]
 
 ## A scrolling layout system's arrangements, the windows left out, the settings.
 Cols : {
@@ -82,8 +82,8 @@ Columns := [].{
 				(layouts, _) = Slots.remove(cols.layouts, layout)
 				({ ..cols, layouts }, Done)
 			}
-			Participation({ window, participation, remembered }) => {
-				(after, changed) = set_window_participation(cols, window, participation, remembered)
+			Participation({ window, participation, cameras }) => {
+				(after, changed) = set_window_participation(cols, window, participation, cameras)
 				(after, Verdict(changed))
 			}
 			Settings(settings) => ({ ..cols, settings }, Done)
@@ -100,6 +100,7 @@ Columns := [].{
 				(after, Removal(removal))
 			}
 			ReplaceWindow({ from, to }) => (replace_window(cols, from, to), Done)
+			LeaveOutDormant(windows) => ({ ..cols, left_out: windows.fold(cols.left_out, |acc, w| acc.insert(w)) }, Done)
 			ForgetApp(windows) => {
 				(after, closing) = forget_app(cols, windows)
 				(after, Closing(closing))
@@ -603,8 +604,8 @@ Columns := [].{
 
 	# The system's operations.
 
-	set_window_participation : Cols, U64, BspTakesPart, List(ColumnsActivate) -> (Cols, Bool)
-	set_window_participation = |cols, window, participation, remembered| {
+	set_window_participation : Cols, U64, BspTakesPart, List(ColumnsCamera) -> (Cols, Bool)
+	set_window_participation = |cols, window, participation, cameras| {
 		(left_out, changed) =
 			match participation {
 				TakesPart => (cols.left_out.remove(window), cols.left_out.contains(window))
@@ -618,13 +619,18 @@ Columns := [].{
 				marked,
 				|acc, layout|
 					if contains_window(acc, layout, window) {
-						preferred =
-							match remembered.find_first(|r| r.layout == layout) {
-								Ok(r) => Some(r.column)
-								Err(_) => Nothing
+						match cameras.find_first(|c| c.layout == layout) {
+							# A camera restoring a saved view keeps the selection (upstream #663).
+							Ok({ memory: Restoring, .. }) => acc
+							Ok({ memory: Remembers(id), .. }) => {
+								(after, _) = edited_layout(acc, layout, {}, |e| (repair_selection(e, left_out, Some(id)), {}))
+								after
 							}
-						(after, _) = edited_layout(acc, layout, {}, |e| (repair_selection(e, left_out, preferred), {}))
-						after
+							Err(_) => {
+								(after, _) = edited_layout(acc, layout, {}, |e| (repair_selection(e, left_out, Nothing), {}))
+								after
+							}
+						}
 					} else {
 						acc
 					},

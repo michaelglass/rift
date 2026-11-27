@@ -1168,8 +1168,9 @@ pub mod stack_tree {
 /// operations and views, and the Rust system they are held to.
 pub mod columns {
     use rift_core::layout::columns::{
-        Arrangement, ColumnId, Direction, DropAction, Edited, Focus, Focused, FrameResize,
-        Fullscreened, Moved, Participation, Query, Removal, ResizeAlong, Settings, Span,
+        Arrangement, CameraMemory, ColumnId, Direction, DropAction, Edited, Focus, Focused,
+        FrameResize, Fullscreened, Moved, Participation, Query, Removal, ResizeAlong, Settings,
+        Span,
     };
     use rift_core::slot_table::{SlotTable, SlotsError};
 
@@ -1188,8 +1189,8 @@ pub mod columns {
         CreateLayout,
         CloneLayout(LayoutKey),
         RemoveLayout(LayoutKey),
-        /// A window taking part or left out, and the column each layout's camera remembers.
-        Participation(u64, Participation, Vec<(LayoutKey, ColumnId)>),
+        /// A window taking part or left out, and what each layout's camera holds.
+        Participation(u64, Participation, Vec<(LayoutKey, CameraMemory)>),
         Settings(Settings),
         Insert(LayoutKey, u64),
         ForgetWindow(u64),
@@ -1200,6 +1201,7 @@ pub mod columns {
             to: u64,
         },
         ForgetApp(Vec<u64>),
+        LeaveOutDormant(Vec<u64>),
         ResizeFromFrame(LayoutKey, u64, FrameResize),
         ActivateColumn(LayoutKey, ColumnId),
         PreserveWindowSizes {
@@ -1278,9 +1280,13 @@ pub mod columns {
                 columns.remove_layout(layout);
                 Answer::Done
             }
-            Event::Participation(window, participation, remembered) => Answer::Verdict(
-                columns.set_window_participation(window, participation, &remembered),
-            ),
+            Event::Participation(window, participation, cameras) => {
+                Answer::Verdict(columns.set_window_participation(window, participation, &cameras))
+            }
+            Event::LeaveOutDormant(windows) => {
+                columns.leave_out_dormant(windows);
+                Answer::Done
+            }
             Event::Settings(settings) => {
                 columns.set_settings(settings);
                 Answer::Done
