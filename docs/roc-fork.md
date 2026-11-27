@@ -333,7 +333,37 @@ constraints (`preserve_window_sizes`).
 - The rest of #718's range needs ports before the merge: our reactor no longer has upstream's
   presentation policy, so 17a3c021 (tears), #705's reactor half and #709 are ported into its
   shape, and #718's camera commits are the camera slice.
-- Next: those ports, the merge, then the camera (modelled on PR #718).
+  - (h) #718 proper (cfa1e3b4..eb00c2f1), the camera slice. The viewport is `Uninitialized`,
+    a `Gesture`, or `Resting(Rest::{At, Centred}, Motion::{Static, Pending, Animation})`. Every
+    geometry change goes through `LayoutState::set_geometry`, which settles the viewport
+    (`settle_viewport`): into the strip's bounds, or re-centred on the selected column when
+    centred; a gesture keeps its overscroll until its release. What an edit keeps still is
+    `Hold::Selection` or `Hold::Strip` (a move between columns). Upstream's thirteen camera
+    tests carried over (fixed widths through a saved layout) and its changed persistence
+    expectation (a restored view settles into bounds).
+    - Beyond #718, the presented viewport: the presenter's camera is taken back by
+      `Viewport::presented`, only out of a gesture or out of a resting viewport on its way to
+      the very target presented, so a stale snapshot can never overwrite a target the layout
+      set since. A cancel after a suspension (what #705's reactor half fixed upstream) cannot
+      regress the camera by construction. Tested with quarter-width columns (moving and
+      arrived presenters, presented and ended) and a reactor test where a presenter run
+      through an invalidate-then-close settles the survivors where a headless run does.
+    - The fullscreen return: `Camera.showing` is `Showing::{Strip, Fullscreen { window,
+      return_to }}`, a return owed to `window`, not a second fullscreen fact (the core's fills
+      say what is fullscreen). It changes only on the core's answers: the toggle's
+      `Entered` (a return already owed is kept) and `Left` naming the window (consumed:
+      restored, or dropped while the core's active column still shows a fullscreen window), a
+      replacement (it follows the window); selecting or snapping to another column owes none.
+      The settle point reconciles it with the core: a return whose window the core no longer
+      shows fullscreen, by any path, is consumed there (a removal goes this way: the window's
+      column, if it survives, is the active one). Saved with its window; a file saved before
+      that is owed to its one fullscreen window.
+    - Plants 18/19: #718's three (no clamp after a close; a centred view clamped, not
+      re-centred; overscroll clamped mid-gesture), the settle and hold, centring's ends, the
+      dormant saved view, the presented overwrite (moving, still), the fullscreen return's
+      transitions (the toggle's answer, the settle's reconciliation, gates 1-3, the
+      replacement, saving, the legacy load). By construction: the cancel after a suspension.
+- Next: the merge, holding resolutions only.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

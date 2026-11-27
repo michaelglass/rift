@@ -1032,12 +1032,41 @@ struct ArrangementView {
     fullscreen: HashMap<WindowId, FullscreenMode>,
 }
 
+/// The view the camera owes a fullscreen window: none (`Strip`), or the strip's view to go back
+/// to once `window` is no longer fullscreen. Not a second fullscreen fact: whether `window` is
+/// fullscreen is the core's (its rows' fills). This changes only on the core's answers (the
+/// fullscreen toggle's outcome, a removal or replacement naming `window`) and is reconciled
+/// against the core at the settle point.
+#[derive(Clone, Debug, Default)]
+enum Showing {
+    #[default]
+    Strip,
+    Fullscreen {
+        window: WindowId,
+        return_to: ViewBookmark,
+    },
+}
+
+impl Showing {
+    /// The return owed to `window`, taken (the camera back to owing nothing); none if it is owed
+    /// to another window, or to none.
+    fn take_owed_to(&mut self, window: WindowId) -> Option<ViewBookmark> {
+        match std::mem::take(self) {
+            Self::Fullscreen { window: owed, return_to } if owed == window => Some(return_to),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct Camera {
     viewport: Viewport,
     motion: MotionHistory,
     transient_restore: Option<ViewBookmark>,
-    fullscreen_restore: Option<ViewBookmark>,
+    showing: Showing,
     restored_view: Option<ViewBookmark>,
 }
 
@@ -1087,7 +1116,11 @@ impl Serialize for SavedLayout<'_> {
         );
         stored.serialize_field("view_anchor", &anchor)?;
         stored.serialize_field("transient_restore", &state.camera.transient_restore)?;
-        stored.serialize_field("fullscreen_restore", &state.camera.fullscreen_restore)?;
+        let owed = match &state.camera.showing {
+            Showing::Strip => None,
+            Showing::Fullscreen { window, return_to } => Some((*window, return_to)),
+        };
+        stored.serialize_field("fullscreen_return", &owed)?;
         stored.serialize_field("fullscreen_modes", &view.fullscreen)?;
         stored.end()
     }
@@ -1105,6 +1138,8 @@ struct StoredLayoutState {
     viewport: Viewport,
     view_anchor: Option<ViewBookmark>,
     transient_restore: Option<ViewBookmark>,
+    fullscreen_return: Option<(WindowId, ViewBookmark)>,
+    /// Saved before the return named its window: owed to the one fullscreen window, if one.
     fullscreen_restore: Option<ViewBookmark>,
     fullscreen_modes: HashMap<WindowId, FullscreenMode>,
     fullscreen: HashSet<WindowId>,
@@ -1215,6 +1250,8 @@ impl From<StoredLayoutState> for LoadedLayout {
             }
             kept
         });
+        // Saved before the return named its window: owed to the one fullscreen window, if one.
+        let lone_fullscreen = (fullscreen.len() == 1).then(|| *fullscreen.keys().next().unwrap());
         let mut loaded = Self {
             view: ArrangementView {
                 columns,
@@ -1226,7 +1263,14 @@ impl From<StoredLayoutState> for LoadedLayout {
                 camera: Camera {
                     viewport: stored.viewport,
                     transient_restore: stored.transient_restore,
-                    fullscreen_restore: stored.fullscreen_restore,
+                    showing: match (stored.fullscreen_return, stored.fullscreen_restore) {
+                        (Some((window, return_to)), _) => Showing::Fullscreen { window, return_to },
+                        (None, Some(return_to)) => match lone_fullscreen {
+                            Some(window) => Showing::Fullscreen { window, return_to },
+                            None => Showing::Strip,
+                        },
+                        (None, None) => Showing::Strip,
+                    },
                     restored_view: stored.view_anchor,
                     ..Camera::default()
                 },
@@ -1270,20 +1314,46 @@ impl LayoutState {
         })
     }
 
-    /// After a fullscreen ends: the view remembered before it, unless the active column still
-    /// shows a fullscreen window; the column it shows, for the core to make active.
-    fn restore_fullscreen_view(&mut self, view: &ArrangementView) -> Option<ColumnId> {
-        let fullscreen = view
-            .columns
-            .get(view.active_column)
-            .is_some_and(|column| column.windows().any(|wid| view.fullscreen.contains_key(wid)));
-        if fullscreen {
+    /// A return owed to a window that is no longer fullscreen, consumed: restored, unless the
+    /// core's active column still shows a fullscreen window (dropped then); the column it
+    /// shows, for the core to make active.
+    fn consume_return(
+        &mut self,
+        view: &ArrangementView,
+        return_to: ViewBookmark,
+    ) -> Option<ColumnId> {
+        if Self::active_column_fullscreen(view) {
             return None;
         }
-        self.camera
-            .fullscreen_restore
-            .take()
-            .and_then(|bookmark| self.restore(view, bookmark))
+        self.restore(view, return_to)
+    }
+
+    /// Whether the core shows a fullscreen window in its active column.
+    fn active_column_fullscreen(view: &ArrangementView) -> bool {
+        view.columns
+            .get(view.active_column)
+            .is_some_and(|column| column.windows().any(|wid| view.fullscreen.contains_key(wid)))
+    }
+
+    /// The return owed reconciled with the core: if the core no longer shows its window
+    /// fullscreen, by whatever path, it is consumed here. From the settle point the camera
+    /// cannot make a column active, so it restores only a return to the active column and
+    /// drops any other.
+    fn reconcile_return(&mut self, view: &ArrangementView) {
+        let Showing::Fullscreen { window, .. } = &self.camera.showing else {
+            return;
+        };
+        if view.fullscreen.contains_key(window) {
+            return;
+        }
+        let window = *window;
+        let Some(return_to) = self.camera.showing.take_owed_to(window) else {
+            return;
+        };
+        let active = view.columns.get(view.active_column).map(|c| c.id);
+        if active == Some(return_to.column) {
+            self.consume_return(view, return_to);
+        }
     }
 
     fn prepare_geometry(
@@ -1383,6 +1453,7 @@ impl LayoutState {
     /// centred, centred on whichever column is selected now. A gesture keeps its overscroll
     /// until it ends.
     fn settle_viewport(&mut self, view: &ArrangementView) {
+        self.reconcile_return(view);
         let Some(g) = &self.geometry else {
             return;
         };
@@ -1752,14 +1823,9 @@ impl ScrollingLayoutSystem {
         let restored = restore
             .filter(|bookmark| Some(bookmark.column) == shown)
             .and_then(|bookmark| state.restore(&view(core), bookmark));
-        let restored_fullscreen = removal
-            .was_fullscreen
-            .then(|| state.restore_fullscreen_view(&view(core)))
-            .flatten();
-        if let Some(column) = restored_fullscreen {
-            Self::activate_chosen(core, layout, column);
-        }
-        if removal.active_removed && restored.is_none() && restored_fullscreen.is_none() {
+        // A return owed to the window removed was reconciled by the edit's settle: the window's
+        // column, if it survives, is the active one, whose return the settle restores.
+        if removal.active_removed && restored.is_none() {
             state.reveal(&view(core), settings);
         }
         let after = view(core);
@@ -2163,8 +2229,9 @@ impl ScrollingLayoutSystem {
         }
         let offset = snap.offset;
         let canonical_index = view.columns.iter().position(|c| c.id == column)?;
+        // A snap to another column owes no return (gate 4).
         if canonical_index != view.active_column {
-            state.camera.fullscreen_restore = None;
+            state.camera.showing = Showing::Strip;
         }
         state.camera.transient_restore = None;
         state.camera.viewport.set_target(offset);
@@ -2218,15 +2285,18 @@ impl ScrollingLayoutSystem {
         match core.toggle_fullscreen(layout, within_gaps) {
             Fullscreened::Nothing => Vec::new(),
             Fullscreened::Left(wid) => {
-                if let Some(column) = state.restore_fullscreen_view(&view(core)) {
+                if let Some(return_to) = state.camera.showing.take_owed_to(wid)
+                    && let Some(column) = state.consume_return(&view(core), return_to)
+                {
                     Self::activate_chosen(core, layout, column);
                 }
                 vec![wid]
             }
             Fullscreened::Entered(wid) => {
                 let after = view(core);
-                if state.camera.fullscreen_restore.is_none() {
-                    state.camera.fullscreen_restore = bookmark;
+                // A return already owed is kept: the view before the first fullscreen (gate 1).
+                if let (Showing::Strip, Some(return_to)) = (&state.camera.showing, bookmark) {
+                    state.camera.showing = Showing::Fullscreen { window: wid, return_to };
                 }
                 if let Some(column) = state.geometry.as_ref().and_then(|g| {
                     after.columns.get(after.active_column).and_then(|c| g.column(c.id))
@@ -2355,13 +2425,11 @@ impl ScrollingLayoutSystem {
         }
         state.camera.restored_view = None;
         state.camera.transient_restore = None;
-        if state
-            .camera
-            .fullscreen_restore
-            .as_ref()
-            .is_some_and(|b| b.column != view.columns[view.active_column].id)
+        // Selecting another column than the return's owes no return (gate 3).
+        if let Showing::Fullscreen { return_to, .. } = &state.camera.showing
+            && return_to.column != view.columns[view.active_column].id
         {
-            state.camera.fullscreen_restore = None;
+            state.camera.showing = Showing::Strip;
         }
         state.reveal(&view, &self.settings);
         true
@@ -2569,6 +2637,12 @@ impl ScrollingLayoutSystem {
                     .collect();
                 self.core.replace_window(from, to);
                 for layout in holding {
+                    // A return owed to the window follows it to its new identity.
+                    if let Some(state) = self.layouts.get_mut(layout)
+                        && let Some(return_to) = state.camera.showing.take_owed_to(from)
+                    {
+                        state.camera.showing = Showing::Fullscreen { window: to, return_to };
+                    }
                     self.edited(layout, |_| ());
                 }
             }
@@ -2840,6 +2914,132 @@ pub(crate) mod tests {
             }
             assert_eq!(f.target(), aimed, "ended {ended}, arrived {arrived}");
         }
+    }
+
+    /// Four columns (window 4 stacked under 3), column 3 selected and shown at offset 500;
+    /// window 3 made fullscreen, the camera at its column (1000), owing it the view at 500.
+    fn fullscreen_with_a_return_owed() -> Fixture {
+        let mut f = Fixture::new(5);
+        f.drop(4, 3, WindowDropAction::Stack);
+        f.select(3);
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.target(), 500.0);
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(3)]);
+        f.system.finish_viewport(f.layout);
+        assert_eq!(f.target(), 1000.0);
+        assert!(matches!(
+            f.system.layouts[f.layout].camera.showing,
+            Showing::Fullscreen { window, .. } if window == wid(3)
+        ));
+        f
+    }
+
+    fn owes_nothing(f: &Fixture) -> bool {
+        matches!(f.system.layouts[f.layout].camera.showing, Showing::Strip)
+    }
+
+    #[test]
+    fn leaving_fullscreen_goes_back_to_the_view_before_it() {
+        let mut f = fullscreen_with_a_return_owed();
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(3)]);
+        assert_eq!(f.target(), 500.0);
+        assert!(owes_nothing(&f));
+    }
+
+    /// The core leaving fullscreen by a path the camera's toggle never saw: the settle point
+    /// asks the core and consumes the return.
+    #[test]
+    fn a_return_the_core_no_longer_owes_is_consumed_at_the_settle() {
+        let mut f = fullscreen_with_a_return_owed();
+        f.system.core.toggle_fullscreen(f.layout, false);
+        f.system.edited(f.layout, |_| ());
+        assert!(owes_nothing(&f));
+        assert_eq!(f.target(), 500.0);
+    }
+
+    /// A second fullscreen in the column keeps the first one's return (gate 1); leaving the
+    /// first while the second is still fullscreen drops it (gate 2).
+    #[test]
+    fn a_second_fullscreen_keeps_the_first_return_and_leaving_under_it_drops_it() {
+        let mut f = fullscreen_with_a_return_owed();
+        f.select(4);
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(4)]);
+        assert!(matches!(
+            f.system.layouts[f.layout].camera.showing,
+            Showing::Fullscreen { window, .. } if window == wid(3)
+        ));
+        // Window 4 leaves: nothing was owed to it, and 3 is still fullscreen.
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(4)]);
+        assert_eq!(f.target(), 1000.0);
+        // Window 3 leaves: its return is restored.
+        f.select(3);
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(3)]);
+        assert_eq!(f.target(), 500.0);
+
+        // Again, leaving 3 first: 4 is still fullscreen in the active column, so the return
+        // owed to 3 is dropped, not restored.
+        let mut f = fullscreen_with_a_return_owed();
+        f.select(4);
+        f.system.toggle_fullscreen(f.layout, false);
+        f.select(3);
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(3)]);
+        assert!(owes_nothing(&f));
+        assert_eq!(f.target(), 1000.0);
+    }
+
+    /// A saved layout keeps the return and the window it is owed to; one saved before the
+    /// return named its window is owed to its one fullscreen window.
+    #[test]
+    fn saving_keeps_the_return_owed_and_its_window() {
+        let f = fullscreen_with_a_return_owed();
+        let text = ron::to_string(&f.system).unwrap();
+        let owed_to = |text: &str| {
+            let system: ScrollingLayoutSystem = ron::from_str(text).unwrap();
+            match &system.layouts[f.layout].camera.showing {
+                Showing::Fullscreen { window, return_to } => Some((*window, return_to.column)),
+                Showing::Strip => None,
+            }
+        };
+        let column = match &f.system.layouts[f.layout].camera.showing {
+            Showing::Fullscreen { return_to, .. } => return_to.column,
+            Showing::Strip => unreachable!("fullscreen_with_a_return_owed owes one"),
+        };
+        assert_eq!(owed_to(&text), Some((wid(3), column)));
+        // `fullscreen_return:Some((<window>,<bookmark>))` becomes `fullscreen_restore:Some(<bookmark>)`.
+        let head = "fullscreen_return:Some((";
+        let start = text.find(head).expect("saved with its window");
+        let rest = &text[start + head.len()..];
+        let window = rest.find("),").expect("the window, then the bookmark") + 2;
+        let bookmark = rest[window..].find("))").expect("the bookmark's end") + window;
+        let legacy = format!(
+            "{}fullscreen_restore:Some({}){}",
+            &text[..start],
+            &rest[window..bookmark],
+            &rest[bookmark + 2..]
+        );
+        assert!(!legacy.contains("fullscreen_return"), "{legacy}");
+        assert_eq!(owed_to(&legacy), Some((wid(3), column)));
+    }
+
+    /// Selecting another column owes no return (gate 3).
+    #[test]
+    fn selecting_another_column_owes_no_return() {
+        let mut f = fullscreen_with_a_return_owed();
+        f.select(1);
+        assert!(owes_nothing(&f));
+    }
+
+    /// A return owed to a window follows it to a new identity.
+    #[test]
+    fn a_replaced_window_keeps_the_return_owed_to_it() {
+        let mut f = fullscreen_with_a_return_owed();
+        f.system.update(WindowChange::Replace(wid(3), wid(9)));
+        assert!(matches!(
+            f.system.layouts[f.layout].camera.showing,
+            Showing::Fullscreen { window, .. } if window == wid(9)
+        ));
+        assert_eq!(f.system.toggle_fullscreen(f.layout, false), vec![wid(9)]);
+        assert_eq!(f.target(), 500.0);
     }
 
     struct Fixture {
