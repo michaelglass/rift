@@ -10,9 +10,10 @@ use std::collections::BTreeSet;
 
 use rift_core::layout::columns::{self as core, Fill};
 use rift_core::plain::Rect;
+use slotmap::SlotMap;
 
 use super::{
-    Arrangement, Column, ColumnId, ColumnWidth, FullscreenMode, LayoutState, Row,
+    ArrangementView, Column, ColumnId, ColumnWidth, FullscreenMode, LoadedLayout, Row,
     ScrollingLayoutSettings, ScrollingLayoutSystem,
 };
 use crate::actor::app::WindowId;
@@ -74,7 +75,7 @@ fn rift_width(width: core::Width) -> ColumnWidth {
 }
 
 /// Rift's arrangement as the core holds it (a window's fullscreen mode on its row).
-pub(super) fn arrangement(arrangement: &Arrangement) -> core::Arrangement<WindowId> {
+pub(super) fn arrangement(arrangement: &ArrangementView) -> core::Arrangement<WindowId> {
     let fill = |window: WindowId| match arrangement.fullscreen.get(&window) {
         None => Fill::Tiled,
         Some(FullscreenMode::Screen) => Fill::Screen,
@@ -104,10 +105,11 @@ pub(super) fn arrangement(arrangement: &Arrangement) -> core::Arrangement<Window
     )
 }
 
-/// The core's arrangement in rift's form: what saving writes, and what a difference re-seeds.
-pub(super) fn rift_arrangement(arrangement: &core::Arrangement<WindowId>) -> Arrangement {
+/// The core's arrangement in rift's shape: what the camera reads and saving writes, computed at
+/// each use.
+pub(super) fn view(arrangement: &core::Arrangement<WindowId>) -> ArrangementView {
     let columns = arrangement.strip.columns();
-    Arrangement {
+    ArrangementView {
         columns: columns
             .iter()
             .map(|column| Column {
@@ -138,20 +140,17 @@ pub(super) fn rift_arrangement(arrangement: &core::Arrangement<WindowId>) -> Arr
     }
 }
 
-/// The core seeded from a loaded system's layouts (each read as rift reads its saved form).
-pub(super) fn seed(system: &ScrollingLayoutSystem) -> CoreColumns {
-    // The slot structure (versions, free list) from the slotmap's saved form; each value from
-    // the live state (a saved one is normalized on its way back in).
-    let slots = of_slotmap(&system.layouts, LayoutState::default(), |_| ());
-    let layouts = slots
-        .map(|layout, ()| {
-            Ok::<_, std::convert::Infallible>(arrangement(&system.layouts[layout].arrangement))
-        })
-        .unwrap_or_else(|never| match never {});
+/// The core seeded from a loaded system's layouts (each read as rift reads its saved form): the
+/// slot structure (versions, free list) from the slotmap's saved form, each arrangement as the
+/// core parses rift's; nothing left out, the default settings (both set after a load).
+pub(super) fn seed(layouts: &SlotMap<LayoutId, LoadedLayout>) -> CoreColumns {
+    let table = of_slotmap(layouts, LoadedLayout::default(), |loaded| {
+        arrangement(&loaded.view)
+    });
     CoreColumns::from_parts(
-        layouts,
-        system.inactive.iter().copied().collect::<BTreeSet<_>>(),
-        settings(&system.settings),
+        table,
+        BTreeSet::new(),
+        settings(&ScrollingLayoutSettings::default()),
     )
 }
 
@@ -159,12 +158,15 @@ pub(super) fn seed(system: &ScrollingLayoutSystem) -> CoreColumns {
 pub(super) fn span(system: &ScrollingLayoutSystem, layout: LayoutId) -> Option<core::Span> {
     let state = system.layouts.get(layout)?;
     let g = state.geometry.as_ref()?;
-    let column = state.arrangement.columns.get(state.arrangement.active_column)?;
-    let laid = g.column(column.id)?;
+    let arrangement = system.core.arrangement(layout)?;
+    let core::Strip::Columns { active, .. } = &arrangement.strip else {
+        return None;
+    };
+    let column = g.column(ColumnId(active.id.0))?;
     Some(core::Span {
         view: g.tiling.size.width,
         gap: g.gaps.inner.horizontal,
-        width: laid.width,
+        width: column.width,
     })
 }
 

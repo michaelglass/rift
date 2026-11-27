@@ -202,10 +202,24 @@ constraints (`preserve_window_sizes`).
   core, a fullscreen ended giving back the view before it. Plants 9/10 (the tenth, a load
   leaving the projections as rift read them, is equivalent: rift's load and the core normalize
   the same states). The scrolling tests run 8x faster (no per-operation seed).
-- **Left for the camera slice:** the projection itself (the camera's ~120 reads of rift's shape;
-  option (B) would rewrite them against the core's types), and the camera's own reads of the
-  selection through the projection (`Arrangement::selected`, `selected_location`, `locate`, used
-  by `mutate`'s anchor), which repeat the core's rule on the projection.
+- **The view is computed, not stored** (the lead's ruling on slice 5, 2026-11-27): the stored,
+  refreshed projection was a second copy that could go stale (the participation bug above was
+  one). `LayoutState` holds only the camera and the geometry; `projection::view(&core
+  arrangement) -> ArrangementView` builds rift's shape at each camera or geometry entry point and
+  is passed down by reference; the windows left out are read from the core (`left_out()`), and
+  `inactive` is gone. An edit is the system's (`edited`): the view before (the core's selection
+  and its column), the core's edit, the view after, then the camera's half (`rebuilt`: the
+  geometry rebuilt, the camera rebased on the selection). Rift's selection rule on the view
+  (`selected`, `selected_location`, `Column::selected`) is deleted: the core is asked. A pass's
+  view is taken after the core fixes preserved widths (`prepare_geometry` takes the view as a
+  closure). The camera states sit in a `SecondaryMap` under the core's layout ids (one
+  allocator); saving writes the core's table slot for slot (`slot_table::saved`, slotmap's own
+  form, held to a slotmap's bytes by a test), a load reads `LoadedLayout`s and seeds the core.
+  Cost: a view of 70 windows builds in 3.8 us (release), an edit with its geometry 24.5 us: no
+  cache. Plants 6/6.
+- **Left for the camera slice:** the view itself (the camera's reads of rift's shape, to be
+  rewritten against the core's types), and `fullscreen_restore` living outside the fullscreen
+  (the lead's ruling: put it inside the fullscreen state and delete the gates).
 - Next: the camera (modelled on PR #718).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
