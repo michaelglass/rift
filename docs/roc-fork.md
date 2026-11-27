@@ -103,7 +103,11 @@ the dev backend runs the same program, and at nightly-2026-11-26-890d6c8 it does
   crashed.
 - Retry on a bump once both are fixed: `roc/bump.sh` runs rift-core-roc's layout tests under dev
   (`ROC_OPT=dev`, the build script's only other setting, in `target/roc-dev`) and says whether they
-  pass; it never gates. The key cache stays (one optimized Roc build per `.roc` change).
+  pass, and runs `roc/repros/recursive-nominal-payload` under dev and size and says whether it
+  prints 7; neither gates. The key cache stays (one optimized Roc build per `.roc` change).
+- No workaround for the nominal-payload crash (ruled 2026-11-27): written inline, the payloads
+  would get hashed glue names (`AnonStruct…`), against the named boundary and its guard; the gain
+  (a size build in check-fast) does not pay for that.
 - `mise run check-release` (what `rift-local.sh` runs before an install) is an alias of the check
   run: the release build's Roc is the one the check run tests.
 

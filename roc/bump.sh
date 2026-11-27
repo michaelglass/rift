@@ -77,6 +77,15 @@ if ROC_OPT=dev CARGO_TARGET_DIR=target/roc-dev cargo test -q -p rift-core-roc --
 else
     echo "roc-bump: rift-core-roc's layout tests still fail under --opt=dev at $latest (target/roc-dev.log)"
 fi
+# The same crash reduced (roc/repros/recursive-nominal-payload): a nominal record as a recursive
+# union's variant payload, which --opt=size and --opt=dev misread. Never a gate.
+for opt in dev size; do
+    if ROC="$home/current/roc" roc/repros/recursive-nominal-payload/run.sh "$opt" 2>/dev/null | grep -qx 7; then
+        echo "roc-bump: the recursive-nominal-payload repro passes under --opt=$opt at $latest (report it)"
+    else
+        echo "roc-bump: the recursive-nominal-payload repro still crashes under --opt=$opt at $latest"
+    fi
+done
 if roc/check.sh; then
     echo "roc-bump: $latest is green; commit roc/NIGHTLY"
 else
