@@ -1844,16 +1844,21 @@ mod tests {
             );
             event
         };
-        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(1), None));
+        // Held events are recorded, never posted into the session.
+        let reposted = std::cell::Cell::new(0);
+        let post = |_: &CGEvent| reposted.set(reposted.get() + 1);
+        assert!(!input.gesture_forward(CGEventType::ScrollWheel, &event(1), post));
         std::thread::sleep(Duration::from_millis(70));
-        input.native_gesture_forward(CGEventType::ScrollWheel, &event(2), None);
+        input.gesture_forward(CGEventType::ScrollWheel, &event(2), post);
         assert_eq!(
             input.gesture_control.ownership_guard().owner,
             gesture::Owner::Undecided,
             "native delivery timeout must not impose a minimum recognition speed"
         );
+        assert_eq!(reposted.get(), 1, "the slow stroke's held event is released");
         input.gesture_control.ownership_guard().owner = gesture::Owner::Rift;
-        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(2), None));
+        assert!(!input.gesture_forward(CGEventType::ScrollWheel, &event(2), post));
+        assert_eq!(reposted.get(), 2, "Rift's stroke releases what was still held");
     }
 
     #[test]
@@ -2560,7 +2565,7 @@ mod tests {
         input.on_request(Request::ConfigUpdated(initial), &recovery);
         input.on_request(Request::AppsRegistered, &recovery);
         let key = |code| {
-            let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
+            let event = CGEvent::new_keyboard_event(Some(&private_source()), code, true).unwrap();
             input.on_event(CGEventType::KeyDown, &event, None)
         };
         let global = |event| {
@@ -3033,21 +3038,32 @@ impl Input {
         event: &CGEvent,
         proxy: Option<CGEventTapProxy>,
     ) -> bool {
+        self.gesture_forward(ty, event, |held| {
+            if let Some(proxy) = proxy {
+                // The proxy is valid only during this tap callback. Held events
+                // must reach downstream taps before the current event returns.
+                unsafe { CGEvent::tap_post_event(proxy, Some(held)) };
+            } else {
+                // A test never posts into the login session: it would reach whatever window is
+                // under the pointer. Tests record held events through `gesture_forward`.
+                #[cfg(test)]
+                panic!("a test posted a held gesture event into the session");
+                #[cfg(not(test))]
+                CGEvent::post(CGTapLoc::SessionEventTap, Some(held));
+            }
+        })
+    }
+
+    /// The gesture filter's decision on `event`, held events going to `post` (the tap, or the
+    /// session: a test records them instead, so nothing reaches the OS).
+    fn gesture_forward(
+        &self,
+        ty: CGEventType,
+        event: &CGEvent,
+        post: impl FnMut(&CGEvent),
+    ) -> bool {
         let mut filter = self.gesture_filter.borrow_mut();
-        filter.forward(
-            ty,
-            event,
-            || self.gesture_control.ownership_guard(),
-            |held| {
-                if let Some(proxy) = proxy {
-                    // The proxy is valid only during this tap callback. Held events
-                    // must reach downstream taps before the current event returns.
-                    unsafe { CGEvent::tap_post_event(proxy, Some(held)) };
-                } else {
-                    CGEvent::post(CGTapLoc::SessionEventTap, Some(held));
-                }
-            },
-        )
+        filter.forward(ty, event, || self.gesture_control.ownership_guard(), post)
     }
 
     fn reset_gestures(&self) {
