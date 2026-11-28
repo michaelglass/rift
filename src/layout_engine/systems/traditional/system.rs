@@ -625,6 +625,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
 #[derive(Clone, Debug)]
 pub(crate) struct Snapshot(CoreTraditional);
 
+impl Snapshot {
+    /// `layout`'s windows, as the core value holds them.
+    pub(crate) fn windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.0.forest().windows(layout, core_query(WindowQuery::All))
+    }
+}
+
 impl TraditionalLayoutSystem {
     /// The core's value, for a native snapshot.
     pub(crate) fn snapshot(&self) -> Snapshot { Snapshot(self.core.clone()) }

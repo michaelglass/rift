@@ -17,6 +17,7 @@ pub mod layout;
 pub mod lifecycle;
 pub mod main_window;
 pub mod modes;
+pub mod native_memory;
 pub mod plain;
 pub mod pointer;
 pub mod reconciler;

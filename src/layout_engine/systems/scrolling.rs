@@ -1204,6 +1204,13 @@ pub(crate) struct Snapshot {
     settings: ScrollingLayoutSettings,
 }
 
+impl Snapshot {
+    /// `layout`'s windows, as the columns core holds them.
+    pub(crate) fn windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.core.windows(layout, projection::query(WindowQuery::All))
+    }
+}
+
 impl ScrollingLayoutSystem {
     /// The cores' values, for a native snapshot.
     pub(crate) fn snapshot(&self) -> Snapshot {

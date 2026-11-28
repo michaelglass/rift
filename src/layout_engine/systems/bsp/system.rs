@@ -797,6 +797,13 @@ fn stored_node(node: &core::Node<NodeId, WindowId>) -> Node {
 #[derive(Clone, Debug)]
 pub(crate) struct Snapshot(CoreTree);
 
+impl Snapshot {
+    /// `layout`'s windows, as the core value holds them.
+    pub(crate) fn windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.0.windows(layout, Query::All)
+    }
+}
+
 impl BspLayoutSystem {
     /// The core's value, for a native snapshot.
     pub(crate) fn snapshot(&self) -> Snapshot { Snapshot(self.core.clone()) }

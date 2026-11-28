@@ -3,6 +3,7 @@ use std::sync::Arc;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_core::display_memory::{DisplayEvent, LastSpace};
 use rift_core::evictions::EvictionEvent;
+use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -11,7 +12,7 @@ use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, ResizeOrient
 #[cfg(test)]
 use crate::actor::app::AppInfo;
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::common::config::{LayoutMode, LayoutSettings, WorkspaceSelector};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::floating::FloatingFullscreenKind;
@@ -217,8 +218,9 @@ pub struct LayoutEngine {
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
     // Display-relocation recovery only; temporary absence never snapshots topology.
-    native_layouts: HashMap<VirtualWorkspaceId, NativeSnapshot>,
-    native_reconcile_batch: Option<HashSet<VirtualWorkspaceId>>,
+    /// Workspace arrangements kept for a departed display's return, and the reconcile batch
+    /// (engine slice E3c).
+    native: rift_core::native_memory::NativeMemory<VirtualWorkspaceId, NativeSnapshot>,
     // Windows a display departure moved to another display, by where they came from.
     /// Where a display departure moved windows from (engine slice E3b).
     evicted: crate::roc_twin::TwinnedEvictions,
@@ -249,13 +251,16 @@ impl StartingLayout {
 
 /// A workspace's arrangement kept for a departed display's return (engine slice E3c): its layout
 /// system's state as the cores hold it (never a live system), its active layout and the size it
-/// was laid out for, and that layout's windows.
+/// was laid out for. Its windows are computed from the value.
 #[derive(Clone, Debug)]
 struct NativeSnapshot {
     system: super::systems::SystemSnapshot,
     layout: LayoutId,
     size: super::workspaces::Size,
-    windows: Vec<WindowId>,
+}
+
+impl rift_core::native_memory::Held<WindowId> for NativeSnapshot {
+    fn windows(&self) -> Vec<WindowId> { self.system.windows(self.layout) }
 }
 
 impl NativeSnapshot {
@@ -269,18 +274,15 @@ impl NativeSnapshot {
             system: workspace.layout_system.snapshot()?,
             layout,
             size,
-            windows: workspace.layout_system.windows(layout, WindowQuery::All),
         })
     }
 
-    fn holds(&self, window: WindowId) -> bool { self.windows.contains(&window) }
-
     /// The snapshot after `change`, as its system makes it (a scrolling camera's answer kept).
-    fn update(&mut self, change: WindowChange<'_>) {
+    fn updated(&self, change: WindowChange<'_>) -> Self {
         let mut live = self.system.clone().restored();
         live.update(change);
-        self.windows = live.windows(self.layout, WindowQuery::All);
-        self.system = live.snapshot().expect("a snapshot's system keeps one");
+        let system = live.snapshot().expect("a snapshot's system keeps one");
+        NativeSnapshot { system, ..self.clone() }
     }
 
     /// The live system and layout state it holds.
@@ -319,7 +321,7 @@ impl LayoutEngine {
             return false;
         };
         self.forget_native_layout_for_window_id(request.source);
-        self.native_layouts.remove(&workspace);
+        self.native.step::<WindowId>(MemoryEvent::Forgotten(workspace));
         self.workspaces[workspace]
             .layout_system
             .edit(layout, LayoutEdit::Drop {
@@ -422,7 +424,7 @@ impl LayoutEngine {
                 return false;
             }
         } else if let Some(tree) = prospective {
-            self.native_layouts.remove(&destination);
+            self.native.step::<WindowId>(MemoryEvent::Forgotten(destination));
             self.workspaces[destination].layout_system = tree;
         }
         if self.floats.focused() == Some(drop.window) {
@@ -855,7 +857,7 @@ impl LayoutEngine {
     // Hydrated systems carry saved settings even though the runtime settings
     // field starts at its default. Loading must apply the current configuration.
     fn apply_layout_settings(&mut self, windows: Windows<'_>, settings: &LayoutSettings) {
-        self.native_layouts.clear();
+        self.native.step::<WindowId>(MemoryEvent::Cleared);
         self.layout_settings = settings.clone();
 
         let spaces: HashMap<_, _> = windows.core.catalog().iter().copied().collect();
@@ -1417,29 +1419,28 @@ impl LayoutEngine {
     // Native reconciliation deliberately does not use this boundary.
     fn forget_native_layout_for_window_id(&mut self, wid: WindowId) {
         self.evicted.step(EvictionEvent::Forgotten(wid));
-        for snapshot in self.native_layouts.values_mut() {
-            if snapshot.holds(wid) {
-                snapshot.update(WindowChange::Remove(wid));
-            }
+        self.edit_native_snapshots(wid, WindowChange::Remove(wid));
+    }
+
+    /// Every snapshot holding `window` edited by `change` through its system.
+    fn edit_native_snapshots(&mut self, window: WindowId, change: WindowChange<'_>) {
+        for workspace in self.native.holding(window) {
+            let snapshot = self.native.get(workspace).expect("a snapshot it named").updated(change);
+            self.native.step::<WindowId>(MemoryEvent::Edited { workspace, snapshot });
         }
-        self.prune_native_layouts();
     }
 
     fn forget_native_layout_for_workspace(&mut self, workspace: VirtualWorkspaceId) {
-        self.native_layouts.remove(&workspace);
+        self.native.step::<WindowId>(MemoryEvent::Forgotten(workspace));
         for window in self.evicted.landed_in(workspace) {
             self.forget_native_layout_for_window_id(window);
         }
     }
 
-    fn prune_native_layouts(&mut self) {
-        self.native_layouts.retain(|_, snapshot| !snapshot.windows.is_empty());
-    }
-
     pub(crate) fn forget_native_layout_for_window(&mut self, windows: Windows<'_>, wid: WindowId) {
         self.forget_native_layout_for_window_id(wid);
         if let Some(assignment) = windows.workspace_for_window(wid) {
-            self.native_layouts.remove(&assignment);
+            self.native.step::<WindowId>(MemoryEvent::Forgotten(assignment));
         }
     }
 
@@ -1448,11 +1449,11 @@ impl LayoutEngine {
             return;
         };
         let workspace = assignment;
-        if self.floats.is_floating(wid) || self.native_layouts.contains_key(&workspace) {
+        if !self.native.keeps(workspace, self.floats.is_floating(wid)) {
             return;
         }
         if let Some(snapshot) = NativeSnapshot::of(&self.workspaces[workspace]) {
-            self.native_layouts.insert(workspace, snapshot);
+            self.native.step::<WindowId>(MemoryEvent::Kept { workspace, snapshot });
         }
     }
 
@@ -1469,11 +1470,15 @@ impl LayoutEngine {
                 self.remember_native_departure(windows, window);
             }
         }
-        self.native_reconcile_batch = Some(HashSet::default());
+        self.native.step::<WindowId>(MemoryEvent::ReconcileBegan);
     }
 
     pub(crate) fn finish_native_reconcile(&mut self, windows: Windows<'_>) {
-        let workspaces = self.native_reconcile_batch.take().unwrap_or_default();
+        let MemoryAnswer::Waited(workspaces) =
+            self.native.step::<WindowId>(MemoryEvent::ReconcileEnded)
+        else {
+            unreachable!("the batch's end answers the workspaces that waited");
+        };
         for workspace in workspaces {
             self.restore_native_layout(windows, workspace, None);
         }
@@ -1481,7 +1486,6 @@ impl LayoutEngine {
         for wid in self.evicted.stale(|wid| windows.workspace_for_window(wid)) {
             self.forget_native_layout_for_window_id(wid);
         }
-        self.prune_native_layouts();
     }
 
     /// Tells the evictions machine where a display departure moved `wid` from. Call after the
@@ -1541,58 +1545,50 @@ impl LayoutEngine {
         workspace: VirtualWorkspaceId,
         returning: Option<WindowId>,
     ) {
-        let Some(saved) = self.native_layouts.get(&workspace) else {
-            return;
-        };
-        if returning.is_some_and(|window| !saved.holds(window)) {
-            return;
-        }
-        if let Some(workspaces) = self.native_reconcile_batch.as_mut() {
-            workspaces.insert(workspace);
-            return;
-        }
-        let original: HashSet<_> = saved.windows.iter().copied().collect();
         let current = &self.workspaces[workspace];
-        let Some(size) = current.layout_state.active_size() else {
+        let size = current.layout_state.active_size();
+        let facts = match current.layout_state.active() {
+            None => Current::Unlaid,
+            Some(layout) => Current::Laid(
+                (current.layout_system.windows(layout, WindowQuery::All).into_iter())
+                    .map(|window| Candidate {
+                        window,
+                        in_workspace: windows
+                            .workspace_for_window(window)
+                            .or_else(|| windows.claim(window).and_then(|claim| claim.workspace()))
+                            == Some(workspace),
+                        present: windows.is_admitted(window)
+                            || windows.is_temporarily_unavailable(window),
+                        floating: self.floats.is_floating(window),
+                    })
+                    .collect(),
+            ),
+        };
+        let asked = MemoryEvent::RestoreAsked {
+            workspace,
+            returning,
+            current: facts,
+        };
+        let MemoryAnswer::Restore(plan) = self.native.step(asked) else {
             return;
         };
-        let mut desired = HashSet::default();
-        let ordered: Vec<_> = current
-            .layout_state
-            .active()
-            .into_iter()
-            .flat_map(|layout| current.layout_system.windows(layout, WindowQuery::All))
-            .filter(|window| {
-                windows
-                    .workspace_for_window(*window)
-                    .or_else(|| windows.claim(*window).and_then(|claim| claim.workspace()))
-                    == Some(workspace)
-                    && (windows.is_admitted(*window) || windows.is_temporarily_unavailable(*window))
-                    && !self.floats.is_floating(*window)
-                    && desired.insert(*window)
-            })
-            .collect();
-        if original.is_disjoint(&desired) {
-            return;
+        let size = size.expect("a laid-out workspace has a size");
+        let (mut system, mut state) = plan.snapshot.restored();
+        // Only a working copy is pruned: partial returns share one original arrangement.
+        for &window in &plan.remove {
+            system.update(WindowChange::Remove(window));
         }
-        let (mut system, mut state) = saved.restored();
-        // Prune only a working copy: partial returns must share one original arrangement.
-        for window in original.difference(&desired) {
-            system.update(WindowChange::Remove(*window));
-        }
-        for layout in state.active().into_iter() {
-            for &window in &ordered {
-                if !system.contains_window(layout, window) {
-                    system.update(WindowChange::Add(layout, window, None));
-                }
+        if let Some(layout) = state.active() {
+            for &window in &plan.add {
+                system.update(WindowChange::Add(layout, window, None));
             }
         }
         // Display recovery restores topology, never historical eligibility.
-        for &window in &ordered {
+        for &window in &plan.ordered {
             system.set_window_participation(window, !windows.is_temporarily_unavailable(window));
         }
         state.ensure_active(size, &mut system);
-        if let Some(focused) = self.floats.focused().filter(|window| desired.contains(window))
+        if let Some(focused) = self.floats.focused().filter(|window| plan.ordered.contains(window))
             && let Some(layout) = state.active()
         {
             system.focus(layout, Focus::Select(focused)).handled;
@@ -1600,9 +1596,6 @@ impl LayoutEngine {
         let current = &mut self.workspaces[workspace];
         current.layout_system = system;
         current.layout_state = state;
-        if original.is_subset(&desired) {
-            self.native_layouts.remove(&workspace);
-        }
     }
 
     fn suspend_window(&mut self, window_store: Windows<'_>, wid: WindowId) -> bool {
@@ -1904,10 +1897,7 @@ impl LayoutEngine {
     /// Drop everything keyed by a workspace that no longer exists; one left behind would no
     /// longer resolve.
     fn forget_workspace(&mut self, workspace: VirtualWorkspaceId) {
-        self.native_layouts.remove(&workspace);
-        if let Some(batch) = self.native_reconcile_batch.as_mut() {
-            batch.remove(&workspace);
-        }
+        self.native.step::<WindowId>(MemoryEvent::Forgotten(workspace));
         self.floats.remove_workspace(workspace);
         self.forget_persisted_workspace(workspace);
     }
@@ -1927,8 +1917,7 @@ impl LayoutEngine {
             displays: Default::default(),
             persistence: PersistenceState::default(),
             scroll_boundary: None,
-            native_layouts: HashMap::default(),
-            native_reconcile_batch: None,
+            native: Default::default(),
             evicted: Default::default(),
             shadow_passes: Default::default(),
         }
@@ -2283,10 +2272,14 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::AppClosed(pid) => {
-                for snapshot in self.native_layouts.values_mut() {
-                    if snapshot.windows.iter().any(|window| window.pid == pid) {
-                        snapshot.update(WindowChange::CloseApp(pid));
-                    }
+                let holding: Vec<_> = (self.native.snapshots())
+                    .filter(|(_, snapshot)| snapshot.windows().iter().any(|w| w.pid == pid))
+                    .map(|(workspace, _)| workspace)
+                    .collect();
+                for workspace in holding {
+                    let snapshot =
+                        self.native.get(workspace).unwrap().updated(WindowChange::CloseApp(pid));
+                    self.native.step::<WindowId>(MemoryEvent::Edited { workspace, snapshot });
                 }
                 let changed =
                     self.workspaces.reading(window_store.read()).layout_spaces().into_iter().any(
@@ -2311,7 +2304,6 @@ impl LayoutEngine {
                     }
                 }
                 self.evicted.step(EvictionEvent::AppQuit(pid));
-                self.prune_native_layouts();
                 self.floats.app_quit(pid);
                 self.constraints.step(rift_core::constraints::ConstraintsEvent::AppQuit(pid));
                 self.forget_persisted_app(pid);
@@ -3861,7 +3853,7 @@ impl LayoutEngine {
         if !self.workspaces.transfer_workspace(windows, id, target, display, reason) {
             return EventResponse::default();
         }
-        self.native_layouts.remove(&id);
+        self.native.step::<WindowId>(MemoryEvent::Forgotten(id));
         if reason == crate::model::virtual_workspace::WorkspaceTransferReason::Explicit
             && let Some(source_size) = source_size
         {
@@ -3952,8 +3944,8 @@ impl LayoutEngine {
         }
 
         self.forget_native_layout_for_window_id(window);
-        self.native_layouts.remove(&source);
-        self.native_layouts.remove(&destination);
+        self.native.step::<WindowId>(MemoryEvent::Forgotten(source));
+        self.native.step::<WindowId>(MemoryEvent::Forgotten(destination));
         self.workspaces[source].layout_system.update(WindowChange::Remove(window));
         let project_as_floating = directional.is_none() && was_floating && !target_floating_layout;
         if directional.is_none() {
@@ -4118,14 +4110,8 @@ impl LayoutEngine {
         }
 
         self.evicted.step(EvictionEvent::Replaced { from, to });
-        for snapshot in self.native_layouts.values_mut() {
-            if snapshot.holds(to) {
-                snapshot.update(WindowChange::Remove(to));
-            }
-            if snapshot.holds(from) {
-                snapshot.update(WindowChange::Replace(from, to));
-            }
-        }
+        self.edit_native_snapshots(to, WindowChange::Remove(to));
+        self.edit_native_snapshots(from, WindowChange::Replace(from, to));
         // A live `to` identity can already be provisionally present when a saved `from` identity
         // is matched. Remove that projection before replacement; LayoutSystem::replace_window is
         // not required to deduplicate and otherwise the same window can survive in two workspaces.
@@ -4223,10 +4209,7 @@ mod tests {
                 None,
                 "stale focus must not reactivate a suspended member"
             );
-            assert!(
-                engine.native_layouts.is_empty(),
-                "suspension never snapshots topology"
-            );
+            assert!(engine.native.is_empty(), "suspension never snapshots topology");
             engine.workspaces.set_active_workspace(&mut store.view_mut(), space, other);
             store.validate_ax_identity(windows[0]);
             let _ = engine.handle_event(
@@ -5189,7 +5172,8 @@ mod tests {
 
     /// A native snapshot's windows, in window order.
     fn kept(engine: &LayoutEngine, workspace: VirtualWorkspaceId) -> Vec<WindowId> {
-        let mut windows = engine.native_layouts[&workspace].windows.clone();
+        let mut windows =
+            rift_core::native_memory::Held::windows(engine.native.get(workspace).unwrap());
         windows.sort();
         windows
     }
@@ -5199,7 +5183,7 @@ mod tests {
     #[test]
     fn a_native_snapshot_forgets_a_closed_window_and_is_spent_once_the_rest_return() {
         let (mut engine, mut store, workspace, [a, b, c]) = departed_workspace();
-        let snapshot = &engine.native_layouts[&workspace];
+        let snapshot = engine.native.get(workspace).unwrap();
         assert_eq!(
             Some(snapshot.layout),
             engine.workspaces[workspace].layout_state.active()
@@ -5208,7 +5192,35 @@ mod tests {
         let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::WindowRemoved(c));
         assert_eq!(kept(&engine, workspace), [a, b]);
         engine.restore_native_layout(store.view(), workspace, None);
-        assert!(engine.native_layouts.is_empty(), "every window it kept is back");
+        assert!(engine.native.is_empty(), "every window it kept is back");
+    }
+
+    /// A window still in the workspace's layout but assigned to another workspace is not taken
+    /// back: the restore leaves it out, and the snapshot is not spent.
+    #[test]
+    fn a_restore_takes_back_only_the_workspaces_own_windows() {
+        let (mut engine, mut store, workspace, [_, _, c]) = departed_workspace();
+        let space = SpaceId::new(97);
+        let other = engine
+            .workspaces
+            .reading(store.view())
+            .workspaces_on(space)
+            .find(|&id| id != workspace)
+            .expect("a second workspace on the Space");
+        assert!(engine.workspaces.assign_window_to_workspace(
+            &mut store.view_mut(),
+            space,
+            c,
+            other
+        ));
+        // Still in the workspace's layout, as a window is between its reassignment and the
+        // layout pass that moves it.
+        let layout = engine.workspaces[workspace].layout_state.active().unwrap();
+        engine.workspaces[workspace]
+            .layout_system
+            .update(WindowChange::Add(layout, c, None));
+        engine.restore_native_layout(store.view(), workspace, None);
+        assert!(engine.native.get(workspace).is_some(), "window c is not back");
     }
 
     /// A snapshot follows a window's new identity, and is dropped once its last window is gone.
@@ -5221,7 +5233,7 @@ mod tests {
         for window in [rekeyed, b, c] {
             let _ = engine.handle_event(&mut store.view_mut(), LayoutEvent::WindowRemoved(window));
         }
-        assert!(engine.native_layouts.is_empty());
+        assert!(engine.native.is_empty());
     }
 
     /// A window evicted from Space 97 (display `a`) into Space 98's active workspace (display

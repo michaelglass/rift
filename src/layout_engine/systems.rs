@@ -540,6 +540,17 @@ pub(crate) enum SystemSnapshot {
 }
 
 impl SystemSnapshot {
+    /// `layout`'s windows, computed from the value (never kept beside it).
+    pub(crate) fn windows(&self, layout: LayoutId) -> Vec<WindowId> {
+        match self {
+            Self::Traditional(s) => s.windows(layout),
+            Self::Bsp(s) => s.windows(layout),
+            Self::MasterStack(s) => s.windows(layout),
+            Self::Scrolling(s) => s.windows(layout),
+            Self::Stack(s) => s.windows(layout),
+        }
+    }
+
     /// The live system holding the snapshot's values.
     pub(crate) fn restored(self) -> LayoutSystemKind {
         match self {

@@ -921,7 +921,37 @@ cache: clippy re-emits warnings only for crates it re-lints (one run printed 4).
   left in its snapshots; a scrolling snapshot without its cameras; a restore without the
   snapshot's layout; a snapshot taken without its windows.
 
-- Next: E3c-2 (the native-memory machine in rift-core).
+**E3c-2 (2026-11-28): the native memory is a core machine.**
+`rift_core::native_memory::NativeMemory<Ws, S>` holds each workspace's snapshot and the reconcile
+batch (`Batch::{Idle, Collecting(set)}`); it replaced the engine's `native_layouts` and
+`native_reconcile_batch`. Events: `Kept`, `Edited`, `Forgotten`, `Cleared`, `ReconcileBegan`,
+`ReconcileEnded` (answers the workspaces that waited), `RestoreAsked` (answers `Deferred`, a
+`Plan`, or nothing).
+- **A snapshot's windows are computed from its value** (the lead's question): every core value
+  knows its windows, so the list `NativeSnapshot` kept beside the value was a second copy kept in
+  step on every edit, the shape of the deleted active-floating set. It is gone:
+  `SystemSnapshot::windows(layout)` asks the core value, and the machine reads it through
+  `Held::windows`. "Which snapshot holds window w" (`holding`) scans the snapshots, which are few
+  (one per workspace a departure moved) and small; no index.
+- **The machine decides** whether a departure keeps a snapshot (not for a floating window, not
+  over one held, not of nothing), when a restore waits for the batch, which of the workspace's
+  current windows a restore takes back (from each one's facts: in the workspace, present,
+  floating), what it changes (`Plan`: the snapshot's windows to remove, in its order; the windows
+  taken back, in the workspace's order; those to add; whether it is spent), and drops a snapshot
+  an edit empties. The engine gathers the facts, makes snapshot values and edits them through
+  their systems, and applies a plan.
+- A forgotten workspace also leaves the batch. Removals follow the snapshot's order (before, a
+  hash set's).
+- Tests for what nothing tested: a forgotten workspace no longer waits for the batch; a restore
+  takes back only the workspace's own windows (one still in its layout but assigned elsewhere is
+  left out, and the snapshot is not spent). Plants 11/11: in the core, a floating window's
+  departure kept, a second departure replacing the snapshot, an emptied snapshot kept, a restore
+  during a batch not deferred, a forgotten workspace still waiting, an absent window taken back,
+  a held window added again, never spent; in the engine, a closed window left in the snapshots,
+  an identity change not followed, a window of another workspace taken back.
+
+- Next: E3c-3 (its Roc twin: the batch and each snapshot's windows as words; the values stay in
+  the Rust machine, and restores count as seeds).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line
