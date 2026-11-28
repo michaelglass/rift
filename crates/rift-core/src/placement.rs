@@ -1425,6 +1425,467 @@ pub fn rule_frame<P, R>(place: Option<P>, resize: Option<R>) -> RuleFrame<P, R> 
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Placement, the moves, assignment and the rule outcome, typed per kind (the wire form a Roc core
+// answers; payloads the engine holds are tokens).
+
+impl<K: Copy, L> AdditionFacts<K, L> {
+    /// The facts with the layout as a token.
+    pub fn tokens(&self) -> AdditionFacts<K, ()> {
+        AdditionFacts {
+            admitted: self.admitted,
+            fullscreen_suspended: self.fullscreen_suspended,
+            workspace: self.workspace,
+            in_floats: self.in_floats,
+            tree: self.tree.as_ref().map(|t| Tree {
+                layout: (),
+                holds_window: t.holds_window,
+            }),
+            preserve_widths: self.preserve_widths,
+        }
+    }
+}
+
+impl<K> Addition<K, ()> {
+    /// The workspace renamed; none where a word names nothing.
+    pub fn map<K2>(self, k: impl FnOnce(K) -> Option<K2>) -> Option<Addition<K2, ()>> {
+        Some(match self {
+            Addition::Skip(s) => Addition::Skip(s),
+            Addition::Float { workspace } => Addition::Float { workspace: k(workspace)? },
+            Addition::Tile { workspace, insert } => Addition::Tile {
+                workspace: k(workspace)?,
+                insert,
+            },
+            Addition::IntoFloatingLayout { workspace, insert } => Addition::IntoFloatingLayout {
+                workspace: k(workspace)?,
+                insert,
+            },
+        })
+    }
+}
+
+impl<K, L> Addition<K, L> {
+    /// The addition with its layout as a token.
+    pub fn tokens(self) -> Addition<K, ()> {
+        match self {
+            Addition::Skip(s) => Addition::Skip(s),
+            Addition::Float { workspace } => Addition::Float { workspace },
+            Addition::Tile { workspace, insert } => Addition::Tile {
+                workspace,
+                insert: insert.with_layout(|_| ()),
+            },
+            Addition::IntoFloatingLayout { workspace, insert } => Addition::IntoFloatingLayout {
+                workspace,
+                insert: insert.with_layout(|_| ()),
+            },
+        }
+    }
+}
+
+impl<L, Wd> Insert<L, Wd> {
+    /// The same insertion with its layout replaced.
+    pub fn with_layout<L2>(self, layout: impl FnOnce(L) -> L2) -> Insert<L2, Wd> {
+        match self {
+            Insert::Present => Insert::Present,
+            Insert::Add { layout: l, width } => Insert::Add { layout: layout(l), width },
+            Insert::NoLayout => Insert::NoLayout,
+        }
+    }
+}
+
+/// [`window_move`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowMoveAsk<K> {
+    pub from: Option<K>,
+    pub to: Option<K>,
+}
+
+/// [`landing`]'s fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingAsk {
+    pub placeable: bool,
+}
+
+/// [`workspace_move`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkspaceMoveAsk<K> {
+    pub shown: Option<K>,
+    pub per_display: bool,
+    pub same_space: bool,
+    pub index: Option<usize>,
+}
+
+/// [`members_destination`]'s fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembersAsk<K> {
+    pub found: Option<K>,
+}
+
+/// [`moved_focus`]'s facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedFocusAsk<W> {
+    pub preferred: Option<W>,
+    pub moved: Vec<W>,
+}
+
+/// [`claim`]'s facts (the override is a rule's manage flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimAsk {
+    pub claimed: bool,
+    pub management_override: Option<bool>,
+}
+
+/// [`assignment`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignmentAsk {
+    pub restored: bool,
+    pub reapply: bool,
+    pub rule_names_workspace: bool,
+}
+
+/// [`rule_float`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleFloatAsk {
+    pub should_float: bool,
+    pub was_floating: bool,
+}
+
+/// [`rule_frame`]'s facts: the placement and the resize a rule makes (payloads the engine holds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuleFrameAsk<P, R> {
+    pub place: Option<P>,
+    pub resize: Option<R>,
+}
+
+/// [`crate::floats::requested_frame`]'s facts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameAsk {
+    pub frame: Rect,
+    pub screen: Rect,
+    pub centering: crate::floats::Centering,
+    pub sizing: crate::floats::Sizing,
+}
+
+/// The layout engine's remaining placement choices, as a question (the wire form).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaceQuestion<W, K> {
+    Addition(AdditionFacts<K, ()>),
+    WindowMove(WindowMoveAsk<K>),
+    Landing(LandingAsk),
+    WorkspaceMove(WorkspaceMoveAsk<K>),
+    Members(MembersAsk<K>),
+    MovedFocus(MovedFocusAsk<W>),
+    Claim(ClaimAsk),
+    Assignment(AssignmentAsk),
+    RuleFloat(RuleFloatAsk),
+    RuleFrame(RuleFrameAsk<(), ()>),
+    Frame(FrameAsk),
+}
+
+/// A placement choice's answer, in its wire form.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaceChoice<W, K> {
+    Addition(Addition<K, ()>),
+    WindowMove(WindowMove<K>),
+    Landing(Landing),
+    WorkspaceMove(WorkspaceMove<K>),
+    Members(Result<K, WorkspaceMoveRefusal>),
+    MovedFocus(MovedFocus<W>),
+    Claim(Claim<bool>),
+    Assignment(Assignment),
+    RuleFloat(RuleFloat),
+    RuleFrame(RuleFrame<(), ()>),
+    Frame(Rect),
+}
+
+/// The answer to `question` (the wire form's), from the functions above.
+pub fn choose_place<W: Copy + PartialEq, K: Copy>(
+    question: PlaceQuestion<W, K>,
+) -> PlaceChoice<W, K> {
+    match question {
+        PlaceQuestion::Addition(facts) => PlaceChoice::Addition(addition(facts)),
+        PlaceQuestion::WindowMove(a) => PlaceChoice::WindowMove(window_move(a.from, a.to)),
+        PlaceQuestion::Landing(a) => PlaceChoice::Landing(landing(a.placeable)),
+        PlaceQuestion::WorkspaceMove(a) => PlaceChoice::WorkspaceMove(workspace_move(
+            a.shown,
+            a.per_display,
+            a.same_space,
+            a.index,
+        )),
+        PlaceQuestion::Members(a) => PlaceChoice::Members(members_destination(a.found)),
+        PlaceQuestion::MovedFocus(a) => PlaceChoice::MovedFocus(moved_focus(a.preferred, &a.moved)),
+        PlaceQuestion::Claim(a) => PlaceChoice::Claim(claim(a.claimed, a.management_override)),
+        PlaceQuestion::Assignment(a) => {
+            PlaceChoice::Assignment(assignment(a.restored, a.reapply, a.rule_names_workspace))
+        }
+        PlaceQuestion::RuleFloat(a) => {
+            PlaceChoice::RuleFloat(rule_float(a.should_float, a.was_floating))
+        }
+        PlaceQuestion::RuleFrame(a) => PlaceChoice::RuleFrame(rule_frame(a.place, a.resize)),
+        PlaceQuestion::Frame(a) => PlaceChoice::Frame(crate::floats::requested_frame(
+            a.frame,
+            a.screen,
+            a.centering,
+            a.sizing,
+        )),
+    }
+}
+
+impl<W: Copy, K: Copy> PlaceQuestion<W, K> {
+    /// The question with its windows and workspaces renamed.
+    pub fn map<W2, K2>(self, w: impl Fn(W) -> W2, k: impl Fn(K) -> K2) -> PlaceQuestion<W2, K2> {
+        match self {
+            PlaceQuestion::Addition(f) => PlaceQuestion::Addition(AdditionFacts {
+                admitted: f.admitted,
+                fullscreen_suspended: f.fullscreen_suspended,
+                workspace: f.workspace.map(|(id, family)| (k(id), family)),
+                in_floats: f.in_floats,
+                tree: f.tree,
+                preserve_widths: f.preserve_widths,
+            }),
+            PlaceQuestion::WindowMove(a) => PlaceQuestion::WindowMove(WindowMoveAsk {
+                from: a.from.map(&k),
+                to: a.to.map(&k),
+            }),
+            PlaceQuestion::Landing(a) => PlaceQuestion::Landing(a),
+            PlaceQuestion::WorkspaceMove(a) => PlaceQuestion::WorkspaceMove(WorkspaceMoveAsk {
+                shown: a.shown.map(&k),
+                per_display: a.per_display,
+                same_space: a.same_space,
+                index: a.index,
+            }),
+            PlaceQuestion::Members(a) => {
+                PlaceQuestion::Members(MembersAsk { found: a.found.map(&k) })
+            }
+            PlaceQuestion::MovedFocus(a) => PlaceQuestion::MovedFocus(MovedFocusAsk {
+                preferred: a.preferred.map(&w),
+                moved: a.moved.into_iter().map(&w).collect(),
+            }),
+            PlaceQuestion::Claim(a) => PlaceQuestion::Claim(a),
+            PlaceQuestion::Assignment(a) => PlaceQuestion::Assignment(a),
+            PlaceQuestion::RuleFloat(a) => PlaceQuestion::RuleFloat(a),
+            PlaceQuestion::RuleFrame(a) => PlaceQuestion::RuleFrame(a),
+            PlaceQuestion::Frame(a) => PlaceQuestion::Frame(a),
+        }
+    }
+}
+
+impl<W, K> PlaceChoice<W, K> {
+    /// The answer with its words renamed; none where a word names nothing.
+    pub fn map<W2, K2>(
+        self,
+        w: impl Fn(W) -> Option<W2>,
+        k: impl Fn(K) -> Option<K2>,
+    ) -> Option<PlaceChoice<W2, K2>> {
+        Some(match self {
+            PlaceChoice::Addition(a) => PlaceChoice::Addition(a.map(&k)?),
+            PlaceChoice::WindowMove(m) => PlaceChoice::WindowMove(match m {
+                WindowMove::Refused(r) => WindowMove::Refused(r),
+                WindowMove::Move { from, to } => WindowMove::Move { from: k(from)?, to: k(to)? },
+            }),
+            PlaceChoice::Landing(l) => PlaceChoice::Landing(l),
+            PlaceChoice::WorkspaceMove(m) => PlaceChoice::WorkspaceMove(match m {
+                WorkspaceMove::Refused(r) => WorkspaceMove::Refused(r),
+                WorkspaceMove::Members { from, index } => {
+                    WorkspaceMove::Members { from: k(from)?, index }
+                }
+                WorkspaceMove::Transfer(id) => WorkspaceMove::Transfer(k(id)?),
+            }),
+            PlaceChoice::Members(r) => PlaceChoice::Members(match r {
+                Ok(id) => Ok(k(id)?),
+                Err(e) => Err(e),
+            }),
+            PlaceChoice::MovedFocus(f) => PlaceChoice::MovedFocus(match f {
+                MovedFocus::Preferred(x) => MovedFocus::Preferred(w(x)?),
+                MovedFocus::First(x) => MovedFocus::First(w(x)?),
+                MovedFocus::Nothing => MovedFocus::Nothing,
+            }),
+            PlaceChoice::Claim(c) => PlaceChoice::Claim(c),
+            PlaceChoice::Assignment(a) => PlaceChoice::Assignment(a),
+            PlaceChoice::RuleFloat(r) => PlaceChoice::RuleFloat(r),
+            PlaceChoice::RuleFrame(r) => PlaceChoice::RuleFrame(r),
+            PlaceChoice::Frame(r) => PlaceChoice::Frame(r),
+        })
+    }
+}
+
+/// One kind of placement question with its own answer: callers see `Answer`, never a
+/// [`PlaceChoice`]. `of` reads only a choice of its own kind and puts back the payloads the
+/// engine holds (none: a twin's bug, its answer of another kind or naming a payload the engine
+/// does not hold).
+pub trait PlaceAsk<W, K> {
+    type Answer: PartialEq + std::fmt::Debug;
+    /// The Rust core's answer.
+    fn answer(&self) -> Self::Answer;
+    /// The question in its wire form.
+    fn question(&self) -> PlaceQuestion<W, K>;
+    /// An answer in its wire form.
+    fn choice(answer: &Self::Answer) -> PlaceChoice<W, K>;
+    /// A wire answer as this kind's answer, its payloads put back.
+    fn of(&self, choice: PlaceChoice<W, K>) -> Option<Self::Answer>;
+}
+
+/// A kind without payloads: `of` takes its own variant; any other is none (a new kind is not
+/// this one, so the catch-all is the meaning, not a guard).
+macro_rules! plain_ask {
+    ($ask:ty, [$($g:tt)*], $answer:ty, $variant:ident, |$this:ident| $answered:expr, |$q:ident| $question:expr) => {
+        impl<W: Copy + PartialEq + std::fmt::Debug, K: Copy + PartialEq + std::fmt::Debug, $($g)*> PlaceAsk<W, K> for $ask {
+            type Answer = $answer;
+            fn answer(&self) -> $answer { let $this = self; $answered }
+            fn question(&self) -> PlaceQuestion<W, K> { let $q = self; $question }
+            fn choice(answer: &$answer) -> PlaceChoice<W, K> { PlaceChoice::$variant(answer.clone()) }
+            fn of(&self, choice: PlaceChoice<W, K>) -> Option<$answer> {
+                match choice {
+                    PlaceChoice::$variant(answer) => Some(answer),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+plain_ask!(
+    WindowMoveAsk<K>,
+    [],
+    WindowMove<K>,
+    WindowMove,
+    |a| window_move(a.from, a.to),
+    |a| PlaceQuestion::WindowMove(*a)
+);
+plain_ask!(LandingAsk, [], Landing, Landing, |a| landing(a.placeable), |a| {
+    PlaceQuestion::Landing(*a)
+});
+plain_ask!(
+    WorkspaceMoveAsk<K>,
+    [],
+    WorkspaceMove<K>,
+    WorkspaceMove,
+    |a| workspace_move(a.shown, a.per_display, a.same_space, a.index),
+    |a| PlaceQuestion::WorkspaceMove(*a)
+);
+plain_ask!(
+    MembersAsk<K>,
+    [],
+    Result<K, WorkspaceMoveRefusal>,
+    Members,
+    |a| members_destination(a.found),
+    |a| PlaceQuestion::Members(*a)
+);
+plain_ask!(
+    MovedFocusAsk<W>,
+    [],
+    MovedFocus<W>,
+    MovedFocus,
+    |a| moved_focus(a.preferred, &a.moved),
+    |a| PlaceQuestion::MovedFocus(a.clone())
+);
+plain_ask!(
+    ClaimAsk,
+    [],
+    Claim<bool>,
+    Claim,
+    |a| claim(a.claimed, a.management_override),
+    |a| PlaceQuestion::Claim(*a)
+);
+plain_ask!(
+    AssignmentAsk,
+    [],
+    Assignment,
+    Assignment,
+    |a| assignment(a.restored, a.reapply, a.rule_names_workspace),
+    |a| PlaceQuestion::Assignment(*a)
+);
+plain_ask!(
+    RuleFloatAsk,
+    [],
+    RuleFloat,
+    RuleFloat,
+    |a| rule_float(a.should_float, a.was_floating),
+    |a| PlaceQuestion::RuleFloat(*a)
+);
+plain_ask!(
+    FrameAsk,
+    [],
+    Rect,
+    Frame,
+    |a| crate::floats::requested_frame(a.frame, a.screen, a.centering, a.sizing),
+    |a| PlaceQuestion::Frame(*a)
+);
+
+impl<W, K: Copy + PartialEq + std::fmt::Debug, L: Copy + PartialEq + std::fmt::Debug> PlaceAsk<W, K>
+    for AdditionFacts<K, L>
+{
+    type Answer = Addition<K, L>;
+
+    fn answer(&self) -> Addition<K, L> { addition(*self) }
+
+    fn question(&self) -> PlaceQuestion<W, K> { PlaceQuestion::Addition(self.tokens()) }
+
+    fn choice(answer: &Addition<K, L>) -> PlaceChoice<W, K> {
+        PlaceChoice::Addition(answer.tokens())
+    }
+
+    fn of(&self, choice: PlaceChoice<W, K>) -> Option<Addition<K, L>> {
+        let layout = self.tree.map(|tree| tree.layout);
+        let insert = |i: Insert<(), Width>| -> Option<Insert<L, Width>> {
+            Some(match i {
+                Insert::Present => Insert::Present,
+                Insert::Add { width, .. } => Insert::Add { layout: layout?, width },
+                Insert::NoLayout => Insert::NoLayout,
+            })
+        };
+        match choice {
+            PlaceChoice::Addition(a) => Some(match a {
+                Addition::Skip(s) => Addition::Skip(s),
+                Addition::Float { workspace } => Addition::Float { workspace },
+                Addition::Tile { workspace, insert: i } => {
+                    Addition::Tile { workspace, insert: insert(i)? }
+                }
+                Addition::IntoFloatingLayout { workspace, insert: i } => {
+                    let i = insert(i.with_width(|()| Width::AsIs))?;
+                    Addition::IntoFloatingLayout {
+                        workspace,
+                        insert: i.with_width(|_| ()),
+                    }
+                }
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl<W, K, P: Copy + PartialEq + std::fmt::Debug, R: Copy + PartialEq + std::fmt::Debug>
+    PlaceAsk<W, K> for RuleFrameAsk<P, R>
+{
+    type Answer = RuleFrame<P, R>;
+
+    fn answer(&self) -> RuleFrame<P, R> { rule_frame(self.place, self.resize) }
+
+    fn question(&self) -> PlaceQuestion<W, K> {
+        PlaceQuestion::RuleFrame(RuleFrameAsk {
+            place: self.place.map(|_| ()),
+            resize: self.resize.map(|_| ()),
+        })
+    }
+
+    fn choice(answer: &RuleFrame<P, R>) -> PlaceChoice<W, K> {
+        PlaceChoice::RuleFrame(match answer {
+            RuleFrame::Place(_) => RuleFrame::Place(()),
+            RuleFrame::Resize(_) => RuleFrame::Resize(()),
+            RuleFrame::Keep => RuleFrame::Keep,
+        })
+    }
+
+    fn of(&self, choice: PlaceChoice<W, K>) -> Option<RuleFrame<P, R>> {
+        match choice {
+            PlaceChoice::RuleFrame(RuleFrame::Place(())) => self.place.map(RuleFrame::Place),
+            PlaceChoice::RuleFrame(RuleFrame::Resize(())) => self.resize.map(RuleFrame::Resize),
+            PlaceChoice::RuleFrame(RuleFrame::Keep) => Some(RuleFrame::Keep),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1987,6 +2448,52 @@ mod tests {
         assert_eq!(reads(&action, &all), only(2));
         assert_eq!(reads(&OverrideAsk(None), &all), only(3));
         assert_eq!(reads(&Arrangement::Tiled, &all), only(4));
+    }
+
+    /// A placement kind reads only a choice of its own kind; an addition naming a layout, or a
+    /// frame request naming a placement or resize, the ask does not hold reads as nothing.
+    #[test]
+    fn a_place_choice_of_another_kind_or_naming_a_missing_payload_reads_as_nothing() {
+        type C = PlaceChoice<u32, u32>;
+        let add = C::Addition(Addition::Tile {
+            workspace: 1,
+            insert: Insert::Add { layout: (), width: Width::AsIs },
+        });
+        let landing = C::Landing(Landing::Focused);
+        let facts = adding(Some((1, Family::Tiled)));
+        assert_eq!(
+            PlaceAsk::<u32, u32>::of(&facts, add),
+            Some(Addition::Tile {
+                workspace: 1,
+                insert: Insert::Add {
+                    layout: 'L',
+                    width: Width::AsIs
+                }
+            })
+        );
+        assert_eq!(PlaceAsk::<u32, u32>::of(&facts, landing), None);
+        let unlaid = AdditionFacts { tree: None, ..facts };
+        assert_eq!(
+            PlaceAsk::<u32, u32>::of(&unlaid, add),
+            None,
+            "a layout the facts do not hold"
+        );
+        let frame = RuleFrameAsk {
+            place: Some('p'),
+            resize: None::<char>,
+        };
+        assert_eq!(
+            PlaceAsk::<u32, u32>::of(&frame, C::RuleFrame(RuleFrame::Place(()))),
+            Some(RuleFrame::Place('p'))
+        );
+        assert_eq!(
+            PlaceAsk::<u32, u32>::of(&frame, C::RuleFrame(RuleFrame::Resize(()))),
+            None,
+            "a resize the rule does not make"
+        );
+        let land = LandingAsk { placeable: true };
+        assert_eq!(PlaceAsk::<u32, u32>::of(&land, landing), Some(Landing::Focused));
+        assert_eq!(PlaceAsk::<u32, u32>::of(&land, add), None);
     }
 
     #[test]

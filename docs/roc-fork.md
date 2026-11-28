@@ -1417,7 +1417,24 @@ in `EnginePlacement.roc`), since relocation is one kind of question.
 - Plants 11/11, among them the part's payload plant: a Roc plan adding to a layout the facts do not
   hold, caught at the engine's door.
 
-- Next: E1c-4c (the rest of E1c in Roc).
+**E1c-4c (2026-11-28): the rest of E1c decides in Roc.** `rift_core::placement::PlaceAsk`, one per
+kind: `AdditionFacts` → `Addition` (the layout a token, put back from the facts' tree),
+`WindowMoveAsk`, `LandingAsk`, `WorkspaceMoveAsk`, `MembersAsk`, `MovedFocusAsk`, `ClaimAsk`,
+`AssignmentAsk`, `RuleFloatAsk`, `RuleFrameAsk` (a rule's placement and resize as tokens, put back
+from the ask), `FrameAsk` (`floats::requested_frame`). The kinds without payloads share one macro
+whose `of` takes its own variant and reads any other as none. The wire form
+`PlaceQuestion`/`PlaceChoice` sits behind one Roc entry (`roc_engine_place`, in
+`EnginePlacement.roc`); the engine's door is `LayoutEngine::placing` (family `PLACEMENT`), through
+which all eleven call sites now ask. With this, every E1c choice decides in Roc.
+- Differential (`rift-core-roc/tests/placement.rs`): 20 000 random questions of every kind;
+  check-fast cuts it to 2000.
+- Tests: a kind reads only its own kind, and an addition naming a layout or a frame request naming
+  a placement or resize the ask does not hold reads as nothing (rift-core); every kind through the
+  engine's door, payloads put back.
+- Plants 13/13, among them the part's two payload plants (a Roc addition into a layout the facts do
+  not hold; a Roc placement request where the rule makes only a resize), both caught at the door.
+
+- Next: E1d (displays and the native reconcile).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

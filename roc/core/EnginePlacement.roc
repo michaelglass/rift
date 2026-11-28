@@ -3,7 +3,7 @@
 ## drop edits a layout). Questions on plain data; windows and workspaces are one word each, and
 ## payloads the engine holds (the place, the trees) are tokens.
 
-import pf.Boundary exposing [DropQuestion, DropChoice, DropFactsWire, DropActionWire, Rect, MaybeRect, MaybeSlot, AcrossWire, RelocationFactsWire, RelocationWire, FamilyWire, EditedToken, WidthWire, ObservedWire, ProjectionWire]
+import pf.Boundary exposing [DropQuestion, DropChoice, DropFactsWire, DropActionWire, Rect, MaybeRect, MaybeSlot, AcrossWire, RelocationFactsWire, RelocationWire, FamilyWire, EditedToken, WidthWire, ObservedWire, ProjectionWire, PlaceQuestion, PlaceChoice, AdditionFactsWire, AdditionWire, InsertWidth, InsertToken, FrameQuestion]
 
 EnginePlacement := [].{
 
@@ -134,6 +134,151 @@ EnginePlacement := [].{
 				},
 			)
 		}
+
+	## One of the remaining placement choices (`rift_core::placement::choose_place`).
+	choose_place : PlaceQuestion -> PlaceChoice
+	choose_place = |question|
+		match question {
+			Addition(facts) => Addition(addition(facts))
+			WindowMove(q) =>
+				match q.from {
+					Nothing => WindowMove(Refused(NotAMember))
+					Some(from) =>
+						match q.to {
+							Nothing => WindowMove(Refused(NoWorkspace))
+							Some(to) => WindowMove(Move({ from, to }))
+						}
+				}
+			Landing(placeable) => if placeable Landing(Focused) else Landing(Hidden)
+			WorkspaceMove(q) =>
+				match q.shown {
+					Nothing => WorkspaceMove(Refused(Nothing))
+					Some(shown) =>
+						if !q.per_display {
+							WorkspaceMove(Transfer(shown))
+						} else if q.same_space {
+							WorkspaceMove(Refused(SameSpace))
+						} else {
+							match q.index {
+								Nothing => WorkspaceMove(Refused(NoIndex))
+								Some(index) => WorkspaceMove(Members({ from: shown, index }))
+							}
+						}
+				}
+			Members(found) =>
+				match found {
+					Some(id) => Members(To(id))
+					Nothing => Members(Refused(NoDestination))
+				}
+			MovedFocus(q) => {
+				preferred =
+					match q.preferred {
+						Some(w) => if q.moved.contains(w) Some(w) else Nothing
+						Nothing => Nothing
+					}
+				match preferred {
+					Some(w) => MovedFocus(Preferred(w))
+					Nothing =>
+						match q.moved.first() {
+							Ok(w) => MovedFocus(First(w))
+							Err(_) => MovedFocus(Nothing)
+						}
+				}
+			}
+			Claim(q) =>
+				if !q.claimed {
+					Claim(Free)
+				} else {
+					match q.management_override {
+						NoBool => Claim(Claimed(ByRule))
+						SomeBool(o) => Claim(Claimed(Override(o)))
+					}
+				}
+			Assignment(q) => {
+				rule_workspace = if q.restored DroppedByRestore else Kept
+				native = if q.reapply and q.rule_names_workspace and !q.restored Forgotten else Kept
+				Assignment({ rule_workspace, native })
+			}
+			RuleFloat(q) =>
+				if q.should_float {
+					RuleFloat(Float)
+				} else if q.was_floating {
+					RuleFloat(Unfloat)
+				} else {
+					RuleFloat(Keep)
+				}
+			RuleFrame(q) =>
+				if q.has_place {
+					RuleFrame(Place)
+				} else if q.has_resize {
+					RuleFrame(Resize)
+				} else {
+					RuleFrame(Keep)
+				}
+			Frame(q) => Frame(requested_frame(q))
+		}
+
+	addition : AdditionFactsWire -> AdditionWire
+	addition = |f|
+		if !f.admitted {
+			Skip(Unadmitted)
+		} else if f.fullscreen_suspended {
+			Skip(FullscreenSuspended)
+		} else {
+			match f.workspace {
+				Unassigned => Skip(Unassigned)
+				Assigned(a) =>
+					match a.family {
+						Floating => IntoFloatingLayout({ workspace: a.workspace, insert: insert_token(f) })
+						_ =>
+							if f.in_floats {
+								Float(a.workspace)
+							} else {
+								width = match a.family {
+									Scrolling => if f.preserve_widths Preserve else AsIs
+									_ => AsIs
+								}
+								Tile({ workspace: a.workspace, insert: insert_width(f, width) })
+							}
+					}
+			}
+		}
+
+	insert_width : AdditionFactsWire, WidthWire -> InsertWidth
+	insert_width = |f, width|
+		match f.tree {
+			NoTree => NoLayout
+			Tree(holds) => if holds Present else Add(width)
+		}
+
+	insert_token : AdditionFactsWire -> InsertToken
+	insert_token = |f|
+		match f.tree {
+			NoTree => NoLayout
+			Tree(holds) => if holds Present else Add
+		}
+
+	smart_width : F64
+	smart_width = 0.8
+
+	smart_height : F64
+	smart_height = 0.93
+
+	requested_frame : FrameQuestion -> Rect
+	requested_frame = |q| {
+		(w, h) =
+			match q.sizing {
+				Keep => (q.frame.w, q.frame.h)
+				Dimensions(size) => (size.w, size.h)
+				Smart => (q.screen.w * smart_width, q.screen.h * smart_height)
+			}
+		(x, y) =
+			match q.centering {
+				Keep => (q.frame.x, q.frame.y)
+				Center => (q.screen.x + q.screen.w / 2.0 - w / 2.0, q.screen.y + q.screen.h / 2.0 - h / 2.0)
+			}
+		{ x, y, w, h }
+	}
 
 	usable : Rect -> Bool
 	usable = |r| {

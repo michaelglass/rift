@@ -2529,6 +2529,17 @@ pub mod placement {
         boundary::engine_drop_choice(unsafe { abi::roc_engine_drop(question) })
     }
 
+    /// One of the layout engine's remaining placement choices
+    /// (`rift_core::placement::choose_place`): every fact is in the question.
+    pub fn engine_place(
+        question: rift_core::placement::PlaceQuestion<u64, u64>,
+    ) -> rift_core::placement::PlaceChoice<u64, u64> {
+        let host = host();
+        let question = boundary::engine_place_question(question, &host);
+        // SAFETY: the question is handed to Roc, which consumes it; the choice is plain data.
+        boundary::engine_place_choice(unsafe { abi::roc_engine_place(question) })
+    }
+
     /// What relocating a window does (`rift_core::placement::relocation`), on the facts' token
     /// form: the engine puts its payloads back (`rift_core::placement::relocation_as`).
     pub fn engine_relocation(

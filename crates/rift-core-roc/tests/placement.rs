@@ -196,3 +196,106 @@ fn the_roc_core_relocates_as_the_rust_core_does() {
     assert!(moved > 0);
     eprintln!("engine relocation: {runs} questions answered alike ({moved} moves)");
 }
+
+/// The remaining placement choices (`rift_core::placement::choose_place`): every kind, drawn at
+/// random, with few workspaces and windows so moved windows include the preferred one about half
+/// the time, and frames on a coarse grid.
+#[test]
+fn the_roc_core_makes_the_remaining_placement_choices_as_the_rust_core_does() {
+    use rift_core::floats::{Centering, Sizing};
+    use rift_core::placement::{
+        AdditionFacts, AssignmentAsk, ClaimAsk, Family, FrameAsk, LandingAsk, MembersAsk,
+        MovedFocusAsk, PlaceQuestion as Q, RuleFloatAsk, RuleFrameAsk, Tree, WindowMoveAsk,
+        WorkspaceMoveAsk, choose_place,
+    };
+    let mut rng = Rng(0x91AC_E0E1_C4C0);
+    let runs: u64 = std::env::var("RIFT_ENGINE_PLACE_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let coin = |r: &mut Rng| r.below(2) == 0;
+    let family =
+        |r: &mut Rng| [Family::Floating, Family::Scrolling, Family::Tiled][r.below(3) as usize];
+    for case in 0..runs {
+        let question: Q<u64, u64> = match rng.below(11) {
+            0 => Q::Addition(AdditionFacts {
+                admitted: rng.below(6) > 0,
+                fullscreen_suspended: rng.below(6) == 0,
+                workspace: rng.maybe(|r| (10 + r.below(2), family(r))),
+                in_floats: coin(&mut rng),
+                tree: rng.maybe(|r| Tree {
+                    layout: (),
+                    holds_window: r.below(2) == 0,
+                }),
+                preserve_widths: coin(&mut rng),
+            }),
+            1 => Q::WindowMove(WindowMoveAsk {
+                from: rng.maybe(|r| 10 + r.below(2)),
+                to: rng.maybe(|r| 10 + r.below(2)),
+            }),
+            2 => Q::Landing(LandingAsk { placeable: coin(&mut rng) }),
+            3 => Q::WorkspaceMove(WorkspaceMoveAsk {
+                shown: rng.maybe(|r| 10 + r.below(2)),
+                per_display: coin(&mut rng),
+                same_space: coin(&mut rng),
+                index: rng.maybe(|r| r.below(4) as usize),
+            }),
+            4 => Q::Members(MembersAsk {
+                found: rng.maybe(|r| 10 + r.below(2)),
+            }),
+            5 => {
+                let n = rng.below(4);
+                Q::MovedFocus(MovedFocusAsk {
+                    preferred: rng.maybe(|r| 1 + r.below(4)),
+                    moved: (0..n).map(|_| 1 + rng.below(4)).collect(),
+                })
+            }
+            6 => Q::Claim(ClaimAsk {
+                claimed: coin(&mut rng),
+                management_override: rng.maybe(|r| r.below(2) == 0),
+            }),
+            7 => Q::Assignment(AssignmentAsk {
+                restored: coin(&mut rng),
+                reapply: coin(&mut rng),
+                rule_names_workspace: coin(&mut rng),
+            }),
+            8 => Q::RuleFloat(RuleFloatAsk {
+                should_float: coin(&mut rng),
+                was_floating: coin(&mut rng),
+            }),
+            9 => Q::RuleFrame(RuleFrameAsk {
+                place: rng.maybe(|_| ()),
+                resize: rng.maybe(|_| ()),
+            }),
+            _ => {
+                let mut grid = |r: &mut Rng| Rect {
+                    x: 100.0 * r.below(10) as f64,
+                    y: 50.0 * r.below(10) as f64,
+                    w: 100.0 + 100.0 * r.below(10) as f64,
+                    h: 80.0 + 40.0 * r.below(10) as f64,
+                };
+                let (frame, screen) = (grid(&mut rng), grid(&mut rng));
+                let sizing = match rng.below(3) {
+                    0 => Sizing::Keep,
+                    1 => Sizing::Smart,
+                    _ => Sizing::Dimensions {
+                        w: 300.0 + rng.below(5) as f64 * 37.5,
+                        h: 200.0,
+                    },
+                };
+                let centering = if coin(&mut rng) {
+                    Centering::Center
+                } else {
+                    Centering::Keep
+                };
+                Q::Frame(FrameAsk {
+                    frame,
+                    screen,
+                    centering,
+                    sizing,
+                })
+            }
+        };
+        let rust = choose_place(question.clone());
+        let roc = rift_core_roc::placement::engine_place(question.clone());
+        assert_eq!(roc, rust, "case {case}: {question:?}");
+    }
+    eprintln!("engine place: {runs} questions answered alike");
+}

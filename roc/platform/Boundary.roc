@@ -1021,6 +1021,92 @@ Boundary := [].{
 
 	NativeBatchView := [Idle, Collecting(List(U64))]
 
+	# The layout engine's remaining placement choices (`rift_core::placement::choose_place`):
+	# windows and workspaces are one word each; the layout and a rule's placement and resize are
+	# tokens.
+
+	FamilyAssigned := { workspace : U64, family : FamilyWire }
+
+	MaybeAssigned := [Unassigned, Assigned(FamilyAssigned)]
+
+	AdditionTree := [NoTree, Tree(Bool)]
+
+	AdditionFactsWire := { admitted : Bool, fullscreen_suspended : Bool, workspace : MaybeAssigned, in_floats : Bool, tree : AdditionTree, preserve_widths : Bool }
+
+	SkippedWire := [Unadmitted, FullscreenSuspended, Unassigned]
+
+	InsertWidth := [Present, Add(WidthWire), NoLayout]
+
+	InsertToken := [Present, Add, NoLayout]
+
+	TileAddition := { workspace : U64, insert : InsertWidth }
+
+	FloatingAddition := { workspace : U64, insert : InsertToken }
+
+	AdditionWire := [Skip(SkippedWire), Float(U64), Tile(TileAddition), IntoFloatingLayout(FloatingAddition)]
+
+	WindowMoveQuestion := { from : MaybeWord, to : MaybeWord }
+
+	WindowMoveRefusalWire := [NotAMember, NoWorkspace]
+
+	FromTo := { from : U64, to : U64 }
+
+	WindowMoveWire := [Refused(WindowMoveRefusalWire), Move(FromTo)]
+
+	LandingWire := [Hidden, Focused]
+
+	WorkspaceMoveQuestion := { shown : MaybeWord, per_display : Bool, same_space : Bool, index : MaybeWord }
+
+	WorkspaceMoveRefusalWire := [Nothing, SameSpace, NoIndex, NoDestination]
+
+	MembersPlan := { from : U64, index : U64 }
+
+	WorkspaceMoveWire := [Refused(WorkspaceMoveRefusalWire), Members(MembersPlan), Transfer(U64)]
+
+	MembersWire := [To(U64), Refused(WorkspaceMoveRefusalWire)]
+
+	MovedFocusQuestion := { preferred : MaybeWord, moved : List(U64) }
+
+	MovedFocusWire := [Preferred(U64), First(U64), Nothing]
+
+	MaybeBool := [NoBool, SomeBool(Bool)]
+
+	ClaimQuestion := { claimed : Bool, management_override : MaybeBool }
+
+	ManageWire := [ByRule, Override(Bool)]
+
+	ClaimWire := [Claimed(ManageWire), Free]
+
+	AssignmentQuestion := { restored : Bool, reapply : Bool, rule_names_workspace : Bool }
+
+	RuleWorkspaceWire := [Kept, DroppedByRestore]
+
+	NativeLayoutWire := [Forgotten, Kept]
+
+	AssignmentWire := { rule_workspace : RuleWorkspaceWire, native : NativeLayoutWire }
+
+	RuleFloatQuestion := { should_float : Bool, was_floating : Bool }
+
+	RuleFloatWire := [Float, Unfloat, Keep]
+
+	RuleFrameQuestion := { has_place : Bool, has_resize : Bool }
+
+	RuleFrameWire := [Place, Resize, Keep]
+
+	SizeWire := { w : F64, h : F64 }
+
+	SizingWire := [Keep, Dimensions(SizeWire), Smart]
+
+	CenteringWire := [Center, Keep]
+
+	FrameQuestion := { frame : Rect, screen : Rect, centering : CenteringWire, sizing : SizingWire }
+
+	## One of the layout engine's remaining placement choices.
+	PlaceQuestion := [Addition(AdditionFactsWire), WindowMove(WindowMoveQuestion), Landing(Bool), WorkspaceMove(WorkspaceMoveQuestion), Members(MaybeWord), MovedFocus(MovedFocusQuestion), Claim(ClaimQuestion), Assignment(AssignmentQuestion), RuleFloat(RuleFloatQuestion), RuleFrame(RuleFrameQuestion), Frame(FrameQuestion)]
+
+	## A placement choice's answer.
+	PlaceChoice := [Addition(AdditionWire), WindowMove(WindowMoveWire), Landing(LandingWire), WorkspaceMove(WorkspaceMoveWire), Members(MembersWire), MovedFocus(MovedFocusWire), Claim(ClaimWire), Assignment(AssignmentWire), RuleFloat(RuleFloatWire), RuleFrame(RuleFrameWire), Frame(Rect)]
+
 	# The layout engine's relocation (`rift_core::placement::relocation`), on the facts' token
 	# form: workspaces and Spaces are one word each; the drop's tree and the destination's layout
 	# are tokens.

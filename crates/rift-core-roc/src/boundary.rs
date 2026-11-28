@@ -4213,6 +4213,346 @@ impl Drop for CamerasBox {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The layout engine's remaining placement choices.
+
+pub(crate) fn engine_place_question(
+    question: rift_core::placement::PlaceQuestion<u64, u64>,
+    host: &abi::RocHost,
+) -> abi::BoundaryPlaceQuestion {
+    use abi::BoundaryPlaceQuestionTag as Tag;
+    use rift_core::floats::{Centering, Sizing};
+    use rift_core::placement::PlaceQuestion as Q;
+    match question {
+        Q::Addition(f) => {
+            let workspace = match f.workspace {
+                Some((workspace, family)) => union!(
+                    BoundaryMaybeAssigned,
+                    BoundaryMaybeAssignedPayload.assigned(abi::BoundaryFamilyAssigned {
+                        workspace,
+                        family: family_wire(family),
+                    }),
+                    abi::BoundaryMaybeAssignedTag::Assigned
+                ),
+                None => union!(
+                    BoundaryMaybeAssigned,
+                    BoundaryMaybeAssignedPayload.unassigned,
+                    abi::BoundaryMaybeAssignedTag::Unassigned
+                ),
+            };
+            let tree = match f.tree {
+                Some(t) => union!(
+                    BoundaryAdditionTree,
+                    BoundaryAdditionTreePayload.tree(t.holds_window),
+                    abi::BoundaryAdditionTreeTag::Tree
+                ),
+                None => union!(
+                    BoundaryAdditionTree,
+                    BoundaryAdditionTreePayload.no_tree,
+                    abi::BoundaryAdditionTreeTag::NoTree
+                ),
+            };
+            union!(
+                BoundaryPlaceQuestion,
+                BoundaryPlaceQuestionPayload.addition(abi::BoundaryAdditionFactsWire {
+                    admitted: f.admitted,
+                    fullscreen_suspended: f.fullscreen_suspended,
+                    workspace,
+                    in_floats: f.in_floats,
+                    tree,
+                    preserve_widths: f.preserve_widths,
+                }),
+                Tag::Addition
+            )
+        }
+        Q::WindowMove(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.window_move(abi::BoundaryWindowMoveQuestion {
+                from: maybe_word(a.from),
+                to: maybe_word(a.to),
+            }),
+            Tag::WindowMove
+        ),
+        Q::Landing(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.landing(a.placeable),
+            Tag::Landing
+        ),
+        Q::WorkspaceMove(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.workspace_move(abi::BoundaryWorkspaceMoveQuestion {
+                shown: maybe_word(a.shown),
+                per_display: a.per_display,
+                same_space: a.same_space,
+                index: maybe_word(a.index.map(|i| i as u64)),
+            }),
+            Tag::WorkspaceMove
+        ),
+        Q::Members(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.members(maybe_word(a.found)),
+            Tag::Members
+        ),
+        Q::MovedFocus(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.moved_focus(abi::BoundaryMovedFocusQuestion {
+                preferred: maybe_word(a.preferred),
+                moved: list(&a.moved, host),
+            }),
+            Tag::MovedFocus
+        ),
+        Q::Claim(a) => {
+            let management_override = match a.management_override {
+                Some(o) => union!(
+                    BoundaryMaybeBool,
+                    BoundaryMaybeBoolPayload.some_bool(o),
+                    abi::BoundaryMaybeBoolTag::SomeBool
+                ),
+                None => union!(
+                    BoundaryMaybeBool,
+                    BoundaryMaybeBoolPayload.no_bool,
+                    abi::BoundaryMaybeBoolTag::NoBool
+                ),
+            };
+            union!(
+                BoundaryPlaceQuestion,
+                BoundaryPlaceQuestionPayload.claim(abi::BoundaryClaimQuestion {
+                    claimed: a.claimed,
+                    management_override
+                }),
+                Tag::Claim
+            )
+        }
+        Q::Assignment(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.assignment(abi::BoundaryAssignmentQuestion {
+                restored: a.restored,
+                reapply: a.reapply,
+                rule_names_workspace: a.rule_names_workspace,
+            }),
+            Tag::Assignment
+        ),
+        Q::RuleFloat(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.rule_float(abi::BoundaryRuleFloatQuestion {
+                should_float: a.should_float,
+                was_floating: a.was_floating,
+            }),
+            Tag::RuleFloat
+        ),
+        Q::RuleFrame(a) => union!(
+            BoundaryPlaceQuestion,
+            BoundaryPlaceQuestionPayload.rule_frame(abi::BoundaryRuleFrameQuestion {
+                has_place: a.place.is_some(),
+                has_resize: a.resize.is_some(),
+            }),
+            Tag::RuleFrame
+        ),
+        Q::Frame(a) => {
+            let sizing = match a.sizing {
+                Sizing::Keep => union!(
+                    BoundarySizingWire,
+                    BoundarySizingWirePayload.keep,
+                    abi::BoundarySizingWireTag::Keep
+                ),
+                Sizing::Smart => union!(
+                    BoundarySizingWire,
+                    BoundarySizingWirePayload.smart,
+                    abi::BoundarySizingWireTag::Smart
+                ),
+                Sizing::Dimensions { w, h } => union!(
+                    BoundarySizingWire,
+                    BoundarySizingWirePayload.dimensions(abi::BoundarySizeWire { w, h }),
+                    abi::BoundarySizingWireTag::Dimensions
+                ),
+            };
+            union!(
+                BoundaryPlaceQuestion,
+                BoundaryPlaceQuestionPayload.frame(abi::BoundaryFrameQuestion {
+                    frame: rect(a.frame),
+                    screen: rect(a.screen),
+                    centering: match a.centering {
+                        Centering::Center => abi::BoundaryCenteringWire::Center,
+                        Centering::Keep => abi::BoundaryCenteringWire::Keep,
+                    },
+                    sizing,
+                }),
+                Tag::Frame
+            )
+        }
+    }
+}
+
+pub(crate) fn engine_place_choice(
+    choice: abi::BoundaryPlaceChoice,
+) -> rift_core::placement::PlaceChoice<u64, u64> {
+    use abi::BoundaryPlaceChoiceTag as Tag;
+    use rift_core::placement::{
+        Addition, Assignment, Claim, Insert, Landing, Manage, MovedFocus, NativeLayout,
+        PlaceChoice as C, RuleFloat, RuleFrame, RuleWorkspace, Skipped, Width, WindowMove,
+        WindowMoveRefusal, WorkspaceMove, WorkspaceMoveRefusal as WR,
+    };
+    let width = |w: abi::BoundaryWidthWire| match w {
+        abi::BoundaryWidthWire::Preserve => Width::Preserve,
+        abi::BoundaryWidthWire::AsIs => Width::AsIs,
+    };
+    let refusal = |r: abi::BoundaryWorkspaceMoveRefusalWire| match r {
+        abi::BoundaryWorkspaceMoveRefusalWire::Nothing => WR::Nothing,
+        abi::BoundaryWorkspaceMoveRefusalWire::SameSpace => WR::SameSpace,
+        abi::BoundaryWorkspaceMoveRefusalWire::NoIndex => WR::NoIndex,
+        abi::BoundaryWorkspaceMoveRefusalWire::NoDestination => WR::NoDestination,
+    };
+    // SAFETY: each arm reads the payload its tag names.
+    match choice.tag {
+        Tag::Addition => {
+            use abi::BoundaryAdditionWireTag as A;
+            let a = unsafe { choice.borrow_payload_addition_unchecked() };
+            C::Addition(match a.tag {
+                A::Skip => Addition::Skip(match unsafe { *a.borrow_payload_skip_unchecked() } {
+                    abi::BoundarySkippedWire::Unadmitted => Skipped::Unadmitted,
+                    abi::BoundarySkippedWire::FullscreenSuspended => Skipped::FullscreenSuspended,
+                    abi::BoundarySkippedWire::Unassigned => Skipped::Unassigned,
+                }),
+                A::Float => Addition::Float {
+                    workspace: unsafe { *a.borrow_payload_float_unchecked() },
+                },
+                A::Tile => {
+                    let t = unsafe { a.borrow_payload_tile_unchecked() };
+                    let insert = match t.insert.tag {
+                        abi::BoundaryInsertWidthTag::Present => Insert::Present,
+                        abi::BoundaryInsertWidthTag::NoLayout => Insert::NoLayout,
+                        abi::BoundaryInsertWidthTag::Add => Insert::Add {
+                            layout: (),
+                            width: width(unsafe { *t.insert.borrow_payload_add_unchecked() }),
+                        },
+                    };
+                    Addition::Tile { workspace: t.workspace, insert }
+                }
+                A::IntoFloatingLayout => {
+                    let t = unsafe { a.borrow_payload_into_floating_layout_unchecked() };
+                    let insert = match t.insert {
+                        abi::BoundaryInsertToken::Present => Insert::Present,
+                        abi::BoundaryInsertToken::NoLayout => Insert::NoLayout,
+                        abi::BoundaryInsertToken::Add => Insert::Add { layout: (), width: () },
+                    };
+                    Addition::IntoFloatingLayout { workspace: t.workspace, insert }
+                }
+            })
+        }
+        Tag::WindowMove => {
+            let m = unsafe { choice.borrow_payload_window_move_unchecked() };
+            C::WindowMove(match m.tag {
+                abi::BoundaryWindowMoveWireTag::Refused => {
+                    WindowMove::Refused(match unsafe { *m.borrow_payload_refused_unchecked() } {
+                        abi::BoundaryWindowMoveRefusalWire::NotAMember => {
+                            WindowMoveRefusal::NotAMember
+                        }
+                        abi::BoundaryWindowMoveRefusalWire::NoWorkspace => {
+                            WindowMoveRefusal::NoWorkspace
+                        }
+                    })
+                }
+                abi::BoundaryWindowMoveWireTag::Move => {
+                    let ft = unsafe { m.borrow_payload_move_unchecked() };
+                    WindowMove::Move { from: ft.from, to: ft.to }
+                }
+            })
+        }
+        Tag::Landing => C::Landing(match unsafe { *choice.borrow_payload_landing_unchecked() } {
+            abi::BoundaryLandingWire::Hidden => Landing::Hidden,
+            abi::BoundaryLandingWire::Focused => Landing::Focused,
+        }),
+        Tag::WorkspaceMove => {
+            let m = unsafe { choice.borrow_payload_workspace_move_unchecked() };
+            C::WorkspaceMove(match m.tag {
+                abi::BoundaryWorkspaceMoveWireTag::Refused => {
+                    WorkspaceMove::Refused(refusal(unsafe {
+                        *m.borrow_payload_refused_unchecked()
+                    }))
+                }
+                abi::BoundaryWorkspaceMoveWireTag::Members => {
+                    let p = unsafe { m.borrow_payload_members_unchecked() };
+                    WorkspaceMove::Members {
+                        from: p.from,
+                        index: p.index as usize,
+                    }
+                }
+                abi::BoundaryWorkspaceMoveWireTag::Transfer => {
+                    WorkspaceMove::Transfer(unsafe { *m.borrow_payload_transfer_unchecked() })
+                }
+            })
+        }
+        Tag::Members => {
+            let m = unsafe { choice.borrow_payload_members_unchecked() };
+            C::Members(match m.tag {
+                abi::BoundaryMembersWireTag::To => Ok(unsafe { *m.borrow_payload_to_unchecked() }),
+                abi::BoundaryMembersWireTag::Refused => {
+                    Err(refusal(unsafe { *m.borrow_payload_refused_unchecked() }))
+                }
+            })
+        }
+        Tag::MovedFocus => {
+            let f = unsafe { choice.borrow_payload_moved_focus_unchecked() };
+            C::MovedFocus(match f.tag {
+                abi::BoundaryMovedFocusWireTag::Preferred => {
+                    MovedFocus::Preferred(unsafe { *f.borrow_payload_preferred_unchecked() })
+                }
+                abi::BoundaryMovedFocusWireTag::First => {
+                    MovedFocus::First(unsafe { *f.borrow_payload_first_unchecked() })
+                }
+                abi::BoundaryMovedFocusWireTag::Nothing => MovedFocus::Nothing,
+            })
+        }
+        Tag::Claim => {
+            let c = unsafe { choice.borrow_payload_claim_unchecked() };
+            C::Claim(match c.tag {
+                abi::BoundaryClaimWireTag::Free => Claim::Free,
+                abi::BoundaryClaimWireTag::Claimed => {
+                    let m = unsafe { c.borrow_payload_claimed_unchecked() };
+                    Claim::Claimed {
+                        manage: match m.tag {
+                            abi::BoundaryManageWireTag::ByRule => Manage::ByRule,
+                            abi::BoundaryManageWireTag::Override => {
+                                Manage::Override(unsafe { *m.borrow_payload_override_unchecked() })
+                            }
+                        },
+                    }
+                }
+            })
+        }
+        Tag::Assignment => {
+            let a = unsafe { choice.borrow_payload_assignment_unchecked() };
+            C::Assignment(Assignment {
+                rule_workspace: match a.rule_workspace {
+                    abi::BoundaryRuleWorkspaceWire::Kept => RuleWorkspace::Kept,
+                    abi::BoundaryRuleWorkspaceWire::DroppedByRestore => {
+                        RuleWorkspace::DroppedByRestore
+                    }
+                },
+                native: match a.native {
+                    abi::BoundaryNativeLayoutWire::Forgotten => NativeLayout::Forgotten,
+                    abi::BoundaryNativeLayoutWire::Kept => NativeLayout::Kept,
+                },
+            })
+        }
+        Tag::RuleFloat => {
+            C::RuleFloat(match unsafe { *choice.borrow_payload_rule_float_unchecked() } {
+                abi::BoundaryRuleFloatWire::Float => RuleFloat::Float,
+                abi::BoundaryRuleFloatWire::Unfloat => RuleFloat::Unfloat,
+                abi::BoundaryRuleFloatWire::Keep => RuleFloat::Keep,
+            })
+        }
+        Tag::RuleFrame => {
+            C::RuleFrame(match unsafe { *choice.borrow_payload_rule_frame_unchecked() } {
+                abi::BoundaryRuleFrameWire::Place => RuleFrame::Place(()),
+                abi::BoundaryRuleFrameWire::Resize => RuleFrame::Resize(()),
+                abi::BoundaryRuleFrameWire::Keep => RuleFrame::Keep,
+            })
+        }
+        Tag::Frame => C::Frame(from_rect(unsafe { *choice.borrow_payload_frame_unchecked() })),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The layout engine's relocation (its token form).
 
 fn family_wire(f: rift_core::placement::Family) -> abi::BoundaryFamilyWire {

@@ -11,8 +11,8 @@ use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, Memo
 use rift_core::placement::{
     Across, Addition, AdditionFacts, Afterwards, Arrangement, Assign, Claim, DropAsk, DropEdit,
     DropFacts, DropPlan, DropTarget, Edited, Family, Insert, Kept, Laid, Landing, Manage,
-    MovedFocus, NativeLayout, Observed, Override, Placed, Projection, Relocation, RelocationFacts,
-    RuleFloat, RuleWorkspace, Tree, Width, WindowMove, WorkspaceMove,
+    MovedFocus, NativeLayout, Observed, Override, PlaceAsk, Placed, Projection, Relocation,
+    RelocationFacts, RuleFloat, RuleWorkspace, Tree, Width, WindowMove, WorkspaceMove,
 };
 use rift_core::workspaces::{
     Arrival, ArrivalAsk, Moved, MovedAsk, SourceAfter, Switch, SwitchAsk, WorkspaceAsk,
@@ -97,12 +97,12 @@ fn requested_floating_frame(
     } else {
         Centering::Keep
     };
-    cg_rect(rift_core::floats::requested_frame(
-        core_rect(frame),
-        core_rect(screen),
+    cg_rect(LayoutEngine::placing(&rift_core::placement::FrameAsk {
+        frame: core_rect(frame),
+        screen: core_rect(screen),
         centering,
         sizing,
-    ))
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +352,42 @@ impl LayoutEngine {
 
     /// Validate a prospective drop on a workspace-local tree before touching membership.
     /// The regular relocation and target-drop primitives perform the committed operation.
+    /// One of the engine's remaining placement choices (placement, the moves, assignment, the
+    /// rule outcome, a floating frame), answered in its own kind: the Rust core's answer, and
+    /// under `roc-core` the Roc core's, which decides. The layout and a rule's placement and
+    /// resize never cross: Roc names the variant and the engine puts its payload back. A Roc
+    /// answer of another kind, or naming a payload the engine does not hold, is a difference like
+    /// any other (reported; the Rust answer stands).
+    pub(crate) fn placing<A: PlaceAsk<WindowId, VirtualWorkspaceId>>(ask: &A) -> A::Answer {
+        let rust = ask.answer();
+        #[cfg(feature = "roc-core")]
+        let rust = {
+            use crate::roc_path::Word;
+            let words = ask.question().map(Word::word, Word::word);
+            let roc = rift_core_roc::placement::engine_place(words.clone());
+            let rust_words = A::choice(&rust)
+                .map(|w| Some(w.word()), |k| Some(k.word()))
+                .expect("words for every id");
+            crate::roc_path::decided(
+                &crate::roc_path::PLACEMENT,
+                "engine_place",
+                &[],
+                &words,
+                rust,
+                &rust_words,
+                Ok(roc),
+                |roc| {
+                    let roc = roc.map(
+                        crate::roc_path::window_of_word,
+                        crate::roc_path::FromWord::from_word,
+                    )?;
+                    ask.of(roc)
+                },
+            )
+        };
+        rust
+    }
+
     /// One of the engine's drop choices, answered in its own kind: the Rust core's answer, and
     /// under `roc-core` the Roc core's, which decides. The payloads the engine holds (the place,
     /// the trees) never cross: Roc names the variant, and the engine puts its payload back. A Roc
@@ -1847,8 +1883,7 @@ impl LayoutEngine {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
-        let addition =
-            rift_core::placement::addition(self.addition_facts(window_store, space, wid));
+        let addition = Self::placing(&self.addition_facts(window_store, space, wid));
         match addition {
             Addition::Skip(_) => false,
             Addition::Float { workspace } => {
@@ -2102,15 +2137,19 @@ impl LayoutEngine {
         effects: AppRuleEffects,
         app_rule_outcome: &mut AppRuleOutcome,
     ) -> Option<(WindowId, VirtualWorkspaceId)> {
-        match rift_core::placement::rule_float(effects.should_float(was_floating), was_floating) {
+        let float = rift_core::placement::RuleFloatAsk {
+            should_float: effects.should_float(was_floating),
+            was_floating,
+        };
+        match Self::placing(&float) {
             RuleFloat::Float => self.floats.add_floating(window),
             RuleFloat::Unfloat => self.floats.remove_floating(window),
             RuleFloat::Keep => {}
         }
-        app_rule_outcome.frame = rift_core::placement::rule_frame(
-            effects.floating_placement(window, space),
-            effects.tiled_resize(window, space, was_floating),
-        );
+        app_rule_outcome.frame = Self::placing(&rift_core::placement::RuleFrameAsk {
+            place: effects.floating_placement(window, space),
+            resize: effects.tiled_resize(window, space, was_floating),
+        });
 
         effects.focus.then_some((window, effects.workspace_id))
     }
@@ -3798,7 +3837,11 @@ impl LayoutEngine {
             })
         };
         let management = decision.as_ref().and_then(|rule| rule.management_override());
-        match rift_core::placement::claim(window_store.read().is_claimed(window_id), management) {
+        let claim = rift_core::placement::ClaimAsk {
+            claimed: window_store.read().is_claimed(window_id),
+            management_override: management,
+        };
+        match Self::placing(&claim) {
             Claim::Claimed { manage } => {
                 let manage_override = match manage {
                     Manage::ByRule => None,
@@ -3833,8 +3876,11 @@ impl LayoutEngine {
         // their default placement must not relocate the window during restore.
         let names_workspace =
             decision.as_ref().is_some_and(|decision| decision.workspace.is_some());
-        let plan =
-            rift_core::placement::assignment(restored, reapply_workspace_rule, names_workspace);
+        let plan = Self::placing(&rift_core::placement::AssignmentAsk {
+            restored,
+            reapply: reapply_workspace_rule,
+            rule_names_workspace: names_workspace,
+        });
         apply_rule_workspace(plan.rule_workspace, &mut decision);
         match plan.native {
             NativeLayout::Forgotten => {
@@ -3873,10 +3919,11 @@ impl LayoutEngine {
         window_id: WindowId,
     ) -> EventResponse {
         let reading = self.workspaces.reading(window_store.read());
-        let (source_workspace_id, target_workspace_id) = match rift_core::placement::window_move(
-            reading.workspace_for_window(source_space, window_id),
-            reading.active_workspace(target_space),
-        ) {
+        let ask = rift_core::placement::WindowMoveAsk {
+            from: reading.workspace_for_window(source_space, window_id),
+            to: reading.active_workspace(target_space),
+        };
+        let (source_workspace_id, target_workspace_id) = match Self::placing(&ask) {
             WindowMove::Refused(reason) => {
                 debug!(?window_id, ?target_space, ?reason, "Window move refused");
                 return EventResponse::default();
@@ -3895,7 +3942,8 @@ impl LayoutEngine {
             return EventResponse::default();
         }
 
-        match rift_core::placement::landing(window_store.read().can_place_window(window_id)) {
+        let placeable = window_store.read().can_place_window(window_id);
+        match Self::placing(&rift_core::placement::LandingAsk { placeable }) {
             Landing::Hidden => {
                 return EventResponse {
                     changed: true,
@@ -3930,12 +3978,13 @@ impl LayoutEngine {
         target_screen_size: CGSize,
     ) -> EventResponse {
         let reading = self.workspaces.reading(window_store.read());
-        let plan = rift_core::placement::workspace_move(
-            reading.active_workspace(source_space),
-            self.workspaces.effective_mode() == crate::common::config::WorkspaceMode::PerDisplay,
-            source_space == target_space,
-            reading.active_workspace_idx(source_space).map(|index| index as usize),
-        );
+        let plan = Self::placing(&rift_core::placement::WorkspaceMoveAsk {
+            shown: reading.active_workspace(source_space),
+            per_display: self.workspaces.effective_mode()
+                == crate::common::config::WorkspaceMode::PerDisplay,
+            same_space: source_space == target_space,
+            index: reading.active_workspace_idx(source_space).map(|index| index as usize),
+        });
         let id = match plan {
             WorkspaceMove::Refused(reason) => {
                 debug!(?source_space, ?target_space, ?reason, "Workspace move refused");
@@ -3976,7 +4025,7 @@ impl LayoutEngine {
             .workspaces
             .reading(window_store.read())
             .workspace_id_at(target_space, Some(index));
-        let destination = match rift_core::placement::members_destination(found) {
+        let destination = match Self::placing(&rift_core::placement::MembersAsk { found }) {
             Ok(destination) => destination,
             Err(reason) => {
                 debug!(?target_space, index, ?reason, "Workspace move refused");
@@ -4001,7 +4050,11 @@ impl LayoutEngine {
         let changed = self.workspaces.reading(window_store.read()).active_workspace(target_space)
             != Some(destination);
         self.workspaces.set_active_workspace(window_store, target_space, destination);
-        let focus_window = match rift_core::placement::moved_focus(focus, &moved) {
+        let moved_focus = rift_core::placement::MovedFocusAsk {
+            preferred: focus,
+            moved: moved.clone(),
+        };
+        let focus_window = match Self::placing(&moved_focus) {
             MovedFocus::Preferred(window) | MovedFocus::First(window) => Some(window),
             MovedFocus::Nothing => None,
         };
@@ -5045,6 +5098,109 @@ mod tests {
         assert_eq!(
             rift_core::placement::drop_plan(facts),
             DropPlan::Refused(rift_core::placement::DropRefusal::FloatingTarget)
+        );
+    }
+
+    /// Every kind of the remaining placement questions through the engine's one door, payloads
+    /// put back; under `roc-core` the Roc core answers too (a difference, an answer of another
+    /// kind, or one naming a payload the ask does not hold, fails here).
+    #[test]
+    fn each_place_question_answers_with_its_payloads() {
+        use rift_core::floats::{Centering, Sizing};
+        use rift_core::placement::{
+            AssignmentAsk, ClaimAsk, FrameAsk, LandingAsk, MembersAsk, MovedFocusAsk, RuleFloatAsk,
+            RuleFrameAsk, WindowMoveAsk, WorkspaceMoveAsk,
+        };
+        let (engine, store, space, a, _, window) =
+            relocation_fixture(LayoutMode::Traditional, false);
+        let other = WindowId::new(7, 9);
+        let layout = layout_of(&engine, &store, space, a);
+        let facts = engine.addition_facts(store.view(), space, window);
+        assert_eq!(
+            LayoutEngine::placing(&AdditionFacts {
+                tree: Some(Tree { layout, holds_window: false }),
+                ..facts
+            }),
+            Addition::Tile {
+                workspace: a,
+                insert: Insert::Add { layout, width: Width::AsIs }
+            }
+        );
+        assert_eq!(
+            LayoutEngine::placing(&AdditionFacts { tree: None, ..facts }),
+            Addition::Tile {
+                workspace: a,
+                insert: Insert::NoLayout
+            }
+        );
+        assert_eq!(
+            LayoutEngine::placing(&WindowMoveAsk { from: Some(a), to: None }),
+            WindowMove::Refused(rift_core::placement::WindowMoveRefusal::NoWorkspace)
+        );
+        assert_eq!(
+            LayoutEngine::placing(&LandingAsk { placeable: false }),
+            Landing::Hidden
+        );
+        assert_eq!(
+            LayoutEngine::placing(&WorkspaceMoveAsk {
+                shown: Some(a),
+                per_display: true,
+                same_space: false,
+                index: Some(2)
+            }),
+            WorkspaceMove::Members { from: a, index: 2 }
+        );
+        assert_eq!(LayoutEngine::placing(&MembersAsk { found: Some(a) }), Ok(a));
+        assert_eq!(
+            LayoutEngine::placing(&MovedFocusAsk {
+                preferred: Some(other),
+                moved: vec![window]
+            }),
+            MovedFocus::First(window)
+        );
+        assert_eq!(
+            LayoutEngine::placing(&ClaimAsk {
+                claimed: true,
+                management_override: Some(false)
+            }),
+            Claim::Claimed {
+                manage: Manage::Override(false)
+            }
+        );
+        assert_eq!(
+            LayoutEngine::placing(&AssignmentAsk {
+                restored: true,
+                reapply: true,
+                rule_names_workspace: true
+            }),
+            rift_core::placement::Assignment {
+                rule_workspace: RuleWorkspace::DroppedByRestore,
+                native: NativeLayout::Kept
+            }
+        );
+        assert_eq!(
+            LayoutEngine::placing(&RuleFloatAsk {
+                should_float: false,
+                was_floating: true
+            }),
+            RuleFloat::Unfloat
+        );
+        assert_eq!(
+            LayoutEngine::placing(&RuleFrameAsk {
+                place: None::<char>,
+                resize: Some('r')
+            }),
+            rift_core::placement::RuleFrame::Resize('r')
+        );
+        let rect = |x, w| rift_core::plain::Rect { x, y: 0.0, w, h: 100.0 };
+        assert_eq!(
+            LayoutEngine::placing(&FrameAsk {
+                frame: rect(0.0, 200.0),
+                screen: rect(1000.0, 1000.0),
+                centering: Centering::Center,
+                sizing: Sizing::Keep
+            }),
+            rect(1400.0, 200.0)
         );
     }
 
