@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use objc2_core_foundation::{CGPoint, CGRect};
+use rift_core::placement::Override;
 
 use crate::actor::app::WindowId;
 use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
@@ -456,7 +457,10 @@ fn hit_test_available(
             space: target.space,
             frame: target.frame,
             zone,
-            action: scene.action_override.unwrap_or_else(|| resolve_action(zone, center)),
+            action: match scene.action_override {
+                Override::ByZone => resolve_action(zone, center),
+                Override::Swap => WindowDropAction::Swap,
+            },
         })
     };
 
@@ -473,7 +477,7 @@ fn hit_test_available(
         && let Some(space) = source.current_space
         && let Some(zone) = classify_zone(source.origin_frame, point, fraction)
     {
-        if let (None, WindowDropAction::Insert(direction)) =
+        if let (Override::ByZone, WindowDropAction::Insert(direction)) =
             (scene.action_override, resolve_action(zone, center))
             && !scene.source_neighbors[match direction {
                 Direction::Left => 0,
@@ -591,14 +595,14 @@ mod tests {
     }
     fn scene(frame: CGRect) -> DragScene {
         DragScene {
-            action_override: None,
+            action_override: Override::ByZone,
             source_neighbors: [false; 4],
             targets: vec![target(2, frame)],
         }
     }
     fn scene_with(targets: Vec<DragSceneTarget>) -> DragScene {
         DragScene {
-            action_override: None,
+            action_override: Override::ByZone,
             source_neighbors: [false; 4],
             targets,
         }
@@ -946,7 +950,7 @@ mod tests {
     #[test]
     fn stack_scene_resolves_every_zone_to_swap() {
         let mut scene = scene(rect());
-        scene.action_override = Some(WindowDropAction::Swap);
+        scene.action_override = Override::Swap;
         for point in [point(1.0, 50.0), point(100.0, 50.0)] {
             let intent = hit_test(&scene, point, 0.25, MouseDropAction::Stack, None).unwrap();
             assert_eq!(intent.action, WindowDropAction::Swap);

@@ -1253,7 +1253,37 @@ engine's door is one generic `LayoutEngine::switching`, deciding through `roc_pa
 - Plants 9/9: six on the Roc choices, a Moved question answered with a Source from Roc (engine), a
   Source ask reading a Moved choice, a Roc arrival's Space read back as another.
 
-- Next: E1c (placement and relocation), its plan a sum type per outcome kind.
+**E1c shape (approved 2026-11-28, with the lead's tightenings):** every plan is a sum type per
+outcome kind; a refusal names its reason (part of the decision); where a choice needs a layout
+system's answer (a prospective tree) it is two pure steps with the query between; where "none" is a
+real answer it has a name (`Override::ByZone`, `Manage::ByRule`, `RuleFrame::Keep`); relocation's
+`Tile` cannot pair "from floating" with anything but a directional insert. Steps: E1c-1 the drop,
+E1c-2 relocation, E1c-3 placement, the moves, assignment and the rule outcome, E1c-4 Roc.
+
+**E1c-1 (2026-11-28): the drop's choices are core functions**, in a new `rift_core::placement`:
+- `drop_plan` over `DropFacts` → `DropPlan::{Refused(DropRefusal), Float { frame, across, place },
+  Relocate { from, place }, Target { target, action, across, place }}`. `Across::{Same, Into { from }}`
+  (a floating drop can cross workspaces: the same frame in another workspace is a move). `Laid<P>`
+  carries the destination's place (Space, layout) into the accepted plans, so the engine reads no
+  value a refusal would have lacked. Twelve refusals: `NotAMember`, `NoDestination`, `NoLayout`,
+  `FloatWithoutFrame`, `BadFrame`, `FloatOntoTarget`, `FloatUnmoved`, `TiledWithFrame`,
+  `SelfInsert`, `ForeignTarget`, `FloatingTarget`, `InPlace`.
+- `target_kept(before, after)` → `Kept::{Unchanged, Moved}`, after the layout's prospective tree.
+- `drop_action` (`DropPreview::action`), `drop_override` → `Override::{ByZone, Swap}` (the drag
+  scene's `Option<WindowDropAction>` is gone; mission control's own stack check uses it too, through
+  a named mode mapping), `drop_edit` → `DropEdit::{Refused, Edit}` (`apply_window_drop`).
+- `WindowDropAction` is the core's (`rift_core::placement::WindowDropAction<D>`); the engine's name is
+  an alias over its directions.
+- The engine gathers facts in `drop_facts` and `drop_arrangement` (queries, so tests read them),
+  and carries a plan out through `drop_across`.
+- Tests: every refusal named in rift-core; in the engine, a floating drop storing its frame, a
+  drop's target facts being the target's own, the stack override and the floating-mode refusal per
+  mode, the edited tree in place after a same-workspace target drop; mission control's mapping.
+- Plants 23/23. Five engine plants survived at first: two were equivalent at the engine's surface
+  (a floating target or a floating layout is also refused by the layout system's own answer), so the
+  facts were made queries and tested directly; three needed the tests above.
+
+- Next: E1c-2 (relocation).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

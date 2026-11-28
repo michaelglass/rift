@@ -35,7 +35,7 @@ pub struct DragSceneTarget {
 #[derive(Debug, Clone, Default)]
 pub struct DragScene {
     /// Layout-wide semantic override. Stack layouts use Swap for every zone.
-    pub action_override: Option<WindowDropAction>,
+    pub action_override: rift_core::placement::Override,
     /// Whether each source-tile edge points toward a logical tiled neighbor.
     pub source_neighbors: [bool; 4],
     pub targets: Vec<DragSceneTarget>,

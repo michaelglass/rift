@@ -902,8 +902,8 @@ impl DisplayOverview {
         for region in &mut self.regions {
             if let Some(ws) = self.workspaces.iter().find(|ws| ws.workspace_id == region.id) {
                 region.update_label(ws, &self.windows);
-                region.drops.action_override = (ws.layout_mode == "stack")
-                    .then_some(crate::layout_engine::WindowDropAction::Swap);
+                region.drops.action_override =
+                    rift_core::placement::drop_override(Some(drop_arrangement(&ws.layout_mode)));
                 region.drops.targets.clear();
                 region.drops.targets.extend(
                     self.windows
@@ -3552,9 +3552,29 @@ impl OverviewSession {
     }
 }
 
+/// The layout family a drop reads from a workspace's layout mode as the server names it.
+fn drop_arrangement(layout_mode: &str) -> rift_core::placement::Arrangement {
+    use rift_core::placement::Arrangement;
+    match layout_mode {
+        "stack" => Arrangement::Stack,
+        "floating" => Arrangement::Floating,
+        _ => Arrangement::Tiled,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stack_workspace_swaps_on_every_zone_and_others_drop_by_zone() {
+        use rift_core::placement::{Override, drop_override};
+        let over = |mode| drop_override(Some(drop_arrangement(mode)));
+        assert_eq!(over("stack"), Override::Swap);
+        for mode in ["floating", "bsp", "traditional", "scrolling"] {
+            assert_eq!(over(mode), Override::ByZone, "{mode}");
+        }
+    }
     #[test]
     fn workspace_labels_enter_at_their_target_and_visible_labels_follow_motion() {
         let _tx = LayerTransaction::disabled();

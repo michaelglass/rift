@@ -8,6 +8,9 @@ use rift_core::focus::{
     PastTheEdge, RecordAsk, SpaceAsk, WorkspaceFocus,
 };
 use rift_core::native_memory::{Candidate, Current, Held as _, MemoryAnswer, MemoryEvent};
+use rift_core::placement::{
+    Across, Arrangement, DropEdit, DropFacts, DropPlan, DropTarget, Kept, Laid, Override,
+};
 use rift_core::workspaces::{
     Arrival, ArrivalAsk, Moved, MovedAsk, SourceAfter, Switch, SwitchAsk, WorkspaceAsk,
 };
@@ -21,11 +24,11 @@ use crate::actor::app::AppInfo;
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::{LayoutMode, LayoutSettings, WorkspaceSelector};
-use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::{
     Focus, GroupEdit, LayoutEdit, WindowChange, WindowLayoutConstraints, WindowQuery,
 };
+use crate::layout_engine::{LayoutSystem, cg_rect, core_rect};
 use crate::model::app_rules::{AppRuleFrame, AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::window_store::{Windows, WindowsMut};
@@ -55,11 +58,7 @@ impl DropPreview {
         action: crate::layout_engine::WindowDropAction,
         center: crate::common::config::MouseDropAction,
     ) -> crate::layout_engine::WindowDropAction {
-        if self.same_slot && matches!(action, crate::layout_engine::WindowDropAction::Insert(_)) {
-            center.into()
-        } else {
-            action
-        }
+        rift_core::placement::drop_action(self.same_slot, action, center.into())
     }
 }
 
@@ -315,8 +314,9 @@ impl LayoutEngine {
         windows: Windows<'_>,
         request: crate::layout_engine::WindowDropRequest,
     ) -> bool {
-        if self.active_layout_mode_at(windows, request.space) == LayoutMode::Floating {
-            return false;
+        match rift_core::placement::drop_edit(self.drop_arrangement(windows, request.space)) {
+            DropEdit::Refused => return false,
+            DropEdit::Edit => {}
         }
         let Some((workspace, layout)) =
             self.workspaces.reading(windows).active_layout_for_space(request.space)
@@ -337,105 +337,109 @@ impl LayoutEngine {
 
     /// Validate a prospective drop on a workspace-local tree before touching membership.
     /// The regular relocation and target-drop primitives perform the committed operation.
+    /// The layout family a tile drop on `space` reads: its shown workspace's layout mode.
+    fn drop_arrangement(&self, windows: Windows<'_>, space: SpaceId) -> Arrangement {
+        match self.active_layout_mode_at(windows, space) {
+            LayoutMode::Floating => Arrangement::Floating,
+            _ => Arrangement::Tiled,
+        }
+    }
+
+    /// What a drop request is checked against.
+    fn drop_facts(
+        &self,
+        windows: Windows<'_>,
+        drop: &crate::layout_engine::WorkspaceDropRequest,
+    ) -> DropFacts<WindowId, VirtualWorkspaceId, Direction, (SpaceId, LayoutId)> {
+        let destination = drop.workspace;
+        let reading = self.workspaces.reading(windows);
+        let source = (windows.workspace_for_window(drop.window))
+            .filter(|&source| self.workspaces.workspaces.contains_key(source));
+        let laid = match reading.workspace_space(destination) {
+            None => Laid::NoSpace,
+            Some(space) => match reading.active_layout(space, destination) {
+                None => Laid::NoLayout,
+                Some(layout) => Laid::Laid((space, layout)),
+            },
+        };
+        let target = drop.target.map(|(target, action)| DropTarget {
+            window: target,
+            action,
+            in_destination: windows.workspace_for_window(target) == Some(destination),
+            floating: self.is_window_floating(target),
+        });
+        DropFacts {
+            window: drop.window,
+            source,
+            destination,
+            laid,
+            floating: self.is_window_floating(drop.window),
+            at: self.get_floating_position(destination, drop.window).map(core_rect),
+            frame: drop.frame.map(core_rect),
+            target,
+        }
+    }
+
     pub(crate) fn relocate_window_with_drop(
         &mut self,
         windows: &mut WindowsMut<'_>,
         drop: &crate::layout_engine::WorkspaceDropRequest,
     ) -> bool {
-        let Some(source) = windows.read().workspace_for_window(drop.window) else {
-            return false;
-        };
-        if !self.workspaces.workspaces.contains_key(source) {
-            return false;
-        }
         let destination = drop.workspace;
-        let Some(space) = self.workspaces.reading(windows.read()).workspace_space(destination)
-        else {
-            return false;
-        };
-        let floating = self.is_window_floating(drop.window);
-        let Some(layout) =
-            self.workspaces.reading(windows.read()).active_layout(space, destination)
-        else {
-            return false;
-        };
-        let different = source != destination;
-        let prospective = if floating {
-            let Some(frame) = drop.frame else { return false };
-            if ![
-                frame.origin.x,
-                frame.origin.y,
-                frame.size.width,
-                frame.size.height,
-            ]
-            .iter()
-            .all(|v| v.is_finite())
-                || frame.size.width <= 0.0
-                || frame.size.height <= 0.0
-            {
+        let plan = rift_core::placement::drop_plan(self.drop_facts(windows.read(), drop));
+        let space = match plan {
+            DropPlan::Refused(reason) => {
+                debug!(?reason, window = ?drop.window, "drop refused");
                 return false;
             }
-            if drop.target.is_some()
-                || (!different
-                    && self.get_floating_position(destination, drop.window) == Some(frame))
-            {
-                return false;
-            }
-            None
-        } else {
-            if drop.frame.is_some() {
-                return false;
-            }
-
-            if let Some((target, action)) = drop.target {
-                if (target == drop.window
-                    && !matches!(
-                        action,
-                        crate::layout_engine::WindowDropAction::Move(_)
-                            | crate::layout_engine::WindowDropAction::ConsumeOrExpel(_)
-                    ))
-                    || windows.read().workspace_for_window(target) != Some(destination)
-                    || self.is_window_floating(target)
-                {
+            DropPlan::Float {
+                frame,
+                across,
+                place: (space, _),
+            } => {
+                if !self.drop_across(windows, across, (space, destination), drop.window, None) {
                     return false;
                 }
+                windows.clear_floating_display_geometry(drop.window);
+                self.store_floating_position(destination, drop.window, cg_rect(frame));
+                space
+            }
+            DropPlan::Relocate { from, place: (space, _) } => {
+                let across = Across::Into { from };
+                if !self.drop_across(windows, across, (space, destination), drop.window, None) {
+                    return false;
+                }
+                space
+            }
+            DropPlan::Target {
+                target,
+                action,
+                across,
+                place: (space, layout),
+            } => {
                 // The same prospective layout the preview showed (upstream #709).
                 let Some((mut tree, before)) =
                     self.prospective_drop_tree(destination, layout, drop.window, target, action)
                 else {
                     return false;
                 };
-                if before.is_some() && before == tree.window_slot(layout, drop.window) {
-                    return false;
+                match rift_core::placement::target_kept(
+                    before,
+                    tree.window_slot(layout, drop.window),
+                ) {
+                    Kept::Unchanged => return false,
+                    Kept::Moved => {}
                 }
                 tree.focus(layout, Focus::Select(drop.window)).handled;
-                Some(tree)
-            } else if different {
-                None // Generic relocation already inserts a rendered member.
-            } else {
-                return false;
+                if !self.drop_across(windows, across, (space, destination), drop.window, Some(tree))
+                {
+                    return false;
+                }
+                space
             }
         };
-        if different {
-            if !self.relocate_window_to_workspace(
-                windows,
-                source,
-                (space, destination),
-                drop.window,
-                WindowRelocation::Drop(prospective),
-            ) {
-                return false;
-            }
-        } else if let Some(tree) = prospective {
-            self.native.step(MemoryEvent::Forgotten(destination));
-            self.workspaces[destination].layout_system = tree;
-        }
         if self.floats.focused() == Some(drop.window) {
             self.floats.set_focused(None);
-        }
-        if let Some(frame) = drop.frame {
-            windows.clear_floating_display_geometry(drop.window);
-            self.store_floating_position(destination, drop.window, frame);
         }
         self.workspaces.set_last_focused_window(
             &windows.core,
@@ -444,6 +448,33 @@ impl LayoutEngine {
             Some(drop.window),
         );
         true
+    }
+
+    /// A drop's move: into the destination by relocation (with the edited tree, if any), or
+    /// within its own workspace by putting the edited tree in place.
+    fn drop_across(
+        &mut self,
+        windows: &mut WindowsMut<'_>,
+        across: Across<VirtualWorkspaceId>,
+        (space, destination): (SpaceId, VirtualWorkspaceId),
+        window: WindowId,
+        edited: Option<LayoutSystemKind>,
+    ) -> bool {
+        match (across, edited) {
+            (Across::Into { from }, edited) => self.relocate_window_to_workspace(
+                windows,
+                from,
+                (space, destination),
+                window,
+                WindowRelocation::Drop(edited),
+            ),
+            (Across::Same, Some(tree)) => {
+                self.native.step(MemoryEvent::Forgotten(destination));
+                self.workspaces[destination].layout_system = tree;
+                true
+            }
+            (Across::Same, None) => true,
+        }
     }
 
     /// Return the visible logical tiles eligible for drag targeting.
@@ -472,17 +503,15 @@ impl LayoutEngine {
         windows
     }
 
-    pub(crate) fn drop_action_override(
-        &self,
-        windows: Windows<'_>,
-        space: SpaceId,
-    ) -> Option<crate::layout_engine::WindowDropAction> {
-        let workspace = self.workspaces.reading(windows).active_workspace(space)?;
-        matches!(
-            self.workspaces[workspace].layout_system,
-            LayoutSystemKind::Stack(_)
-        )
-        .then_some(crate::layout_engine::WindowDropAction::Swap)
+    pub(crate) fn drop_action_override(&self, windows: Windows<'_>, space: SpaceId) -> Override {
+        let shown = self.workspaces.reading(windows).active_workspace(space).map(|workspace| {
+            match self.workspaces[workspace].layout_system {
+                LayoutSystemKind::Stack(_) => Arrangement::Stack,
+                LayoutSystemKind::Floating(_) => Arrangement::Floating,
+                _ => Arrangement::Tiled,
+            }
+        });
+        rift_core::placement::drop_override(shown)
     }
 
     pub(crate) fn drop_preview_frame(
@@ -4730,10 +4759,112 @@ mod tests {
                 target: Some((target, action)),
                 frame: None,
             };
+            let layout =
+                engine.workspaces.reading(store.view()).active_layout(space, owner).unwrap();
+            let order = |engine: &LayoutEngine| {
+                engine.workspaces[owner].layout_system.windows(layout, WindowQuery::Visible)
+            };
+            assert_eq!(order(&engine), vec![source, target]);
             assert_eq!(
                 engine.relocate_window_with_drop(&mut store.view_mut(), &drop),
                 !stays,
                 "{action:?}"
+            );
+            let expected = if stays {
+                vec![source, target]
+            } else {
+                vec![target, source]
+            };
+            assert_eq!(
+                order(&engine),
+                expected,
+                "{action:?}: the edited tree is in place"
+            );
+        }
+    }
+
+    /// A floating window dropped elsewhere in its own workspace keeps the new frame.
+    #[test]
+    fn a_floating_drop_in_its_own_workspace_stores_the_new_frame() {
+        let (mut engine, mut store, _, workspace, window) = floating_window();
+        let frame = CGRect::new(CGPoint::new(100.0, 50.0), CGSize::new(400.0, 300.0));
+        let drop = crate::layout_engine::WorkspaceDropRequest {
+            window,
+            workspace,
+            target: None,
+            frame: Some(frame),
+        };
+        assert!(engine.relocate_window_with_drop(&mut store.view_mut(), &drop));
+        assert_eq!(engine.get_floating_position(workspace, window), Some(frame));
+        assert!(
+            !engine.relocate_window_with_drop(&mut store.view_mut(), &drop),
+            "dropped where it is now"
+        );
+    }
+
+    /// A drop's facts: the target's own membership and floating, not the dropped window's.
+    #[test]
+    fn a_drops_target_facts_are_the_targets_own() {
+        let (mut engine, mut store, space, workspace, floating) = floating_window();
+        let tiled = WindowId::new(9, 2);
+        store
+            .view_mut()
+            .insert_manageable_window(tiled, live_window(CGSize::new(400.0, 300.0)));
+        assert!(engine.workspaces.assign_window_to_workspace(
+            &mut store.view_mut(),
+            space,
+            tiled,
+            workspace
+        ));
+        let action = crate::layout_engine::WindowDropAction::Swap;
+        let drop = crate::layout_engine::WorkspaceDropRequest {
+            window: tiled,
+            workspace,
+            target: Some((floating, action)),
+            frame: None,
+        };
+        let facts = engine.drop_facts(store.view(), &drop);
+        assert!(!facts.floating);
+        assert_eq!(
+            facts.target,
+            Some(DropTarget {
+                window: floating,
+                action,
+                in_destination: true,
+                floating: true
+            })
+        );
+        assert_eq!(
+            rift_core::placement::drop_plan(facts),
+            DropPlan::Refused(rift_core::placement::DropRefusal::FloatingTarget)
+        );
+    }
+
+    /// A stack layout swaps on every zone; a floating layout takes no tile drops.
+    #[test]
+    fn a_stack_overrides_the_zones_and_a_floating_mode_refuses_tile_drops() {
+        for (mode, override_, arrangement) in [
+            (LayoutMode::Stack, Override::Swap, Arrangement::Tiled),
+            (LayoutMode::Traditional, Override::ByZone, Arrangement::Tiled),
+            (LayoutMode::Floating, Override::ByZone, Arrangement::Floating),
+        ] {
+            let settings = LayoutSettings {
+                mode,
+                ..LayoutSettings::default()
+            };
+            let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings);
+            let mut store = OwnedWindows::default();
+            let space = SpaceId::new(96);
+            shown_space(&mut engine, &mut store, space);
+            assert_eq!(
+                engine.drop_action_override(store.view(), space),
+                override_,
+                "{mode:?}"
+            );
+            assert_eq!(
+                engine.drop_arrangement(store.view(), space),
+                arrangement,
+                "{mode:?}"
             );
         }
     }

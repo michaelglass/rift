@@ -17,14 +17,8 @@ pub use engine::{
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowDropAction {
-    Swap,
-    Stack,
-    Insert(Direction),
-    Move(Direction),
-    ConsumeOrExpel(Direction),
-}
+/// What a dropped window does to its target: the core's action, over the layout's directions.
+pub type WindowDropAction = rift_core::placement::WindowDropAction<Direction>;
 
 impl From<crate::common::config::MouseDropAction> for WindowDropAction {
     fn from(action: crate::common::config::MouseDropAction) -> Self {

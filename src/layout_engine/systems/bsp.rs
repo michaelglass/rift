@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn cloned_stacks_replace_and_remove_all_members() {
-        use crate::layout_engine::WindowDropAction::Stack;
+        use rift_core::placement::WindowDropAction::Stack;
 
         let (mut system, original) = tiled(&[1, 2, 3]);
         assert!(
