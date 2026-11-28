@@ -401,6 +401,43 @@ impl RocDisplayMemory {
     }
 }
 
+/// The scrolling layouts' cameras (`rift_core::camera::Cameras`), kept in Roc between events.
+/// Stepped beside the Rust machine, it must answer the same and hold the same cameras. Layouts,
+/// columns and windows are words; times are nanoseconds.
+pub struct RocCameras {
+    cameras: boundary::CamerasBox,
+    host: abi::RocHost,
+}
+
+// SAFETY: as for `RocCore`.
+unsafe impl Send for RocCameras {}
+
+impl Default for RocCameras {
+    fn default() -> Self {
+        RocCameras {
+            cameras: boundary::CamerasBox::empty(),
+            host: host(),
+        }
+    }
+}
+
+impl RocCameras {
+    /// As `Cameras::step`: what the camera answered.
+    pub fn step(
+        &mut self,
+        event: rift_core::camera::CamerasEvent<u64, u64, u64>,
+    ) -> rift_core::camera::Answer<u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.cameras, |cameras| cameras.step(event, host))
+    }
+
+    /// Every layout's camera, as a Rust `Cameras`.
+    pub fn view(&mut self) -> rift_core::camera::Cameras<u64, u64, u64> {
+        let host = &self.host;
+        boundary::in_place(&mut self.cameras, |cameras| cameras.view(host))
+    }
+}
+
 /// Where a display's departure moved windows from (`rift_core::evictions::Evictions`), kept in
 /// Roc between events. Stepped beside the Rust machine, it must hold the same records. Windows,
 /// displays and workspaces are words, pids i32.

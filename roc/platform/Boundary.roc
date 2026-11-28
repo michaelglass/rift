@@ -869,6 +869,133 @@ Boundary := [].{
 	## An evicted window's record.
 	EvictionRecord := { window : U64, display : U64, ordinal : U64, landed : U64 }
 
+	# The scrolling layouts' cameras (`rift_core::camera`), kept between events. Layouts, columns
+	# and windows are one word each; a time is nanoseconds on the host's clock.
+
+	CamBookmark := { column : U64, relative_offset : F64 }
+
+	MaybeBookmark := [NoBookmark, Bookmark(CamBookmark)]
+
+	CamRest := [At, Centred]
+
+	CamSpring := { from : F64, target : F64, velocity : F64, current : F64, current_velocity : F64, started : U64, sampled : U64 }
+
+	CamPending := { from : F64, target : F64 }
+
+	CamMotion := [Static(F64), Pending(CamPending), Animation(CamSpring)]
+
+	CamResting := { rest : CamRest, motion : CamMotion }
+
+	CamViewport := [Uninitialized, Gesture(F64), Resting(CamResting)]
+
+	CamPresented := [Gesture(F64), Still(F64), Moving(CamSpring)]
+
+	CamEnded := [No, Yes]
+
+	CamSample := { time : U64, delta : F64 }
+
+	CamHistory := { samples : List(CamSample), overscroll : F64 }
+
+	CamOwed := { window : U64, return_to : CamBookmark }
+
+	CamShowing := [Strip, Fullscreen(CamOwed)]
+
+	CamSpan := { id : U64, world_x : F64, width : F64 }
+
+	CamSnap := { offset : F64, column : U64 }
+
+	CamSpans := { columns : List(CamSpan), low : F64, high : F64, view : F64, snaps : List(CamSnap) }
+
+	MaybeSpans := [NoSpans, Spans(CamSpans)]
+
+	CamFactColumn := { id : U64, windows : List(U64) }
+
+	CamFacts := { columns : List(CamFactColumn), active_column : U64, selected : MaybeWord, fullscreen : List(U64) }
+
+	CamAlignment := [Left, Center, Right]
+
+	CamNavigation := [Niri, Anchored]
+
+	CamSettings := { alignment : CamAlignment, navigation : CamNavigation }
+
+	CamHeld := { window : MaybeWord, column : U64, x : F64 }
+
+	MaybeHeld := [NoHold, Hold(CamHeld)]
+
+	CamPrepared := { before : MaybeSpans, spans : CamSpans, facts : CamFacts, settings : CamSettings, now : U64 }
+
+	CamRebuilt := { spans : MaybeSpans, facts : CamFacts, hold : MaybeHeld, now : U64 }
+
+	CamRevealed := { spans : MaybeSpans, facts : CamFacts, settings : CamSettings }
+
+	CamAt := { spans : MaybeSpans, facts : CamFacts }
+
+	CamRemoved := { active_removed : Bool, column_removed : Bool, spans : MaybeSpans, facts : CamFacts, settings : CamSettings }
+
+	CamSelected := { column_changed : Bool, spans : MaybeSpans, facts : CamFacts, settings : CamSettings }
+
+	CamPair := { from : U64, to : U64 }
+
+	CamLeft := { window : U64, spans : MaybeSpans, facts : CamFacts }
+
+	CamEntered := { window : U64, spans : MaybeSpans, before : CamFacts, after : CamFacts }
+
+	CamPresentedEvent := { presented : CamPresented, motion : CamHistory, ended : CamEnded }
+
+	CamScroll := { delta : F64, spans : MaybeSpans, facts : CamFacts, gap : F64 }
+
+	CamBegan := { now : U64, spans : MaybeSpans, facts : CamFacts }
+
+	CamMoved := { delta : F64, at : U64, spans : MaybeSpans }
+
+	CamEndedGesture := { at : U64, animate : Bool, started : U64, spans : MaybeSpans, facts : CamFacts, settings : CamSettings }
+
+	## What a layout's camera learns (`rift_core::camera::CameraEvent`).
+	CameraEvent := [
+		Prepared(CamPrepared),
+		Rebuilt(CamRebuilt),
+		Revealed(CamRevealed),
+		Centred(CamAt),
+		Inserting(CamAt),
+		WindowRemoved(CamRemoved),
+		Selected(CamSelected),
+		Followed(CamRevealed),
+		TransientForgotten,
+		ViewForgotten,
+		Replaced(CamPair),
+		FullscreenLeft(CamLeft),
+		FullscreenEntered(CamEntered),
+		Finished,
+		Presented(CamPresentedEvent),
+		ScrollBy(CamScroll),
+		GestureBegan(CamBegan),
+		GestureMoved(CamMoved),
+		GestureEnded(CamEndedGesture),
+		GestureCancelled(MaybeSpans),
+		Snapped(CamRevealed),
+	]
+
+	CamClone := { from : U64, to : U64, spans : MaybeSpans }
+
+	CamLayoutEvent := { layout : U64, event : CameraEvent }
+
+	## What the cameras learn: a layout made, cloned or removed, or one layout's event.
+	CamerasEvent := [Created(U64), Cloned(CamClone), Removed(U64), Camera(CamLayoutEvent)]
+
+	CamEdge := [Left, Right]
+
+	CamExcess := { edge : CamEdge, columns : F64 }
+
+	CamRelease := { column : U64, offset : F64, from_offset : F64, velocity : F64 }
+
+	## What a camera answered.
+	CamAnswer := [Nothing, Activate(U64), Began(Bool), Moved(F64), Excess(CamExcess), Released(CamRelease)]
+
+	CamCamera := { viewport : CamViewport, motion : CamHistory, transient_restore : MaybeBookmark, showing : CamShowing, restored_view : MaybeBookmark }
+
+	## A layout's camera, as the view lists it.
+	CamEntry := { layout : U64, camera : CamCamera }
+
 	# The floating state (`rift_core::floats`), kept between events. Windows and workspaces are one
 	# word each, pids an I32 (macOS's pid_t).
 

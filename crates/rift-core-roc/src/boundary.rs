@@ -45,6 +45,7 @@ use rift_core::workspaces::{
 };
 use rift_core::{
     Answer, Button, Desire, Effect, Event, Note, Plan, Release, Reply, Ungrip, Want, Write,
+    camera as cam,
 };
 
 use crate::abi;
@@ -3525,6 +3526,563 @@ impl Drop for DisplayMemoryBox {
     fn drop(&mut self) {
         // SAFETY: the box is this machine's and is never used again.
         unsafe { abi::roc_display_memory_release(self.0) }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The cameras.
+
+/// The cameras as words: layouts, columns and windows.
+pub(crate) type WordCameras = cam::Cameras<u64, u64, u64>;
+type WordCamera = cam::Camera<u64, u64>;
+
+fn cam_spring(s: cam::Spring) -> abi::BoundaryCamSpring {
+    abi::BoundaryCamSpring {
+        from: s.from,
+        target: s.target,
+        velocity: s.velocity,
+        current: s.current,
+        current_velocity: s.current_velocity,
+        started: s.started.0,
+        sampled: s.sampled.0,
+    }
+}
+
+fn cam_history(h: &cam::MotionHistory, host: &abi::RocHost) -> abi::BoundaryCamHistory {
+    let samples: Vec<_> = h
+        .samples()
+        .map(|(time, delta)| abi::BoundaryCamSample { time: time.0, delta })
+        .collect();
+    abi::BoundaryCamHistory {
+        samples: list(&samples, host),
+        overscroll: h.overscroll(),
+    }
+}
+
+fn cam_spans(spans: &cam::Spans<u64>, host: &abi::RocHost) -> abi::BoundaryCamSpans {
+    let columns: Vec<_> = (spans.columns.iter())
+        .map(|c| abi::BoundaryCamSpan {
+            id: c.id,
+            world_x: c.world_x,
+            width: c.width,
+        })
+        .collect();
+    let snaps: Vec<_> = (spans.snaps.iter())
+        .map(|s| abi::BoundaryCamSnap {
+            offset: s.offset,
+            column: s.column,
+        })
+        .collect();
+    abi::BoundaryCamSpans {
+        columns: list(&columns, host),
+        low: spans.bounds.0,
+        high: spans.bounds.1,
+        view: spans.view,
+        snaps: list(&snaps, host),
+    }
+}
+
+fn cam_maybe_spans(
+    spans: Option<&cam::Spans<u64>>,
+    host: &abi::RocHost,
+) -> abi::BoundaryMaybeSpans {
+    use abi::BoundaryMaybeSpansTag as Tag;
+    match spans {
+        Some(spans) => union!(
+            BoundaryMaybeSpans,
+            BoundaryMaybeSpansPayload.spans(cam_spans(spans, host)),
+            Tag::Spans
+        ),
+        None => union!(
+            BoundaryMaybeSpans,
+            BoundaryMaybeSpansPayload.no_spans,
+            Tag::NoSpans
+        ),
+    }
+}
+
+fn cam_facts(facts: &cam::Facts<u64, u64>, host: &abi::RocHost) -> abi::BoundaryCamFacts {
+    let columns: Vec<_> = (facts.columns.iter())
+        .map(|c| abi::BoundaryCamFactColumn {
+            id: c.id,
+            windows: list(&c.windows, host),
+        })
+        .collect();
+    let fullscreen: Vec<u64> = facts.fullscreen.iter().copied().collect();
+    abi::BoundaryCamFacts {
+        columns: list(&columns, host),
+        active_column: facts.active_column as u64,
+        selected: maybe_word(facts.selected),
+        fullscreen: list(&fullscreen, host),
+    }
+}
+
+fn cam_settings(settings: cam::CameraSettings) -> abi::BoundaryCamSettings {
+    abi::BoundaryCamSettings {
+        alignment: match settings.alignment {
+            cam::Alignment::Left => abi::BoundaryCamAlignment::Left,
+            cam::Alignment::Center => abi::BoundaryCamAlignment::Center,
+            cam::Alignment::Right => abi::BoundaryCamAlignment::Right,
+        },
+        navigation: match settings.navigation {
+            cam::Navigation::Niri => abi::BoundaryCamNavigation::Niri,
+            cam::Navigation::Anchored => abi::BoundaryCamNavigation::Anchored,
+        },
+    }
+}
+
+fn camera_event(
+    event: cam::CameraEvent<u64, u64>,
+    host: &abi::RocHost,
+) -> abi::BoundaryCameraEvent {
+    use abi::BoundaryCameraEventTag as Tag;
+    use cam::CameraEvent as E;
+    let ms = |spans: &Option<cam::Spans<u64>>| cam_maybe_spans(spans.as_ref(), host);
+    match event {
+        E::Prepared {
+            before,
+            spans,
+            facts,
+            settings,
+            now,
+        } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.prepared(abi::BoundaryCamPrepared {
+                before: ms(&before),
+                spans: cam_spans(&spans, host),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+                now: now.0,
+            }),
+            Tag::Prepared
+        ),
+        E::Rebuilt { spans, facts, hold, now } => {
+            use abi::BoundaryMaybeHeldTag as H;
+            let hold = match hold {
+                Some(h) => union!(
+                    BoundaryMaybeHeld,
+                    BoundaryMaybeHeldPayload.hold(abi::BoundaryCamHeld {
+                        window: maybe_word(h.window),
+                        column: h.column,
+                        x: h.x,
+                    }),
+                    H::Hold
+                ),
+                None => union!(BoundaryMaybeHeld, BoundaryMaybeHeldPayload.no_hold, H::NoHold),
+            };
+            union!(
+                BoundaryCameraEvent,
+                BoundaryCameraEventPayload.rebuilt(abi::BoundaryCamRebuilt {
+                    spans: ms(&spans),
+                    facts: cam_facts(&facts, host),
+                    hold,
+                    now: now.0,
+                }),
+                Tag::Rebuilt
+            )
+        }
+        E::Revealed { spans, facts, settings } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.revealed(abi::BoundaryCamRevealed {
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+            }),
+            Tag::Revealed
+        ),
+        E::Centred { spans, facts } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.centred(abi::BoundaryCamAt {
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+            }),
+            Tag::Centred
+        ),
+        E::Inserting { spans, facts } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.inserting(abi::BoundaryCamAt {
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+            }),
+            Tag::Inserting
+        ),
+        E::WindowRemoved {
+            active_removed,
+            column_removed,
+            spans,
+            facts,
+            settings,
+        } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.window_removed(abi::BoundaryCamRemoved {
+                active_removed,
+                column_removed,
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+            }),
+            Tag::WindowRemoved
+        ),
+        E::Selected {
+            column_changed,
+            spans,
+            facts,
+            settings,
+        } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.selected(abi::BoundaryCamSelected {
+                column_changed,
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+            }),
+            Tag::Selected
+        ),
+        E::Followed { spans, facts, settings } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.followed(abi::BoundaryCamRevealed {
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+            }),
+            Tag::Followed
+        ),
+        E::TransientForgotten => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.transient_forgotten,
+            Tag::TransientForgotten
+        ),
+        E::ViewForgotten => {
+            union!(
+                BoundaryCameraEvent,
+                BoundaryCameraEventPayload.view_forgotten,
+                Tag::ViewForgotten
+            )
+        }
+        E::Replaced { from, to } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.replaced(abi::BoundaryCamPair { from, to }),
+            Tag::Replaced
+        ),
+        E::FullscreenLeft { window, spans, facts } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.fullscreen_left(abi::BoundaryCamLeft {
+                window,
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+            }),
+            Tag::FullscreenLeft
+        ),
+        E::FullscreenEntered { window, spans, before, after } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.fullscreen_entered(abi::BoundaryCamEntered {
+                window,
+                spans: ms(&spans),
+                before: cam_facts(&before, host),
+                after: cam_facts(&after, host),
+            }),
+            Tag::FullscreenEntered
+        ),
+        E::Finished => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.finished,
+            Tag::Finished
+        ),
+        E::Presented { presented, motion, ended } => {
+            use abi::BoundaryCamPresentedTag as P;
+            let presented = match presented {
+                cam::Presented::Gesture(o) => {
+                    union!(
+                        BoundaryCamPresented,
+                        BoundaryCamPresentedPayload.gesture(o),
+                        P::Gesture
+                    )
+                }
+                cam::Presented::Still(o) => {
+                    union!(
+                        BoundaryCamPresented,
+                        BoundaryCamPresentedPayload.still(o),
+                        P::Still
+                    )
+                }
+                cam::Presented::Moving(s) => union!(
+                    BoundaryCamPresented,
+                    BoundaryCamPresentedPayload.moving(cam_spring(s)),
+                    P::Moving
+                ),
+            };
+            union!(
+                BoundaryCameraEvent,
+                BoundaryCameraEventPayload.presented(abi::BoundaryCamPresentedEvent {
+                    presented,
+                    motion: cam_history(&motion, host),
+                    ended: match ended {
+                        cam::Ended::No => abi::BoundaryCamEnded::No,
+                        cam::Ended::Yes => abi::BoundaryCamEnded::Yes,
+                    },
+                }),
+                Tag::Presented
+            )
+        }
+        E::ScrollBy { delta, spans, facts, gap } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.scroll_by(abi::BoundaryCamScroll {
+                delta,
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                gap,
+            }),
+            Tag::ScrollBy
+        ),
+        E::GestureBegan { now, spans, facts } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.gesture_began(abi::BoundaryCamBegan {
+                now: now.0,
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+            }),
+            Tag::GestureBegan
+        ),
+        E::GestureMoved { delta, at, spans } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.gesture_moved(abi::BoundaryCamMoved {
+                delta,
+                at: at.0,
+                spans: ms(&spans),
+            }),
+            Tag::GestureMoved
+        ),
+        E::GestureEnded {
+            at,
+            animate,
+            started,
+            spans,
+            facts,
+            settings,
+        } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.gesture_ended(abi::BoundaryCamEndedGesture {
+                at: at.0,
+                animate,
+                started: started.0,
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+            }),
+            Tag::GestureEnded
+        ),
+        E::GestureCancelled { spans } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.gesture_cancelled(ms(&spans)),
+            Tag::GestureCancelled
+        ),
+        E::Snapped { spans, facts, settings } => union!(
+            BoundaryCameraEvent,
+            BoundaryCameraEventPayload.snapped(abi::BoundaryCamRevealed {
+                spans: ms(&spans),
+                facts: cam_facts(&facts, host),
+                settings: cam_settings(settings),
+            }),
+            Tag::Snapped
+        ),
+    }
+}
+
+fn cameras_event(
+    event: cam::CamerasEvent<u64, u64, u64>,
+    host: &abi::RocHost,
+) -> abi::BoundaryCamerasEvent {
+    use abi::BoundaryCamerasEventTag as Tag;
+    match event {
+        cam::CamerasEvent::Created(layout) => {
+            union!(
+                BoundaryCamerasEvent,
+                BoundaryCamerasEventPayload.created(layout),
+                Tag::Created
+            )
+        }
+        cam::CamerasEvent::Cloned { from, to, spans } => union!(
+            BoundaryCamerasEvent,
+            BoundaryCamerasEventPayload.cloned(abi::BoundaryCamClone {
+                from,
+                to,
+                spans: cam_maybe_spans(spans.as_ref(), host),
+            }),
+            Tag::Cloned
+        ),
+        cam::CamerasEvent::Removed(layout) => {
+            union!(
+                BoundaryCamerasEvent,
+                BoundaryCamerasEventPayload.removed(layout),
+                Tag::Removed
+            )
+        }
+        cam::CamerasEvent::Camera(layout, event) => union!(
+            BoundaryCamerasEvent,
+            BoundaryCamerasEventPayload.camera(abi::BoundaryCamLayoutEvent {
+                layout,
+                event: camera_event(event, host),
+            }),
+            Tag::Camera
+        ),
+    }
+}
+
+fn from_cam_spring(s: &abi::BoundaryCamSpring) -> cam::Spring {
+    cam::Spring {
+        from: s.from,
+        target: s.target,
+        velocity: s.velocity,
+        current: s.current,
+        current_velocity: s.current_velocity,
+        started: cam::Time(s.started),
+        sampled: cam::Time(s.sampled),
+    }
+}
+
+fn from_cam_viewport(v: &abi::BoundaryCamViewport) -> cam::Viewport {
+    use abi::{BoundaryCamMotionTag as M, BoundaryCamViewportTag as Tag};
+    // SAFETY: each arm reads the payload its tag names.
+    match v.tag {
+        Tag::Uninitialized => cam::Viewport::Uninitialized,
+        Tag::Gesture => cam::Viewport::Gesture(unsafe { *v.borrow_payload_gesture_unchecked() }),
+        Tag::Resting => {
+            let r = unsafe { v.borrow_payload_resting_unchecked() };
+            let rest = match r.rest {
+                abi::BoundaryCamRest::At => cam::Rest::At,
+                abi::BoundaryCamRest::Centred => cam::Rest::Centred,
+            };
+            let motion = match r.motion.tag {
+                M::Static => {
+                    cam::Motion::Static(unsafe { *r.motion.borrow_payload_static_unchecked() })
+                }
+                M::Pending => {
+                    let p = unsafe { r.motion.borrow_payload_pending_unchecked() };
+                    cam::Motion::Pending { from: p.from, target: p.target }
+                }
+                M::Animation => cam::Motion::Animation(from_cam_spring(unsafe {
+                    r.motion.borrow_payload_animation_unchecked()
+                })),
+            };
+            cam::Viewport::Resting(rest, motion)
+        }
+    }
+}
+
+fn from_cam_bookmark(b: &abi::BoundaryMaybeBookmark) -> Option<cam::Bookmark<u64>> {
+    match b.tag {
+        abi::BoundaryMaybeBookmarkTag::NoBookmark => None,
+        abi::BoundaryMaybeBookmarkTag::Bookmark => {
+            // SAFETY: the tag says the payload is the bookmark.
+            let b = unsafe { b.borrow_payload_bookmark_unchecked() };
+            Some(cam::Bookmark {
+                column: b.column,
+                relative_offset: b.relative_offset,
+            })
+        }
+    }
+}
+
+fn from_cam_camera(c: &abi::BoundaryCamCamera) -> WordCamera {
+    let motion = cam::MotionHistory::from_parts(
+        c.motion.samples.as_slice().iter().map(|s| (cam::Time(s.time), s.delta)),
+        c.motion.overscroll,
+    );
+    let showing = match c.showing.tag {
+        abi::BoundaryCamShowingTag::Strip => cam::Showing::Strip,
+        abi::BoundaryCamShowingTag::Fullscreen => {
+            // SAFETY: the tag says the payload is the return owed.
+            let owed = unsafe { c.showing.borrow_payload_fullscreen_unchecked() };
+            cam::Showing::Fullscreen {
+                window: owed.window,
+                return_to: cam::Bookmark {
+                    column: owed.return_to.column,
+                    relative_offset: owed.return_to.relative_offset,
+                },
+            }
+        }
+    };
+    cam::Camera::from_parts(
+        from_cam_viewport(&c.viewport),
+        motion,
+        from_cam_bookmark(&c.transient_restore),
+        showing,
+        from_cam_bookmark(&c.restored_view),
+    )
+}
+
+fn from_cam_answer(a: &abi::BoundaryCamAnswer) -> cam::Answer<u64> {
+    use abi::BoundaryCamAnswerTag as Tag;
+    // SAFETY: each arm reads the payload its tag names.
+    match a.tag {
+        Tag::Nothing => cam::Answer::Nothing,
+        Tag::Activate => cam::Answer::Activate(unsafe { *a.borrow_payload_activate_unchecked() }),
+        Tag::Began => cam::Answer::Began(unsafe { *a.borrow_payload_began_unchecked() }),
+        Tag::Moved => cam::Answer::Moved(unsafe { *a.borrow_payload_moved_unchecked() }),
+        Tag::Excess => {
+            let e = unsafe { a.borrow_payload_excess_unchecked() };
+            let edge = match e.edge {
+                abi::BoundaryCamEdge::Left => cam::Edge::Left,
+                abi::BoundaryCamEdge::Right => cam::Edge::Right,
+            };
+            cam::Answer::Excess(edge, e.columns)
+        }
+        Tag::Released => {
+            let r = unsafe { a.borrow_payload_released_unchecked() };
+            cam::Answer::Released(cam::Release {
+                column: r.column,
+                offset: r.offset,
+                from_offset: r.from_offset,
+                velocity: r.velocity,
+            })
+        }
+    }
+}
+
+/// The cameras' box, which only Roc can read or free; only the `roc_cameras_*` entries make and
+/// take one. Dropping it releases the machine.
+pub(crate) struct CamerasBox(abi::RocBox);
+
+impl CamerasBox {
+    pub(crate) fn empty() -> CamerasBox { CamerasBox(unsafe { abi::roc_cameras_init() }) }
+
+    /// The raw box, handed to Roc (see [`LifecycleBox::into_raw`]).
+    fn into_raw(self) -> abi::RocBox {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// An event: the machine after it, and what the camera answered.
+    pub(crate) fn step(
+        self,
+        event: cam::CamerasEvent<u64, u64, u64>,
+        host: &abi::RocHost,
+    ) -> (CamerasBox, cam::Answer<u64>) {
+        // SAFETY: the box is this machine's, given to the step; its successor comes back. The
+        // answer is plain data.
+        let stepped = unsafe { abi::roc_cameras_step(self.into_raw(), cameras_event(event, host)) };
+        let answer = from_cam_answer(&stepped.answer);
+        (CamerasBox(stepped.model), answer)
+    }
+
+    /// Every layout's camera.
+    pub(crate) fn view(self, host: &abi::RocHost) -> (CamerasBox, WordCameras) {
+        // SAFETY: as in `step`; the list is Roc's answer, owned here, read in full, released.
+        let viewed = unsafe { abi::roc_cameras_view(self.into_raw()) };
+        let view = cam::Cameras::from_parts(
+            viewed.cameras.as_slice().iter().map(|e| (e.layout, from_cam_camera(&e.camera))),
+        );
+        // The deep release: each camera's motion history holds a list of its own.
+        unsafe { abi::decref_list_of_boundary_cam_entry(viewed.cameras, host) };
+        (CamerasBox(viewed.model), view)
+    }
+}
+
+impl Drop for CamerasBox {
+    fn drop(&mut self) {
+        // SAFETY: the box is this machine's and is never used again.
+        unsafe { abi::roc_cameras_release(self.0) }
     }
 }
 

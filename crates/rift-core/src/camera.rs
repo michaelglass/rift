@@ -53,6 +53,55 @@ pub enum Rest {
     Centred,
 }
 
+/// √800, the spring's natural frequency (stiffness 800, mass 1).
+const OMEGA: f64 = 28.284271247461902;
+
+/// ln 0.997, niri's touchpad deceleration per millisecond.
+pub const DECELERATION_LN: f64 = -0.0030045090202987243;
+
+/// e^`x`, from `+`, `*` and floor only, so the Rust and Roc cores compute it bit for bit alike
+/// (their libraries' `exp` differ in the last bits, and Roc has none). Range reduction by ln 2
+/// (fdlibm's split constants), a degree-13 Taylor polynomial on |r| ≤ ln 2 / 2 (error below
+/// 1e-17 relative), and 2^k built from its bits; below 2^-1020 it is 0, above 2^1023 infinite.
+pub fn exp(x: f64) -> f64 {
+    const LN2_HI: f64 = 6.931_471_803_691_238e-1;
+    const LN2_LO: f64 = 1.908_214_929_270_587_7e-10;
+    // log2(e), 1.4426950408889634: the literal the Roc core writes.
+    const INV_LN2: f64 = std::f64::consts::LOG2_E;
+    const C: [f64; 12] = [
+        1.6059043836821613e-10,
+        2.08767569878681e-9,
+        2.505210838544172e-8,
+        2.755731922398589e-7,
+        2.7557319223985893e-6,
+        2.48015873015873e-5,
+        1.984126984126984e-4,
+        1.388888888888889e-3,
+        8.333333333333333e-3,
+        4.1666666666666664e-2,
+        1.6666666666666666e-1,
+        0.5,
+    ];
+    if x.is_nan() {
+        return x;
+    }
+    let k = (x * INV_LN2 + 0.5).floor();
+    if k < -1020.0 {
+        return 0.0;
+    }
+    if k > 1023.0 {
+        return f64::INFINITY;
+    }
+    let r = (x - k * LN2_HI) - k * LN2_LO;
+    let mut p = C[0];
+    for c in &C[1..] {
+        p = p * r + c;
+    }
+    p = p * r + 1.0;
+    p = p * r + 1.0;
+    p * f64::from_bits(((k as i64 + 1023) as u64) << 52)
+}
+
 /// Niri's default horizontal-view-movement: mass 1, critical damping, stiffness 800.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spring {
@@ -81,10 +130,10 @@ impl Spring {
     /// Where the spring is at `now`, and how fast it moves.
     pub fn position_velocity(&self, now: Time) -> (f64, f64) {
         let t = now.seconds_since(self.started);
-        let omega = 800.0_f64.sqrt();
+        let omega = OMEGA;
         let x0 = self.from - self.target;
         let b = omega * x0 + self.velocity;
-        let envelope = (-omega * t).exp();
+        let envelope = exp(-omega * t);
         (
             self.target + envelope * (x0 + b * t),
             envelope * (self.velocity - omega * b * t),
@@ -99,8 +148,7 @@ impl Spring {
         self.current_velocity = velocity;
         self.sampled = now;
         // Check both position and speed so crossing the target cannot finish early.
-        (self.current - self.target).abs() <= 0.25 / scale
-            && velocity.abs() / 800.0_f64.sqrt() <= 0.25 / scale
+        (self.current - self.target).abs() <= 0.25 / scale && velocity.abs() / OMEGA <= 0.25 / scale
     }
 }
 
@@ -1058,7 +1106,7 @@ impl<C: Copy + PartialEq, W: Copy + Ord> Camera<C, W> {
                     return Answer::Nothing;
                 }
                 let velocity = self.motion.velocity();
-                let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
+                let projected = offset - velocity / (1000.0 * DECELERATION_LN);
                 let Some(spans) = spans else {
                     return Answer::Nothing;
                 };
@@ -1696,6 +1744,19 @@ mod tests {
                 "snap to {snap_to}"
             );
         }
+    }
+
+    /// The portable `exp` is within an ulp or two of the library's over the spring's range.
+    #[test]
+    fn the_portable_exp_matches_the_librarys_closely() {
+        for i in 0..20_000 {
+            let x = -(i as f64) * 0.01;
+            let (ours, std) = (exp(x), x.exp());
+            assert!((ours - std).abs() <= std * 4e-16, "x {x}: {ours} vs {std}");
+        }
+        assert_eq!((exp(0.0), exp(-800.0)), (1.0, 0.0));
+        assert_eq!(800.0_f64.sqrt(), OMEGA);
+        assert_eq!(0.997_f64.ln(), DECELERATION_LN);
     }
 
     #[test]

@@ -783,7 +783,40 @@ port (cam-3) brings the real differential.
   first view animating, a gesture beginning on a fullscreen selection, a snap keeping the return
   owed, a removal restoring a view of a column the core does not show).
 
-- Next: cam-3 (the Roc port).
+**The equivalence check, confirmed (the lead asked):** in the cam-1+2 commit no existing scrolling
+or reactor test's assertions changed. Every changed line in the test modules is an accessor path
+(`f.system.layouts[l].camera.viewport` → `camera(&f.system, l).viewport()`) or a test's setup
+seeding a viewport (`seed_viewport`, `aim`) or calling the camera's settle decision (`settle`);
+no reactor test file changed. The asserted values are the same.
+
+**cam-3 (2026-11-28): the Roc port.** `roc/core/Cameras.roc` holds the same machine over words
+(layouts, columns, windows; times in nanoseconds), with every Boundary type (`Cam*`,
+`CameraEvent`, `CamerasEvent`, `CamAnswer`) and `RocCameras` beside it.
+- **`exp` is portable.** Roc has no `exp` (and its `pow` and Rust's libm differ in the last
+  bits), so both cores use one `camera::exp` written from `+`, `*` and floor: range reduction by
+  ln 2 (fdlibm's split constants), a degree-13 Taylor polynomial, 2^k from its bits; within
+  4e-16 relative of the library's over the spring's range. √800 and ln 0.997 are shared
+  literals.
+- **Differential** (`rift-core-roc/tests/cameras.rs`): 120 000 steps, every answer and the whole
+  machine compared after each. Random strips and arrangements (dormant columns, stray columns,
+  ties between resting points, a dormant column's lone resting point), a clock that moves
+  forward, repeats a moment and goes back (and lands inside a live spring's flight), presented
+  springs aimed at the camera's own target, histories at the 64-sample cap; plus a scripted run
+  through a full history, and a copy tripwire (200 cameras).
+- **Found on the way:** the view's release of its list was shallow (`RocList::decref`), so each
+  camera's motion-history list leaked once per view; it is now the generated deep release
+  (`decref_list_of_boundary_cam_entry`). The other views were checked: their lists are flat or
+  already released deep.
+- Plants 11/12 in Roc: the clock (a spring sampling a stale `now` backwards, a retarget at a
+  stale `now`, a stale gesture moment accepted, samples kept past 150 ms), the invariants (a
+  presented spring overwriting a target, the settle point skipping the owed return), an edit
+  holding the old column, a tie broken the other way, niri travel from a resting point whose
+  column is not laid out, the 64-sample cap dropped, and an `exp` coefficient off in its fourth
+  digit. The twelfth, a coefficient off by one ulp, survives and is near-equivalent: measured,
+  it changes the polynomial's result in 0.012% of evaluations. Five of the eleven survived the
+  first generator; each led to the generator change named above, not to a code change.
+
+- Next: cam-4 (Roc decides).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

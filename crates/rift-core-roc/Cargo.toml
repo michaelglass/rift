@@ -100,3 +100,7 @@ required-features = ["roc"]
 [[test]]
 name = "evictions"
 required-features = ["roc"]
+
+[[test]]
+name = "cameras"
+required-features = ["roc"]
