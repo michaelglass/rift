@@ -40,6 +40,7 @@ FAST_CUTS=(
     RIFT_EVICTIONS_RUNS=200    # rift-core-roc: the evictions (2000)
     RIFT_CAMERAS_RUNS=200      # rift-core-roc: the cameras (2000)
     RIFT_NATIVE_RUNS=200       # rift-core-roc: the native memory (2000)
+    RIFT_ENGINE_FOCUS_CASES=2000 # rift-core-roc: the engine's focus choices (20,000)
     RIFT_SESSION_ROUNDS=40     # rift-core-roc: the session (200)
 )
 # The full run's fuzzer budget.

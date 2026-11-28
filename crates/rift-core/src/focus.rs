@@ -857,6 +857,160 @@ pub fn space_in_direction<S: Copy>(
     best.map(|(_, _, space)| space)
 }
 
+/// One of the layout engine's focus choices, as a question (the form a Roc core answers): the
+/// facts of each function above, windows `W` and Spaces `S`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FocusQuestion<W, S> {
+    Workspace(WorkspaceFocus<W>),
+    Record {
+        workspace: bool,
+        focus: Option<Committed<W>>,
+    },
+    Cycle {
+        floating: Vec<W>,
+        focused: Option<W>,
+        direction: Direction,
+    },
+    Edge {
+        direction: Direction,
+        scrolling: bool,
+    },
+    Entry {
+        directional: Option<W>,
+        visible: Vec<W>,
+    },
+    Fallback {
+        first_floating: Option<W>,
+        previous: Option<W>,
+        first_visible: Option<W>,
+    },
+    SpaceInDirection {
+        current: Rect,
+        direction: Direction,
+        candidates: Vec<(S, Rect)>,
+    },
+}
+
+/// A focus choice's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusChoice<W, S> {
+    Window(Option<W>),
+    Record(FocusRecord<W>),
+    Edge(PastTheEdge),
+    Space(Option<S>),
+}
+
+/// The answer to `question`, from the functions above.
+pub fn choose<W: Copy + PartialEq, S: Copy>(question: &FocusQuestion<W, S>) -> FocusChoice<W, S> {
+    match question {
+        FocusQuestion::Workspace(facts) => FocusChoice::Window(workspace_focus(facts)),
+        FocusQuestion::Record { workspace, focus } => {
+            FocusChoice::Record(focus_record(*workspace, *focus))
+        }
+        FocusQuestion::Cycle { floating, focused, direction } => {
+            FocusChoice::Window(floating_cycle(floating, *focused, *direction))
+        }
+        FocusQuestion::Edge { direction, scrolling } => {
+            FocusChoice::Edge(past_the_edge(*direction, *scrolling))
+        }
+        FocusQuestion::Entry { directional, visible } => {
+            FocusChoice::Window(entry_window(*directional, visible))
+        }
+        FocusQuestion::Fallback {
+            first_floating,
+            previous,
+            first_visible,
+        } => FocusChoice::Window(focus_fallback(*first_floating, *previous, *first_visible)),
+        FocusQuestion::SpaceInDirection { current, direction, candidates } => {
+            FocusChoice::Space(space_in_direction(*current, *direction, candidates))
+        }
+    }
+}
+
+impl<W: Copy, S: Copy> FocusQuestion<W, S> {
+    /// The question with its windows and Spaces renamed (a twin's words).
+    pub fn map<W2, S2>(&self, w: impl Fn(W) -> W2, s: impl Fn(S) -> S2) -> FocusQuestion<W2, S2> {
+        let eligible = |e: Eligible<W>| Eligible {
+            window: w(e.window),
+            belongs: e.belongs,
+        };
+        match self {
+            FocusQuestion::Workspace(f) => FocusQuestion::Workspace(WorkspaceFocus {
+                preferred: f.preferred.map(eligible),
+                last_focused: f.last_focused.map(eligible),
+                selected: f.selected.map(eligible),
+                visible: f.visible.iter().copied().map(eligible).collect(),
+                floating: f.floating.iter().copied().map(&w).collect(),
+                floating_last_focus: f.floating_last_focus.map(&w),
+            }),
+            FocusQuestion::Record { workspace, focus } => FocusQuestion::Record {
+                workspace: *workspace,
+                focus: focus.map(|c| Committed {
+                    window: w(c.window),
+                    belongs: c.belongs,
+                    floating: c.floating,
+                }),
+            },
+            FocusQuestion::Cycle { floating, focused, direction } => FocusQuestion::Cycle {
+                floating: floating.iter().copied().map(&w).collect(),
+                focused: focused.map(&w),
+                direction: *direction,
+            },
+            FocusQuestion::Edge { direction, scrolling } => FocusQuestion::Edge {
+                direction: *direction,
+                scrolling: *scrolling,
+            },
+            FocusQuestion::Entry { directional, visible } => FocusQuestion::Entry {
+                directional: directional.map(&w),
+                visible: visible.iter().copied().map(&w).collect(),
+            },
+            FocusQuestion::Fallback {
+                first_floating,
+                previous,
+                first_visible,
+            } => FocusQuestion::Fallback {
+                first_floating: first_floating.map(&w),
+                previous: previous.map(&w),
+                first_visible: first_visible.map(&w),
+            },
+            FocusQuestion::SpaceInDirection { current, direction, candidates } => {
+                FocusQuestion::SpaceInDirection {
+                    current: *current,
+                    direction: *direction,
+                    candidates: candidates.iter().map(|&(space, rect)| (s(space), rect)).collect(),
+                }
+            }
+        }
+    }
+}
+
+impl<W: Copy, S: Copy> FocusChoice<W, S> {
+    /// The answer with its windows and Spaces renamed; none where a word names nothing.
+    pub fn map<W2, S2>(
+        self,
+        w: impl Fn(W) -> Option<W2>,
+        s: impl Fn(S) -> Option<S2>,
+    ) -> Option<FocusChoice<W2, S2>> {
+        Some(match self {
+            FocusChoice::Window(window) => FocusChoice::Window(match window {
+                Some(window) => Some(w(window)?),
+                None => None,
+            }),
+            FocusChoice::Record(record) => FocusChoice::Record(match record {
+                FocusRecord::NoWorkspace => FocusRecord::NoWorkspace,
+                FocusRecord::Cleared => FocusRecord::Cleared,
+                FocusRecord::Floating(window) => FocusRecord::Floating(w(window)?),
+                FocusRecord::Tiled(window) => FocusRecord::Tiled(w(window)?),
+            }),
+            FocusChoice::Edge(edge) => FocusChoice::Edge(edge),
+            FocusChoice::Space(space) => FocusChoice::Space(match space {
+                Some(space) => Some(s(space)?),
+                None => None,
+            }),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // The layout engine's focus choices.

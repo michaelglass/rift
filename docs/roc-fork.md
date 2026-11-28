@@ -1168,7 +1168,23 @@ beside the reactor's focus decisions), the engine gathering facts and carrying o
   the first parenthesis, the visibility's); it now strips the visibility first. The baseline was
   re-keyed once (24 entries got their item's name; the count is unchanged by the re-key).
 
-- Next: E1a-2 (the focus choices in Roc, deciding).
+**E1a-2 (2026-11-28): the focus choices decide in Roc.** The seven choices are one question,
+`rift_core::focus::FocusQuestion` (`Workspace`, `Record`, `Cycle`, `Edge`, `Entry`, `Fallback`,
+`SpaceInDirection`), answered by `choose` with a `FocusChoice` (`Window`, `Record`, `Edge`,
+`Space`): one Roc entry (`roc_engine_focus`, `roc/core/EngineFocus.roc`), one boundary
+conversion, one differential. Every fact is in the question, so none is asked lazily (no
+`Unasked`). The engine asks through `focus_choice`, which takes the Roc core's answer under
+`roc-core` through `roc_path::decided` (family `FOCUS`), a difference reported.
+- Differential (`rift-core-roc/tests/focus.rs`): 20 000 random questions of every kind (windows
+  repeating, candidates belonging or not, displays aligned, offset, touching and tied); check-fast
+  cuts it to 2000.
+- Plants 10/10: in Roc, the last focused before the window asked for, a floating last focus no
+  longer active, a floating window recorded as tiled, the floating cycle reversed, a strip stopping
+  vertical focus, the entry preferring a visible window, the fallback order, the nearest Space
+  before the best aligned, a touching display counted as behind; in the engine, a Roc window
+  answer read back as another window.
+
+- Next: E1b (workspace switching).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

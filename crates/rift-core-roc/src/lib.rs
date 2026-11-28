@@ -2320,6 +2320,17 @@ pub mod focus {
         boundary::follow_answer(unsafe { abi::roc_activation_follow(question) })
     }
 
+    /// One of the layout engine's focus choices (`rift_core::focus::choose`): every fact is in
+    /// the question, so it is always decided.
+    pub fn engine_focus(
+        question: rift_core::focus::FocusQuestion<u64, u64>,
+    ) -> rift_core::focus::FocusChoice<u64, u64> {
+        let host = host();
+        let question = boundary::engine_focus_question(question, &host);
+        // SAFETY: the question is handed to Roc, which consumes it; the choice is plain data.
+        boundary::engine_focus_choice(unsafe { abi::roc_engine_focus(question) })
+    }
+
     pub fn display_to_follow(question: DisplayFollow) -> Result<Option<u64>, Unasked> {
         let host = host();
         let question = boundary::display_follow_question(question, &host);

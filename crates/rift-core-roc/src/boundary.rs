@@ -4213,6 +4213,164 @@ impl Drop for CamerasBox {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The layout engine's focus choices.
+
+pub(crate) fn engine_focus_question(
+    question: rift_core::focus::FocusQuestion<u64, u64>,
+    host: &abi::RocHost,
+) -> abi::BoundaryFocusQuestion {
+    use abi::BoundaryFocusQuestionTag as Tag;
+    use rift_core::focus::FocusQuestion as Q;
+    let eligible = |e: rift_core::focus::Eligible<u64>| abi::BoundaryEligibleWindow {
+        window: e.window,
+        belongs: e.belongs,
+    };
+    let maybe_eligible = |e: Option<rift_core::focus::Eligible<u64>>| {
+        use abi::BoundaryMaybeEligibleTag as T;
+        match e {
+            Some(e) => union!(
+                BoundaryMaybeEligible,
+                BoundaryMaybeEligiblePayload.candidate(eligible(e)),
+                T::Candidate
+            ),
+            None => union!(
+                BoundaryMaybeEligible,
+                BoundaryMaybeEligiblePayload.no_candidate,
+                T::NoCandidate
+            ),
+        }
+    };
+    match question {
+        Q::Workspace(f) => {
+            let visible: Vec<_> = f.visible.iter().copied().map(eligible).collect();
+            union!(
+                BoundaryFocusQuestion,
+                BoundaryFocusQuestionPayload.workspace(abi::BoundaryWorkspaceFocusQuestion {
+                    preferred: maybe_eligible(f.preferred),
+                    last_focused: maybe_eligible(f.last_focused),
+                    selected: maybe_eligible(f.selected),
+                    visible: list(&visible, host),
+                    floating: list(&f.floating, host),
+                    floating_last_focus: maybe_word(f.floating_last_focus),
+                }),
+                Tag::Workspace
+            )
+        }
+        Q::Record { workspace, focus } => {
+            use abi::BoundaryMaybeCommittedTag as T;
+            let focus = match focus {
+                Some(c) => union!(
+                    BoundaryMaybeCommitted,
+                    BoundaryMaybeCommittedPayload.focus(abi::BoundaryCommittedWindow {
+                        window: c.window,
+                        belongs: c.belongs,
+                        floating: c.floating,
+                    }),
+                    T::Focus
+                ),
+                None => union!(
+                    BoundaryMaybeCommitted,
+                    BoundaryMaybeCommittedPayload.no_focus,
+                    T::NoFocus
+                ),
+            };
+            union!(
+                BoundaryFocusQuestion,
+                BoundaryFocusQuestionPayload
+                    .record(abi::BoundaryRecordQuestion { workspace, focus }),
+                Tag::Record
+            )
+        }
+        Q::Cycle { floating, focused, direction } => union!(
+            BoundaryFocusQuestion,
+            BoundaryFocusQuestionPayload.cycle(abi::BoundaryCycleQuestion {
+                floating: list(&floating, host),
+                focused: maybe_word(focused),
+                direction: tree_direction(direction),
+            }),
+            Tag::Cycle
+        ),
+        Q::Edge { direction, scrolling } => union!(
+            BoundaryFocusQuestion,
+            BoundaryFocusQuestionPayload.edge(abi::BoundaryEdgeQuestion {
+                direction: tree_direction(direction),
+                scrolling,
+            }),
+            Tag::Edge
+        ),
+        Q::Entry { directional, visible } => union!(
+            BoundaryFocusQuestion,
+            BoundaryFocusQuestionPayload.entry(abi::BoundaryEntryQuestion {
+                directional: maybe_word(directional),
+                visible: list(&visible, host),
+            }),
+            Tag::Entry
+        ),
+        Q::Fallback {
+            first_floating,
+            previous,
+            first_visible,
+        } => union!(
+            BoundaryFocusQuestion,
+            BoundaryFocusQuestionPayload.fallback(abi::BoundaryFallbackQuestion {
+                first_floating: maybe_word(first_floating),
+                previous: maybe_word(previous),
+                first_visible: maybe_word(first_visible),
+            }),
+            Tag::Fallback
+        ),
+        Q::SpaceInDirection { current, direction, candidates } => {
+            let candidates: Vec<_> = (candidates.into_iter())
+                .map(|(space, r)| abi::BoundarySpaceRect { space, rect: rect(r) })
+                .collect();
+            union!(
+                BoundaryFocusQuestion,
+                BoundaryFocusQuestionPayload.space_in_direction(
+                    abi::BoundarySpaceInDirectionQuestion {
+                        current: rect(current),
+                        direction: tree_direction(direction),
+                        candidates: list(&candidates, host),
+                    }
+                ),
+                Tag::SpaceInDirection
+            )
+        }
+    }
+}
+
+pub(crate) fn engine_focus_choice(
+    choice: abi::BoundaryFocusChoice,
+) -> rift_core::focus::FocusChoice<u64, u64> {
+    use abi::BoundaryFocusChoiceTag as Tag;
+    use rift_core::focus::{FocusChoice, FocusRecord, PastTheEdge};
+    // SAFETY: each arm reads the payload its tag names.
+    match choice.tag {
+        Tag::Window => FocusChoice::Window(from_maybe_word(unsafe {
+            *choice.borrow_payload_window_unchecked()
+        })),
+        Tag::Space => FocusChoice::Space(from_maybe_word(unsafe {
+            *choice.borrow_payload_space_unchecked()
+        })),
+        Tag::Edge => FocusChoice::Edge(match unsafe { *choice.borrow_payload_edge_unchecked() } {
+            abi::BoundaryPastTheEdge::Stop => PastTheEdge::Stop,
+            abi::BoundaryPastTheEdge::NextSpace => PastTheEdge::NextSpace,
+        }),
+        Tag::Record => {
+            use abi::BoundaryFocusRecordAnswerTag as R;
+            let record = unsafe { choice.borrow_payload_record_unchecked() };
+            FocusChoice::Record(match record.tag {
+                R::NoWorkspace => FocusRecord::NoWorkspace,
+                R::Cleared => FocusRecord::Cleared,
+                R::Floating => {
+                    FocusRecord::Floating(unsafe { *record.borrow_payload_floating_unchecked() })
+                }
+                R::Tiled => FocusRecord::Tiled(unsafe { *record.borrow_payload_tiled_unchecked() }),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The native memory.
 
 fn native_current(current: Current<u64>, host: &abi::RocHost) -> abi::BoundaryNativeCurrent {

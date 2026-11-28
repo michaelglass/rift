@@ -348,3 +348,126 @@ fn the_roc_core_raises_a_window_under_the_mouse_as_the_rust_core_does() {
         (format!("{question:?}"), roc, rust)
     });
 }
+
+/// A window word among a few, so candidates repeat.
+fn engine_window(rng: &mut Rng) -> u64 { 1 + rng.below(6) }
+
+fn engine_maybe(rng: &mut Rng) -> Option<u64> {
+    if rng.below(3) == 0 {
+        None
+    } else {
+        Some(engine_window(rng))
+    }
+}
+
+fn engine_eligible(rng: &mut Rng) -> rift_core::focus::Eligible<u64> {
+    rift_core::focus::Eligible {
+        window: engine_window(rng),
+        belongs: rng.below(3) > 0,
+    }
+}
+
+fn engine_maybe_eligible(rng: &mut Rng) -> Option<rift_core::focus::Eligible<u64>> {
+    if rng.below(3) == 0 {
+        None
+    } else {
+        Some(engine_eligible(rng))
+    }
+}
+
+fn engine_windows(rng: &mut Rng) -> Vec<u64> {
+    let n = rng.below(4);
+    (0..n).map(|_| engine_window(rng)).collect()
+}
+
+/// A display frame on a coarse grid (aligned, offset, touching and tied ones all occur).
+fn engine_rect(rng: &mut Rng) -> rift_core::plain::Rect {
+    rift_core::plain::Rect {
+        x: (rng.below(9) as f64 - 4.0) * 500.0 + rng.below(3) as f64 * 0.5,
+        y: (rng.below(5) as f64 - 2.0) * 400.0,
+        w: 400.0 + rng.below(3) as f64 * 100.0,
+        h: 300.0 + rng.below(3) as f64 * 100.0,
+    }
+}
+
+/// The layout engine's focus choices (`rift_core::focus::choose`): every kind of question, drawn
+/// at random, with windows and Spaces repeating so candidates belong or not, floating windows
+/// cycle from a focused one or none, and displays sit aligned, offset, touching and tied.
+#[test]
+fn the_roc_core_makes_the_engines_focus_choices_as_the_rust_core_does() {
+    use rift_core::focus::{Committed, FocusChoice, FocusQuestion as Q, WorkspaceFocus, choose};
+    use rift_core::layout::bsp_tree::Direction;
+    let mut rng = Rng(0xF0C5_0000_0E1A);
+    let runs: u64 = std::env::var("RIFT_ENGINE_FOCUS_CASES").map_or(20_000, |n| n.parse().unwrap());
+    let mut chosen = 0;
+    for case in 0..runs {
+        let direction = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ][rng.below(4) as usize];
+        let question: Q<u64, u64> = match rng.below(7) {
+            0 => Q::Workspace(WorkspaceFocus {
+                preferred: engine_maybe_eligible(&mut rng),
+                last_focused: engine_maybe_eligible(&mut rng),
+                selected: engine_maybe_eligible(&mut rng),
+                visible: (0..rng.below(4)).map(|_| engine_eligible(&mut rng)).collect(),
+                floating: engine_windows(&mut rng),
+                floating_last_focus: engine_maybe(&mut rng),
+            }),
+            1 => Q::Record {
+                workspace: rng.below(4) > 0,
+                focus: if rng.below(4) == 0 {
+                    None
+                } else {
+                    Some(Committed {
+                        window: engine_window(&mut rng),
+                        belongs: rng.below(3) > 0,
+                        floating: rng.below(2) == 0,
+                    })
+                },
+            },
+            2 => {
+                let mut floating = engine_windows(&mut rng);
+                floating.dedup();
+                Q::Cycle {
+                    floating,
+                    focused: engine_maybe(&mut rng),
+                    direction,
+                }
+            }
+            3 => Q::Edge {
+                direction,
+                scrolling: rng.below(2) == 0,
+            },
+            4 => Q::Entry {
+                directional: engine_maybe(&mut rng),
+                visible: engine_windows(&mut rng),
+            },
+            5 => Q::Fallback {
+                first_floating: engine_maybe(&mut rng),
+                previous: engine_maybe(&mut rng),
+                first_visible: engine_maybe(&mut rng),
+            },
+            _ => {
+                let current = engine_rect(&mut rng);
+                let n = rng.below(5);
+                Q::SpaceInDirection {
+                    current,
+                    direction,
+                    candidates: (0..n).map(|i| (10 + i, engine_rect(&mut rng))).collect(),
+                }
+            }
+        };
+        let rust = choose(&question);
+        let roc = rift_core_roc::focus::engine_focus(question.clone());
+        assert_eq!(roc, rust, "case {case}: {question:?}");
+        chosen += u64::from(matches!(
+            rust,
+            FocusChoice::Window(Some(_)) | FocusChoice::Space(Some(_))
+        ));
+    }
+    assert!(chosen > 0);
+    eprintln!("engine focus: {runs} questions answered alike ({chosen} chose a window or Space)");
+}

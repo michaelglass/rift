@@ -1021,6 +1021,43 @@ Boundary := [].{
 
 	NativeBatchView := [Idle, Collecting(List(U64))]
 
+	# The layout engine's focus choices (`rift_core::focus::choose`), questions on plain data:
+	# windows and Spaces are one word each.
+
+	EligibleWindow := { window : U64, belongs : Bool }
+
+	MaybeEligible := [NoCandidate, Candidate(EligibleWindow)]
+
+	WorkspaceFocusQuestion := { preferred : MaybeEligible, last_focused : MaybeEligible, selected : MaybeEligible, visible : List(EligibleWindow), floating : List(U64), floating_last_focus : MaybeWord }
+
+	CommittedWindow := { window : U64, belongs : Bool, floating : Bool }
+
+	MaybeCommitted := [NoFocus, Focus(CommittedWindow)]
+
+	RecordQuestion := { workspace : Bool, focus : MaybeCommitted }
+
+	CycleQuestion := { floating : List(U64), focused : MaybeWord, direction : BspDirection }
+
+	EdgeQuestion := { direction : BspDirection, scrolling : Bool }
+
+	EntryQuestion := { directional : MaybeWord, visible : List(U64) }
+
+	FallbackQuestion := { first_floating : MaybeWord, previous : MaybeWord, first_visible : MaybeWord }
+
+	SpaceRect := { space : U64, rect : Rect }
+
+	SpaceInDirectionQuestion := { current : Rect, direction : BspDirection, candidates : List(SpaceRect) }
+
+	## One of the layout engine's focus choices.
+	FocusQuestion := [Workspace(WorkspaceFocusQuestion), Record(RecordQuestion), Cycle(CycleQuestion), Edge(EdgeQuestion), Entry(EntryQuestion), Fallback(FallbackQuestion), SpaceInDirection(SpaceInDirectionQuestion)]
+
+	FocusRecordAnswer := [NoWorkspace, Cleared, Floating(U64), Tiled(U64)]
+
+	PastTheEdge := [Stop, NextSpace]
+
+	## A focus choice's answer.
+	FocusChoice := [Window(MaybeWord), Record(FocusRecordAnswer), Edge(PastTheEdge), Space(MaybeWord)]
+
 	# The floating state (`rift_core::floats`), kept between events. Windows and workspaces are one
 	# word each, pids an I32 (macOS's pid_t).
 
