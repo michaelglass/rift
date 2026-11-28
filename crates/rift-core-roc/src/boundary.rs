@@ -3561,6 +3561,108 @@ fn cam_spring(s: cam::Spring) -> abi::BoundaryCamSpring {
     }
 }
 
+fn cam_bookmark(b: cam::Bookmark<u64>) -> abi::BoundaryCamBookmark {
+    abi::BoundaryCamBookmark {
+        column: b.column,
+        relative_offset: b.relative_offset,
+    }
+}
+
+fn cam_maybe_bookmark(b: Option<cam::Bookmark<u64>>) -> abi::BoundaryMaybeBookmark {
+    use abi::BoundaryMaybeBookmarkTag as Tag;
+    match b {
+        Some(b) => union!(
+            BoundaryMaybeBookmark,
+            BoundaryMaybeBookmarkPayload.bookmark(cam_bookmark(b)),
+            Tag::Bookmark
+        ),
+        None => union!(
+            BoundaryMaybeBookmark,
+            BoundaryMaybeBookmarkPayload.no_bookmark,
+            Tag::NoBookmark
+        ),
+    }
+}
+
+fn cam_motion(m: cam::Motion) -> abi::BoundaryCamMotion {
+    use abi::BoundaryCamMotionTag as Tag;
+    match m {
+        cam::Motion::Static(o) => {
+            union!(
+                BoundaryCamMotion,
+                BoundaryCamMotionPayload.r#static(o),
+                Tag::Static
+            )
+        }
+        cam::Motion::Pending { from, target } => union!(
+            BoundaryCamMotion,
+            BoundaryCamMotionPayload.pending(abi::BoundaryCamPending { from, target }),
+            Tag::Pending
+        ),
+        cam::Motion::Animation(s) => union!(
+            BoundaryCamMotion,
+            BoundaryCamMotionPayload.animation(cam_spring(s)),
+            Tag::Animation
+        ),
+    }
+}
+
+fn cam_viewport(v: cam::Viewport) -> abi::BoundaryCamViewport {
+    use abi::BoundaryCamViewportTag as Tag;
+    match v {
+        cam::Viewport::Uninitialized => {
+            union!(
+                BoundaryCamViewport,
+                BoundaryCamViewportPayload.uninitialized,
+                Tag::Uninitialized
+            )
+        }
+        cam::Viewport::Gesture(o) => {
+            union!(
+                BoundaryCamViewport,
+                BoundaryCamViewportPayload.gesture(o),
+                Tag::Gesture
+            )
+        }
+        cam::Viewport::Resting(rest, motion) => union!(
+            BoundaryCamViewport,
+            BoundaryCamViewportPayload.resting(abi::BoundaryCamResting {
+                rest: match rest {
+                    cam::Rest::At => abi::BoundaryCamRest::At,
+                    cam::Rest::Centred => abi::BoundaryCamRest::Centred,
+                },
+                motion: cam_motion(motion),
+            }),
+            Tag::Resting
+        ),
+    }
+}
+
+/// A Rust camera as Roc holds it (a seed: loaded or restored).
+fn cam_camera(c: &WordCamera, host: &abi::RocHost) -> abi::BoundaryCamCamera {
+    use abi::BoundaryCamShowingTag as Tag;
+    let showing = match *c.showing() {
+        cam::Showing::Strip => {
+            union!(BoundaryCamShowing, BoundaryCamShowingPayload.strip, Tag::Strip)
+        }
+        cam::Showing::Fullscreen { window, return_to } => union!(
+            BoundaryCamShowing,
+            BoundaryCamShowingPayload.fullscreen(abi::BoundaryCamOwed {
+                window,
+                return_to: cam_bookmark(return_to),
+            }),
+            Tag::Fullscreen
+        ),
+    };
+    abi::BoundaryCamCamera {
+        viewport: cam_viewport(*c.viewport()),
+        motion: cam_history(c.motion(), host),
+        transient_restore: cam_maybe_bookmark(c.transient_restore()),
+        showing,
+        restored_view: cam_maybe_bookmark(c.restored_view()),
+    }
+}
+
 fn cam_history(h: &cam::MotionHistory, host: &abi::RocHost) -> abi::BoundaryCamHistory {
     let samples: Vec<_> = h
         .samples()
@@ -3930,6 +4032,14 @@ fn cameras_event(
                 Tag::Removed
             )
         }
+        cam::CamerasEvent::Seeded { layout, camera } => union!(
+            BoundaryCamerasEvent,
+            BoundaryCamerasEventPayload.seeded(abi::BoundaryCamSeed {
+                layout,
+                camera: cam_camera(&camera, host),
+            }),
+            Tag::Seeded
+        ),
         cam::CamerasEvent::Camera(layout, event) => union!(
             BoundaryCamerasEvent,
             BoundaryCamerasEventPayload.camera(abi::BoundaryCamLayoutEvent {

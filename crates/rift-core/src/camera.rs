@@ -1392,6 +1392,11 @@ pub enum CamerasEvent<L, C, W> {
         spans: Option<Spans<C>>,
     },
     Removed(L),
+    /// `layout`'s camera is `camera`, as loaded or restored (replacing any it had).
+    Seeded {
+        layout: L,
+        camera: Camera<C, W>,
+    },
     Camera(L, CameraEvent<C, W>),
 }
 
@@ -1426,6 +1431,9 @@ impl<L: Ord + Copy, C: Copy + PartialEq, W: Copy + Ord> Cameras<L, C, W> {
             CamerasEvent::Removed(layout) => {
                 self.cameras.remove(&layout);
             }
+            CamerasEvent::Seeded { layout, camera } => {
+                self.cameras.insert(layout, camera);
+            }
             CamerasEvent::Camera(layout, event) => {
                 if let Some(camera) = self.cameras.get_mut(&layout) {
                     return camera.step(event);
@@ -1437,12 +1445,271 @@ impl<L: Ord + Copy, C: Copy + PartialEq, W: Copy + Ord> Cameras<L, C, W> {
 
     pub fn get(&self, layout: L) -> Option<&Camera<C, W>> { self.cameras.get(&layout) }
 
-    /// `layout`'s camera replaced by `camera` (a twin's reseed, a test's setup).
-    pub fn seed(&mut self, layout: L, camera: Camera<C, W>) { self.cameras.insert(layout, camera); }
-
     /// Every layout's camera, in layout order.
     pub fn cameras(&self) -> impl Iterator<Item = (L, &Camera<C, W>)> + '_ {
         self.cameras.iter().map(|(layout, camera)| (*layout, camera))
+    }
+}
+
+// Ids renamed (a twin's words and back): every type holding columns or windows maps them.
+
+impl<C> Bookmark<C> {
+    pub fn map<C2>(self, c: &impl Fn(C) -> C2) -> Bookmark<C2> {
+        Bookmark {
+            column: c(self.column),
+            relative_offset: self.relative_offset,
+        }
+    }
+}
+
+impl<W, C> Showing<W, C> {
+    pub fn map<W2, C2>(self, c: &impl Fn(C) -> C2, w: &impl Fn(W) -> W2) -> Showing<W2, C2> {
+        match self {
+            Showing::Strip => Showing::Strip,
+            Showing::Fullscreen { window, return_to } => Showing::Fullscreen {
+                window: w(window),
+                return_to: return_to.map(c),
+            },
+        }
+    }
+}
+
+impl<C> Spans<C> {
+    pub fn map<C2>(self, c: &impl Fn(C) -> C2) -> Spans<C2> {
+        Spans {
+            columns: (self.columns.into_iter())
+                .map(|s| Span {
+                    id: c(s.id),
+                    world_x: s.world_x,
+                    width: s.width,
+                })
+                .collect(),
+            bounds: self.bounds,
+            view: self.view,
+            snaps: (self.snaps.into_iter())
+                .map(|s| Snap {
+                    offset: s.offset,
+                    column: c(s.column),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl<C, W> Facts<C, W> {
+    pub fn map<C2, W2: Ord>(self, c: &impl Fn(C) -> C2, w: &impl Fn(W) -> W2) -> Facts<C2, W2> {
+        Facts {
+            columns: (self.columns.into_iter())
+                .map(|col| FactColumn {
+                    id: c(col.id),
+                    windows: col.windows.into_iter().map(w).collect(),
+                })
+                .collect(),
+            active_column: self.active_column,
+            selected: self.selected.map(w),
+            fullscreen: self.fullscreen.into_iter().map(w).collect(),
+        }
+    }
+}
+
+impl<C, W> Camera<C, W> {
+    pub fn map<C2, W2>(self, c: &impl Fn(C) -> C2, w: &impl Fn(W) -> W2) -> Camera<C2, W2> {
+        Camera {
+            viewport: self.viewport,
+            motion: self.motion,
+            transient_restore: self.transient_restore.map(|b| b.map(c)),
+            showing: self.showing.map(c, w),
+            restored_view: self.restored_view.map(|b| b.map(c)),
+        }
+    }
+}
+
+impl<C> Answer<C> {
+    pub fn map<C2>(self, c: &impl Fn(C) -> C2) -> Answer<C2> {
+        match self {
+            Answer::Nothing => Answer::Nothing,
+            Answer::Activate(column) => Answer::Activate(c(column)),
+            Answer::Began(began) => Answer::Began(began),
+            Answer::Moved(moved) => Answer::Moved(moved),
+            Answer::Excess(edge, columns) => Answer::Excess(edge, columns),
+            Answer::Released(r) => Answer::Released(Release {
+                column: c(r.column),
+                offset: r.offset,
+                from_offset: r.from_offset,
+                velocity: r.velocity,
+            }),
+        }
+    }
+}
+
+impl<C, W> CameraEvent<C, W> {
+    pub fn map<C2, W2: Ord>(
+        self,
+        c: &impl Fn(C) -> C2,
+        w: &impl Fn(W) -> W2,
+    ) -> CameraEvent<C2, W2> {
+        use CameraEvent as E;
+        let spans = |s: Option<Spans<C>>| s.map(|s| s.map(c));
+        match self {
+            E::Prepared {
+                before,
+                spans: s,
+                facts,
+                settings,
+                now,
+            } => E::Prepared {
+                before: spans(before),
+                spans: s.map(c),
+                facts: facts.map(c, w),
+                settings,
+                now,
+            },
+            E::Rebuilt { spans: s, facts, hold, now } => E::Rebuilt {
+                spans: spans(s),
+                facts: facts.map(c, w),
+                hold: hold.map(|h| HeldAt {
+                    window: h.window.map(w),
+                    column: c(h.column),
+                    x: h.x,
+                }),
+                now,
+            },
+            E::Revealed { spans: s, facts, settings } => E::Revealed {
+                spans: spans(s),
+                facts: facts.map(c, w),
+                settings,
+            },
+            E::Centred { spans: s, facts } => E::Centred {
+                spans: spans(s),
+                facts: facts.map(c, w),
+            },
+            E::Inserting { spans: s, facts } => E::Inserting {
+                spans: spans(s),
+                facts: facts.map(c, w),
+            },
+            E::WindowRemoved {
+                active_removed,
+                column_removed,
+                spans: s,
+                facts,
+                settings,
+            } => E::WindowRemoved {
+                active_removed,
+                column_removed,
+                spans: spans(s),
+                facts: facts.map(c, w),
+                settings,
+            },
+            E::Selected {
+                column_changed,
+                spans: s,
+                facts,
+                settings,
+            } => E::Selected {
+                column_changed,
+                spans: spans(s),
+                facts: facts.map(c, w),
+                settings,
+            },
+            E::Followed { spans: s, facts, settings } => E::Followed {
+                spans: spans(s),
+                facts: facts.map(c, w),
+                settings,
+            },
+            E::TransientForgotten => E::TransientForgotten,
+            E::ViewForgotten => E::ViewForgotten,
+            E::Replaced { from, to } => E::Replaced { from: w(from), to: w(to) },
+            E::FullscreenLeft { window, spans: s, facts } => E::FullscreenLeft {
+                window: w(window),
+                spans: spans(s),
+                facts: facts.map(c, w),
+            },
+            E::FullscreenEntered {
+                window,
+                spans: s,
+                before,
+                after,
+            } => E::FullscreenEntered {
+                window: w(window),
+                spans: spans(s),
+                before: before.map(c, w),
+                after: after.map(c, w),
+            },
+            E::Finished => E::Finished,
+            E::Presented { presented, motion, ended } => E::Presented { presented, motion, ended },
+            E::ScrollBy { delta, spans: s, facts, gap } => E::ScrollBy {
+                delta,
+                spans: spans(s),
+                facts: facts.map(c, w),
+                gap,
+            },
+            E::GestureBegan { now, spans: s, facts } => E::GestureBegan {
+                now,
+                spans: spans(s),
+                facts: facts.map(c, w),
+            },
+            E::GestureMoved { delta, at, spans: s } => {
+                E::GestureMoved { delta, at, spans: spans(s) }
+            }
+            E::GestureEnded {
+                at,
+                animate,
+                started,
+                spans: s,
+                facts,
+                settings,
+            } => E::GestureEnded {
+                at,
+                animate,
+                started,
+                spans: spans(s),
+                facts: facts.map(c, w),
+                settings,
+            },
+            E::GestureCancelled { spans: s } => E::GestureCancelled { spans: spans(s) },
+            E::Snapped { spans: s, facts, settings } => E::Snapped {
+                spans: spans(s),
+                facts: facts.map(c, w),
+                settings,
+            },
+        }
+    }
+}
+
+impl<L, C, W> CamerasEvent<L, C, W> {
+    pub fn map<L2, C2, W2: Ord>(
+        self,
+        l: &impl Fn(L) -> L2,
+        c: &impl Fn(C) -> C2,
+        w: &impl Fn(W) -> W2,
+    ) -> CamerasEvent<L2, C2, W2> {
+        match self {
+            CamerasEvent::Created(layout) => CamerasEvent::Created(l(layout)),
+            CamerasEvent::Cloned { from, to, spans } => CamerasEvent::Cloned {
+                from: l(from),
+                to: l(to),
+                spans: spans.map(|s| s.map(c)),
+            },
+            CamerasEvent::Removed(layout) => CamerasEvent::Removed(l(layout)),
+            CamerasEvent::Seeded { layout, camera } => CamerasEvent::Seeded {
+                layout: l(layout),
+                camera: camera.map(c, w),
+            },
+            CamerasEvent::Camera(layout, event) => CamerasEvent::Camera(l(layout), event.map(c, w)),
+        }
+    }
+}
+
+impl<L, C, W> Cameras<L, C, W> {
+    pub fn map<L2: Ord, C2, W2>(
+        self,
+        l: &impl Fn(L) -> L2,
+        c: &impl Fn(C) -> C2,
+        w: &impl Fn(W) -> W2,
+    ) -> Cameras<L2, C2, W2> {
+        Cameras {
+            cameras: self.cameras.into_iter().map(|(k, v)| (l(k), v.map(c, w))).collect(),
+        }
     }
 }
 

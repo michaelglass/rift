@@ -34,6 +34,7 @@ Cameras := [].{
 				({ cameras: kept.cameras.insert(clone.to, copy) }, Nothing)
 			}
 			Removed(layout) => ({ cameras: kept.cameras.remove(layout) }, Nothing)
+			Seeded(seed) => ({ cameras: kept.cameras.insert(seed.layout, seed.camera) }, Nothing)
 			Camera(on) =>
 				match kept.cameras.get(on.layout) {
 					Ok(c) => {

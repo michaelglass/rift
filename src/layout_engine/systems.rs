@@ -379,6 +379,8 @@ pub(crate) mod scrolling;
 #[cfg(feature = "roc-core")]
 pub(crate) use scrolling::columns_roc_reseeds;
 pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
+#[cfg(feature = "roc-core")]
+pub(crate) use scrolling::{cameras_roc_reseeds, cameras_roc_seeds};
 
 #[cfg(test)]
 mod tests {

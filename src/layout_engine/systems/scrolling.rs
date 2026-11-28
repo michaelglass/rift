@@ -23,9 +23,12 @@ use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAct
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
 
+mod cameras_twin;
 mod projection;
 #[cfg(feature = "roc-core")]
 mod roc_columns;
+#[cfg(feature = "roc-core")]
+pub(crate) use cameras_twin::{cameras_roc_reseeds, cameras_roc_seeds};
 #[cfg(feature = "roc-core")]
 pub(crate) use roc_columns::columns_roc_reseeds;
 
@@ -1130,7 +1133,7 @@ pub struct ScrollingLayoutSystem {
     layouts: slotmap::SecondaryMap<LayoutId, LayoutState>,
     /// Every layout's camera (`rift_core::camera`), told of each change with the geometry and
     /// arrangement it reads.
-    cameras: cam::Cameras<LayoutId, ColumnId, WindowId>,
+    cameras: cameras_twin::TwinnedCameras,
     pub(super) settings: ScrollingLayoutSettings,
     core: projection::Decider,
 }
@@ -1140,7 +1143,7 @@ impl Default for ScrollingLayoutSystem {
         let settings = ScrollingLayoutSettings::default();
         ScrollingLayoutSystem {
             layouts: slotmap::SecondaryMap::default(),
-            cameras: cam::Cameras::default(),
+            cameras: Default::default(),
             core: projection::decider(projection::CoreColumns::new(projection::settings(
                 &settings,
             ))),
@@ -1162,9 +1165,9 @@ impl From<SavedSystem> for ScrollingLayoutSystem {
         let layouts: Vec<_> = saved.layouts.into_iter().collect();
         ScrollingLayoutSystem {
             layouts: layouts.iter().map(|(layout, _)| (*layout, LayoutState::default())).collect(),
-            cameras: cam::Cameras::from_parts(
+            cameras: cameras_twin::TwinnedCameras::seeded(cam::Cameras::from_parts(
                 layouts.into_iter().map(|(layout, loaded)| (layout, loaded.camera)),
-            ),
+            )),
             core: projection::decider(core),
             ..ScrollingLayoutSystem::default()
         }
@@ -2312,7 +2315,7 @@ pub(crate) mod tests {
             *c.showing(),
             c.restored_view(),
         );
-        system.cameras.seed(layout, seeded);
+        system.cameras.step(cam::CamerasEvent::Seeded { layout, camera: seeded });
     }
 
     /// The camera's settle decision on `layout` (`projected`, as a gesture's release or not),
@@ -2328,7 +2331,7 @@ pub(crate) mod tests {
         let mut c = camera(system, layout).clone();
         let settings = camera_settings(&system.settings);
         let release = c.settle(&spans, &facts(&view), settings, projected, velocity, gesture)?;
-        system.cameras.seed(layout, c);
+        system.cameras.step(cam::CamerasEvent::Seeded { layout, camera: c });
         system.released(layout, cam::Answer::Released(release))
     }
 

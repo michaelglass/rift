@@ -979,8 +979,11 @@ Boundary := [].{
 
 	CamLayoutEvent := { layout : U64, event : CameraEvent }
 
-	## What the cameras learn: a layout made, cloned or removed, or one layout's event.
-	CamerasEvent := [Created(U64), Cloned(CamClone), Removed(U64), Camera(CamLayoutEvent)]
+	## A layout's camera as loaded or restored.
+	CamSeed := { layout : U64, camera : CamCamera }
+
+	## What the cameras learn: a layout made, cloned, removed or seeded, or one layout's event.
+	CamerasEvent := [Created(U64), Cloned(CamClone), Removed(U64), Seeded(CamSeed), Camera(CamLayoutEvent)]
 
 	CamEdge := [Left, Right]
 

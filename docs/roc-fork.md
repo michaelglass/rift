@@ -826,7 +826,27 @@ of plain elements). A list of refcounted elements goes through its generated dee
 flat lists, so no second leak was hiding. Planted: a shallow `decref` in a view is refused by
 clippy; `release_flat` on a list of refcounted elements does not compile.
 
-- Next: cam-4 (Roc decides).
+**cam-4 (2026-11-28): Roc decides.** `scrolling/cameras_twin.rs`'s `TwinnedCameras` holds the
+cameras for the scrolling system (policy (a)): under `roc-core` the Roc core's answers are the
+system's, and the Rust machine is its shadow, read through `Deref` and held to it (every answer
+on every step; the whole machine on every step in tests and debug builds, every 32nd in a
+release build). A difference is reported (`roc-divergence:`, a failure in tests), counted
+(`cameras_roc_reseeds`) and re-seeds the shadow from the Roc core's view.
+- **`CamerasEvent::Seeded { layout, camera }`** carries a loaded or restored camera to both
+  sides (it replaced `Cameras::seed`); a loaded system and a copied one (`Clone`, which E3c's
+  restore will use) seed the Roc core this way. **Seeds are counted apart** (`cameras_roc_seeds`)
+  from re-seeds after a disagreement, as ruled for E3c, so a disagreement never hides among
+  restores. The test setups that seed a viewport go through the same event.
+- Ids cross through `map` on every camera type (`CameraEvent`, `Camera`, `Cameras`, `Answer`,
+  ...), written once in the core: layouts as their slotmap words, columns as their ids, windows
+  as their words.
+- The run log reports both counts.
+- Plants 6/6: a loaded camera not counted as a seed; seeds counted as re-seeds; a re-seed leaving
+  the shadow as it was; a copy not seeding the Roc core; a column crossing as the wrong word; a
+  loaded camera reaching only the shadow. (That the Roc core's answer is returned rather than the
+  shadow's is the step's shape; while the two agree, a plant there is equivalent.)
+
+- Next: E3c (the native-layout memory), with the camera now core state a snapshot can hold.
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

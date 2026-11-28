@@ -385,8 +385,48 @@ impl Rng {
         }
     }
 
+    fn bookmark(&mut self) -> Option<rift_core::camera::Bookmark<u64>> {
+        self.chance(50).then(|| rift_core::camera::Bookmark {
+            column: 1 + self.below(6),
+            relative_offset: self.length(400) - 200.0,
+        })
+    }
+
+    /// A camera as a file or a restore might hold it: any viewport, history, views and return.
+    fn seed(&mut self) -> Camera<u64, u64> {
+        use rift_core::camera::{Rest, Showing};
+        let rest = if self.chance(70) {
+            Rest::At
+        } else {
+            Rest::Centred
+        };
+        let viewport = match self.below(5) {
+            0 => Viewport::Uninitialized,
+            1 => Viewport::Gesture(self.length(2000)),
+            2 => Viewport::Resting(rest, Motion::Static(self.length(2000))),
+            3 => Viewport::Resting(rest, Motion::Pending {
+                from: self.length(2000),
+                target: self.length(2000),
+            }),
+            _ => Viewport::Resting(rest, Motion::Animation(self.spring())),
+        };
+        let showing = match self.bookmark() {
+            Some(return_to) if self.chance(50) => Showing::Fullscreen {
+                window: self.window(),
+                return_to,
+            },
+            _ => Showing::Strip,
+        };
+        let (transient, restored) = (self.bookmark(), self.bookmark());
+        Camera::from_parts(viewport, self.history(), transient, showing, restored)
+    }
+
     fn event(&mut self, cameras: &Cameras<u64, u64, u64>) -> CamerasEvent<u64, u64, u64> {
         match self.below(40) {
+            3 => CamerasEvent::Seeded {
+                layout: self.layout(),
+                camera: self.seed(),
+            },
             0 => CamerasEvent::Created(self.layout()),
             1 => {
                 let facts = self.facts();

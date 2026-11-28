@@ -147,6 +147,12 @@ fn show_roc_core() {
         let reseeds = crate::layout_engine::systems::columns_roc_reseeds();
         println!("roc-core: scrolling columns re-seeds: {reseeds}");
         tracing::info!(reseeds, "roc-core: scrolling columns re-seeds");
+        let reseeds = crate::layout_engine::systems::cameras_roc_reseeds();
+        println!("roc-core: scrolling cameras re-seeds: {reseeds}");
+        tracing::info!(reseeds, "roc-core: scrolling cameras re-seeds");
+        let seeds = crate::layout_engine::systems::cameras_roc_seeds();
+        println!("roc-core: scrolling cameras loaded or restored: {seeds}");
+        tracing::info!(seeds, "roc-core: scrolling cameras loaded or restored");
     }
 }
 
