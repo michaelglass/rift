@@ -846,7 +846,41 @@ release build). A difference is reported (`roc-divergence:`, a failure in tests)
   loaded camera reaching only the shadow. (That the Roc core's answer is returned rather than the
   shadow's is the step's shape; while the two agree, a plant there is equivalent.)
 
-- Next: E3c (the native-layout memory), with the camera now core state a snapshot can hold.
+**The clippy +1 after cam-4, found:** `ScrollingLayoutSystem` held `TwinnedCameras` inline, and the
+twin (the Roc box, its host table, the step count) grew `LayoutSystemKind` from 336 to 408
+bytes, which made `large_enum_variant` fire in `systems.rs`, a file cam-4 did not touch. The
+twin is boxed now (`Box<Twin>`); the warning list is back to what it was (the enum 344 bytes).
+
+#### E3c
+
+Three steps, data first (the lead approved, 2026-11-28): **E3c-1** the snapshot as core values,
+**E3c-2** the native-memory machine in rift-core, **E3c-3** its Roc twin. E3c-1 lands in two
+commits.
+
+**E3c-1a (2026-11-28): a workspace's layout state is a sum type, and an older file's obsolete
+layouts are parsed at the boundary.**
+- `WorkspaceLayoutState` is `Unlaid | Laid { layout, size }`: no size without a layout. It is
+  written as files have always held it (`layout`, `active_size`).
+- **The saved form is the only one that knows obsolete layouts** (the lead's ruling).
+  `SavedLayoutState` (the file's layout, size and an older multi-size file's other layouts) and
+  `SavedWorkspaces` (the file's workspaces, their catalog order checked as it is read) are what
+  the file deserializes into; `PersistedFile` holds them, and `PersistedLayout` is the parsed,
+  live result. `SavedWorkspaces::into_loaded` converts them once: each workspace's members are
+  worked out over every layout the file holds (the old `all_layouts` rule), the active layout is
+  kept, the obsolete layouts' trees are dropped there, and the topology is checked. Live
+  workspaces have no obsolete ids, no retire-on-first-activation, and no parse-time field; the
+  persistence pass takes membership from the conversion (`Members`), not from live trees.
+- **One existing test's assertions changed, on purpose:** the legacy-v2 load test asserted the old
+  representation (two layouts live after load, four dormant windows across both trees, one layout
+  after the first activation). It now asserts the active layout kept, the other display size's
+  layout gone at load, and two dormant windows; membership (`pending`) is asserted as before.
+- Tests: a window saved only in an obsolete layout stays its workspace's member after load, with
+  no saved position (the lead's plant); a layout state keeps its layout across sizes and its size
+  across a new layout. Plants 4/4: members from the active layout only; obsolete trees kept; a
+  laid-out workspace forgetting its size on a replace; a saved layout's validation skipped.
+
+- Next: E3c-1b (the snapshot as core values: the layout's core value, active layout, size,
+  camera).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

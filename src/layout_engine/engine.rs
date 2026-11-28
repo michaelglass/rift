@@ -1388,7 +1388,8 @@ impl LayoutEngine {
     fn prune_native_layouts(&mut self) {
         self.native_layouts.retain(|_, (system, state)| {
             state
-                .all_layouts()
+                .active()
+                .into_iter()
                 .any(|layout| !system.windows(layout, WindowQuery::All).is_empty())
         });
     }
@@ -1410,7 +1411,7 @@ impl LayoutEngine {
         }
         let current = &self.workspaces[workspace];
         if let Some(system) = current.layout_system.preview_clone() {
-            self.native_layouts.insert(workspace, (system, current.layout_state.clone()));
+            self.native_layouts.insert(workspace, (system, current.layout_state));
         }
     }
 
@@ -1503,7 +1504,7 @@ impl LayoutEngine {
             return;
         };
         if returning.is_some_and(|window| {
-            !state.all_layouts().any(|layout| saved.contains_window(layout, window))
+            !state.active().into_iter().any(|layout| saved.contains_window(layout, window))
         }) {
             return;
         }
@@ -1512,7 +1513,8 @@ impl LayoutEngine {
             return;
         }
         let original: HashSet<_> = state
-            .all_layouts()
+            .active()
+            .into_iter()
             .flat_map(|layout| saved.windows(layout, WindowQuery::All))
             .collect();
         let current = &self.workspaces[workspace];
@@ -1522,7 +1524,8 @@ impl LayoutEngine {
         let mut desired = HashSet::default();
         let ordered: Vec<_> = current
             .layout_state
-            .all_layouts()
+            .active()
+            .into_iter()
             .flat_map(|layout| current.layout_system.windows(layout, WindowQuery::All))
             .filter(|window| {
                 windows
@@ -1540,12 +1543,12 @@ impl LayoutEngine {
         let Some(mut system) = saved.preview_clone() else {
             return;
         };
-        let mut state = state.clone();
+        let mut state = *state;
         // Prune only a working copy: partial returns must share one original arrangement.
         for window in original.difference(&desired) {
             system.update(WindowChange::Remove(*window));
         }
-        for layout in state.all_layouts() {
+        for layout in state.active().into_iter() {
             for &window in &ordered {
                 if !system.contains_window(layout, window) {
                     system.update(WindowChange::Add(layout, window, None));
@@ -1736,7 +1739,8 @@ impl LayoutEngine {
         let workspace = &self.workspaces[workspace_id];
         workspace
             .layout_state
-            .all_layouts()
+            .active()
+            .into_iter()
             .any(|layout| workspace.layout_system.contains_window(layout, wid))
     }
 

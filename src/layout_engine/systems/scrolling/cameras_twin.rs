@@ -65,8 +65,10 @@ fn window_of_word(word: u64) -> WindowId {
 #[derive(Default)]
 pub(super) struct TwinnedCameras {
     rust: RiftCameras,
+    /// Boxed: the scrolling system sits inline in the layout-system enum, which the twin's box,
+    /// host table and step count would otherwise grow by some 70 bytes.
     #[cfg(feature = "roc-core")]
-    twin: Twin,
+    twin: Box<Twin>,
 }
 
 #[cfg(feature = "roc-core")]

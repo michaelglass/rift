@@ -14,7 +14,9 @@ use crate::common::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings, WorkspaceMode};
 use crate::layout_engine::LayoutSystem;
 use crate::model::reactor::WindowState;
-use crate::model::virtual_workspace::{LoadedWorkspaces, SavedStoreRef};
+use crate::model::virtual_workspace::{
+    LoadError, LoadedWorkspaces, Members, SavedStoreRef, SavedWorkspaces,
+};
 use crate::model::window_store::{Windows, WindowsMut};
 use crate::model::{AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId};
 use crate::sys::screen::SpaceId;

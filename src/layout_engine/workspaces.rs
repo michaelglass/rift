@@ -4,18 +4,18 @@ use serde::{Deserialize, Serialize};
 use super::{LayoutId, LayoutSystem};
 use crate::common::collections::HashMap;
 
-/// One logical arrangement follows its workspace between viewports.
-#[derive(Clone, Serialize, Debug, Default)]
-pub(crate) struct WorkspaceLayoutState {
+/// A workspace's layout state as a saved file holds it: its active layout and the display size
+/// it was laid out for, and the layouts an older multi-size file kept for other sizes
+/// (`obsolete`). Only this type knows them: [`SavedLayoutState::into_live`] drops their trees,
+/// once, as the file becomes live state.
+#[derive(Debug, Default)]
+pub(crate) struct SavedLayoutState {
     layout: Option<LayoutId>,
     active_size: Size,
-    // Only populated while migrating an old multi-size snapshot. Retire these
-    // trees once the owning layout system is available.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     obsolete: Vec<LayoutId>,
 }
 
-impl<'de> Deserialize<'de> for WorkspaceLayoutState {
+impl<'de> Deserialize<'de> for SavedLayoutState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Snapshot {
@@ -59,6 +59,61 @@ impl<'de> Deserialize<'de> for WorkspaceLayoutState {
     }
 }
 
+impl SavedLayoutState {
+    /// Every layout the file holds for the workspace: the active one, then the obsolete ones.
+    pub(crate) fn trees(&self) -> impl Iterator<Item = LayoutId> + '_ {
+        self.layout.into_iter().chain(self.obsolete.iter().copied())
+    }
+
+    /// An error if a layout the file names is not in `tree`.
+    pub(crate) fn validate(&self, tree: &impl LayoutSystem) -> Result<(), String> {
+        for layout in self.trees() {
+            if !tree.contains_layout(layout) {
+                return Err(format!("references missing layout {layout:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The live state: the active layout kept, the obsolete layouts' trees dropped from `tree`.
+    pub(crate) fn into_live(self, tree: &mut impl LayoutSystem) -> WorkspaceLayoutState {
+        for old in self.obsolete {
+            tree.remove_layout(old);
+        }
+        match self.layout {
+            Some(layout) => WorkspaceLayoutState::Laid { layout, size: self.active_size },
+            None => WorkspaceLayoutState::Unlaid,
+        }
+    }
+}
+
+/// One logical arrangement follows its workspace between viewports: none yet, or its layout and
+/// the display size it is laid out for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WorkspaceLayoutState {
+    #[default]
+    Unlaid,
+    Laid {
+        layout: LayoutId,
+        size: Size,
+    },
+}
+
+/// Saved as files have always held it: the layout, if any, and the size (zero when none).
+impl Serialize for WorkspaceLayoutState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (layout, size) = match *self {
+            WorkspaceLayoutState::Unlaid => (None, Size::default()),
+            WorkspaceLayoutState::Laid { layout, size } => (Some(layout), size),
+        };
+        let mut saved = serializer.serialize_struct("WorkspaceLayoutState", 2)?;
+        saved.serialize_field("layout", &layout)?;
+        saved.serialize_field("active_size", &size)?;
+        saved.end()
+    }
+}
+
 #[derive(
     Serialize, Deserialize, Default, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug,
 )]
@@ -77,39 +132,61 @@ impl From<CGSize> for Size {
 }
 
 impl WorkspaceLayoutState {
-    pub(crate) fn active(&self) -> Option<LayoutId> { self.layout }
+    pub(crate) fn active(&self) -> Option<LayoutId> {
+        match *self {
+            WorkspaceLayoutState::Unlaid => None,
+            WorkspaceLayoutState::Laid { layout, .. } => Some(layout),
+        }
+    }
 
     pub(crate) fn active_size(&self) -> Option<CGSize> {
-        self.layout
-            .map(|_| CGSize::new(self.active_size.width.into(), self.active_size.height.into()))
-    }
-
-    pub(crate) fn all_layouts(&self) -> impl Iterator<Item = LayoutId> + '_ {
-        self.layout.into_iter().chain(self.obsolete.iter().copied())
-    }
-
-    pub(crate) fn ensure_active(&mut self, size: CGSize, tree: &mut impl LayoutSystem) {
-        for old in self.obsolete.drain(..) {
-            tree.remove_layout(old);
-        }
-        self.layout.get_or_insert_with(|| tree.create_layout());
-        self.active_size = size.into();
-    }
-
-    pub(crate) fn replace(&mut self, layout: LayoutId) {
-        if self.layout.is_none() {
-            self.active_size = Size::from(CGSize::new(1000.0, 1000.0));
-        }
-        self.layout = Some(layout);
-        self.obsolete.clear();
-    }
-
-    pub(crate) fn validate(&self, tree: &impl LayoutSystem) -> Result<(), String> {
-        for layout in self.all_layouts() {
-            if !tree.contains_layout(layout) {
-                return Err(format!("references missing layout {layout:?}"));
+        match *self {
+            WorkspaceLayoutState::Unlaid => None,
+            WorkspaceLayoutState::Laid { size, .. } => {
+                Some(CGSize::new(size.width.into(), size.height.into()))
             }
         }
-        Ok(())
+    }
+
+    /// Laid out for `size`: its layout, created in `tree` if it had none.
+    pub(crate) fn ensure_active(&mut self, size: CGSize, tree: &mut impl LayoutSystem) {
+        let layout = self.active().unwrap_or_else(|| tree.create_layout());
+        *self = WorkspaceLayoutState::Laid { layout, size: size.into() };
+    }
+
+    /// `layout` the active one (at a nominal size, if there was none).
+    pub(crate) fn replace(&mut self, layout: LayoutId) {
+        let size = match *self {
+            WorkspaceLayoutState::Unlaid => Size::from(CGSize::new(1000.0, 1000.0)),
+            WorkspaceLayoutState::Laid { size, .. } => size,
+        };
+        *self = WorkspaceLayoutState::Laid { layout, size };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout_engine::systems::TraditionalLayoutSystem;
+
+    /// Laid out once, a workspace keeps its layout across sizes and its size across a new
+    /// layout; with none yet, a new layout takes a nominal size.
+    #[test]
+    fn a_layout_state_keeps_its_size_across_a_new_layout_and_its_layout_across_sizes() {
+        let mut tree = TraditionalLayoutSystem::default();
+        let mut state = WorkspaceLayoutState::Unlaid;
+        assert_eq!((state.active(), state.active_size()), (None, None));
+        state.ensure_active(CGSize::new(1200.0, 800.0), &mut tree);
+        let layout = state.active().unwrap();
+        state.ensure_active(CGSize::new(1600.0, 1000.0), &mut tree);
+        assert_eq!(state.active(), Some(layout));
+        assert_eq!(state.active_size(), Some(CGSize::new(1600.0, 1000.0)));
+        let other = tree.create_layout();
+        state.replace(other);
+        assert_eq!(state.active(), Some(other));
+        assert_eq!(state.active_size(), Some(CGSize::new(1600.0, 1000.0)));
+        let mut fresh = WorkspaceLayoutState::Unlaid;
+        fresh.replace(other);
+        assert_eq!(fresh.active_size(), Some(CGSize::new(1000.0, 1000.0)));
     }
 }

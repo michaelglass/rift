@@ -13,8 +13,8 @@ use crate::common::config::{
     WorkspaceMode, WorkspaceSelector,
 };
 use crate::common::log::trace_misc;
-use crate::layout_engine::systems::{self, LayoutSystemKind};
-use crate::layout_engine::workspaces::WorkspaceLayoutState;
+use crate::layout_engine::systems::{self, LayoutSystemKind, WindowQuery};
+use crate::layout_engine::workspaces::{SavedLayoutState, WorkspaceLayoutState};
 use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
 use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
 use crate::model::slot_table::{SavedSlot, SlotTable};
@@ -363,7 +363,7 @@ pub enum RuleStanding {
 }
 
 /// A workspace as it is saved: the form every version has written, parsed into the workspace's
-/// types on load (`From<SavedWorkspace>`) and written back field for field.
+/// types once on load ([`SavedWorkspace::into_live`]) and written back field for field.
 #[derive(Deserialize)]
 #[serde(rename = "VirtualWorkspace")]
 struct SavedWorkspace {
@@ -384,7 +384,7 @@ struct SavedWorkspace {
     #[serde(default)]
     layout_mode: LayoutMode,
     #[serde(default)]
-    layout_state: WorkspaceLayoutState,
+    layout_state: SavedLayoutState,
 }
 
 /// [`SavedWorkspace`] borrowed from a workspace, for writing.
@@ -405,31 +405,39 @@ pub(crate) struct SavedWorkspaceRef<'a> {
 
 impl SavedWorkspace {
     /// The saved record split into the workspace and the Space it is on (the core's).
+    #[cfg(test)]
     fn split(self) -> (VirtualWorkspace, SpaceId) {
         let space = self.space;
-        (VirtualWorkspace::from(self), space)
+        (self.into_live().0, space)
     }
-}
 
-impl From<SavedWorkspace> for VirtualWorkspace {
-    fn from(saved: SavedWorkspace) -> Self {
-        VirtualWorkspace {
-            name: saved.name,
+    /// The live workspace, and its members: the windows of every layout the file holds for it,
+    /// obsolete ones included, in the order they are listed. The obsolete layouts' trees are
+    /// dropped here; nothing past this point knows them.
+    fn into_live(mut self) -> (VirtualWorkspace, Vec<WindowId>) {
+        let members = (self.layout_state.trees())
+            .flat_map(|layout| self.layout_system.windows(layout, WindowQuery::All))
+            .collect();
+        let layout_state =
+            std::mem::take(&mut self.layout_state).into_live(&mut self.layout_system);
+        let workspace = VirtualWorkspace {
+            name: self.name,
             home: Home::from_saved(
-                saved.home_space,
-                saved.preferred_display,
-                saved.display_manually_selected,
+                self.home_space,
+                self.preferred_display,
+                self.display_manually_selected,
             ),
-            rule_standing: if saved.rule_overridden {
+            rule_standing: if self.rule_overridden {
                 RuleStanding::Overridden
             } else {
                 RuleStanding::Followed
             },
-            last_focused: saved.last_focused,
-            layout_system: saved.layout_system,
-            layout_mode: saved.layout_mode,
-            layout_state: saved.layout_state,
-        }
+            last_focused: self.last_focused,
+            layout_system: self.layout_system,
+            layout_mode: self.layout_mode,
+            layout_state,
+        };
+        (workspace, members)
     }
 }
 
@@ -448,12 +456,6 @@ impl VirtualWorkspace {
             layout_mode: self.layout_mode,
             layout_state: &self.layout_state,
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for VirtualWorkspace {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        SavedWorkspace::deserialize(deserializer).map(VirtualWorkspace::from)
     }
 }
 
@@ -853,9 +855,27 @@ impl Catalog {
     fn parse(
         records: SlotTable<VirtualWorkspaceId, SavedWorkspace>,
         order: Vec<VirtualWorkspaceId>,
-    ) -> Result<(Catalog, Vec<(VirtualWorkspaceId, SpaceId)>), CatalogError> {
+    ) -> Result<ParsedCatalog, CatalogError> {
+        Self::check(&records, &order)?;
+        let order = order.into_iter().map(|id| (id, records[id].space)).collect();
+        let mut members = Members::default();
+        let workspaces = records
+            .map(|id, record| {
+                let (workspace, of) = record.into_live();
+                members.insert(id, of);
+                Ok::<_, std::convert::Infallible>(workspace)
+            })
+            .unwrap_or_else(|never| match never {});
+        Ok((Catalog { workspaces }, order, members))
+    }
+
+    /// The order names every saved workspace, each once.
+    fn check(
+        records: &SlotTable<VirtualWorkspaceId, SavedWorkspace>,
+        order: &[VirtualWorkspaceId],
+    ) -> Result<(), CatalogError> {
         let mut listed = HashSet::default();
-        for &id in &order {
+        for &id in order {
             if !records.contains_key(id) {
                 return Err(CatalogError::Unknown(id));
             }
@@ -866,11 +886,7 @@ impl Catalog {
         if let Some((id, record)) = records.iter().find(|(id, _)| !listed.contains(id)) {
             return Err(CatalogError::Unlisted { id, space: record.space });
         }
-        let order = order.into_iter().map(|id| (id, records[id].space)).collect();
-        let workspaces = records
-            .map(|_, record| Ok::<_, std::convert::Infallible>(record.split().0))
-            .unwrap_or_else(|never| match never {});
-        Ok((Catalog { workspaces }, order))
+        Ok(())
     }
 
     /// Adds a workspace (the core puts it at the end of the catalog order).
@@ -1124,36 +1140,95 @@ pub(crate) struct LoadedWorkspaces {
     pub(crate) topology: SavedTopology,
 }
 
-impl<'de> Deserialize<'de> for LoadedWorkspaces {
+/// A saved catalog read: the live workspaces, the order with each workspace's Space, and each
+/// workspace's members.
+type ParsedCatalog = (Catalog, Vec<(VirtualWorkspaceId, SpaceId)>, Members);
+
+/// Each workspace's members as a saved file lists them: the windows of every layout it holds for
+/// the workspace, obsolete ones included.
+pub(crate) type Members = HashMap<VirtualWorkspaceId, Vec<WindowId>>;
+
+/// The workspaces as a saved file holds them, before they are live: the only form that knows an
+/// older file's obsolete layouts. Read whole (its catalog order checked), it becomes live state
+/// exactly once ([`SavedWorkspaces::into_loaded`]).
+pub(crate) struct SavedWorkspaces {
+    records: SlotTable<VirtualWorkspaceId, SavedWorkspace>,
+    order: Vec<VirtualWorkspaceId>,
+    single_display: bool,
+    activations: HashMap<SpaceId, SpaceActivation>,
+}
+
+impl<'de> Deserialize<'de> for SavedWorkspaces {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let saved = SavedStore::deserialize(deserializer)?;
         let records =
             crate::model::slot_table::parse(saved.workspaces).map_err(serde::de::Error::custom)?;
-        let (workspaces, catalog) =
-            Catalog::parse(records, saved.order).map_err(serde::de::Error::custom)?;
-        let topology = SavedTopology {
-            catalog,
-            activations: saved.active_workspace_per_space,
-        };
-        let store = WorkspaceStore {
-            workspaces,
+        Catalog::check(&records, &saved.order).map_err(serde::de::Error::custom)?;
+        Ok(SavedWorkspaces {
+            records,
+            order: saved.order,
             single_display: saved.single_display,
-            settings: VirtualWorkspaceSettings::default(),
-            layout_settings: LayoutSettings::default(),
-        };
-        Ok(LoadedWorkspaces { store, topology })
+            activations: saved.active_workspace_per_space,
+        })
     }
 }
 
-impl LoadedWorkspaces {
-    /// Runs the load-time checks on the saved topology (normalizing, then validating it).
-    pub(crate) fn checked(mut self) -> Result<LoadedWorkspaces, String> {
-        let store = &self.store;
-        self.topology.migrate_legacy_activation(|id| {
-            store.workspaces.get(id).and_then(|workspace| workspace.home.space())
+/// Why saved workspaces do not become live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoadError {
+    /// A layout state names a layout its workspace's system does not hold.
+    Layouts(String),
+    /// The saved topology does not check.
+    Topology(String),
+}
+
+impl SavedWorkspaces {
+    /// A pre-schema-3 file's layout state for workspace `id` on `space`, kept apart in the file.
+    pub(crate) fn legacy_layout_state(
+        &mut self,
+        id: VirtualWorkspaceId,
+        space: SpaceId,
+        state: SavedLayoutState,
+    ) -> Result<(), String> {
+        let record = self
+            .records
+            .get_mut(id)
+            .ok_or_else(|| format!("layout state references missing workspace {id:?}"))?;
+        if record.space != space {
+            return Err(format!(
+                "workspace {id:?} is stored under the wrong native space"
+            ));
+        }
+        record.layout_state = state;
+        Ok(())
+    }
+
+    /// The live workspaces and their saved topology, checked, and each workspace's members: the
+    /// one conversion from the saved form (each workspace's obsolete layouts dropped here).
+    pub(crate) fn into_loaded(self) -> Result<(LoadedWorkspaces, Members), LoadError> {
+        for (id, record) in self.records.iter() {
+            record
+                .layout_state
+                .validate(&record.layout_system)
+                .map_err(|error| LoadError::Layouts(format!("workspace {id:?} {error}")))?;
+        }
+        let (workspaces, catalog, members) = Catalog::parse(self.records, self.order)
+            .map_err(|error| LoadError::Topology(error.to_string()))?;
+        let mut topology = SavedTopology {
+            catalog,
+            activations: self.activations,
+        };
+        topology.migrate_legacy_activation(|id| {
+            workspaces.workspaces.get(id).and_then(|workspace| workspace.home.space())
         });
-        self.topology.validate()?;
-        Ok(self)
+        topology.validate().map_err(LoadError::Topology)?;
+        let store = WorkspaceStore {
+            workspaces,
+            single_display: self.single_display,
+            settings: VirtualWorkspaceSettings::default(),
+            layout_settings: LayoutSettings::default(),
+        };
+        Ok((LoadedWorkspaces { store, topology }, members))
     }
 }
 
@@ -2163,16 +2238,6 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn validate_layouts(&self) -> Result<(), String> {
-        for (id, workspace) in self.workspaces.iter() {
-            workspace
-                .layout_state
-                .validate(&workspace.layout_system)
-                .map_err(|error| format!("workspace {id:?} {error}"))?;
-        }
-        Ok(())
-    }
-
     pub fn new() -> Self {
         Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
     }
@@ -2869,7 +2934,7 @@ mod tests {
 
     /// `saved`, a saved store, loaded and checked as a file's is.
     fn load_store(saved: &str) -> LoadedWorkspaces {
-        ron::from_str::<LoadedWorkspaces>(saved).unwrap().checked().unwrap()
+        ron::from_str::<SavedWorkspaces>(saved).unwrap().into_loaded().unwrap().0
     }
 
     /// `store` as it is saved, its topology written from `windows`' core.
@@ -2973,10 +3038,11 @@ mod tests {
         );
         // Loading before the first screen snapshot must preserve independent names.
         let saved = serde_json::to_string(&store.saved(windows.view().core_workspaces())).unwrap();
-        let mut loaded = serde_json::from_str::<LoadedWorkspaces>(&saved)
+        let mut loaded = serde_json::from_str::<SavedWorkspaces>(&saved)
             .unwrap()
-            .checked()
+            .into_loaded()
             .unwrap()
+            .0
             .store;
         let plan = loaded.reading(windows.view()).plan_settings_names(&settings, true).unwrap();
         loaded.apply_settings(
@@ -4393,7 +4459,7 @@ mod tests {
                 copy.insert(record(&name));
             }
             Catalog::parse(copy, order)
-                .map(|(_, order)| order.into_iter().map(|(id, _)| id).collect::<Vec<_>>())
+                .map(|(_, order, _)| order.into_iter().map(|(id, _)| id).collect::<Vec<_>>())
         };
         assert_eq!(parse(vec![b, a]), Ok(vec![b, a]));
         assert_eq!(parse(vec![a, unknown, b]), Err(CatalogError::Unknown(unknown)));
@@ -4403,7 +4469,7 @@ mod tests {
             Err(CatalogError::Unlisted { id: b, space: SpaceId::new(1) })
         );
         // The order is the core's now; the catalog keeps each workspace by id.
-        let (mut catalog, _) = Catalog::parse(map, vec![a, b]).unwrap();
+        let (mut catalog, ..) = Catalog::parse(map, vec![a, b]).unwrap();
         let c = catalog.insert(workspace("c"));
         assert_eq!(catalog.remove(b).map(|w| w.name), Some("b".into()));
         assert!(catalog.remove(b).is_none());
@@ -4415,7 +4481,7 @@ mod tests {
         let saved = r#"(workspaces:[(value:None,version:0),(value:Some((name:"One",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(3),preferred_display:None,home_space:Some((3)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"One",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1),(value:Some((name:"Two",space:(4),preferred_display:None,home_space:Some((4)),rule_overridden:false,last_focused:None,layout_system:traditional((tree:(map:(map:[(value:None,version:0)]),window:(window_nodes:{})),layout_roots:[(value:None,version:0)])),layout_mode:traditional,layout_state:(layout:None,active_size:(width:0,height:0)))),version:1)],order:[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)],single_display:false,active_workspace_per_space:{(3):(current:Some((idx:1,version:1)),previous:None,remembered:None),(4):(current:Some((idx:3,version:1)),previous:None,remembered:None)})"#;
         let broken = saved.replace(",(idx:4,version:1)]", "]");
         assert_ne!(broken, saved);
-        let error = ron::from_str::<LoadedWorkspaces>(&broken).err().unwrap().to_string();
+        let error = ron::from_str::<SavedWorkspaces>(&broken).err().unwrap().to_string();
         assert!(error.contains("is not indexed"), "{error}");
     }
 

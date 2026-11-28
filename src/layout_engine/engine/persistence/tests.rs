@@ -177,7 +177,7 @@ fn restore_on(
 
 fn tree(engine: &LayoutEngine, id: VirtualWorkspaceId) -> Vec<WindowId> {
     let entry = &engine.workspaces[id];
-    (entry.layout_state.all_layouts())
+    (entry.layout_state.active().into_iter())
         .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
         .collect()
 }
@@ -282,11 +282,19 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
             .active_workspace(SpaceId::new(901))
             .unwrap();
         assert_eq!(loaded.workspaces[id].layout_mode, LayoutMode::Stack);
-        assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 2);
+        // The other display size's layout is dropped as the file becomes live; only the active
+        // layout's tree is left, its windows still the workspace's (they were in both).
+        // The file's layouts for Main: (idx:1) at 1200x800, the active one, and (idx:2) at
+        // 1600x1000.
+        let layout = |idx: u64| -> crate::layout_engine::LayoutId {
+            slotmap::KeyData::from_ffi((1 << 32) | idx).into()
+        };
+        assert_eq!(loaded.workspaces[id].layout_state.active(), Some(layout(1)));
+        assert!(!loaded.workspaces[id].layout_system.contains_layout(layout(2)));
         assert_eq!(loaded.workspaces[id].last_focused(), Some(win(9, 2)));
         // The loaded windows are dormant until seen again (upstream #663).
-        assert_eq!(tree(&loaded, id).len(), 4);
-        for layout in loaded.workspaces[id].layout_state.all_layouts() {
+        assert_eq!(tree(&loaded, id).len(), 2);
+        if let Some(layout) = loaded.workspaces[id].layout_state.active() {
             assert!(
                 loaded.workspaces[id]
                     .layout_system
@@ -295,7 +303,7 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
             );
         }
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
-        assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 1);
+        assert_eq!(loaded.workspaces[id].layout_state.active(), Some(layout(1)));
         let canonical = loaded.serialize_to_string(joined.view());
         assert!(!canonical.contains("\"workspace_layouts\":"));
         let (reloaded, _) = load(&canonical);
@@ -1102,4 +1110,51 @@ fn a_gone_saved_space_leaves_no_display_behind() {
     );
     assert_eq!(engine.display_uuid_for_space(gone), None);
     assert_eq!(engine.display_uuid_for_space(last), None);
+}
+
+/// A window an older multi-size file kept only in another display size's layout (an obsolete
+/// one) stays its workspace's member after load, with no saved position: the obsolete layout is
+/// dropped as the file becomes live, its windows counted as members first.
+#[test]
+fn a_window_saved_only_in_an_obsolete_layout_stays_its_workspaces_member() {
+    use crate::layout_engine::LayoutSystem as _;
+    use crate::layout_engine::systems::WindowChange;
+    let settings = VirtualWorkspaceSettings::default();
+    let space = SpaceId::new(951);
+    let (mut engine, mut store) = fresh(&settings, &[(space, "display")]);
+    let id = ws(&engine, store.view(), space, 0);
+    let (tiled, elsewhere) = (win(95, 1), win(95, 2));
+    open(&mut engine, &mut store.view_mut(), id, tiled);
+    // `elsewhere` is the workspace's, laid out only in another layout of its system.
+    store.view_mut().insert_manageable_window(elsewhere, live_state(elsewhere));
+    assert!(engine.workspaces.assign_window_to_workspace(
+        &mut store.view_mut(),
+        space,
+        elsewhere,
+        id
+    ));
+    let other = engine.workspaces[id].layout_system.create_layout();
+    engine.workspaces[id]
+        .layout_system
+        .update(WindowChange::Add(other, elsewhere, None));
+    let active = engine.workspaces[id].layout_state.active().unwrap();
+    // As an older file wrote it: the other layout named obsolete beside the active one.
+    let file = engine.serialize_to_string(store.view());
+    let laid = format!("layout:Some({}),active_size:", ron::to_string(&active).unwrap());
+    let at = file.find(&laid).expect("the workspace's layout state");
+    // Just past the size's closing parenthesis, inside the layout state.
+    let size = at + file[at..].find("active_size:(").unwrap();
+    let end = size + file[size..].find(')').unwrap() + 1;
+    let file = format!(
+        "{},obsolete:[{}]{}",
+        &file[..end],
+        ron::to_string(&other).unwrap(),
+        &file[end..]
+    );
+    let (loaded, _) = load(&file);
+    let saved = &loaded.persistence.pending[&elsewhere];
+    assert_eq!((saved.workspace, saved.frame), (id, None));
+    assert!(!loaded.workspaces[id].layout_system.contains_layout(other));
+    assert!(!tree(&loaded, id).contains(&elsewhere));
+    assert!(tree(&loaded, id).contains(&tiled));
 }

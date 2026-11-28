@@ -2,7 +2,7 @@ use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
 
 use super::*;
-use crate::layout_engine::systems::{WindowChange, WindowQuery};
+use crate::layout_engine::systems::WindowChange;
 
 pub(super) const CURRENT_SCHEMA_VERSION: u32 = 5;
 
@@ -11,10 +11,7 @@ fn legacy_schema_version() -> u32 { 0 }
 /// Pre-consolidation file representation. It is normalized before any runtime use.
 #[derive(Deserialize, Default)]
 pub(super) struct LegacyWorkspaceLayouts {
-    map: HashMap<
-        (SpaceId, VirtualWorkspaceId),
-        crate::layout_engine::workspaces::WorkspaceLayoutState,
-    >,
+    map: HashMap<(SpaceId, VirtualWorkspaceId), crate::layout_engine::workspaces::SavedLayoutState>,
 }
 
 /// Saved identity evidence. Files keep these flattened at the top level.
@@ -30,30 +27,41 @@ pub(super) struct PersistedIdentities {
     saved_active_space: Option<u64>,
 }
 
-/// Owned, versioned representation of the layout file, and the validated snapshot a restore works
-/// from once `parse` has returned it.
+/// Owned, versioned representation of the layout file, as read: the saved form, which
+/// [`PersistedLayout::parse`] turns into the snapshot a restore works from, once.
 ///
 /// Keep this type independent from runtime-only `LayoutEngine` fields. Adding an engine cache,
 /// service, or transient index must never silently alter the persistence schema again.
 #[derive(Deserialize)]
-pub(super) struct PersistedLayout {
+struct PersistedFile {
     #[serde(default = "legacy_schema_version")]
-    pub(super) schema_version: u32,
+    schema_version: u32,
     #[serde(default)]
     workspace_layouts: LegacyWorkspaceLayouts,
     floating: FloatingManager,
     floating_positions: Box<ron::value::RawValue>,
-    /// The saved store, and the topology the core is seeded from.
+    /// The saved workspaces: the only form that knows an older file's obsolete layouts.
     #[serde(rename = "virtual_workspace_manager")]
-    pub(super) loaded: LoadedWorkspaces,
+    saved: SavedWorkspaces,
     #[serde(default)]
     space_display_map: HashMap<SpaceId, Option<String>>,
     #[serde(default)]
-    pub(super) display_last_space: HashMap<String, SpaceId>,
+    display_last_space: HashMap<String, SpaceId>,
     #[serde(flatten)]
     identities: PersistedIdentities,
-    /// Every saved window, each at exactly one location. Filled by `parse`.
-    #[serde(skip)]
+}
+
+/// The layout file, validated and live: the snapshot a restore works from once
+/// [`PersistedLayout::parse`] has returned it.
+pub(super) struct PersistedLayout {
+    pub(super) schema_version: u32,
+    floating: FloatingManager,
+    /// The live store, and the topology the core is seeded from.
+    pub(super) loaded: LoadedWorkspaces,
+    space_display_map: HashMap<SpaceId, Option<String>>,
+    pub(super) display_last_space: HashMap<String, SpaceId>,
+    identities: PersistedIdentities,
+    /// Every saved window, each at exactly one location.
     pub(super) pending: HashMap<WindowId, SavedWindow>,
 }
 
@@ -78,8 +86,8 @@ impl PersistedLayout {
 
     /// Read and fully validate a layout file. Whatever fails here has touched no live state.
     pub(super) fn parse(buf: &str) -> anyhow::Result<Self> {
-        let mut persisted: Self = match ron::from_str(buf) {
-            Ok(persisted) => persisted,
+        let mut file: PersistedFile = match ron::from_str(buf) {
+            Ok(file) => file,
             Err(original_error) => {
                 let Some(migrated) = migrate_legacy_layout_system_tags(buf) else {
                     return Err(original_error.into());
@@ -91,23 +99,34 @@ impl PersistedLayout {
                 })?
             }
         };
-        if persisted.schema_version > CURRENT_SCHEMA_VERSION {
+        if file.schema_version > CURRENT_SCHEMA_VERSION {
             return Err(anyhow::anyhow!(
                 "layout schema version {} is newer than supported version {}",
-                persisted.schema_version,
+                file.schema_version,
                 CURRENT_SCHEMA_VERSION,
             ));
         }
-        persisted.loaded = persisted
-            .loaded
-            .checked()
-            .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
+        for ((space, id), state) in std::mem::take(&mut file.workspace_layouts.map) {
+            if file.schema_version >= 3 {
+                return Err(anyhow::anyhow!(
+                    "invalid workspace layouts: legacy layout state in schema 3"
+                ));
+            }
+            file.saved
+                .legacy_layout_state(id, space, state)
+                .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))?;
+        }
+        // The one conversion to live state: members worked out over every layout the file holds,
+        // obsolete layouts dropped.
+        let (mut loaded, members) = file.saved.into_loaded().map_err(|error| match error {
+            LoadError::Layouts(error) => anyhow::anyhow!("invalid workspace layouts: {error}"),
+            LoadError::Topology(error) => anyhow::anyhow!("invalid workspace topology: {error}"),
+        })?;
         // Unknown preview-only metadata (including display_fallback) is ignored
         // by serde. Keep its workspace identity rather than guessing whether it
         // has since become intentional user state.
-        persisted.loaded.store.normalize_loaded_names(&persisted.loaded.topology);
-        persisted.migrate_workspace_layouts()?;
-        if let Some((window, _)) = persisted.identities.windows.iter().find(|(_, saved)| {
+        loaded.store.normalize_loaded_names(&loaded.topology);
+        if let Some((window, _)) = file.identities.windows.iter().find(|(_, saved)| {
             !saved.width.is_finite()
                 || !saved.height.is_finite()
                 || saved.width < 0.0
@@ -115,65 +134,22 @@ impl PersistedLayout {
         }) {
             anyhow::bail!("window {window:?} has an invalid persisted size");
         }
-        let positions = persisted.migrate_floating_positions()?;
+        let positions =
+            migrate_floating_positions(file.schema_version, &file.floating_positions, &loaded)?;
         positions
-            .validate_persisted(&persisted.loaded.store)
+            .validate_persisted(&loaded.store)
             .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
-        persisted.resolve_locations(positions);
+        let mut persisted = PersistedLayout {
+            schema_version: file.schema_version,
+            floating: file.floating,
+            loaded,
+            space_display_map: file.space_display_map,
+            display_last_space: file.display_last_space,
+            identities: file.identities,
+            pending: HashMap::default(),
+        };
+        persisted.resolve_locations(positions, members);
         Ok(persisted)
-    }
-
-    fn migrate_workspace_layouts(&mut self) -> anyhow::Result<()> {
-        for ((space, id), state) in std::mem::take(&mut self.workspace_layouts.map) {
-            let workspace = self.loaded.store.workspaces.get_mut(id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "invalid workspace layouts: layout state references missing workspace {id:?}"
-                )
-            })?;
-            if self.loaded.topology.space(id) != Some(space) {
-                return Err(anyhow::anyhow!(
-                    "invalid workspace layouts: workspace {id:?} is stored under the wrong native space"
-                ));
-            }
-            if self.schema_version >= 3 {
-                return Err(anyhow::anyhow!(
-                    "invalid workspace layouts: legacy layout state in schema 3"
-                ));
-            }
-            workspace.layout_state = state;
-        }
-        self.loaded
-            .store
-            .validate_layouts()
-            .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))
-    }
-
-    fn migrate_floating_positions(&self) -> anyhow::Result<FloatingPositionStore> {
-        if self.schema_version >= 4 {
-            return Ok(self.floating_positions.into_rust::<FloatingPositionStore>()?);
-        }
-        // Versionless files produced by current tools also remain readable.
-        if let Ok(current) = self.floating_positions.into_rust::<FloatingPositionStore>() {
-            return Ok(current);
-        }
-        // Validate legacy native keys before discarding the redundant ownership dimension.
-        #[serde_with::serde_as]
-        #[derive(Deserialize)]
-        struct LegacyPositions {
-            #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
-            positions: HashMap<(SpaceId, VirtualWorkspaceId, WindowId), CGRect>,
-        }
-        let legacy = self.floating_positions.into_rust::<LegacyPositions>()?;
-        let mut positions = FloatingPositionStore::default();
-        for ((space, workspace, window), frame) in legacy.positions {
-            if self.loaded.topology.space(workspace) != Some(space) {
-                anyhow::bail!(
-                    "invalid floating positions: legacy frame is stored under the wrong native Space"
-                );
-            }
-            positions.store(workspace, window, frame);
-        }
-        Ok(positions)
     }
 
     /// Give every saved window exactly one location in a single pass over the file, so nothing
@@ -183,7 +159,7 @@ impl PersistedLayout {
     /// floating marker needs a frame to agree with it; otherwise tiled ownership wins. A serialized
     /// identity without a fingerprint has no evidence with which to match a live window, and a
     /// fingerprint without a location has nowhere to restore it to: both are dropped here.
-    fn resolve_locations(&mut self, positions: FloatingPositionStore) {
+    fn resolve_locations(&mut self, positions: FloatingPositionStore, mut members: Members) {
         let marked = self.floating.take_persisted_windows();
         let windows = &mut self.identities.windows;
         let pending = &mut self.pending;
@@ -200,9 +176,8 @@ impl PersistedLayout {
         }
         for workspace in self.loaded.topology.ids().collect::<Vec<_>>() {
             let entry = &mut self.loaded.store[workspace];
-            let mut members: Vec<_> = (entry.layout_state.all_layouts())
-                .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
-                .collect();
+            // Every layout the file held for it, obsolete ones included (their trees are gone).
+            let mut members = members.remove(&workspace).unwrap_or_default();
             // The windows retained start out dormant, left out until seen again, the saved
             // views kept (upstream #663, f08825a4).
             members.retain(|&window| {
@@ -402,4 +377,37 @@ pub(super) fn migrate_legacy_layout_system_tags(input: &str) -> Option<String> {
         changed = true;
     }
     changed.then_some(output)
+}
+
+/// The file's floating frames in the current form (older schemas keyed them by native Space).
+fn migrate_floating_positions(
+    schema_version: u32,
+    raw: &ron::value::RawValue,
+    loaded: &LoadedWorkspaces,
+) -> anyhow::Result<FloatingPositionStore> {
+    if schema_version >= 4 {
+        return Ok(raw.into_rust::<FloatingPositionStore>()?);
+    }
+    // Versionless files produced by current tools also remain readable.
+    if let Ok(current) = raw.into_rust::<FloatingPositionStore>() {
+        return Ok(current);
+    }
+    // Validate legacy native keys before discarding the redundant ownership dimension.
+    #[serde_with::serde_as]
+    #[derive(Deserialize)]
+    struct LegacyPositions {
+        #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
+        positions: HashMap<(SpaceId, VirtualWorkspaceId, WindowId), CGRect>,
+    }
+    let legacy = raw.into_rust::<LegacyPositions>()?;
+    let mut positions = FloatingPositionStore::default();
+    for ((space, workspace, window), frame) in legacy.positions {
+        if loaded.topology.space(workspace) != Some(space) {
+            anyhow::bail!(
+                "invalid floating positions: legacy frame is stored under the wrong native Space"
+            );
+        }
+        positions.store(workspace, window, frame);
+    }
+    Ok(positions)
 }
