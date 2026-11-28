@@ -1215,9 +1215,29 @@ difference like any other (reported; the Rust answer stands). The engine's door 
   another Space only takes focus, a hidden one is shown.
 - Plants 10/10 (five on the core's choices, five on the engine's facts; three engine plants
   survived until those tests existed).
-- **Asked of the lead, not changed:** `ensure_active_workspace_info` shows a Space's first
-  workspace right after initialising it, which overrides `default_workspace` when it is the one
-  initialising (a probe: `default_workspace = 2` shows the first). Its classing waits on that.
+- `ensure_active_workspace_info` overrode `default_workspace`: fixed in its own commit, below.
+
+**Fix (2026-11-28): a fresh Space shows `default_workspace`.** `ensure_active_workspace_info`
+initialised a Space with no shown workspace (which shows `default_workspace`) and then showed the
+Space's first workspace over it, so a new window on a Space nothing had initialised yet went to
+workspace 1. The follow-up is deleted, not guarded: it read `workspace_id_at(space, Some(0))`,
+the same list initialising's first branch shows from, so a Space initialising leaves vacant owns
+no workspace and the follow-up could only ever override. Tests: a fresh Space shows the default
+workspace through `ensure_active_workspace_info`; in Global mode a second display's Space that
+owns no workspace stays vacant. Plants 3/3 (the old override; a vacant Global Space shown the
+scope's first workspace; a Global Space making its own workspaces). A first Global plant through
+`set_active_workspace` was a no-op (it refuses another Space's workspace) and was rewritten to
+write the activation.
+
+**Upstream PR candidate** (the owner decides; nothing opened): upstream main (`95a0ad14`,
+2026-11-28) has the same bug by another path. Its `workspace_id_at(space, Some(0))` initialises the
+Space (showing `default_workspace`), and `ensure_active_workspace_info` then shows the first
+workspace over it.
+- One line: "A fresh Space shows workspace 1, not `default_workspace`, when
+  `ensure_active_workspace_info` is what initialises it."
+- Test: `a_fresh_space_shows_the_default_workspace` (engine tests).
+- Fix: the commit "engine: a fresh Space shows default_workspace" on `rearch/roc-next`. Upstream's
+  form: initialise, then return the active workspace, with no second activation.
 
 - Next: E1b-2 (the switching choices in Roc).
 

@@ -3686,14 +3686,9 @@ impl LayoutEngine {
         windows: &mut WindowsMut<'_>,
         space: SpaceId,
     ) -> Option<(crate::model::VirtualWorkspaceId, String)> {
-        if self.workspaces.reading(windows.read()).active_workspace(space).is_none() {
-            self.workspaces.ensure_space_initialized(windows, space);
-            if let Some(id) =
-                self.workspaces.reading(windows.read()).workspace_id_at(space, Some(0))
-            {
-                self.workspaces.set_active_workspace(windows, space, id);
-            }
-        }
+        // Initialising shows what it chooses (the default workspace, or the first one a Space
+        // owns); a Space it leaves vacant owns no workspace, so there is none to show.
+        self.workspaces.ensure_space_initialized(windows, space);
         self.active_workspace_id_and_name(windows.read(), space)
     }
 
@@ -5350,6 +5345,53 @@ mod tests {
 
     /// A window evicted from Space 97 (display `a`) into Space 98's active workspace (display
     /// `landed_on`), recorded; with the engine, store, both Spaces and the workspace it left.
+    /// A fresh Space shows the configured default workspace, also when asking for its active
+    /// workspace is what initialises it.
+    #[test]
+    fn a_fresh_space_shows_the_default_workspace() {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 4,
+            default_workspace: 2,
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
+        let mut store = OwnedWindows::default();
+        let space = SpaceId::new(5);
+        let shown = engine.ensure_active_workspace_info(&mut store.view_mut(), space);
+        let third = engine.workspaces.reading(store.view()).workspace_id_at(space, Some(2));
+        assert!(third.is_some());
+        assert_eq!(shown.map(|(id, _)| id), third);
+        assert_eq!(
+            engine.workspaces.reading(store.view()).active_workspace(space),
+            third
+        );
+    }
+
+    /// In Global mode, a second display's Space owns no workspace: it stays vacant (it shows
+    /// none of the first display's).
+    #[test]
+    fn a_global_space_that_owns_no_workspace_stays_vacant() {
+        let settings = VirtualWorkspaceSettings {
+            mode: crate::common::config::WorkspaceMode::Global,
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default());
+        let mut store = OwnedWindows::default();
+        let (a, b) = (SpaceId::new(97), SpaceId::new(98));
+        shown_space(&mut engine, &mut store, a);
+        let catalog = store.view().core.catalog().to_vec();
+        engine.workspaces.update_display_count(&catalog, 2);
+        let on_a: Vec<_> = engine.workspaces.reading(store.view()).workspaces_on(a).collect();
+        assert!(!on_a.is_empty());
+        assert_eq!(
+            engine.ensure_active_workspace_info(&mut store.view_mut(), b),
+            None
+        );
+        assert_eq!(engine.workspaces.reading(store.view()).active_workspace(b), None);
+        let still_on_a: Vec<_> = engine.workspaces.reading(store.view()).workspaces_on(a).collect();
+        assert_eq!(still_on_a, on_a);
+    }
+
     /// Two Spaces on displays "a" and "b", with `count` workspaces each.
     fn two_displays(count: usize) -> (LayoutEngine, OwnedWindows, SpaceId, SpaceId) {
         let settings = VirtualWorkspaceSettings {
