@@ -1194,6 +1194,39 @@ impl Serialize for ScrollingLayoutSystem {
     }
 }
 
+/// A scrolling system's state as the cores hold it, what a native snapshot keeps (engine slice
+/// E3c): the columns core's arrangements, every layout's camera, and the settings. Never the
+/// geometry, a cache rebuilt from these.
+#[derive(Clone, Debug)]
+pub(crate) struct Snapshot {
+    core: projection::CoreColumns,
+    cameras: cameras_twin::RiftCameras,
+    settings: ScrollingLayoutSettings,
+}
+
+impl ScrollingLayoutSystem {
+    /// The cores' values, for a native snapshot.
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            core: projection::core_of(&self.core).clone(),
+            cameras: (*self.cameras).clone(),
+            settings: self.settings.clone(),
+        }
+    }
+
+    /// The system holding a snapshot's values (under `roc-core`, the Roc columns and cameras
+    /// seeded from them, the cameras' seeds counted as seeds); no geometry until its next pass.
+    pub(crate) fn restored(snapshot: Snapshot) -> Self {
+        let layouts = snapshot.core.layouts().keys().map(|layout| (layout, LayoutState::default()));
+        ScrollingLayoutSystem {
+            layouts: layouts.collect(),
+            cameras: cameras_twin::TwinnedCameras::seeded(snapshot.cameras),
+            settings: snapshot.settings,
+            core: projection::decider(snapshot.core),
+        }
+    }
+}
+
 impl ScrollingLayoutSystem {
     /// Windows a restored system holds before they are seen again: left out, every layout's
     /// selection and saved view kept (upstream #663, f08825a4).
@@ -2631,6 +2664,26 @@ pub(crate) mod tests {
                     .changed()
             );
         }
+    }
+
+    /// A snapshot keeps every layout's camera (a restored workspace keeps its scroll position),
+    /// the arrangement and the settings; the geometry comes back with the next pass.
+    #[test]
+    fn a_snapshot_round_trip_keeps_the_cameras_and_the_arrangement() {
+        let mut f = Fixture::new(5);
+        f.select(4);
+        f.system.finish_viewport(f.layout);
+        let offset = camera(&f.system, f.layout).viewport().offset();
+        assert!(offset > 0.0, "the camera moved to show window 4");
+        let restored = ScrollingLayoutSystem::restored(f.system.snapshot());
+        assert_eq!(camera(&restored, f.layout), camera(&f.system, f.layout));
+        assert_eq!(restored.selected_window(f.layout), Some(wid(4)));
+        assert_eq!(
+            restored.windows(f.layout, WindowQuery::All),
+            f.system.windows(f.layout, WindowQuery::All)
+        );
+        assert_eq!(restored.settings, f.system.settings);
+        assert!(restored.layouts[f.layout].geometry.is_none());
     }
 
     /// Columns wholly out of view are parked at the screen's edge with one point showing (what

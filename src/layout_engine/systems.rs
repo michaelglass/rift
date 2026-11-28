@@ -528,6 +528,30 @@ pub enum LayoutSystemKind {
     Floating(FloatingLayoutSystem),
 }
 
+/// A layout system's state as its cores hold it: what a native snapshot keeps (engine slice
+/// E3c), never a live system. Restoring builds the live system from it, its Roc twins seeded.
+#[derive(Clone, Debug)]
+pub(crate) enum SystemSnapshot {
+    Traditional(traditional::Snapshot),
+    Bsp(bsp::Snapshot),
+    MasterStack(master_stack::Snapshot),
+    Scrolling(scrolling::Snapshot),
+    Stack(stack::Snapshot),
+}
+
+impl SystemSnapshot {
+    /// The live system holding the snapshot's values.
+    pub(crate) fn restored(self) -> LayoutSystemKind {
+        match self {
+            Self::Traditional(s) => TraditionalLayoutSystem::restored(s).into(),
+            Self::Bsp(s) => BspLayoutSystem::restored(s).into(),
+            Self::MasterStack(s) => MasterStackLayoutSystem::restored(s).into(),
+            Self::Scrolling(s) => ScrollingLayoutSystem::restored(s).into(),
+            Self::Stack(s) => StackLayoutSystem::restored(s).into(),
+        }
+    }
+}
+
 impl LayoutSystemKind {
     /// A freshly loaded layout's windows not seen yet, left out without disturbing its saved
     /// view (upstream #663, f08825a4).
@@ -538,6 +562,19 @@ impl LayoutSystemKind {
             for window in windows {
                 self.set_window_participation(window, false);
             }
+        }
+    }
+
+    /// The system's state as its cores hold it, for a native snapshot (engine slice E3c); a
+    /// floating system keeps none.
+    pub(crate) fn snapshot(&self) -> Option<SystemSnapshot> {
+        match self {
+            Self::Traditional(system) => Some(SystemSnapshot::Traditional(system.snapshot())),
+            Self::Bsp(system) => Some(SystemSnapshot::Bsp(system.snapshot())),
+            Self::MasterStack(system) => Some(SystemSnapshot::MasterStack(system.snapshot())),
+            Self::Scrolling(system) => Some(SystemSnapshot::Scrolling(system.snapshot())),
+            Self::Stack(system) => Some(SystemSnapshot::Stack(system.snapshot())),
+            Self::Floating(_) => None,
         }
     }
 

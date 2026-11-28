@@ -8,6 +8,7 @@ mod stored;
 mod system;
 #[cfg(feature = "roc-core")]
 pub(crate) use roc_stacks::stack_tree_reseeds;
+pub(crate) use system::Snapshot;
 pub use system::StackLayoutSystem;
 
 #[cfg(test)]

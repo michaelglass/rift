@@ -9,6 +9,7 @@ mod system;
 #[cfg(feature = "roc-core")]
 pub(crate) use roc_tree::bsp_tree_reseeds;
 pub use system::BspLayoutSystem;
+pub(crate) use system::Snapshot;
 
 #[cfg(test)]
 mod tests {

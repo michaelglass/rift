@@ -1,6 +1,7 @@
 mod system;
 #[cfg(feature = "roc-core")]
 pub(super) use system::CoreTraditional;
+pub(crate) use system::Snapshot;
 pub use system::TraditionalLayoutSystem;
 
 #[cfg(test)]

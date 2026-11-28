@@ -899,8 +899,29 @@ cache: clippy re-emits warnings only for crates it re-lints (one run printed 4).
   with everything built went from 99 s (gate serial) to 50 s and 51 s, more than the gate's own
   29 s.
 
-- Next: E3c-1b (the snapshot as core values: the layout's core value, active layout, size,
-  camera).
+**E3c-1b (2026-11-28): a native snapshot holds the cores' values, never a live system.**
+- `systems::SystemSnapshot` is one of `traditional`, `bsp`, `master_stack`, `stack` (each its
+  core's value: `Traditional`, `Tree`, `MasterStack`, `Stacks`) or `scrolling` (the columns
+  core's arrangements, every layout's camera, and the settings: never the geometry, a cache
+  rebuilt from these). `LayoutSystemKind::snapshot` takes it (a floating system keeps none);
+  `SystemSnapshot::restored` builds the live system from it, its Roc twins seeded (the cameras'
+  counted as seeds).
+- The engine's `NativeSnapshot` is (that value, the active layout, the size it was laid out for,
+  that layout's windows): the shape ruled. It replaces the `(LayoutSystemKind,
+  WorkspaceLayoutState)` pair. A workspace not laid out keeps none.
+- An edit to a held snapshot (a window closing, an app quitting, an identity changing) goes
+  through its system: rebuilt, edited, taken back, so a scrolling camera answers a removal as
+  it did; it runs only for a snapshot holding the window (before, every snapshot's system took
+  every window's edit).
+- Tests for what nothing tested: a snapshot keeps the workspace's layout and windows, a window
+  that closes leaves it, and once the rest are back a restore spends it; a snapshot follows a
+  window's new identity and goes with its last window; a scrolling snapshot's round trip keeps
+  every camera (a restored workspace keeps its scroll position), the arrangement and the
+  settings, and no geometry. Plants 5/5: windows not refreshed after an edit; a forgotten window
+  left in its snapshots; a scrolling snapshot without its cameras; a restore without the
+  snapshot's layout; a snapshot taken without its windows.
+
+- Next: E3c-2 (the native-memory machine in rift-core).
 
 **Pruning (the lead, 2026-11-26):** at a milestone, delete only what no future build reuses:
 stale `target/roc-build` keys (all but the current sources', which the build script's line

@@ -693,6 +693,18 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 }
 
+/// The system's state as its core holds it: what a native snapshot keeps (engine slice E3c).
+#[derive(Clone, Debug)]
+pub(crate) struct Snapshot(CoreMasterStack);
+
+impl MasterStackLayoutSystem {
+    /// The core's value, for a native snapshot.
+    pub(crate) fn snapshot(&self) -> Snapshot { Snapshot(self.core.clone()) }
+
+    /// The system holding a snapshot's core value (under `roc-core`, the Roc twin seeded from it).
+    pub(crate) fn restored(snapshot: Snapshot) -> Self { Self::from(snapshot.0) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

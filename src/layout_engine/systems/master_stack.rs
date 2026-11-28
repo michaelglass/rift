@@ -2,6 +2,7 @@ mod system;
 #[cfg(feature = "roc-core")]
 pub(super) use system::CoreMasterStack;
 pub use system::MasterStackLayoutSystem;
+pub(crate) use system::Snapshot;
 
 #[cfg(test)]
 mod tests {

@@ -793,6 +793,18 @@ fn stored_node(node: &core::Node<NodeId, WindowId>) -> Node {
     }
 }
 
+/// The system's state as its core holds it: what a native snapshot keeps (engine slice E3c).
+#[derive(Clone, Debug)]
+pub(crate) struct Snapshot(CoreTree);
+
+impl BspLayoutSystem {
+    /// The core's value, for a native snapshot.
+    pub(crate) fn snapshot(&self) -> Snapshot { Snapshot(self.core.clone()) }
+
+    /// The system holding a snapshot's core value (under `roc-core`, the Roc twin seeded from it).
+    pub(crate) fn restored(snapshot: Snapshot) -> Self { Self::holding(snapshot.0) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

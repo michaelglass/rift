@@ -185,6 +185,9 @@ impl Clone for ColumnsDecider {
 
 impl ColumnsDecider {
     /// The Roc system holding what `rust` holds, `rust` its shadow.
+    /// The Rust core, the Roc columns' shadow (held equal to them).
+    pub(super) fn rust(&self) -> &CoreColumns { &self.rust }
+
     pub(super) fn seeded(rust: CoreColumns) -> Self {
         ColumnsDecider {
             roc: RefCell::new(RocColumns::seeded(&view_of(&rust))),

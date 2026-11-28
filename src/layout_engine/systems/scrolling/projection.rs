@@ -35,6 +35,14 @@ pub(super) type Decider = super::roc_columns::ColumnsDecider;
 #[cfg(not(feature = "roc-core"))]
 pub(super) type Decider = CoreColumns;
 
+/// The Rust core the decider holds (under `roc-core`, the Roc columns' shadow, equal to them).
+pub(super) fn core_of(decider: &Decider) -> &CoreColumns {
+    #[cfg(feature = "roc-core")]
+    return decider.rust();
+    #[cfg(not(feature = "roc-core"))]
+    decider
+}
+
 /// The decider holding what `core` holds.
 pub(super) fn decider(core: CoreColumns) -> Decider {
     #[cfg(feature = "roc-core")]
